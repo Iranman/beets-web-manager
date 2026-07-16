@@ -1,6 +1,8 @@
 import unittest
 from pathlib import Path
 
+from project_docs import read_operator_docs
+
 
 class ImportReviewDeleteFolderTests(unittest.TestCase):
     def test_needs_mbid_delete_folder_stays_guarded(self):
@@ -22,12 +24,7 @@ class ImportReviewDeleteFolderTests(unittest.TestCase):
         review_source = (
             root / "frontend" / "src" / "features" / "importReview" / "ImportReviewPage.tsx"
         ).read_text(encoding="utf-8")
-        docs_source = "\n".join(
-            [
-                (root / "AGENTS.md").read_text(encoding="utf-8"),
-                (root / "CLAUDE.md").read_text(encoding="utf-8"),
-            ]
-        )
+        docs_source = read_operator_docs(root)
 
         self.assertIn("folder = fpath.parent", album_folder_source)
         self.assertIn("folder = folder.parent", album_folder_source)

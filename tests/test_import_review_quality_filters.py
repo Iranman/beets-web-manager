@@ -1,6 +1,8 @@
 import unittest
 from pathlib import Path
 
+from project_docs import read_operator_docs
+
 
 class ImportReviewQualityFilterTests(unittest.TestCase):
     def test_review_page_exposes_music_matching_buckets(self):
@@ -8,12 +10,7 @@ class ImportReviewQualityFilterTests(unittest.TestCase):
         review_source = (
             root / "frontend" / "src" / "features" / "importReview" / "ImportReviewPage.tsx"
         ).read_text(encoding="utf-8")
-        docs_source = "\n".join(
-            [
-                (root / "AGENTS.md").read_text(encoding="utf-8"),
-                (root / "CLAUDE.md").read_text(encoding="utf-8"),
-            ]
-        )
+        docs_source = read_operator_docs(root)
         types_source = (root / "frontend" / "src" / "api" / "types.ts").read_text(encoding="utf-8")
         app_source = (root / "app.py").read_text(encoding="utf-8")
 
@@ -276,12 +273,7 @@ class ImportReviewQualityFilterTests(unittest.TestCase):
         review_source = (
             root / "frontend" / "src" / "features" / "importReview" / "ImportReviewPage.tsx"
         ).read_text(encoding="utf-8")
-        docs_source = "\n".join(
-            [
-                (root / "AGENTS.md").read_text(encoding="utf-8"),
-                (root / "CLAUDE.md").read_text(encoding="utf-8"),
-            ]
-        )
+        docs_source = read_operator_docs(root)
 
         self.assertIn("const AUTO_QUARANTINE_REJECTED_MAX_FILES = 5", review_source)
         self.assertIn("const autoCleanupKeysRef = useRef<Set<string>>(new Set())", review_source)

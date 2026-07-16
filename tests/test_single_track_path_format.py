@@ -1,6 +1,8 @@
 import unittest
 from pathlib import Path
 
+from project_docs import read_operator_docs
+
 
 SINGLE_TRACK_TEMPLATE = (
     "$albumartist%if{$mb_albumartistid, ($mb_albumartistid),}/"
@@ -17,14 +19,12 @@ DEFAULT_TEMPLATE = (
 class SingleTrackPathFormatTests(unittest.TestCase):
     def test_single_track_template_is_shared(self):
         root = Path(__file__).resolve().parents[1]
-        config_source = (root / "config.yaml").read_text(encoding="utf-8")
+        config_path = root / "config.yaml"
+        if not config_path.exists():
+            config_path = root / "config.yaml.example"
+        config_source = config_path.read_text(encoding="utf-8")
         app_source = (root / "app.py").read_text(encoding="utf-8")
-        docs_source = "\n".join(
-            [
-                (root / "AGENTS.md").read_text(encoding="utf-8"),
-                (root / "CLAUDE.md").read_text(encoding="utf-8"),
-            ]
-        )
+        docs_source = read_operator_docs(root)
 
         self.assertIn(f'singleton: "{SINGLE_TRACK_TEMPLATE}"', config_source)
         self.assertIn(f'default: "{DEFAULT_TEMPLATE}"', config_source)

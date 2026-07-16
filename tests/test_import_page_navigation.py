@@ -1,6 +1,8 @@
 import unittest
 from pathlib import Path
 
+from project_docs import read_operator_docs
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -19,12 +21,7 @@ class ImportPageNavigationTests(unittest.TestCase):
             ROOT / "frontend" / "src" / "features" / "importReview" / "ImportReviewPage.tsx"
         ).read_text(encoding="utf-8")
         cls.jobs_source = (ROOT / "frontend" / "src" / "views" / "Jobs.tsx").read_text(encoding="utf-8")
-        cls.docs_source = "\n".join(
-            [
-                (ROOT / "AGENTS.md").read_text(encoding="utf-8"),
-                (ROOT / "CLAUDE.md").read_text(encoding="utf-8"),
-            ]
-        )
+        cls.docs_source = read_operator_docs(ROOT)
 
     def test_import_overview_metrics_drive_url_filters(self):
         self.assertIn("type SourceFilter", self.import_source)

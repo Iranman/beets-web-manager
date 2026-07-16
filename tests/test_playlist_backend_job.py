@@ -1,6 +1,8 @@
 import unittest
 from pathlib import Path
 
+from project_docs import read_operator_docs
+
 
 class PlaylistBackendJobTests(unittest.TestCase):
     def test_playlist_download_job_can_parse_and_match_inside_backend(self):
@@ -13,12 +15,7 @@ class PlaylistBackendJobTests(unittest.TestCase):
         jobs_page_source = (root / "frontend" / "src" / "views" / "Jobs.tsx").read_text(encoding="utf-8")
         client_source = (root / "frontend" / "src" / "api" / "client.ts").read_text(encoding="utf-8")
         api_types_source = (root / "frontend" / "src" / "api" / "types.ts").read_text(encoding="utf-8")
-        docs_source = "\n".join(
-            [
-                (root / "AGENTS.md").read_text(encoding="utf-8"),
-                (root / "CLAUDE.md").read_text(encoding="utf-8"),
-            ]
-        )
+        docs_source = read_operator_docs(root)
 
         self.assertIn('parse_content = _s(payload.get("content") or "").strip()', app_source)
         self.assertIn('"/api/playlist/parse"', app_source)

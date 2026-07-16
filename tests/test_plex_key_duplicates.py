@@ -3,7 +3,7 @@ import time
 import unittest
 from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,6 +28,7 @@ class PlexKeyDuplicateTests(unittest.TestCase):
         namespace = {
             "Any": Any,
             "Dict": Dict,
+            "Iterable": Iterable,
             "List": List,
             "Optional": Optional,
             "Counter": Counter,
