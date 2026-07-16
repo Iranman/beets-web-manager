@@ -1,0 +1,53 @@
+services:
+  beets:
+    build: .
+    image: beets-web-manager:0.1.0
+    container_name: beets-web-manager
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${WEBCONTROL_PORT:-8337}:8337"
+    environment:
+      - BEETS_WEB_AUTH_TOKEN=${BEETS_WEB_AUTH_TOKEN:?set a strong owner token}
+      - BEETS_WEB_PASSWORD=${BEETS_WEB_PASSWORD:-}
+      - BEETS_WEB_USERNAME=${BEETS_WEB_USERNAME:-admin}
+      - BEETS_WEB_AUTH_DISABLED=${BEETS_WEB_AUTH_DISABLED:-0}
+      - BEETS_TRUSTED_PROXIES=${BEETS_TRUSTED_PROXIES:-}
+      - BEETS_OUTBOUND_ALLOWLIST=${BEETS_OUTBOUND_ALLOWLIST:-}
+      - WEBCONTROL_PORT=${WEBCONTROL_PORT:-8337}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - AI_API_KEY=${AI_API_KEY:-}
+      - ACOUSTID_API_KEY=${ACOUSTID_API_KEY:-}
+      - PLEX_URL=${PLEX_URL:-}
+      - PLEX_TOKEN=${PLEX_TOKEN:-}
+      - LIDARR_URL=${LIDARR_URL:-}
+      - LIDARR_API_KEY=${LIDARR_API_KEY:-}
+      - DISCOGS_TOKEN=${DISCOGS_TOKEN:-}
+      - LISTENBRAINZ_TOKEN=${LISTENBRAINZ_TOKEN:-}
+      - SLSKD_URL=${SLSKD_URL:-}
+      - SLSKD_API_KEY=${SLSKD_API_KEY:-}
+      - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID:-}
+      - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET:-}
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=512m
+      - /run:rw,nosuid,nodev,size=64m
+    volumes:
+      - ./config:/config
+      - ${MUSIC_LIBRARY_PATH:-./data/music}:/data/media/music
+      - ${DOWNLOAD_PATH:-./data/downloads}:/data/torrents
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8337/api/health', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+# For a broader Arr/media stack (Lidarr, Plex, slskd, bgutil-provider, etc.)
+# in one Compose project, see docker-compose.arrs.yml instead.

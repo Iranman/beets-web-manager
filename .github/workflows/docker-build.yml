@@ -1,0 +1,30 @@
+name: docker-build
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  compose-verification:
+    runs-on: ubuntu-latest
+    env:
+      BEETS_WEB_AUTH_TOKEN: changeme
+      OPENAI_API_KEY: changeme
+      PLEX_TOKEN: changeme
+      LIDARR_API_KEY: changeme
+      SLSKD_SLSK_USERNAME: changeme
+      SLSKD_SLSK_PASSWORD: changeme
+      DIGARR_INITIAL_PASSWORD: changeme
+      POSTGRES_PASSWORD: changeme
+      AI_API_KEY: changeme
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python scripts/validate_compose_security.py
+      - run: docker compose -f docker-compose.arrs.yml config
+      - run: docker build --pull=false -t beets-web-manager:ci .

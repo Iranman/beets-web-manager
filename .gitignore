@@ -1,0 +1,99 @@
+# Dependencies and build output
+node_modules/
+frontend/node_modules/
+.next/
+frontend/.next/
+out/
+frontend/out/
+dist/
+frontend/dist/
+build/
+coverage/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+frontend/next-dev.*.log
+
+# Runtime data and local databases
+*.sqlite
+*.sqlite3
+*.db
+*.db-shm
+*.db-wal
+musiclibrary.blb
+*.blb
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+config.yaml
+!config.yaml.example
+lidarr_api_key
+lidarr_url
+qbittorrent_password
+qbittorrent_url
+qbittorrent_username
+slskd_api_key
+*.netrc
+.netrc
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Temporary/cache/local artifact folders
+tmp/
+temp/
+cache/
+.cache/
+output/
+.local-archive/
+.codex-live-backups/
+_codex_backups/
+.playwright-cli/
+frontend/.playwright-cli/
+
+# Docker local state
+.docker/
+docker-data/
+volumes/
+
+# Editor and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local scratch files from browser probes
+/1
+/b.right-a.right).slice(0
+/document.documentElement.clientWidth
+/document.documentElement.clientWidth+2
+
+# Local agent/operator notes and one-off probes
+AGENTS.md
+CLAUDE.md
+fix_vultures.py
+query_vultures.py
+library-*.png
+
+# Local runtime Beets configuration; commit config.yaml.example instead
+config.yaml
+# Unreviewed local docs drafts
+docs/
