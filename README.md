@@ -142,6 +142,16 @@ This creates `.env`/`config.yaml` from the example templates, generates a random
 - [Configuration Reference](docs/CONFIGURATION.md) — every environment variable and `config.yaml` setting.
 - [Troubleshooting](docs/TROUBLESHOOTING.md) — common failure modes and fixes.
 
+## Demo Mode
+
+Try the app without your own music library or paid AI credentials:
+
+```bash
+python scripts/seed_demo_library.py
+```
+
+Generates a few short, self-synthesized sine-wave WAV files (not copies of any real recording — zero copyright concern) tagged as "Demo Artist / Beets Web Manager Demo Album" under your music path. Set `DEMO_MODE=1` in `.env` so `/api/setup/status` flags it clearly as demo data. Fully removable: delete the generated folder and unset `DEMO_MODE`.
+
 ## Backups
 
 ```bash

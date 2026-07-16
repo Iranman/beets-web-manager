@@ -30,6 +30,7 @@ services:
       - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET:-}
       - PUID=${PUID:-1000}
       - PGID=${PGID:-1000}
+      - DEMO_MODE=${DEMO_MODE:-0}
     security_opt:
       - no-new-privileges:true
     cap_drop:

@@ -140,10 +140,12 @@ def setup_status():
         blocking.append("fpcalc (chromaprint) not found on PATH — AcoustID fingerprinting will not work")
 
     ready = not blocking
+    demo_mode = os.environ.get("DEMO_MODE", "0").strip().lower() in ("1", "true", "yes", "on")
     return jsonify({
         "ok": True,
         "status": "ready" if ready else "warning",
         "version": _APP_VERSION,
+        "demo_mode": demo_mode,
         "setup_complete": _SETUP_COMPLETE_MARKER.exists(),
         "blocking_reasons": blocking,
         "paths": {

@@ -73,6 +73,20 @@ class RoutesSetupStatusTests(unittest.TestCase):
         settings = r.get_json()["settings"]
         self.assertNotIn("verysecretvalue123", str(settings))
 
+    def test_status_reports_demo_mode_flag(self):
+        r = self.client.get("/api/setup/status")
+        self.assertIn("demo_mode", r.get_json())
+        self.assertFalse(r.get_json()["demo_mode"])  # not set in test env
+
+    def test_status_reports_demo_mode_true_when_env_set(self):
+        import os
+        os.environ["DEMO_MODE"] = "1"
+        try:
+            r = self.client.get("/api/setup/status")
+            self.assertTrue(r.get_json()["demo_mode"])
+        finally:
+            del os.environ["DEMO_MODE"]
+
 
 class RoutesSetupTestConnectionTests(unittest.TestCase):
     """These hit the /api/setup/test/* endpoints without real credentials —
