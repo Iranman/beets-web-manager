@@ -45546,6 +45546,7 @@ def api_plugins_installed():
 # Imported after all state is initialized; each module registers routes with app.
 import routes_jobs     # noqa: F401, E402
 import routes_lidarr   # noqa: F401, E402
+import routes_setup    # noqa: F401, E402
 
 
 if __name__ == "__main__":

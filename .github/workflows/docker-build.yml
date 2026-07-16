@@ -27,4 +27,33 @@ jobs:
           python-version: "3.13"
       - run: python scripts/validate_compose_security.py
       - run: docker compose -f docker-compose.arrs.yml config
+      - run: docker compose config
       - run: docker build --pull=false -t beets-web-manager:ci .
+      - name: Installation smoke test
+        run: |
+          set -e
+          mkdir -p /tmp/beets-ci-config /tmp/beets-ci-music /tmp/beets-ci-downloads
+          cp config.yaml.example /tmp/beets-ci-config/config.yaml
+          docker run -d --name beets-ci \
+            -p 18337:8337 \
+            -e BEETS_WEB_AUTH_TOKEN=ci-smoke-test-token-not-a-real-secret \
+            -e WEBCONTROL_PORT=8337 \
+            -v /tmp/beets-ci-config:/config \
+            -v /tmp/beets-ci-music:/data/media/music \
+            -v /tmp/beets-ci-downloads:/data/torrents \
+            beets-web-manager:ci
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18337/health/live >/dev/null 2>&1; then
+              echo "Container is alive after ${i}0s"
+              break
+            fi
+            sleep 10
+          done
+          echo "--- /health/live ---"
+          curl -fsS http://127.0.0.1:18337/health/live
+          echo "--- /api/setup/status ---"
+          curl -fsS http://127.0.0.1:18337/api/setup/status
+          echo "--- container logs (tail) ---"
+          docker logs --tail 50 beets-ci
+          docker stop beets-ci
+          docker rm beets-ci

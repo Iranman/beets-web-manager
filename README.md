@@ -126,6 +126,40 @@ Long-running operations are represented as jobs with status, logs, cancellation,
 - Continue narrowing service credentials and mounts for multi-service stacks.
 - Improve release automation and signed provenance.
 
+## First-Run Setup
+
+For the simplest possible start:
+
+```bash
+./setup.sh          # or .\setup.ps1 on Windows
+```
+
+This creates `.env`/`config.yaml` from the example templates, generates a random `BEETS_WEB_AUTH_TOKEN`, builds the image, and starts the stack via `docker-compose.yml` (a minimal single-container Compose file — see `docker-compose.arrs.yml` for the broader Arr-stack variant used above). Readiness and per-integration connectivity checks are available at `GET /api/setup/status` and `POST /api/setup/test/{ai,musicbrainz,acoustid,plex}`, and standard health probes at `/health`, `/health/live`, `/health/ready`.
+
+## Documentation
+
+- [Installation Guide](docs/INSTALLATION.md) — per-platform path-mapping examples (Linux, TrueNAS, Unraid, Synology, Windows) and local dev setup.
+- [Configuration Reference](docs/CONFIGURATION.md) — every environment variable and `config.yaml` setting.
+- [Troubleshooting](docs/TROUBLESHOOTING.md) — common failure modes and fixes.
+
+## Backups
+
+```bash
+./scripts/backup.sh              # writes ./backups/beets-backup-<timestamp>.tar.gz
+./scripts/restore.sh <file.tar.gz>
+```
+
+Backs up the beets database and configuration/state JSON files under `/config` — **not** your music library, which you should back up separately with your own storage/snapshot tooling.
+
+## Updates
+
+```bash
+docker compose pull   # or: docker compose build
+docker compose up -d
+```
+
+Run `./scripts/backup.sh` first. There is no separate database-migration step — the beets library schema is managed by beets itself on next library open.
+
 ## Contributing
 
 See `CONTRIBUTING.md`. Commit messages should use concise conventional prefixes such as `feat:`, `fix:`, `docs:`, `test:`, `build:`, `ci:`, and `chore:`.

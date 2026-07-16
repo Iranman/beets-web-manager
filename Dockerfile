@@ -30,11 +30,11 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py helpers_mb.py job_engine.py routes_jobs.py ./
+COPY app.py helpers_mb.py job_engine.py routes_jobs.py routes_lidarr.py routes_setup.py ./
 COPY backend/ ./backend/
 COPY beetsplug/ ./beetsplug/
 COPY tests/ ./tests/
-COPY config.yaml.example ./
+COPY config.yaml.example VERSION ./
 COPY --from=frontend /src/frontend/dist ./frontend/dist
 
 # /config: beets config + app JSON state + musiclibrary.blb
