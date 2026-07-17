@@ -8,6 +8,7 @@ Werkzeug==3.1.3
 # bundled with beets core. The packages below are the separate PyPI extras
 # those plugins need at runtime (verified present on PyPI as of 2026-07-16).
 beets==2.2.0
+typing_extensions==4.16.0
 pyacoustid==1.3.0
 python3-discogs-client==2.8
 deezer-python==2.1.0
@@ -25,3 +26,7 @@ requests==2.32.3
 # app.py is intentionally a no-op; see Dockerfile comment)
 yt-dlp[default,curl-cffi]==2024.11.4
 bgutil-ytdlp-pot-provider==1.3.1
+
+# Demo-mode library seeding (scripts/seed_demo_library.py writes ID3 tags
+# directly, independent of beets, to synthesize a self-contained demo library)
+mutagen==1.48.1

@@ -17,6 +17,9 @@ jobs:
       - name: Secret scan
         run: python3 scripts/security_secret_scan.py
 
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
       - name: Python syntax and security regression tests
         run: |
           python3 -m py_compile app.py tests/test_security_hardening.py scripts/security_secret_scan.py

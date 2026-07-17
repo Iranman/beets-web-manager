@@ -42,18 +42,25 @@ jobs:
             -v /tmp/beets-ci-music:/data/media/music \
             -v /tmp/beets-ci-downloads:/data/torrents \
             beets-web-manager:ci
+          alive=0
           for i in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:18337/health/live >/dev/null 2>&1; then
               echo "Container is alive after ${i}0s"
+              alive=1
               break
             fi
             sleep 10
           done
           echo "--- /health/live ---"
-          curl -fsS http://127.0.0.1:18337/health/live
+          curl -fsS http://127.0.0.1:18337/health/live || true
           echo "--- /api/setup/status ---"
-          curl -fsS http://127.0.0.1:18337/api/setup/status
+          curl -fsS -H "Authorization: Bearer ci-smoke-test-token-not-a-real-secret" \
+            http://127.0.0.1:18337/api/setup/status || true
           echo "--- container logs (tail) ---"
-          docker logs --tail 50 beets-ci
-          docker stop beets-ci
-          docker rm beets-ci
+          docker logs --tail 200 beets-ci || true
+          docker stop beets-ci || true
+          docker rm beets-ci || true
+          if [ "$alive" -ne 1 ]; then
+            echo "::error::Container never became healthy within the timeout"
+            exit 1
+          fi

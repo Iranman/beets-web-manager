@@ -1686,6 +1686,15 @@ _AUTH_PUBLIC_ENDPOINTS = {
     ("HEAD", "react_next_static"),
     ("GET", "favicon"),
     ("HEAD", "favicon"),
+    # routes_setup.py's Docker/k8s-style unprefixed probes — these must stay
+    # public or every orchestrator health check gets 401'd and the container
+    # gets killed/restarted for "failing" a check that never actually ran.
+    ("GET", "health_live"),
+    ("HEAD", "health_live"),
+    ("GET", "health_ready"),
+    ("HEAD", "health_ready"),
+    ("GET", "health_root"),
+    ("HEAD", "health_root"),
 }
 _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)\b(api[_-]?key|token|password|secret|authorization|cookie|client[_-]?secret)"
