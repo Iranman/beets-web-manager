@@ -177,15 +177,44 @@ class ReviewRequiredDownloadAccountingTests(unittest.TestCase):
         self.assertIn("\"review_required\": review_required_count", self._download_fn)
         self.assertIn("\"activity\": downloaded_count + review_required_count", self._download_fn)
 
-    def test_round_with_review_required_stops_before_directory_import(self):
+    def test_round_with_only_review_required_stops_before_directory_import(self):
+        """When NOTHING in the round was fingerprint-verified, the round must
+        stop before reaching the import phase — there's nothing safe to import."""
         review_guard = self._run_fn.index("if review_downloaded > 0:")
         import_phase = self._run_fn.index("state[\"phase\"] = \"import\"", review_guard)
         self.assertLess(review_guard, import_phase)
-        guard_block = self._run_fn[review_guard:self._run_fn.index("if verified_downloaded <= 0:", review_guard)]
+        inner_guard = self._run_fn.index("if verified_downloaded <= 0:", review_guard)
+        self.assertLess(inner_guard, import_phase)
+        guard_block = self._run_fn[review_guard:inner_guard]
         self.assertIn("state[\"phase\"] = \"review\"", guard_block)
         self.assertIn("state[\"waiting_for_import\"] = waiting_total", guard_block)
         self.assertIn("_playlist_waiting_import_count_from_state(state)", guard_block)
-        self.assertIn("stopping automatic import for this round", guard_block)
+        inner_block = self._run_fn[inner_guard:self._run_fn.index("break", inner_guard) + len("break")]
+        self.assertIn("stopping automatic import for this round", inner_block)
+
+    def test_round_with_some_verified_downloads_still_reaches_import(self):
+        """Regression (2026-07-17, real playlist "Tamborito": 73 tracks, 0 ever
+        imported): a round with SOME fingerprint-verified downloads must still
+        reach the import phase even if other tracks in the same round need
+        review — discarding the whole round's verified files was the bug.
+        Further rounds are paused afterward via pause_after_this_round until
+        the pending review is resolved."""
+        self.assertIn("pause_after_this_round = False", self._run_fn)
+        pause_set_idx = self._run_fn.index("pause_after_this_round = True")
+        review_guard = self._run_fn.index("if review_downloaded > 0:")
+        import_phase = self._run_fn.index("state[\"phase\"] = \"import\"", review_guard)
+        # Setting pause_after_this_round = True must happen before reaching
+        # the import phase (it's set inside the review_downloaded>0 branch,
+        # which falls through to import when some files were verified) —
+        # not as an alternative to importing.
+        self.assertLess(review_guard, pause_set_idx)
+        self.assertLess(pause_set_idx, import_phase)
+        # The deferred break must come after the round's active_tracks
+        # reassignment (i.e. after import/match/sync already ran), not
+        # instead of it.
+        deferred_break_idx = self._run_fn.index("if pause_after_this_round:", import_phase)
+        active_tracks_idx = self._run_fn.rindex("active_tracks = missing_round", import_phase, deferred_break_idx)
+        self.assertLess(active_tracks_idx, deferred_break_idx)
 
     def test_final_sync_keeps_review_required_tracks_and_does_not_raise(self):
         self.assertIn("if existing_status == \"review_required\":\n                        continue", self._run_fn)

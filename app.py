@@ -1200,6 +1200,7 @@ MUSIC_ROOT   = Path("/data/media/music")    # canonical library root on disk
 CONFIG_FILE  = "/config/config.yaml"        # main beets config
 METADATA_CACHE_ROOT = Path(os.environ.get("METADATA_CACHE_DIR", "/config/.cache/metadata"))
 ARTIST_IMAGE_CACHE_DIR = METADATA_CACHE_ROOT / "artist-images"
+RELEASE_ART_CACHE_DIR = METADATA_CACHE_ROOT / "release-art"
 ART_REPAIR_LAST_FILE = METADATA_CACHE_ROOT / "art-repair-last.json"
 MAINTENANCE_RUNNER_LAST_FILE = METADATA_CACHE_ROOT / "maintenance-runner-last.json"
 ALBUM_FOLDER_CLEANUP_LAST_FILE = METADATA_CACHE_ROOT / "album-folder-cleanup-last.json"
@@ -3811,7 +3812,7 @@ def _slskd_title_guess_from_name(name: str) -> str:
     # Strip leading track/disc numbers without eating artist names like
     # "01-2_chainz-intro": that should become "2_chainz-intro" first, then
     # the scene artist prefix is removed below.
-    stem = re.sub(r"^\s*\d{1,2}[\s._-]+\d{1,3}(?=[\s.-])[\s._-]+", "", stem)
+    stem = re.sub(r"^\s*\d{1,2}[\s._-]+\d{2,3}(?=[\s.-])[\s._-]+", "", stem)
     stem = re.sub(r"^\s*\d{1,3}\s*[\s._-]+\s*", "", stem)
     parts = [p.strip() for p in re.split(r"\s+-\s+", stem) if p.strip()]
     if len(parts) >= 2:
@@ -8122,6 +8123,165 @@ def artist_image_cache(key):
         return ("", 404)
 
 
+_RELEASE_ART_MBID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+_RELEASE_ART_NEGATIVE_TTL = 7 * 24 * 3600  # re-check a "no art found" release weekly, not every page load
+
+
+def _release_art_cache_info(mbid: str) -> Dict[str, Any]:
+    if not _RELEASE_ART_MBID_RE.match(mbid or ""):
+        return {}
+    meta_path = RELEASE_ART_CACHE_DIR / f"{mbid}.json"
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if meta.get("miss"):
+        if time.time() - float(meta.get("cached_at") or 0) < _RELEASE_ART_NEGATIVE_TTL:
+            return {"miss": True}
+        return {}
+    image_name = _s(meta.get("image_file", "") or "")
+    if not image_name or Path(image_name).name != image_name:
+        return {}
+    image_path = RELEASE_ART_CACHE_DIR / image_name
+    if not image_path.exists() or not image_path.is_file():
+        return {}
+    return {
+        "url": f"/api/release-art-cache/{mbid}?v={int(image_path.stat().st_mtime)}",
+        "image_file": image_name,
+    }
+
+
+def _release_art_save_miss(mbid: str) -> None:
+    try:
+        RELEASE_ART_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        (RELEASE_ART_CACHE_DIR / f"{mbid}.json").write_text(
+            json.dumps({"miss": True, "cached_at": time.time()}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+def _release_art_download(mbid: str, url: str, source: str) -> str:
+    try:
+        RELEASE_ART_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        req = _ur.Request(url, headers={"User-Agent": "BeetsWebControl/1.0"})
+        with _ur.urlopen(req, timeout=15) as r:
+            content_type = r.headers.get("Content-Type", "")
+            ext = _artist_image_ext(url, content_type)
+            if not ext:
+                return ""
+            blob = r.read(_ARTIST_IMAGE_MAX_BYTES + 1)
+        if not blob or len(blob) > _ARTIST_IMAGE_MAX_BYTES:
+            return ""
+        if ext == ".jpeg":
+            ext = ".jpg"
+        image_name = f"{mbid}{ext}"
+        image_path = RELEASE_ART_CACHE_DIR / image_name
+        tmp_path = RELEASE_ART_CACHE_DIR / f"{image_name}.tmp"
+        tmp_path.write_bytes(blob)
+        tmp_path.replace(image_path)
+        for stale in RELEASE_ART_CACHE_DIR.glob(f"{mbid}.*"):
+            if stale.name not in {image_name, f"{mbid}.json"} and stale.is_file():
+                try:
+                    stale.unlink()
+                except Exception:
+                    pass
+        meta = {
+            "mbid": mbid,
+            "source_url": url,
+            "source": source,
+            "image_file": image_name,
+            "mime": (content_type or mimetypes.guess_type(image_name)[0] or "image/jpeg").split(";", 1)[0],
+            "cached_at": time.time(),
+        }
+        (RELEASE_ART_CACHE_DIR / f"{mbid}.json").write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return f"/api/release-art-cache/{mbid}?v={int(image_path.stat().st_mtime)}"
+    except Exception:
+        return ""
+
+
+def _fetch_release_group_art_discogs(artist_name: str, album_title: str) -> str:
+    """Fallback source when Cover Art Archive has no art for a release group."""
+    if not DISCOGS_TOKEN or not (artist_name or album_title):
+        return ""
+    q = _up.urlencode({
+        "q": f"{artist_name} {album_title}".strip(),
+        "type": "release",
+        "per_page": 3,
+        "page": 1,
+        "token": DISCOGS_TOKEN,
+    })
+    headers = {"User-Agent": "BeetsWebControl/1.0", "Authorization": f"Discogs token={DISCOGS_TOKEN}"}
+    try:
+        req = _ur.Request(f"https://api.discogs.com/database/search?{q}", headers=headers)
+        with _ur.urlopen(req, timeout=10) as r:
+            results = json.loads(r.read()).get("results") or []
+        if results:
+            return results[0].get("cover_image") or results[0].get("thumb") or ""
+    except Exception:
+        pass
+    return ""
+
+
+def _ensure_release_group_art(mbid: str, artist_name: str = "", album_title: str = "") -> Dict[str, Any]:
+    """Serve a locally-stored release-group cover, downloading+caching on first request.
+    Tries Cover Art Archive first, then Discogs (if configured) so a release with no
+    MusicBrainz-registered art can still get a thumbnail. Misses are cached too, so a
+    release with genuinely no art anywhere isn't re-fetched on every page load."""
+    if not _RELEASE_ART_MBID_RE.match(mbid or ""):
+        return {"ok": False, "error": "invalid mbid"}
+    cached = _release_art_cache_info(mbid)
+    if cached.get("url"):
+        return {"ok": True, "url": cached["url"]}
+    if cached.get("miss"):
+        return {"ok": False, "error": "no art found"}
+
+    url = _release_art_download(
+        mbid, f"https://coverartarchive.org/release-group/{mbid}/front-250", "coverartarchive")
+    if not url and (artist_name or album_title):
+        discogs_url = _fetch_release_group_art_discogs(artist_name, album_title)
+        if discogs_url:
+            url = _release_art_download(mbid, discogs_url, "discogs")
+    if not url:
+        _release_art_save_miss(mbid)
+        return {"ok": False, "error": "no art found"}
+    return {"ok": True, "url": url}
+
+
+@app.get("/api/release-art-cache/<mbid>")
+def release_art_cache(mbid):
+    if not _RELEASE_ART_MBID_RE.match(mbid or ""):
+        return ("", 404)
+    meta_path = RELEASE_ART_CACHE_DIR / f"{mbid}.json"
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        image_name = _s(meta.get("image_file", "") or "")
+        if not image_name or Path(image_name).name != image_name:
+            return ("", 404)
+        image_path = RELEASE_ART_CACHE_DIR / image_name
+        if not image_path.exists() or not image_path.is_file():
+            return ("", 404)
+        mime = _s(meta.get("mime", "") or "") or mimetypes.guess_type(image_name)[0] or "image/jpeg"
+        return send_file(str(image_path), mimetype=mime)
+    except Exception:
+        return ("", 404)
+
+
+@app.get("/api/release-art")
+def release_art_api():
+    """Return a locally cached release-group cover art URL, fetching+storing it first if needed."""
+    mbid = request.args.get("mbid", "").strip()
+    artist_name = request.args.get("artist", "").strip()
+    album_title = request.args.get("album", "").strip()
+    if not mbid:
+        return jsonify({"ok": False, "error": "mbid required"})
+    return jsonify(_ensure_release_group_art(mbid, artist_name, album_title))
+
+
 @app.get("/api/artist-image-url")
 def artist_image_url_api():
     """Return a local cached artist image URL, downloading it if needed."""
@@ -8147,7 +8307,14 @@ def artist_image_url_api():
         if url:
             source = "artist_cache"
             downloaded = True
-            _invalidate_lib_cache()
+            # Do NOT _invalidate_lib_cache() here: with the Library page now
+            # fetching+swapping in artist photos client-side on mount (see
+            # useArtistArtUrl), a burst of first-time downloads for many
+            # never-cached artists would otherwise force a full, expensive
+            # /api/library rebuild after nearly every single one of them —
+            # a self-inflicted cache-invalidation storm. /api/library's own
+            # _LIB_CACHE_TTL (90s) picks up the fresh image_url soon enough
+            # for any other consumer that reads it from there instead.
         else:
             url = _artist_local_art_url(artist)
             source = "album_fallback" if url else ""
@@ -9061,11 +9228,19 @@ def album_art(aid):
             break   # only need first item's folder
     except Exception:
         pass
-    # Fallback 2: Cover Art Archive via MB release group or release ID
+    # Fallback 2: Cover Art Archive (or Discogs) via MB release group or
+    # release ID, downloaded and cached locally so the browser only ever
+    # loads a same-origin URL (external image hosts are blocked by CSP).
     mbid = (_s(getattr(album, "mb_releasegroupid", "") or "")
             or _s(getattr(album, "mb_albumid", "") or ""))
     if mbid:
-        return redirect(f"https://coverartarchive.org/release-group/{mbid}/front-250")
+        art_result = _ensure_release_group_art(
+            mbid,
+            _s(getattr(album, "albumartist", "") or getattr(album, "artist", "") or ""),
+            _s(getattr(album, "album", "") or ""),
+        )
+        if art_result.get("ok") and art_result.get("url"):
+            return redirect(art_result["url"])
     # Fallback 3: return a transparent placeholder so the browser doesn't log a 404
     _SVG = (b'<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>')
     from flask import Response as _Resp
@@ -10548,6 +10723,39 @@ def _delete_review_source_folder(src_path: str, log: list,
         "library_folder_deleted": bool(inside_music_library),
         "pending_review_removed": bool(removed_review),
     }
+
+
+@app.get("/api/import/folder-stats")
+def import_folder_stats():
+    """Quick file-type breakdown of a review-item folder, shown in the
+    delete-confirmation dialog so the user can see what they're about to
+    remove before confirming a destructive action."""
+    raw_path = _s(request.args.get("path") or "").strip()
+    if not raw_path:
+        return jsonify({"ok": False, "error": "path required"})
+    folder = Path(raw_path)
+    if not folder.exists() or not folder.is_dir():
+        return jsonify({"ok": True, "path": raw_path, "exists": False,
+                        "audio_count": 0, "art_count": 0, "other_count": 0, "total_count": 0})
+    audio_count = art_count = other_count = 0
+    try:
+        for entry in folder.rglob("*"):
+            if not entry.is_file():
+                continue
+            ext = entry.suffix.lower()
+            if ext in AUDIO_EXT:
+                audio_count += 1
+            elif ext in _ART_EXTS:
+                art_count += 1
+            else:
+                other_count += 1
+    except Exception as ex:
+        return jsonify({"ok": False, "error": str(ex)})
+    return jsonify({
+        "ok": True, "path": raw_path, "exists": True,
+        "audio_count": audio_count, "art_count": art_count, "other_count": other_count,
+        "total_count": audio_count + art_count + other_count,
+    })
 
 
 @app.post("/api/import/review-folder/delete")
@@ -14387,7 +14595,7 @@ _AI_EVIDENCE_FMT_SEG_RE = re.compile(
 _AI_EVIDENCE_DISC_FOLDER_RE = re.compile(r'^(?:disc|cd|disk)\s*0*\d{1,2}$', re.I)
 _AI_EVIDENCE_SCENE_DROP_SEG_RE = re.compile(
     r'^(?:READNFO|NFOFIX|PROPER|REPACK|RERIP|REMASTER|REMASTERED|BONUS|'
-    r'WEBRIP|SCENE)$',
+    r'WEBRIP|SCENE|ALBUM|RELEASE|TITLE)$',
     re.I,
 )
 _CANDIDATE_COUNTRY_RANK = {"US": 0, "XW": 1, "GB": 2, "CA": 3, "AU": 4}
@@ -14474,12 +14682,18 @@ def _ai_evidence_scene_guess(folder_name: str) -> tuple[str, str, str]:
     raw, year = _ai_evidence_extract_year(raw)
     parts = [p.strip() for p in re.split(r"\s*-\s*", raw) if p.strip()]
     cleaned: List[str] = []
-    for part in parts:
+    for idx, part in enumerate(parts):
         seg = _ai_evidence_clean_segment(part)
         if not seg:
             continue
         if re.fullmatch(r"(?:19|20)\d{2}", seg):
             year = year or seg
+            continue
+        if idx == 0 and re.fullmatch(r"\d{2,4}", seg):
+            # A purely-numeric first segment is almost always the artist
+            # position (e.g. "311", "112"), never a bitrate/quality marker —
+            # the FMT drop rule below would otherwise eat it.
+            cleaned.append(seg)
             continue
         if _AI_EVIDENCE_FMT_SEG_RE.match(seg) or _AI_EVIDENCE_SCENE_DROP_SEG_RE.match(seg):
             continue
@@ -14494,6 +14708,37 @@ def _ai_evidence_scene_guess(folder_name: str) -> tuple[str, str, str]:
     if cleaned:
         return "", cleaned[0], year
     return "", "", year
+
+
+def _import_review_folder_signature(folder_path: str) -> str:
+    """Hash of the audio file list (name/size/mtime) so a stored AI Suggest
+    result can be checked for staleness against a folder that changed since
+    the suggestion was generated (files added/removed/replaced)."""
+    source = Path(folder_path)
+    entries = []
+    try:
+        for p in sorted(source.rglob("*"), key=lambda x: str(x).lower()):
+            if p.is_file() and p.suffix.lower() in AUDIO_EXT:
+                st = p.stat()
+                entries.append(f"{p.name}:{st.st_size}:{int(st.st_mtime)}")
+    except Exception:
+        return ""
+    if not entries:
+        return ""
+    raw = "|".join(entries)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _import_review_suggestion_is_stale(item: Dict[str, Any]) -> bool:
+    """True if a stored AI Suggest result's folder_signature no longer
+    matches the folder's current contents. An empty stored signature is
+    inconclusive (older items predate this field), not stale — don't
+    false-positive on those."""
+    stored_sig = _s((item or {}).get("folder_signature") or "")
+    path = _s((item or {}).get("path") or "")
+    if not stored_sig or not path:
+        return False
+    return _import_review_folder_signature(path) != stored_sig
 
 
 def _build_folder_evidence(folder_path: str) -> Dict[str, Any]:
@@ -15365,23 +15610,30 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
     # ── MusicBrainz release search ─────────────────────────────────────────────
     # When the artist folder is MBID-stamped, prefer arid: lookup over artist name
     # search — more reliable for non-ASCII or unusual artist names (e.g. ¥$).
+    # mb_search_log captures real lookup failures (network/API errors) so they
+    # surface as "MusicBrainz lookup failed: ..." instead of being silently
+    # indistinguishable from a genuine no-candidates result.
+    mb_search_log: List[str] = []
     mb_candidates = _mb_release_search(guessed_album, guessed_artist, limit=8,
                                        year=guessed_year, track_count=folder_track_count,
-                                       artist_mbid=guessed_artist_mbid)
+                                       artist_mbid=guessed_artist_mbid, log=mb_search_log)
     if not mb_candidates and guessed_artist:
         mb_candidates = _mb_release_search(guessed_album, "", limit=8,
                                            year=guessed_year, track_count=folder_track_count,
-                                           artist_mbid=guessed_artist_mbid)
+                                           artist_mbid=guessed_artist_mbid, log=mb_search_log)
     if not mb_candidates and guessed_album:
         short = " ".join(guessed_album.split()[:3])
         mb_candidates = _mb_release_search(short, guessed_artist, limit=8,
                                            year=guessed_year, track_count=folder_track_count,
-                                           artist_mbid=guessed_artist_mbid)
+                                           artist_mbid=guessed_artist_mbid, log=mb_search_log)
     if not mb_candidates:
         # Last resort: search MB by track titles extracted from the audio files.
         # Useful when folder/tag names are badly mangled but track metadata is intact.
         mb_candidates = _mb_release_search_by_folder_tracks(
-            folder_path, artist=guessed_artist, log=None, limit=8)
+            folder_path, artist=guessed_artist, log=mb_search_log, limit=8)
+    mb_search_failed = any(
+        "failed" in line.lower() or "warn:" in line.lower() for line in mb_search_log
+    )
 
     # ── AcoustID winner injection ─────────────────────────────────────────────
     # If 3+ independently fingerprinted tracks agree on a release not yet in
@@ -15461,6 +15713,7 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
                     candidates=mb_candidates,
                     preflight=_pf,
                 )
+                sug["folder_signature"] = _import_review_folder_signature(folder_path)
                 sug["review_evidence"] = evidence
                 return {
                     "ok": True,
@@ -15472,6 +15725,17 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
                 }
 
     if not mb_candidates:
+        if mb_search_failed:
+            no_candidates_reason = (
+                "MusicBrainz lookup failed: " + "; ".join(mb_search_log[-2:])
+            )
+        elif not guessed_artist and not guessed_album:
+            no_candidates_reason = (
+                "No artist/album could be parsed from the folder name/tags; "
+                "manual review is required."
+            )
+        else:
+            no_candidates_reason = "No MusicBrainz release candidates were found; manual review is required."
         sug = {
             "candidate_index": -1,
             "album": guessed_album,
@@ -15480,7 +15744,7 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
             "label": "",
             "country": "",
             "confidence": "low",
-            "reason": "No MusicBrainz release candidates were found; manual review is required.",
+            "reason": no_candidates_reason,
             "mb_albumid": "",
             "mb_valid": False,
         }
@@ -15491,6 +15755,7 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
             folder_evidence=ev,
             candidates=[],
         )
+        sug["folder_signature"] = _import_review_folder_signature(folder_path)
         sug["review_evidence"] = evidence
         return {
             "ok": True,
@@ -15681,6 +15946,24 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
             sug["mb_artist_search_url"] = (
                 "https://musicbrainz.org/search?"
                 + urllib.parse.urlencode({"query": _aa, "type": "artist"}))
+        # Backend identity gate: reject a candidate whose artist doesn't
+        # match the folder's own evidence, independent of album title —
+        # a matching album title must never rescue a wrong-artist candidate
+        # (2026-07-16, Voyager/Vitalic fix: "same title, different artist"
+        # was slipping through an earlier AND-based version of this check).
+        identity_rejection_reason = ""
+        if selected_candidate and guessed_artist:
+            cand_artist = _s(selected_candidate.get("artist", "")).strip()
+            cand_album = _s(selected_candidate.get("album", "")).strip()
+            artist_score = _playlist_artist_name_score(guessed_artist, cand_artist)
+            album_score = _playlist_title_score(guessed_album, cand_album)
+            if cand_artist and artist_score < 0.45:
+                identity_rejection_reason = (
+                    "Rejected: artist mismatch. Album title matched, but "
+                    f"candidate artist is {cand_artist} and source artist is {guessed_artist}."
+                )
+        sug["identity_validated"] = not bool(identity_rejection_reason)
+        sug["candidate_identity_error"] = identity_rejection_reason
         evidence = _ai_match_evidence_packet(
             "fresh_import",
             folder_path=folder_path,
@@ -15690,6 +15973,7 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
             candidates=mb_candidates,
             preflight=selected_preflight,
         )
+        sug["folder_signature"] = _import_review_folder_signature(folder_path)
         sug["review_evidence"] = evidence
         return {
             "ok": True,
@@ -18357,6 +18641,20 @@ def import_folder_with_id():
                 _delete_if_already_in_library(folder_path, "already in library", log)
                 return True
 
+            if selected_subset_import and not useful_files and scan.get("duplicate_files"):
+                # unknown_files counts ANY file in the source folder that
+                # wasn't selected for this job — completely unrelated to what
+                # was actually requested. Don't let unrelated files block
+                # recognizing that the selected file(s) are already present
+                # (they showed up as duplicate_files, not useful_files).
+                # Unlike the "fully complete" branch above, do not delete the
+                # folder here: the unrelated files may still need review.
+                log.append(
+                    "[import] Selected file(s) are already present in the library; "
+                    "unrelated files remain in the source folder for review."
+                )
+                return True
+
             if source_is_library:
                 reason = (
                     "Selected MusicBrainz release did not match the current library track list. "
@@ -19051,7 +19349,7 @@ def import_folder_with_id():
                         review_item_id=review_item_id,
                         path=folder_path,
                     )
-                log.append("[import] Import slot acquired — starting…")
+                log.append(f"[import] Import slot acquired — starting… selected_files={len(selected_source_files)}")
                 result = _do(log, cancel_event)
                 if auto_import_idempotency_key:
                     _import_review_auto_update(
@@ -27151,6 +27449,13 @@ _ALBUM_TRACK_ANNOT_RE = re.compile(
 )
 _ALBUM_TRACK_UNCLOSED_RE = re.compile(r'\s*[\(\[](?!.*[\)\]]).*$')
 _ALBUM_TRACK_TRAILING_ALIAS_RE = re.compile(r'\s*[\(\[]\s*([^\)\]]{2,})\s*[\)\]]\s*$')
+_ALBUM_TRACK_VERSION_MARKER_RE = re.compile(
+    r"\b(?:remix|re-?mix|edit|remaster(?:ed)?|radio|live|acoustic|acappella|"
+    r"a\s*cappella|a\s*pella|instrumental|karaoke|dub|extended|club|vip|"
+    r"rework|reprise|demo|sketch|outtake|version|mix|mono|stereo|explicit|"
+    r"clean|bonus|deluxe|single|album\s+edit)\b",
+    re.IGNORECASE,
+)
 _ALBUM_TRACK_FEATURE_SUFFIX_RE = re.compile(
     r'\b(?:featuring|feat|ft|with)\.?\s+.+$',
     re.IGNORECASE,
@@ -27260,7 +27565,7 @@ def _album_track_parenthetical_alias_variants(value: str) -> List[str]:
         return []
     variants: List[str] = []
     match = _ALBUM_TRACK_TRAILING_ALIAS_RE.search(text)
-    if match:
+    if match and not _ALBUM_TRACK_VERSION_MARKER_RE.search(match.group(1)):
         base = text[:match.start()].strip(" -_–—:;,.")
         if len(_album_track_norm(base)) >= 3:
             variants.append(base)
@@ -35956,6 +36261,23 @@ def _playlist_artist_score(query_artist, item):
     return best
 
 
+_PLAYLIST_ARTIST_CHANNEL_NOISE_RE = re.compile(
+    r"\b(?:canal\s+oficial|official\s+channel|oficial|official)\b",
+    re.IGNORECASE,
+)
+
+def _playlist_strip_artist_channel_noise(value: str) -> str:
+    """Strip YouTube-channel-branding noise ("[Canal Oficial]", "Oficial",
+    trailing brackets) that commonly rides along with an artist name scraped
+    from a video/channel title but isn't part of the actual artist name —
+    left in, it silently drags down artist-match scores against a real
+    downloaded file's tags/filename, which don't carry that branding."""
+    text = _s(value)
+    text = re.sub(r"\s*\[[^\]]*\]\s*$", "", text).strip()
+    text = _PLAYLIST_ARTIST_CHANNEL_NOISE_RE.sub("", text)
+    return " ".join(text.split()).strip(" -_/")
+
+
 def _playlist_artist_name_variants(value):
     raw = _s(value).strip()
     if not raw:
@@ -35970,12 +36292,15 @@ def _playlist_artist_name_variants(value):
     cleaned = re.sub(r"\s*\([^)]*\)\s*$", "", raw).strip()
     add(raw)
     add(cleaned)
+    add(_playlist_strip_artist_channel_noise(raw))
+    add(_playlist_strip_artist_channel_noise(cleaned))
     for part in re.split(
         r"\s*(?:/|,|\+|\b(?:ft\.?|feat\.?|featuring|with|x|and)\b|&)\s+",
         cleaned,
         flags=re.IGNORECASE,
     ):
         add(part)
+        add(_playlist_strip_artist_channel_noise(part))
     return variants
 
 
@@ -36009,7 +36334,7 @@ def _playlist_artist_name_score(query_artist, candidate_artist):
 
 def _playlist_strip_track_prefix(value):
     text = _s(value).strip()
-    text = re.sub(r"^\s*\d{1,2}\s*[-_. ]+\s*\d{1,3}\s*[-_. ]+", "", text)
+    text = re.sub(r"^\s*\d{1,2}\s*[-_. ]+\s*\d{2,3}\s*[-_. ]+", "", text)
     text = re.sub(r"^\s*\d{1,3}\s*[-_. ]+", "", text)
     return text.strip()
 
@@ -40913,6 +41238,7 @@ def playlist_download():
                     _log("Playlist pipeline paused at checkpoint." if paused else "Playlist pipeline stopped by user.")
                     return {"playlist_job_id": jid, "playlist": name, "status": state["status"]}
 
+                pause_after_this_round = False
                 if review_downloaded > 0:
                     review_total = _playlist_review_required_count_from_state(state)
                     waiting_total = _playlist_waiting_import_count_from_state(state)
@@ -40921,16 +41247,24 @@ def playlist_download():
                     state["review_required"] = review_total
                     state["waiting_for_import"] = waiting_total
                     _playlist_save_job_state(state)
-                    if verified_downloaded > 0:
+                    if verified_downloaded <= 0:
                         _log(
-                            f"{verified_downloaded} fingerprint-verified file(s) remain staged "
-                            "for Import Downloaded."
+                            f"{review_downloaded} downloaded file(s) require review before import; "
+                            "stopping automatic import for this round."
                         )
+                        break
+                    # Some tracks in this round need review, but others were
+                    # already fingerprint-verified — import those now instead
+                    # of discarding a whole round's verified downloads just
+                    # because a sibling track needs review. Stop starting new
+                    # rounds after this one so the pending review can be
+                    # resolved before more downloads pile up.
                     _log(
-                        f"{review_downloaded} downloaded file(s) require review before import; "
-                        "stopping automatic import for this round."
+                        f"{verified_downloaded} fingerprint-verified file(s) will be imported now; "
+                        f"{review_downloaded} other downloaded file(s) require review and are held back. "
+                        "Stopping further rounds until review is resolved."
                     )
-                    break
+                    pause_after_this_round = True
 
                 if verified_downloaded <= 0:
                     _log(
@@ -41056,6 +41390,12 @@ def playlist_download():
                     active_tracks = missing_round
                     break
                 active_tracks = missing_round
+                if pause_after_this_round:
+                    _log(
+                        "Stopping further download rounds until this round's "
+                        "review-required file(s) are resolved."
+                    )
+                    break
 
             if active_tracks and round_num >= max_rounds:
                 _log(
