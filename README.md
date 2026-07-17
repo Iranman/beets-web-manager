@@ -3,6 +3,7 @@
 Beets Web Manager is a self-hosted web application for managing a Beets music library, import review, playlist repair, acquisition queues, cleanup jobs, metadata verification, and media-server synchronization from one operator-focused interface.
 
 The app is designed for local or self-hosted deployments where the music library, download staging folders, Beets database, Plex, downloader services, MusicBrainz, AcoustID, and optional AI providers are controlled by the administrator.
+I made this because the beets web plugin just wasn't cutting it. Not only does this web app have a UI but it can do everything I need to manage my music libary. Yes this was vibe-coded and if that bothers you please dont waste your time. But for everyone else I tried my best to cover all vunerbilities and make sure all features work correctly. Please feel free to point out issues or how to make it better.
 
 ## Features
 
