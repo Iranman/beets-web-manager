@@ -85,6 +85,14 @@ import type {
   SetupStatusResponse,
   WantedResponse,
   YtdlpStatusResponse,
+  TransactionDetailResponse,
+  TransactionListResponse,
+  TransactionSettings,
+  SubmissionTargetResponse,
+  SubmissionDraftResponse,
+  SubmissionMusicBrainzValidationResponse,
+  SubmissionAttachMbidsPayload,
+  TransactionSettingsResponse,
 } from './types';
 import type { LibraryTrack } from '../types/api';
 
@@ -144,6 +152,57 @@ export function cleanupStaleReview(): Promise<CleanupStaleResponse> {
 
 export function getHealth(): Promise<HealthResponse> {
   return apiJson<HealthResponse>('/api/health');
+}
+export function getTransactionSettings(): Promise<TransactionSettingsResponse> {
+  return apiJson<TransactionSettingsResponse>('/api/transactions/settings');
+}
+
+export function saveTransactionSettings(payload: Partial<TransactionSettings>): Promise<TransactionSettingsResponse> {
+  return apiJson<TransactionSettingsResponse>('/api/transactions/settings', jsonRequest('POST', payload));
+}
+
+export function getTransactions(params: {
+  status?: string;
+  operation?: string;
+  q?: string;
+  offset?: number;
+  limit?: number;
+} = {}): Promise<TransactionListResponse> {
+  const query = new URLSearchParams();
+  if (params.status && params.status !== 'all') query.set('status', params.status);
+  if (params.operation && params.operation !== 'all') query.set('operation', params.operation);
+  if (params.q?.trim()) query.set('q', params.q.trim());
+  if (params.offset) query.set('offset', String(params.offset));
+  if (params.limit) query.set('limit', String(params.limit));
+  const suffix = query.toString();
+  return apiJson<TransactionListResponse>(`/api/transactions${suffix ? `?${suffix}` : ''}`);
+}
+
+export function getTransaction(transactionId: string, params: { offset?: number; limit?: number } = {}): Promise<TransactionDetailResponse> {
+  const query = new URLSearchParams();
+  if (params.offset) query.set('offset', String(params.offset));
+  if (params.limit) query.set('limit', String(params.limit));
+  const suffix = query.toString();
+  return apiJson<TransactionDetailResponse>(`/api/transactions/${encodeURIComponent(transactionId)}${suffix ? `?${suffix}` : ''}`);
+}
+
+export function approveTransaction(transactionId: string): Promise<TransactionDetailResponse> {
+  return apiJson<TransactionDetailResponse>(`/api/transactions/${encodeURIComponent(transactionId)}/approve`, jsonRequest('POST'));
+}
+
+export function cancelTransaction(transactionId: string): Promise<TransactionDetailResponse> {
+  return apiJson<TransactionDetailResponse>(`/api/transactions/${encodeURIComponent(transactionId)}/cancel`, jsonRequest('POST'));
+}
+export function applyTransaction(transactionId: string): Promise<TransactionDetailResponse & { job_id?: string }> {
+  return apiJson<TransactionDetailResponse & { job_id?: string }>(`/api/transactions/${encodeURIComponent(transactionId)}/apply`, jsonRequest('POST'));
+}
+
+export function rollbackTransaction(transactionId: string): Promise<TransactionDetailResponse> {
+  return apiJson<TransactionDetailResponse>(`/api/transactions/${encodeURIComponent(transactionId)}/rollback`, jsonRequest('POST'));
+}
+
+export function transactionExportUrl(transactionId: string, format: 'json' | 'csv' | 'markdown'): string {
+  return `/api/transactions/${encodeURIComponent(transactionId)}/export?format=${encodeURIComponent(format)}`;
 }
 
 export function getSetupStatus(): Promise<SetupStatusResponse> {
@@ -649,6 +708,17 @@ export function getArtistDiscography(artist: string): Promise<DiscographyRespons
   return apiJson<DiscographyResponse>(`/api/artist-discography?artist=${encodeURIComponent(artist)}`);
 }
 
+export function getReleaseArt(mbid: string, artist?: string, album?: string): Promise<{ ok: boolean; url?: string; error?: string }> {
+  const params = new URLSearchParams({ mbid });
+  if (artist) params.set('artist', artist);
+  if (album) params.set('album', album);
+  return apiJson(`/api/release-art?${params.toString()}`);
+}
+
+export function getArtistImageUrl(artist: string): Promise<{ ok: boolean; url?: string; source?: string }> {
+  return apiJson(`/api/artist-image-url?artist=${encodeURIComponent(artist)}`);
+}
+
 export function getAlbumMbCompleteness(albumId: number, mbAlbumId?: string): Promise<AlbumMbCompletenessResponse> {
   const qs = mbAlbumId ? `?mb_albumid=${encodeURIComponent(mbAlbumId)}` : '';
   return apiJson<AlbumMbCompletenessResponse>(`/api/albums/${albumId}/mb-completeness${qs}`);
@@ -1132,6 +1202,47 @@ export function startCleanAll(): Promise<JobStartResponse> {
 }
 
 // ── Unmatched releases ────────────────────────────────────────────────────────
+
+
+export function getSubmissionTarget(params: {
+  albumId?: number;
+  itemId?: number;
+  singleton?: boolean;
+}): Promise<SubmissionTargetResponse> {
+  const qs = new URLSearchParams();
+  if (params.albumId) qs.set('album_id', String(params.albumId));
+  if (params.itemId) qs.set('item_id', String(params.itemId));
+  if (params.singleton) qs.set('singleton', '1');
+  return apiJson<SubmissionTargetResponse>(`/api/submissions/target?${qs.toString()}`);
+}
+
+export function saveSubmissionDraft(payload: {
+  target_type: string;
+  target_id: number;
+  draft: Record<string, unknown>;
+}): Promise<SubmissionDraftResponse> {
+  return apiJson<SubmissionDraftResponse>('/api/submissions/draft', jsonRequest('POST', payload));
+}
+
+export function resetSubmissionDraft(targetType: string, targetId: number): Promise<SubmissionDraftResponse> {
+  const qs = new URLSearchParams({ target_type: targetType, target_id: String(targetId) });
+  return apiJson<SubmissionDraftResponse>(`/api/submissions/draft?${qs.toString()}`, { method: 'DELETE' });
+}
+
+export function validateSubmissionMusicBrainzRelease(payload: {
+  input: string;
+  album_id?: number;
+  item_id?: number;
+}): Promise<SubmissionMusicBrainzValidationResponse> {
+  return apiJson<SubmissionMusicBrainzValidationResponse>(
+    '/api/submissions/musicbrainz-release/validate',
+    jsonRequest('POST', payload),
+  );
+}
+
+export function attachSubmissionMbids(albumId: number, payload: SubmissionAttachMbidsPayload): Promise<JobStartResponse> {
+  return apiJson<JobStartResponse>(`/api/submissions/albums/${albumId}/attach-mbids`, jsonRequest('POST', payload));
+}
 
 export function albumMbsubmit(albumId: number): Promise<JobStartResponse> {
   return apiJson<JobStartResponse>(`/api/albums/${albumId}/mbsubmit`, jsonRequest('POST'));

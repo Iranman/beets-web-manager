@@ -147,6 +147,124 @@ export interface ApiOkResponse {
   ok: boolean;
   error?: string | null;
 }
+export type TransactionStatus =
+  | 'Pending'
+  | 'Preview'
+  | 'Approved'
+  | 'Running'
+  | 'Completed'
+  | 'Cancelled'
+  | 'Failed'
+  | 'Rolled Back'
+  | 'Partially Rolled Back';
+
+export interface TransactionConfidence {
+  overall?: number | null;
+  ai?: number | null;
+  acoustid?: number | null;
+  musicbrainz?: number | null;
+  artwork?: number | null;
+}
+
+export interface TransactionRollback {
+  available: boolean;
+  reason?: string;
+}
+
+export interface TransactionCounts {
+  items?: number;
+  files?: number;
+  changes?: number;
+  warnings?: number;
+  errors?: number;
+  [key: string]: number | undefined;
+}
+
+export interface TransactionSummary {
+  id: string;
+  created_at: number;
+  updated_at: number;
+  initiating_user?: string;
+  originating_job?: string | null;
+  operation_type: string;
+  status: TransactionStatus | string;
+  dry_run: boolean;
+  summary: string;
+  reason?: string;
+  source?: string;
+  confidence: TransactionConfidence;
+  counts: TransactionCounts;
+  rollback: TransactionRollback;
+  metadata?: Record<string, unknown>;
+}
+
+export interface TransactionMetadataDiffRow {
+  field: string;
+  old?: unknown;
+  new?: unknown;
+  changed?: boolean;
+}
+
+export interface TransactionFilesystemChange {
+  operation?: string;
+  old?: string;
+  new?: string;
+}
+
+export interface TransactionChange {
+  id?: string;
+  operation?: string;
+  artist?: string;
+  album?: string;
+  track?: string;
+  current_metadata?: Record<string, unknown>;
+  new_metadata?: Record<string, unknown>;
+  metadata_diff?: TransactionMetadataDiffRow[];
+  filesystem?: TransactionFilesystemChange[];
+  artwork?: Record<string, unknown>;
+  confidence?: TransactionConfidence;
+  reason?: string;
+  source?: string;
+  warnings?: string[];
+  errors?: string[];
+}
+
+export interface TransactionDetail extends TransactionSummary {
+  changes: TransactionChange[];
+  changes_total: number;
+  changes_offset?: number;
+  changes_limit?: number;
+  logs?: string[];
+  backup?: Record<string, unknown>;
+  result_summary?: Record<string, unknown>;
+}
+
+export interface TransactionListResponse {
+  ok: boolean;
+  transactions: TransactionSummary[];
+  total: number;
+}
+
+export interface TransactionDetailResponse {
+  ok: boolean;
+  transaction: TransactionDetail;
+}
+
+export interface TransactionSettings {
+  enabled: boolean;
+  backups_enabled: boolean;
+  rollback_enabled: boolean;
+  backup_retention_days: number;
+  automatic_approval_threshold: number;
+  require_review_below_threshold: boolean;
+  maximum_undo_history: number;
+  dry_run_by_default: boolean;
+}
+
+export interface TransactionSettingsResponse {
+  ok: boolean;
+  settings: TransactionSettings;
+}
 
 export interface SetupPathCheck {
   path: string;
@@ -216,6 +334,140 @@ export interface AlbumMbFormatResponse extends ApiOkResponse {
   albumartist: string;
   year: number | string;
   track_count: number;
+}
+
+
+export interface SubmissionReadiness {
+  plugins: Record<string, boolean>;
+  fpcalc_available: boolean;
+  fpcalc_path?: string;
+  pyacoustid_available: boolean;
+  acoustid_key_configured: boolean;
+  beet_available: boolean;
+}
+
+export interface SubmissionSummary {
+  target_type: 'album' | 'item' | string;
+  album_id?: number;
+  item_id?: number;
+  title: string;
+  albumartist: string;
+  release_type?: string;
+  secondary_type?: string;
+  release_status?: string;
+  release_date?: string | number;
+  country?: string;
+  label?: string;
+  catalog_number?: string;
+  barcode?: string;
+  format?: string;
+  disc_count?: number;
+  track_count?: number;
+  runtime?: number;
+  runtime_display?: string;
+  source_path?: string;
+  mb_albumartistid?: string;
+  mb_albumartistids?: string;
+  mb_releasegroupid?: string;
+  mb_albumid?: string;
+  cover_art_url?: string;
+  workflow_stage?: string;
+}
+
+export interface SubmissionTrack {
+  index: number;
+  item_id: number;
+  album_id?: number;
+  disc: number;
+  track: number;
+  title: string;
+  artist: string;
+  album?: string;
+  albumartist?: string;
+  duration?: number;
+  duration_display?: string;
+  file_name?: string;
+  file_path?: string;
+  file_available?: boolean;
+  format?: string;
+  mb_trackid?: string;
+  mb_albumid?: string;
+  fingerprint_status?: string;
+  validation_status?: string;
+}
+
+export interface SubmissionPreflightCheck {
+  label: string;
+  status: 'pass' | 'fail' | 'warning' | string;
+  stage: 'MusicBrainz' | 'AcoustID' | string;
+  explanation?: string;
+  action?: string;
+  affected?: string[];
+  blocking?: boolean;
+}
+
+export interface SubmissionPreflight {
+  checks: SubmissionPreflightCheck[];
+  missing_count: number;
+  warning_count: number;
+  musicbrainz_ready: boolean;
+  acoustid_ready: boolean;
+}
+
+export interface SubmissionTargetResponse extends ApiOkResponse {
+  target_type: 'album' | 'item' | string;
+  target_id: number;
+  summary: SubmissionSummary;
+  tracks: SubmissionTrack[];
+  preflight: SubmissionPreflight;
+  readiness: SubmissionReadiness;
+  draft?: Record<string, unknown>;
+}
+
+export interface SubmissionDraftResponse extends ApiOkResponse {
+  draft: Record<string, unknown>;
+  removed?: boolean;
+}
+
+export interface SubmissionMusicBrainzMapping {
+  item_id?: number;
+  disc?: number;
+  track?: number;
+  local_title?: string;
+  musicbrainz_title?: string;
+  recording_mbid?: string;
+  duration_delta_ms?: number;
+  status?: string;
+  issues?: string[];
+}
+
+export interface SubmissionMusicBrainzValidationResponse extends ApiOkResponse {
+  entity_type?: string;
+  release_group_mbid?: string;
+  requires_release_mbid?: boolean;
+  message?: string;
+  release?: {
+    mb_albumid?: string;
+    title?: string;
+    albumartist?: string;
+    mb_albumartistid?: string;
+    mb_albumartistids?: string;
+    mb_releasegroupid?: string;
+    date?: string;
+    country?: string;
+    track_count?: number;
+  };
+  local?: SubmissionSummary;
+  mapping?: SubmissionMusicBrainzMapping[];
+  mismatches?: SubmissionMusicBrainzMapping[];
+  needs_confirmation?: boolean;
+}
+
+export interface SubmissionAttachMbidsPayload {
+  mb_albumartistid: string;
+  mb_releasegroupid: string;
+  mb_albumid?: string;
+  recordings?: Array<{ item_id: number; mb_trackid: string }>;
 }
 
 export interface JobStartResponse extends ApiOkResponse {

@@ -1,25 +1,20 @@
-import { Dialog, DialogBackdrop, DialogPanel, DialogTitle } from '@headlessui/react';
 import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
 import LinearProgress from '@mui/material/LinearProgress';
 import TextField from '@mui/material/TextField';
 import { useCallback, useEffect, useState } from 'react';
 import {
-  getConfigFile,
   getHealth,
   getMbidStatus,
   getMusicFormatPreferences,
   getMusicFormatReplacementStatuses,
   getStats,
-  revertConfigFile,
-  saveConfigFile,
   saveMusicFormatPreferences,
   startMusicFormatReplacement,
   startMusicFormatScan,
 } from '../api/client';
 import { PluginsPanel } from '../features/plugins/PluginsPanel';
 import type {
-  ConfigFileResponse,
   HealthChecks,
   HealthResponse,
   MbidStatusResponse,
@@ -118,58 +113,6 @@ function CoverageBar({ label, present, total }: { label: string; present: number
   );
 }
 
-type ConfigAction = 'save' | 'revert' | null;
-
-function formatBackupTime(value?: number | null): string {
-  if (!value) return 'No backup';
-  return `Backup from ${new Date(value * 1000).toLocaleString()}`;
-}
-
-function ConfigActionDialog({
-  action,
-  onClose,
-  onConfirm,
-  busy,
-}: {
-  action: ConfigAction;
-  onClose: () => void;
-  onConfirm: () => void;
-  busy: boolean;
-}) {
-  const isSave = action === 'save';
-  return (
-    <Dialog open={action !== null} onClose={busy ? () => undefined : onClose} className="relative z-50">
-      <DialogBackdrop className="fixed inset-0 bg-graphite-950/60" />
-      <div className="fixed inset-0 flex items-center justify-center p-4">
-        <DialogPanel className="w-full max-w-sm rounded-lg border border-graphite-700 bg-graphite-900 p-5 shadow-2xl">
-          <DialogTitle className="text-base font-semibold text-zinc-100">
-            {isSave ? 'Save config.yaml?' : 'Revert config.yaml?'}
-          </DialogTitle>
-          <p className="mt-2 text-sm text-zinc-400">
-            {isSave
-              ? 'The current file will be backed up before the new content is written.'
-              : 'The backup file will replace the current config.yaml.'}
-          </p>
-          <div className="mt-5 flex justify-end gap-2">
-            <Button variant="outlined" size="small" onClick={onClose} disabled={busy}>
-              Cancel
-            </Button>
-            <Button
-              variant="contained"
-              size="small"
-              color={isSave ? 'primary' : 'warning'}
-              onClick={onConfirm}
-              disabled={busy}
-            >
-              {busy ? 'Working...' : isSave ? 'Save' : 'Revert'}
-            </Button>
-          </div>
-        </DialogPanel>
-      </div>
-    </Dialog>
-  );
-}
-
 // ── ID health metric ──────────────────────────────────────────────────────────
 
 function HealthMetric({
@@ -241,14 +184,6 @@ export default function Config() {
   const [mbStatus, setMbStatus] = useState<MbidStatusResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [configText, setConfigText] = useState('');
-  const [savedConfigText, setSavedConfigText] = useState('');
-  const [configMeta, setConfigMeta] = useState<Pick<ConfigFileResponse, 'has_backup' | 'backup_ts'> | null>(null);
-  const [configLoading, setConfigLoading] = useState(true);
-  const [configBusy, setConfigBusy] = useState(false);
-  const [configError, setConfigError] = useState('');
-  const [configMsg, setConfigMsg] = useState('');
-  const [configAction, setConfigAction] = useState<ConfigAction>(null);
   const [formatPrefs, setFormatPrefs] = useState<MusicFormatPreferences>(DEFAULT_MUSIC_FORMAT_PREFS);
   const [savedFormatPrefs, setSavedFormatPrefs] = useState<MusicFormatPreferences>(DEFAULT_MUSIC_FORMAT_PREFS);
   const [replacementRows, setReplacementRows] = useState<MusicFormatReplacementTrack[]>([]);
@@ -257,8 +192,6 @@ export default function Config() {
   const [formatMsg, setFormatMsg] = useState('');
   const [formatError, setFormatError] = useState('');
 
-  const configDirty = configText !== savedConfigText;
-  const configEmpty = !configText.trim();
   const formatDirty = JSON.stringify(formatPrefs) !== JSON.stringify(savedFormatPrefs);
   const queuedReplacementCount = replacementRows.filter((row) => {
     const status = (row.replacement_status || row.status || '').toLowerCase();
@@ -277,22 +210,6 @@ export default function Config() {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
-    }
-  }, []);
-
-  const loadConfig = useCallback(async () => {
-    setConfigLoading(true);
-    setConfigError('');
-    try {
-      const cfg = await getConfigFile();
-      const content = cfg.content ?? '';
-      setConfigText(content);
-      setSavedConfigText(content);
-      setConfigMeta({ has_backup: Boolean(cfg.has_backup), backup_ts: cfg.backup_ts ?? null });
-    } catch (err) {
-      setConfigError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setConfigLoading(false);
     }
   }, []);
 
@@ -316,9 +233,8 @@ export default function Config() {
 
   useEffect(() => {
     void load();
-    void loadConfig();
     void loadMusicFormat();
-  }, [load, loadConfig, loadMusicFormat]);
+  }, [load, loadMusicFormat]);
 
   const handleSaveMusicFormat = async () => {
     setFormatBusy(true);
@@ -364,38 +280,6 @@ export default function Config() {
     }
   };
 
-  const handleSaveConfig = async () => {
-    setConfigBusy(true);
-    setConfigMsg('');
-    setConfigError('');
-    try {
-      const saved = await saveConfigFile(configText);
-      await loadConfig();
-      setConfigMsg(saved.backed_up ? 'Saved config.yaml. Backup updated.' : 'Saved config.yaml.');
-    } catch (err) {
-      setConfigError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setConfigBusy(false);
-      setConfigAction(null);
-    }
-  };
-
-  const handleRevertConfig = async () => {
-    setConfigBusy(true);
-    setConfigMsg('');
-    setConfigError('');
-    try {
-      await revertConfigFile();
-      await loadConfig();
-      setConfigMsg('Reverted config.yaml from backup.');
-    } catch (err) {
-      setConfigError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setConfigBusy(false);
-      setConfigAction(null);
-    }
-  };
-
   const toggleLayout = (key: MusicFormatLayout, checked: boolean) => {
     setFormatPrefs((current) => ({
       ...current,
@@ -433,7 +317,6 @@ export default function Config() {
 
   const refreshAll = () => {
     void load();
-    void loadConfig();
     void loadMusicFormat();
   };
 
@@ -446,8 +329,8 @@ export default function Config() {
     <div className="space-y-6">
       {/* Header */}
       <div className="flex items-center justify-between gap-4">
-        <h1 className="text-xl font-semibold text-zinc-100">Config</h1>
-        <Button variant="outlined" size="small" onClick={refreshAll} disabled={loading || configLoading || formatLoading}>
+        <h1 className="text-xl font-semibold text-zinc-100">Settings</h1>
+        <Button variant="outlined" size="small" onClick={refreshAll} disabled={loading || formatLoading}>
           Refresh
         </Button>
       </div>
@@ -674,57 +557,7 @@ export default function Config() {
         <PluginsPanel />
       </section>
 
-      {/* config.yaml */}
-      <section className="space-y-3">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h2 className="text-[0.78rem] font-semibold uppercase tracking-wide text-zinc-500">config.yaml</h2>
-            <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-zinc-500">
-              <code className="text-zinc-400">/config/config.yaml</code>
-              <span>{formatBackupTime(configMeta?.backup_ts)}</span>
-              {configDirty && <span className="font-semibold text-amber-400">Unsaved</span>}
-            </div>
-          </div>
-          <div className="flex gap-2">
-            <Button size="small" variant="outlined" onClick={loadConfig} disabled={configLoading || configBusy}>Reload</Button>
-            <Button size="small" variant="outlined" color="warning" onClick={() => setConfigAction('revert')} disabled={configLoading || configBusy || !configMeta?.has_backup}>Revert</Button>
-            <Button size="small" variant="contained" onClick={() => setConfigAction('save')} disabled={configLoading || configBusy || !configDirty || configEmpty}>Save</Button>
-          </div>
-        </div>
-        {configMsg && <Alert severity="success" onClose={() => setConfigMsg('')}>{configMsg}</Alert>}
-        {configError && <Alert severity="error">{configError}</Alert>}
-        {configLoading && <LinearProgress sx={{ borderRadius: 1 }} />}
-        <TextField
-          value={configText}
-          onChange={(event) => setConfigText(event.target.value)}
-          fullWidth
-          multiline
-          minRows={10}
-          maxRows={20}
-          disabled={configLoading || configBusy}
-          spellCheck={false}
-          slotProps={{
-            input: {
-              sx: {
-                alignItems: 'flex-start',
-                bgcolor: '#020617',
-                color: '#d1d5db',
-                fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace',
-                fontSize: '0.78rem',
-                lineHeight: 1.55,
-                overflowY: 'auto',
-              },
-            },
-          }}
-        />
-      </section>
 
-      <ConfigActionDialog
-        action={configAction}
-        onClose={() => setConfigAction(null)}
-        onConfirm={configAction === 'save' ? handleSaveConfig : handleRevertConfig}
-        busy={configBusy}
-      />
     </div>
   );
 }

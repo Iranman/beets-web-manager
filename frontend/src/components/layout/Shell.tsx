@@ -126,7 +126,7 @@ export default function Shell() {
                 <MenuButton
                   disabled={restarting}
                   className="flex items-center rounded-md px-1.5 py-1 text-red-300 transition-colors hover:bg-red-950/35 hover:text-white disabled:opacity-40"
-                  title="Settings"
+                  title="System"
                 >
                   <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <circle cx="12" cy="12" r="3" />
@@ -148,9 +148,17 @@ export default function Shell() {
                   <MenuItem>
                     <button
                       className="flex w-full items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:bg-graphite-800 hover:text-white"
-                      onClick={() => void navigate('/setup')}
+                      onClick={() => void navigate('/changes')}
                     >
-                      Setup
+                      Library Changes
+                    </button>
+                  </MenuItem>
+                  <MenuItem>
+                    <button
+                      className="flex w-full items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:bg-graphite-800 hover:text-white"
+                      onClick={() => void navigate('/system')}
+                    >
+                      System
                     </button>
                   </MenuItem>
                   <MenuItem>

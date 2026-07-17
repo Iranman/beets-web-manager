@@ -307,6 +307,7 @@ from backend.audio_preferences import (
     validate_audio_tree as _validate_audio_tree_preferences,
     handle_rejected_download as _handle_rejected_audio_download,
 )
+from backend.transaction_engine import TransactionStore, metadata_diff
 from backend.title_normalize import restore_time_colon_title as _restore_time_colon_title
 from helpers_mb import (
     _fetch_mb_recording_details, _mb_recording_search, _mb_release_search,
@@ -1665,6 +1666,7 @@ EDITABLE_FIELDS = [
 
 app   = Flask(__name__)
 jobs  = JobStore()
+transactions = TransactionStore()
 APP_ROOT = Path(__file__).parent
 REACT_DIST_DIR = APP_ROOT / "frontend" / "dist"
 LEGACY_STATIC_DIR = APP_ROOT / "static"
@@ -1682,6 +1684,8 @@ _AUTH_PUBLIC_ENDPOINTS = {
     ("HEAD", "react_assets"),
     ("GET", "react_next_static"),
     ("HEAD", "react_next_static"),
+    ("GET", "favicon"),
+    ("HEAD", "favicon"),
 }
 _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)\b(api[_-]?key|token|password|secret|authorization|cookie|client[_-]?secret)"
@@ -1694,6 +1698,176 @@ _PLACEHOLDER_AUTH_SECRETS = {
     "admin", "password", "password1", "changeme", "changeit", "secret", "token",
     "default", "example", "letmein", "beets", "beetsweb", "setinenv", "setastrongownertoken",
 }
+
+_TRANSACTION_LABEL_BLOCKLIST = (
+    "discography",
+    "plex library refresh",
+)
+
+
+def _transaction_user_label() -> str:
+    try:
+        auth = request.authorization
+        if auth and auth.username:
+            return str(auth.username)
+    except RuntimeError:
+        pass
+    return os.environ.get("BEETS_WEB_USERNAME", "admin").strip() or "operator"
+
+
+def _transaction_operation_from_job(label: str, metadata: Dict[str, Any]) -> Optional[str]:
+    text = f"{metadata.get('type', '')} {label}".strip().lower()
+    if not text or any(blocked in text for blocked in _TRANSACTION_LABEL_BLOCKLIST):
+        return None
+    if "playlist" in text:
+        if any(word in text for word in ("import", "place", "repair", "sync", "quality")):
+            return "Playlist Import"
+    if "music-format" in text or "replace" in text or "replacement" in text:
+        return "Replace"
+    if "fetchart" in text or "art" in text or "artwork" in text:
+        return "Artwork Update"
+    if "dedup" in text or "duplicate" in text:
+        return "Duplicate Removal"
+    if "merge artist" in text or "artist-folder-merge" in text or "merge-artist" in text:
+        return "Merge Artist"
+    if "merge album" in text or "merge-split" in text or "release group merge" in text:
+        return "Merge Album"
+    if "split" in text:
+        return "Split Album"
+    if "import" in text or "tag+import" in text or "import+tag" in text:
+        return "Import"
+    if "mbsync" in text or "mbid" in text or "musicbrainz" in text or "mbsubmit" in text:
+        return "MusicBrainz Match"
+    if "acoustid" in text or "fingerprint" in text:
+        return "AcoustID Match"
+    if "ai" in text or "suggest" in text:
+        return "AI Suggestion"
+    if "move" in text:
+        return "Move"
+    if "rename" in text or "normalize" in text or "stamp" in text:
+        return "Rename"
+    if "delete" in text or "remove" in text or "cleanup" in text or "clean" in text:
+        return "Library Cleanup"
+    if "repair" in text or "fix" in text:
+        return "Repair"
+    if "scan" in text or "rescan" in text:
+        return "Rescan"
+    if text.startswith("beet "):
+        return "Repair"
+    return None
+
+
+def _transaction_create_for_job(label: str, metadata: Optional[Dict[str, Any]], command: Optional[List[str]] = None) -> Optional[Dict[str, Any]]:
+    metadata = dict(metadata or {})
+    explicit = metadata.get("transaction")
+    if explicit is False:
+        return None
+    explicit_payload = explicit if isinstance(explicit, dict) else {}
+    operation_type = (
+        explicit_payload.get("operation_type")
+        or metadata.get("transaction_operation")
+        or metadata.get("operation_type")
+        or _transaction_operation_from_job(label, metadata)
+    )
+    if not operation_type:
+        return None
+    text = f"{metadata.get('type', '')} {label}".lower()
+    dry_run = bool(
+        explicit_payload.get("dry_run")
+        or metadata.get("dry_run")
+        or metadata.get("preview")
+        or "dry run" in text
+        or "preview" in text
+    )
+    summary = str(explicit_payload.get("summary") or label or operation_type)
+    reason = str(explicit_payload.get("reason") or "Created from the existing job workflow before library changes are applied.")
+    source = str(explicit_payload.get("source") or metadata.get("type") or "job")
+    tx_metadata = {k: v for k, v in metadata.items() if k != "transaction"}
+    if command:
+        tx_metadata["command"] = [str(part) for part in command]
+    return transactions.create(
+        operation_type=str(operation_type),
+        initiating_user=_transaction_user_label(),
+        status="Running",
+        dry_run=dry_run,
+        summary=summary,
+        reason=reason,
+        source=source,
+        confidence=explicit_payload.get("confidence") if isinstance(explicit_payload.get("confidence"), dict) else None,
+        rollback_available=bool(explicit_payload.get("rollback_available", False)),
+        rollback_reason=str(explicit_payload.get("rollback_reason") or "Rollback data has not been captured for this workflow yet."),
+        metadata=tx_metadata,
+    )
+
+
+def _call_job_fn(fn, log, cancel=None, update_state=None):
+    import inspect as _inspect
+    sig = _inspect.signature(fn)
+    if len(sig.parameters) >= 3:
+        return fn(log, cancel, update_state)
+    if len(sig.parameters) >= 2:
+        return fn(log, cancel)
+    return fn(log)
+
+
+def _install_transaction_job_hooks() -> None:
+    if getattr(jobs, "_transaction_hooks_installed", False):
+        return
+    original_start = jobs.start
+    original_start_python = jobs.start_python
+
+    def start_python_with_transaction(fn, label="", metadata=None):
+        metadata_payload = dict(metadata or {})
+        tx = _transaction_create_for_job(label, metadata_payload)
+        tx_id = tx.get("id") if tx else ""
+        if tx_id:
+            metadata_payload["transaction_id"] = tx_id
+
+            def wrapped(log, cancel=None, update_state=None):
+                transactions.update(tx_id, status="Running")
+                try:
+                    result = _call_job_fn(fn, log, cancel, update_state)
+                except Exception as ex:
+                    transactions.update(tx_id, status="Failed")
+                    transactions.append_log(tx_id, f"ERROR: {ex}")
+                    raise
+                next_status = "Preview" if metadata_payload.get("dry_run") or metadata_payload.get("preview") else "Completed"
+                transactions.update(tx_id, status=next_status)
+                return result
+        else:
+            wrapped = fn
+        job = original_start_python(wrapped, label=label, metadata=metadata_payload)
+        if tx_id:
+            transactions.attach_job(tx_id, job.job_id)
+        return job
+
+    def start_with_transaction(command, label=""):
+        tx = _transaction_create_for_job(label or "beet command", {"type": "beet-command"}, command=list(command or []))
+        job = original_start(command, label=label)
+        if tx:
+            metadata_payload = {"type": "beet-command", "transaction_id": tx["id"]}
+            setattr(job, "metadata", metadata_payload)
+            transactions.attach_job(tx["id"], job.job_id)
+        return job
+
+    jobs.start_python = start_python_with_transaction
+    jobs.start = start_with_transaction
+    jobs._transaction_hooks_installed = True
+
+
+def _sync_transactions_from_jobs() -> None:
+    for job in jobs.all():
+        metadata = getattr(job, "metadata", {}) or {}
+        tx_id = metadata.get("transaction_id")
+        if not tx_id:
+            continue
+        try:
+            transactions.update_from_job(str(tx_id), job)
+        except Exception as ex:
+            app.logger.debug("transaction sync failed for %s: %s", tx_id, ex)
+
+
+_install_transaction_job_hooks()
 _AUTH_RATE_LIMITS: Dict[str, Dict[str, Any]] = {}
 _AUTH_RATE_LIMIT_LOCK = threading.Lock()
 
@@ -1808,6 +1982,15 @@ def _request_client_identity() -> str:
             if _valid_client_ip(candidate):
                 return candidate
     return peer or "unknown"
+
+
+def _client_ip_is_lan() -> bool:
+    try:
+        import ipaddress as _ipaddress
+        ip = _ipaddress.ip_address(_request_client_identity())
+        return bool(ip.is_private or ip.is_loopback)
+    except Exception:
+        return False
 
 
 def _rate_limit_subject(include_auth: bool = False) -> str:
@@ -1933,11 +2116,7 @@ def _is_public_endpoint() -> bool:
     return (method, endpoint) in _AUTH_PUBLIC_ENDPOINTS
 
 
-@app.before_request
-def _enforce_security_boundary():
-    if _is_public_endpoint() or _security_auth_disabled():
-        return None
-
+def _auth_failure_rate_limit_response():
     auth_limited, auth_retry = _rate_limited(
         "auth",
         _rate_limit_subject(include_auth=False),
@@ -1946,6 +2125,13 @@ def _enforce_security_boundary():
     )
     if auth_limited:
         return _rate_limit_response(auth_retry)
+    return None
+
+
+@app.before_request
+def _enforce_security_boundary():
+    if _is_public_endpoint() or _security_auth_disabled():
+        return None
 
     if not _security_auth_configured():
         return _json_security_error(
@@ -1953,9 +2139,15 @@ def _enforce_security_boundary():
             "Authentication is required. Set a strong BEETS_WEB_AUTH_TOKEN or BEETS_WEB_PASSWORD.",
         )
     if not _request_authorized():
+        limited = _auth_failure_rate_limit_response()
+        if limited is not None:
+            return limited
         return _json_security_error(401, "Authentication required")
     if not _csrf_request_allowed():
         return _json_security_error(403, "CSRF check failed")
+
+    if _client_ip_is_lan():
+        return None
 
     bucket, limit, window_seconds = _rate_limit_profile_for_request()
     action_limited, action_retry = _rate_limited(
@@ -1969,16 +2161,27 @@ def _enforce_security_boundary():
     return None
 
 
-@app.after_request
-def _set_security_headers(response):
-    response.headers.setdefault("X-Content-Type-Options", "nosniff")
-    response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
-    response.headers.setdefault("Referrer-Policy", "same-origin")
-    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
-    response.headers.setdefault(
-        "Content-Security-Policy",
+_INLINE_SCRIPT_RE = re.compile(r"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>", re.IGNORECASE | re.DOTALL)
+
+
+def _inline_script_csp_hashes(html: Optional[str]) -> List[str]:
+    if not html:
+        return []
+    hashes: List[str] = []
+    for match in _INLINE_SCRIPT_RE.finditer(html):
+        script_body = match.group(1)
+        if not script_body.strip():
+            continue
+        digest = base64.b64encode(hashlib.sha256(script_body.encode("utf-8")).digest()).decode("ascii")
+        hashes.append(f"'sha256-{digest}'")
+    return list(dict.fromkeys(hashes))
+
+
+def _content_security_policy(html: Optional[str] = None) -> str:
+    script_src = " ".join(["'self'", *_inline_script_csp_hashes(html)])
+    return (
         "default-src 'self'; "
-        "script-src 'self'; "
+        f"script-src {script_src}; "
         "style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data: blob:; "
         "connect-src 'self'; "
@@ -1986,8 +2189,23 @@ def _set_security_headers(response):
         "object-src 'none'; "
         "base-uri 'none'; "
         "form-action 'self'; "
-        "frame-ancestors 'self'",
+        "frame-ancestors 'self'"
     )
+
+
+@app.after_request
+def _set_security_headers(response):
+    html_for_csp = None
+    try:
+        if response.mimetype == "text/html" and not response.direct_passthrough:
+            html_for_csp = response.get_data(as_text=True)
+    except Exception:
+        html_for_csp = None
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    response.headers.setdefault("Referrer-Policy", "same-origin")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    response.headers.setdefault("Content-Security-Policy", _content_security_policy(html_for_csp))
     if request.path.startswith("/api/"):
         response.headers.setdefault("Cache-Control", "no-store")
     return response
@@ -2051,6 +2269,18 @@ def react_next_static(filename):
     if target:
         return send_file(target)
     abort(404)
+
+
+@app.get("/favicon.ico")
+def favicon():
+    for icon_path in (
+        REACT_DIST_DIR / "favicon.ico",
+        LEGACY_STATIC_DIR / "favicon.ico",
+        APP_ROOT / "favicon.ico",
+    ):
+        if icon_path.exists() and icon_path.is_file():
+            return send_file(icon_path)
+    return Response(status=204)
 
 
 def _redacted_ytdlp_auth_label(auth: Dict[str, Any]) -> str:
@@ -2254,6 +2484,88 @@ def stats():
     artists = len({a.albumartist for a in albums_list if a.albumartist})
     return jsonify({"tracks": tracks, "albums": len(albums_list), "artists": artists})
 
+
+# -- Transaction helpers for item metadata changes ---------------------------
+
+
+def _item_transaction_fields(item) -> Dict[str, Any]:
+    values: Dict[str, Any] = {}
+    for field, _label in EDITABLE_FIELDS:
+        try:
+            values[field] = _s(getattr(item, field, "") or "")
+        except Exception:
+            values[field] = ""
+    try:
+        values["path"] = _s(getattr(item, "path", "") or "")
+    except Exception:
+        values["path"] = ""
+    return values
+
+
+def _item_metadata_transaction_payload(iid: int, fields: Dict[str, Any]) -> Tuple[Any, Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+    item = lib.get_item(iid)
+    if not item:
+        raise KeyError(f"Item {iid} not found")
+    current = _item_transaction_fields(item)
+    proposed = dict(current)
+    for key, value in fields.items():
+        proposed[str(key)] = _s(value)
+    diff_rows = metadata_diff(current, proposed)
+    change = {
+        "id": f"item:{iid}",
+        "operation": "Metadata Update",
+        "artist": proposed.get("artist") or current.get("artist") or "",
+        "album": proposed.get("album") or current.get("album") or "",
+        "track": proposed.get("title") or current.get("title") or f"item {iid}",
+        "current_metadata": current,
+        "new_metadata": proposed,
+        "metadata_diff": diff_rows,
+        "filesystem": [],
+        "confidence": {"overall": 1.0},
+        "reason": "Manual operator metadata edit.",
+        "source": "User supplied fields",
+    }
+    rollback_op = {
+        "type": "metadata_restore",
+        "item_id": iid,
+        "fields": {row["field"]: row.get("old") for row in diff_rows if row.get("changed")},
+        "write_tags": False,
+        "reason": "Restore metadata values captured before the edit.",
+    }
+    return item, current, proposed, {"change": change, "rollback_op": rollback_op, "diff_rows": diff_rows}
+
+
+def _write_fast_item_modify_config(path_value: str) -> str:
+    _plugins = _beet_plugins()
+    try:
+        Path(path_value).write_text(
+            "include:\n  - /config/config.yaml\n"
+            "pluginpath: /config/beetsplug\n"
+            + (f"plugins: {_plugins}\n" if _plugins else "")
+            + "lyrics:\n  auto: no\n"
+            "replaygain:\n  auto: no\n",
+            encoding="utf-8",
+        )
+        return path_value
+    except Exception:
+        return "/config/config.yaml"
+
+
+def _run_item_metadata_restore(item_id: int, fields: Dict[str, Any], log: List[str], cancel_event=None) -> bool:
+    parts = [f"{k}={v}" for k, v in (fields or {}).items()]
+    if not parts:
+        log.append("  [rollback] No metadata fields to restore.")
+        return True
+    cfg = _write_fast_item_modify_config(f"/tmp/beets_rollback_item_{item_id}_{uuid.uuid4().hex}.yaml")
+    cmd = [BEET_BIN, "-c", cfg, "modify", "--yes", "--nowrite", f"id:{item_id}"] + parts
+    r = _beet_run(cmd, log, timeout=60, env=_beet_env(), cancel=cancel_event)
+    if r.returncode not in (0, -9, 124):
+        log.append(f"  [rollback] Metadata restore failed for item {item_id} (rc={r.returncode}).")
+        return False
+    _invalidate_lib_cache()
+    log.append(f"  [rollback] Restored metadata for item {item_id}.")
+    return True
+
 # ── Items / Albums ────────────────────────────────────────────────────────────
 
 @app.get("/api/items")
@@ -2274,39 +2586,138 @@ def get_item(iid):
         return jsonify({"ok": False, "error": "Not found"}), 404
     return jsonify({"ok": True, "item": item_dict_full(item)})
 
-@app.post("/api/items/<int:iid>/modify")
-def modify_item(iid):
-    fields = (request.get_json(silent=True) or {}).get("fields", {})
+def _metadata_transaction_pending_fields(tx: Dict[str, Any]) -> Dict[str, Any]:
+    metadata = tx.get("metadata") or {}
+    fields = metadata.get("pending_fields") if isinstance(metadata.get("pending_fields"), dict) else {}
+    editable = {field for field, _label in EDITABLE_FIELDS}
+    cleaned = {str(k): v for k, v in fields.items() if str(k) in editable}
+    if cleaned:
+        return cleaned
+    changes = tx.get("changes") or []
+    if not changes:
+        return {}
+    diff_rows = changes[0].get("metadata_diff") or []
+    return {
+        str(row.get("field")): row.get("new")
+        for row in diff_rows
+        if row.get("changed") and str(row.get("field")) in editable
+    }
+
+
+def _start_metadata_apply_transaction(transaction_id: str):
+    tx = transactions.get(transaction_id)
+    if tx.get("operation_type") != "Metadata Update":
+        raise ValueError("Only metadata update transactions can be applied by this endpoint.")
+    if tx.get("status") != "Approved":
+        raise ValueError("Approve the transaction before applying it.")
+    metadata = tx.get("metadata") or {}
+    item_id = int(metadata.get("item_id") or 0)
+    if not item_id:
+        raise ValueError("Metadata transaction is missing item id.")
+    fields = _metadata_transaction_pending_fields(tx)
     if not fields:
-        return jsonify({"ok": False, "error": "No fields"}), 400
+        transactions.update(transaction_id, status="Completed", dry_run=False, counts={"items": 0, "changes": 0})
+        return None
+    changed_fields = [str(v) for v in (metadata.get("changed_fields") or list(fields.keys()))]
     parts = [f"{k}={v}" for k, v in fields.items()]
 
     def _do(log, cancel_event=None):
-        # Write a temp config that disables slow auto-plugins so modify is fast.
-        # Use --nowrite: only update the beets DB here; the retag step writes
-        # the actual audio file tags.
-        _mcfg = "/tmp/beets_modify_item.yaml"
-        _plugins = _beet_plugins()
+        transactions.update(transaction_id, status="Running", dry_run=False)
         try:
-            Path(_mcfg).write_text(
-                "include:\n  - /config/config.yaml\n"
-                "pluginpath: /config/beetsplug\n"
-                + (f"plugins: {_plugins}\n" if _plugins else "")
-                + "lyrics:\n  auto: no\n"
-                "replaygain:\n  auto: no\n"
-            )
-        except Exception:
-            _mcfg = "/config/config.yaml"
-        cmd = ([BEET_BIN, "-c", _mcfg, "modify", "--yes", "--nowrite", f"id:{iid}"]
-               + parts)
-        r = _beet_run(cmd, log, timeout=60, env=_beet_env(), cancel=cancel_event)
-        if r.returncode not in (0, -9, 124):
-            raise RuntimeError(f"modify failed rc={r.returncode}")
-        _invalidate_lib_cache()
+            cfg = _write_fast_item_modify_config(f"/tmp/beets_modify_item_{item_id}_{uuid.uuid4().hex}.yaml")
+            cmd = ([BEET_BIN, "-c", cfg, "modify", "--yes", "--nowrite", f"id:{item_id}"]
+                   + parts)
+            r = _beet_run(cmd, log, timeout=60, env=_beet_env(), cancel=cancel_event)
+            if r.returncode not in (0, -9, 124):
+                raise RuntimeError(f"modify failed rc={r.returncode}")
+            _invalidate_lib_cache()
+            transactions.update(transaction_id, status="Completed", logs=list(log)[-500:], counts={"items": 1, "changes": len(changed_fields)})
+            return {"ok": True, "transaction_id": transaction_id, "changed_fields": changed_fields}
+        except Exception as ex:
+            transactions.update(transaction_id, status="Failed", logs=list(log)[-500:])
+            transactions.append_log(transaction_id, f"ERROR: {ex}")
+            raise
 
-    job = jobs.start_python(_do, label=f"Tag: {fields.get('title', f'item {iid}')}")
-    return jsonify({"ok": True, "job_id": job.job_id})
+    job = jobs.start_python(
+        _do,
+        label=f"Apply metadata transaction {transaction_id}",
+        metadata={"transaction": False, "transaction_id": transaction_id, "type": "metadata-update", "item_id": item_id},
+    )
+    transactions.attach_job(transaction_id, job.job_id)
+    return job
 
+
+@app.post("/api/items/<int:iid>/modify")
+def modify_item(iid):
+    payload = request.get_json(silent=True) or {}
+    fields = payload.get("fields", {})
+    if not isinstance(fields, dict) or not fields:
+        return jsonify({"ok": False, "error": "No fields"}), 400
+    editable = {field for field, _label in EDITABLE_FIELDS}
+    fields = {str(k): v for k, v in fields.items() if str(k) in editable}
+    if not fields:
+        return jsonify({"ok": False, "error": "No editable fields"}), 400
+
+    approved_tx_id = _s(payload.get("apply_transaction_id") or payload.get("approved_transaction_id") or "").strip()
+    if approved_tx_id:
+        try:
+            tx = transactions.get(approved_tx_id)
+            meta = tx.get("metadata") or {}
+            if int(meta.get("item_id") or 0) != int(iid):
+                return jsonify({"ok": False, "error": "Approved transaction belongs to a different item."}), 409
+            pending_fields = _metadata_transaction_pending_fields(tx)
+            if {str(k): _s(v) for k, v in pending_fields.items()} != {str(k): _s(v) for k, v in fields.items()}:
+                return jsonify({"ok": False, "error": "Approved transaction fields do not match this apply request."}), 409
+            job = _start_metadata_apply_transaction(approved_tx_id)
+        except KeyError:
+            return jsonify({"ok": False, "error": "Transaction not found"}), 404
+        except ValueError as ex:
+            return jsonify({"ok": False, "error": str(ex)}), 409
+        if job is None:
+            return jsonify({"ok": True, "transaction_id": approved_tx_id, "applied": True})
+        return jsonify({"ok": True, "job_id": job.job_id, "transaction_id": approved_tx_id})
+
+    try:
+        _item, _current, _proposed, tx_payload = _item_metadata_transaction_payload(iid, fields)
+    except KeyError:
+        return jsonify({"ok": False, "error": "Not found"}), 404
+
+    changed_fields = [row["field"] for row in tx_payload["diff_rows"] if row.get("changed")]
+    summary = f"Metadata edit for item {iid}: {', '.join(changed_fields) if changed_fields else 'no field changes'}"
+    tx = transactions.create(
+        operation_type="Metadata Update",
+        initiating_user=_transaction_user_label(),
+        status="Preview",
+        dry_run=True,
+        summary=summary,
+        reason="Manual operator metadata edit.",
+        source="User supplied fields",
+        confidence={"overall": 1.0},
+        changes=[tx_payload["change"]],
+        rollback_available=bool(changed_fields),
+        rollback_reason="Captured previous metadata values before apply." if changed_fields else "No changed fields were captured.",
+        metadata={
+            "item_id": iid,
+            "changed_fields": changed_fields,
+            "pending_fields": fields,
+            "apply_endpoint": f"/api/transactions/{{id}}/apply",
+            "requires_approval": True,
+        },
+    )
+    if changed_fields:
+        transactions.update(tx["id"], rollback={
+            "available": True,
+            "reason": "Captured previous metadata values before apply.",
+            "operations": [tx_payload["rollback_op"]],
+        }, counts={"items": 1, "changes": len(changed_fields)})
+
+    return jsonify({
+        "ok": True,
+        "requires_approval": True,
+        "dry_run": True,
+        "transaction_id": tx["id"],
+        "transaction": transactions.get(tx["id"]),
+    })
 @app.post("/api/items/<int:iid>/retag")
 def retag_item(iid):
     """Sync metadata from MusicBrainz (if item has mb_trackid/mb_albumid),
@@ -45474,6 +45885,170 @@ def _plugin_status_payload() -> Dict[str, Any]:
         "status": status,
     }
 
+
+
+# -- Transaction / Library Changes Endpoints ---------------------------------
+
+
+def _transaction_int_arg(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(request.args.get(name) or default)
+    except Exception:
+        value = default
+    return max(minimum, min(maximum, value))
+
+
+@app.get("/api/transactions/settings")
+def api_transaction_settings():
+    return jsonify({"ok": True, "settings": transactions.settings()})
+
+
+@app.post("/api/transactions/settings")
+def api_transaction_settings_save():
+    payload = request.get_json(silent=True) or {}
+    try:
+        settings = transactions.save_settings(payload)
+    except Exception as ex:
+        return jsonify({"ok": False, "error": str(ex)}), 400
+    return jsonify({"ok": True, "settings": settings})
+
+
+@app.get("/api/transactions")
+def api_transactions_list():
+    _sync_transactions_from_jobs()
+    rows, total = transactions.list(
+        offset=_transaction_int_arg("offset", 0, 0, 1_000_000),
+        limit=_transaction_int_arg("limit", 50, 1, 500),
+        status=str(request.args.get("status") or ""),
+        operation=str(request.args.get("operation") or ""),
+        query=str(request.args.get("q") or ""),
+        job=str(request.args.get("job") or ""),
+    )
+    return jsonify({"ok": True, "transactions": rows, "total": total})
+
+
+@app.get("/api/transactions/<transaction_id>")
+def api_transaction_detail(transaction_id):
+    _sync_transactions_from_jobs()
+    try:
+        tx = transactions.get(
+            transaction_id,
+            offset=_transaction_int_arg("offset", 0, 0, 1_000_000),
+            limit=_transaction_int_arg("limit", 100, 1, 1000),
+        )
+    except KeyError:
+        return jsonify({"ok": False, "error": "Transaction not found"}), 404
+    return jsonify({"ok": True, "transaction": tx})
+
+
+@app.post("/api/transactions/<transaction_id>/approve")
+def api_transaction_approve(transaction_id):
+    try:
+        tx = transactions.update(transaction_id, status="Approved")
+    except KeyError:
+        return jsonify({"ok": False, "error": "Transaction not found"}), 404
+    return jsonify({"ok": True, "transaction": tx})
+
+
+@app.post("/api/transactions/<transaction_id>/cancel")
+def api_transaction_cancel(transaction_id):
+    try:
+        tx = transactions.update(transaction_id, status="Cancelled")
+    except KeyError:
+        return jsonify({"ok": False, "error": "Transaction not found"}), 404
+    return jsonify({"ok": True, "transaction": tx})
+
+
+@app.post("/api/transactions/<transaction_id>/apply")
+def api_transaction_apply(transaction_id):
+    try:
+        tx = transactions.get(transaction_id)
+        if tx.get("operation_type") == "Metadata Update":
+            job = _start_metadata_apply_transaction(transaction_id)
+        else:
+            return jsonify({"ok": False, "error": "Apply is not implemented for this transaction type yet."}), 409
+    except KeyError:
+        return jsonify({"ok": False, "error": "Transaction not found"}), 404
+    except ValueError as ex:
+        return jsonify({"ok": False, "error": str(ex)}), 409
+    if job is None:
+        return jsonify({"ok": True, "transaction": transactions.get(transaction_id)})
+    return jsonify({"ok": True, "job_id": job.job_id, "transaction": transactions.get(transaction_id)})
+
+@app.post("/api/transactions/<transaction_id>/rollback")
+def api_transaction_rollback(transaction_id):
+    try:
+        tx = transactions.get(transaction_id)
+    except KeyError:
+        return jsonify({"ok": False, "error": "Transaction not found"}), 404
+    rollback = tx.get("rollback") or {}
+    operations = rollback.get("operations") or []
+    if not rollback.get("available") or not operations:
+        return jsonify({
+            "ok": False,
+            "error": rollback.get("reason") or "Rollback unavailable.",
+            "rollback_available": False,
+        }), 409
+
+    unsupported = [op for op in operations if op.get("type") != "metadata_restore"]
+    if unsupported:
+        return jsonify({
+            "ok": False,
+            "error": "Rollback unavailable for one or more recorded operation types.",
+            "rollback_available": False,
+        }), 409
+
+    def _do(log, cancel_event=None):
+        transactions.update(transaction_id, status="Running")
+        ok_count = 0
+        failed_count = 0
+        try:
+            for op in operations:
+                if cancel_event is not None and cancel_event.is_set():
+                    log.append("  [rollback] Cancel requested.")
+                    break
+                fields = op.get("fields") or {}
+                item_id = int(op.get("item_id") or 0)
+                if not item_id:
+                    failed_count += 1
+                    log.append("  [rollback] Missing item id; skipped operation.")
+                    continue
+                if _run_item_metadata_restore(item_id, fields, log, cancel_event=cancel_event):
+                    ok_count += 1
+                else:
+                    failed_count += 1
+            status = "Rolled Back" if failed_count == 0 else "Partially Rolled Back"
+            transactions.update(
+                transaction_id,
+                status=status,
+                logs=list(log)[-500:],
+                counts={"rollback_ok": ok_count, "rollback_failed": failed_count},
+            )
+            return {"ok": failed_count == 0, "transaction_id": transaction_id, "rollback_ok": ok_count, "rollback_failed": failed_count}
+        except Exception as ex:
+            transactions.update(transaction_id, status="Failed", logs=list(log)[-500:])
+            transactions.append_log(transaction_id, f"ERROR: rollback failed: {ex}")
+            raise
+
+    job = jobs.start_python(
+        _do,
+        label=f"Rollback transaction {transaction_id}",
+        metadata={"transaction": False, "transaction_id": transaction_id, "type": "transaction-rollback"},
+    )
+    transactions.update(transaction_id, status="Running", metadata={"rollback_job_id": job.job_id})
+    return jsonify({"ok": True, "job_id": job.job_id, "transaction": transactions.get(transaction_id)})
+
+@app.get("/api/transactions/<transaction_id>/export")
+def api_transaction_export(transaction_id):
+    fmt = str(request.args.get("format") or "json").strip().lower()
+    try:
+        payload, mimetype = transactions.export(transaction_id, fmt)
+    except KeyError:
+        return jsonify({"ok": False, "error": "Transaction not found"}), 404
+    ext = "md" if fmt in {"markdown", "md"} else ("csv" if fmt == "csv" else "json")
+    response = Response(payload, mimetype=mimetype)
+    response.headers["Content-Disposition"] = f"attachment; filename={transaction_id}.{ext}"
+    return response
 
 # ── HTML ──────────────────────────────────────────────────────────────────────
 

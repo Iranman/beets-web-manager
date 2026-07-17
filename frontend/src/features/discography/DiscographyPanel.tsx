@@ -2,7 +2,7 @@ import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
 import LinearProgress from '@mui/material/LinearProgress';
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { getAlbumMbCompleteness, getArtistDiscography, getYtdlpStatus, startAlbumDownload } from '../../api/client';
+import { getAlbumMbCompleteness, getArtistDiscography, getReleaseArt, getYtdlpStatus, startAlbumDownload } from '../../api/client';
 import {
   albumHasNoTrackRows,
   albumLooksComplete,
@@ -84,10 +84,6 @@ function releaseTypeInfo(primary?: string | null, subtypes?: string | string[] |
     label: primaryType,
     order: (primaryOrder >= 0 ? primaryOrder : 50) * 100,
   };
-}
-
-function coverArtArchiveUrl(mbid: string) {
-  return mbid ? `https://coverartarchive.org/release-group/${encodeURIComponent(mbid)}/front-250` : '';
 }
 
 function shouldOfferDownload(release?: DiscographyAlbum | null, local?: LibraryAlbum | null) {
@@ -297,11 +293,24 @@ function MissingReleaseCard({
   onLibraryChanged?: () => void;
 }) {
   const [artFailed, setArtFailed] = useState(false);
-  const artUrl = coverArtArchiveUrl(album.mbid);
+  const [artUrl, setArtUrl] = useState('');
 
   useEffect(() => {
+    let cancelled = false;
     setArtFailed(false);
-  }, [artUrl]);
+    setArtUrl('');
+    if (!album.mbid) return undefined;
+    getReleaseArt(album.mbid, artistName, album.album)
+      .then((res) => {
+        if (!cancelled) setArtUrl(res.ok && res.url ? res.url : '');
+      })
+      .catch(() => {
+        if (!cancelled) setArtUrl('');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [album.mbid, artistName, album.album]);
 
   return (
     <div className="flex min-h-full flex-col overflow-hidden rounded-md border border-graphite-800 bg-graphite-900">

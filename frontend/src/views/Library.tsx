@@ -12,7 +12,7 @@ import MenuItem from '@mui/material/MenuItem';
 import TextField from '@mui/material/TextField';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { getAlbumTracks, getLibraryArtRepairReport } from '../api/client';
+import { getAlbumTracks, getArtistImageUrl, getLibraryArtRepairReport } from '../api/client';
 import type { ArtRepairItem, ArtRepairReportResponse } from '../api/types';
 import { artistNeedsAttention, getAlbumHealth } from '../lib/libraryHealth';
 import { apiGet } from '../lib/api';
@@ -125,6 +125,32 @@ function artistArtUrl(artist: LibraryArtist, libraryVersion?: number) {
     if (url) return url;
   }
   return '';
+}
+
+// Falls back to an album cover immediately, then swaps in a real locally-cached
+// artist photo (fetched from Discogs and stored under /api/artist-image-cache)
+// once available, so artists aren't stuck showing a borrowed album cover forever.
+function useArtistArtUrl(artist: LibraryArtist, libraryVersion?: number) {
+  const [fetchedUrl, setFetchedUrl] = useState('');
+  const hasCachedImage = Boolean(artist.artist_image_url || artist.image_url);
+  const artistName = artist.name;
+
+  useEffect(() => {
+    setFetchedUrl('');
+    if (hasCachedImage || !artistName) return undefined;
+    let cancelled = false;
+    getArtistImageUrl(artistName)
+      .then((res) => {
+        if (!cancelled && res.ok && res.url) setFetchedUrl(res.url);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [artistName, hasCachedImage]);
+
+  if (fetchedUrl) return addVersion(fetchedUrl, libraryVersion);
+  return artistArtUrl(artist, libraryVersion);
 }
 
 function initials(name: string) {
@@ -640,6 +666,7 @@ function ArtistCard({
   const name = displayArtistName(artist);
   const needsAttention = artistNeedsAttention(artist);
   const attentionAlbums = countAttentionAlbums(artist);
+  const artUrl = useArtistArtUrl(artist, libraryVersion);
 
   return (
     <button
@@ -651,7 +678,7 @@ function ArtistCard({
         className="h-14 w-14 rounded-md"
         fallback={initials(name) || 'A'}
         label={`${name} artwork`}
-        src={artistArtUrl(artist, libraryVersion)}
+        src={artUrl}
       />
       <span className="min-w-0">
         <span className="block truncate text-sm font-semibold text-zinc-100">{name}</span>
@@ -876,6 +903,7 @@ function ArtistDetail({
 }) {
   const name = displayArtistName(artist);
   const attentionAlbums = countAttentionAlbums(artist);
+  const artUrl = useArtistArtUrl(artist, libraryVersion);
 
   return (
     <section className="space-y-3">
@@ -892,7 +920,7 @@ function ArtistDetail({
           className="h-20 w-20 rounded-md"
           fallback={initials(name) || 'A'}
           label={`${name} artwork`}
-          src={artistArtUrl(artist, libraryVersion)}
+          src={artUrl}
         />
         <div className="min-w-0 flex-1">
           <h2 className="truncate text-xl font-semibold text-zinc-100">{name}</h2>

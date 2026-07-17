@@ -6,6 +6,9 @@ ROOT = Path(__file__).resolve().parents[1]
 APP_SOURCE = (ROOT / "app.py").read_text(encoding="utf-8")
 CLIENT_SOURCE = (ROOT / "frontend" / "src" / "api" / "client.ts").read_text(encoding="utf-8")
 CONFIG_SOURCE = (ROOT / "frontend" / "src" / "views" / "Config.tsx").read_text(encoding="utf-8")
+SYSTEM_SOURCE = (ROOT / "frontend" / "src" / "views" / "System.tsx").read_text(encoding="utf-8")
+APP_ROUTES_SOURCE = (ROOT / "frontend" / "src" / "App.tsx").read_text(encoding="utf-8")
+SHELL_SOURCE = (ROOT / "frontend" / "src" / "components" / "layout" / "Shell.tsx").read_text(encoding="utf-8")
 
 
 class MusicFormatPreferenceIntegrationTests(unittest.TestCase):
@@ -90,6 +93,19 @@ class MusicFormatPreferenceIntegrationTests(unittest.TestCase):
         verify_index = replace_source.index('replacement = _music_format_find_verified_replacement(resolved, prefs)')
         remove_index = replace_source.index('_music_format_remove_original_after_replacement(')
         self.assertLess(verify_index, remove_index)
+
+
+    def test_system_page_owns_raw_config_editor(self):
+        self.assertIn('path="system"', APP_ROUTES_SOURCE)
+        self.assertIn('path="setup"', APP_ROUTES_SOURCE)
+        self.assertIn('to="/system"', APP_ROUTES_SOURCE)
+        self.assertIn("navigate('/system')", SHELL_SOURCE)
+        self.assertIn('System', SHELL_SOURCE)
+        self.assertIn('/config/config.yaml', SYSTEM_SOURCE)
+        self.assertIn('Save config.yaml?', SYSTEM_SOURCE)
+        self.assertIn('Revert config.yaml?', SYSTEM_SOURCE)
+        self.assertNotIn('/config/config.yaml', CONFIG_SOURCE)
+        self.assertNotIn('Save config.yaml?', CONFIG_SOURCE)
 
     def test_frontend_settings_controls_are_present(self):
         self.assertIn('getMusicFormatPreferences', CLIENT_SOURCE)

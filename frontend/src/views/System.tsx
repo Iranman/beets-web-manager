@@ -1,16 +1,22 @@
+import { Dialog, DialogBackdrop, DialogPanel, DialogTitle } from '@headlessui/react';
 import Alert from '@mui/material/Alert';
 import Button from '@mui/material/Button';
 import Checkbox from '@mui/material/Checkbox';
 import CircularProgress from '@mui/material/CircularProgress';
+import LinearProgress from '@mui/material/LinearProgress';
 import TextField from '@mui/material/TextField';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   completeSetup,
+  getConfigFile,
   getSetupEnv,
   getSetupStatus,
+  revertConfigFile,
+  saveConfigFile,
   saveSetupEnv,
 } from '../api/client';
 import type {
+  ConfigFileResponse,
   SetupEnvResponse,
   SetupEnvVariable,
   SetupStatusResponse,
@@ -77,6 +83,58 @@ function PathRow({ label, path, ok }: { label: string; path: string; ok: boolean
   );
 }
 
+type ConfigAction = 'save' | 'revert' | null;
+
+function formatBackupTime(value?: number | null): string {
+  if (!value) return 'No backup';
+  return `Backup from ${new Date(value * 1000).toLocaleString()}`;
+}
+
+function ConfigActionDialog({
+  action,
+  onClose,
+  onConfirm,
+  busy,
+}: {
+  action: ConfigAction;
+  onClose: () => void;
+  onConfirm: () => void;
+  busy: boolean;
+}) {
+  const isSave = action === 'save';
+  return (
+    <Dialog open={action !== null} onClose={busy ? () => undefined : onClose} className="relative z-50">
+      <DialogBackdrop className="fixed inset-0 bg-graphite-950/60" />
+      <div className="fixed inset-0 flex items-center justify-center p-4">
+        <DialogPanel className="w-full max-w-sm rounded-lg border border-graphite-700 bg-graphite-900 p-5 shadow-2xl">
+          <DialogTitle className="text-base font-semibold text-zinc-100">
+            {isSave ? 'Save config.yaml?' : 'Revert config.yaml?'}
+          </DialogTitle>
+          <p className="mt-2 text-sm text-zinc-400">
+            {isSave
+              ? 'The current file will be backed up before the new content is written.'
+              : 'The backup file will replace the current config.yaml.'}
+          </p>
+          <div className="mt-5 flex justify-end gap-2">
+            <Button variant="outlined" size="small" onClick={onClose} disabled={busy}>
+              Cancel
+            </Button>
+            <Button
+              variant="contained"
+              size="small"
+              color={isSave ? 'primary' : 'warning'}
+              onClick={onConfirm}
+              disabled={busy}
+            >
+              {busy ? 'Working...' : isSave ? 'Save' : 'Revert'}
+            </Button>
+          </div>
+        </DialogPanel>
+      </div>
+    </Dialog>
+  );
+}
+
 function EnvVariableRow({
   variable,
   value,
@@ -126,7 +184,7 @@ function EnvVariableRow({
   );
 }
 
-export default function Setup() {
+export default function System() {
   const [status, setStatus] = useState<SetupStatusResponse | null>(null);
   const [env, setEnv] = useState<SetupEnvResponse | null>(null);
   const [form, setForm] = useState<Record<string, string>>({});
@@ -136,6 +194,14 @@ export default function Setup() {
   const [completing, setCompleting] = useState(false);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
+  const [configText, setConfigText] = useState('');
+  const [savedConfigText, setSavedConfigText] = useState('');
+  const [configMeta, setConfigMeta] = useState<Pick<ConfigFileResponse, 'has_backup' | 'backup_ts'> | null>(null);
+  const [configLoading, setConfigLoading] = useState(true);
+  const [configBusy, setConfigBusy] = useState(false);
+  const [configError, setConfigError] = useState('');
+  const [configMsg, setConfigMsg] = useState('');
+  const [configAction, setConfigAction] = useState<ConfigAction>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -153,11 +219,30 @@ export default function Setup() {
     }
   }, []);
 
+  const loadConfig = useCallback(async () => {
+    setConfigLoading(true);
+    setConfigError('');
+    try {
+      const cfg = await getConfigFile();
+      const content = cfg.content ?? '';
+      setConfigText(content);
+      setSavedConfigText(content);
+      setConfigMeta({ has_backup: Boolean(cfg.has_backup), backup_ts: cfg.backup_ts ?? null });
+    } catch (err) {
+      setConfigError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setConfigLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     void load();
-  }, [load]);
+    void loadConfig();
+  }, [load, loadConfig]);
 
   const grouped = useMemo(() => groupVariables(env?.variables ?? []), [env?.variables]);
+  const configDirty = configText !== savedConfigText;
+  const configEmpty = !configText.trim();
 
   const dirty = useMemo(() => {
     if (!env) return false;
@@ -198,6 +283,43 @@ export default function Setup() {
     }
   };
 
+  const handleSaveConfig = async () => {
+    setConfigBusy(true);
+    setConfigMsg('');
+    setConfigError('');
+    try {
+      const saved = await saveConfigFile(configText);
+      await loadConfig();
+      setConfigMsg(saved.backed_up ? 'Saved config.yaml. Backup updated.' : 'Saved config.yaml.');
+    } catch (err) {
+      setConfigError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setConfigBusy(false);
+      setConfigAction(null);
+    }
+  };
+
+  const handleRevertConfig = async () => {
+    setConfigBusy(true);
+    setConfigMsg('');
+    setConfigError('');
+    try {
+      await revertConfigFile();
+      await loadConfig();
+      setConfigMsg('Reverted config.yaml from backup.');
+    } catch (err) {
+      setConfigError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setConfigBusy(false);
+      setConfigAction(null);
+    }
+  };
+
+  const refreshSystem = () => {
+    void load();
+    void loadConfig();
+  };
+
   const markComplete = async () => {
     setCompleting(true);
     setError('');
@@ -205,7 +327,7 @@ export default function Setup() {
     try {
       await completeSetup();
       setStatus((current) => current ? { ...current, setup_complete: true } : current);
-      setMessage('Setup marked complete.');
+      setMessage('System readiness marked complete.');
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -225,13 +347,13 @@ export default function Setup() {
     <div className="space-y-5">
       <section className="flex flex-wrap items-start justify-between gap-3 border-b border-graphite-800 pb-4">
         <div>
-          <h1 className="text-xl font-semibold text-zinc-100">Setup</h1>
+          <h1 className="text-xl font-semibold text-zinc-100">System</h1>
           <div className="mt-1 text-sm text-zinc-500">
-            {status?.version ? `Version ${status.version}` : 'Environment and readiness'}
+            {status?.version ? `Version ${status.version}` : 'Environment, readiness, and Beets configuration'}
           </div>
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button variant="outlined" size="small" onClick={() => void load()}>
+          <Button variant="outlined" size="small" onClick={() => refreshSystem()} disabled={loading || configLoading}>
             Refresh
           </Button>
           <Button
@@ -255,7 +377,7 @@ export default function Setup() {
           tone={status?.status === 'ready' ? 'ok' : 'warn'}
         />
         <StatusCard
-          label="Setup marker"
+          label="Readiness marker"
           value={status?.setup_complete ? 'complete' : 'open'}
           tone={status?.setup_complete ? 'ok' : 'warn'}
         />
@@ -314,7 +436,7 @@ export default function Setup() {
             disabled={completing || status?.setup_complete}
             onClick={() => void markComplete()}
           >
-            {completing ? 'Marking...' : status?.setup_complete ? 'Complete' : 'Mark setup complete'}
+            {completing ? 'Marking...' : status?.setup_complete ? 'Complete' : 'Mark system ready'}
           </Button>
         </div>
 
@@ -350,6 +472,57 @@ export default function Setup() {
           </div>
         ))}
       </section>
+
+      <section className="space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-base font-semibold text-zinc-100">config.yaml</h2>
+            <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-zinc-500">
+              <code className="text-zinc-400">/config/config.yaml</code>
+              <span>{formatBackupTime(configMeta?.backup_ts)}</span>
+              {configDirty && <span className="font-semibold text-amber-400">Unsaved</span>}
+            </div>
+          </div>
+          <div className="flex gap-2">
+            <Button size="small" variant="outlined" onClick={loadConfig} disabled={configLoading || configBusy}>Reload</Button>
+            <Button size="small" variant="outlined" color="warning" onClick={() => setConfigAction('revert')} disabled={configLoading || configBusy || !configMeta?.has_backup}>Revert</Button>
+            <Button size="small" variant="contained" onClick={() => setConfigAction('save')} disabled={configLoading || configBusy || !configDirty || configEmpty}>Save</Button>
+          </div>
+        </div>
+        {configMsg && <Alert severity="success" onClose={() => setConfigMsg('')}>{configMsg}</Alert>}
+        {configError && <Alert severity="error">{configError}</Alert>}
+        {configLoading && <LinearProgress sx={{ borderRadius: 1 }} />}
+        <TextField
+          value={configText}
+          onChange={(event) => setConfigText(event.target.value)}
+          fullWidth
+          multiline
+          minRows={10}
+          maxRows={20}
+          disabled={configLoading || configBusy}
+          spellCheck={false}
+          slotProps={{
+            input: {
+              sx: {
+                alignItems: 'flex-start',
+                bgcolor: '#020617',
+                color: '#d1d5db',
+                fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace',
+                fontSize: '0.78rem',
+                lineHeight: 1.55,
+                overflowY: 'auto',
+              },
+            },
+          }}
+        />
+      </section>
+
+      <ConfigActionDialog
+        action={configAction}
+        onClose={() => setConfigAction(null)}
+        onConfirm={configAction === 'save' ? handleSaveConfig : handleRevertConfig}
+        busy={configBusy}
+      />
     </div>
   );
 }

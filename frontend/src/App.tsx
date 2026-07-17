@@ -6,8 +6,9 @@ import Config from './views/Config';
 import Import from './views/Import';
 import Jobs from './views/Jobs';
 import Library from './views/Library';
+import LibraryChanges from './views/LibraryChanges';
 import Playlists from './views/Playlists';
-import Setup from './views/Setup';
+import System from './views/System';
 import Submissions from './views/Submissions';
 import { theme } from './theme';
 
@@ -20,12 +21,14 @@ export default function App() {
           <Route element={<Shell />}>
             <Route index element={<Navigate to="/library" replace />} />
             <Route path="library"   element={<Library />} />
+            <Route path="changes"   element={<LibraryChanges />} />
             <Route path="import"    element={<Import />} />
             <Route path="clean"     element={<Navigate to="/jobs" replace />} />
             <Route path="playlists" element={<Playlists />} />
             <Route path="jobs"      element={<Jobs />} />
             <Route path="config"    element={<Config />} />
-            <Route path="setup"     element={<Setup />} />
+            <Route path="system"    element={<System />} />
+            <Route path="setup"     element={<Navigate to="/system" replace />} />
             <Route path="submissions" element={<Submissions />} />
           </Route>
         </Routes>
