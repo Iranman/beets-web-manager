@@ -10096,16 +10096,14 @@ _DISK_ART_MIME_BY_EXT = {
 
 @app.get("/api/disk-art")
 def disk_art_serve():
-    """Serve an album art image from /data/media/music (security: path must be under music root)."""
-    MUSIC_ROOT = "/data/media/music/"
+    """Serve an album art image from the music library or downloads root
+    (security: path must be under one of those roots)."""
     path = request.args.get("path", "").strip()
     if not path:
         return ("", 404)
-    # Normalise and restrict to music root
-    real = os.path.realpath(path)
-    if not real.startswith(str(MUSIC_ROOT)):
+    p = Path(os.path.realpath(path))
+    if not any(_path_is_under(p, root) for root in _BROWSE_ALLOWED_ROOTS):
         return ("", 403)
-    p = Path(real)
     if not p.exists() or not p.is_file():
         return ("", 404)
     sfx = p.suffix.lower().lstrip(".")

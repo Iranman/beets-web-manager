@@ -3,12 +3,17 @@
 Registered after app.py initializes. Keeps submission-only Beets commands out of
 the main app module while reusing the existing JobStore and Beets config helpers.
 """
+import hashlib
 import importlib.util
 import json
 import os
+import re
 import shutil
+import threading
 import time
+import urllib.request
 import uuid
+from html import unescape
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 from urllib.parse import urlparse
@@ -16,21 +21,35 @@ from urllib.parse import urlparse
 from flask import jsonify, request
 
 from app import (  # noqa: E402
+    AUDIO_EXT,
     BEET_BIN,
+    DISCOGS_TOKEN,
+    DOWNLOADS_ROOT,
+    MUSIC_ROOT,
     _ANSI_RE,
     _MB_UUID_RE,
     _beet_env,
     _beet_run,
+    _build_folder_evidence,
     _extract_mb_uuid,
     _fetch_mb_release_tracklist,
     _invalidate_lib_cache,
+    _path_is_under,
     _read_beets_plugin_list,
     _s,
     _write_job_beets_config,
+    _ytdlp_js_runtime_options,
+    _ytdlp_ready,
+    _ytdlp_remote_components,
     app,
     jobs,
     lib,
 )
+from backend.security import OutboundPolicyError, validate_outbound_url
+
+_SUBMISSION_ALLOWED_ROOTS = (MUSIC_ROOT, DOWNLOADS_ROOT)
+_REFERENCE_URL_TIMEOUT = 20
+_REFERENCE_MAX_BYTES = 2_000_000
 
 
 def _acoustid_key() -> str:
@@ -158,8 +177,11 @@ def _submission_json_save(path: Path, payload: Any) -> None:
     tmp.replace(path)
 
 
-def _submission_key(target_type: str, target_id: int) -> str:
-    return f"{target_type}:{int(target_id)}"
+def _submission_key(target_type: str, target_ref: Any) -> str:
+    if target_type == "folder":
+        digest = hashlib.sha1(_s(target_ref).encode("utf-8")).hexdigest()[:24]
+        return f"folder:{digest}"
+    return f"{target_type}:{int(target_ref)}"
 
 
 def _submission_drafts() -> Dict[str, Any]:
@@ -167,25 +189,25 @@ def _submission_drafts() -> Dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def _submission_draft(target_type: str, target_id: int) -> Dict[str, Any]:
-    draft = _submission_drafts().get(_submission_key(target_type, target_id), {})
+def _submission_draft(target_type: str, target_ref: Any) -> Dict[str, Any]:
+    draft = _submission_drafts().get(_submission_key(target_type, target_ref), {})
     return draft if isinstance(draft, dict) else {}
 
 
-def _save_submission_draft(target_type: str, target_id: int, draft: Dict[str, Any]) -> Dict[str, Any]:
+def _save_submission_draft(target_type: str, target_ref: Any, draft: Dict[str, Any]) -> Dict[str, Any]:
     drafts = _submission_drafts()
     clean = draft if isinstance(draft, dict) else {}
     clean["target_type"] = target_type
-    clean["target_id"] = int(target_id)
+    clean["target_id"] = target_ref if target_type == "folder" else int(target_ref)
     clean["updated_at"] = time.time()
-    drafts[_submission_key(target_type, target_id)] = clean
+    drafts[_submission_key(target_type, target_ref)] = clean
     _submission_json_save(_SUBMISSION_DRAFTS_FILE, drafts)
     return clean
 
 
-def _delete_submission_draft(target_type: str, target_id: int) -> bool:
+def _delete_submission_draft(target_type: str, target_ref: Any) -> bool:
     drafts = _submission_drafts()
-    key = _submission_key(target_type, target_id)
+    key = _submission_key(target_type, target_ref)
     existed = key in drafts
     if existed:
         drafts.pop(key, None)
@@ -320,6 +342,7 @@ def _summary_for_album(album, tracks: List[Dict[str, Any]]) -> Dict[str, Any]:
         "mb_releasegroupid": _s(getattr(album, "mb_releasegroupid", "") or "").strip().lower(),
         "mb_albumid": _s(getattr(album, "mb_albumid", "") or "").strip().lower(),
         "cover_art_url": f"/api/albums/{album_id}/art" if album_id else "",
+        "resolved_state": "imported_album",
     }
 
 
@@ -350,7 +373,188 @@ def _summary_for_item(item, tracks: List[Dict[str, Any]]) -> Dict[str, Any]:
         "mb_releasegroupid": _s(getattr(item, "mb_releasegroupid", "") or "").strip().lower(),
         "mb_albumid": _s(getattr(item, "mb_albumid", "") or "").strip().lower(),
         "cover_art_url": "",
+        "resolved_state": "imported_singleton",
     }
+
+
+# -- Folder resolution (unimported/loose-track review items) --------------------
+
+def _abs_resolved(path_str: str) -> Path:
+    return Path(path_str).expanduser().resolve(strict=False)
+
+
+def _find_beets_album_for_folder(folder: Path):
+    target = str(folder)
+    for album in lib.albums():
+        try:
+            album_dir = str(Path(album.item_dir()).resolve(strict=False))
+        except Exception:
+            continue
+        if album_dir == target:
+            return album
+    return None
+
+
+def _find_beets_items_for_folder(folder: Path) -> List[Any]:
+    target = str(folder)
+    matches = []
+    for item in lib.items():
+        try:
+            item_path = _item_abs_path(item)
+            if not item_path:
+                continue
+            if str(Path(item_path).parent.resolve(strict=False)) == target:
+                matches.append(item)
+        except Exception:
+            continue
+    return matches
+
+
+def _media_tag_track_payload(file_path: Path, index: int) -> Dict[str, Any]:
+    exists = file_path.exists()
+    title = artist = album = albumartist = fmt = ""
+    track = disc = 0
+    duration = 0.0
+    mb_trackid = ""
+    if exists:
+        try:
+            from beets.mediafile import MediaFile
+            mf = MediaFile(str(file_path))
+            title = _s(mf.title or "").strip()
+            artist = _s(mf.artist or "").strip()
+            album = _s(mf.album or "").strip()
+            albumartist = _s(getattr(mf, "albumartist", "") or artist).strip()
+            track = int(mf.track or 0)
+            disc = int(mf.disc or 0)
+            duration = float(mf.length or 0)
+            mb_trackid = _s(getattr(mf, "mb_trackid", "") or "").strip().lower()
+            fmt = file_path.suffix.lstrip(".").upper()
+        except Exception:
+            pass
+    if not title:
+        title = file_path.stem
+    if not exists:
+        validation = "File unavailable"
+    elif not title.strip():
+        validation = "Missing track title"
+    else:
+        validation = "Not imported to Beets yet"
+    return {
+        "index": index,
+        "item_id": 0,
+        "album_id": 0,
+        "disc": disc or 1,
+        "track": track or index,
+        "title": title,
+        "artist": artist,
+        "album": album,
+        "albumartist": albumartist,
+        "duration": duration,
+        "duration_display": _duration_label(duration),
+        "file_name": file_path.name,
+        "file_path": str(file_path),
+        "file_available": exists,
+        "format": fmt,
+        "mb_trackid": mb_trackid,
+        "mb_albumid": "",
+        "fingerprint_status": "File unavailable" if not exists else "Not imported to Beets yet",
+        "validation_status": validation,
+    }
+
+
+def _folder_cover_art_url(folder: Path) -> str:
+    if not folder.is_dir():
+        return ""
+    try:
+        candidates = sorted(p for p in folder.glob("*") if p.is_file() and p.suffix.lower().lstrip(".") in {"jpg", "jpeg", "png"})
+    except Exception:
+        return ""
+    for art_path in candidates:
+        if any(_path_is_under(art_path, root) for root in _SUBMISSION_ALLOWED_ROOTS):
+            from urllib.parse import quote
+            return f"/api/disk-art?path={quote(str(art_path))}"
+    return ""
+
+
+def _empty_folder_summary(folder: Path, resolved_state: str = "empty") -> Dict[str, Any]:
+    return {
+        "target_type": "folder", "album_id": 0, "item_id": 0,
+        "title": folder.name, "albumartist": "", "release_type": "", "secondary_type": "",
+        "release_status": "", "release_date": "", "country": "", "label": "",
+        "catalog_number": "", "barcode": "", "format": "", "disc_count": 0,
+        "track_count": 0, "runtime": 0, "runtime_display": "", "source_path": str(folder),
+        "mb_albumartistid": "", "mb_albumartistids": "", "mb_releasegroupid": "", "mb_albumid": "",
+        "cover_art_url": "", "resolved_state": resolved_state,
+    }
+
+
+def _summary_for_folder_tracks(folder: Path, tracks: List[Dict[str, Any]], resolved_state: str, evidence: Dict[str, Any] = None) -> Dict[str, Any]:
+    evidence = evidence or {}
+    runtime = sum(float(t.get("duration") or 0) for t in tracks)
+    discs = sorted({int(t.get("disc") or 1) for t in tracks}) or [1]
+    tag_albums = [t.get("album", "").strip() for t in tracks if t.get("album", "").strip()]
+    tag_artists = [(t.get("albumartist") or t.get("artist") or "").strip() for t in tracks if (t.get("albumartist") or t.get("artist"))]
+    title = (max(set(tag_albums), key=tag_albums.count) if tag_albums else "") or evidence.get("guessed_album") or folder.name
+    albumartist = (max(set(tag_artists), key=tag_artists.count) if tag_artists else "") or evidence.get("guessed_artist") or ""
+    return {
+        "target_type": "folder", "album_id": 0, "item_id": 0,
+        "title": title, "albumartist": albumartist,
+        "release_type": "Album" if resolved_state in ("unimported_album", "imported_singletons") else "Track",
+        "secondary_type": "", "release_status": "",
+        "release_date": evidence.get("guessed_year", ""), "country": "", "label": "",
+        "catalog_number": "", "barcode": "", "format": (tracks[0].get("format") if tracks else "") or "",
+        "disc_count": len(discs), "track_count": len(tracks), "runtime": runtime,
+        "runtime_display": _duration_label(runtime), "source_path": str(folder),
+        "mb_albumartistid": "", "mb_albumartistids": "", "mb_releasegroupid": "", "mb_albumid": "",
+        "cover_art_url": _folder_cover_art_url(folder), "resolved_state": resolved_state,
+    }
+
+
+def _resolve_folder_submission_target(path: str) -> Tuple[str, Any, Dict[str, Any], List[Dict[str, Any]]]:
+    """Resolve a review-item source path into tracks without requiring a prior
+    Beets import. Detects: imported album/singletons (delegates to the normal
+    Beets-backed resolution), an unimported album folder, a loose-track folder,
+    or an empty/inaccessible path. The detected state is stamped on
+    summary['resolved_state']."""
+    raw_path = _s(path).strip()
+    if not raw_path:
+        raise ValueError("This review item has no source path to resolve.")
+    folder = _abs_resolved(raw_path)
+
+    if not folder.exists():
+        return "folder", str(folder), _empty_folder_summary(folder, "inaccessible"), []
+
+    if folder.is_file():
+        if folder.suffix.lower() not in AUDIO_EXT:
+            return "folder", str(folder), _empty_folder_summary(folder, "inaccessible"), []
+        track = _media_tag_track_payload(folder, 1)
+        summary = _summary_for_folder_tracks(folder.parent, [track], "loose_tracks")
+        return "folder", str(folder), summary, [track]
+
+    beets_album = _find_beets_album_for_folder(folder)
+    if beets_album is not None:
+        tracks = _album_track_rows(beets_album)
+        summary = _summary_for_album(beets_album, tracks)
+        return "album", int(beets_album.id), summary, tracks
+
+    evidence = _build_folder_evidence(str(folder))
+    audio_paths = [Path(p) for p in (evidence.get("audio_files") or [])]
+    beets_items = _find_beets_items_for_folder(folder)
+
+    if beets_items and len(beets_items) >= max(1, len(audio_paths)):
+        ordered = sorted(beets_items, key=lambda i: (int(getattr(i, "disc", 0) or 0), int(getattr(i, "track", 0) or 0), int(getattr(i, "id", 0) or 0)))
+        tracks = [_track_payload(item, idx + 1) for idx, item in enumerate(ordered)]
+        summary = _summary_for_folder_tracks(folder, tracks, "imported_singletons")
+        return "folder", str(folder), summary, tracks
+
+    if not audio_paths:
+        return "folder", str(folder), _empty_folder_summary(folder, "empty"), []
+
+    tracks = [_media_tag_track_payload(p, idx + 1) for idx, p in enumerate(audio_paths)]
+    albums_seen = {t.get("album", "").strip().lower() for t in tracks if t.get("album", "").strip()}
+    resolved_state = "unimported_album" if len(albums_seen) <= 1 else "loose_tracks"
+    summary = _summary_for_folder_tracks(folder, tracks, resolved_state, evidence=evidence)
+    return "folder", str(folder), summary, tracks
 
 
 def _check(label: str, ok: bool, stage: str, explanation: str, action: str = "", affected: List[str] = None, blocking: bool = True) -> Dict[str, Any]:
@@ -365,8 +569,18 @@ def _submission_preflight(summary: Dict[str, Any], tracks: List[Dict[str, Any]],
     no_duration = [f"track {t.get('track') or t.get('index')}" for t in tracks if float(t.get("duration") or 0) <= 0]
     missing_recordings = [f"track {t.get('track') or t.get('index')}" for t in tracks if not _MB_UUID_RE.match(_s(t.get("mb_trackid")).strip())]
     plugins = readiness.get("plugins") or {}
+    resolved_state = _s(summary.get("resolved_state") or "").strip()
+    is_beets_target = summary.get("target_type") in ("album", "item")
+    state_explanations = {
+        "inaccessible": "The source path could not be found or read on disk.",
+        "empty": "No supported audio files were found in the source folder.",
+        "unimported_album": "This folder has not been imported into the Beets library yet.",
+        "loose_tracks": "These files were found on disk but do not share consistent album metadata.",
+        "imported_singletons": "These files are already Beets library items, but not grouped as an album.",
+    }
     checks = [
-        _check("Album is imported into the Beets library", bool(summary.get("album_id") or summary.get("item_id")), "MusicBrainz", "The selected folder has not been imported into the Beets library.", "Import it before preparing a MusicBrainz submission."),
+        _check("Local audio files were found", bool(tracks) and resolved_state not in ("inaccessible", "empty"), "MusicBrainz", state_explanations.get(resolved_state, "No audio files were found for this review item."), "Rescan the folder, or pick a different review item." if resolved_state in ("inaccessible", "empty") else "", blocking=True),
+        _check("Album is imported into the Beets library", is_beets_target, "MusicBrainz", "The selected folder has not been imported into the Beets library.", "Import it from Import Review before preparing a MusicBrainz submission or attaching IDs."),
         _check("All files are accessible", not missing_files, "MusicBrainz", "Some files are missing or unreadable.", "Restore the missing files or remove them from the album before submitting.", missing_files),
         _check("Artist metadata is present", bool(_s(summary.get("albumartist")).strip()), "MusicBrainz", "Album artist is empty.", "Enter a release artist credit before preparing the submission."),
         _check("Album title is present", bool(_s(summary.get("title")).strip()), "MusicBrainz", "Release title is empty.", "Enter a release title before preparing the submission."),
@@ -390,7 +604,7 @@ def _submission_preflight(summary: Dict[str, Any], tracks: List[Dict[str, Any]],
     return {"checks": checks, "missing_count": sum(1 for c in checks if c["status"] == "fail"), "warning_count": sum(1 for c in checks if c["status"] == "warning"), "musicbrainz_ready": not mb_blocked, "acoustid_ready": not acoustid_blocked}
 
 
-def _resolve_submission_target(album_id: int = 0, item_id: int = 0, singleton: bool = False) -> Tuple[str, int, Dict[str, Any], List[Dict[str, Any]]]:
+def _resolve_submission_target(album_id: int = 0, item_id: int = 0, path: str = "", singleton: bool = False) -> Tuple[str, Any, Dict[str, Any], List[Dict[str, Any]]]:
     if album_id > 0:
         album = lib.get_album(album_id)
         if not album:
@@ -406,7 +620,9 @@ def _resolve_submission_target(album_id: int = 0, item_id: int = 0, singleton: b
             return _resolve_submission_target(album_id=item_album_id)
         tracks = [_track_payload(item, 1)]
         return "item", item_id, _summary_for_item(item, tracks), tracks
-    raise ValueError("Select an imported album or item before opening the submission workspace.")
+    if path:
+        return _resolve_folder_submission_target(path)
+    raise ValueError("Select a review item with a resolvable path, album, or item first.")
 
 
 @app.get("/api/submissions/target")
@@ -414,8 +630,9 @@ def submission_target():
     try:
         album_id = int(request.args.get("album_id") or 0)
         item_id = int(request.args.get("item_id") or 0)
+        path = _s(request.args.get("path") or "").strip()
         singleton = str(request.args.get("singleton") or "").strip().lower() in {"1", "true", "yes"}
-        target_type, target_id, summary, tracks = _resolve_submission_target(album_id=album_id, item_id=item_id, singleton=singleton)
+        target_type, target_id, summary, tracks = _resolve_submission_target(album_id=album_id, item_id=item_id, path=path, singleton=singleton)
     except KeyError as ex:
         return jsonify({"ok": False, "error": str(ex)}), 404
     except Exception as ex:
@@ -427,26 +644,400 @@ def submission_target():
     return jsonify({"ok": True, "target_type": target_type, "target_id": target_id, "summary": summary, "tracks": tracks, "preflight": preflight, "readiness": readiness, "draft": draft})
 
 
+def _draft_target_ref(target_type: str, payload_or_args) -> Any:
+    if target_type == "folder":
+        path = _s(payload_or_args.get("target_path") or payload_or_args.get("target_id") or "").strip()
+        if not path:
+            raise ValueError("target_path is required for a folder draft.")
+        return str(_abs_resolved(path))
+    target_id = int(payload_or_args.get("target_id") or 0)
+    if target_id <= 0:
+        raise ValueError("A positive target_id is required.")
+    return target_id
+
+
 @app.post("/api/submissions/draft")
 def save_submission_draft():
     payload = request.get_json(silent=True) or {}
     target_type = _s(payload.get("target_type") or "").strip().lower()
-    target_id = int(payload.get("target_id") or 0)
-    draft = payload.get("draft") or {}
-    if target_type not in {"album", "item"} or target_id <= 0:
+    if target_type not in {"album", "item", "folder"}:
         return jsonify({"ok": False, "error": "Valid target_type and target_id are required."}), 400
+    try:
+        target_ref = _draft_target_ref(target_type, payload)
+    except ValueError as ex:
+        return jsonify({"ok": False, "error": str(ex)}), 400
+    draft = payload.get("draft") or {}
     if len(json.dumps(draft)) > 1_500_000:
         return jsonify({"ok": False, "error": "Submission draft is too large."}), 413
-    return jsonify({"ok": True, "draft": _save_submission_draft(target_type, target_id, draft)})
+    return jsonify({"ok": True, "draft": _save_submission_draft(target_type, target_ref, draft)})
 
 
 @app.delete("/api/submissions/draft")
 def reset_submission_draft():
     target_type = _s(request.args.get("target_type") or "").strip().lower()
-    target_id = int(request.args.get("target_id") or 0)
-    if target_type not in {"album", "item"} or target_id <= 0:
+    if target_type not in {"album", "item", "folder"}:
         return jsonify({"ok": False, "error": "Valid target_type and target_id are required."}), 400
-    return jsonify({"ok": True, "removed": _delete_submission_draft(target_type, target_id)})
+    try:
+        target_ref = _draft_target_ref(target_type, request.args)
+    except ValueError as ex:
+        return jsonify({"ok": False, "error": str(ex)}), 400
+    return jsonify({"ok": True, "removed": _delete_submission_draft(target_type, target_ref)})
+
+
+# -- Reference URLs (YouTube metadata extraction + generic OpenGraph fallback) ---
+
+_YT_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be"}
+_MB_HOSTS = {"musicbrainz.org", "www.musicbrainz.org"}
+_DISCOGS_HOSTS = {"discogs.com", "www.discogs.com"}
+_SOUNDCLOUD_HOSTS = {"soundcloud.com", "www.soundcloud.com"}
+
+_YT_BRACKET_NOISE_RE = re.compile(
+    r'\s*[\(\[]\s*(?:official\s+(?:music\s+)?video|official\s+audio|lyric\s+video|lyrics?|'
+    r'visualizer|full\s+album|hd|4k)\s*[\)\]]',
+    re.IGNORECASE,
+)
+_YT_BARE_REMASTER_RE = re.compile(r'\bremastered\b(?!\s*\d{4})', re.IGNORECASE)
+_YT_TOPIC_SUFFIX_RE = re.compile(r'\s*-\s*Topic\s*$', re.IGNORECASE)
+_YT_PROVIDED_TO_RE = re.compile(r'^\s*provided\s+to\s+youtube\s+by\s+', re.IGNORECASE)
+_YT_LABEL_CHANNEL_RE = re.compile(r'\b(records?|music|label|entertainment)\b\s*$', re.IGNORECASE)
+_OG_META_RE = re.compile(r'<meta[^>]+property=["\']og:([a-zA-Z:]+)["\'][^>]+content=["\']([^"\']*)["\']', re.IGNORECASE)
+_TITLE_TAG_RE = re.compile(r'<title[^>]*>([^<]*)</title>', re.IGNORECASE)
+
+
+def _reference_url_source(host: str) -> str:
+    host = (host or "").lower()
+    if host in _YT_HOSTS:
+        return "youtube"
+    if host in _MB_HOSTS:
+        return "musicbrainz"
+    if host in _DISCOGS_HOSTS:
+        return "discogs"
+    if host.endswith(".bandcamp.com"):
+        return "bandcamp"
+    if host in _SOUNDCLOUD_HOSTS:
+        return "soundcloud"
+    return "web"
+
+
+def _validate_reference_url(raw: str) -> str:
+    text = _s(raw).strip()
+    if not text:
+        raise ValueError("Paste a URL first.")
+    parsed = urlparse(text)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError("Only http:// and https:// URLs are supported.")
+    if not parsed.hostname:
+        raise ValueError("URL is missing a host.")
+    try:
+        validate_outbound_url(text)
+    except OutboundPolicyError as ex:
+        raise ValueError(f"This URL cannot be fetched: {ex}") from ex
+    return text
+
+
+def _yt_normalize_title(raw_title: str) -> str:
+    text = _s(raw_title).strip()
+    text = _YT_BRACKET_NOISE_RE.sub('', text)
+    text = _YT_BARE_REMASTER_RE.sub('', text)
+    return re.sub(r'\s{2,}', ' ', text).strip(' -–—')
+
+
+def _yt_channel_is_topic(channel: str) -> bool:
+    return bool(_YT_TOPIC_SUFFIX_RE.search(_s(channel)))
+
+
+def _yt_channel_looks_like_label(channel: str) -> bool:
+    text = _s(channel).strip()
+    if not text:
+        return False
+    if _YT_PROVIDED_TO_RE.search(text):
+        return True
+    return bool(_YT_LABEL_CHANNEL_RE.search(text)) and 'topic' not in text.lower()
+
+
+def _yt_split_artist_title(raw_title: str) -> Tuple[str, str]:
+    normalized = _yt_normalize_title(raw_title)
+    for sep in (' - ', ' – ', ' — '):
+        if sep in normalized:
+            artist, title = normalized.split(sep, 1)
+            return artist.strip(), title.strip()
+    return '', normalized
+
+
+def _yt_thumbnails(info: Dict[str, Any]) -> List[Dict[str, Any]]:
+    raw = info.get("thumbnails") or []
+    out = []
+    for t in raw:
+        if not isinstance(t, dict):
+            continue
+        url = _s(t.get("url"))
+        if not url:
+            continue
+        out.append({"url": url, "width": int(t.get("width") or 0), "height": int(t.get("height") or 0)})
+    out.sort(key=lambda t: (t.get("width") or 0) * (t.get("height") or 0), reverse=True)
+    return out[:8]
+
+
+def _extract_youtube_info(url: str) -> Dict[str, Any]:
+    if not _ytdlp_ready.wait(timeout=30):
+        raise RuntimeError("yt-dlp is still installing; try again in about 30 seconds.")
+    import yt_dlp
+    ydl_opts: Dict[str, Any] = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "simulate": True,
+        "socket_timeout": _REFERENCE_URL_TIMEOUT,
+        "extract_flat": "in_playlist",
+        "js_runtimes": _ytdlp_js_runtime_options(),
+        "remote_components": _ytdlp_remote_components(),
+    }
+    result: Dict[str, Any] = {}
+    errors: Dict[str, Any] = {}
+
+    def _run():
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                result["info"] = ydl.extract_info(url, download=False)
+        except Exception as ex:  # noqa: BLE001 - surfaced to the caller as a plain message
+            errors["error"] = str(ex)
+
+    worker = threading.Thread(target=_run, daemon=True)
+    worker.start()
+    worker.join(timeout=_REFERENCE_URL_TIMEOUT + 10)
+    if worker.is_alive():
+        raise TimeoutError("Metadata extraction timed out.")
+    if errors.get("error"):
+        raise RuntimeError(errors["error"])
+    info = result.get("info")
+    if not isinstance(info, dict):
+        raise RuntimeError("yt-dlp returned no data for that URL.")
+    return info
+
+
+def _describe_youtube_entry(info: Dict[str, Any]) -> Dict[str, Any]:
+    is_playlist = info.get("_type") == "playlist"
+    entries = [e for e in (info.get("entries") or []) if isinstance(e, dict)] if is_playlist else []
+    raw_title = _s(info.get("title"))
+    channel = _s(info.get("channel") or info.get("uploader") or "")
+    uploader = _s(info.get("uploader") or "")
+    description = _s(info.get("description"))[:4000]
+    duration = float(info.get("duration") or 0)
+    upload_date = _s(info.get("upload_date"))
+    year = upload_date[:4] if len(upload_date) >= 4 and upload_date[:4].isdigit() else _s(info.get("release_year") or "")
+
+    yt_artist_tag = _s(info.get("artist") or "")
+    yt_track_tag = _s(info.get("track") or "")
+    yt_album_tag = _s(info.get("album") or "")
+
+    parsed_artist, parsed_title = _yt_split_artist_title(raw_title)
+    is_topic = _yt_channel_is_topic(channel)
+    label_like = _yt_channel_looks_like_label(channel)
+
+    proposed_artist = yt_artist_tag or (_YT_TOPIC_SUFFIX_RE.sub('', channel).strip() if is_topic else parsed_artist)
+    proposed_title = yt_track_tag or parsed_title or _yt_normalize_title(raw_title)
+    proposed_album = yt_album_tag or (_yt_normalize_title(raw_title) if is_playlist else "")
+
+    if yt_artist_tag:
+        artist_confidence = "high"
+    elif is_topic:
+        artist_confidence = "medium"
+    elif label_like:
+        artist_confidence = "low"
+    elif parsed_artist:
+        artist_confidence = "medium"
+    else:
+        artist_confidence = "low"
+
+    fields = []
+    if proposed_artist:
+        source = "youtube_metadata" if yt_artist_tag else ("youtube_channel" if is_topic else "youtube_title")
+        fields.append({"field": "artist", "value": proposed_artist, "source": source, "confidence": artist_confidence})
+    if proposed_title:
+        fields.append({"field": "title", "value": proposed_title, "source": "youtube_metadata" if yt_track_tag else "youtube_title", "confidence": "high" if yt_track_tag else "medium"})
+    if proposed_album:
+        fields.append({"field": "album", "value": proposed_album, "source": "youtube_metadata" if yt_album_tag else "youtube_playlist", "confidence": "high" if yt_album_tag else "medium"})
+    if year:
+        fields.append({"field": "year", "value": year, "source": "youtube_upload_date", "confidence": "low"})
+
+    mb_links = re.findall(r'https?://(?:www\.)?musicbrainz\.org/release[a-zA-Z0-9\-/]*', description)
+    discogs_links = re.findall(r'https?://(?:www\.)?discogs\.com/release/[a-zA-Z0-9\-/]*', description)
+
+    return {
+        "raw": {
+            "title": raw_title, "channel": channel, "uploader": uploader, "description": description,
+            "duration": duration, "duration_display": _duration_label(duration),
+            "upload_date": upload_date, "is_playlist": is_playlist, "entry_count": len(entries),
+        },
+        "normalized": {
+            "artist": proposed_artist, "title": proposed_title, "album": proposed_album, "year": year,
+            "is_topic_channel": is_topic, "likely_label_channel": label_like,
+        },
+        "fields": fields,
+        "artwork_candidates": _yt_thumbnails(info),
+        "playlist_entries": [
+            {"title": _s(e.get("title")), "duration": float(e.get("duration") or 0), "url": _s(e.get("url") or e.get("webpage_url") or "")}
+            for e in entries[:200]
+        ] if is_playlist else [],
+        "mb_links": mb_links[:5],
+        "discogs_links": discogs_links[:5],
+    }
+
+
+_DISCOGS_RELEASE_ID_RE = re.compile(r'/release/(\d+)')
+_DISCOGS_MASTER_ID_RE = re.compile(r'/master/(\d+)')
+
+
+def _discogs_release_id_from_url(url: str) -> Tuple[str, str]:
+    m = _DISCOGS_RELEASE_ID_RE.search(urlparse(url).path)
+    if m:
+        return "release", m.group(1)
+    m = _DISCOGS_MASTER_ID_RE.search(urlparse(url).path)
+    if m:
+        return "master", m.group(1)
+    return "", ""
+
+
+def _fetch_discogs_release(entity_type: str, entity_id: str) -> Dict[str, Any]:
+    endpoint = "masters" if entity_type == "master" else "releases"
+    headers = {"User-Agent": "BeetsWebControl/1.0 (reference-url fetcher)"}
+    if DISCOGS_TOKEN:
+        headers["Authorization"] = f"Discogs token={DISCOGS_TOKEN}"
+    req = urllib.request.Request(f"https://api.discogs.com/{endpoint}/{entity_id}", headers=headers)
+    with urllib.request.urlopen(req, timeout=_REFERENCE_URL_TIMEOUT) as resp:
+        data = json.loads(resp.read(_REFERENCE_MAX_BYTES))
+
+    artists = data.get("artists") or []
+    artist = ", ".join(_s(a.get("name")).replace(" (2)", "").strip() for a in artists if a.get("name")) if isinstance(artists, list) else ""
+    title = _s(data.get("title") or "")
+    year = _s(data.get("year") or "")
+    country = _s(data.get("country") or "")
+    labels = data.get("labels") or []
+    label = _s((labels[0] or {}).get("name") or "") if labels else ""
+    catalog_number = _s((labels[0] or {}).get("catno") or "") if labels else ""
+    formats = data.get("formats") or []
+    fmt = ", ".join(_s(f.get("name")) for f in formats if isinstance(f, dict) and f.get("name"))
+
+    tracklist = []
+    for track in (data.get("tracklist") or []):
+        if not isinstance(track, dict) or _s(track.get("type_") or "track") != "track":
+            continue
+        tracklist.append({"position": _s(track.get("position")), "title": _s(track.get("title")), "duration": _s(track.get("duration"))})
+
+    images = data.get("images") or []
+    artwork = []
+    for img in images:
+        if not isinstance(img, dict) or not img.get("uri"):
+            continue
+        artwork.append({"url": img["uri"], "width": int(img.get("width") or 0), "height": int(img.get("height") or 0)})
+    artwork.sort(key=lambda a: 0 if any(i.get("uri") == a["url"] and i.get("type") == "primary" for i in images) else 1)
+
+    fields = []
+    if artist:
+        fields.append({"field": "artist", "value": artist, "source": "discogs_release", "confidence": "high"})
+    if title:
+        fields.append({"field": "title", "value": title, "source": "discogs_release", "confidence": "high"})
+    if year:
+        fields.append({"field": "year", "value": year, "source": "discogs_release", "confidence": "high"})
+
+    return {
+        "raw": {"title": title, "artist": artist, "year": year, "country": country, "label": label, "catalog_number": catalog_number, "format": fmt, "tracklist_count": len(tracklist)},
+        "normalized": {"artist": artist, "title": title, "album": title, "year": year},
+        "fields": fields,
+        "artwork_candidates": artwork[:8],
+        "playlist_entries": [{"title": t["title"], "duration": 0.0, "url": ""} for t in tracklist[:200]],
+        "discogs_release_id": entity_id,
+        "discogs_entity_type": entity_type,
+    }
+
+
+def _fetch_open_graph_metadata(url: str) -> Dict[str, Any]:
+    req = urllib.request.Request(url, headers={"User-Agent": "beets-web-manager reference-url fetcher"})
+    with urllib.request.urlopen(req, timeout=_REFERENCE_URL_TIMEOUT) as resp:
+        raw = resp.read(_REFERENCE_MAX_BYTES)
+    html = raw.decode("utf-8", errors="replace")
+    og: Dict[str, str] = {}
+    for m in _OG_META_RE.finditer(html):
+        og[m.group(1).lower()] = unescape(m.group(2))
+    title = og.get("title") or ""
+    if not title:
+        tm = _TITLE_TAG_RE.search(html)
+        title = unescape(tm.group(1)).strip() if tm else ""
+    return {
+        "raw": {"title": title, "og_site_name": og.get("site_name", ""), "og_description": og.get("description", "")},
+        "normalized": {"artist": "", "title": title, "album": "", "year": ""},
+        "fields": ([{"field": "title", "value": title, "source": "web_page_title", "confidence": "low"}] if title else []),
+        "artwork_candidates": ([{"url": og["image"], "width": 0, "height": 0}] if og.get("image") else []),
+        "playlist_entries": [],
+        "mb_links": [],
+        "discogs_links": [],
+    }
+
+
+@app.post("/api/submissions/reference-url")
+def submission_reference_url():
+    payload = request.get_json(silent=True) or {}
+    try:
+        url = _validate_reference_url(_s(payload.get("url")))
+    except ValueError as ex:
+        return jsonify({"ok": False, "error": str(ex)}), 400
+
+    album_id = int(payload.get("album_id") or 0)
+    item_id = int(payload.get("item_id") or 0)
+    path = _s(payload.get("path") or "").strip()
+    try:
+        if album_id > 0:
+            target_type, target_ref = "album", album_id
+        elif item_id > 0:
+            resolved_type, resolved_id, _summary, _tracks = _resolve_submission_target(item_id=item_id)
+            target_type, target_ref = resolved_type, resolved_id
+        elif path:
+            resolved_type, resolved_id, _summary, _tracks = _resolve_folder_submission_target(path)
+            target_type, target_ref = resolved_type, resolved_id
+        else:
+            raise ValueError("Select a review item before adding a reference URL.")
+    except (KeyError, ValueError) as ex:
+        return jsonify({"ok": False, "error": str(ex)}), 400
+
+    host = (urlparse(url).hostname or "").lower()
+    source = _reference_url_source(host)
+    entry: Dict[str, Any] = {"id": uuid.uuid4().hex, "url": url, "source": source, "added_at": time.time()}
+    try:
+        if source == "youtube":
+            info = _extract_youtube_info(url)
+            entry.update(_describe_youtube_entry(info))
+            entry["status"] = "ok"
+        elif source == "musicbrainz":
+            entity_type, mbid = _extract_release_input(url)
+            entry.update({
+                "status": "ok",
+                "raw": {"entity_type": entity_type, "mbid": mbid},
+                "normalized": {}, "fields": [], "artwork_candidates": [], "playlist_entries": [],
+                "mb_entity_type": entity_type, "mb_mbid": mbid,
+            })
+        elif source == "discogs" and _discogs_release_id_from_url(url)[1]:
+            discogs_entity_type, discogs_id = _discogs_release_id_from_url(url)
+            entry.update(_fetch_discogs_release(discogs_entity_type, discogs_id))
+            entry["status"] = "ok"
+        else:
+            entry.update(_fetch_open_graph_metadata(url))
+            entry["status"] = "ok"
+    except TimeoutError as ex:
+        entry["status"] = "error"
+        entry["error"] = str(ex) or "Metadata extraction timed out."
+    except Exception as ex:  # noqa: BLE001 - surfaced to the caller as a plain message
+        entry["status"] = "error"
+        entry["error"] = str(ex)
+
+    draft = _submission_draft(target_type, target_ref)
+    references = [r for r in (draft.get("reference_urls") or []) if isinstance(r, dict)]
+    references.append(entry)
+    if len(references) > 20:
+        references = references[-20:]
+    draft["reference_urls"] = references
+    saved = _save_submission_draft(target_type, target_ref, draft)
+    return jsonify({"ok": True, "reference": entry, "draft": saved})
+
 
 def _extract_release_input(value: str) -> Tuple[str, str]:
     text = _s(value).strip()

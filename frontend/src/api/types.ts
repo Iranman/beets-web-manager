@@ -372,6 +372,46 @@ export interface SubmissionSummary {
   mb_albumid?: string;
   cover_art_url?: string;
   workflow_stage?: string;
+  resolved_state?:
+    | 'imported_album'
+    | 'imported_singleton'
+    | 'imported_singletons'
+    | 'unimported_album'
+    | 'loose_tracks'
+    | 'empty'
+    | 'inaccessible'
+    | string;
+}
+
+export interface ReferenceUrlField {
+  field: string;
+  value: string;
+  source: string;
+  confidence: 'high' | 'medium' | 'low' | string;
+}
+
+export interface ReferenceUrlArtworkCandidate {
+  url: string;
+  width?: number;
+  height?: number;
+}
+
+export interface ReferenceUrlEntry {
+  id: string;
+  url: string;
+  source: 'youtube' | 'musicbrainz' | 'discogs' | 'bandcamp' | 'soundcloud' | 'web' | string;
+  added_at?: number;
+  status: 'ok' | 'error' | string;
+  error?: string;
+  raw?: Record<string, unknown>;
+  normalized?: Record<string, unknown>;
+  fields?: ReferenceUrlField[];
+  artwork_candidates?: ReferenceUrlArtworkCandidate[];
+  playlist_entries?: Array<{ title: string; duration?: number; url?: string }>;
+  mb_links?: string[];
+  discogs_links?: string[];
+  mb_entity_type?: string;
+  mb_mbid?: string;
 }
 
 export interface SubmissionTrack {
@@ -415,8 +455,8 @@ export interface SubmissionPreflight {
 }
 
 export interface SubmissionTargetResponse extends ApiOkResponse {
-  target_type: 'album' | 'item' | string;
-  target_id: number;
+  target_type: 'album' | 'item' | 'folder' | string;
+  target_id: number | string;
   summary: SubmissionSummary;
   tracks: SubmissionTrack[];
   preflight: SubmissionPreflight;
@@ -427,6 +467,11 @@ export interface SubmissionTargetResponse extends ApiOkResponse {
 export interface SubmissionDraftResponse extends ApiOkResponse {
   draft: Record<string, unknown>;
   removed?: boolean;
+}
+
+export interface SubmissionReferenceUrlResponse extends ApiOkResponse {
+  reference: ReferenceUrlEntry;
+  draft: Record<string, unknown>;
 }
 
 export interface SubmissionMusicBrainzMapping {

@@ -90,6 +90,7 @@ import type {
   TransactionSettings,
   SubmissionTargetResponse,
   SubmissionDraftResponse,
+  SubmissionReferenceUrlResponse,
   SubmissionMusicBrainzValidationResponse,
   SubmissionAttachMbidsPayload,
   TransactionSettingsResponse,
@@ -1218,26 +1219,44 @@ export function startCleanAll(): Promise<JobStartResponse> {
 export function getSubmissionTarget(params: {
   albumId?: number;
   itemId?: number;
+  path?: string;
   singleton?: boolean;
 }): Promise<SubmissionTargetResponse> {
   const qs = new URLSearchParams();
   if (params.albumId) qs.set('album_id', String(params.albumId));
   if (params.itemId) qs.set('item_id', String(params.itemId));
+  if (params.path) qs.set('path', params.path);
   if (params.singleton) qs.set('singleton', '1');
   return apiJson<SubmissionTargetResponse>(`/api/submissions/target?${qs.toString()}`);
 }
 
 export function saveSubmissionDraft(payload: {
   target_type: string;
-  target_id: number;
+  target_id: number | string;
   draft: Record<string, unknown>;
 }): Promise<SubmissionDraftResponse> {
-  return apiJson<SubmissionDraftResponse>('/api/submissions/draft', jsonRequest('POST', payload));
+  const body = payload.target_type === 'folder'
+    ? { target_type: payload.target_type, target_path: String(payload.target_id), draft: payload.draft }
+    : payload;
+  return apiJson<SubmissionDraftResponse>('/api/submissions/draft', jsonRequest('POST', body));
 }
 
-export function resetSubmissionDraft(targetType: string, targetId: number): Promise<SubmissionDraftResponse> {
-  const qs = new URLSearchParams({ target_type: targetType, target_id: String(targetId) });
+export function resetSubmissionDraft(targetType: string, targetId: number | string): Promise<SubmissionDraftResponse> {
+  const qs = new URLSearchParams({ target_type: targetType });
+  qs.set(targetType === 'folder' ? 'target_path' : 'target_id', String(targetId));
   return apiJson<SubmissionDraftResponse>(`/api/submissions/draft?${qs.toString()}`, { method: 'DELETE' });
+}
+
+export function addSubmissionReferenceUrl(payload: {
+  albumId?: number;
+  itemId?: number;
+  path?: string;
+  url: string;
+}): Promise<SubmissionReferenceUrlResponse> {
+  return apiJson<SubmissionReferenceUrlResponse>(
+    '/api/submissions/reference-url',
+    jsonRequest('POST', { album_id: payload.albumId || undefined, item_id: payload.itemId || undefined, path: payload.path || undefined, url: payload.url }),
+  );
 }
 
 export function validateSubmissionMusicBrainzRelease(payload: {
