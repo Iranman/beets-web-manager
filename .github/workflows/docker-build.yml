@@ -33,6 +33,10 @@ jobs:
         run: |
           set -e
           mkdir -p /tmp/beets-ci-config /tmp/beets-ci-music /tmp/beets-ci-downloads
+          # The image runs as uid 1000 (beets); these are ephemeral CI-only
+          # scratch dirs, so make them world-writable rather than trying to
+          # match uids between the runner and the container.
+          chmod -R a+rwX /tmp/beets-ci-config /tmp/beets-ci-music /tmp/beets-ci-downloads
           cp config.yaml.example /tmp/beets-ci-config/config.yaml
           docker run -d --name beets-ci \
             -p 18337:8337 \

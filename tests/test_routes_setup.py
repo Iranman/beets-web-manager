@@ -124,6 +124,14 @@ class RoutesSetupSettingsPersistenceTests(unittest.TestCase):
     def setUp(self):
         self.flask_app, self.module = _load_routes_setup_against_stub_app()
         self.client = self.flask_app.test_client()
+        # Module defaults point at /config/*, which isn't writable (or may
+        # not even exist) outside the real container — isolate to a temp
+        # dir so this test doesn't depend on host filesystem layout.
+        self.tempdir = tempfile.TemporaryDirectory()
+        root = Path(self.tempdir.name)
+        self.module._SETTINGS_FILE = root / "app_settings.json"
+        self.module._SETUP_COMPLETE_MARKER = root / ".setup_complete"
+        self.addCleanup(self.tempdir.cleanup)
         self.addCleanup(self._cleanup_settings_file)
 
     def _cleanup_settings_file(self):
