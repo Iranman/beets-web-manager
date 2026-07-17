@@ -171,12 +171,12 @@ docker compose up -d
 
 Run `./scripts/backup.sh` first. There is no separate database-migration step — the beets library schema is managed by beets itself on next library open.
 
-## Support AudioMuse-AI
+## Support Beets Web Manager
 
 If this project helps your library, please consider supporting its future.
 
 - ⭐ Leave a star on this project: One shines alone; together, they make it visible and keep it alive.
-- Donate to shape AudioMuse-AI's future by supporting AI licenses, homelab infrastructure, and continuous development.
+- Donate to support future development, AI licenses, homelab infrastructure, and ongoing maintenance.
 
 Sponsor links are configured through GitHub's Sponsor button when available.
 
