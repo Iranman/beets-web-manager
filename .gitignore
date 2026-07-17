@@ -97,3 +97,4 @@ library-*.png
 config.yaml
 # Unreviewed local docs drafts
 docs/
+.playwright-mcp/

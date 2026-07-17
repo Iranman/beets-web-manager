@@ -7,7 +7,9 @@ routes_setup, matching how a real Flask blueprint would be exercised without
 the rest of the application's side effects.
 """
 import importlib
+import os
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -147,6 +149,80 @@ class RoutesSetupSettingsPersistenceTests(unittest.TestCase):
         self.assertTrue(r1.get_json()["ok"])
         self.assertTrue(r2.get_json()["ok"])
         self.assertTrue(self.module._SETUP_COMPLETE_MARKER.exists())
+
+
+class RoutesSetupEnvironmentTests(unittest.TestCase):
+    def setUp(self):
+        self.flask_app, self.module = _load_routes_setup_against_stub_app()
+        self.client = self.flask_app.test_client()
+        self.tempdir = tempfile.TemporaryDirectory()
+        root = Path(self.tempdir.name)
+        self.env_file = root / ".env"
+        self.example_file = root / ".env.example"
+        self.example_file.write_text(
+            "# Plex and Arr services\n"
+            "PLEX_URL=\n"
+            "PLEX_TOKEN=\n"
+            "LIDARR_API_KEY=\n"
+            "\n"
+            "# Demo mode\n"
+            "DEMO_MODE=0\n",
+            encoding="utf-8",
+        )
+        self.module._SETUP_ENV_FILE = self.env_file
+        self.module._ENV_EXAMPLE_FILE = self.example_file
+        self._saved_env = {
+            name: os.environ.get(name)
+            for name in ("PLEX_URL", "PLEX_TOKEN", "LIDARR_API_KEY", "DEMO_MODE")
+        }
+        self.addCleanup(self._cleanup)
+
+    def _cleanup(self):
+        self.tempdir.cleanup()
+        for name, value in self._saved_env.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    def test_env_get_masks_secret_values(self):
+        self.env_file.write_text("PLEX_URL=http://plex:32400\nPLEX_TOKEN=supersecretvalue\n", encoding="utf-8")
+        r = self.client.get("/api/setup/env")
+        self.assertEqual(r.status_code, 200)
+        body = r.get_json()
+        variables = {item["name"]: item for item in body["variables"]}
+        self.assertEqual(variables["PLEX_URL"]["value"], "http://plex:32400")
+        self.assertTrue(variables["PLEX_TOKEN"]["has_value"])
+        self.assertNotIn("supersecretvalue", str(body))
+
+    def test_env_save_updates_file_and_applies_process_env(self):
+        self.env_file.write_text("PLEX_URL=http://old:32400\nPLEX_TOKEN=oldsecretvalue\n", encoding="utf-8")
+        r = self.client.post("/api/setup/env", json={
+            "variables": {
+                "PLEX_URL": "http://new:32400",
+                "PLEX_TOKEN": "",
+            },
+        })
+        self.assertEqual(r.status_code, 200)
+        text = self.env_file.read_text(encoding="utf-8")
+        self.assertIn("PLEX_URL=http://new:32400", text)
+        self.assertIn("PLEX_TOKEN=oldsecretvalue", text)
+        self.assertEqual(os.environ["PLEX_URL"], "http://new:32400")
+        self.assertTrue(r.get_json()["backup_path"])
+
+    def test_env_save_can_clear_secret_explicitly(self):
+        self.env_file.write_text("PLEX_TOKEN=oldsecretvalue\n", encoding="utf-8")
+        r = self.client.post("/api/setup/env", json={
+            "variables": {"PLEX_TOKEN": ""},
+            "clear": ["PLEX_TOKEN"],
+        })
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("PLEX_TOKEN=\n", self.env_file.read_text(encoding="utf-8"))
+        self.assertEqual(os.environ["PLEX_TOKEN"], "")
+
+    def test_env_save_rejects_unlisted_variable(self):
+        r = self.client.post("/api/setup/env", json={"variables": {"PYTHONPATH": "x"}})
+        self.assertEqual(r.status_code, 400)
 
 
 class RoutesSetupHelperTests(unittest.TestCase):

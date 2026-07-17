@@ -41,6 +41,7 @@ services:
       - /run:rw,nosuid,nodev,size=64m
     volumes:
       - ./config:/config
+      - ./.env:/config/.env
       - ${MUSIC_LIBRARY_PATH:-./data/music}:/data/media/music
       - ${DOWNLOAD_PATH:-./data/downloads}:/data/torrents
     healthcheck:

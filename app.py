@@ -45547,6 +45547,7 @@ def api_plugins_installed():
 import routes_jobs     # noqa: F401, E402
 import routes_lidarr   # noqa: F401, E402
 import routes_setup    # noqa: F401, E402
+import routes_submissions  # noqa: F401, E402
 
 
 if __name__ == "__main__":

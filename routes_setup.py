@@ -4,6 +4,8 @@ Read-only status/test endpoints plus a single settings-persistence endpoint.
 Does not change how app.py itself loads config: env vars and config.yaml
 remain authoritative. This module only adds:
   - GET  /api/setup/status         readiness snapshot for the wizard/health page
+  - GET  /api/setup/env            masked .env editor metadata
+  - POST /api/setup/env            update allowed .env keys and apply them to this process
   - POST /api/setup/test/ai        live AI provider connectivity test
   - POST /api/setup/test/musicbrainz
   - POST /api/setup/test/acoustid  fpcalc + AcoustID API test
@@ -15,13 +17,15 @@ remain authoritative. This module only adds:
 """
 import json
 import os
+import re
 import shutil
 import subprocess
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List, Tuple
 
 from flask import jsonify, request
 
@@ -31,6 +35,73 @@ from app import app  # noqa: E402
 
 _SETTINGS_FILE = Path(os.environ.get("SETUP_SETTINGS_FILE", "/config/app_settings.json"))
 _SETUP_COMPLETE_MARKER = Path(os.environ.get("SETUP_COMPLETE_FILE", "/config/.setup_complete"))
+_SETUP_ENV_FILE = Path(os.environ.get("SETUP_ENV_FILE", "/config/.env"))
+_ENV_EXAMPLE_FILE = Path(os.environ.get("SETUP_ENV_EXAMPLE_FILE", str(Path(__file__).parent / ".env.example")))
+_ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+_BLOCKED_ENV_NAMES = {"SETUP_ENV_FILE", "SETUP_ENV_EXAMPLE_FILE", "SETUP_SETTINGS_FILE", "SETUP_COMPLETE_FILE"}
+_SECRET_ENV_PARTS = ("KEY", "TOKEN", "PASSWORD", "SECRET")
+_FALLBACK_ENV_TEMPLATE = """# Required owner/admin authentication
+BEETS_WEB_AUTH_TOKEN=
+BEETS_WEB_PASSWORD=
+BEETS_WEB_USERNAME=admin
+BEETS_WEB_AUTH_DISABLED=0
+BEETS_WEB_AUTH_MIN_LENGTH=32
+BEETS_TRUSTED_PROXIES=
+BEETS_OUTBOUND_ALLOWLIST=
+
+# Core Beets paths
+BEETS_LIBRARY=/config/musiclibrary.blb
+BEETS_CONFIG=/config/config.yaml
+BEETS_LOG=/config/beet.log
+WEBCONTROL_PORT=8337
+
+# AI provider keys
+OPENAI_API_KEY=
+OPENROUTER_API_KEY=
+AI_API_KEY=
+
+# Plex and Arr services
+PLEX_URL=
+PLEX_TOKEN=
+LIDARR_URL=
+LIDARR_API_KEY=
+
+# Music metadata providers
+ACOUSTID_API_KEY=
+ACOUSTID_KEY=
+DISCOGS_TOKEN=
+LISTENBRAINZ_TOKEN=
+
+# SLSKD and Soulseek
+SLSKD_SLSK_USERNAME=
+SLSKD_SLSK_PASSWORD=
+SLSKD_API_KEY=
+SLSKD_API_KEY_FILE=/config/slskd_api_key
+
+# Spotify playlist parsing
+SPOTIFY_CLIENT_ID=
+SPOTIFY_CLIENT_SECRET=
+
+# yt-dlp and direct-source helpers
+YTDLP_COOKIE_FILE=/config/yt-dlp/cookies.txt
+YTDLP_ALLOW_BROWSER_COOKIES=0
+YTDLP_NETRC_FILE=/config/.netrc
+YTDLP_PO_PROVIDER_URL=http://bgutil-provider:4416
+YTDLP_JS_RUNTIMES=deno,node,quickjs
+SPOTIFLAC_AUTO_INSTALL=0
+SPOTIFLAC_CMD=
+
+# Docker service credentials
+PUID=1000
+PGID=1000
+BEETS_UID=1000
+BEETS_GID=1000
+DIGARR_INITIAL_PASSWORD=
+POSTGRES_PASSWORD=
+
+# Demo mode
+DEMO_MODE=0
+"""
 
 
 def _app_version() -> str:
@@ -66,6 +137,220 @@ def _mask(value: str) -> str:
     if len(value) <= 4:
         return "*" * len(value)
     return value[:2] + "*" * (len(value) - 4) + value[-2:]
+
+
+def _is_secret_env(name: str) -> bool:
+    upper = name.upper()
+    return any(part in upper for part in _SECRET_ENV_PARTS)
+
+
+def _decode_env_value(raw: str) -> str:
+    raw = raw.strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ("'", '"'):
+        inner = raw[1:-1]
+        if raw[0] == '"':
+            return (
+                inner
+                .replace("\\n", "\n")
+                .replace("\\r", "\r")
+                .replace('\\"', '"')
+                .replace("\\\\", "\\")
+            )
+        return inner
+    return raw
+
+
+def _format_env_value(value: str) -> str:
+    value = str(value or "")
+    if value == "":
+        return ""
+    needs_quotes = (
+        value != value.strip()
+        or any(ch in value for ch in (" ", "\t", "#", '"', "'", "\\", "\n", "\r"))
+    )
+    if not needs_quotes:
+        return value
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r")
+    return f'"{escaped}"'
+
+
+def _parse_env_text(text: str) -> Tuple[List[Dict[str, Any]], Dict[str, str]]:
+    entries: List[Dict[str, Any]] = []
+    values: Dict[str, str] = {}
+    section = "General"
+    previous_blank = True
+    for raw_line in text.splitlines():
+        stripped = raw_line.strip()
+        if not stripped:
+            entries.append({"type": "blank", "raw": raw_line})
+            previous_blank = True
+            continue
+        if stripped.startswith("#"):
+            comment = stripped.lstrip("#").strip()
+            if comment and previous_blank:
+                section = comment
+            entries.append({"type": "comment", "raw": raw_line, "section": section})
+            previous_blank = False
+            continue
+        candidate = stripped[7:].strip() if stripped.startswith("export ") else stripped
+        if "=" not in candidate:
+            entries.append({"type": "raw", "raw": raw_line})
+            previous_blank = False
+            continue
+        key, raw_value = candidate.split("=", 1)
+        key = key.strip()
+        if not _ENV_NAME_RE.match(key):
+            entries.append({"type": "raw", "raw": raw_line})
+            previous_blank = False
+            continue
+        value = _decode_env_value(raw_value)
+        values[key] = value
+        entries.append({"type": "var", "raw": raw_line, "key": key, "value": value, "section": section})
+        previous_blank = False
+    return entries, values
+
+
+def _read_text_if_exists(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except Exception:
+        return ""
+
+
+def _env_example_text() -> str:
+    return _read_text_if_exists(_ENV_EXAMPLE_FILE) or _FALLBACK_ENV_TEMPLATE
+
+
+def _env_catalog() -> Dict[str, Dict[str, Any]]:
+    entries, values = _parse_env_text(_env_example_text())
+    catalog: Dict[str, Dict[str, Any]] = {}
+    for entry in entries:
+        if entry.get("type") != "var":
+            continue
+        key = str(entry.get("key") or "")
+        if key in _BLOCKED_ENV_NAMES:
+            continue
+        catalog[key] = {
+            "name": key,
+            "section": entry.get("section") or "General",
+            "default": values.get(key, ""),
+            "secret": _is_secret_env(key),
+        }
+    return catalog
+
+
+def _load_env_file() -> Tuple[List[Dict[str, Any]], Dict[str, str], bool]:
+    text = _read_text_if_exists(_SETUP_ENV_FILE)
+    if not text:
+        return [], {}, False
+    entries, values = _parse_env_text(text)
+    return entries, values, True
+
+
+def _setup_env_payload(extra: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    catalog = _env_catalog()
+    _, persisted, exists = _load_env_file()
+    names = list(catalog.keys())
+    for key in persisted:
+        if key not in catalog and _ENV_NAME_RE.match(key) and key not in _BLOCKED_ENV_NAMES:
+            catalog[key] = {
+                "name": key,
+                "section": "Custom",
+                "default": "",
+                "secret": _is_secret_env(key),
+            }
+            names.append(key)
+    variables = []
+    for name in names:
+        meta = catalog[name]
+        if name in persisted:
+            raw_value = persisted[name]
+            source = "file"
+        elif name in os.environ:
+            raw_value = os.environ.get(name, "")
+            source = "process"
+        else:
+            raw_value = str(meta.get("default") or "")
+            source = "example"
+        runtime_value = os.environ.get(name, "")
+        secret = bool(meta.get("secret"))
+        variables.append({
+            "name": name,
+            "section": meta.get("section") or "General",
+            "secret": secret,
+            "has_value": bool(raw_value),
+            "value": _mask(raw_value) if secret else raw_value,
+            "source": source,
+            "runtime_has_value": bool(runtime_value),
+            "runtime_value": _mask(runtime_value) if secret else runtime_value,
+        })
+    payload: Dict[str, Any] = {
+        "ok": True,
+        "env_file": str(_SETUP_ENV_FILE),
+        "exists": exists,
+        "example_file": str(_ENV_EXAMPLE_FILE),
+        "restart_required_after_save": True,
+        "variables": variables,
+    }
+    if extra:
+        payload.update(extra)
+    return payload
+
+
+def _write_env_file(updates: Dict[str, str], clear: List[str]) -> str:
+    catalog = _env_catalog()
+    entries, persisted, exists = _load_env_file()
+    editable = set(catalog.keys()) | set(persisted.keys())
+    for key, value in list(updates.items()):
+        if key in _BLOCKED_ENV_NAMES or not _ENV_NAME_RE.match(key) or key not in editable:
+            raise ValueError(f"{key} is not an editable setup environment variable")
+        if "\n" in value or "\r" in value:
+            raise ValueError(f"{key} cannot contain newlines")
+        if len(value) > 4096:
+            raise ValueError(f"{key} is too long")
+    for key in clear:
+        if key in _BLOCKED_ENV_NAMES or not _ENV_NAME_RE.match(key) or key not in editable:
+            raise ValueError(f"{key} is not an editable setup environment variable")
+
+    if not entries:
+        entries, _ = _parse_env_text(_env_example_text())
+
+    desired = dict(updates)
+    for key in clear:
+        desired[key] = ""
+
+    lines: List[str] = []
+    seen = set()
+    for entry in entries:
+        if entry.get("type") == "var":
+            key = str(entry.get("key") or "")
+            if key in desired:
+                lines.append(f"{key}={_format_env_value(desired[key])}")
+                seen.add(key)
+            else:
+                lines.append(str(entry.get("raw") or ""))
+        else:
+            lines.append(str(entry.get("raw") or ""))
+    missing = [key for key in desired if key not in seen]
+    if missing:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.append("# Added by setup")
+        for key in missing:
+            lines.append(f"{key}={_format_env_value(desired[key])}")
+
+    _SETUP_ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
+    backup_path = ""
+    if exists:
+        backup = _SETUP_ENV_FILE.with_name(f"{_SETUP_ENV_FILE.name}.bak-{time.strftime('%Y%m%d-%H%M%S')}")
+        shutil.copy2(_SETUP_ENV_FILE, backup)
+        backup_path = str(backup)
+    tmp = _SETUP_ENV_FILE.with_suffix(_SETUP_ENV_FILE.suffix + ".tmp")
+    tmp.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    tmp.replace(_SETUP_ENV_FILE)
+    for key, value in desired.items():
+        os.environ[key] = value
+    return backup_path
 
 
 def _check_path(path_value: str, *, require_writable: bool) -> Dict[str, Any]:
@@ -159,6 +444,54 @@ def setup_status():
         "settings": {k: (_mask(v) if "key" in k.lower() or "token" in k.lower() else v)
                      for k, v in settings.items()},
     })
+
+
+@app.get("/api/setup/env")
+def setup_get_env():
+    """Return editable .env metadata with secret values masked."""
+    return jsonify(_setup_env_payload())
+
+
+@app.post("/api/setup/env")
+def setup_save_env():
+    """Persist setup-managed environment variables to a .env-style file.
+
+    Blank secret fields are ignored unless the key is explicitly listed in
+    `clear`, so password inputs do not accidentally erase credentials.
+    """
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "expected a JSON object"}), 400
+    raw_updates = payload.get("variables") or {}
+    raw_clear = payload.get("clear") or []
+    if not isinstance(raw_updates, dict) or not isinstance(raw_clear, list):
+        return jsonify({"ok": False, "error": "expected variables object and clear list"}), 400
+
+    updates: Dict[str, str] = {}
+    for key, raw_value in raw_updates.items():
+        key = str(key)
+        value = "" if raw_value is None else str(raw_value)
+        if _is_secret_env(key) and value == "" and key not in raw_clear:
+            continue
+        updates[key] = value
+    clear = [str(key) for key in raw_clear]
+    if not updates and not clear:
+        return jsonify(_setup_env_payload({
+            "saved": [],
+            "backup_path": "",
+            "process_applied": False,
+        }))
+    try:
+        backup_path = _write_env_file(updates, clear)
+    except ValueError as ex:
+        return jsonify({"ok": False, "error": str(ex)}), 400
+    except Exception as ex:
+        return jsonify({"ok": False, "error": f"Could not save environment file: {ex}"}), 500
+    return jsonify(_setup_env_payload({
+        "saved": sorted(set(updates) | set(clear)),
+        "backup_path": backup_path,
+        "process_applied": True,
+    }))
 
 
 @app.post("/api/setup/test/ai")

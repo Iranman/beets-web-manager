@@ -13,6 +13,7 @@ import type {
   ArtRepairReportResponse,
   AlbumDuplicateResolverAction,
   AlbumDuplicateResolverPlan,
+  AlbumMbFormatResponse,
   AlbumMbCompletenessResponse,
   AlbumArtStatusResponse,
   AiBatchStatusResponse,
@@ -79,6 +80,9 @@ import type {
   ImportTargetPreviewPayload,
   ImportTargetPreviewResponse,
   StatsResponse,
+  SetupEnvResponse,
+  SetupEnvSavePayload,
+  SetupStatusResponse,
   WantedResponse,
   YtdlpStatusResponse,
 } from './types';
@@ -140,6 +144,22 @@ export function cleanupStaleReview(): Promise<CleanupStaleResponse> {
 
 export function getHealth(): Promise<HealthResponse> {
   return apiJson<HealthResponse>('/api/health');
+}
+
+export function getSetupStatus(): Promise<SetupStatusResponse> {
+  return apiJson<SetupStatusResponse>('/api/setup/status');
+}
+
+export function getSetupEnv(): Promise<SetupEnvResponse> {
+  return apiJson<SetupEnvResponse>('/api/setup/env');
+}
+
+export function saveSetupEnv(payload: SetupEnvSavePayload): Promise<SetupEnvResponse> {
+  return apiJson<SetupEnvResponse>('/api/setup/env', jsonRequest('POST', payload));
+}
+
+export function completeSetup(): Promise<ApiOkResponse> {
+  return apiJson<ApiOkResponse>('/api/setup/complete', jsonRequest('POST'));
 }
 
 export function getStats(): Promise<StatsResponse> {
@@ -1114,7 +1134,23 @@ export function startCleanAll(): Promise<JobStartResponse> {
 // ── Unmatched releases ────────────────────────────────────────────────────────
 
 export function albumMbsubmit(albumId: number): Promise<JobStartResponse> {
-  return apiJson<JobStartResponse>(`/api/albums/${albumId}/mbsubmit`, { method: 'POST' });
+  return apiJson<JobStartResponse>(`/api/albums/${albumId}/mbsubmit`, jsonRequest('POST'));
+}
+
+export function itemMbsubmit(itemId: number): Promise<JobStartResponse> {
+  return apiJson<JobStartResponse>(`/api/items/${itemId}/mbsubmit`, jsonRequest('POST'));
+}
+
+export function getAlbumMbFormat(albumId: number): Promise<AlbumMbFormatResponse> {
+  return apiJson<AlbumMbFormatResponse>(`/api/albums/${albumId}/mb-format`);
+}
+
+export function albumAcoustidSubmit(albumId: number): Promise<JobStartResponse> {
+  return apiJson<JobStartResponse>(`/api/albums/${albumId}/acoustid-submit`, jsonRequest('POST'));
+}
+
+export function itemAcoustidSubmit(itemId: number): Promise<JobStartResponse> {
+  return apiJson<JobStartResponse>(`/api/items/${itemId}/acoustid-submit`, jsonRequest('POST'));
 }
 
 export function albumAddMbids(
@@ -1123,7 +1159,3 @@ export function albumAddMbids(
 ): Promise<JobStartResponse> {
   return apiJson<JobStartResponse>(`/api/albums/${albumId}/add-mbids`, jsonRequest('POST', payload));
 }
-
-
-
-

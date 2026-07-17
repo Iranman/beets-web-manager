@@ -16,6 +16,7 @@ import Chip from '@mui/material/Chip';
 import LinearProgress from '@mui/material/LinearProgress';
 import TextField from '@mui/material/TextField';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { apiGet } from '../../lib/api';
 import {
   albumAddMbids,
@@ -2116,6 +2117,7 @@ function ReviewCard({
   const busy = actionState?.status === 'running';
   const [mbsubmitOpen, setMbsubmitOpen] = useState(false);
   const [addMbidsOpen, setAddMbidsOpen] = useState(false);
+  const navigate = useNavigate();
   const isLibraryNoMb = item.type === 'library_no_mb' && Boolean(item.album_id);
   const matchBucket = itemMatchBucket(item);
   const selectedMatchActive = Boolean(selectedMatch && selectedMatch.source !== 'manual');
@@ -2175,6 +2177,14 @@ function ReviewCard({
   const cleanupFiles = selectedCleanupSourceFiles(selectedMatch, targetPreviewState?.preview);
   const cleanupPurgeReady = hasDestructiveCleanupMismatch(selectedMatch, targetPreviewState?.preview);
   const cleanupReady = cleanupFiles.length > 0;
+  const openSubmissionPage = () => {
+    const params = new URLSearchParams();
+    params.set('review_item_id', item.id);
+    if (item.album_id) params.set('album_id', String(item.album_id));
+    if (item.first_item_id) params.set('item_id', String(item.first_item_id));
+    if (item.path) params.set('path', item.path);
+    navigate(`/submissions?${params.toString()}`);
+  };
 
   return (
     <Card variant="outlined" sx={{ borderRadius: 2, borderColor: 'rgba(15, 23, 42, 0.12)' }}>
@@ -2370,6 +2380,15 @@ function ReviewCard({
 
             <Button size="small" variant="text" color="inherit" onClick={onDismiss} disabled={busy}>
               {item.type === 'pending_ai' || item.type === 'skipped' ? 'Remove from Review' : 'Hide'}
+            </Button>
+            <Button
+              size="small"
+              variant="outlined"
+              onClick={openSubmissionPage}
+              disabled={busy}
+              title="Open the MusicBrainz and AcoustID submission page with this review item selected"
+            >
+              Submit Metadata
             </Button>
             {canDeleteFolder(item) ? (
               <Button

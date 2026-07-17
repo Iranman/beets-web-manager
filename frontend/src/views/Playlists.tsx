@@ -1717,7 +1717,7 @@ export default function Playlists() {
     });
     try {
       const started = await startPlaylistDownload({
-        name: name.trim() || 'Playlist',
+        name: savedPlaylistName || name.trim() || 'Playlist',
         tracks: useParsedTracks ? tracksToDownload : undefined,
         all_tracks: useParsedTracks ? tracksForPlaylist : undefined,
         source: useParsedTracks ? undefined : source,

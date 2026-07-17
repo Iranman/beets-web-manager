@@ -34,7 +34,7 @@ COPY app.py helpers_mb.py job_engine.py routes_jobs.py routes_lidarr.py routes_s
 COPY backend/ ./backend/
 COPY beetsplug/ ./beetsplug/
 COPY tests/ ./tests/
-COPY config.yaml.example VERSION ./
+COPY config.yaml.example .env.example VERSION ./
 COPY --from=frontend /src/frontend/dist ./frontend/dist
 
 # /config: beets config + app JSON state + musiclibrary.blb

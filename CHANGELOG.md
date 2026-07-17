@@ -21,6 +21,7 @@ The project uses Semantic Versioning.
 ### Fixed
 
 - `config.yaml` (contains plaintext integration secret fields) was not excluded by `.gitignore`.
+- Baseline CI no longer depends on local-only `AGENTS.md`, `CLAUDE.md`, or private `config.yaml` files, and Docker dependency installation uses the available `pylistenbrainz==0.5.1` pin.
 
 ### Known Limitations
 
@@ -28,4 +29,4 @@ The project uses Semantic Versioning.
 - Some security scanner integrations may require repository-level GitHub settings or release artifacts.
 - Operators must provide their own credentials and rotate any values that were ever exposed before this baseline.
 - Setup wizard is backend-API-only in this release; no browser wizard UI yet.
-- Docker build/compose startup has not been live-validated in this environment (Docker Desktop backend issue on the dev machine); the Dockerfile has been reviewed but not run end-to-end.
+- Baseline Docker image build passes GitHub CI; local Docker Desktop validation still fails before build start with a Linux engine `_ping` 500, and setup/demo packaging still needs a release check after `routes_lidarr.py` is restored.

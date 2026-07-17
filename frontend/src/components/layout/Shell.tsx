@@ -14,6 +14,7 @@ const TABS: Tab[] = [
   { to: '/import',    label: 'Import' },
   { to: '/playlists', label: 'Playlists' },
   { to: '/jobs',      label: 'Jobs' },
+  { to: '/submissions', label: 'Submit' },
 ];
 
 function BeetsLogo() {
@@ -142,6 +143,14 @@ export default function Shell() {
                       onClick={() => void navigate('/config')}
                     >
                       Settings
+                    </button>
+                  </MenuItem>
+                  <MenuItem>
+                    <button
+                      className="flex w-full items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:bg-graphite-800 hover:text-white"
+                      onClick={() => void navigate('/setup')}
+                    >
+                      Setup
                     </button>
                   </MenuItem>
                   <MenuItem>

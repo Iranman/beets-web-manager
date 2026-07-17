@@ -7,6 +7,8 @@ import Import from './views/Import';
 import Jobs from './views/Jobs';
 import Library from './views/Library';
 import Playlists from './views/Playlists';
+import Setup from './views/Setup';
+import Submissions from './views/Submissions';
 import { theme } from './theme';
 
 export default function App() {
@@ -23,6 +25,8 @@ export default function App() {
             <Route path="playlists" element={<Playlists />} />
             <Route path="jobs"      element={<Jobs />} />
             <Route path="config"    element={<Config />} />
+            <Route path="setup"     element={<Setup />} />
+            <Route path="submissions" element={<Submissions />} />
           </Route>
         </Routes>
       </BrowserRouter>

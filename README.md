@@ -137,6 +137,8 @@ For the simplest possible start:
 
 This creates `.env`/`config.yaml` from the example templates, generates a random `BEETS_WEB_AUTH_TOKEN`, builds the image, and starts the stack via `docker-compose.yml` (a minimal single-container Compose file — see `docker-compose.arrs.yml` for the broader Arr-stack variant used above). Readiness and per-integration connectivity checks are available at `GET /api/setup/status` and `POST /api/setup/test/{ai,musicbrainz,acoustid,plex}`, and standard health probes at `/health`, `/health/live`, `/health/ready`.
 
+Packaging status: the baseline branch has passing GitHub CI for lint, typecheck, frontend build, Python tests, security, and Docker image build. The unreleased setup/demo packaging path still needs a final Docker/startup check after `routes_lidarr.py` is restored.
+
 ## Documentation
 
 - [Installation Guide](docs/INSTALLATION.md) — per-platform path-mapping examples (Linux, TrueNAS, Unraid, Synology, Windows) and local dev setup.

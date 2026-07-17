@@ -148,6 +148,76 @@ export interface ApiOkResponse {
   error?: string | null;
 }
 
+export interface SetupPathCheck {
+  path: string;
+  exists: boolean;
+  writable?: boolean;
+  error?: string;
+}
+
+export interface SetupStatusResponse {
+  ok: boolean;
+  status: 'ready' | 'warning' | string;
+  version: string;
+  demo_mode: boolean;
+  setup_complete: boolean;
+  blocking_reasons: string[];
+  paths: {
+    config: SetupPathCheck;
+    music_library: SetupPathCheck;
+    downloads: SetupPathCheck;
+    beets_config: Pick<SetupPathCheck, 'path' | 'exists'>;
+  };
+  fpcalc: {
+    available: boolean;
+    path: string;
+  };
+  integrations: Record<string, {
+    configured: boolean;
+    required: boolean;
+    note?: string;
+  }>;
+  settings: Record<string, unknown>;
+}
+
+export interface SetupEnvVariable {
+  name: string;
+  section: string;
+  secret: boolean;
+  has_value: boolean;
+  value: string;
+  source: 'file' | 'process' | 'example' | string;
+  runtime_has_value: boolean;
+  runtime_value: string;
+}
+
+export interface SetupEnvResponse {
+  ok: boolean;
+  error?: string;
+  env_file: string;
+  exists: boolean;
+  example_file: string;
+  restart_required_after_save: boolean;
+  variables: SetupEnvVariable[];
+  saved?: string[];
+  backup_path?: string;
+  process_applied?: boolean;
+}
+
+export interface SetupEnvSavePayload {
+  variables: Record<string, string>;
+  clear?: string[];
+}
+
+export interface AlbumMbFormatResponse extends ApiOkResponse {
+  track_text: string;
+  mb_url: string;
+  album: string;
+  albumartist: string;
+  year: number | string;
+  track_count: number;
+}
+
 export interface JobStartResponse extends ApiOkResponse {
   job_id: string;
   batch_job_id?: string;
