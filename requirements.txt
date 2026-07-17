@@ -1,6 +1,7 @@
 # Core web app
 Flask==3.1.0
 Werkzeug==3.1.3
+waitress==3.0.2
 
 # Beets + plugins referenced in config.yaml.example. fetchart, embedart, convert,
 # scrub, replaygain, lastgenre, chroma, lyrics, mbsync, musicbrainz, ftintitle,

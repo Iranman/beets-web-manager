@@ -46516,7 +46516,20 @@ if __name__ == "__main__":
     print(f"Beets Web Control → http://{HOST}:{PORT}")
     print(f"Library: {LIB_PATH}")
     print(f"Beet bin: {BEET_BIN}")
-    app.run(host=HOST, port=PORT, threaded=True, use_reloader=False)
+    # Waitress, not Flask's built-in dev server: pure-Python (works
+    # identically on the Linux container and on Windows during local
+    # development) and single-process/multi-threaded, matching the
+    # threaded=True model this app was already built around — job stores,
+    # caches, and dedup-scan state all live in module-level dicts that
+    # assume one process. A pre-fork server (e.g. Gunicorn's default
+    # worker model) would silently fragment that state across processes.
+    from waitress import serve as _waitress_serve
+    _waitress_serve(
+        app,
+        host=HOST,
+        port=PORT,
+        threads=_env_int("WEBCONTROL_THREADS", 8, minimum=1, maximum=64),
+    )
 
 
 
