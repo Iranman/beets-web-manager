@@ -101,8 +101,20 @@ type ApiErrorBody = {
   error?: string;
 };
 
+const _CSRF_EXEMPT_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
 export async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, init);
+  const method = (init?.method ?? 'GET').toUpperCase();
+  let headers = init?.headers;
+  if (!_CSRF_EXEMPT_METHODS.has(method)) {
+    // Every mutating request must carry X-Beets-CSRF, regardless of which
+    // call site built the RequestInit — centralized here so a call site
+    // forgetting the header (or a future one) can't silently skip it.
+    const merged = new Headers(headers);
+    if (!merged.has('X-Beets-CSRF')) merged.set('X-Beets-CSRF', '1');
+    headers = merged;
+  }
+  const response = await fetch(path, { ...init, headers });
   const body = (await response.json().catch(() => null)) as ApiErrorBody | null;
 
   if (!response.ok) {
@@ -150,8 +162,12 @@ export function cleanupStaleReview(): Promise<CleanupStaleResponse> {
   return apiJson<CleanupStaleResponse>('/api/import/cleanup-stale', jsonRequest('POST'));
 }
 
-export function getHealth(): Promise<HealthResponse> {
-  return apiJson<HealthResponse>('/api/health');
+export function getHealth(): Promise<ApiOkResponse> {
+  return apiJson<ApiOkResponse>('/api/health');
+}
+
+export function getHealthDetail(): Promise<HealthResponse> {
+  return apiJson<HealthResponse>('/api/health/detail');
 }
 export function getTransactionSettings(): Promise<TransactionSettingsResponse> {
   return apiJson<TransactionSettingsResponse>('/api/transactions/settings');
@@ -991,21 +1007,16 @@ export function replaceAlbumArtFromUrl(albumId: number, url: string): Promise<Jo
   return apiJson<JobStartResponse>(`/api/albums/${albumId}/art/url`, jsonRequest('POST', { url }));
 }
 
-export async function uploadAlbumArt(albumId: number, file: File): Promise<JobStartResponse> {
+export function uploadAlbumArt(albumId: number, file: File): Promise<JobStartResponse> {
   const form = new FormData();
   form.append('file', file);
-  const response = await fetch(`/api/albums/${albumId}/art/upload`, {
+  // No Content-Type header here — the browser sets it (with the correct
+  // multipart boundary) automatically for a FormData body. apiJson still
+  // adds X-Beets-CSRF for this POST.
+  return apiJson<JobStartResponse>(`/api/albums/${albumId}/art/upload`, {
     method: 'POST',
     body: form,
   });
-  const body = (await response.json().catch(() => null)) as ApiErrorBody | null;
-  if (!response.ok) {
-    throw new Error(body?.error || `HTTP ${response.status}`);
-  }
-  if (body && body.ok === false) {
-    throw new Error(body.error || 'Request failed');
-  }
-  return body as JobStartResponse;
 }
 
 export function deleteAlbumArt(albumId: number): Promise<AlbumArtDeleteResponse> {

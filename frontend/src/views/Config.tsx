@@ -4,7 +4,7 @@ import LinearProgress from '@mui/material/LinearProgress';
 import TextField from '@mui/material/TextField';
 import { useCallback, useEffect, useState } from 'react';
 import {
-  getHealth,
+  getHealthDetail,
   getMbidStatus,
   getMusicFormatPreferences,
   getMusicFormatReplacementStatuses,
@@ -202,7 +202,7 @@ export default function Config() {
     setLoading(true);
     setError('');
     try {
-      const [h, s, m] = await Promise.all([getHealth(), getStats(), getMbidStatus()]);
+      const [h, s, m] = await Promise.all([getHealthDetail(), getStats(), getMbidStatus()]);
       setHealth(h);
       setStats(s);
       setMbStatus(m);

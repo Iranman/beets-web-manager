@@ -2453,9 +2453,8 @@ def ytdlp_test_youtube():
         metadata={"type": "ytdlp-youtube-test", "category": "diagnostic"},
     )
     return jsonify({"ok": True, "job_id": job.job_id, "status": "queued"})
-@app.get("/api/health")
-def health():
-    checks = {
+def _health_checks() -> Dict[str, bool]:
+    return {
         "library_path": Path(LIB_PATH).exists(),
         "beet_bin":     Path(BEET_BIN).exists() if BEET_BIN else False,
         "music_root":   MUSIC_ROOT.is_dir(),
@@ -2464,6 +2463,24 @@ def health():
         "slskd_key":    bool(SLSKD_API_KEY),
         "openai_key":   bool(os.environ.get("OPENAI_API_KEY")),
     }
+
+
+@app.get("/api/health")
+def health():
+    # Public/unauthenticated (Docker/k8s-style probes never send credentials)
+    # — keep this minimal. An unauthenticated caller should not be able to
+    # fingerprint which integrations are configured or which host paths
+    # exist; that detail lives at /api/health/detail, which requires auth.
+    checks = _health_checks()
+    ok = checks["library_path"] and checks["beet_bin"]
+    return jsonify({"ok": ok})
+
+
+@app.get("/api/health/detail")
+def health_detail():
+    """Same integration/path diagnostics /api/health used to expose
+    unauthenticated. Requires auth (no entry in _AUTH_PUBLIC_ENDPOINTS)."""
+    checks = _health_checks()
     ok = checks["library_path"] and checks["beet_bin"]
     return jsonify({"ok": ok, "checks": checks})
 
@@ -10070,6 +10087,13 @@ def album_deduplicate(aid):
     return jsonify({"ok": True, "job_id": job.job_id})
 
 
+_DISK_ART_MIME_BY_EXT = {
+    "jpg": "image/jpeg", "jpeg": "image/jpeg",
+    "png": "image/png", "gif": "image/gif",
+    "webp": "image/webp", "bmp": "image/bmp",
+}
+
+
 @app.get("/api/disk-art")
 def disk_art_serve():
     """Serve an album art image from /data/media/music (security: path must be under music root)."""
@@ -10084,10 +10108,12 @@ def disk_art_serve():
     p = Path(real)
     if not p.exists() or not p.is_file():
         return ("", 404)
-    sfx = p.suffix.lower()
-    mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg",
-            "png": "image/png", "gif": "image/gif",
-            "webp": "image/webp"}.get(sfx.lstrip("."), "image/jpeg")
+    sfx = p.suffix.lower().lstrip(".")
+    mime = _DISK_ART_MIME_BY_EXT.get(sfx)
+    if not mime:
+        # Unrecognized extension: don't guess "image/jpeg" and serve
+        # arbitrary file content under a misleading content-type.
+        return ("", 404)
     return send_file(str(p), mimetype=mime)
 
 
@@ -24877,18 +24903,27 @@ def import_preflight():
         "folders": folder_rows[:100],
     })
 
+_BROWSE_ALLOWED_ROOTS = (MUSIC_ROOT, DOWNLOADS_ROOT)
+
+
 @app.get("/api/browse")
 def browse():
-    """List subdirectories of a path for the path picker."""
-    p = request.args.get("path", "/data/torrents/music")
+    """List subdirectories of a path for the path picker. Restricted to the
+    library/downloads roots — this is an authenticated endpoint, but callers
+    should never be able to enumerate arbitrary container filesystem paths."""
+    raw = request.args.get("path", str(DOWNLOADS_ROOT))
+    p = Path(raw)
+    if not any(_path_is_under(p, root) or p.resolve(strict=False) == root.resolve(strict=False)
+               for root in _BROWSE_ALLOWED_ROOTS):
+        return jsonify({"ok": False, "error": "path is outside the allowed browse roots"}), 400
     try:
         entries = sorted(
-            [d.name for d in Path(p).iterdir() if d.is_dir()],
+            [d.name for d in p.iterdir() if d.is_dir()],
             key=str.lower
         )
-        return jsonify({"ok": True, "path": p, "dirs": entries})
-    except Exception as exc:
-        return jsonify({"ok": False, "error": str(exc)})
+        return jsonify({"ok": True, "path": str(p), "dirs": entries})
+    except Exception:
+        return jsonify({"ok": False, "error": "could not list directory"})
 
 # ── Dedup scan ────────────────────────────────────────────────────────────────
 

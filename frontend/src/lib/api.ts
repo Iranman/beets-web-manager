@@ -7,8 +7,17 @@ export class ApiError extends Error {
   }
 }
 
+const CSRF_EXEMPT_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
 async function apiFetch<T>(url: string, opts: RequestInit = {}): Promise<T> {
-  const res = await fetch(url, opts);
+  const method = (opts.method ?? 'GET').toUpperCase();
+  let headers = opts.headers;
+  if (!CSRF_EXEMPT_METHODS.has(method)) {
+    const merged = new Headers(headers);
+    if (!merged.has('X-Beets-CSRF')) merged.set('X-Beets-CSRF', '1');
+    headers = merged;
+  }
+  const res = await fetch(url, { ...opts, headers });
   if (!res.ok) {
     let message = `HTTP ${res.status}`;
     try {
