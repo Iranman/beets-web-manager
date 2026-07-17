@@ -171,6 +171,15 @@ docker compose up -d
 
 Run `./scripts/backup.sh` first. There is no separate database-migration step — the beets library schema is managed by beets itself on next library open.
 
+## Support AudioMuse-AI
+
+If this project helps your library, please consider supporting its future.
+
+- ⭐ Leave a star on this project: One shines alone; together, they make it visible and keep it alive.
+- Donate to shape AudioMuse-AI's future by supporting AI licenses, homelab infrastructure, and continuous development.
+
+Sponsor links are configured through GitHub's Sponsor button when available.
+
 ## Contributing
 
 See `CONTRIBUTING.md`. Commit messages should use concise conventional prefixes such as `feat:`, `fix:`, `docs:`, `test:`, `build:`, `ci:`, and `chore:`.
