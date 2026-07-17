@@ -3,7 +3,7 @@ import re
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, List
+from typing import Any, Dict, Iterable, List, Optional
 
 
 class PlaylistMatchQualityTests(unittest.TestCase):
@@ -13,6 +13,11 @@ class PlaylistMatchQualityTests(unittest.TestCase):
         start = source.index("def _norm(s):")
         end = source.index("def _playlist_item_payload")
         namespace = {
+            "Any": Any,
+            "Dict": Dict,
+            "Iterable": Iterable,
+            "List": List,
+            "Optional": Optional,
             "difflib": difflib,
             "re": re,
             "Path": Path,

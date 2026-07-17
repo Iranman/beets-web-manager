@@ -1,6 +1,8 @@
 import unittest
 from pathlib import Path
 
+from project_docs import read_operator_docs
+
 
 class ArtistFolderJobsTests(unittest.TestCase):
     def test_artist_folder_scan_is_jobstore_backed(self):
@@ -27,12 +29,7 @@ class ArtistFolderJobsTests(unittest.TestCase):
             client_source.index("export function mergeArtistFolders")
         ]
         clean_source = (root / "frontend" / "src" / "views" / "Clean.tsx").read_text(encoding="utf-8")
-        docs_source = "\n".join(
-            [
-                (root / "AGENTS.md").read_text(encoding="utf-8"),
-                (root / "CLAUDE.md").read_text(encoding="utf-8"),
-            ]
-        )
+        docs_source = read_operator_docs(root)
 
         self.assertIn("jobs.start_python(", scan_route)
         self.assertIn('"type": "artist-folder-scan"', scan_route)

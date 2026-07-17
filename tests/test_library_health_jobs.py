@@ -1,6 +1,8 @@
 import unittest
 from pathlib import Path
 
+from project_docs import read_operator_docs
+
 
 class LibraryHealthJobsTests(unittest.TestCase):
     def test_library_health_scan_is_jobstore_backed(self):
@@ -14,12 +16,7 @@ class LibraryHealthJobsTests(unittest.TestCase):
             root / "frontend" / "src" / "features" / "libraryHealth" / "LibraryHealthPanel.tsx"
         ).read_text(encoding="utf-8")
         clean_source = (root / "frontend" / "src" / "views" / "Clean.tsx").read_text(encoding="utf-8")
-        docs_source = "\n".join(
-            [
-                (root / "AGENTS.md").read_text(encoding="utf-8"),
-                (root / "CLAUDE.md").read_text(encoding="utf-8"),
-            ]
-        )
+        docs_source = read_operator_docs(root)
 
         self.assertIn("jobs.start_python(", route_source)
         self.assertIn('"type": "library-health-scan"', route_source)
