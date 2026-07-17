@@ -175,6 +175,8 @@ Run `./scripts/backup.sh` first. There is no separate database-migration step ‚Ä
 
 If this project helps your library, please consider supporting its future.
 
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/K5G823CQ0S)
+
 - ‚≠ê Leave a star on this project: One shines alone; together, they make it visible and keep it alive.
 - Donate to support future development, AI licenses, homelab infrastructure, and ongoing maintenance.
 
