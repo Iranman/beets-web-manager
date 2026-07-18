@@ -19347,6 +19347,15 @@ def import_folder_with_id():
                 )
         else:
             _remove_pending_review_for_path(folder_path, log)
+        try:
+            for aid in album_ids:
+                album_obj = lib.get_album(int(aid))
+                if album_obj:
+                    _auto_merge_case_duplicate_artist_folder(
+                        music_root, _s(getattr(album_obj, "albumartist", "") or ""), log,
+                    )
+        except Exception as ex:
+            log.append(f"  [auto-dedup] artist-folder check skipped: {ex}")
         _invalidate_lib_cache()
         if trigger_plex_refresh_after:
             _trigger_plex_refresh(log, workflow=trigger_plex_context)
@@ -22980,6 +22989,14 @@ def _ai_import_folder(folder_path: str, mb_albumid: str, suggestion: dict,
             pass
 
     _remove_pending_review_for_path(folder_path, log)
+    try:
+        imported_album = lib.get_album(int(aid))
+        if imported_album:
+            _auto_merge_case_duplicate_artist_folder(
+                str(MUSIC_ROOT), _s(getattr(imported_album, "albumartist", "") or ""), log,
+            )
+    except Exception as ex:
+        log.append(f"  [auto-dedup] artist-folder check skipped: {ex}")
     _invalidate_lib_cache()
     _trigger_plex_refresh(log, workflow="batch")
     log.append("  ✓ Done")
@@ -35365,12 +35382,13 @@ def _merge_artist_dir_contents(src: Path, dst: Path, *, dry_run: bool,
 
 
 def _apply_artist_folder_groups(root: str, keys: Optional[List[str]],
-                                dry_run: bool, log: List[str]) -> Dict[str, int]:
+                                dry_run: bool, log: List[str],
+                                use_musicbrainz: bool = True) -> Dict[str, int]:
     root_path = Path(root).resolve(strict=False)
     wanted = set(keys or [])
     groups = _scan_artist_folder_groups(
         str(root_path),
-        use_musicbrainz=True,
+        use_musicbrainz=use_musicbrainz,
         only_keys=wanted if wanted else None,
     )
     if wanted:
@@ -35509,6 +35527,43 @@ def _apply_artist_folder_groups(root: str, keys: Optional[List[str]],
                f"{summary['files']} file(s), updated {summary['db_paths']} DB path(s), "
                f"wrote tags for {summary['db_tags']} album(s).")
     return summary
+
+
+def _auto_merge_case_duplicate_artist_folder(root: str, albumartist: str,
+                                             log: Optional[List[str]] = None) -> bool:
+    """Call right after an import lands a new album folder. If the artist
+    folder that import just used is a case/punctuation-only duplicate of an
+    existing one (e.g. "aaliyah" vs "Aaliyah"), merge it into the existing
+    folder immediately instead of leaving a new duplicate for someone to
+    notice later. Skips the MusicBrainz canonical-name lookup so it stays
+    cheap enough to run after every import without a network round trip;
+    the manual Clean-page merge (which does use MusicBrainz) still runs
+    the occasional slower pass for names it doesn't catch this way."""
+    name = _s(albumartist).strip()
+    if not name:
+        return False
+    key = _artist_folder_key(name)
+    if not key:
+        return False
+    try:
+        groups = _scan_artist_folder_groups(root, use_musicbrainz=False, only_keys={key})
+    except Exception as ex:
+        if log is not None:
+            log.append(f"  [auto-dedup] artist-folder check skipped: {ex}")
+        return False
+    if not groups:
+        return False
+    merge_log: List[str] = []
+    try:
+        summary = _apply_artist_folder_groups(root, [key], False, merge_log, use_musicbrainz=False)
+    except Exception as ex:
+        if log is not None:
+            log.append(f"  [auto-dedup] artist-folder merge failed: {ex}")
+        return False
+    if log is not None and summary.get("folders"):
+        log.append(f"  [auto-dedup] Merged {summary['folders']} duplicate artist folder(s) for '{name}' "
+                    f"found on disk (case/punctuation variant of an existing folder).")
+    return bool(summary.get("folders"))
 
 
 @app.post("/api/clean/artist-folders/scan")
