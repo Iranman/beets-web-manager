@@ -71,6 +71,16 @@ class MetadataSubmissionsStaticTests(unittest.TestCase):
         self.assertIn("target.preflight.checks", SUBMISSIONS_SOURCE)
         self.assertIn("Select a resolvable review item to see preflight checks.", SUBMISSIONS_SOURCE)
 
+    def test_reference_url_uses_ytdlp_for_soundcloud_and_bandcamp_too(self):
+        # yt-dlp has dedicated, reliable extractors for SoundCloud and
+        # Bandcamp (not just YouTube). Generic/unrecognized URLs go straight
+        # to the OpenGraph scrape instead: yt-dlp's catch-all "generic"
+        # extractor can silently "succeed" with an empty result on a plain
+        # webpage rather than raising, which would throw away real title
+        # data an OpenGraph read would have found.
+        self.assertIn('elif source in ("soundcloud", "bandcamp"):', ROUTES_SOURCE)
+        self.assertIn("_fetch_open_graph_metadata(url)", ROUTES_SOURCE)
+
 
 if __name__ == "__main__":
     unittest.main()

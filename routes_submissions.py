@@ -778,7 +778,15 @@ def _yt_thumbnails(info: Dict[str, Any]) -> List[Dict[str, Any]]:
     return out[:8]
 
 
-def _extract_youtube_info(url: str) -> Dict[str, Any]:
+class _YtdlpUnsupportedUrlError(Exception):
+    """Raised when yt-dlp has no extractor for a given URL, so the caller can
+    fall back to a generic scrape instead of surfacing a hard error."""
+
+
+def _extract_ytdlp_info(url: str) -> Dict[str, Any]:
+    """Metadata-only extraction via yt-dlp. Works for YouTube and the many
+    other sites yt-dlp has native extractors for (SoundCloud, Bandcamp,
+    Vimeo, Mixcloud, etc.) - it auto-detects the right extractor from the URL."""
     if not _ytdlp_ready.wait(timeout=30):
         raise RuntimeError("yt-dlp is still installing; try again in about 30 seconds.")
     import yt_dlp
@@ -798,7 +806,14 @@ def _extract_youtube_info(url: str) -> Dict[str, Any]:
     def _run():
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                result["info"] = ydl.extract_info(url, download=False)
+                # process=False skips format-selection entirely (we only want
+                # metadata, never a downloadable stream), so a site requiring a
+                # JS/PO-token challenge for format resolution doesn't block
+                # metadata extraction with "Requested format is not available".
+                info = ydl.extract_info(url, download=False, process=False)
+                if isinstance(info, dict) and info.get("_type") not in ("playlist", "multi_video"):
+                    info = ydl.sanitize_info(info)
+                result["info"] = info
         except Exception as ex:  # noqa: BLE001 - surfaced to the caller as a plain message
             errors["error"] = str(ex)
 
@@ -808,14 +823,17 @@ def _extract_youtube_info(url: str) -> Dict[str, Any]:
     if worker.is_alive():
         raise TimeoutError("Metadata extraction timed out.")
     if errors.get("error"):
-        raise RuntimeError(errors["error"])
+        message = errors["error"]
+        if "unsupported url" in message.lower():
+            raise _YtdlpUnsupportedUrlError(message)
+        raise RuntimeError(message)
     info = result.get("info")
     if not isinstance(info, dict):
         raise RuntimeError("yt-dlp returned no data for that URL.")
     return info
 
 
-def _describe_youtube_entry(info: Dict[str, Any]) -> Dict[str, Any]:
+def _describe_ytdlp_entry(info: Dict[str, Any]) -> Dict[str, Any]:
     is_playlist = info.get("_type") == "playlist"
     entries = [e for e in (info.get("entries") or []) if isinstance(e, dict)] if is_playlist else []
     raw_title = _s(info.get("title"))
@@ -1003,11 +1021,7 @@ def submission_reference_url():
     source = _reference_url_source(host)
     entry: Dict[str, Any] = {"id": uuid.uuid4().hex, "url": url, "source": source, "added_at": time.time()}
     try:
-        if source == "youtube":
-            info = _extract_youtube_info(url)
-            entry.update(_describe_youtube_entry(info))
-            entry["status"] = "ok"
-        elif source == "musicbrainz":
+        if source == "musicbrainz":
             entity_type, mbid = _extract_release_input(url)
             entry.update({
                 "status": "ok",
@@ -1019,7 +1033,22 @@ def submission_reference_url():
             discogs_entity_type, discogs_id = _discogs_release_id_from_url(url)
             entry.update(_fetch_discogs_release(discogs_entity_type, discogs_id))
             entry["status"] = "ok"
+        elif source == "youtube":
+            # No fallback: yt-dlp is the only sane way to read a YouTube page
+            # (heavily JS-rendered, so OpenGraph tags are minimal/unreliable).
+            info = _extract_ytdlp_info(url)
+            entry.update(_describe_ytdlp_entry(info))
+            entry["status"] = "ok"
+        elif source in ("soundcloud", "bandcamp"):
+            # yt-dlp has dedicated, reliable extractors for these two.
+            entry.update(_describe_ytdlp_entry(_extract_ytdlp_info(url)))
+            entry["status"] = "ok"
         else:
+            # Any other site ("web"): go straight to an OpenGraph scrape, not
+            # yt-dlp. yt-dlp's "generic" extractor treats *any* URL as a
+            # possible video-embed page and can "succeed" with an empty
+            # result instead of raising - which silently threw away real
+            # title/description data a plain OpenGraph read would have found.
             entry.update(_fetch_open_graph_metadata(url))
             entry["status"] = "ok"
     except TimeoutError as ex:
