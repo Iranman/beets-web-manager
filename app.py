@@ -9,6 +9,7 @@ import urllib.error, urllib.parse, urllib.request
 from backend.security import (OutboundPolicyError, bounded_rate_key_store_sweep, direct_peer_is_trusted, install_secure_urllib, validate_outbound_url)
 install_secure_urllib()
 from collections import Counter, OrderedDict, defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -25204,9 +25205,15 @@ def dedup_scan():
                 current_result=f"Found {total} source audio file(s)",
             ))
 
-        # Build fast library indexes for duplicate identity checks.
+        # Build fast library indexes for duplicate identity checks. Also index
+        # by path so a source file that is itself already a known library item
+        # (the common case when this scan runs against the library itself,
+        # e.g. "Clean All", rather than a downloads folder) can reuse its
+        # already-loaded DB tags instead of re-stat'ing and re-parsing the
+        # file from disk below.
         size_index: Dict[int, list] = {}
         mb_trackid_index: Dict[str, list] = {}
+        path_to_item: Dict[str, Any] = {}
         _dedup_raise_if_cancelled(cancel, state)
         for item in lib.items([]):
             _dedup_raise_if_cancelled(cancel, state)
@@ -25217,30 +25224,32 @@ def dedup_scan():
             try:
                 sz = Path(lp).stat().st_size
                 size_index.setdefault(sz, []).append(item)
+                path_to_item[_path_key(lp)] = (item, sz)
             except Exception:
                 pass
 
-        duplicates = []
-        for i, src in enumerate(source_files):
-            _dedup_raise_if_cancelled(cancel, state)
-            state["scanned"] = i + 1
-            state["current_path"] = str(src)
-            state["current_task"] = "Checking source files against the library"
-            state["current_result"] = f"{len(duplicates)} duplicate file(s) found so far"
-            if update_state and (i == 0 or i % 10 == 0 or i == total - 1):
-                update_state(_dedup_structured_state(state))
-            if i % 10 == 0 or i == total - 1:
-                state["log"].append(f"  [{i+1}/{total}] {src.name}")
-
+        def _prepare_source(src: Path) -> Dict[str, Any]:
+            """I/O step for one source file: size + mb_trackid/artist/title.
+            Reuses already-known DB tags for files that are already library
+            items (no stat()/MediaFile() re-read needed); otherwise reads the
+            file directly. Safe to run concurrently across files — touches no
+            shared state."""
+            known = path_to_item.get(_path_key(src))
+            if known is not None:
+                known_item, known_size = known
+                return {
+                    "ok": True,
+                    "size": known_size,
+                    "mb_trackid": _s(getattr(known_item, "mb_trackid", "") or "").strip(),
+                    "artist": _s(getattr(known_item, "artist", "") or "").strip(),
+                    "title": _s(getattr(known_item, "title", "") or "").strip(),
+                }
             try:
-                source_size = src.stat().st_size
+                size = src.stat().st_size
             except FileNotFoundError:
-                state["log"].append(f"  skipped stale path: {src}")
-                continue
+                return {"ok": False, "error": "stale path"}
             except Exception as exc:
-                state["log"].append(f"  skipped unreadable path: {src} ({exc})")
-                continue
-
+                return {"ok": False, "error": str(exc)}
             mb_trackid = artist = title = ""
             try:
                 mf = MediaFile(str(src))
@@ -25249,165 +25258,196 @@ def dedup_scan():
                 title      = (getattr(mf, "title",      "") or "").strip()
             except Exception:
                 pass
-
-            # If tags are empty, try parsing the filename
             if not title:
                 fn_artist, fn_title = _parse_filename_tags(src.stem)
                 if not artist:
                     artist = fn_artist
                 title = fn_title
+            return {"ok": True, "size": size, "mb_trackid": mb_trackid, "artist": artist, "title": title}
 
-            lib_item   = None
-            match_type = ""
+        duplicates = []
+        _DEDUP_BATCH_SIZE = 64
+        _DEDUP_IO_WORKERS = 8
+        with ThreadPoolExecutor(max_workers=_DEDUP_IO_WORKERS) as pool:
+            for batch_start in range(0, total, _DEDUP_BATCH_SIZE):
+                _dedup_raise_if_cancelled(cancel, state)
+                batch = source_files[batch_start:batch_start + _DEDUP_BATCH_SIZE]
+                # Skip the thread pool entirely for files we already know from
+                # the DB (a plain dict lookup) - only files that need a real
+                # stat()/MediaFile() read benefit from concurrency.
+                prepared = list(pool.map(_prepare_source, batch))
 
-            source_key = _path_key(src)
+                for offset, (src, info) in enumerate(zip(batch, prepared)):
+                    i = batch_start + offset
+                    _dedup_raise_if_cancelled(cancel, state)
+                    state["scanned"] = i + 1
+                    state["current_path"] = str(src)
+                    state["current_task"] = "Checking source files against the library"
+                    state["current_result"] = f"{len(duplicates)} duplicate file(s) found so far"
+                    if update_state and (i == 0 or i % 10 == 0 or i == total - 1):
+                        update_state(_dedup_structured_state(state))
+                    if i % 10 == 0 or i == total - 1:
+                        state["log"].append(f"  [{i+1}/{total}] {src.name}")
 
-            # 1. Exact MusicBrainz Track ID match (most reliable)
-            if mb_trackid:
-                results = mb_trackid_index.get(mb_trackid) or []
-                if results:
-                    canonical = results[0]
-                    canonical_path = _item_library_path(canonical)
-                    if canonical_path and _path_key(canonical_path) != source_key:
-                        lib_item   = canonical
-                        match_type = "MB Track ID"
+                    if not info["ok"]:
+                        state["log"].append(f"  skipped {info['error']}: {src}")
+                        continue
 
-            # 2. Exact file size match (catches perfect copies with same bytes)
-            if not lib_item:
-                try:
-                    src_size = source_size
-                    if src_size > 0 and src_size in size_index:
-                        candidates = size_index[src_size]
-                        if candidates:
-                            canonical = candidates[0]
+                    source_size = info["size"]
+                    mb_trackid = info["mb_trackid"]
+                    artist = info["artist"]
+                    title = info["title"]
+
+                    lib_item   = None
+                    match_type = ""
+
+                    source_key = _path_key(src)
+
+                    # 1. Exact MusicBrainz Track ID match (most reliable)
+                    if mb_trackid:
+                        results = mb_trackid_index.get(mb_trackid) or []
+                        for canonical in results:
                             canonical_path = _item_library_path(canonical)
                             if canonical_path and _path_key(canonical_path) != source_key:
                                 lib_item   = canonical
-                                match_type = "identical file size"
-                except Exception:
-                    pass
-
-            # 3. Fuzzy artist + title match (threshold 0.88)
-            if not lib_item and title:
-                res = _match_track(artist, title)
-                if res:
-                    candidate, score = res
-                    if score >= 0.88:
-                        lib_item   = candidate
-                        match_type = f"fuzzy match {score:.0%}"
-
-            # 4. Album-folder + title match — catches beets-renamed files where
-            #    the source folder is "WILLOW (2019)" or "1999 - Californication"
-            if not lib_item and title:
-                folder_raw   = src.parent.name          # e.g. "WILLOW (2019)" or "1999 - Californication"
-                folder_album = re.sub(r'\s*[\(\[]\d{4}[\)\]]\s*$', '', folder_raw).strip()  # "WILLOW (2019)" → "WILLOW"
-                folder_album = re.sub(r'^\d{4}\s*[-–—]\s*', '', folder_album).strip()        # "1999 - Californication" → "Californication"
-                folder_album = _restore_time_colon_title(folder_album)
-                if folder_album:
-                    try:
-                        candidates = list(lib.items([f"album:{folder_album}"]))
-                        for cand in candidates:
-                            cand_title = (cand.title or '').lower()
-                            score = SequenceMatcher(None, cand_title, title.lower()).ratio()
-                            if score >= _MB_TRACK_PREFLIGHT_MATCH_THRESHOLD:
-                                lib_item   = cand
-                                match_type = f"album+title ({score:.0%})"
+                                match_type = "MB Track ID"
                                 break
-                    except Exception:
-                        pass
 
-            # 5. AcoustID fingerprint fallback — when tags/size/text heuristics
-            #    found nothing, fingerprint the source file and look for a
-            #    library item that resolves to the same MusicBrainz recording.
-            fingerprint_verified = False
-            fingerprint_mbid = ""
-            if not lib_item:
-                for fid in _acoustid_fingerprint_ids(str(src)):
-                    results = mb_trackid_index.get(fid) or []
-                    if results:
-                        canonical = results[0]
-                        canonical_path = _item_library_path(canonical)
-                        if canonical_path and _path_key(canonical_path) == source_key:
+                    # 2. Exact file size match (catches perfect copies with same bytes)
+                    if not lib_item:
+                        try:
+                            src_size = source_size
+                            if src_size > 0 and src_size in size_index:
+                                for canonical in size_index[src_size]:
+                                    canonical_path = _item_library_path(canonical)
+                                    if canonical_path and _path_key(canonical_path) != source_key:
+                                        lib_item   = canonical
+                                        match_type = "identical file size"
+                                        break
+                        except Exception:
+                            pass
+
+                    # 3. Fuzzy artist + title match (threshold 0.88)
+                    if not lib_item and title:
+                        res = _match_track(artist, title)
+                        if res:
+                            candidate, score = res
+                            if score >= 0.88:
+                                lib_item   = candidate
+                                match_type = f"fuzzy match {score:.0%}"
+
+                    # 4. Album-folder + title match — catches beets-renamed files where
+                    #    the source folder is "WILLOW (2019)" or "1999 - Californication"
+                    if not lib_item and title:
+                        folder_raw   = src.parent.name          # e.g. "WILLOW (2019)" or "1999 - Californication"
+                        folder_album = re.sub(r'\s*[\(\[]\d{4}[\)\]]\s*$', '', folder_raw).strip()  # "WILLOW (2019)" → "WILLOW"
+                        folder_album = re.sub(r'^\d{4}\s*[-–—]\s*', '', folder_album).strip()        # "1999 - Californication" → "Californication"
+                        folder_album = _restore_time_colon_title(folder_album)
+                        if folder_album:
+                            try:
+                                candidates = list(lib.items([f"album:{folder_album}"]))
+                                for cand in candidates:
+                                    cand_title = (cand.title or '').lower()
+                                    score = SequenceMatcher(None, cand_title, title.lower()).ratio()
+                                    if score >= _MB_TRACK_PREFLIGHT_MATCH_THRESHOLD:
+                                        lib_item   = cand
+                                        match_type = f"album+title ({score:.0%})"
+                                        break
+                            except Exception:
+                                pass
+
+                    # 5. AcoustID fingerprint fallback — when tags/size/text heuristics
+                    #    found nothing, fingerprint the source file and look for a
+                    #    library item that resolves to the same MusicBrainz recording.
+                    fingerprint_verified = False
+                    fingerprint_mbid = ""
+                    if not lib_item:
+                        for fid in _acoustid_fingerprint_ids(str(src)):
+                            results = mb_trackid_index.get(fid) or []
+                            if results:
+                                canonical = results[0]
+                                canonical_path = _item_library_path(canonical)
+                                if canonical_path and _path_key(canonical_path) == source_key:
+                                    continue
+                                lib_item   = canonical
+                                match_type = "AcoustID fingerprint"
+                                fingerprint_verified = True
+                                fingerprint_mbid = fid
+                                break
+
+                    if not lib_item:
+                        continue
+
+                    lib_path = _s(lib_item.path)
+                    # Normalise relative paths stored without the music root prefix
+                    if lib_path and not lib_path.startswith("/"):
+                        lib_path = "/data/media/music/" + lib_path
+                    if str(src) == lib_path:          # same file — skip
+                        continue
+                    if not Path(lib_path).exists():   # library file gone — skip
+                        continue
+
+                    # 6. Fingerprint-verify weaker text-based matches before trusting
+                    #    them as high-confidence duplicates. MB Track ID and AcoustID
+                    #    matches are already fingerprint-grade; identical file size is
+                    #    byte-grade. Fuzzy/album+title matches get an AcoustID
+                    #    cross-check when fingerprinting is available — a confirmed
+                    #    match upgrades confidence, a confirmed mismatch rejects the
+                    #    candidate outright instead of risking a wrong-file deletion.
+                    if match_type.startswith("fuzzy match") or match_type.startswith("album+title"):
+                        shared_id, src_fp_ids, lib_fp_ids = _acoustid_fingerprint_match(str(src), lib_path)
+                        if shared_id:
+                            fingerprint_verified = True
+                            fingerprint_mbid = shared_id
+                        elif src_fp_ids and lib_fp_ids:
+                            state["log"].append(
+                                f"  ✗ REJECTED [{match_type}]  {src.name}"
+                                f"  — AcoustID fingerprint disagrees with library candidate"
+                            )
                             continue
-                        lib_item   = canonical
-                        match_type = "AcoustID fingerprint"
-                        fingerprint_verified = True
-                        fingerprint_mbid = fid
-                        break
 
-            if not lib_item:
-                continue
+                    if match_type in ("MB Track ID", "identical file size", "AcoustID fingerprint"):
+                        confidence = "high"
+                    elif fingerprint_verified:
+                        confidence = "high"
+                    else:
+                        confidence = "medium"
 
-            lib_path = _s(lib_item.path)
-            # Normalise relative paths stored without the music root prefix
-            if lib_path and not lib_path.startswith("/"):
-                lib_path = "/data/media/music/" + lib_path
-            if str(src) == lib_path:          # same file — skip
-                continue
-            if not Path(lib_path).exists():   # library file gone — skip
-                continue
+                    reason_map = {
+                        "MB Track ID":         "Embedded MusicBrainz track ID matches the library copy exactly.",
+                        "identical file size": "File size is byte-identical to the library copy.",
+                        "AcoustID fingerprint": f"AcoustID audio fingerprint matches library recording {fingerprint_mbid}.",
+                    }
+                    reason = reason_map.get(match_type, f"Matched by {match_type}.")
+                    if fingerprint_verified and match_type not in reason_map:
+                        reason += f" Confirmed by AcoustID audio fingerprint (recording {fingerprint_mbid})."
 
-            # 6. Fingerprint-verify weaker text-based matches before trusting
-            #    them as high-confidence duplicates. MB Track ID and AcoustID
-            #    matches are already fingerprint-grade; identical file size is
-            #    byte-grade. Fuzzy/album+title matches get an AcoustID
-            #    cross-check when fingerprinting is available — a confirmed
-            #    match upgrades confidence, a confirmed mismatch rejects the
-            #    candidate outright instead of risking a wrong-file deletion.
-            if match_type.startswith("fuzzy match") or match_type.startswith("album+title"):
-                shared_id, src_fp_ids, lib_fp_ids = _acoustid_fingerprint_match(str(src), lib_path)
-                if shared_id:
-                    fingerprint_verified = True
-                    fingerprint_mbid = shared_id
-                elif src_fp_ids and lib_fp_ids:
+                    dup = {
+                        "source_path":          str(src),
+                        "source_filename":      src.name,
+                        "source_artist":        artist,
+                        "source_title":         title,
+                        "source_size":          source_size,
+                        "lib_path":             lib_path,
+                        "lib_title":            lib_item.title  or "",
+                        "lib_artist":           lib_item.artist or "",
+                        "lib_album":            lib_item.album  or "",
+                        "lib_id":               lib_item.id,
+                        "match_type":           match_type,
+                        "confidence":           confidence,
+                        "reason":               reason,
+                        "fingerprint_verified": fingerprint_verified,
+                    }
+                    duplicates.append(dup)
+                    state["found"] = len(duplicates)
+                    state["duplicate_type"] = match_type
+                    state["current_result"] = "Duplicate candidate found"
+                    if update_state:
+                        update_state(_dedup_structured_state(state))
                     state["log"].append(
-                        f"  ✗ REJECTED [{match_type}]  {src.name}"
-                        f"  — AcoustID fingerprint disagrees with library candidate"
+                        f"  ✓ DUPLICATE [{match_type}]{' [fingerprint-verified]' if fingerprint_verified else ''}  {src.name}"
+                        f"  →  {lib_item.artist or ''} – {lib_item.title or lib_path}"
                     )
-                    continue
-
-            if match_type in ("MB Track ID", "identical file size", "AcoustID fingerprint"):
-                confidence = "high"
-            elif fingerprint_verified:
-                confidence = "high"
-            else:
-                confidence = "medium"
-
-            reason_map = {
-                "MB Track ID":         "Embedded MusicBrainz track ID matches the library copy exactly.",
-                "identical file size": "File size is byte-identical to the library copy.",
-                "AcoustID fingerprint": f"AcoustID audio fingerprint matches library recording {fingerprint_mbid}.",
-            }
-            reason = reason_map.get(match_type, f"Matched by {match_type}.")
-            if fingerprint_verified and match_type not in reason_map:
-                reason += f" Confirmed by AcoustID audio fingerprint (recording {fingerprint_mbid})."
-
-            dup = {
-                "source_path":          str(src),
-                "source_filename":      src.name,
-                "source_artist":        artist,
-                "source_title":         title,
-                "source_size":          source_size,
-                "lib_path":             lib_path,
-                "lib_title":            lib_item.title  or "",
-                "lib_artist":           lib_item.artist or "",
-                "lib_album":            lib_item.album  or "",
-                "lib_id":               lib_item.id,
-                "match_type":           match_type,
-                "confidence":           confidence,
-                "reason":               reason,
-                "fingerprint_verified": fingerprint_verified,
-            }
-            duplicates.append(dup)
-            state["found"] = len(duplicates)
-            state["duplicate_type"] = match_type
-            state["current_result"] = "Duplicate candidate found"
-            if update_state:
-                update_state(_dedup_structured_state(state))
-            state["log"].append(
-                f"  ✓ DUPLICATE [{match_type}]{' [fingerprint-verified]' if fingerprint_verified else ''}  {src.name}"
-                f"  →  {lib_item.artist or ''} – {lib_item.title or lib_path}"
-            )
 
         state["duplicates"] = duplicates
 
