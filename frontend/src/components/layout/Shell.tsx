@@ -14,7 +14,6 @@ const TABS: Tab[] = [
   { to: '/import',    label: 'Import' },
   { to: '/playlists', label: 'Playlists' },
   { to: '/jobs',      label: 'Jobs' },
-  { to: '/submissions', label: 'Submit' },
 ];
 
 function BeetsLogo() {
