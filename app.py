@@ -22622,6 +22622,42 @@ _ai_batch_state_lock = threading.RLock()
 _ai_batch_control_lock = threading.Lock()
 _ai_batch_controls: Dict[str, Dict[str, Any]] = {}
 
+# Guards the *decision* to start a worker for a given batch_job_id, closing
+# the check-then-start race in _start_ai_batch_job: two threads reconciling
+# state concurrently can both observe no worker running (the persisted
+# job_id may not exist yet, or JobStore's own state hasn't been read by the
+# other thread) and both proceed to call jobs.start_python(). This registry
+# is deliberately independent of state-file content -- it is the sole
+# source of truth for "is a start already in flight for this batch," so it
+# stays correct even when every thread's own state snapshot is stale.
+# Process-local only: correct because this app's supported runtime is one
+# Waitress process with a thread pool (see `if __name__ == "__main__":`,
+# `waitress.serve(..., threads=_env_int("WEBCONTROL_THREADS", ...))`), not
+# multiple worker processes or containers sharing one state directory. If
+# that deployment model ever changes, this lock alone would no longer be
+# sufficient and would need a durable/file-based reservation instead.
+_ai_batch_start_lock = threading.Lock()
+_ai_batch_active_starts: Dict[str, str] = {}
+
+
+def _ai_batch_try_reserve_start(batch_job_id: str) -> bool:
+    """Atomically claim the right to start a worker for batch_job_id.
+
+    Returns True if the caller may proceed to call jobs.start_python();
+    False if another thread already holds the reservation (starting, or
+    already running and not yet released). Must be paired with exactly one
+    _ai_batch_release_start(batch_job_id) call, including on failure."""
+    with _ai_batch_start_lock:
+        if batch_job_id in _ai_batch_active_starts:
+            return False
+        _ai_batch_active_starts[batch_job_id] = ""
+        return True
+
+
+def _ai_batch_release_start(batch_job_id: str) -> None:
+    with _ai_batch_start_lock:
+        _ai_batch_active_starts.pop(batch_job_id, None)
+
 _AI_BATCH_TERMINAL_STATUSES = {"completed", "completed_with_warnings", "failed", "canceled"}
 _AI_BATCH_QUEUED_FOLDER_STATUSES = {"queued", "ai_queued"}
 _AI_BATCH_RUNNING_FOLDER_STATUSES = {"claimed", "scanning", "ai_running", "importing", "retrying"}
@@ -22636,7 +22672,7 @@ _AI_BATCH_IMPORTED_FOLDER_STATUSES = {"completed", "imported"}
 _AI_BATCH_REVIEW_FOLDER_STATUSES = {"review_created", "review_required"}
 _AI_BATCH_POLICY_WARNING_STATUSES = {"policy_rejected", "completed_with_fallback", "handled_warning"}
 _AI_BATCH_REPLACEMENT_FOLDER_STATUSES = {"replacement_queued", "replacement_unavailable"}
-_AI_BATCH_FAILED_FOLDER_STATUSES = {"failed", "import_failed", "ai_failed", "timed_out", "retry_limit_exceeded"}
+_AI_BATCH_FAILED_FOLDER_STATUSES = {"failed", "import_failed", "ai_failed", "timed_out"}
 _AI_BATCH_SKIPPED_FOLDER_STATUSES = {"skipped", "canceled"}
 _AI_BATCH_TERMINAL_FOLDER_STATUSES = (
     _AI_BATCH_IMPORTED_FOLDER_STATUSES
@@ -22679,6 +22715,24 @@ def _ai_batch_write_state(state: Dict[str, Any]) -> None:
     tmp = path.with_suffix(f".{uuid.uuid4().hex}.tmp")
     tmp.write_text(json.dumps(_ai_batch_json_safe(state), indent=2, sort_keys=True), encoding="utf-8")
     os.replace(str(tmp), str(path))
+
+
+def _ai_batch_persist_job_association(batch_job_id: str, job_id: str) -> None:
+    """Durably associate job_id with batch_job_id before the worker thread
+    is unblocked, so an immediate status poll can find this batch by job_id.
+
+    Deliberately bypasses _ai_batch_commit: that function unconditionally
+    calls _ai_batch_recalculate_batch_state, whose finalize logic requires
+    fully-reconciled folder_states to make a correct decision. For a
+    recover/retry start, folder_states is still the pre-reconciliation
+    snapshot at this point -- only the worker's own reconciliation step
+    (inside _run_ai_batch_import) makes it safe to recalculate. A plain,
+    targeted write avoids re-triggering that premature-finalize bug."""
+    with _ai_batch_state_lock:
+        state = _ai_batch_load_state(batch_job_id) or _ai_batch_initial_state(batch_job_id, "")
+        state["job_id"] = job_id
+        state["batch_job_id"] = batch_job_id
+        _ai_batch_write_state(state)
 
 
 def _ai_batch_load_state(identifier: str) -> Optional[Dict[str, Any]]:
@@ -22813,7 +22867,17 @@ def _ai_batch_recompute_counts(state: Dict[str, Any]) -> None:
     state["folders_failed"] = sum(status_counts.get(status, 0) for status in _AI_BATCH_FAILED_FOLDER_STATUSES)
     state["folders_skipped"] = sum(status_counts.get(status, 0) for status in _AI_BATCH_SKIPPED_FOLDER_STATUSES)
     state["folders_unfinished"] = sum(status_counts.get(status, 0) for status in _AI_BATCH_UNFINISHED_FOLDER_STATUSES)
-    state["folders_retryable"] = sum(status_counts.get(status, 0) for status in _AI_BATCH_RETRYABLE_FOLDER_STATUSES)
+    # Counted per-folder rather than via status_counts: a folder that has
+    # exhausted _AI_BATCH_MAX_FOLDER_RETRIES keeps its original status
+    # (e.g. "failed") for operator-UI compatibility, so status alone can't
+    # distinguish it from one that hasn't been retried yet. retry_exhausted
+    # is the field that must exclude it here, or a folder stuck at its cap
+    # would keep inflating folders_retryable forever.
+    state["folders_retryable"] = sum(
+        1 for folder in folders
+        if _ai_batch_normalize_folder_outcome(folder) in _AI_BATCH_RETRYABLE_FOLDER_STATUSES
+        and not folder.get("retry_exhausted")
+    )
     state["folders_attention"] = (
         state["folders_review"]
         + state["folders_warning"]
@@ -23450,21 +23514,11 @@ def _run_ai_batch_import(batch_job_id: str, scan_path: str, log: list, cancel_ev
     if not recover or not folder_states:
         # Commit "running" before the (potentially slow) disk walk below so a
         # poller sees progress immediately. Deliberately NOT done for the
-        # recover/retry branch: _ai_batch_commit unconditionally calls
-        # _ai_batch_recalculate_batch_state, which finalizes the batch to a
-        # terminal status the instant it sees zero *unfinished* folders --
-        # true of the pre-reconciliation snapshot here, since "failed" and
-        # "timed_out" count as terminal, not unfinished. Committing at this
-        # point mutates state["status"] in place on the same dict the
-        # reconciliation loop below runs against, so the just-set "running"
-        # got silently overwritten back to a terminal status before
-        # reconciliation ever ran -- and the terminal check right after this
-        # block then bailed out immediately, leaving the reconciled
-        # "ai_queued" folders persisted but never actually reprocessed
-        # (confirmed live: retry logged "151 requeued" immediately followed
-        # by "batch is terminal", with none of them reprocessed). The single
-        # commit after the if/else below now always sees fully-reconciled
-        # folder_states first.
+        # recover/retry branch: _ai_batch_commit unconditionally recalculates
+        # batch status from folder_states, and pre-reconciliation folder
+        # data would make it finalize a terminal status before reconciliation
+        # runs. The single commit after the if/else below always sees
+        # fully-reconciled folder_states first.
         _ai_batch_commit(state, update_state)
         folders = _ai_batch_find_audio_dirs(scan_path)
         log.append(f"folders discovered count: {len(folders)}")
@@ -23484,11 +23538,22 @@ def _run_ai_batch_import(batch_job_id: str, scan_path: str, log: list, cancel_ev
             if retry_failed and status in _AI_BATCH_RETRYABLE_FOLDER_STATUSES:
                 prior_retries = int(folder.get("retry_count") or 0)
                 if prior_retries >= _AI_BATCH_MAX_FOLDER_RETRIES:
+                    # Status/failure_reason are deliberately left as-is
+                    # ("failed"/"timed_out"/etc) rather than switched to a
+                    # new status value: the existing operator UI already
+                    # renders that status as an attention-needing failure,
+                    # and switching to an unrecognized status risks the
+                    # folder silently disappearing from the attention list.
+                    # retry_exhausted/manual_review_required are the signal
+                    # that further automatic retry_failed=true calls must
+                    # not touch this folder (see _ai_batch_recompute_counts'
+                    # folders_retryable exclusion below).
                     _ai_batch_mark_folder(
                         state, fid,
-                        status="retry_limit_exceeded",
+                        retry_exhausted=True,
+                        max_retries=_AI_BATCH_MAX_FOLDER_RETRIES,
+                        manual_review_required=True,
                         current_step=f"retry limit ({_AI_BATCH_MAX_FOLDER_RETRIES}) reached; needs manual review",
-                        failure_reason=folder.get("failure_reason") or folder.get("ai_suggest_error") or "retry limit reached",
                     )
                     terminal += 1
                     continue
@@ -23553,59 +23618,89 @@ def _run_ai_batch_import(batch_job_id: str, scan_path: str, log: list, cancel_ev
 
 def _start_ai_batch_job(scan_path: str, recover_batch_job_id: str = "", *, retry_failed: bool = False):
     batch_job_id = recover_batch_job_id or uuid.uuid4().hex
-    with _ai_batch_control_lock:
-        _ai_batch_controls[batch_job_id] = {"pause": False, "skip_current": False, "skip_folder_ids": set()}
-    if not recover_batch_job_id:
-        state = _ai_batch_initial_state(batch_job_id, scan_path)
-        _ai_batch_commit(state, None)
 
-    # jobs.start_python() spawns its worker thread before returning, and the
-    # JobStore job_id doesn't exist until that call returns — so the worker
-    # waits here rather than racing the main thread for it. Without this, the
-    # worker's own state commits (which happen repeatedly during scanning/AI
-    # matching) can win the race and permanently stamp job_id="" into the
-    # persisted state, making the batch unfindable by the ID the frontend polls.
-    job_id_holder: Dict[str, str] = {}
-    job_id_ready = threading.Event()
+    # Atomic check-then-start protection: _ai_batch_try_reserve_start is the
+    # sole arbiter of "is a worker already starting/running for this batch,"
+    # independent of any (possibly stale) state-file read. Two threads
+    # calling this function concurrently for the same batch_job_id -- e.g.
+    # a double-clicked retry, or a retried frontend request -- must result
+    # in exactly one jobs.start_python() call; the loser reconnects instead.
+    if not _ai_batch_try_reserve_start(batch_job_id):
+        # The winner may not have finished persisting its job_id association
+        # yet (a brief window between winning the reservation and
+        # _ai_batch_persist_job_association). Poll briefly rather than
+        # immediately falling back to batch_job_id, so a losing caller's
+        # response still carries the real, stable job_id in the common case
+        # instead of a technically-valid but different-looking identifier.
+        existing = None
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            existing = _ai_batch_find_state(batch_job_id)
+            if existing and existing.get("job_id"):
+                break
+            time.sleep(0.02)
+        if existing:
+            existing = _ai_batch_reconcile_state(existing)
+        return jsonify({
+            "ok": True,
+            "job_id": (existing or {}).get("job_id") or batch_job_id,
+            "batch_job_id": batch_job_id,
+            "state": _ai_batch_public_state(existing) if existing else {},
+            "reconnected": True,
+        })
+    try:
+        with _ai_batch_control_lock:
+            _ai_batch_controls[batch_job_id] = {"pause": False, "skip_current": False, "skip_folder_ids": set()}
+        if not recover_batch_job_id:
+            state = _ai_batch_initial_state(batch_job_id, scan_path)
+            _ai_batch_commit(state, None)
 
-    def _do(log, cancel_event=None, update_state=None):
-        job_id_ready.wait(timeout=10)
-        return _run_ai_batch_import(
-            batch_job_id, scan_path, log, cancel_event, update_state,
-            recover=bool(recover_batch_job_id), retry_failed=retry_failed, job_id=job_id_holder.get("job_id", ""),
+        # jobs.start_python() spawns its worker thread before returning, and
+        # the JobStore job_id doesn't exist until that call returns — so the
+        # worker waits here rather than racing the main thread for it. The
+        # worker must not be unblocked (and allowed to write batch state)
+        # until the job_id association below is durably persisted, or an
+        # immediate status poll (by job_id) could miss the batch entirely.
+        job_id_holder: Dict[str, str] = {}
+        job_id_ready = threading.Event()
+
+        def _do(log, cancel_event=None, update_state=None):
+            job_id_ready.wait(timeout=10)
+            return _run_ai_batch_import(
+                batch_job_id, scan_path, log, cancel_event, update_state,
+                recover=bool(recover_batch_job_id), retry_failed=retry_failed, job_id=job_id_holder.get("job_id", ""),
+            )
+
+        job = jobs.start_python(
+            _do,
+            label=f"AI Batch Import: {Path(scan_path).name}" + (" retry" if retry_failed else ""),
+            metadata={"type": "ai-batch-import", "batch_job_id": batch_job_id, "source_path": scan_path},
         )
-
-    job = jobs.start_python(
-        _do,
-        label=f"AI Batch Import: {Path(scan_path).name}" + (" retry" if retry_failed else ""),
-        metadata={"type": "ai-batch-import", "batch_job_id": batch_job_id, "source_path": scan_path},
-    )
-    job_id_holder["job_id"] = job.job_id
-    job_id_ready.set()
-    if recover_batch_job_id:
-        # The worker thread (unblocked above) runs its own load -> reconcile
-        # -> commit cycle inside _run_ai_batch_import, including requeuing
-        # retryable folders back to "ai_queued". _ai_batch_commit
-        # unconditionally calls _ai_batch_recalculate_batch_state, which
-        # finalizes the batch to a terminal status whenever it sees zero
-        # unfinished folders — true of the pre-reconciliation snapshot, since
-        # "failed"/"timed_out" count as terminal, not unfinished. Loading and
-        # committing a second, independent copy of the state here raced that
-        # worker: this thread's stale pre-retry load could win the write race
-        # and silently flip a just-requeued retry batch straight back to
-        # "completed_with_warnings" with the old, un-requeued folder data
-        # (confirmed live: retry logged "151 requeued" but the persisted
-        # state kept all 151 at retry_count 0, status unchanged). Just read
-        # state for the response; let the worker own every write during
-        # recovery/retry.
-        state = _ai_batch_load_state(batch_job_id) or _ai_batch_initial_state(batch_job_id, scan_path)
-        state["job_id"] = job.job_id
-    else:
-        state = _ai_batch_load_state(batch_job_id) or _ai_batch_initial_state(batch_job_id, scan_path)
-        state["job_id"] = job.job_id
-        state["status"] = "running"
-        _ai_batch_commit(state, job.update_state)
-    return jsonify({"ok": True, "job_id": job.job_id, "batch_job_id": batch_job_id, "state": _ai_batch_public_state(state)})
+        job_id_holder["job_id"] = job.job_id
+        if recover_batch_job_id:
+            # Targeted job_id association only -- not a full _ai_batch_commit.
+            # The worker thread (still blocked below) owns the reconcile ->
+            # commit cycle inside _run_ai_batch_import; a second independent
+            # commit here would race it with a stale pre-reconciliation
+            # snapshot (see _ai_batch_commit's docstring above).
+            _ai_batch_persist_job_association(batch_job_id, job.job_id)
+            state = _ai_batch_load_state(batch_job_id) or _ai_batch_initial_state(batch_job_id, scan_path)
+        else:
+            state = _ai_batch_load_state(batch_job_id) or _ai_batch_initial_state(batch_job_id, scan_path)
+            state["job_id"] = job.job_id
+            state["status"] = "running"
+            _ai_batch_commit(state, job.update_state)
+        job_id_ready.set()
+        return jsonify({"ok": True, "job_id": job.job_id, "batch_job_id": batch_job_id, "state": _ai_batch_public_state(state)})
+    finally:
+        # Released as soon as the start sequence finishes (success or
+        # failure), not held for the worker's whole run: once job_id is
+        # durably associated (or start failed and nothing was persisted),
+        # any subsequent caller's own worker_alive check via JobStore
+        # becomes the reliable signal. Releasing here also ensures a failed
+        # startup (jobs.start_python() raising, or the association write
+        # raising) does not leave the batch permanently unstartable.
+        _ai_batch_release_start(batch_job_id)
 
 @app.post("/api/ai-batch-skip")
 def ai_batch_skip():

@@ -1,118 +1,18 @@
-"""Regression test for a real AI Batch Import retry bug found live on the
-TrueNAS deployment, 2026-07-20.
-
-Reported symptom: a batch retry logged a normal-looking reconciliation --
-"Reconciled state: 1875 terminal, 151 requeued, 0 cached decision(s) ready"
--- immediately followed by "No unfinished folder work remains; batch is
-terminal." with none of the 151 requeued folders actually reprocessed.
-Live inspection of the persisted batch state file
-(`ai_batch_jobs/<batch_job_id>.json`) showed all 151 folders still sitting
-at their pre-retry `status` ("failed"/"timed_out") with `retry_count: 0`
--- proof the reconciliation's requeue-to-"ai_queued" update (which does
-increment `retry_count`) never survived to disk, even though the log
-showed it happening.
-
-Root cause: `_start_ai_batch_job` (app.py) starts the background worker via
-`jobs.start_python(_do, ...)`, which begins running `_run_ai_batch_import`
-concurrently the moment `job_id_ready.set()` fires. The very next lines in
-`_start_ai_batch_job` independently did their own
-load -> mutate("status"="running") -> `_ai_batch_commit(...)` on a second,
-unrelated in-memory copy of the same durable state -- with no
-synchronization against the worker thread doing the exact same
-load -> reconcile -> commit cycle on its own copy. `_ai_batch_commit`
-unconditionally calls `_ai_batch_recalculate_batch_state`, which finalizes
-the batch to a terminal status the instant it sees zero *unfinished*
-folders -- true of the pre-reconciliation snapshot, since "failed" and
-"timed_out" are terminal (not unfinished) folder statuses. When this
-second, stale commit landed after the worker's own reconciliation write,
-it silently clobbered the just-requeued "ai_queued" folder data back to
-the old failed/timed_out state with a terminal batch status -- exactly
-what was observed live.
-
-Fixed by only doing the eager main-thread state commit for a genuinely new
-batch (`recover_batch_job_id` falsy, no worker race possible since
-`folder_states` is still empty at that point). For a recover/retry
-reconnect, the main thread now just reads the current on-disk state for
-the HTTP response and leaves every write to the worker thread.
-
-That fix alone turned out not to be enough -- live-verifying it (triggering
-a real retry against the still-stuck batch) surfaced a second, deeper bug
-with the same root shape, entirely inside `_run_ai_batch_import` itself,
-no threading required. That function used to call `_ai_batch_commit(state,
-update_state)` right after setting `state["status"] = "running"` but
-*before* the recover/retry reconciliation block that requeues retryable
-folders. `_ai_batch_commit` unconditionally calls
-`_ai_batch_recalculate_batch_state`, which mutates `state["status"]` in
-place -- and on that first commit, `folder_states` still held the old,
-unreconciled data (151 folders at "failed"/"timed_out", both terminal, not
-unfinished), so recalculate immediately re-finalized `state["status"]`
-back to a terminal value on the *same shared dict* the reconciliation loop
-was about to run against. Reconciliation then correctly set 151 folders to
-"ai_queued" and persisted that via the second commit, but never restored
-`state["status"]` to "running" -- so the terminal check right after
-(`if state.get("status") in _AI_BATCH_TERMINAL_STATUSES`) still saw the
-stale terminal value and bailed out immediately. Net effect, confirmed
-live: the persisted state ended up with `folder_status_counts` correctly
-showing `ai_queued: 151`, but `status` stuck at `completed_with_warnings`
-and `folders_unfinished: 151` -- an internally contradictory state that
-explains the reported symptom exactly (reconciliation log line printed,
-folders genuinely requeued, but the batch still declared itself terminal
-and never called `_ai_batch_run_suggestions` to actually reprocess them).
-
-Fixed by moving that first commit inside the fresh-batch branch only (it's
-still needed there, to make "running" visible before a potentially slow
-`os.walk` disk scan) -- the recover/retry branch now performs its
-reconciliation first and commits exactly once, after `folder_states`
-reflects the reconciled reality, so `_ai_batch_recalculate_batch_state`
-sees the correct non-zero `unfinished` count and leaves `state["status"]`
-alone.
-
-A third issue surfaced live-verifying the second fix: the real stuck batch
-had already been corrupted by the second bug on an earlier attempt, so its
-persisted `status` was stuck at `completed_with_warnings` even though
-`folder_status_counts` genuinely showed `ai_queued: 151` (unfinished).
-Nothing previously ever walked `state["status"]` back off a terminal value
-once set, so both `/api/ai-batch-import/recover` (plain and
-`retry_failed=true`) short-circuited to a no-op "reconnected" response
-trusting the stale terminal status, permanently blocking recovery.
-`_ai_batch_recalculate_batch_state` now self-heals this: whenever it finds
-`unfinished > 0` but the previously-persisted status is terminal, it
-reopens the batch to "running" (and clears `completed_at`) instead of
-leaving the contradiction in place, letting the existing stale-heartbeat
-detection in `_ai_batch_reconcile_state` take it from there.
-
-Two further gaps found while hardening the retry path against concurrent
-use, neither reproduced live but both directly reachable from the fixed
-code above:
-
-1. `ai_batch_import_recover()` (`/api/ai-batch-import/recover`) had no
-   check for an already-running worker before calling
-   `_start_ai_batch_job()`. Two near-simultaneous recover/retry requests
-   for the same `batch_job_id` (a double-click, a retried frontend
-   request) could both pass the terminal-status/retryable-count checks
-   -- neither request's read reflects the other's not-yet-started write
-   -- and both spawn a `jobs.start_python()` worker running
-   `_run_ai_batch_import` concurrently against the same durable state
-   file. Fixed by checking `state["worker_alive"]` (already computed by
-   `_ai_batch_reconcile_state`, called immediately above) and returning a
-   `reconnected` response instead of starting a second worker.
-2. Per-folder retries were unbounded: `retry_count` was tracked but never
-   checked against a limit, so a folder that will never succeed (e.g. a
-   permanently corrupt file) could be requeued by `retry_failed=true`
-   forever. Fixed with `_AI_BATCH_MAX_FOLDER_RETRIES` (3): the
-   reconciliation loop's retry branch now marks a folder
-   `"retry_limit_exceeded"` instead of requeuing it once its retry count
-   reaches the cap -- a status included in `_AI_BATCH_FAILED_FOLDER_STATUSES`
-   (so it still counts as terminal/failed) but deliberately excluded from
-   `_AI_BATCH_RETRYABLE_FOLDER_STATUSES` (so further `retry_failed=true`
-   calls leave it alone instead of retrying indefinitely).
+"""Tests for the AI Batch Import retry-race fix (see PR description for the
+full incident writeup and design rationale). Source-text tests below give
+limited structural protection for a few source-ordering invariants that
+are awkward to assert behaviorally; the classes further down import the
+real app.py into an isolated temp environment and execute the actual
+functions -- that behavioral coverage is the primary proof this fix works,
+not the source-text assertions.
 """
 import unittest
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 APP_SOURCE = (ROOT / "app.py").read_text(encoding="utf-8")
+INTAKE_PANEL_SOURCE = (ROOT / "frontend" / "src" / "features" / "intake" / "IntakePanel.tsx").read_text(encoding="utf-8")
+API_TYPES_SOURCE = (ROOT / "frontend" / "src" / "api" / "types.ts").read_text(encoding="utf-8")
 
 
 def _function_source(src: str, start_marker: str, end_marker: str) -> str:
@@ -129,30 +29,42 @@ class StartAiBatchJobRaceTests(unittest.TestCase):
             "\n\n@app.post(\"/api/ai-batch-skip\")",
         )
 
-    def test_recover_path_does_not_independently_commit_state(self):
+    def test_reservation_guards_the_whole_start_sequence(self):
+        self.assertIn("if not _ai_batch_try_reserve_start(batch_job_id):", self.fn)
+        self.assertIn('"reconnected": True,', self.fn)
+        reserve_pos = self.fn.index("if not _ai_batch_try_reserve_start(batch_job_id):")
+        try_pos = self.fn.index("try:")
+        finally_pos = self.fn.index("finally:")
+        release_pos = self.fn.index("_ai_batch_release_start(batch_job_id)")
+        self.assertLess(reserve_pos, try_pos)
+        self.assertLess(try_pos, finally_pos)
+        self.assertLess(finally_pos, release_pos)
+
+    def test_recover_path_uses_targeted_association_not_full_commit(self):
         # The bug: an unconditional _ai_batch_commit() call after the worker
         # thread was already unblocked, racing that thread's own reconcile
-        # + commit cycle. The fix scopes the eager commit to the
-        # brand-new-batch branch only.
+        # + commit cycle. The fix uses a minimal, targeted association write
+        # for the recover/retry branch instead of a full commit.
         recover_branch = self.fn[self.fn.index("if recover_batch_job_id:"):self.fn.index("else:")]
         self.assertNotIn("_ai_batch_commit(", recover_branch)
+        self.assertIn("_ai_batch_persist_job_association(batch_job_id, job.job_id)", recover_branch)
         self.assertIn("state = _ai_batch_load_state(batch_job_id)", recover_branch)
-        self.assertIn('state["job_id"] = job.job_id', recover_branch)
 
     def test_fresh_batch_path_still_commits_running_status(self):
         else_branch = self.fn[self.fn.index("else:"):]
         self.assertIn('state["status"] = "running"', else_branch)
         self.assertIn("_ai_batch_commit(state, job.update_state)", else_branch)
 
-    def test_worker_thread_is_unblocked_before_the_branch_runs(self):
-        # job_id_ready.set() must precede the recover/fresh branch so the
-        # worker's own load/reconcile/commit cycle is already free to run
-        # concurrently -- the exact condition the race depends on, and the
-        # reason this code cannot safely do a second unconditional commit
-        # for the recover/retry case.
-        set_pos = self.fn.index("job_id_ready.set()")
+    def test_worker_thread_is_unblocked_after_job_association_is_persisted(self):
+        # Reversed from the first version of this fix: the worker must not
+        # be unblocked (and allowed to write batch state) until the job_id
+        # association is durably persisted, or an immediate status poll by
+        # job_id could miss the batch. job_id_ready.set() must therefore
+        # come AFTER the recover/fresh branch that persists the association,
+        # not before it.
         branch_pos = self.fn.index("if recover_batch_job_id:")
-        self.assertLess(set_pos, branch_pos)
+        set_pos = self.fn.index("job_id_ready.set()")
+        self.assertLess(branch_pos, set_pos)
 
 
 class RunAiBatchImportReconciliationCommitOrderTests(unittest.TestCase):
@@ -279,23 +191,457 @@ class BoundedFolderRetryTests(unittest.TestCase):
         requeue_pos = retry_branch.index('"status": "ai_queued",')
         self.assertLess(limit_pos, requeue_pos)
 
-    def test_limit_exceeded_folder_marked_distinctly_not_silently_dropped(self):
+    def test_exhausted_folder_marked_distinctly_not_silently_dropped(self):
+        # Preferred minimal approach: keep the existing frontend-recognized
+        # status (e.g. "failed") rather than introduce a new status value
+        # the UI doesn't handle -- distinguish exhaustion via metadata only.
         retry_branch = self.fn[
             self.fn.index("if retry_failed and status in _AI_BATCH_RETRYABLE_FOLDER_STATUSES:"):
             self.fn.index('if status in _AI_BATCH_UNFINISHED_FOLDER_STATUSES and _pending_review_path_key')
         ]
-        self.assertIn('status="retry_limit_exceeded"', retry_branch)
+        self.assertIn("retry_exhausted=True", retry_branch)
+        self.assertIn("max_retries=_AI_BATCH_MAX_FOLDER_RETRIES", retry_branch)
+        self.assertIn("manual_review_required=True", retry_branch)
         self.assertIn("needs manual review", retry_branch)
+        self.assertNotIn('status="retry_limit_exceeded"', retry_branch)
 
-    def test_retry_limit_exceeded_status_is_terminal_and_failed_but_not_retryable(self):
+    def test_failed_folder_statuses_unchanged_by_exhaustion_metadata(self):
+        # No new status value was introduced -- exhaustion is metadata-only.
         self.assertIn(
-            '_AI_BATCH_FAILED_FOLDER_STATUSES = {"failed", "import_failed", "ai_failed", "timed_out", "retry_limit_exceeded"}',
+            '_AI_BATCH_FAILED_FOLDER_STATUSES = {"failed", "import_failed", "ai_failed", "timed_out"}',
             APP_SOURCE,
         )
-        retryable_line = next(
-            line for line in APP_SOURCE.splitlines() if line.startswith("_AI_BATCH_RETRYABLE_FOLDER_STATUSES =")
+        self.assertNotIn("retry_limit_exceeded", APP_SOURCE)
+
+    def test_folders_retryable_excludes_exhausted_folders(self):
+        fn = _function_source(
+            APP_SOURCE,
+            "def _ai_batch_recompute_counts(state: Dict[str, Any]) -> None:",
+            "\n\ndef _ai_batch_terminal_summary(",
         )
-        self.assertNotIn("retry_limit_exceeded", retryable_line)
+        retryable_block = fn[fn.index('state["folders_retryable"] ='):]
+        retryable_block = retryable_block[:retryable_block.index("state[\"folders_attention\"]")]
+        self.assertIn("not folder.get(\"retry_exhausted\")", retryable_block)
+        # Must no longer be a plain status_counts lookup -- status alone
+        # can't distinguish an exhausted folder from a fresh failure since
+        # both keep the same status string.
+        self.assertNotIn("status_counts.get(status, 0) for status in _AI_BATCH_RETRYABLE_FOLDER_STATUSES", retryable_block)
+
+
+class RetryExhaustionFrontendVisibilityTests(unittest.TestCase):
+    # This repo has no JS test runner configured (package.json has no
+    # "test" script; frontend behavior is covered by Python tests reading
+    # .tsx source, matching the rest of this test suite's convention) --
+    # this is that focused frontend test for retry-exhaustion visibility.
+    def test_api_type_declares_exhaustion_fields(self):
+        block = API_TYPES_SOURCE[
+            API_TYPES_SOURCE.index("export interface AiBatchFolderState {"):
+            API_TYPES_SOURCE.index("export interface AiBatchState {")
+        ]
+        self.assertIn("retry_count?: number;", block)
+        self.assertIn("retry_exhausted?: boolean;", block)
+        self.assertIn("max_retries?: number;", block)
+        self.assertIn("manual_review_required?: boolean;", block)
+
+    def test_attention_list_shows_exhaustion_reason_before_raw_failure_text(self):
+        # The existing attention-list rendering showed only
+        # failure_reason/ai_suggest_error/current_step -- an exhausted
+        # folder's failure_reason is left unchanged by design (the original
+        # error is still useful evidence), so without a distinct line an
+        # operator can't tell exhaustion apart from an ordinary failure.
+        panel = _function_source(
+            INTAKE_PANEL_SOURCE,
+            "{attentionFolders.length ? (",
+            "</div>\n            ) : null}\n          </div>\n        ) : (",
+        )
+        self.assertIn("folder.retry_exhausted", panel)
+        self.assertIn("Retry limit reached", panel)
+        self.assertIn("manual review required", panel)
+        exhaustion_pos = panel.index("folder.retry_exhausted")
+        failure_reason_pos = panel.index("folder.failure_reason")
+        self.assertLess(exhaustion_pos, failure_reason_pos)
+
+    def test_manual_review_chip_shown_for_exhausted_folders(self):
+        panel = _function_source(
+            INTAKE_PANEL_SOURCE,
+            "{attentionFolders.length ? (",
+            "</div>\n            ) : null}\n          </div>\n        ) : (",
+        )
+        self.assertIn("folder.retry_exhausted || folder.manual_review_required", panel)
+        self.assertIn('label="Manual review"', panel)
+
+
+# ---------------------------------------------------------------------------
+# Behavioral tests: import the real app.py in an isolated environment and
+# execute its actual functions, rather than only asserting source shape.
+# Source-text tests above give limited structural protection; they cannot
+# prove concurrency, persistence, or reconciliation behavior by themselves.
+# ---------------------------------------------------------------------------
+import json
+import os
+import shutil
+import sys
+import tempfile
+import threading
+import time
+import unittest.mock as mock
+
+_BEHAVIORAL_TMP_ROOT = Path(tempfile.mkdtemp(prefix="beets_retry_race_behavioral_"))
+
+
+def _import_app_for_behavioral_tests():
+    """Import the real app.py once, pointed at an isolated temp directory.
+
+    Must not touch the real music library or make network calls. app.py has
+    module-level side effects (opens a Beets Library at LIB_PATH, starts an
+    _auto_scan_loop background thread, starts a local-only _install_ytdlp
+    probe thread) -- all env vars below are set before import specifically
+    so those land in a throwaway temp directory instead of any real path.
+    """
+    config_dir = _BEHAVIORAL_TMP_ROOT / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    os.environ["BEETSDIR"] = str(config_dir)
+    os.environ["LIB_PATH"] = str(config_dir / "musiclibrary.blb")
+    os.environ["AI_BATCH_STATE_DIR"] = str(_BEHAVIORAL_TMP_ROOT / "ai_batch_jobs")
+    os.environ["METADATA_CACHE_DIR"] = str(_BEHAVIORAL_TMP_ROOT / "cache")
+    os.environ["BEETS_TRANSACTION_DIR"] = str(_BEHAVIORAL_TMP_ROOT / "transactions")
+    os.environ["BEETS_WEB_AUTH_DISABLED"] = "1"
+    sys.path.insert(0, str(ROOT))
+    import app as app_module
+    return app_module
+
+
+try:
+    APP = _import_app_for_behavioral_tests()
+    _APP_IMPORT_ERROR = None
+except Exception as _exc:  # pragma: no cover - environment-dependent
+    APP = None
+    _APP_IMPORT_ERROR = _exc
+
+
+def _behavioral_scan_path() -> str:
+    path = _BEHAVIORAL_TMP_ROOT / "scan_source"
+    path.mkdir(parents=True, exist_ok=True)
+    return str(path)
+
+
+def _make_folder(batch_job_id: str, name: str, *, status: str, retry_count: int = 0, **extra) -> dict:
+    folder = APP._ai_batch_folder_state(batch_job_id, f"{_behavioral_scan_path()}/{name}")
+    folder.update({"status": status, "retry_count": retry_count})
+    folder.update(extra)
+    return folder
+
+
+def _write_batch_state(batch_job_id: str, folders: dict, *, status: str = "completed_with_warnings") -> dict:
+    state = APP._ai_batch_initial_state(batch_job_id, _behavioral_scan_path())
+    state["status"] = status
+    state["folder_states"] = folders
+    APP._ai_batch_recompute_counts(state)
+    APP._ai_batch_write_state(state)
+    return state
+
+
+@unittest.skipIf(APP is None, f"app.py could not be imported for behavioral tests: {_APP_IMPORT_ERROR}")
+class BehavioralTestCase(unittest.TestCase):
+    """Shared setup: isolate module-level mutable state between tests."""
+
+    def setUp(self):
+        self.batch_job_id = f"behavioral-{uuid_hex()}"
+        with APP._ai_batch_start_lock:
+            APP._ai_batch_active_starts.clear()
+
+    def tearDown(self):
+        with APP._ai_batch_start_lock:
+            APP._ai_batch_active_starts.pop(self.batch_job_id, None)
+        state_file = APP._ai_batch_state_file(self.batch_job_id)
+        if state_file.exists():
+            state_file.unlink()
+
+
+def uuid_hex() -> str:
+    import uuid as _uuid
+    return _uuid.uuid4().hex[:12]
+
+
+class SimultaneousRecoverStartsExactlyOneWorkerTests(BehavioralTestCase):
+    """Required behavioral test: simultaneous recover/retry."""
+
+    def test_concurrent_recover_requests_start_exactly_one_worker(self):
+        folders = {
+            "f1": _make_folder(self.batch_job_id, "f1", status="failed", failure_reason="boom"),
+            "f2": _make_folder(self.batch_job_id, "f2", status="timed_out"),
+        }
+        _write_batch_state(self.batch_job_id, folders)
+
+        start_calls = []
+        real_start_python = APP.jobs.start_python
+
+        def counting_start_python(fn, label="", metadata=None):
+            start_calls.append(metadata)
+            return real_start_python(fn, label=label, metadata=metadata)
+
+        # _run_ai_batch_import would otherwise reach real AI-suggestion /
+        # MusicBrainz work for the newly-requeued folders -- irrelevant to
+        # what this test measures (worker start count) and would make real
+        # network calls. Replaced with a fast, recording stub.
+        run_calls = []
+
+        def fake_run_ai_batch_import(batch_job_id, scan_path, log, cancel_event=None, update_state=None, **kwargs):
+            run_calls.append(batch_job_id)
+            return {"status": "completed_with_warnings"}
+
+        barrier = threading.Barrier(6)
+        results = []
+        results_lock = threading.Lock()
+
+        def call_recover():
+            barrier.wait(timeout=5)
+            with APP.app.test_client() as client:
+                resp = client.post(
+                    "/api/ai-batch-import/recover",
+                    json={"batch_job_id": self.batch_job_id, "retry_failed": True},
+                )
+            with results_lock:
+                results.append(resp.get_json())
+
+        with mock.patch.object(APP.jobs, "start_python", side_effect=counting_start_python), \
+             mock.patch.object(APP, "_run_ai_batch_import", side_effect=fake_run_ai_batch_import):
+            threads = [threading.Thread(target=call_recover) for _ in range(6)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=10)
+
+        self.assertEqual(len(results), 6, "not all concurrent requests completed")
+        for r in results:
+            self.assertTrue(r.get("ok"))
+        self.assertEqual(
+            len(start_calls), 1,
+            f"jobs.start_python() must be called exactly once for concurrent recover requests, got {len(start_calls)}",
+        )
+        # Every response must reference the one real job/batch identity.
+        job_ids = {r.get("job_id") for r in results}
+        self.assertEqual(len(job_ids), 1, f"responses disagree on job_id: {job_ids}")
+        # The loser responses must say so.
+        reconnected_count = sum(1 for r in results if r.get("reconnected"))
+        self.assertEqual(reconnected_count, 5, "exactly 5 of 6 requests should reconnect to the existing worker")
+        # Reservation must not be left stuck after the winner finishes.
+        deadline = time.time() + 5
+        while self.batch_job_id in APP._ai_batch_active_starts and time.time() < deadline:
+            time.sleep(0.05)
+        with APP._ai_batch_start_lock:
+            self.assertNotIn(self.batch_job_id, APP._ai_batch_active_starts)
+
+
+class StartupFailureReleasesReservationTests(BehavioralTestCase):
+    """Required behavioral test: startup failure cleanup."""
+
+    def test_start_python_raising_releases_the_reservation(self):
+        folders = {"f1": _make_folder(self.batch_job_id, "f1", status="failed")}
+        _write_batch_state(self.batch_job_id, folders)
+
+        def raising_start_python(fn, label="", metadata=None):
+            raise RuntimeError("simulated startup failure")
+
+        with mock.patch.object(APP.jobs, "start_python", side_effect=raising_start_python):
+            with self.assertRaises(RuntimeError):
+                APP._start_ai_batch_job(_behavioral_scan_path(), recover_batch_job_id=self.batch_job_id, retry_failed=True)
+
+        with APP._ai_batch_start_lock:
+            self.assertNotIn(
+                self.batch_job_id, APP._ai_batch_active_starts,
+                "a failed jobs.start_python() call must not leave the batch permanently reserved",
+            )
+
+        # A later legitimate call must be able to proceed normally.
+        run_calls = []
+
+        def fake_run_ai_batch_import(batch_job_id, scan_path, log, cancel_event=None, update_state=None, **kwargs):
+            run_calls.append(batch_job_id)
+            return {"status": "completed_with_warnings"}
+
+        with mock.patch.object(APP, "_run_ai_batch_import", side_effect=fake_run_ai_batch_import):
+            with APP.app.test_request_context():
+                resp = APP._start_ai_batch_job(_behavioral_scan_path(), recover_batch_job_id=self.batch_job_id, retry_failed=True)
+        payload = json.loads(resp.get_data(as_text=True))
+        self.assertTrue(payload.get("ok"))
+        self.assertNotIn(
+            "reconnected", payload,
+            "the recovered call should start a real worker, not report a stale reservation",
+        )
+
+
+class RetryReconciliationRegressionTests(BehavioralTestCase):
+    """Required behavioral tests: premature finalization + stale-writer
+    prevention, exercised together as an end-to-end regression test for the
+    original live bug (retry logged "N requeued" immediately followed by
+    "batch is terminal", with folders reverted rather than reprocessed)."""
+
+    def setUp(self):
+        super().setUp()
+        self._suggestions_patcher = mock.patch.object(
+            APP, "_ai_batch_run_suggestions", return_value="done",
+        )
+        self._decisions_patcher = mock.patch.object(
+            APP, "_ai_batch_process_decisions", return_value={},
+        )
+        self._suggestions_patcher.start()
+        self._decisions_patcher.start()
+        self.addCleanup(self._suggestions_patcher.stop)
+        self.addCleanup(self._decisions_patcher.stop)
+
+    def test_retry_failed_reconciliation_requeues_and_does_not_report_terminal(self):
+        folders = {
+            "f1": _make_folder(self.batch_job_id, "f1", status="failed", retry_count=0, failure_reason="boom"),
+            "f2": _make_folder(self.batch_job_id, "f2", status="timed_out", retry_count=1),
+            "f3": _make_folder(self.batch_job_id, "f3", status="review_created"),  # already terminal, not retryable
+        }
+        _write_batch_state(self.batch_job_id, folders)
+
+        result = APP._run_ai_batch_import(
+            self.batch_job_id, _behavioral_scan_path(), log=[],
+            recover=True, retry_failed=True, job_id="test-job",
+        )
+
+        self.assertNotEqual(
+            result.get("status"), "completed_with_warnings",
+            "batch must not immediately report itself terminal when retryable folders exist",
+        )
+        self.assertNotIn(result.get("status"), APP._AI_BATCH_TERMINAL_STATUSES)
+        self.assertGreater(result.get("folders_unfinished", 0), 0)
+
+        persisted = APP._ai_batch_load_state(self.batch_job_id)
+        pf1 = persisted["folder_states"]["f1"]
+        pf2 = persisted["folder_states"]["f2"]
+        self.assertEqual(pf1["status"], "ai_queued")
+        self.assertEqual(pf1["retry_count"], 1)
+        self.assertEqual(pf2["status"], "ai_queued")
+        self.assertEqual(pf2["retry_count"], 2)
+        # The already-terminal, non-retryable folder must be untouched.
+        self.assertEqual(persisted["folder_states"]["f3"]["status"], "review_created")
+
+    def test_suggestion_processing_is_reached_after_reconciliation(self):
+        folders = {"f1": _make_folder(self.batch_job_id, "f1", status="failed")}
+        _write_batch_state(self.batch_job_id, folders)
+
+        APP._run_ai_batch_import(
+            self.batch_job_id, _behavioral_scan_path(), log=[],
+            recover=True, retry_failed=True, job_id="test-job",
+        )
+
+        self.assertTrue(APP._ai_batch_run_suggestions.called)
+        self.assertTrue(APP._ai_batch_process_decisions.called)
+
+
+class ContradictoryTerminalStateHealingTests(BehavioralTestCase):
+    def test_terminal_status_with_unfinished_folder_reopens(self):
+        folders = {"f1": _make_folder(self.batch_job_id, "f1", status="ai_queued")}
+        state = _write_batch_state(self.batch_job_id, folders, status="completed_with_warnings")
+
+        changed = APP._ai_batch_recalculate_batch_state(state)
+
+        self.assertTrue(changed)
+        self.assertEqual(state["status"], "running")
+        self.assertIsNone(state["completed_at"])
+
+    def test_canceled_status_does_not_reopen(self):
+        folders = {"f1": _make_folder(self.batch_job_id, "f1", status="ai_queued")}
+        state = _write_batch_state(self.batch_job_id, folders, status="canceled")
+
+        changed = APP._ai_batch_recalculate_batch_state(state)
+
+        self.assertFalse(changed)
+        self.assertEqual(state["status"], "canceled")
+
+    def test_genuinely_completed_batch_does_not_reopen_and_no_folder_is_requeued(self):
+        folders = {
+            "f1": _make_folder(self.batch_job_id, "f1", status="review_created"),
+            "f2": _make_folder(self.batch_job_id, "f2", status="imported"),
+        }
+        state = _write_batch_state(self.batch_job_id, folders, status="running")
+
+        changed = APP._ai_batch_recalculate_batch_state(state)
+
+        self.assertTrue(changed)
+        self.assertIn(state["status"], APP._AI_BATCH_TERMINAL_STATUSES)
+        self.assertEqual(state["folder_states"]["f1"]["status"], "review_created")
+        self.assertEqual(state["folder_states"]["f2"]["status"], "imported")
+
+
+class RetryExhaustionStateTransitionTests(BehavioralTestCase):
+    def setUp(self):
+        super().setUp()
+        self._suggestions_patcher = mock.patch.object(APP, "_ai_batch_run_suggestions", return_value="done")
+        self._decisions_patcher = mock.patch.object(APP, "_ai_batch_process_decisions", return_value={})
+        self._suggestions_patcher.start()
+        self._decisions_patcher.start()
+        self.addCleanup(self._suggestions_patcher.stop)
+        self.addCleanup(self._decisions_patcher.stop)
+
+    def _retry_once(self):
+        return APP._run_ai_batch_import(
+            self.batch_job_id, _behavioral_scan_path(), log=[],
+            recover=True, retry_failed=True, job_id="test-job",
+        )
+
+    def test_retry_counts_zero_one_two_can_retry_three_cannot(self):
+        # The original attempt that produced the first failure is not
+        # counted as a retry; retry_count tracks *retry* attempts only, so
+        # retry_count values 0/1/2 (three prior retries at most) may retry
+        # again, and retry_count 3 (== _AI_BATCH_MAX_FOLDER_RETRIES) may not.
+        folders = {
+            "f0": _make_folder(self.batch_job_id, "f0", status="failed", retry_count=0),
+            "f1": _make_folder(self.batch_job_id, "f1", status="failed", retry_count=1),
+            "f2": _make_folder(self.batch_job_id, "f2", status="failed", retry_count=2),
+            "f3": _make_folder(self.batch_job_id, "f3", status="failed", retry_count=3),
+        }
+        _write_batch_state(self.batch_job_id, folders)
+
+        self._retry_once()
+
+        persisted = APP._ai_batch_load_state(self.batch_job_id)
+        pf = persisted["folder_states"]
+        self.assertEqual(pf["f0"]["status"], "ai_queued")
+        self.assertEqual(pf["f0"]["retry_count"], 1)
+        self.assertEqual(pf["f1"]["status"], "ai_queued")
+        self.assertEqual(pf["f1"]["retry_count"], 2)
+        self.assertEqual(pf["f2"]["status"], "ai_queued")
+        self.assertEqual(pf["f2"]["retry_count"], 3)
+        # f3 was already at the cap: must not be requeued.
+        self.assertEqual(pf["f3"]["status"], "failed")
+        self.assertEqual(pf["f3"]["retry_count"], 3)
+        self.assertTrue(pf["f3"].get("retry_exhausted"))
+        self.assertTrue(pf["f3"].get("manual_review_required"))
+        self.assertEqual(pf["f3"].get("max_retries"), APP._AI_BATCH_MAX_FOLDER_RETRIES)
+
+    def test_exhausted_folder_remains_visible_in_attention_and_correct_counts(self):
+        folders = {
+            "f_ok": _make_folder(self.batch_job_id, "f_ok", status="failed", retry_count=0),
+            "f_exhausted": _make_folder(self.batch_job_id, "f_exhausted", status="failed", retry_count=3),
+        }
+        _write_batch_state(self.batch_job_id, folders)
+
+        self._retry_once()
+
+        persisted = APP._ai_batch_load_state(self.batch_job_id)
+        # Public counts must reflect exactly one still-retryable folder --
+        # the exhausted one must not inflate folders_retryable.
+        self.assertEqual(persisted["folders_retryable"], 0)  # f_ok just got requeued to ai_queued
+        self.assertEqual(persisted["folders_failed"], 1)  # f_exhausted keeps its "failed" status
+        self.assertGreater(persisted["folders_attention"], 0)
+
+    def test_a_later_retry_does_not_silently_requeue_an_exhausted_folder(self):
+        folders = {"f3": _make_folder(self.batch_job_id, "f3", status="failed", retry_count=3)}
+        _write_batch_state(self.batch_job_id, folders)
+
+        self._retry_once()
+        first = APP._ai_batch_load_state(self.batch_job_id)["folder_states"]["f3"]
+        self._retry_once()
+        second = APP._ai_batch_load_state(self.batch_job_id)["folder_states"]["f3"]
+
+        self.assertEqual(first["status"], "failed")
+        self.assertEqual(second["status"], "failed")
+        self.assertEqual(second["retry_count"], 3, "retry_count must not keep climbing past the cap")
 
 
 if __name__ == "__main__":
