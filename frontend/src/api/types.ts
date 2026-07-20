@@ -109,6 +109,10 @@ export interface ReviewItem {
   year?: number | string;
   album_id?: number;
   first_item_id?: number;
+  item_id?: number;
+  /** For type "library_no_mb": "item" means this is a singleton (no album
+   * row) needing a recording ID, not a release ID like the album case. */
+  target_kind?: 'album' | 'item';
   tracks?: number;
   path?: string;
   folder?: string;
@@ -290,12 +294,42 @@ export interface SetupStatusResponse {
     available: boolean;
     path: string;
   };
+  auth: {
+    token_configured: boolean;
+    token_auto_generated: boolean;
+    password_configured: boolean;
+  };
   integrations: Record<string, {
     configured: boolean;
     required: boolean;
     note?: string;
   }>;
   settings: Record<string, unknown>;
+}
+
+/** Response from POST /api/setup/auth-token/regenerate. `token` is the
+ * plaintext value and is returned exactly once, here -- every other read of
+ * BEETS_WEB_AUTH_TOKEN (GET /api/setup/env) is masked, so the caller must
+ * capture and display it immediately and never expect to fetch it again. */
+export interface SetupAuthTokenRegenerateResponse {
+  ok: boolean;
+  error?: string;
+  token?: string;
+  warning?: string;
+  backup_path?: string;
+}
+
+/** Live connectivity test result from /api/setup/test/{ai,musicbrainz,acoustid,plex}.
+ * Each integration is tested and reported independently -- one failing must
+ * never block or hide the others. */
+export interface SetupIntegrationTestResponse {
+  ok: boolean;
+  status: 'ready' | 'failed' | 'not_configured' | string;
+  error?: string;
+  model?: string;
+  fpcalc_available?: boolean;
+  fpcalc_version?: string;
+  music_libraries?: string[];
 }
 
 export interface SetupEnvVariable {
@@ -436,14 +470,35 @@ export interface SubmissionTrack {
   validation_status?: string;
 }
 
+export type SubmissionCheckSeverity = 'blocked' | 'needs_attention' | 'ready' | string;
+export type SubmissionCheckStage = 'artist' | 'identify' | 'musicbrainz_prep' | 'attach_ids' | 'acoustid' | 'complete' | string;
+export type SubmissionCheckGroup = 'local_files' | 'metadata' | 'musicbrainz' | 'acoustid' | 'system' | string;
+export type SubmissionActionType =
+  | 'rescan' | 'open_import_review' | 'edit_metadata' | 'edit_tracks' | 'resolve_artist'
+  | 'review_duplicates' | 'open_mb_handoff' | 'open_settings' | 'view_setup_details' | '';
+
+export interface SubmissionArtistMatch {
+  id: string;
+  name: string;
+  score: number;
+  disambiguation?: string;
+}
+
 export interface SubmissionPreflightCheck {
+  id: string;
   label: string;
+  /** @deprecated raw backend status; use severity for display */
   status: 'pass' | 'fail' | 'warning' | string;
-  stage: 'MusicBrainz' | 'AcoustID' | string;
+  severity: SubmissionCheckSeverity;
+  stage: SubmissionCheckStage;
+  group: SubmissionCheckGroup;
   explanation?: string;
   action?: string;
+  action_type?: SubmissionActionType;
+  action_target?: string;
   affected?: string[];
   blocking?: boolean;
+  current_stage_relevant?: boolean;
 }
 
 export interface SubmissionPreflight {
@@ -452,6 +507,8 @@ export interface SubmissionPreflight {
   warning_count: number;
   musicbrainz_ready: boolean;
   acoustid_ready: boolean;
+  current_stage?: SubmissionCheckStage;
+  current_stage_label?: string;
 }
 
 export interface SubmissionTargetResponse extends ApiOkResponse {
@@ -462,6 +519,7 @@ export interface SubmissionTargetResponse extends ApiOkResponse {
   preflight: SubmissionPreflight;
   readiness: SubmissionReadiness;
   draft?: Record<string, unknown>;
+  artist_match?: SubmissionArtistMatch | Record<string, never>;
 }
 
 export interface SubmissionDraftResponse extends ApiOkResponse {
@@ -1674,10 +1732,25 @@ export interface AiSuggestion {
   source_batch_id?: string;
   source_folder?: string;
   created_by_workflow?: string;
+  /** Fallback Discogs match, set only when MusicBrainz search found nothing. */
+  discogs_candidate?: {
+    discogs_id?: number | string;
+    discogs_url?: string;
+    artist?: string;
+    album?: string;
+    year?: string;
+    country?: string;
+    format?: string;
+    genre?: string;
+  } | null;
 }
 
 export interface AiSuggestResponse extends ApiOkResponse {
   suggestion?: AiSuggestion;
+  /** /api/items/<iid>/ai-suggest uses this key (plural) instead of
+   * `suggestion` -- a pre-existing backend inconsistency, not replicated
+   * here on purpose, just typed as-is so item-level callers can read it. */
+  suggestions?: AiSuggestion & { mb_trackid?: string };
   mb_candidates?: ReviewCandidate[];
   acoustid_candidates?: unknown[];
   evidence?: ReviewEvidence;

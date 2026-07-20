@@ -37,7 +37,7 @@ class MaintenanceRunnerTests(unittest.TestCase):
         self.assertIn("export function startMaintenanceRunner", self.client_source)
         self.assertIn("export function startCleanAll", self.client_source)
         self.assertIn("'/api/jobs/maintenance-runner'", self.client_source)
-        self.assertIn("await startCleanAll()", self.jobs_source)
+        self.assertIn("await startCleanAll(options)", self.jobs_source)
         self.assertIn('@app.post("/api/jobs/maintenance-runner")', self.app_source)
         self.assertIn('@app.get("/api/jobs/maintenance-runner/report")', self.app_source)
         self.assertIn('label="Clean All"', self.runner_source)

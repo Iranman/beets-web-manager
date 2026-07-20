@@ -28,12 +28,14 @@ from app import (  # noqa: E402
     MUSIC_ROOT,
     _ANSI_RE,
     _MB_UUID_RE,
+    _artist_folder_key,
     _beet_env,
     _beet_run,
     _build_folder_evidence,
     _extract_mb_uuid,
     _fetch_mb_release_tracklist,
     _invalidate_lib_cache,
+    _mb_artist_search_one,
     _path_is_under,
     _read_beets_plugin_list,
     _s,
@@ -413,7 +415,7 @@ def _find_beets_items_for_folder(folder: Path) -> List[Any]:
 def _media_tag_track_payload(file_path: Path, index: int) -> Dict[str, Any]:
     exists = file_path.exists()
     title = artist = album = albumartist = fmt = ""
-    track = disc = 0
+    track = disc = year = 0
     duration = 0.0
     mb_trackid = ""
     if exists:
@@ -426,6 +428,7 @@ def _media_tag_track_payload(file_path: Path, index: int) -> Dict[str, Any]:
             albumartist = _s(getattr(mf, "albumartist", "") or artist).strip()
             track = int(mf.track or 0)
             disc = int(mf.disc or 0)
+            year = int(getattr(mf, "year", 0) or getattr(mf, "original_year", 0) or 0)
             duration = float(mf.length or 0)
             mb_trackid = _s(getattr(mf, "mb_trackid", "") or "").strip().lower()
             fmt = file_path.suffix.lstrip(".").upper()
@@ -455,6 +458,7 @@ def _media_tag_track_payload(file_path: Path, index: int) -> Dict[str, Any]:
         "file_path": str(file_path),
         "file_available": exists,
         "format": fmt,
+        "year": year,
         "mb_trackid": mb_trackid,
         "mb_albumid": "",
         "fingerprint_status": "File unavailable" if not exists else "Not imported to Beets yet",
@@ -494,20 +498,34 @@ def _summary_for_folder_tracks(folder: Path, tracks: List[Dict[str, Any]], resol
     discs = sorted({int(t.get("disc") or 1) for t in tracks}) or [1]
     tag_albums = [t.get("album", "").strip() for t in tracks if t.get("album", "").strip()]
     tag_artists = [(t.get("albumartist") or t.get("artist") or "").strip() for t in tracks if (t.get("albumartist") or t.get("artist"))]
+    tag_years = [str(int(t.get("year"))) for t in tracks if t.get("year")]
     title = (max(set(tag_albums), key=tag_albums.count) if tag_albums else "") or evidence.get("guessed_album") or folder.name
     albumartist = (max(set(tag_artists), key=tag_artists.count) if tag_artists else "") or evidence.get("guessed_artist") or ""
+    release_date = (max(set(tag_years), key=tag_years.count) if tag_years else "") or evidence.get("guessed_year", "")
     return {
         "target_type": "folder", "album_id": 0, "item_id": 0,
         "title": title, "albumartist": albumartist,
         "release_type": "Album" if resolved_state in ("unimported_album", "imported_singletons") else "Track",
         "secondary_type": "", "release_status": "",
-        "release_date": evidence.get("guessed_year", ""), "country": "", "label": "",
+        "release_date": release_date, "country": "", "label": "",
         "catalog_number": "", "barcode": "", "format": (tracks[0].get("format") if tracks else "") or "",
         "disc_count": len(discs), "track_count": len(tracks), "runtime": runtime,
         "runtime_display": _duration_label(runtime), "source_path": str(folder),
         "mb_albumartistid": "", "mb_albumartistids": "", "mb_releasegroupid": "", "mb_albumid": "",
         "cover_art_url": _folder_cover_art_url(folder), "resolved_state": resolved_state,
     }
+
+
+def _folder_audio_file_listing(folder: Path) -> List[Path]:
+    """Just the audio file paths under a folder -- same direct-children-else-
+    recursive rule _build_folder_evidence uses, but without also opening and
+    tag-parsing every file. Listing directory entries is cheap; MediaFile()
+    parsing each one over networked storage is not, so callers that only
+    need "which files are here" (not their tags) should use this instead."""
+    direct = sorted(p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in AUDIO_EXT)
+    if direct:
+        return direct
+    return sorted(p for p in folder.rglob("*") if p.is_file() and p.suffix.lower() in AUDIO_EXT)
 
 
 def _resolve_folder_submission_target(path: str) -> Tuple[str, Any, Dict[str, Any], List[Dict[str, Any]]]:
@@ -537,8 +555,15 @@ def _resolve_folder_submission_target(path: str) -> Tuple[str, Any, Dict[str, An
         summary = _summary_for_album(beets_album, tracks)
         return "album", int(beets_album.id), summary, tracks
 
-    evidence = _build_folder_evidence(str(folder))
-    audio_paths = [Path(p) for p in (evidence.get("audio_files") or [])]
+    # _media_tag_track_payload (below) already reads every file's tags once
+    # for the actual track payloads; _build_folder_evidence does its own
+    # separate MediaFile() pass over the same files purely to guess an
+    # artist/album/year for cases where tags are missing. Listing files
+    # doesn't need that second tag-reading pass at all, and the
+    # imported_singletons branch below doesn't either (it builds its
+    # summary from Beets item rows, not from evidence) -- so only pay for
+    # the full evidence scan lazily, once we know tags alone weren't enough.
+    audio_paths = _folder_audio_file_listing(folder)
     beets_items = _find_beets_items_for_folder(folder)
 
     if beets_items and len(beets_items) >= max(1, len(audio_paths)):
@@ -553,15 +578,94 @@ def _resolve_folder_submission_target(path: str) -> Tuple[str, Any, Dict[str, An
     tracks = [_media_tag_track_payload(p, idx + 1) for idx, p in enumerate(audio_paths)]
     albums_seen = {t.get("album", "").strip().lower() for t in tracks if t.get("album", "").strip()}
     resolved_state = "unimported_album" if len(albums_seen) <= 1 else "loose_tracks"
+    # _summary_for_folder_tracks falls back to evidence's guessed_album/
+    # guessed_artist/guessed_year only when tags didn't supply them; skip
+    # the (separate, redundant) full evidence scan only when tags already
+    # cover all three, not just album/artist -- year has no other fallback.
+    has_usable_tags = (
+        any(t.get("album") or t.get("albumartist") for t in tracks)
+        and any(t.get("year") for t in tracks)
+    )
+    evidence = {} if has_usable_tags else _build_folder_evidence(str(folder))
     summary = _summary_for_folder_tracks(folder, tracks, resolved_state, evidence=evidence)
     return "folder", str(folder), summary, tracks
 
 
-def _check(label: str, ok: bool, stage: str, explanation: str, action: str = "", affected: List[str] = None, blocking: bool = True) -> Dict[str, Any]:
-    return {"label": label, "status": "pass" if ok else ("fail" if blocking else "warning"), "stage": stage, "explanation": "" if ok else explanation, "action": action, "affected": affected or [], "blocking": blocking}
+# Stage taxonomy for the readiness UI. Order matters: a check's stage index
+# vs. the target's current-stage index decides whether it is shown as
+# "current stage" (index <= current) or hidden as future-stage noise.
+_STAGE_ORDER = ["artist", "identify", "musicbrainz_prep", "attach_ids", "acoustid", "complete"]
+_STAGE_LABELS = {
+    "artist": "Artist identification",
+    "identify": "Identify and review",
+    "musicbrainz_prep": "MusicBrainz preparation",
+    "attach_ids": "Attach published IDs",
+    "acoustid": "AcoustID submission",
+    "complete": "Complete",
+}
+_ARTIST_MATCH_MIN_SCORE = 95
 
 
-def _submission_preflight(summary: Dict[str, Any], tracks: List[Dict[str, Any]], readiness: Dict[str, Any]) -> Dict[str, Any]:
+def _submission_artist_match(albumartist: str) -> Dict[str, Any]:
+    """Best-effort MusicBrainz artist lookup for the album artist credit.
+
+    Reuses _mb_artist_search_one (already used by artist-folder cleanup to
+    pick canonical spellings) instead of adding a second MusicBrainz artist
+    search. Only returns a match confident enough to auto-attach without
+    review: an exact name/alias match, or a very high search score.
+    """
+    name = _s(albumartist).strip()
+    if not name:
+        return {}
+    match = _mb_artist_search_one(name)
+    if not match or not _MB_UUID_RE.match(_s(match.get("id")).strip()):
+        return {}
+    confident = (
+        _artist_folder_key(_s(match.get("name"))) == _artist_folder_key(name)
+        or int(match.get("score") or 0) >= _ARTIST_MATCH_MIN_SCORE
+    )
+    if not confident:
+        return {}
+    return {
+        "id": _s(match.get("id")).strip().lower(),
+        "name": _s(match.get("name")),
+        "score": int(match.get("score") or 0),
+        "disambiguation": _s(match.get("disambiguation")),
+    }
+
+
+def _check(check_id: str, label: str, ok: bool, stage: str, group: str, explanation: str,
+           action: str = "", action_type: str = "", action_target: str = "",
+           affected: List[str] = None, blocking: bool = True) -> Dict[str, Any]:
+    """Build one normalized preflight check.
+
+    A passed check always carries empty explanation/action/action_type —
+    the previous version always kept whatever `action` text the caller
+    passed in, so a check that reported "pass" could still render its
+    corrective text (the actual cause of "check X passed but says to fix
+    X" everywhere in the old UI). Severity (blocked/needs_attention/ready)
+    is the one field the frontend should key off of; status is kept only
+    for backward compatibility with older stored drafts/log text.
+    """
+    if ok:
+        status, severity = "pass", "ready"
+        explanation, action, action_type, action_target = "", "", "", ""
+    elif blocking:
+        status, severity = "fail", "blocked"
+    else:
+        status, severity = "warning", "needs_attention"
+    return {
+        "id": check_id, "label": label, "status": status, "severity": severity,
+        "stage": stage, "group": group,
+        "explanation": explanation, "action": action,
+        "action_type": action_type, "action_target": action_target,
+        "affected": affected or [], "blocking": blocking,
+    }
+
+
+def _submission_preflight(summary: Dict[str, Any], tracks: List[Dict[str, Any]], readiness: Dict[str, Any],
+                           artist_match: Dict[str, Any] = None, artist_dismissed: bool = False,
+                           duplicates_reviewed: bool = False) -> Dict[str, Any]:
     missing_files = [t.get("file_name") or f"item {t.get('item_id')}" for t in tracks if not t.get("file_available")]
     missing_titles = [f"track {t.get('track') or t.get('index')}" for t in tracks if not _s(t.get("title")).strip()]
     bad_tracks = [f"item {t.get('item_id')}" for t in tracks if int(t.get("track") or 0) <= 0]
@@ -571,6 +675,18 @@ def _submission_preflight(summary: Dict[str, Any], tracks: List[Dict[str, Any]],
     plugins = readiness.get("plugins") or {}
     resolved_state = _s(summary.get("resolved_state") or "").strip()
     is_beets_target = summary.get("target_type") in ("album", "item")
+    # There's nothing to identify an artist for yet if the folder itself
+    # couldn't be read or has no audio files -- that's an identify-stage
+    # problem (see local_files_found below), not an unresolved artist. Left
+    # unguarded, an empty/inaccessible folder has no albumartist to search
+    # for, so artist_resolved would always be False and the "artist" stage
+    # would incorrectly outrank "identify" and show "artist not found"
+    # instead of the real "folder not found"/"no audio files" message.
+    artist_resolved = (
+        bool(_s(summary.get("mb_albumartistid")).strip())
+        or bool((artist_match or {}).get("id"))
+        or resolved_state in ("inaccessible", "empty")
+    )
     state_explanations = {
         "inaccessible": "The source path could not be found or read on disk.",
         "empty": "No supported audio files were found in the source folder.",
@@ -579,29 +695,162 @@ def _submission_preflight(summary: Dict[str, Any], tracks: List[Dict[str, Any]],
         "imported_singletons": "These files are already Beets library items, but not grouped as an album.",
     }
     checks = [
-        _check("Local audio files were found", bool(tracks) and resolved_state not in ("inaccessible", "empty"), "MusicBrainz", state_explanations.get(resolved_state, "No audio files were found for this review item."), "Rescan the folder, or pick a different review item." if resolved_state in ("inaccessible", "empty") else "", blocking=True),
-        _check("Album is imported into the Beets library", is_beets_target, "MusicBrainz", "The selected folder has not been imported into the Beets library.", "Import it from Import Review before preparing a MusicBrainz submission or attaching IDs."),
-        _check("All files are accessible", not missing_files, "MusicBrainz", "Some files are missing or unreadable.", "Restore the missing files or remove them from the album before submitting.", missing_files),
-        _check("Artist metadata is present", bool(_s(summary.get("albumartist")).strip()), "MusicBrainz", "Album artist is empty.", "Enter a release artist credit before preparing the submission."),
-        _check("Album title is present", bool(_s(summary.get("title")).strip()), "MusicBrainz", "Release title is empty.", "Enter a release title before preparing the submission."),
-        _check("Track titles are present", not missing_titles, "MusicBrainz", "One or more tracks have no title.", "Fill in the missing track titles.", missing_titles),
-        _check("Track positions are valid", not bad_tracks, "MusicBrainz", "One or more tracks have an invalid track number.", "Fix track numbers before preparing the submission.", bad_tracks),
-        _check("Disc positions are valid", not bad_discs, "MusicBrainz", "One or more tracks have an invalid disc number.", "Fix disc numbers before preparing the submission.", bad_discs),
-        _check("Track durations are available", not no_duration, "MusicBrainz", "Some tracks have no duration. MusicBrainz can still be prepared, but duplicate checks are weaker.", "Refresh Beets metadata for the affected files.", no_duration, False),
-        _check("Release date is valid", bool(_s(summary.get("release_date")).strip()), "MusicBrainz", "Release date is missing. Complete it during the MusicBrainz handoff.", "Add a year or full release date.", blocking=False),
-        _check("Release format is selected", bool(_s(summary.get("format")).strip()), "MusicBrainz", "Media format is unknown.", "Choose the media format during the MusicBrainz handoff.", blocking=False),
-        _check("Existing MusicBrainz duplicates have been checked", False, "MusicBrainz", "Review likely existing releases before creating a new release.", "Use the duplicate candidates section.", blocking=False),
-        _check("Artist MusicBrainz entity has been selected or will be created", bool(_s(summary.get("mb_albumartistid")).strip()), "MusicBrainz", "Album artist MBID is not attached yet.", "Select or create the artist on MusicBrainz.", blocking=False),
-        _check("Beets mbsubmit plugin is enabled", bool(plugins.get("mbsubmit")), "MusicBrainz", "The Beets mbsubmit plugin is not enabled in config.yaml.", "Enable mbsubmit before generating track-parser text."),
-        _check("Tracks have recording IDs before AcoustID submission", not missing_recordings, "AcoustID", "Some tracks do not have MusicBrainz recording MBIDs.", "Attach recording MBIDs before submitting fingerprints.", missing_recordings),
-        _check("AcoustID API key is configured", bool(readiness.get("acoustid_key_configured")), "AcoustID", "The AcoustID API key is not configured.", "Add it in Settings -> Integrations."),
-        _check("Chromaprint/fpcalc is available", bool(readiness.get("fpcalc_available")), "AcoustID", "fpcalc was not found in the application container.", "Install chromaprint/fpcalc in the runtime."),
-        _check("pyacoustid is available", bool(readiness.get("pyacoustid_available")), "AcoustID", "The Python acoustid module is not available.", "Install pyacoustid in the runtime."),
-        _check("Beets chroma plugin is enabled", bool(plugins.get("chroma")), "AcoustID", "The Beets chroma plugin is not enabled.", "Enable chroma before submitting fingerprints."),
+        _check("artist_resolved", "MusicBrainz artist found",
+               artist_resolved or artist_dismissed, "artist", "musicbrainz",
+               "No confident MusicBrainz match was found for this artist name.",
+               "Create this artist on MusicBrainz, or paste an artist ID/URL you already have.",
+               "resolve_artist", blocking=True),
+        _check("local_files_found", "Local audio files found",
+               bool(tracks) and resolved_state not in ("inaccessible", "empty"), "identify", "local_files",
+               state_explanations.get(resolved_state, "No audio files were found for this review item."),
+               "Scan the folder for audio files again." if resolved_state in ("inaccessible", "empty") else "",
+               "rescan", blocking=True),
+        _check("beets_imported", "Album imported into Beets",
+               is_beets_target, "musicbrainz_prep", "musicbrainz",
+               "This folder has not been imported into the Beets library yet.",
+               "Import this album from Import Review.", "open_import_review"),
+        _check("files_accessible", "Local files accessible",
+               not missing_files, "identify", "local_files",
+               "Some files are missing or unreadable.",
+               "Restore the missing files or remove them from the album.", "edit_tracks", "submission-tracks",
+               affected=missing_files),
+        _check("artist_credit", "Artist credit present",
+               bool(_s(summary.get("albumartist")).strip()), "identify", "metadata",
+               "Album artist is empty.", "Enter a release artist credit.", "edit_metadata", "submission-metadata"),
+        _check("album_title", "Album title present",
+               bool(_s(summary.get("title")).strip()), "identify", "metadata",
+               "Release title is empty.", "Enter a release title.", "edit_metadata", "submission-metadata"),
+        _check("track_titles", "Track titles present",
+               not missing_titles, "identify", "metadata",
+               "One or more tracks have no title.", "Fill in the missing track titles.", "edit_tracks", "submission-tracks",
+               affected=missing_titles),
+        _check("track_positions", "Track positions valid",
+               not bad_tracks, "identify", "local_files",
+               "One or more tracks have an invalid track number.", "Fix track numbers.", "edit_tracks", "submission-tracks",
+               affected=bad_tracks),
+        _check("disc_positions", "Disc positions valid",
+               not bad_discs, "identify", "local_files",
+               "One or more tracks have an invalid disc number.", "Fix disc numbers.", "edit_tracks", "submission-tracks",
+               affected=bad_discs),
+        _check("track_durations", "Track durations available",
+               not no_duration, "identify", "local_files",
+               "Some tracks have no duration. MusicBrainz can still be prepared, but duplicate checks are weaker.",
+               "Refresh Beets metadata for the affected files.", "edit_tracks", "submission-tracks",
+               affected=no_duration, blocking=False),
+        _check("release_date", "Release date set",
+               bool(_s(summary.get("release_date")).strip()), "musicbrainz_prep", "metadata",
+               "Release date is missing. Optional, but recommended before publishing.",
+               "Add a year or full release date.", "edit_metadata", "submission-metadata", blocking=False),
+        _check("release_format", "Media format selected",
+               bool(_s(summary.get("format")).strip()), "musicbrainz_prep", "metadata",
+               "Media format is unknown. Optional, but recommended before publishing.",
+               "Choose the media format.", "edit_metadata", "submission-metadata", blocking=False),
+        _check("duplicates_reviewed", "Possible existing releases reviewed",
+               duplicates_reviewed, "musicbrainz_prep", "musicbrainz",
+               "Review likely existing releases before creating a new one.",
+               "Review possible duplicate releases.", "review_duplicates", "submission-duplicates", blocking=False),
+        _check("mbsubmit_plugin", "MusicBrainz submission tool enabled",
+               bool(plugins.get("mbsubmit")), "musicbrainz_prep", "musicbrainz",
+               "The Beets mbsubmit plugin is not enabled in config.yaml.",
+               "Enable the mbsubmit plugin in config.yaml.", "view_setup_details"),
+        _check("recording_mbids", "MusicBrainz recording IDs attached",
+               not missing_recordings, "acoustid", "acoustid",
+               "Some tracks do not have MusicBrainz recording MBIDs.",
+               "Attach recording IDs before submitting fingerprints.", "open_mb_handoff", "submission-mb-handoff",
+               affected=missing_recordings),
+        _check("acoustid_api_key", "AcoustID connection available",
+               bool(readiness.get("acoustid_key_configured")), "acoustid", "acoustid",
+               "The AcoustID API key is not configured.",
+               "Add your AcoustID API key in Settings.", "open_settings"),
+        _check("fpcalc_available", "Fingerprinting tools available",
+               bool(readiness.get("fpcalc_available")), "acoustid", "system",
+               "fpcalc was not found in the application container.",
+               "Install chromaprint/fpcalc in the runtime.", "view_setup_details"),
+        _check("pyacoustid_available", "AcoustID library available",
+               bool(readiness.get("pyacoustid_available")), "acoustid", "system",
+               "The Python acoustid module is not available.",
+               "Install pyacoustid in the runtime.", "view_setup_details"),
+        _check("chroma_plugin", "Chroma integration enabled",
+               bool(plugins.get("chroma")), "acoustid", "acoustid",
+               "The Beets chroma plugin is not enabled.",
+               "Enable the chroma plugin.", "view_setup_details"),
     ]
-    mb_blocked = any(c["blocking"] and c["status"] == "fail" and c["stage"] == "MusicBrainz" for c in checks)
-    acoustid_blocked = mb_blocked or any(c["blocking"] and c["status"] == "fail" and c["stage"] == "AcoustID" for c in checks)
-    return {"checks": checks, "missing_count": sum(1 for c in checks if c["status"] == "fail"), "warning_count": sum(1 for c in checks if c["status"] == "warning"), "musicbrainz_ready": not mb_blocked, "acoustid_ready": not acoustid_blocked}
+    mb_blocked = any(c["blocking"] and c["status"] == "fail" and c["stage"] in ("artist", "identify", "musicbrainz_prep") for c in checks)
+    acoustid_blocked = mb_blocked or any(c["blocking"] and c["status"] == "fail" and c["stage"] == "acoustid" for c in checks)
+    return {
+        "checks": checks,
+        "missing_count": sum(1 for c in checks if c["status"] == "fail"),
+        "warning_count": sum(1 for c in checks if c["status"] == "warning"),
+        "musicbrainz_ready": not mb_blocked,
+        "acoustid_ready": not acoustid_blocked,
+    }
+
+
+def _submission_stage_id(workflow_stage: str) -> str:
+    """Map the existing free-text workflow_stage to one of _STAGE_ORDER.
+
+    Mirrors the same substring precedence the frontend stepper already uses
+    (stepIndex() in Submissions.tsx) so both stay in agreement without the
+    checklist re-deriving progress through a second, divergent code path.
+    """
+    text = (workflow_stage or "").lower()
+    if "complete" in text:
+        return "complete"
+    if "acoustid" in text:
+        return "acoustid"
+    if "waiting" in text or "ids" in text or "prepared" in text:
+        return "attach_ids"
+    if "ready for musicbrainz" in text:
+        return "musicbrainz_prep"
+    return "identify"
+
+
+def _submission_current_stage(preflight: Dict[str, Any], workflow_stage: str) -> str:
+    """More precise stage id than the free-text workflow_stage alone.
+
+    `musicbrainz_ready` blocks on both "identify" and "musicbrainz_prep"
+    checks together (e.g. missing album title AND not-yet-imported both
+    keep it False), so workflow_stage can stay "Needs metadata" purely
+    because of a musicbrainz_prep-only check like "not imported into
+    Beets" even after every identify-stage check has passed. Left alone,
+    that would hide the real blocker from the checklist (it only shows
+    current-or-earlier-stage checks) while the primary action stays
+    disabled for a reason the compact card can't see — exactly the kind
+    of card/footer disagreement this rework is meant to prevent. Advance
+    past "identify" as soon as identify-stage checks are clean, and only
+    defer to the workflow_stage text for the stages after that.
+    """
+    artist_blocked = any(
+        c["blocking"] and c["status"] == "fail" and c["stage"] == "artist"
+        for c in preflight["checks"]
+    )
+    if artist_blocked:
+        return "artist"
+    identify_blocked = any(
+        c["blocking"] and c["status"] == "fail" and c["stage"] == "identify"
+        for c in preflight["checks"]
+    )
+    if identify_blocked:
+        return "identify"
+    return _submission_stage_id(workflow_stage)
+
+
+def _annotate_current_stage(preflight: Dict[str, Any], workflow_stage: str) -> Dict[str, Any]:
+    """Tag each check with current_stage_relevant and the target's stage id/label.
+
+    A check is relevant once its own stage is reached (current or earlier);
+    checks that belong only to a later stage (e.g. AcoustID checks while
+    still preparing MusicBrainz metadata) are marked not relevant so the
+    default UI can hide them instead of overwhelming the current step.
+    """
+    stage_id = _submission_current_stage(preflight, workflow_stage)
+    current_index = _STAGE_ORDER.index(stage_id)
+    for check in preflight["checks"]:
+        check_index = _STAGE_ORDER.index(check["stage"]) if check["stage"] in _STAGE_ORDER else 0
+        check["current_stage_relevant"] = check_index <= current_index
+    preflight["current_stage"] = stage_id
+    preflight["current_stage_label"] = _STAGE_LABELS[stage_id]
+    return preflight
 
 
 def _resolve_submission_target(album_id: int = 0, item_id: int = 0, path: str = "", singleton: bool = False) -> Tuple[str, Any, Dict[str, Any], List[Dict[str, Any]]]:
@@ -638,10 +887,28 @@ def submission_target():
     except Exception as ex:
         return jsonify({"ok": False, "error": str(ex)}), 400
     readiness = _submission_readiness()
-    preflight = _submission_preflight(summary, tracks, readiness)
     draft = _submission_draft(target_type, target_id)
+    artist_dismissed = bool(draft.get("artist_dismissed"))
+    duplicates_reviewed = bool(draft.get("duplicates_reviewed"))
+    manual_artist_id = _s((draft.get("published") or {}).get("artistId") or "").strip().lower()
+    if _s(summary.get("mb_albumartistid")).strip():
+        artist_match: Dict[str, Any] = {}
+    elif manual_artist_id and _MB_UUID_RE.match(manual_artist_id):
+        # User pasted an artist ID/URL directly instead of relying on search.
+        artist_match = {"id": manual_artist_id, "name": "", "score": 100, "disambiguation": ""}
+    else:
+        artist_match = _submission_artist_match(summary.get("albumartist"))
+    preflight = _submission_preflight(
+        summary, tracks, readiness, artist_match=artist_match,
+        artist_dismissed=artist_dismissed, duplicates_reviewed=duplicates_reviewed,
+    )
     summary["workflow_stage"] = _s(draft.get("stage") or ("Ready for AcoustID" if summary.get("mb_albumid") and summary.get("mb_releasegroupid") and preflight.get("acoustid_ready") else "Waiting for published MBIDs" if draft.get("mbsubmit_output") else "Ready for MusicBrainz" if preflight.get("musicbrainz_ready") else "Needs metadata"))
-    return jsonify({"ok": True, "target_type": target_type, "target_id": target_id, "summary": summary, "tracks": tracks, "preflight": preflight, "readiness": readiness, "draft": draft})
+    preflight = _annotate_current_stage(preflight, summary["workflow_stage"])
+    return jsonify({
+        "ok": True, "target_type": target_type, "target_id": target_id,
+        "summary": summary, "tracks": tracks, "preflight": preflight,
+        "readiness": readiness, "draft": draft, "artist_match": artist_match,
+    })
 
 
 def _draft_target_ref(target_type: str, payload_or_args) -> Any:

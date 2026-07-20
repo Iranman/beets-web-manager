@@ -18,6 +18,7 @@ remain authoritative. This module only adds:
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import time
@@ -32,6 +33,12 @@ from flask import jsonify, request
 # Imported after app.py has already defined app (circular-but-OK pattern,
 # matches routes_jobs.py / routes_lidarr.py).
 from app import app  # noqa: E402
+# The auth-bootstrap helpers below are imported lazily, inside the functions
+# that use them, rather than here at module scope: tests/test_routes_setup.py
+# exercises this module against a minimal stub `app` module (just a bare
+# Flask() instance, none of app.py's real helpers) to test the setup wizard
+# in isolation without booting the full app -- a module-level import of
+# app.py-only names would break that stub import for every test in the file.
 
 _SETTINGS_FILE = Path(os.environ.get("SETUP_SETTINGS_FILE", "/config/app_settings.json"))
 _SETUP_COMPLETE_MARKER = Path(os.environ.get("SETUP_COMPLETE_FILE", "/config/.setup_complete"))
@@ -40,6 +47,50 @@ _ENV_EXAMPLE_FILE = Path(os.environ.get("SETUP_ENV_EXAMPLE_FILE", str(Path(__fil
 _ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 _BLOCKED_ENV_NAMES = {"SETUP_ENV_FILE", "SETUP_ENV_EXAMPLE_FILE", "SETUP_SETTINGS_FILE", "SETUP_COMPLETE_FILE"}
 _SECRET_ENV_PARTS = ("KEY", "TOKEN", "PASSWORD", "SECRET")
+_PASSWORD_MIN_LENGTH = 12
+_PASSWORD_SPECIAL_RE = re.compile(r"[^A-Za-z0-9]")
+_PASSWORD_UPPER_RE = re.compile(r"[A-Z]")
+_PASSWORD_LOWER_RE = re.compile(r"[a-z]")
+_PASSWORD_DIGIT_RE = re.compile(r"[0-9]")
+_FALLBACK_AUTH_TOKEN_FILE = Path(os.environ.get("BEETS_WEB_AUTH_TOKEN_FILE", "/config/.auth_token"))
+_FALLBACK_PLACEHOLDER_AUTH_SECRETS = {
+    "admin", "password", "password1", "changeme", "changeit", "secret", "token",
+    "default", "example", "letmein", "beets", "beetsweb", "setinenv", "setastrongownertoken",
+}
+
+
+def _fallback_auth_secret_usable(value: str) -> bool:
+    """Standalone duplicate of app.py's _auth_secret_is_usable (length +
+    placeholder check only, skipping the ${...}/? shell-substitution guard).
+    Used only if app.py's real helper can't be imported -- e.g. routes_setup
+    loaded against a minimal stub `app` module in tests/test_routes_setup.py
+    -- so /api/setup/status degrades gracefully instead of 500ing."""
+    secret = (value or "").strip()
+    if len(secret) < 32:
+        return False
+    compact = re.sub(r"[^a-z0-9]+", "", secret.lower())
+    return compact not in _FALLBACK_PLACEHOLDER_AUTH_SECRETS
+
+
+def _password_requirements_unmet(password: str) -> List[str]:
+    """Returns unmet BEETS_WEB_PASSWORD requirements (empty list = passes).
+
+    Requirements match what the setup UI displays and enforces client-side:
+    at least 12 characters, one uppercase letter, one lowercase letter, one
+    number, and one special (non-alphanumeric) character.
+    """
+    unmet: List[str] = []
+    if len(password) < _PASSWORD_MIN_LENGTH:
+        unmet.append(f"at least {_PASSWORD_MIN_LENGTH} characters")
+    if not _PASSWORD_UPPER_RE.search(password):
+        unmet.append("an uppercase letter")
+    if not _PASSWORD_LOWER_RE.search(password):
+        unmet.append("a lowercase letter")
+    if not _PASSWORD_DIGIT_RE.search(password):
+        unmet.append("a number")
+    if not _PASSWORD_SPECIAL_RE.search(password):
+        unmet.append("a special character")
+    return unmet
 _FALLBACK_ENV_TEMPLATE = """# Required owner/admin authentication
 BEETS_WEB_AUTH_TOKEN=
 BEETS_WEB_PASSWORD=
@@ -308,6 +359,10 @@ def _write_env_file(updates: Dict[str, str], clear: List[str]) -> str:
             raise ValueError(f"{key} cannot contain newlines")
         if len(value) > 4096:
             raise ValueError(f"{key} is too long")
+    if updates.get("BEETS_WEB_PASSWORD"):
+        unmet = _password_requirements_unmet(updates["BEETS_WEB_PASSWORD"])
+        if unmet:
+            raise ValueError("Password does not meet requirements: needs " + ", ".join(unmet) + ".")
     for key in clear:
         if key in _BLOCKED_ENV_NAMES or not _ENV_NAME_RE.match(key) or key not in editable:
             raise ValueError(f"{key} is not an editable setup environment variable")
@@ -426,6 +481,22 @@ def setup_status():
 
     ready = not blocking
     demo_mode = os.environ.get("DEMO_MODE", "0").strip().lower() in ("1", "true", "yes", "on")
+    try:
+        from app import _auth_secret_is_usable, _security_auth_token, _security_auth_password, _GENERATED_AUTH_TOKEN_FILE
+        token_configured = _auth_secret_is_usable(_security_auth_token())
+        password_configured = _auth_secret_is_usable(_security_auth_password())
+        token_auto_generated = token_configured and _GENERATED_AUTH_TOKEN_FILE.exists()
+    except ImportError:
+        token_configured = _fallback_auth_secret_usable(
+            os.environ.get("BEETS_WEB_AUTH_TOKEN", "") or os.environ.get("BEETS_WEB_TOKEN", "")
+        )
+        password_configured = _fallback_auth_secret_usable(os.environ.get("BEETS_WEB_PASSWORD", ""))
+        token_auto_generated = token_configured and _FALLBACK_AUTH_TOKEN_FILE.exists()
+    auth_status = {
+        "token_configured": token_configured,
+        "token_auto_generated": token_auto_generated,
+        "password_configured": password_configured,
+    }
     return jsonify({
         "ok": True,
         "status": "ready" if ready else "warning",
@@ -440,6 +511,7 @@ def setup_status():
             "beets_config": {"path": str(beets_config_path), "exists": beets_config_path.exists()},
         },
         "fpcalc": {"available": bool(fpcalc_path), "path": fpcalc_path or ""},
+        "auth": auth_status,
         "integrations": integrations,
         "settings": {k: (_mask(v) if "key" in k.lower() or "token" in k.lower() else v)
                      for k, v in settings.items()},
@@ -636,6 +708,44 @@ def setup_save_settings():
     settings.update(payload)
     _save_settings(settings)
     return jsonify({"ok": True})
+
+
+@app.post("/api/setup/auth-token/regenerate")
+def setup_regenerate_auth_token():
+    """Generate a fresh BEETS_WEB_AUTH_TOKEN and persist it, both to the
+    editable .env file (so it's visible/masked like any other secret in the
+    System page) and to the dedicated auto-generation file app.py's startup
+    bootstrap reads (so a future restart with no other config still finds a
+    usable token instead of silently locking itself out again).
+
+    The plaintext value is returned exactly once, here, at generation time --
+    it is never included in any other response (GET /api/setup/env always
+    masks it, matching every other secret field).
+    """
+    try:
+        from app import generate_secure_auth_token, _GENERATED_AUTH_TOKEN_FILE
+        token = generate_secure_auth_token()
+        token_file = _GENERATED_AUTH_TOKEN_FILE
+    except ImportError:
+        token = secrets.token_urlsafe(32)
+        token_file = _FALLBACK_AUTH_TOKEN_FILE
+    try:
+        backup_path = _write_env_file({"BEETS_WEB_AUTH_TOKEN": token}, [])
+    except ValueError as ex:
+        return jsonify({"ok": False, "error": str(ex)}), 400
+    except Exception as ex:
+        return jsonify({"ok": False, "error": f"Could not save environment file: {ex}"}), 500
+    try:
+        token_file.parent.mkdir(parents=True, exist_ok=True)
+        token_file.write_text(token, encoding="utf-8")
+    except Exception:
+        pass
+    return jsonify({
+        "ok": True,
+        "token": token,
+        "warning": "Save this token now — it will not be shown again.",
+        "backup_path": backup_path,
+    })
 
 
 @app.post("/api/setup/complete")

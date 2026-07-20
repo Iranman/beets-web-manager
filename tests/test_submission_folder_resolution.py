@@ -76,6 +76,7 @@ def _load_namespace(lib: _FakeLib):
         "_folder_cover_art_url",
         "_empty_folder_summary",
         "_summary_for_folder_tracks",
+        "_folder_audio_file_listing",
         "_resolve_folder_submission_target",
         "_duration_label",
         "_item_abs_path",

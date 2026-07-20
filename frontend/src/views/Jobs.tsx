@@ -1324,11 +1324,11 @@ function MaintenanceRunnerBar({
     };
   }, [currentJob?.job_id, currentJob?.status]);
 
-  const runNow = async () => {
+  const runNow = async (options?: { forceFresh?: boolean }) => {
     setBusy(true);
     setError('');
     try {
-      await startCleanAll();
+      await startCleanAll(options);
       setReport(null);
       await onStarted();
     } catch (err) {
@@ -1431,7 +1431,20 @@ function MaintenanceRunnerBar({
             </div>
             {checkpointResumable ? (
               <div className="mt-2 text-xs text-amber-300">
-                Resume checkpoint ready. Next phase: {checkpointNextLabel}.
+                Resume checkpoint ready. Next phase: {checkpointNextLabel}.{' '}
+                <Button
+                  disabled={busy || running}
+                  size="small"
+                  variant="text"
+                  sx={{ p: 0, minWidth: 0, verticalAlign: 'baseline', fontSize: 'inherit', textTransform: 'none' }}
+                  onClick={() => {
+                    if (window.confirm('Discard this checkpoint and start a completely fresh Clean All run? Progress from the incomplete run will not be reused.')) {
+                      void runNow({ forceFresh: true });
+                    }
+                  }}
+                >
+                  Discard checkpoint and start fresh instead.
+                </Button>
               </div>
             ) : null}
           </div>

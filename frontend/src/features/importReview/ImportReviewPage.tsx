@@ -21,6 +21,7 @@ import { apiGet } from '../../lib/api';
 import {
   albumAddMbids,
   albumMbsubmit,
+  attachRecording,
   autoEnqueueImport,
   cleanupReviewFiles,
   cleanupStaleReview,
@@ -38,6 +39,7 @@ import {
   reimportDisk,
   suggestAlbum,
   suggestFolder,
+  suggestItem,
 } from '../../api/client';
 import type {
   AiSuggestResponse,
@@ -675,7 +677,7 @@ function targetPreviewKey(item: ReviewItem, selectedMatch?: SelectedMatch): stri
 }
 
 function actionLabel(item: ReviewItem, selectedMatch?: SelectedMatch, preview?: ImportTargetPreviewResponse): string {
-  if (item.type === 'library_no_mb') return 'Match album';
+  if (item.type === 'library_no_mb') return item.target_kind === 'item' ? 'Attach recording ID' : 'Match album';
   const selectedCount = selectedMatch && selectedMatch.source !== 'manual'
     ? selectedImportSourceFiles(selectedMatch, preview).length
     : 0;
@@ -744,7 +746,11 @@ function applyBlockReason(
   targetPreviewState?: TargetPreviewState,
 ): string {
   const releaseGroupId = mbid.trim();
-  if (!releaseGroupId) return 'Enter or select a MusicBrainz Release Group ID first.';
+  if (!releaseGroupId) {
+    return item.target_kind === 'item'
+      ? 'Enter or select a MusicBrainz recording ID first.'
+      : 'Enter or select a MusicBrainz Release Group ID first.';
+  }
   const importLike = item.type === 'pending_ai' && !existingAlbumId(item);
   if (!importLike) {
     if (selectedMatch?.preflight_status === 'failed' && selectedMatch.source !== 'manual') {
@@ -2325,16 +2331,16 @@ function ReviewCard({
             {item.album_id ? <Chip size="small" variant="outlined" label={`Album ${item.album_id}`} /> : null}
 
             <TextField
-              label="MusicBrainz Release Group ID"
+              label={item.target_kind === 'item' ? 'MusicBrainz Recording ID' : 'MusicBrainz Release Group ID'}
               value={mbid}
               onChange={(event) => onMbidChange(event.target.value)}
               size="small"
               fullWidth
               disabled={busy}
-              helperText="The canonical album identity. Enter a release-group UUID."
+              helperText={item.target_kind === 'item' ? 'Identifies this specific track. Enter a recording UUID.' : 'The canonical album identity. Enter a release-group UUID.'}
             />
 
-            {representativeRelease ? (
+            {item.target_kind !== 'item' && representativeRelease ? (
               <div className="rounded border border-graphite-200 bg-graphite-50 px-2 py-1.5 text-xs text-zinc-500">
                 <div className="font-medium text-zinc-600">Representative Release ID</div>
                 <div className="font-mono truncate">{representativeRelease}</div>
@@ -3381,6 +3387,27 @@ export function ImportReviewPage({
 
   const handleSuggest = useCallback(async (item: ReviewItem) => {
     setAction(item.id, { status: 'running', message: 'Asking AI...' });
+    if (item.type === 'library_no_mb' && item.target_kind === 'item' && item.item_id) {
+      // Singleton items are identified by recording, not release -- a
+      // separate response shape (suggestions.mb_trackid, not
+      // suggestion.mb_albumid) from the album/folder AI-suggest endpoints,
+      // so this is handled as its own branch rather than forced into the
+      // shared album-shaped path below.
+      try {
+        const response = await suggestItem(item.item_id);
+        const s = response.suggestions;
+        if (s?.mb_valid && s.mb_trackid) {
+          setMbids((current) => ({ ...current, [item.id]: s.mb_trackid || '' }));
+        }
+        setAction(item.id, {
+          status: 'success',
+          message: s?.reason || (s?.mb_valid ? 'AI suggestion ready. Verify the recording ID before attaching.' : 'No confident recording match found.'),
+        });
+      } catch (err) {
+        setAction(item.id, { status: 'error', message: err instanceof Error ? err.message : String(err) });
+      }
+      return;
+    }
     try {
       const response = item.album_id
         ? await suggestAlbum(item.album_id)
@@ -3432,7 +3459,9 @@ export function ImportReviewPage({
         || selectedSourceFiles.length < unfilteredSelectedFiles.length,
       );
 
-      if (item.type === 'library_no_mb' && item.album_id) {
+      if (item.type === 'library_no_mb' && item.target_kind === 'item' && item.item_id) {
+        started = await attachRecording(item.item_id, representativeId);
+      } else if (item.type === 'library_no_mb' && item.album_id) {
         started = await matchAlbum(item.album_id, representativeId);
       } else if (existingId) {
         started = await reimportDisk({

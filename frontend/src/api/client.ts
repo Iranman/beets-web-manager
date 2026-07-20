@@ -80,8 +80,10 @@ import type {
   ImportTargetPreviewPayload,
   ImportTargetPreviewResponse,
   StatsResponse,
+  SetupAuthTokenRegenerateResponse,
   SetupEnvResponse,
   SetupEnvSavePayload,
+  SetupIntegrationTestResponse,
   SetupStatusResponse,
   WantedResponse,
   YtdlpStatusResponse,
@@ -236,6 +238,26 @@ export function saveSetupEnv(payload: SetupEnvSavePayload): Promise<SetupEnvResp
 
 export function completeSetup(): Promise<ApiOkResponse> {
   return apiJson<ApiOkResponse>('/api/setup/complete', jsonRequest('POST'));
+}
+
+export function testSetupAi(): Promise<SetupIntegrationTestResponse> {
+  return apiJson<SetupIntegrationTestResponse>('/api/setup/test/ai', jsonRequest('POST'));
+}
+
+export function testSetupMusicBrainz(): Promise<SetupIntegrationTestResponse> {
+  return apiJson<SetupIntegrationTestResponse>('/api/setup/test/musicbrainz', jsonRequest('POST'));
+}
+
+export function testSetupAcoustid(): Promise<SetupIntegrationTestResponse> {
+  return apiJson<SetupIntegrationTestResponse>('/api/setup/test/acoustid', jsonRequest('POST'));
+}
+
+export function testSetupPlex(): Promise<SetupIntegrationTestResponse> {
+  return apiJson<SetupIntegrationTestResponse>('/api/setup/test/plex', jsonRequest('POST'));
+}
+
+export function regenerateAuthToken(): Promise<SetupAuthTokenRegenerateResponse> {
+  return apiJson<SetupAuthTokenRegenerateResponse>('/api/setup/auth-token/regenerate', jsonRequest('POST'));
 }
 
 export function getStats(): Promise<StatsResponse> {
@@ -1116,6 +1138,14 @@ export function matchAlbum(albumId: number, mbId: string): Promise<JobStartRespo
   return apiJson<JobStartResponse>(`/api/albums/${albumId}/match`, jsonRequest('POST', { mb_id: mbId }));
 }
 
+export function suggestItem(itemId: number): Promise<AiSuggestResponse> {
+  return apiJson<AiSuggestResponse>(`/api/items/${itemId}/ai-suggest`, { method: 'POST' });
+}
+
+export function attachRecording(itemId: number, mbTrackId: string): Promise<JobStartResponse> {
+  return apiJson<JobStartResponse>(`/api/items/${itemId}/attach-recording`, jsonRequest('POST', { mb_trackid: mbTrackId }));
+}
+
 export function reimportDisk(payload: ReimportDiskPayload): Promise<JobStartResponse> {
   return apiJson<JobStartResponse>('/api/albums/reimport-disk', jsonRequest('POST', payload));
 }
@@ -1205,12 +1235,12 @@ export function reconcileImportJob(
   );
 }
 
-export function startMaintenanceRunner(): Promise<JobStartResponse> {
-  return apiJson<JobStartResponse>('/api/jobs/maintenance-runner', { method: 'POST' });
+export function startMaintenanceRunner(options?: { forceFresh?: boolean }): Promise<JobStartResponse> {
+  return apiJson<JobStartResponse>('/api/jobs/maintenance-runner', jsonRequest('POST', options?.forceFresh ? { force_fresh: true } : undefined));
 }
 
-export function startCleanAll(): Promise<JobStartResponse> {
-  return startMaintenanceRunner();
+export function startCleanAll(options?: { forceFresh?: boolean }): Promise<JobStartResponse> {
+  return startMaintenanceRunner(options);
 }
 
 // ── Unmatched releases ────────────────────────────────────────────────────────

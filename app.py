@@ -3,7 +3,7 @@
 Beets Web Control — standalone Flask app.
 Opens the beets library directly. No plugin system, no S6, no beet web.
 """
-import base64, copy, difflib, functools, hashlib, hmac, importlib, json, math, mimetypes, os, platform, re, shlex, shutil, socket, sqlite3, subprocess, sys, threading, time, unicodedata, uuid
+import base64, copy, difflib, functools, hashlib, hmac, importlib, json, math, mimetypes, os, platform, re, secrets, shlex, shutil, socket, sqlite3, subprocess, sys, threading, time, unicodedata, uuid
 import importlib.metadata
 import urllib.error, urllib.parse, urllib.request
 from backend.security import (OutboundPolicyError, bounded_rate_key_store_sweep, direct_peer_is_trusted, install_secure_urllib, validate_outbound_url)
@@ -1205,6 +1205,7 @@ RELEASE_ART_CACHE_DIR = METADATA_CACHE_ROOT / "release-art"
 ART_REPAIR_LAST_FILE = METADATA_CACHE_ROOT / "art-repair-last.json"
 MAINTENANCE_RUNNER_LAST_FILE = METADATA_CACHE_ROOT / "maintenance-runner-last.json"
 ALBUM_FOLDER_CLEANUP_LAST_FILE = METADATA_CACHE_ROOT / "album-folder-cleanup-last.json"
+ROOT_FOLDER_REPAIR_LAST_FILE = METADATA_CACHE_ROOT / "root-folder-repair-last.json"
 RGID_RESOLUTION_STATE_FILE = METADATA_CACHE_ROOT / "rgid-resolution-state.json"
 AUDIO_EXT    = frozenset({                  # all audio extensions the app handles
     '.flac', '.mp3', '.m4a', '.ogg', '.opus', '.wav',
@@ -1213,6 +1214,10 @@ AUDIO_EXT    = frozenset({                  # all audio extensions the app handl
 _ANSI_RE    = re.compile(r'\x1b\[[0-9;]*m')   # strip terminal colour codes
 _MB_UUID_RE = re.compile(                      # MusicBrainz UUID validator
     r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.IGNORECASE)
+
+
+def _is_valid_mb_uuid(value: Any) -> bool:
+    return bool(_MB_UUID_RE.match(_s(value).strip()))
 _YEAR_SFXRE = re.compile(r'\s*[\(\[]\d{4}[\)\]]\s*$')  # trailing year in album name
 _DISC_CACHE_TTL = 1800   # seconds before Discogs discography cache expires
 _MB_RELEASE_TRACKLIST_CACHE_TTL = 300
@@ -1933,6 +1938,72 @@ def _security_auth_configured() -> bool:
 
 def _security_auth_disabled() -> bool:
     return os.environ.get("BEETS_WEB_AUTH_DISABLED", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+_GENERATED_AUTH_TOKEN_FILE = Path(
+    os.environ.get("BEETS_WEB_AUTH_TOKEN_FILE", "/config/.auth_token")
+)
+
+
+def generate_secure_auth_token() -> str:
+    """256-bit-entropy URL-safe token, well above _MIN_AUTH_SECRET_LENGTH and
+    never a placeholder string -- suitable for signing/bearer authentication."""
+    return secrets.token_urlsafe(32)
+
+
+def _persist_generated_auth_token(token: str) -> None:
+    """Best-effort: the in-process env var already works for this run even if
+    writing to disk fails (e.g. read-only /config in some environment)."""
+    try:
+        _GENERATED_AUTH_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _GENERATED_AUTH_TOKEN_FILE.write_text(token, encoding="utf-8")
+        try:
+            os.chmod(_GENERATED_AUTH_TOKEN_FILE, 0o600)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def _bootstrap_auth_token_if_missing() -> None:
+    """First-run safety net: with neither a usable BEETS_WEB_AUTH_TOKEN nor
+    BEETS_WEB_PASSWORD configured, _enforce_security_boundary 503s every
+    route including the setup wizard itself -- an operator with no shell
+    access has no way in. Never require inventing a token manually: generate
+    one automatically instead, persist it so a plain process restart reuses
+    the same value, and print it once to the startup log (the only channel
+    available before any credential exists). Never runs once a real secret
+    (auto-generated or operator-set) is already configured.
+    """
+    if _security_auth_configured():
+        return
+    existing = ""
+    try:
+        existing = _GENERATED_AUTH_TOKEN_FILE.read_text(encoding="utf-8").strip()
+    except Exception:
+        existing = ""
+    if _auth_secret_is_usable(existing):
+        os.environ["BEETS_WEB_AUTH_TOKEN"] = existing
+        return
+    token = generate_secure_auth_token()
+    os.environ["BEETS_WEB_AUTH_TOKEN"] = token
+    _persist_generated_auth_token(token)
+    print(
+        "\n" + "=" * 72 +
+        "\nNo BEETS_WEB_AUTH_TOKEN or BEETS_WEB_PASSWORD was configured."
+        "\nGenerated a secure API token automatically so the app is not"
+        "\nlocked out on first run:\n"
+        f"\n  BEETS_WEB_AUTH_TOKEN={token}\n"
+        "\nSave this now -- it will not be printed again. Use it as a Bearer"
+        "\ntoken for API clients, or set BEETS_WEB_PASSWORD (any authenticated"
+        "\nclient can do this via POST /api/setup/env) for browser access."
+        "\nRegenerate anytime with POST /api/setup/auth-token/regenerate."
+        "\n" + "=" * 72 + "\n",
+        flush=True,
+    )
+
+
+_bootstrap_auth_token_if_missing()
 
 
 def _constant_time_equal(left: str, right: str) -> bool:
@@ -2901,6 +2972,47 @@ def album_add_mbids(aid: int):
     return jsonify({"ok": True, "job_id": job.job_id})
 
 
+@app.post("/api/items/<int:iid>/attach-recording")
+def item_attach_recording(iid: int):
+    """Attach a MusicBrainz recording ID to a singleton item (no album_id)
+    and sync/move it, mirroring album_add_mbids's direct modify+write+move
+    pattern at item level. Meant for recording IDs a user picked from
+    /api/items/<iid>/ai-suggest candidates."""
+    item = lib.get_item(iid)
+    if not item:
+        return jsonify({"ok": False, "error": "Item not found"}), 404
+    payload = request.get_json(silent=True) or {}
+    mb_trackid = _s(payload.get("mb_trackid") or "").strip().lower()
+    if not mb_trackid:
+        return jsonify({"ok": False, "error": "mb_trackid is required"}), 400
+    if not _MB_UUID_RE.match(mb_trackid):
+        return jsonify({"ok": False, "error": "Invalid MusicBrainz UUID format"}), 400
+
+    def _do(log, cancel_event=None):
+        cfg = _write_job_beets_config(f"/tmp/beets_attach_recording_{iid}.yaml")
+        base = [BEET_BIN, "-c", cfg]
+        query = f"id:{iid}"
+        r = _beet_run(base + ["modify", "--yes", "--nowrite", f"mb_trackid={mb_trackid}", query],
+                      log, timeout=120, env=_beet_env(), cancel=cancel_event)
+        if r.returncode not in (0, -9, 124):
+            raise RuntimeError(f"beet modify failed rc={r.returncode}")
+        r = _beet_run(base + ["mbsync", query], log, timeout=60, env=_beet_env(), cancel=cancel_event)
+        if r.returncode not in (0, -9, 124):
+            log.append(f"  WARN beet mbsync rc={r.returncode}")
+        r = _beet_run(base + ["write", "--yes", query], log, timeout=120, env=_beet_env(), cancel=cancel_event)
+        if r.returncode not in (0, -9, 124):
+            log.append(f"  WARN beet write rc={r.returncode}")
+        r = _beet_run(base + ["move", query], log, timeout=120, env=_beet_env(), cancel=cancel_event)
+        if r.returncode not in (0, -9, 124):
+            log.append(f"  WARN beet move rc={r.returncode}")
+        _invalidate_lib_cache()
+        _trigger_plex_refresh(log)
+        log.append("Recording ID attached and item synced/moved.")
+
+    job = jobs.start_python(_do, label=f"Attach recording ID: item {iid}")
+    return jsonify({"ok": True, "job_id": job.job_id})
+
+
 def _item_ai_abs_path(item) -> str:
     path_text = _s(getattr(item, "path", "")).strip()
     if path_text and not Path(path_text).is_absolute():
@@ -3072,9 +3184,10 @@ def ai_suggest(iid):
     item = lib.get_item(iid)
     if not item:
         return jsonify({"ok": False, "error": "Not found"})
+    # AI is optional: gathering AcoustID/MusicBrainz/Discogs candidates below
+    # runs unconditionally, so a missing/invalid key still yields a match.
     api_key = os.environ.get("OPENAI_API_KEY", "")
-    if not api_key:
-        return jsonify({"ok": False, "error": "OPENAI_API_KEY not configured"})
+    ai_available = bool(api_key)
 
     item_path = _item_ai_abs_path(item)
     filename = Path(item_path or _s(item.path)).name
@@ -3218,15 +3331,48 @@ def ai_suggest(iid):
         "temperature": 0.1,
         "response_format": {"type": "json_object"},
     }).encode()
-    req = urllib.request.Request(
-        "https://api.openai.com/v1/chat/completions",
-        data=payload,
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-    )
+    ai_unavailable_reason = "" if ai_available else "OPENAI_API_KEY not configured"
+    suggestions: Optional[Dict[str, Any]] = None
+    if ai_available:
+        req = urllib.request.Request(
+            "https://api.openai.com/v1/chat/completions",
+            data=payload,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read())
+            suggestions = json.loads(data["choices"][0]["message"]["content"])
+        except Exception as exc:
+            ai_available = False
+            ai_unavailable_reason = _classify_openai_error(exc)
+
+    if suggestions is None:
+        # AI unavailable/failed -- fall back to the top-ranked AcoustID/
+        # MusicBrainz candidate (already gathered above) instead of
+        # returning ok=False.
+        if mb_candidates:
+            top = mb_candidates[0]
+            top_score = float((top.get("_match_score") or {}).get("total", 0) or 0)
+            suggestions = {
+                "title": top.get("title", "") or current["title"],
+                "artist": top.get("artist", "") or current["artist"],
+                "album": top.get("album", "") or current["album"],
+                "year": str(top.get("year") or current["year"] or ""),
+                "genre": top.get("genre", "") or current["genre"],
+                "label": top.get("label", "") or current["label"],
+                "mb_trackid": top.get("mb_trackid", ""),
+                "mb_albumid": top.get("mb_albumid", ""),
+                "confidence": "medium" if top_score >= 0.75 else "low",
+                "reason": f"Matched using MusicBrainz and AcoustID (AI unavailable: {ai_unavailable_reason}).",
+            }
+        else:
+            suggestions = {
+                "confidence": "low",
+                "reason": f"No MusicBrainz/AcoustID candidates found, and AI is unavailable ({ai_unavailable_reason}).",
+            }
+
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read())
-        suggestions = json.loads(data["choices"][0]["message"]["content"])
         # Coerce numeric fields
         for f in ("year", "track", "tracktotal", "disc", "disctotal"):
             if f in suggestions:
@@ -3316,6 +3462,8 @@ def ai_suggest(iid):
             acoustid_candidates=acoustid_cands,
             discogs_candidates=discogs_cands,
         )
+        suggestions["ai_available"] = ai_available
+        suggestions["ai_unavailable_reason"] = ai_unavailable_reason
         suggestions["evidence"] = evidence
         return jsonify({"ok": True, "suggestions": suggestions,
                         "mb_candidates": mb_candidates,
@@ -3323,9 +3471,6 @@ def ai_suggest(iid):
                         "evidence": evidence,
                         "acoustid_candidates": acoustid_cands,
                         "discogs_candidates": discogs_cands})
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode(errors="replace")
-        return jsonify({"ok": False, "error": f"OpenAI {exc.code}: {body[:200]}"})
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)})
 
@@ -3380,6 +3525,31 @@ def _discogs_track_search(title: str, artist: str, limit: int = 5) -> List[Dict[
             "source":      "discogs",
         })
     return out
+
+
+def _discogs_release_fallback_candidate(artist: str, album: str) -> Dict[str, Any]:
+    """Best-effort Discogs release match for when MusicBrainz search finds
+    nothing at all. Discogs' catalog is far larger than MusicBrainz's for a
+    lot of regional/independent/reissue releases, so a Discogs hit here is
+    useful two ways: its cleaner artist/album text can succeed at a retry
+    MusicBrainz search that the raw folder-name guess couldn't, and even
+    when MusicBrainz still has nothing, surfacing the Discogs match gives a
+    reviewer something concrete to submit to MusicBrainz instead of a bare
+    "no candidates found". Returns {} if Discogs isn't configured, nothing
+    was found, or the top result's artist looks unrelated to the query.
+    """
+    if not DISCOGS_TOKEN or not (artist or album):
+        return {}
+    results = _discogs_track_search(album, artist, limit=5)
+    if not results:
+        return {}
+    best = results[0]
+    if artist and best.get("artist"):
+        from difflib import SequenceMatcher
+        similarity = SequenceMatcher(None, _s(best.get("artist")).lower(), _s(artist).lower()).ratio()
+        if similarity < 0.55:
+            return {}
+    return best
 
 
 def _discogs_artist_discography(artist_name: str) -> Dict[str, Any]:
@@ -12917,6 +13087,29 @@ def acquisition_download_all_active():
         "last_job": last_job,
     })
 
+def _classify_openai_error(exc: Exception) -> str:
+    """Classify an OpenAI request failure into a short, human-readable reason.
+
+    AI is an optional enhancement everywhere it's used for matching: a missing
+    key, invalid key, timeout, rate limit, or any other provider failure must
+    degrade gracefully to MusicBrainz/AcoustID-only matching rather than abort
+    the caller. Callers use this text as the "AI unavailable: ..." suffix.
+    """
+    if isinstance(exc, urllib.error.HTTPError):
+        if exc.code in (401, 403):
+            return "the AI provider rejected the API key (invalid or unauthorized)"
+        if exc.code == 429:
+            return "the AI provider rate-limited this request"
+        if exc.code == 404:
+            return "the configured AI model was not found"
+        return f"the AI provider returned HTTP {exc.code}"
+    if isinstance(exc, TimeoutError):
+        return "the AI provider request timed out"
+    if isinstance(exc, urllib.error.URLError):
+        return "the AI provider is unreachable"
+    return f"AI provider error ({exc})"
+
+
 def _ai_suggest_album_internal(
     album,
     log: List[str],
@@ -12926,11 +13119,13 @@ def _ai_suggest_album_internal(
     """Run AI + MusicBrainz suggestion for a library album that lacks an mb_albumid.
 
     Returns the same shape as the /api/albums/<id>/ai-suggest JSON response
-    but as a plain dict (not a Flask response).
+    but as a plain dict (not a Flask response). AI is optional here: a
+    missing/invalid key or any provider failure falls back to the top-ranked
+    MusicBrainz/AcoustID candidate instead of returning ok=False, so light-
+    confirm repair keeps working without AI configured.
     """
     api_key = os.environ.get("OPENAI_API_KEY", "")
-    if not api_key:
-        return {"ok": False, "error": "OPENAI_API_KEY not configured"}
+    ai_available = bool(api_key)
 
     aid = existing_album_id or int(getattr(album, "id", 0) or 0)
     tracks = sorted(album.items(), key=lambda t: t.track or 0)
@@ -13119,18 +13314,45 @@ def _ai_suggest_album_internal(
             "json_schema": {"name": "album_match", "strict": True, "schema": _album_match_schema},
         },
     }).encode()
-    req = urllib.request.Request(
-        "https://api.openai.com/v1/chat/completions",
-        data=oai_payload,
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-    )
+    ai_unavailable_reason = "" if ai_available else "OPENAI_API_KEY not configured"
+    sug: Optional[Dict[str, Any]] = None
+    if ai_available:
+        req = urllib.request.Request(
+            "https://api.openai.com/v1/chat/completions",
+            data=oai_payload,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                data = json.loads(r.read())
+            msg = (data.get("choices") or [{}])[0].get("message") or {}
+            if msg.get("refusal"):
+                ai_available = False
+                ai_unavailable_reason = f"AI refusal: {msg['refusal'][:200]}"
+            else:
+                sug = json.loads(msg["content"])
+        except Exception as exc:
+            ai_available = False
+            ai_unavailable_reason = _classify_openai_error(exc)
+
+    if sug is None:
+        # AI unavailable/failed -- fall back to the top-ranked MusicBrainz/
+        # AcoustID candidate instead of returning ok=False. The MB search and
+        # AcoustID work above already ran unconditionally.
+        top = mb_candidates[0]
+        top_score = float((top.get("_match_score") or {}).get("total", 0) or 0)
+        sug = {
+            "candidate_index": 0,
+            "album": top.get("album", "") or (album.album or ""),
+            "albumartist": top.get("artist", "") or (album.albumartist or ""),
+            "year": int(top["year"]) if str(top.get("year", "")).isdigit() else None,
+            "label": top.get("label", ""),
+            "country": top.get("country", ""),
+            "confidence": "medium" if top_score >= 0.75 else "low",
+            "reason": f"Matched using MusicBrainz and AcoustID (AI unavailable: {ai_unavailable_reason}).",
+        }
+
     try:
-        with urllib.request.urlopen(req, timeout=30) as r:
-            data = json.loads(r.read())
-        msg = (data.get("choices") or [{}])[0].get("message") or {}
-        if msg.get("refusal"):
-            return {"ok": False, "error": f"AI refusal: {msg['refusal'][:200]}"}
-        sug = json.loads(msg["content"])
         cand_idx = int(sug.get("candidate_index", -1))
         selected_candidate = None
         if 0 <= cand_idx < len(mb_candidates):
@@ -13185,6 +13407,8 @@ def _ai_suggest_album_internal(
             sug["mb_artist_search_url"] = (
                 "https://musicbrainz.org/search?"
                 + urllib.parse.urlencode({"query": _aa, "type": "artist"}))
+        sug["ai_available"] = ai_available
+        sug["ai_unavailable_reason"] = ai_unavailable_reason
         evidence = _ai_match_evidence_packet(
             "light_confirm",
             folder_path=album_dir,
@@ -13203,9 +13427,6 @@ def _ai_suggest_album_internal(
             "acoustid_release_hits": acoustid_release_hits,
             "evidence": evidence,
         }
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode(errors="replace")
-        return {"ok": False, "error": f"OpenAI {exc.code}: {body[:200]}"}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
 
@@ -13215,8 +13436,6 @@ def ai_suggest_album(aid):
     album = lib.get_album(aid)
     if not album:
         return jsonify({"ok": False, "error": "Album not found"})
-    if not os.environ.get("OPENAI_API_KEY", ""):
-        return jsonify({"ok": False, "error": "OPENAI_API_KEY not configured"})
     log: List[str] = []
     result = _ai_suggest_album_internal(album, log, existing_album_id=aid)
     return jsonify(result)
@@ -14392,7 +14611,18 @@ def import_review_queue():
                 pass
 
     try:
-        with _db(row_factory=sqlite3.Row) as con:
+        # text_factory=bytes matters here: without it sqlite3's default str
+        # decoding requires every selected column to be valid UTF-8, and a
+        # single non-UTF-8 albumartist/album/path anywhere in the result set
+        # raises and aborts the whole fetchall() -- caught by the blanket
+        # except below, silently dropping every library_no_mb row instead of
+        # just the one bad one. That disproportionately hits exactly the
+        # messy/foreign/scene-release folders that are missing an MB ID in
+        # the first place, since well-identified albums already have one.
+        # Every string field read from `r` below already goes through _s()
+        # (which decodes bytes safely with errors="replace"), so this is a
+        # safe drop-in fix, not a wider behavior change.
+        with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:
             album_rows = con.execute(
                 "SELECT albums.id, albums.albumartist, albums.album, albums.year, "
                 "COUNT(items.id) AS tracks, MAX(items.added) AS added, "
@@ -14450,6 +14680,57 @@ def import_review_queue():
             row["mb_url"]         = stored.get("mb_url", "")
             row["top_candidates"] = stored.get("top_candidates") or []
             row["preflight"]      = stored.get("preflight")
+
+    # Singleton items (already imported, but never grouped into an albums
+    # row -- album_id is NULL) lacking a MusicBrainz recording ID. /api/library
+    # surfaces these as synthetic one-track "albums" via disk-folder grouping
+    # and flags them "Missing MusicBrainz ID", but the album-level query
+    # above only scans the `albums` table, which structurally can never
+    # contain a singleton -- leaving them permanently invisible here even
+    # though Library correctly identifies them as needing review. Reuses
+    # the same "library_no_mb" type so existing counts/filters/UI already
+    # pick these up; target_kind="item" distinguishes the identification
+    # target (a recording, not a release) for correct labeling/actions.
+    try:
+        with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:
+            singleton_rows = con.execute(
+                "SELECT items.id, items.artist, items.title, items.album, items.year, "
+                "items.path, items.added "
+                "FROM items "
+                "WHERE (items.album_id IS NULL OR items.album_id = 0) "
+                "AND COALESCE(items.mb_trackid, '') = '' "
+                "ORDER BY items.added DESC "
+                "LIMIT ?",
+                (limit,)
+            ).fetchall()
+        for r in singleton_rows:
+            item_path = _s(r["path"])
+            if not _is_music_root_path(item_path):
+                continue
+            abs_path = item_path if item_path.startswith("/") else str(MUSIC_ROOT / item_path)
+            title = _s(r["title"])
+            artist = _s(r["artist"])
+            rows.append({
+                "id": f"item:{int(r['id'])}",
+                "type": "library_no_mb",
+                "target_kind": "item",
+                "status": "Needs recording ID",
+                "status_key": "needs_mb_id",
+                "title": title or Path(abs_path).stem or "(unknown title)",
+                "artist": artist,
+                "album": _s(r["album"]),
+                "year": int(r["year"] or 0),
+                "album_id": 0,
+                "item_id": int(r["id"]),
+                "first_item_id": int(r["id"]),
+                "tracks": 1,
+                "path": abs_path,
+                "folder": str(Path(abs_path).parent) if abs_path else "",
+                "folder_name": Path(abs_path).parent.name if abs_path else "",
+                "sort_ts": float(r["added"] or 0),
+            })
+    except Exception:
+        pass
 
     try:
         skipped_deep_scan = status_filter == "skipped"
@@ -15600,12 +15881,17 @@ def _acoustid_multi_file(
 def _ai_suggest_folder_internal(folder_path: str) -> dict:
     """Identify an unimported folder using AI + MusicBrainz.
     Returns: { ok, suggestion: { mb_albumid, album, albumartist, year, label, country, confidence, reason, mb_valid, mb_url }, mb_candidates }
+
+    AI is an enhancement, not a requirement: a missing/invalid OpenAI key or
+    any provider failure (401/403/timeout/rate limit/refusal/etc.) must not
+    block MusicBrainz/AcoustID matching. `ai_available` below gates only the
+    actual OpenAI call further down -- folder evidence gathering, AcoustID
+    fingerprinting, and MusicBrainz search all run unconditionally.
     """
     if not folder_path:
         return {"ok": False, "error": "path required"}
     api_key = os.environ.get("OPENAI_API_KEY", "")
-    if not api_key:
-        return {"ok": False, "error": "OPENAI_API_KEY not configured"}
+    ai_available = bool(api_key)
 
     # ── gather folder evidence ────────────────────────────────────────────────
     ev = _build_folder_evidence(folder_path)
@@ -15656,6 +15942,22 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
         # Useful when folder/tag names are badly mangled but track metadata is intact.
         mb_candidates = _mb_release_search_by_folder_tracks(
             folder_path, artist=guessed_artist, log=mb_search_log, limit=8)
+    discogs_fallback: Dict[str, Any] = {}
+    if not mb_candidates:
+        # MusicBrainz text search exhausted every variant it knows; Discogs'
+        # larger catalog and cleaner "Artist - Album" parsing can sometimes
+        # succeed where the raw folder-name guess didn't.
+        discogs_fallback = _discogs_release_fallback_candidate(guessed_artist, guessed_album)
+        if discogs_fallback:
+            mb_search_log.append(
+                f"Discogs match found: {discogs_fallback.get('artist')} - {discogs_fallback.get('album')}"
+            )
+            retry_artist = _s(discogs_fallback.get("artist")) or guessed_artist
+            retry_album = _s(discogs_fallback.get("album")) or guessed_album
+            if retry_artist != guessed_artist or retry_album != guessed_album:
+                mb_candidates = _mb_release_search(retry_album, retry_artist, limit=8,
+                                                   year=guessed_year, track_count=folder_track_count,
+                                                   artist_mbid=guessed_artist_mbid, log=mb_search_log)
     mb_search_failed = any(
         "failed" in line.lower() or "warn:" in line.lower() for line in mb_search_log
     )
@@ -15759,6 +16061,12 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
                 "No artist/album could be parsed from the folder name/tags; "
                 "manual review is required."
             )
+        elif discogs_fallback:
+            no_candidates_reason = (
+                "No MusicBrainz release candidates were found, but a possible match exists on Discogs: "
+                f"{discogs_fallback.get('artist')} - {discogs_fallback.get('album')} "
+                f"({discogs_fallback.get('discogs_url') or 'no URL'}). Consider submitting it to MusicBrainz."
+            )
         else:
             no_candidates_reason = "No MusicBrainz release candidates were found; manual review is required."
         sug = {
@@ -15772,6 +16080,7 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
             "reason": no_candidates_reason,
             "mb_albumid": "",
             "mb_valid": False,
+            "discogs_candidate": discogs_fallback or None,
         }
         evidence = _ai_match_evidence_packet(
             "fresh_import",
@@ -15910,19 +16219,47 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
             },
         },
     }).encode()
-    req = urllib.request.Request(
-        "https://api.openai.com/v1/chat/completions",
-        data=req_payload,
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-    )
+    ai_unavailable_reason = "" if ai_available else "OPENAI_API_KEY not configured"
+    sug: Optional[Dict[str, Any]] = None
+    if ai_available:
+        req = urllib.request.Request(
+            "https://api.openai.com/v1/chat/completions",
+            data=req_payload,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                data = json.loads(r.read())
+            # Check for refusal
+            msg = (data.get("choices") or [{}])[0].get("message") or {}
+            if msg.get("refusal"):
+                ai_available = False
+                ai_unavailable_reason = f"AI refusal: {msg['refusal'][:200]}"
+            else:
+                sug = json.loads(msg["content"])
+        except Exception as exc:
+            ai_available = False
+            ai_unavailable_reason = _classify_openai_error(exc)
+
+    if sug is None:
+        # AI unavailable/failed -- fall back to the top-ranked MusicBrainz/
+        # AcoustID candidate instead of returning ok=False. Folder evidence,
+        # AcoustID fingerprinting, and MusicBrainz search above already ran
+        # unconditionally, so this still completes the match.
+        top = mb_candidates[0]
+        top_score = float((top.get("_match_score") or {}).get("total", 0) or 0)
+        sug = {
+            "candidate_index": 0,
+            "album": top.get("album", "") or guessed_album,
+            "albumartist": top.get("artist", "") or guessed_artist,
+            "year": int(top["year"]) if str(top.get("year", "")).isdigit() else None,
+            "label": top.get("label", ""),
+            "country": top.get("country", ""),
+            "confidence": "medium" if top_score >= 0.75 else "low",
+            "reason": f"Matched using MusicBrainz and AcoustID (AI unavailable: {ai_unavailable_reason}).",
+        }
+
     try:
-        with urllib.request.urlopen(req, timeout=30) as r:
-            data = json.loads(r.read())
-        # Check for refusal
-        msg = (data.get("choices") or [{}])[0].get("message") or {}
-        if msg.get("refusal"):
-            return {"ok": False, "error": f"AI refusal: {msg['refusal'][:200]}"}
-        sug = json.loads(msg["content"])
         # Map candidate_index → mb_albumid
         cand_idx = int(sug.get("candidate_index", -1))
         selected_candidate = None
@@ -15989,6 +16326,8 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
                 )
         sug["identity_validated"] = not bool(identity_rejection_reason)
         sug["candidate_identity_error"] = identity_rejection_reason
+        sug["ai_available"] = ai_available
+        sug["ai_unavailable_reason"] = ai_unavailable_reason
         evidence = _ai_match_evidence_packet(
             "fresh_import",
             folder_path=folder_path,
@@ -16008,9 +16347,6 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
             "acoustid_release_hits": acoustid_release_hits,
             "evidence": evidence,
         }
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode(errors="replace")
-        return {"ok": False, "error": f"OpenAI {exc.code}: {body[:200]}"}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
 
@@ -25345,6 +25681,7 @@ def dedup_scan():
                         folder_album = _restore_time_colon_title(folder_album)
                         if folder_album:
                             try:
+                                from difflib import SequenceMatcher
                                 candidates = list(lib.items([f"album:{folder_album}"]))
                                 for cand in candidates:
                                     cand_title = (cand.title or '').lower()
@@ -32102,14 +32439,11 @@ def _maintenance_safe_folder_renames(rows: List[Dict[str, Any]], log: List[str],
 MAINTENANCE_RUNNER_TASKS = [
     {"id": "library_health", "label": "Library DB Health Check"},
     {"id": "missing_files", "label": "Missing Files Scan"},
+    {"id": "root_folder_repair", "label": "Root Folder Repair"},
     {"id": "artist_alias", "label": "Artist Alias / MBID Variant Check"},
     {"id": "artist_folder_merge", "label": "Artist Folder Merge"},
     {"id": "release_group_merge", "label": "Release Group Merge"},
     {"id": "duplicates", "label": "Duplicate Track Scan"},
-    {"id": "audio_identity", "label": "Audio Identity Verification"},
-    {"id": "metadata_repair", "label": "Metadata Repair"},
-    {"id": "music_format_scan", "label": "Music Format Scan"},
-    {"id": "verified_replacement", "label": "Verified Replacement"},
     {"id": "folder_scan", "label": "Folder Name Scan"},
     {"id": "folder_safe_renames", "label": "Folder Safe Renames"},
     {"id": "artwork", "label": "Artwork Fetch"},
@@ -32132,16 +32466,13 @@ CLEAN_ALL_PIPELINE_STEPS = [
 
 CLEAN_ALL_TASK_PHASES = {
     "duplicates": "Fingerprinting",
-    "audio_identity": "Matching",
-    "metadata_repair": "Repairing",
-    "music_format_scan": "Verifying",
-    "verified_replacement": "Replacing",
     "genres": "Repairing",
     "artwork": "Repairing",
     "folder_scan": "Scanning",
     "folder_safe_renames": "Organizing",
     "library_health": "Verifying",
     "missing_files": "Verifying",
+    "root_folder_repair": "Organizing",
     "artist_alias": "Matching",
     "artist_folder_merge": "Organizing",
     "release_group_merge": "Organizing",
@@ -32733,17 +33064,57 @@ def _maintenance_release_group_merge(log: List[str], cancel_event: Optional[Any]
         summary = report.get("summary") or {}
         log.append(
             "[release-group-merge] Done: "
-            f"{summary.get('safe_issues_selected', 0)} group(s) processed, "
+            f"{summary.get('safe_issues_selected', 0)} group(s) processed in {summary.get('batches', 0)} batch(es), "
             f"{summary.get('files_moved', 0)} file(s) moved, "
             f"{summary.get('duplicate_files_quarantined', 0)} duplicate(s) quarantined, "
             f"{summary.get('folders_deleted', 0)} folder(s) removed, "
-            f"{summary.get('errors', 0)} error(s)."
+            f"{summary.get('errors', 0)} error(s); "
+            f"{summary.get('needs_review_remaining', 0)} group(s) still need manual review."
         )
         _album_cleanup_save_report(report, log)
         _maintenance_save_last_report({"release_group_merge": report}, log)
         return report
     finally:
         _ALBUM_FOLDER_CLEANUP_LOCK.release()
+
+
+def _maintenance_root_folder_repair(log: List[str], cancel_event: Optional[Any] = None,
+                                    progress: Optional[Any] = None) -> Dict[str, Any]:
+    running = _root_folder_repair_running_job()
+    if running:
+        result = {
+            "ok": True,
+            "skipped": True,
+            "reason": "Root folder repair already running",
+            "final_summary": {"skipped": 1},
+        }
+        log.append("[root-folder-repair] skipped: already running.")
+        return result
+    if not _ROOT_FOLDER_REPAIR_LOCK.acquire(blocking=False):
+        result = {
+            "ok": True,
+            "skipped": True,
+            "reason": "Root folder repair lock is busy",
+            "final_summary": {"skipped": 1},
+        }
+        log.append("[root-folder-repair] skipped: lock is busy.")
+        return result
+    try:
+        log.append("[root-folder-repair] Scanning for misplaced root-level album/singleton folders")
+        report = _root_folder_repair_apply_safe(log, cancel_event=cancel_event, progress=progress)
+        summary = report.get("summary") or {}
+        log.append(
+            "[root-folder-repair] Done: "
+            f"{summary.get('empty_folders_removed', 0)} empty folder(s) removed, "
+            f"{summary.get('items_moved', 0)} item(s) re-homed, "
+            f"{summary.get('items_failed', 0)} item(s) failed, "
+            f"{summary.get('orphaned_queued', 0)} folder(s) queued for review."
+        )
+        _root_folder_repair_save_report(report, log)
+        _maintenance_save_last_report({"root_folder_repair": report}, log)
+        return report
+    finally:
+        _ROOT_FOLDER_REPAIR_LOCK.release()
 
 
 def _maintenance_artwork_collision_leftovers(root: Path, limit: int = 10000) -> Dict[str, Any]:
@@ -32855,6 +33226,16 @@ def maintenance_runner_report():
         report = _maintenance_load_last_report() if exists else {}
     except Exception as exc:
         return jsonify({"ok": False, "error": f"Could not read maintenance report: {exc}"}), 500
+    last_run = report.get("last_run") if isinstance(report.get("last_run"), dict) else None
+    if last_run is not None and _s(last_run.get("status")).strip().lower() == "running" and not _maintenance_running_job():
+        # jobs.JobStore is in-memory only, so a "running" checkpoint left
+        # behind by an app restart mid-run has no live job backing it
+        # anymore -- same stale-state class already handled for playlist
+        # download checkpoints (_playlist_job_is_live). Relabel here rather
+        # than leaving the UI showing "running" forever for a job that
+        # cannot possibly still be progressing.
+        last_run["status"] = "interrupted"
+        report["last_run"] = last_run
     resume = _maintenance_resume_summary(report)
     summary_only = _s(request.args.get("summary")).strip().lower() in {"1", "true", "yes"}
     report_payload = {} if summary_only else report
@@ -32885,7 +33266,14 @@ def start_maintenance_runner():
     if running:
         return jsonify({"ok": True, "job_id": running.job_id, "already_running": True})
 
-    resume_snapshot = _maintenance_resume_from_report(_maintenance_load_last_report())
+    # A checkpoint can be resumable but not worth resuming -- e.g. left
+    # behind by an app restart mid-run (JobStore is in-memory only and
+    # doesn't survive one) with a task already marked "skipped" that will
+    # never be retried by resuming. Only a real fresh run re-attempts it,
+    # so the UI needs an explicit way to bypass resume instead of always
+    # being forced into it whenever a checkpoint happens to exist.
+    force_fresh = bool((request.get_json(silent=True) or {}).get("force_fresh"))
+    resume_snapshot = {} if force_fresh else _maintenance_resume_from_report(_maintenance_load_last_report())
     resume_requested = bool(resume_snapshot.get("resumable"))
 
     def _run(
@@ -33061,7 +33449,27 @@ def start_maintenance_runner():
                 )
                 set_task("missing_files", "complete", "Missing files reconciled", missing_summary)
 
-            # 3. Resolve artist identity variants before album-level moves.
+            # 3. Re-home root-level album/singleton folders missing their
+            #    artist-folder wrapper before anything downstream assumes a
+            #    clean two-level artist/album layout.
+            ensure_not_cancelled()
+            if skip_completed_task("root_folder_repair"):
+                pass
+            else:
+                set_task("root_folder_repair", "running", "Repairing misplaced root-level folders")
+                root_repair_result = _maintenance_root_folder_repair(
+                    log,
+                    cancel_event=cancel_event,
+                    progress=lambda updates: emit("root_folder_repair", _s(updates.get("current_result") or "")),
+                )
+                set_task(
+                    "root_folder_repair",
+                    "complete" if not root_repair_result.get("skipped") else "skipped",
+                    "Root folder repair complete",
+                    root_repair_result,
+                )
+
+            # 4. Resolve artist identity variants before album-level moves.
             ensure_not_cancelled()
             if skip_completed_task("artist_alias"):
                 pass
@@ -33116,7 +33524,7 @@ def start_maintenance_runner():
                         result,
                     )
 
-            # 4. Release Group ID drives album-folder consolidation.
+            # 5. Release Group ID drives album-folder consolidation.
             ensure_not_cancelled()
             if skip_completed_task("release_group_merge"):
                 pass
@@ -33129,7 +33537,7 @@ def start_maintenance_runner():
                 )
                 set_task("release_group_merge", "complete" if not result.get("skipped") else "skipped", "Release Group merge complete", result)
 
-            # 5. Full duplicate scan and verified duplicate cleanup.
+            # 6. Full duplicate scan and verified duplicate cleanup.
             ensure_not_cancelled()
             if skip_completed_task("duplicates"):
                 pass
@@ -33142,7 +33550,7 @@ def start_maintenance_runner():
                 )
                 set_task("duplicates", "complete" if not result.get("skipped") else "skipped", "Duplicate track scan complete", result)
 
-            # 6. Placeholder scan stays diagnostic after RGID repair; no blind rename.
+            # 7. Placeholder scan stays diagnostic after RGID repair; no blind rename.
             ensure_not_cancelled()
             set_task("folder_scan", "running", "Scanning remaining folder placeholder names")
             scan_meta: Dict[str, Any] = {}
@@ -33173,7 +33581,7 @@ def start_maintenance_runner():
                 "final_summary": {"renamed": 0, "skipped_unsafe": len(rows)},
             })
 
-            # 7. Artwork and genres run after filesystem consolidation.
+            # 8. Artwork and genres run after filesystem consolidation.
             ensure_not_cancelled()
             if skip_completed_task("artwork"):
                 pass
@@ -33200,7 +33608,7 @@ def start_maintenance_runner():
                     result = _wait_for_child_job(child_id, log, cancel_event, prefix="genres", timeout=3600)
                     set_task("genres", "complete", "Missing genre tagging complete", result)
 
-            # 8. Final verification reports remaining identity and path issues.
+            # 9. Final verification reports remaining identity and path issues.
             ensure_not_cancelled()
             if skip_completed_task("final_verification"):
                 pass
@@ -33477,6 +33885,20 @@ def _folder_cleanup_compare_files(source: Path, target: Path) -> Dict[str, Any]:
 def _folder_cleanup_token(material: Dict[str, Any]) -> str:
     stable = json.dumps(material, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(stable.encode("utf-8")).hexdigest()
+
+
+def _canonical_folder_name(source: Path) -> Optional[Path]:
+    """Fallback proposed target when a folder-placeholder review is requested
+    without an explicit target_path: strip unresolved placeholder/template text
+    from the folder name, same as the proposal shown by the scan that lists
+    these folders in the first place (_scan_folder_name_placeholders)."""
+    name = source.name
+    clean_name = _LITERAL_PLACEHOLDER_RE.sub("", name)
+    clean_name = _UNRESOLVED_TEMPLATE_TOKEN_RE.sub("", clean_name)
+    clean_name = re.sub(r"\s+", " ", clean_name).strip().strip(" -_")
+    if not clean_name or clean_name == name:
+        return None
+    return source.parent / clean_name
 
 
 def _folder_cleanup_review_for(source: Path, proposed: Optional[Path] = None) -> Dict[str, Any]:
@@ -34597,6 +35019,215 @@ def _album_cleanup_build_issue(artist_dir: Path, records: List[Dict[str, Any]], 
         "unproven_source_audio": len(merge_plan.get("conflicts") or []),
     }
 
+_ROOT_FOLDER_REPAIR_LOCK = threading.Lock()
+
+
+def _root_folder_repair_scan(root: Optional[Path] = None) -> Dict[str, Any]:
+    """Find MUSIC_ROOT top-level entries that are actually album/singleton
+    folders sitting one level too shallow, e.g. "/data/media/music/Aaliyah
+    (2001)" instead of "/data/media/music/Aaliyah (mbid)/Aaliyah (2001)
+    {rgid}". A real artist folder in this library always has at least one
+    album subfolder underneath it; anything with zero subfolders directly
+    under root is either leftover empty junk or content that never got its
+    artist-folder wrapper (both invisible to the normal artist/album scans,
+    which only look one level down from root for albums)."""
+    scan_root = (root or MUSIC_ROOT).resolve(strict=False)
+    if not scan_root.exists() or not scan_root.is_dir():
+        raise RuntimeError(f"Music library root is not accessible: {scan_root}")
+
+    try:
+        top_dirs = [
+            p for p in sorted(scan_root.iterdir(), key=lambda x: x.name.casefold())
+            if p.is_dir() and not p.name.startswith(".")
+        ]
+    except Exception as exc:
+        raise RuntimeError(f"Could not list {scan_root}: {exc}")
+
+    # Item id -> its top-level folder name, for items whose path is exactly
+    # "<folder>/<file>" directly under MUSIC_ROOT (no artist-folder level).
+    shallow_by_folder: Dict[str, List[int]] = {}
+    try:
+        for item in lib.items([]):
+            path = _s(getattr(item, "path", "")).strip().replace("\\", "/")
+            if not path or path.startswith("/"):
+                continue
+            parts = path.split("/")
+            if len(parts) == 2:
+                shallow_by_folder.setdefault(parts[0], []).append(int(item.id))
+    except Exception:
+        pass
+
+    empty_folders: List[str] = []
+    shallow_folders: List[Dict[str, Any]] = []
+    orphaned_folders: List[Dict[str, Any]] = []
+
+    for top in top_dirs:
+        try:
+            children = list(top.iterdir())
+        except Exception:
+            continue
+        subdirs = [c for c in children if c.is_dir() and not c.name.startswith(".")]
+        if subdirs:
+            continue  # real artist folder; its albums live one level down
+
+        item_ids = shallow_by_folder.get(top.name) or []
+        if item_ids:
+            shallow_folders.append({
+                "folder": str(top),
+                "name": top.name,
+                "item_ids": sorted(item_ids),
+                "item_count": len(item_ids),
+            })
+            continue
+
+        files = [c for c in children if c.is_file()]
+        if not files:
+            empty_folders.append(str(top))
+            continue
+
+        has_audio = any(c.suffix.lower() in AUDIO_EXT for c in files)
+        orphaned_folders.append({
+            "folder": str(top),
+            "name": top.name,
+            "file_count": len(files),
+            "has_audio": has_audio,
+        })
+
+    return {
+        "ok": True,
+        "root": str(scan_root),
+        "empty_folders": empty_folders,
+        "shallow_folders": shallow_folders,
+        "orphaned_folders": orphaned_folders,
+        "summary": {
+            "empty_count": len(empty_folders),
+            "shallow_folder_count": len(shallow_folders),
+            "shallow_item_count": sum(f["item_count"] for f in shallow_folders),
+            "orphaned_count": len(orphaned_folders),
+        },
+    }
+
+
+def _root_folder_repair_apply_safe(log: List[str], cancel_event: Optional[Any] = None,
+                                   progress: Optional[Any] = None) -> Dict[str, Any]:
+    """Remove empty root-level junk folders and re-home shallow-path items
+    (already-tracked Beets items missing their artist-folder wrapper) to the
+    path the current template says they belong at, via the same per-item
+    `beet write` + `beet move` used by /api/items/<iid>/retag. Folders with
+    untracked audio are left alone and queued to Import Review instead of
+    being touched, matching this app's "queue uncertain matches, don't
+    guess" rule for anything under /data/media/music."""
+    scan = _root_folder_repair_scan()
+    summary = {
+        "empty_folders_removed": 0,
+        "items_moved": 0,
+        "items_failed": 0,
+        "orphaned_queued": 0,
+        "errors": 0,
+    }
+
+    for folder_str in scan["empty_folders"]:
+        if cancel_event and cancel_event.is_set():
+            raise RuntimeError("cancelled")
+        folder = Path(folder_str)
+        removed = _album_cleanup_remove_empty_tree(folder, log)
+        if removed:
+            summary["empty_folders_removed"] += 1
+
+    shallow_folders = scan["shallow_folders"]
+    total_items = sum(f["item_count"] for f in shallow_folders)
+    done = 0
+    cfg = _write_job_beets_config(f"/tmp/beets-root-folder-repair-{uuid.uuid4().hex}.yaml")
+    base = [BEET_BIN, "-c", cfg]
+    env = _beet_env()
+
+    for entry in shallow_folders:
+        if cancel_event and cancel_event.is_set():
+            raise RuntimeError("cancelled")
+        for iid in entry["item_ids"]:
+            if cancel_event and cancel_event.is_set():
+                raise RuntimeError("cancelled")
+            done += 1
+            log.append(f"[{done}/{total_items}] Re-homing item {iid} from {entry['name']}")
+            if progress:
+                progress({
+                    "category": "Cleanup",
+                    "current_task": "Re-homing shallow root-level items",
+                    "current_item": entry["name"],
+                    "scanned_count": done,
+                    "total_count": total_items,
+                })
+            try:
+                item = lib.get_item(iid)
+                has_mb = bool(item) and bool(
+                    getattr(item, "mb_albumid", "") or getattr(item, "mb_trackid", ""))
+            except Exception:
+                has_mb = False
+            if has_mb:
+                r = _beet_run(base + ["mbsync", f"id:{iid}"], log, timeout=60, env=env, cancel=cancel_event)
+                if r.returncode == -9:
+                    raise RuntimeError("cancelled")
+            r = _beet_run(base + ["write", f"id:{iid}"], log, timeout=120, env=env, cancel=cancel_event)
+            if r.returncode == -9:
+                raise RuntimeError("cancelled")
+            if r.returncode not in (0, 124) and r.returncode >= 2:
+                summary["items_failed"] += 1
+                summary["errors"] += 1
+                log.append(f"  ERROR: beet write failed for item {iid} (rc={r.returncode})")
+                continue
+            r = _beet_run(base + ["move", f"id:{iid}"], log, timeout=120, env=env, cancel=cancel_event)
+            if r.returncode == -9:
+                raise RuntimeError("cancelled")
+            if r.returncode != 0:
+                summary["items_failed"] += 1
+                summary["errors"] += 1
+                log.append(f"  ERROR: beet move failed for item {iid} (rc={r.returncode})")
+                continue
+            summary["items_moved"] += 1
+
+        # The move above should have emptied this folder; clean it up if so.
+        folder = Path(entry["folder"])
+        try:
+            if folder.exists() and not any(folder.iterdir()):
+                folder.rmdir()
+                log.append(f"  Removed emptied folder: {folder}")
+                summary["empty_folders_removed"] += 1
+        except Exception:
+            pass
+
+    for entry in scan["orphaned_folders"]:
+        if cancel_event and cancel_event.is_set():
+            raise RuntimeError("cancelled")
+        queued = _queue_folder_for_manual_review(
+            entry["folder"], None,
+            "Root-level folder with untracked audio files, missing its artist-folder level",
+            log=log,
+        )
+        if queued:
+            summary["orphaned_queued"] += 1
+
+    if summary["items_moved"] or summary["empty_folders_removed"]:
+        _invalidate_lib_cache()
+
+    report = {
+        "ok": True,
+        "root": scan["root"],
+        "summary": summary,
+        "final_summary": summary,
+        "scan_summary": scan["summary"],
+    }
+    if progress:
+        progress({
+            "category": "Cleanup",
+            "current_task": "Root folder repair complete",
+            "current_item": None,
+            "scanned_count": total_items,
+            "total_count": total_items,
+            "final_summary": summary,
+        })
+    return report
+
+
 def _album_folder_cleanup_plan(root: Optional[Path] = None,
                                progress: Optional[Any] = None,
                                cancel_event: Optional[Any] = None) -> Dict[str, Any]:
@@ -35088,64 +35719,115 @@ def _album_cleanup_apply_issue(issue: Dict[str, Any], scan_root: Path, trash_roo
     return completed_issue
 
 
+_ALBUM_CLEANUP_BATCH_SIZE = 75
+_ALBUM_CLEANUP_MAX_BATCHES = 100
+
+
 def _album_folder_cleanup_apply_safe(root: Optional[Path], log: List[str],
                                      cancel_event: Optional[Any] = None,
                                      progress: Optional[Any] = None,
-                                     verbose_files: bool = True) -> Dict[str, Any]:
-    plan = _album_folder_cleanup_plan(root, progress=progress, cancel_event=cancel_event)
-    issues = [issue for issue in plan.get("issues", []) if issue.get("safe")]
-    scan_root = Path(plan.get("root") or MUSIC_ROOT).resolve(strict=False)
+                                     verbose_files: bool = True,
+                                     batch_size: int = _ALBUM_CLEANUP_BATCH_SIZE) -> Dict[str, Any]:
+    # Runs in batches of `batch_size` safe issues, re-scanning (re-planning)
+    # before every batch instead of applying one big plan computed up front.
+    # A stale single plan is what let earlier merges in the same run leave
+    # later "safe" issues pointing at folders that had already been
+    # consolidated/removed (surfaced live as safe issues failing at apply
+    # time with "source folder missing"/"unknown leftover files"); a fresh
+    # re-plan each batch also picks up any group that only became safe
+    # because an earlier batch resolved what was blocking it.
+    scan_root = (root or MUSIC_ROOT).resolve(strict=False)
     trash_root = METADATA_CACHE_ROOT / "album-folder-cleanup-trash" / time.strftime("%Y%m%d-%H%M%S")
-    summary = dict(plan.get("summary") or {})
-    summary.update({
+    summary: Dict[str, Any] = {
         "dry_run": False,
-        "safe_issues_selected": len(issues),
+        "safe_issues_selected": 0,
         "files_moved": 0,
         "artwork_moved": 0,
         "duplicate_files_quarantined": 0,
         "folders_renamed": 0,
         "folders_deleted": 0,
         "db_paths_updated": 0,
-        "blocked": int(summary.get("blocked") or 0),
+        "completed": 0,
+        "blocked": 0,
         "errors": 0,
-    })
+    }
     operations: List[Dict[str, Any]] = []
-    errors: List[str] = list(plan.get("errors") or [])
+    errors: List[str] = []
+    seen_scan_errors: set = set()
     applied_issues: List[Dict[str, Any]] = []
+    last_plan_summary: Dict[str, Any] = {}
+    total_applied = 0
+    batch_num = 0
 
-    for index, issue in enumerate(issues, start=1):
+    while True:
         if cancel_event and cancel_event.is_set():
             raise RuntimeError("cancelled")
-        log.append(f"[{index}/{len(issues)}] {issue.get('artist')} - {issue.get('album')}")
-        log.append(f"  Proposed action: {issue.get('proposed_action')}")
-        if issue.get("release_group_id"):
-            rgid_label = "Inferred Release Group ID" if issue.get("release_group_inference") else "Release Group ID"
-            log.append(f"  {rgid_label}: {issue.get('release_group_id')}")
-        if issue.get("risk_reason"):
-            log.append(f"  {issue.get('risk_reason')}")
-        if progress:
-            progress({
-                "category": "Cleanup",
-                "current_task": "Applying safe album folder cleanup",
-                "current_item": f"{issue.get('artist')} - {issue.get('album')}",
-                "scanned_count": index,
-                "total_count": len(issues),
-                "current_result": _s(issue.get("proposed_action")),
-            })
-        applied_issue = _album_cleanup_apply_issue(
-            issue, scan_root, trash_root, log, summary, operations,
-            verbose_files=verbose_files,
-        )
-        applied_issues.append(applied_issue)
-        if applied_issue.get("status") == "Blocked":
-            errors.extend(_s(reason) for reason in applied_issue.get("blocking_reasons") or [])
+        plan = _album_folder_cleanup_plan(root, progress=progress, cancel_event=cancel_event)
+        last_plan_summary = dict(plan.get("summary") or {})
+        for err in plan.get("errors") or []:
+            err_s = _s(err)
+            if err_s and err_s not in seen_scan_errors:
+                seen_scan_errors.add(err_s)
+                errors.append(err_s)
+        issues = [issue for issue in plan.get("issues", []) if issue.get("safe")]
+        if not issues:
+            break
+        batch_num += 1
+        if batch_num > _ALBUM_CLEANUP_MAX_BATCHES:
+            log.append(
+                f"[batch] stopping after {_ALBUM_CLEANUP_MAX_BATCHES} batch(es): "
+                f"{len(issues)} more safe issue(s) remain for the next run"
+            )
+            break
+        batch = issues[:batch_size]
+        log.append(f"[batch {batch_num}] re-scanned: {len(issues)} safe issue(s) found, applying {len(batch)}")
 
-    if operations:
-        _invalidate_lib_cache()
+        for offset, issue in enumerate(batch, start=1):
+            if cancel_event and cancel_event.is_set():
+                raise RuntimeError("cancelled")
+            total_applied += 1
+            log.append(f"[batch {batch_num} #{offset}/{len(batch)}] {issue.get('artist')} - {issue.get('album')}")
+            log.append(f"  Proposed action: {issue.get('proposed_action')}")
+            if issue.get("release_group_id"):
+                rgid_label = "Inferred Release Group ID" if issue.get("release_group_inference") else "Release Group ID"
+                log.append(f"  {rgid_label}: {issue.get('release_group_id')}")
+            if issue.get("risk_reason"):
+                log.append(f"  {issue.get('risk_reason')}")
+            if progress:
+                progress({
+                    "category": "Cleanup",
+                    "current_task": f"Applying safe album folder cleanup (batch {batch_num})",
+                    "current_item": f"{issue.get('artist')} - {issue.get('album')}",
+                    "scanned_count": total_applied,
+                    "current_result": _s(issue.get("proposed_action")),
+                })
+            applied_issue = _album_cleanup_apply_issue(
+                issue, scan_root, trash_root, log, summary, operations,
+                verbose_files=verbose_files,
+            )
+            applied_issues.append(applied_issue)
+            if applied_issue.get("status") == "Blocked":
+                errors.extend(_s(reason) for reason in applied_issue.get("blocking_reasons") or [])
+
+        if operations:
+            _invalidate_lib_cache()
+
+    summary["safe_issues_selected"] = total_applied
+    summary["batches"] = batch_num
+    # Post-run remaining counts from the final re-scan, kept separate from
+    # "blocked" above (which only counts previously-safe issues that failed
+    # at apply time) so the two don't get summed into a confusing total.
+    summary["needs_review_remaining"] = int(
+        last_plan_summary.get("needs_review") or last_plan_summary.get("review_needed") or 0
+    )
+    summary["scan_blocked_remaining"] = int(last_plan_summary.get("blocked") or 0)
+    summary["safe_remaining"] = int(last_plan_summary.get("safe_fixes") or 0)
+
     report = {
         "ok": True,
         "dry_run": False,
         "root": str(scan_root),
+        "batches": batch_num,
         "summary": summary,
         "final_summary": summary,
         "issues": applied_issues,
@@ -35163,8 +35845,8 @@ def _album_folder_cleanup_apply_safe(root: Optional[Path], log: List[str],
             "current_task": "Safe album folder cleanup complete",
             "current_item": None,
             "current_path": None,
-            "scanned_count": len(issues),
-            "total_count": len(issues),
+            "scanned_count": total_applied,
+            "total_count": total_applied,
             "changed_count": int(summary.get("files_moved") or 0) + int(summary.get("folders_deleted") or 0),
             "error_count": int(summary.get("errors") or 0),
             "current_result": (
@@ -35263,6 +35945,116 @@ def clean_album_folders_apply_safe():
         _do,
         label="Apply safe album folder cleanup",
         metadata={"type": "album-folder-cleanup-apply-safe", "category": "Cleanup"},
+    )
+    return jsonify({"ok": True, "job_id": job.job_id})
+
+
+def _root_folder_repair_save_report(report: Dict[str, Any], log: Optional[List[str]] = None) -> None:
+    payload = dict(report)
+    payload["updated_at"] = time.time()
+    try:
+        ROOT_FOLDER_REPAIR_LAST_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = ROOT_FOLDER_REPAIR_LAST_FILE.with_suffix(f".{uuid.uuid4().hex}.tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, default=str), encoding="utf-8")
+        tmp.replace(ROOT_FOLDER_REPAIR_LAST_FILE)
+    except Exception as exc:
+        if log is not None:
+            log.append(f"[root-folder-repair] WARN: could not save report: {exc}")
+
+
+def _root_folder_repair_running_job() -> Optional[Any]:
+    for job in jobs.all():
+        if job.status != "running":
+            continue
+        metadata = getattr(job, "metadata", {}) or {}
+        if str(metadata.get("type") or "") in {"root-folder-repair-scan", "root-folder-repair-apply-safe"}:
+            return job
+    return None
+
+
+@app.get("/api/clean/root-folders/report")
+def clean_root_folders_report():
+    report: Dict[str, Any] = {}
+    exists = False
+    try:
+        if ROOT_FOLDER_REPAIR_LAST_FILE.exists():
+            loaded = json.loads(ROOT_FOLDER_REPAIR_LAST_FILE.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                report = loaded
+                exists = True
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"Could not read root-folder repair report: {exc}"}), 500
+    return jsonify({"ok": True, "exists": exists, "report": report})
+
+
+@app.post("/api/clean/root-folders/scan")
+def clean_root_folders_scan():
+    running = _root_folder_repair_running_job()
+    if running:
+        return jsonify({"ok": True, "job_id": running.job_id, "already_running": True})
+
+    def _do(log, cancel_event=None, update_state=None):
+        if not _ROOT_FOLDER_REPAIR_LOCK.acquire(blocking=False):
+            raise RuntimeError("Root folder repair is already running")
+        try:
+            log.append(f"Scanning {MUSIC_ROOT} for misplaced root-level album/singleton folders")
+            report = _root_folder_repair_scan(MUSIC_ROOT)
+            summary = report.get("summary") or {}
+            log.append(
+                "Root folder scan complete: "
+                f"{summary.get('empty_count', 0)} empty folder(s), "
+                f"{summary.get('shallow_folder_count', 0)} shallow folder(s) "
+                f"({summary.get('shallow_item_count', 0)} tracked item(s)), "
+                f"{summary.get('orphaned_count', 0)} untracked folder(s) needing review."
+            )
+            for name in report.get("empty_folders", [])[:40]:
+                log.append(f"  [empty] {name}")
+            for entry in report.get("shallow_folders", [])[:40]:
+                log.append(f"  [shallow] {entry.get('name')} ({entry.get('item_count')} item(s))")
+            for entry in report.get("orphaned_folders", [])[:40]:
+                log.append(f"  [needs review] {entry.get('name')} ({entry.get('file_count')} file(s))")
+            _root_folder_repair_save_report(report, log)
+            return report
+        finally:
+            _ROOT_FOLDER_REPAIR_LOCK.release()
+
+    job = jobs.start_python(
+        _do,
+        label="Scan root-level folders",
+        metadata={"type": "root-folder-repair-scan", "category": "Cleanup"},
+    )
+    return jsonify({"ok": True, "job_id": job.job_id})
+
+
+@app.post("/api/clean/root-folders/apply-safe")
+def clean_root_folders_apply_safe():
+    running = _root_folder_repair_running_job()
+    if running:
+        return jsonify({"ok": True, "job_id": running.job_id, "already_running": True})
+
+    def _do(log, cancel_event=None, update_state=None):
+        if not _ROOT_FOLDER_REPAIR_LOCK.acquire(blocking=False):
+            raise RuntimeError("Root folder repair is already running")
+        try:
+            log.append(f"Repairing misplaced root-level folders under {MUSIC_ROOT}")
+            report = _root_folder_repair_apply_safe(log, cancel_event=cancel_event, progress=update_state)
+            summary = report.get("summary") or {}
+            log.append(
+                "Root folder repair complete: "
+                f"{summary.get('empty_folders_removed', 0)} empty folder(s) removed, "
+                f"{summary.get('items_moved', 0)} item(s) re-homed, "
+                f"{summary.get('items_failed', 0)} item(s) failed, "
+                f"{summary.get('orphaned_queued', 0)} folder(s) queued for review."
+            )
+            _root_folder_repair_save_report(report, log)
+            return report
+        finally:
+            _ROOT_FOLDER_REPAIR_LOCK.release()
+
+    job = jobs.start_python(
+        _do,
+        label="Repair root-level folders",
+        metadata={"type": "root-folder-repair-apply-safe", "category": "Cleanup"},
     )
     return jsonify({"ok": True, "job_id": job.job_id})
 

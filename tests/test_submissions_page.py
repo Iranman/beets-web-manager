@@ -68,8 +68,11 @@ class MetadataSubmissionsStaticTests(unittest.TestCase):
         self.assertIn("reprocessReferenceUrl", SUBMISSIONS_SOURCE)
 
     def test_preflight_checklist_reflects_real_backend_checks(self):
-        self.assertIn("target.preflight.checks", SUBMISSIONS_SOURCE)
-        self.assertIn("Select a resolvable review item to see preflight checks.", SUBMISSIONS_SOURCE)
+        # The flat checklist grid was replaced by a compact, stage-aware
+        # readiness card (see tests/test_submission_readiness.py for its
+        # dedicated coverage); this just confirms the page still wires it up.
+        self.assertIn("<SubmissionReadinessCard", SUBMISSIONS_SOURCE)
+        self.assertIn("preflight={target?.preflight ?? null}", SUBMISSIONS_SOURCE)
 
     def test_reference_url_uses_ytdlp_for_soundcloud_and_bandcamp_too(self):
         # yt-dlp has dedicated, reliable extractors for SoundCloud and

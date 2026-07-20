@@ -13,9 +13,9 @@ class CleanAllWorkflowStaticTests(unittest.TestCase):
         self.assertIn('@app.post("/api/jobs/maintenance-runner")', APP_SOURCE)
         self.assertIn('metadata={"type": "maintenance-runner", "workflow": "clean-all"', APP_SOURCE)
         self.assertIn('label="Clean All"', APP_SOURCE)
-        self.assertIn('export function startCleanAll()', CLIENT_SOURCE)
-        self.assertIn('return startMaintenanceRunner();', CLIENT_SOURCE)
-        self.assertIn('await startCleanAll()', JOBS_SOURCE)
+        self.assertIn('export function startCleanAll(', CLIENT_SOURCE)
+        self.assertIn('return startMaintenanceRunner(options);', CLIENT_SOURCE)
+        self.assertIn('await startCleanAll(options)', JOBS_SOURCE)
 
     def test_clean_all_progress_has_pipeline_counts_and_heartbeat(self):
         for step in [

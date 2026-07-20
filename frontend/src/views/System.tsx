@@ -11,16 +11,47 @@ import {
   getConfigFile,
   getSetupEnv,
   getSetupStatus,
+  regenerateAuthToken,
   revertConfigFile,
   saveConfigFile,
   saveSetupEnv,
+  testSetupAcoustid,
+  testSetupAi,
+  testSetupMusicBrainz,
+  testSetupPlex,
 } from '../api/client';
 import type {
   ConfigFileResponse,
   SetupEnvResponse,
   SetupEnvVariable,
+  SetupIntegrationTestResponse,
   SetupStatusResponse,
 } from '../api/types';
+
+type IntegrationKey = 'ai' | 'musicbrainz' | 'acoustid' | 'plex';
+
+const INTEGRATION_TESTS: Record<IntegrationKey, () => Promise<SetupIntegrationTestResponse>> = {
+  ai: testSetupAi,
+  musicbrainz: testSetupMusicBrainz,
+  acoustid: testSetupAcoustid,
+  plex: testSetupPlex,
+};
+
+function integrationBadge(
+  configured: boolean,
+  required: boolean,
+  test: SetupIntegrationTestResponse | undefined,
+  testing: boolean,
+): { icon: string; label: string; tone: 'ok' | 'warn' | 'neutral' } {
+  if (testing) return { icon: '…', label: 'testing', tone: 'neutral' };
+  if (test) {
+    if (test.status === 'ready') return { icon: '✓', label: 'Connected', tone: 'ok' };
+    if (test.status === 'not_configured') return { icon: '✗', label: 'Not Configured', tone: required ? 'warn' : 'neutral' };
+    return { icon: '⚠', label: 'Warning', tone: 'warn' };
+  }
+  if (configured) return { icon: '✓', label: 'Connected', tone: 'ok' };
+  return { icon: '✗', label: 'Not Configured', tone: required ? 'warn' : 'neutral' };
+}
 
 function initialFormValues(variables: SetupEnvVariable[]): Record<string, string> {
   const values: Record<string, string> = {};
@@ -135,6 +166,107 @@ function ConfigActionDialog({
   );
 }
 
+const PASSWORD_REQUIREMENTS: Array<{ label: string; test: (v: string) => boolean }> = [
+  { label: 'At least 12 characters', test: (v) => v.length >= 12 },
+  { label: 'An uppercase letter', test: (v) => /[A-Z]/.test(v) },
+  { label: 'A lowercase letter', test: (v) => /[a-z]/.test(v) },
+  { label: 'A number', test: (v) => /[0-9]/.test(v) },
+  { label: 'A special character', test: (v) => /[^A-Za-z0-9]/.test(v) },
+];
+
+function passwordStrength(value: string): { met: number; total: number; label: string; tone: 'ok' | 'warn' | 'bad' } {
+  const met = PASSWORD_REQUIREMENTS.filter((req) => req.test(value)).length;
+  const total = PASSWORD_REQUIREMENTS.length;
+  if (!value) return { met: 0, total, label: '', tone: 'bad' };
+  if (met === total) return { met, total, label: 'Strong', tone: 'ok' };
+  if (met >= total - 1) return { met, total, label: 'Good', tone: 'ok' };
+  if (met >= total - 2) return { met, total, label: 'Fair', tone: 'warn' };
+  return { met, total, label: 'Weak', tone: 'bad' };
+}
+
+function PasswordStrengthMeter({ value }: { value: string }) {
+  const strength = passwordStrength(value);
+  const barColor = strength.tone === 'ok' ? 'bg-emerald-400' : strength.tone === 'warn' ? 'bg-amber-400' : 'bg-red-400';
+  return (
+    <div className="mt-2 space-y-1.5">
+      {value && (
+        <div className="flex items-center gap-2">
+          <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-graphite-800">
+            <div
+              className={`h-full rounded-full transition-all ${barColor}`}
+              style={{ width: `${(strength.met / strength.total) * 100}%` }}
+            />
+          </div>
+          <span className={`text-[0.68rem] font-semibold ${strength.tone === 'ok' ? 'text-emerald-300' : strength.tone === 'warn' ? 'text-amber-300' : 'text-red-300'}`}>
+            {strength.label}
+          </span>
+        </div>
+      )}
+      <div className="flex flex-wrap gap-1.5">
+        {PASSWORD_REQUIREMENTS.map((req) => {
+          const met = req.test(value);
+          return (
+            <span
+              key={req.label}
+              className={`rounded px-1.5 py-0.5 text-[0.66rem] font-semibold ${
+                met ? 'bg-emerald-950/45 text-emerald-300' : 'bg-graphite-800 text-zinc-500'
+              }`}
+            >
+              {met ? '✓' : '○'} {req.label}
+            </span>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function AuthTokenDialog({
+  open,
+  token,
+  warning,
+  onClose,
+}: {
+  open: boolean;
+  token: string;
+  warning: string;
+  onClose: () => void;
+}) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <Dialog open={open} onClose={() => undefined} className="relative z-50">
+      <DialogBackdrop className="fixed inset-0 bg-graphite-950/60" />
+      <div className="fixed inset-0 flex items-center justify-center p-4">
+        <DialogPanel className="w-full max-w-lg rounded-lg border border-graphite-700 bg-graphite-900 p-5 shadow-2xl">
+          <DialogTitle className="text-base font-semibold text-zinc-100">New API token generated</DialogTitle>
+          <p className="mt-2 text-sm font-semibold text-amber-300">{warning || 'Save this token now — it will not be shown again.'}</p>
+          <div className="mt-3 break-all rounded border border-graphite-700 bg-graphite-950 p-3 font-mono text-[0.78rem] text-emerald-300">
+            {token}
+          </div>
+          <p className="mt-2 text-[0.72rem] text-zinc-500">
+            Use this as a Bearer token (Authorization: Bearer &lt;token&gt;) for API/script clients. It replaces the
+            previous token immediately.
+          </p>
+          <div className="mt-5 flex justify-end gap-2">
+            <Button
+              variant="outlined"
+              size="small"
+              onClick={() => {
+                void navigator.clipboard?.writeText(token).then(() => setCopied(true)).catch(() => undefined);
+              }}
+            >
+              {copied ? 'Copied' : 'Copy'}
+            </Button>
+            <Button variant="contained" size="small" onClick={onClose}>
+              I've saved it — close
+            </Button>
+          </div>
+        </DialogPanel>
+      </div>
+    </Dialog>
+  );
+}
+
 function EnvVariableRow({
   variable,
   value,
@@ -161,15 +293,18 @@ function EnvVariableRow({
         </div>
       </div>
 
-      <TextField
-        fullWidth
-        disabled={clear}
-        size="small"
-        type={variable.secret ? 'password' : 'text'}
-        value={clear ? '' : value}
-        placeholder={variable.secret && variable.has_value ? variable.value : ''}
-        onChange={(event) => onValue(event.target.value)}
-      />
+      <div className="min-w-0">
+        <TextField
+          fullWidth
+          disabled={clear}
+          size="small"
+          type={variable.secret ? 'password' : 'text'}
+          value={clear ? '' : value}
+          placeholder={variable.secret && variable.has_value ? variable.value : ''}
+          onChange={(event) => onValue(event.target.value)}
+        />
+        {variable.name === 'BEETS_WEB_PASSWORD' && !clear && <PasswordStrengthMeter value={value} />}
+      </div>
 
       <label className="flex items-center justify-end gap-1.5 text-[0.72rem] font-semibold text-zinc-400">
         <Checkbox
@@ -202,6 +337,12 @@ export default function System() {
   const [configError, setConfigError] = useState('');
   const [configMsg, setConfigMsg] = useState('');
   const [configAction, setConfigAction] = useState<ConfigAction>(null);
+  const [integrationTests, setIntegrationTests] = useState<Partial<Record<IntegrationKey, SetupIntegrationTestResponse>>>({});
+  const [integrationTesting, setIntegrationTesting] = useState<Partial<Record<IntegrationKey, boolean>>>({});
+  const [regeneratingToken, setRegeneratingToken] = useState(false);
+  const [regenerateTokenError, setRegenerateTokenError] = useState('');
+  const [confirmRegenerate, setConfirmRegenerate] = useState(false);
+  const [revealedToken, setRevealedToken] = useState<{ token: string; warning: string } | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -320,6 +461,46 @@ export default function System() {
     void loadConfig();
   };
 
+  const runIntegrationTests = useCallback(() => {
+    (Object.keys(INTEGRATION_TESTS) as IntegrationKey[]).forEach((key) => {
+      setIntegrationTesting((current) => ({ ...current, [key]: true }));
+      // Each integration is tested independently: one provider timing out or
+      // failing must never block or hide the result of the others.
+      INTEGRATION_TESTS[key]()
+        .then((result) => {
+          setIntegrationTests((current) => ({ ...current, [key]: result }));
+        })
+        .catch((err) => {
+          setIntegrationTests((current) => ({
+            ...current,
+            [key]: { ok: false, status: 'failed', error: err instanceof Error ? err.message : String(err) },
+          }));
+        })
+        .finally(() => {
+          setIntegrationTesting((current) => ({ ...current, [key]: false }));
+        });
+    });
+  }, []);
+
+  const handleRegenerateToken = async () => {
+    setConfirmRegenerate(false);
+    setRegeneratingToken(true);
+    setRegenerateTokenError('');
+    try {
+      const result = await regenerateAuthToken();
+      if (result.ok && result.token) {
+        setRevealedToken({ token: result.token, warning: result.warning || '' });
+        await load();
+      } else {
+        setRegenerateTokenError(result.error || 'Could not regenerate token.');
+      }
+    } catch (err) {
+      setRegenerateTokenError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRegeneratingToken(false);
+    }
+  };
+
   const markComplete = async () => {
     setCompleting(true);
     setError('');
@@ -409,18 +590,118 @@ export default function System() {
             <PathRow label="Beets config" path={status.paths.beets_config.path} ok={status.paths.beets_config.exists} />
           </div>
           <div className="rounded border border-graphite-800 bg-graphite-900 p-4">
-            <div className="mb-2 text-sm font-semibold text-zinc-100">Integrations</div>
-            {Object.entries(status.integrations).map(([name, integration]) => (
-              <div key={name} className="flex items-center justify-between gap-3 border-t border-graphite-800 py-2 first:border-t-0">
-                <span className="text-[0.78rem] font-medium capitalize text-zinc-300">{name}</span>
-                <span className={`text-[0.72rem] font-semibold ${integration.configured ? 'text-emerald-300' : integration.required ? 'text-red-300' : 'text-zinc-500'}`}>
-                  {integration.configured ? 'configured' : integration.required ? 'required' : 'not set'}
-                </span>
-              </div>
-            ))}
+            <div className="mb-2 flex items-center justify-between gap-3">
+              <div className="text-sm font-semibold text-zinc-100">Integrations</div>
+              <Button
+                variant="outlined"
+                size="small"
+                onClick={runIntegrationTests}
+                disabled={Object.values(integrationTesting).some(Boolean)}
+              >
+                {Object.values(integrationTesting).some(Boolean) ? 'Testing...' : 'Test connections'}
+              </Button>
+            </div>
+            <div className="mb-2 text-[0.68rem] text-zinc-500">
+              Each integration is tested independently — one failing does not disable the others.
+            </div>
+            {Object.entries(status.integrations).map(([name, integration]) => {
+              const key = name as IntegrationKey;
+              const test = integrationTests[key];
+              const testing = Boolean(integrationTesting[key]);
+              const badge = integrationBadge(integration.configured, integration.required, test, testing);
+              const toneClass = badge.tone === 'ok' ? 'text-emerald-300' : badge.tone === 'warn' ? 'text-amber-300' : 'text-zinc-500';
+              return (
+                <div key={name} className="border-t border-graphite-800 py-2 first:border-t-0">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-[0.78rem] font-medium capitalize text-zinc-300">
+                      {name}
+                      {integration.required && <span className="ml-1.5 text-[0.65rem] font-semibold text-zinc-500">(required)</span>}
+                    </span>
+                    <span className={`flex items-center gap-1 text-[0.72rem] font-semibold ${toneClass}`}>
+                      <span aria-hidden="true">{badge.icon}</span>
+                      {badge.label}
+                    </span>
+                  </div>
+                  {test?.error && (
+                    <div className="mt-1 text-[0.68rem] text-amber-400/90">{test.error}</div>
+                  )}
+                  {integration.note && !test && (
+                    <div className="mt-1 text-[0.68rem] text-zinc-500">{integration.note}</div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </section>
       )}
+
+      {status && (
+        <section className="rounded border border-graphite-800 bg-graphite-900 p-4">
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-3">
+            <div className="text-sm font-semibold text-zinc-100">Authentication</div>
+            <Button
+              variant="outlined"
+              size="small"
+              color="warning"
+              onClick={() => setConfirmRegenerate(true)}
+              disabled={regeneratingToken}
+            >
+              {regeneratingToken ? 'Regenerating...' : 'Regenerate API token'}
+            </Button>
+          </div>
+          {regenerateTokenError && <Alert severity="error" onClose={() => setRegenerateTokenError('')}>{regenerateTokenError}</Alert>}
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="border-t border-graphite-800 py-2 sm:border-t-0 sm:border-r sm:pr-3">
+              <div className="text-[0.78rem] font-medium text-zinc-300">API token (Bearer)</div>
+              <div className={`mt-1 text-[0.72rem] font-semibold ${status.auth.token_configured ? 'text-emerald-300' : 'text-zinc-500'}`}>
+                {status.auth.token_configured
+                  ? status.auth.token_auto_generated ? '✓ Configured (auto-generated)' : '✓ Configured'
+                  : '✗ Not configured'}
+              </div>
+              {status.auth.token_auto_generated && (
+                <div className="mt-1 text-[0.68rem] text-zinc-500">
+                  A secure token was generated automatically on first run and printed once to the server log.
+                  Regenerate it here any time.
+                </div>
+              )}
+            </div>
+            <div className="border-t border-graphite-800 py-2 sm:border-t-0 sm:pl-3">
+              <div className="text-[0.78rem] font-medium text-zinc-300">Browser password (Basic Auth)</div>
+              <div className={`mt-1 text-[0.72rem] font-semibold ${status.auth.password_configured ? 'text-emerald-300' : 'text-zinc-500'}`}>
+                {status.auth.password_configured ? '✓ Configured' : '✗ Not configured'}
+              </div>
+              <div className="mt-1 text-[0.68rem] text-zinc-500">
+                Set BEETS_WEB_PASSWORD below to enable native browser sign-in.
+              </div>
+            </div>
+          </div>
+        </section>
+      )}
+
+      <Dialog open={confirmRegenerate} onClose={() => setConfirmRegenerate(false)} className="relative z-50">
+        <DialogBackdrop className="fixed inset-0 bg-graphite-950/60" />
+        <div className="fixed inset-0 flex items-center justify-center p-4">
+          <DialogPanel className="w-full max-w-sm rounded-lg border border-graphite-700 bg-graphite-900 p-5 shadow-2xl">
+            <DialogTitle className="text-base font-semibold text-zinc-100">Regenerate API token?</DialogTitle>
+            <p className="mt-2 text-sm text-zinc-400">
+              The current token stops working immediately. Any script or API client using it will need the new value.
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <Button variant="outlined" size="small" onClick={() => setConfirmRegenerate(false)}>Cancel</Button>
+              <Button variant="contained" size="small" color="warning" onClick={() => void handleRegenerateToken()}>
+                Regenerate
+              </Button>
+            </div>
+          </DialogPanel>
+        </div>
+      </Dialog>
+
+      <AuthTokenDialog
+        open={revealedToken !== null}
+        token={revealedToken?.token ?? ''}
+        warning={revealedToken?.warning ?? ''}
+        onClose={() => setRevealedToken(null)}
+      />
 
       <section className="space-y-3">
         <div className="flex flex-wrap items-end justify-between gap-3">

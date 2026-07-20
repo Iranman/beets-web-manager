@@ -6,7 +6,9 @@ import Menu from '@mui/material/Menu';
 import MenuItem from '@mui/material/MenuItem';
 import TextField from '@mui/material/TextField';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import ArtistResolutionCard from '../components/ArtistResolutionCard';
+import SubmissionReadinessCard, { ACTION_LABEL, readinessSummary } from '../components/SubmissionReadinessCard';
 import {
   addSubmissionReferenceUrl,
   albumAcoustidSubmit,
@@ -80,6 +82,8 @@ type DraftState = {
   mbsubmit_output?: string;
   published?: { input?: string; artistId?: string; releaseGroupId?: string; releaseId?: string };
   reference_urls?: ReferenceUrlEntry[];
+  artist_dismissed?: boolean;
+  duplicates_reviewed?: boolean;
 };
 
 function wait(ms: number) { return new Promise((resolve) => window.setTimeout(resolve, ms)); }
@@ -167,6 +171,7 @@ function JobLink({ jobId }: { jobId?: string }) {
 }
 
 export default function Submissions() {
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [items, setItems] = useState<ReviewItem[]>([]);
   const [filter, setFilter] = useState('All');
@@ -200,6 +205,12 @@ export default function Submissions() {
   const visibleItems = useMemo(() => items.filter((item) => filter === 'All' || queueStatus(item, reviewItemId(item) === selectedId, target) === filter), [items, filter, selectedId, target]);
   const stage = target?.summary.workflow_stage || draft.stage || 'Needs metadata';
   const activeStep = stepIndex(stage);
+  const artistStageActive = target?.preflight.current_stage === 'artist';
+  // workflow_stage's free-text ("Needs metadata", "Ready for MusicBrainz", ...)
+  // predates the artist stage and doesn't know about it, so it would show
+  // the generic "Needs metadata" while the artist gate is blocking -- less
+  // precise than what the readiness data already knows.
+  const stageLabel = artistStageActive ? (target?.preflight.current_stage_label || 'Artist identification') : stage;
   const tracks = target?.tracks ?? [];
   const resolvedState = target?.summary.resolved_state || '';
   const isBeetsTarget = target?.target_type === 'album' || target?.target_type === 'item';
@@ -207,6 +218,7 @@ export default function Submissions() {
   const parserText = trackParserText(tracks, draft.trackEdits || {});
   const mbUrl = musicBrainzAddUrl(target, selectedItem);
   const selectedCandidateCount = selectedItem?.evidence?.top_candidates?.length ?? 0;
+  const discogsCandidate = selectedItem?.suggestion?.discogs_candidate || null;
   const readyFingerprints = tracks.filter((track) => track.mb_trackid && track.file_available).length;
   const release = validation?.release;
   const canApply = Boolean(activeAlbumId && release?.mb_albumartistid && release?.mb_releasegroupid && release?.mb_albumid && (!validation?.needs_confirmation || window.confirm));
@@ -239,6 +251,9 @@ export default function Submissions() {
     setItemId(selectedItem.first_item_id ? String(selectedItem.first_item_id) : '');
   }, [selectedItem]);
 
+  const [refreshNonce, setRefreshNonce] = useState(0);
+  const refetchTarget = useCallback(() => setRefreshNonce((n) => n + 1), []);
+
   useEffect(() => {
     let cancelled = false;
     if (!activeAlbumId && !activeItemId && !sourcePath) {
@@ -257,15 +272,33 @@ export default function Submissions() {
         if (cancelled) return;
         setTarget(data);
         const remoteDraft = (data.draft || {}) as Partial<DraftState>;
-        setDraft({ metadata: remoteDraft.metadata || {}, trackEdits: remoteDraft.trackEdits || {}, stage: remoteDraft.stage, mbsubmit_output: remoteDraft.mbsubmit_output, published: remoteDraft.published, reference_urls: remoteDraft.reference_urls || [] });
+        // Silently attach a confident auto-found artist MBID into the draft
+        // so it's already there for the later "Attach MBIDs" step -- the
+        // user never has to search for or paste it themselves.
+        const foundArtistId = data.artist_match?.id;
+        const published = (foundArtistId && !remoteDraft.published?.artistId)
+          ? { ...(remoteDraft.published || {}), artistId: foundArtistId }
+          : remoteDraft.published;
+        const nextDraft: DraftState = {
+          metadata: remoteDraft.metadata || {}, trackEdits: remoteDraft.trackEdits || {},
+          stage: remoteDraft.stage, mbsubmit_output: remoteDraft.mbsubmit_output,
+          published, reference_urls: remoteDraft.reference_urls || [],
+          artist_dismissed: remoteDraft.artist_dismissed,
+          duplicates_reviewed: remoteDraft.duplicates_reviewed,
+        };
+        setDraft(nextDraft);
         setMbInput(remoteDraft.published?.input || '');
-        setDirty(false);
-        setSaveState('idle');
+        if (foundArtistId && !remoteDraft.published?.artistId) {
+          setDirty(true);
+        } else {
+          setDirty(false);
+          setSaveState('idle');
+        }
       })
       .catch((err) => { if (!cancelled) { setTarget(null); setTargetError(err instanceof Error ? err.message : String(err)); } })
       .finally(() => { if (!cancelled) setTargetLoading(false); });
     return () => { cancelled = true; };
-  }, [activeAlbumId, activeItemId, sourcePath]);
+  }, [activeAlbumId, activeItemId, sourcePath, refreshNonce]);
 
   useEffect(() => {
     if (!dirty || !target) return undefined;
@@ -424,6 +457,43 @@ export default function Submissions() {
     }
   }
 
+  function handleCheckAction(actionType: string, actionTarget?: string) {
+    switch (actionType) {
+      case 'rescan':
+        refetchTarget();
+        return;
+      case 'open_import_review':
+        navigate('/import?tab=review');
+        return;
+      case 'open_settings':
+        navigate('/config');
+        return;
+      case 'view_setup_details':
+      case 'resolve_artist':
+        // Nothing further to do here: while the artist stage is active the
+        // page already shows nothing but ArtistResolutionCard; "view setup
+        // details" only renders inside the already-expanded check list.
+        return;
+      default:
+        if (actionTarget) document.getElementById(actionTarget)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }
+
+  function dismissArtistStep() {
+    if (!target) return;
+    updateDraft({ ...draft, artist_dismissed: true });
+  }
+
+  function saveManualArtistId(mbid: string) {
+    if (!target || !mbid) return;
+    updateDraft({ ...draft, artist_dismissed: false, published: { ...(draft.published || {}), artistId: mbid } });
+  }
+
+  function markDuplicatesReviewed() {
+    if (!target || draft.duplicates_reviewed) return;
+    updateDraft({ ...draft, duplicates_reviewed: true });
+  }
+
   async function resetDraft() {
     if (!target || !window.confirm('Reset the saved submission draft for this target?')) return;
     await resetSubmissionDraft(target.target_type, target.target_id);
@@ -438,7 +508,16 @@ export default function Submissions() {
   const primary = (() => {
     if (!selectedItem) return { label: 'Select a review item', disabled: true, action: () => undefined };
     if (targetLoading) return { label: 'Resolving local files…', disabled: true, action: () => undefined };
-    if (!target || isBlockedState) return { label: 'Rescan folder', disabled: true, action: () => undefined };
+    if (!target || isBlockedState) return { label: 'Scan local files', disabled: !selectedItem, action: refetchTarget };
+    if (artistStageActive) return { label: 'Resolve artist above', disabled: true, action: () => undefined };
+    const { firstBlocker } = readinessSummary(target.preflight);
+    if (firstBlocker) {
+      return {
+        label: ACTION_LABEL[firstBlocker.action_type || ''] || 'Review required item',
+        disabled: false,
+        action: () => handleCheckAction(firstBlocker.action_type || '', firstBlocker.action_target),
+      };
+    }
     if (activeStep <= 1) return { label: 'Prepare MusicBrainz submission', disabled: !target.preflight.musicbrainz_ready || mbRun.status === 'running', action: runMusicBrainzPrepare };
     if (activeStep === 2) return { label: 'Open prepared submission in MusicBrainz', disabled: false, action: () => window.open(mbUrl, '_blank', 'noopener,noreferrer') };
     if (!validation?.release) return { label: 'Validate published IDs', disabled: !mbInput.trim(), action: validatePublishedIds };
@@ -446,13 +525,13 @@ export default function Submissions() {
     return { label: `Submit ${readyFingerprints} fingerprints`, disabled: !target.preflight.acoustid_ready || acoustidRun.status === 'running' || readyFingerprints === 0, action: runAcoustidSubmit };
   })();
 
-  const footerBlockerCount = target ? target.preflight.checks.filter((c) => c.blocking && c.status === 'fail').length : 0;
+  const footerBlockerCount = readinessSummary(target?.preflight ?? null).blockers.length;
   const footerText = (() => {
     if (!selectedItem) return 'Select a review item to start.';
     if (targetLoading) return 'Resolving local tracks for this review item…';
     if (targetError) return `Could not resolve this item: ${targetError}`;
-    if (!target) return 'Could not resolve this item — see Preflight Checklist.';
-    return `${target.summary.albumartist || 'Unknown artist'} - ${target.summary.title || 'Untitled'} / ${stage}`;
+    if (!target) return 'Could not resolve this item — see the readiness summary below.';
+    return `${target.summary.albumartist || 'Unknown artist'} - ${target.summary.title || 'Untitled'} / ${stageLabel}`;
   })();
 
   const knownFields = PRIMARY_METADATA_FIELDS.filter(([key]) => key !== 'title' && key !== 'albumartist' && !!(target?.summary as Record<string, unknown> | undefined)?.[key] && !REVIEW_SUMMARY_KEYS.has(key));
@@ -475,7 +554,7 @@ export default function Submissions() {
             <p className="text-xs font-semibold uppercase text-red-400">Submissions</p>
             <h1 className="mt-1 text-2xl font-semibold text-zinc-100">MusicBrainz and AcoustID</h1>
             <div className="mt-2 flex flex-wrap gap-2">
-              <Chip label={stage} color={stage === 'Complete' ? 'success' : stage.includes('Ready') ? 'info' : 'default'} size="small" variant="outlined" />
+              <Chip label={stageLabel} color={stage === 'Complete' ? 'success' : stage.includes('Ready') ? 'info' : 'default'} size="small" variant="outlined" />
               {activeAlbumId ? <Chip label={`Album ${activeAlbumId}`} size="small" variant="outlined" /> : null}
               {activeItemId && !activeAlbumId ? <Chip label={`Item ${activeItemId}`} size="small" variant="outlined" /> : null}
               <Chip label={`${targetLoading || !target ? (selectedItem?.tracks || 0) : tracks.length} tracks`} size="small" variant="outlined" />
@@ -666,18 +745,27 @@ export default function Submissions() {
             </div>
           </section>
 
-          {/* D. Preflight problems */}
-          <section className="rounded-md border border-graphite-800 bg-graphite-900/70 p-4">
-            <h2 className="text-sm font-semibold text-zinc-100">Preflight Checklist</h2>
-            {!target ? <p className="mt-2 text-xs text-zinc-500">Select a resolvable review item to see preflight checks.</p> : (
-              <div className="mt-3 grid gap-2 md:grid-cols-2">
-                {(target.preflight.checks || []).map((check) => <div key={check.label} className="rounded border border-graphite-800 bg-graphite-950/35 p-3"><div className="flex items-center justify-between gap-2"><span className="text-sm text-zinc-200">{check.label}</span><Chip size="small" label={check.status} color={check.status === 'pass' ? 'success' : check.status === 'warning' ? 'warning' : 'error'} /></div>{check.explanation ? <p className="mt-2 text-xs text-zinc-400">{check.explanation}</p> : null}{check.action ? <p className="mt-1 text-xs text-red-300">{check.action}</p> : null}{check.affected?.length ? <p className="mt-1 truncate text-xs text-zinc-500">{check.affected.slice(0, 4).join(', ')}</p> : null}</div>)}
-              </div>
-            )}
-          </section>
+          {targetLoading ? (
+            <div className="rounded-md border border-graphite-800 bg-graphite-900/70 p-4 text-sm text-zinc-400">Checking readiness…</div>
+          ) : artistStageActive ? (
+            <ArtistResolutionCard
+              artistName={target?.summary.albumartist || itemArtist(selectedItem)}
+              onSaveManualId={saveManualArtistId}
+              onDismiss={dismissArtistStep}
+              saving={saveState === 'saving'}
+            />
+          ) : (
+          <>
+          {/* D. Submission readiness */}
+          <SubmissionReadinessCard
+            preflight={target?.preflight ?? null}
+            loading={targetLoading}
+            primaryAction={primary}
+            onAction={handleCheckAction}
+          />
 
           {/* E. Track list, moved above the metadata editor */}
-          <section className="rounded-md border border-graphite-800 bg-graphite-900/70 p-4">
+          <section id="submission-tracks" className="rounded-md border border-graphite-800 bg-graphite-900/70 p-4">
             <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between"><h2 className="text-sm font-semibold text-zinc-100">Track Submission Preview</h2><div className="flex flex-wrap gap-2"><Button size="small" variant="outlined" disabled={!tracks.length} onClick={() => void copyText(parserText, 'Track-parser text')}>Copy track-parser text</Button><Button size="small" variant="outlined" disabled={!tracks.length} onClick={() => void copyText(`${target?.summary.albumartist || ''} - ${target?.summary.title || ''}\n\n${parserText}`, 'Submission summary')}>Copy complete summary</Button></div></div>
             {!tracks.length ? <p className="mt-3 text-sm text-zinc-500">{target ? 'No tracks were found for this review item.' : 'Select a review item to see its tracks.'}</p> : (
               <div className="mt-3 overflow-auto rounded border border-graphite-800">
@@ -689,7 +777,7 @@ export default function Submissions() {
           </section>
 
           {/* F. Metadata editor: primary fields first, everything else collapsed */}
-          <section className="rounded-md border border-graphite-800 bg-graphite-900/70 p-4">
+          <section id="submission-metadata" className="rounded-md border border-graphite-800 bg-graphite-900/70 p-4">
             <div className="flex items-center justify-between gap-3">
               <h2 className="text-sm font-semibold text-zinc-100">Editable Release Metadata</h2>
               {saveState === 'saving' ? <Chip size="small" label="Saving…" color="warning" variant="outlined" />
@@ -717,11 +805,36 @@ export default function Submissions() {
           </section>
 
           <section className="grid gap-4 lg:grid-cols-2">
-            <div className="rounded-md border border-graphite-800 bg-graphite-900/70 p-4"><h2 className="text-sm font-semibold text-zinc-100">Duplicate Detection</h2><p className="mt-1 text-sm text-zinc-400">Likely existing releases from the current review evidence.</p><div className="mt-3 space-y-2">{(selectedItem?.evidence?.top_candidates || []).slice(0, 6).map((candidate, index) => <button key={`${candidate.mb_albumid || index}`} type="button" className="w-full rounded border border-graphite-800 bg-graphite-950/35 p-3 text-left hover:border-red-600" onClick={() => { setMbInput(candidate.mb_url || candidate.mb_albumid || ''); setValidation(null); }}><div className="text-sm text-zinc-100">{candidate.album || candidate.artist || 'MusicBrainz candidate'}</div><div className="mt-1 text-xs text-zinc-400">{candidate.artist} / {candidate.date || candidate.year || 'date unknown'} / {candidate.country || 'country unknown'} / {candidate.format_summary || candidate.formats?.join(', ') || 'format unknown'}</div><div className="mt-1 font-mono text-[0.68rem] text-zinc-500">{candidate.mb_albumid || candidate.mb_releasegroupid}</div></button>)}{!selectedCandidateCount ? <Alert severity="info">No duplicate candidates are attached to this review item yet. Prepare the release only after checking MusicBrainz.</Alert> : null}</div></div>
-            <div className="rounded-md border border-graphite-800 bg-graphite-900/70 p-4"><h2 className="text-sm font-semibold text-zinc-100">MusicBrainz Handoff</h2><p className="mt-1 text-sm text-zinc-400">The app prepares track-parser text. MusicBrainz publication stays on the MusicBrainz website in a separate tab.</p>{!isBeetsTarget && target ? <Alert severity="warning" sx={{ mt: 2 }}>This folder is not imported into Beets yet, so track-parser preparation and ID attachment are unavailable until it is imported. You can still add reference URLs and edit metadata below.</Alert> : null}<div className="mt-3 flex flex-wrap gap-2"><Button size="small" variant="contained" disabled={!target?.preflight.musicbrainz_ready || mbRun.status === 'running'} onClick={() => void runMusicBrainzPrepare()}>Prepare Submission</Button><Button size="small" variant="outlined" onClick={() => window.open(mbUrl, '_blank', 'noopener,noreferrer')}>Open MusicBrainz separately</Button></div>{mbRun.message ? <Alert severity={statusTone(mbRun.status)} sx={{ mt: 2 }}>{mbRun.message}</Alert> : null}<JobLink jobId={mbRun.jobId} /><TextField sx={{ mt: 3 }} fullWidth size="small" label="Published MusicBrainz release URL or MBID" value={mbInput} onChange={(event) => { setMbInput(event.target.value); setValidation(null); updateDraft({ ...draft, published: { ...(draft.published || {}), input: event.target.value } }); }} helperText="Paste the resulting MusicBrainz release URL here after the website confirms it exists." /><div className="mt-2 flex gap-2"><Button size="small" variant="outlined" disabled={!mbInput.trim()} onClick={() => void validatePublishedIds()}>Validate published IDs</Button>{release ? <Button size="small" variant="contained" disabled={!canApply || applyRun.status === 'running'} onClick={() => void applyPublishedIds()}>{APPLY_MBIDS_LABEL}</Button> : null}</div>{validation?.error ? <Alert severity="error" sx={{ mt: 2 }}>{validation.error}</Alert> : null}{validation?.message ? <Alert severity="info" sx={{ mt: 2 }}>{validation.message}</Alert> : null}{release ? <Alert severity={validation?.needs_confirmation ? 'warning' : 'success'} sx={{ mt: 2 }}>{release.title} / {release.albumartist} / {release.track_count} tracks. {validation?.mismatches?.length ? `${validation.mismatches.length} mismatch warning(s).` : 'Track mapping matched by position.'}</Alert> : null}{applyRun.message ? <Alert severity={statusTone(applyRun.status)} sx={{ mt: 2 }}>{applyRun.message}</Alert> : null}<JobLink jobId={applyRun.jobId} /></div>
+            <div id="submission-duplicates" className="rounded-md border border-graphite-800 bg-graphite-900/70 p-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h2 className="text-sm font-semibold text-zinc-100">Duplicate Detection</h2>
+                {draft.duplicates_reviewed
+                  ? <Chip size="small" color="success" label="Reviewed" />
+                  : <Button size="small" variant="text" onClick={markDuplicatesReviewed}>Mark as reviewed</Button>}
+              </div>
+              <p className="mt-1 text-sm text-zinc-400">Likely existing releases from the current review evidence.</p>
+              <div className="mt-3 space-y-2">
+                {(selectedItem?.evidence?.top_candidates || []).slice(0, 6).map((candidate, index) => <button key={`${candidate.mb_albumid || index}`} type="button" className="w-full rounded border border-graphite-800 bg-graphite-950/35 p-3 text-left hover:border-red-600" onClick={() => { setMbInput(candidate.mb_url || candidate.mb_albumid || ''); setValidation(null); markDuplicatesReviewed(); }}><div className="text-sm text-zinc-100">{candidate.album || candidate.artist || 'MusicBrainz candidate'}</div><div className="mt-1 text-xs text-zinc-400">{candidate.artist} / {candidate.date || candidate.year || 'date unknown'} / {candidate.country || 'country unknown'} / {candidate.format_summary || candidate.formats?.join(', ') || 'format unknown'}</div><div className="mt-1 font-mono text-[0.68rem] text-zinc-500">{candidate.mb_albumid || candidate.mb_releasegroupid}</div></button>)}
+                {!selectedCandidateCount ? (discogsCandidate ? (
+                  <Alert severity="info" action={<Button color="inherit" size="small" onClick={() => { markDuplicatesReviewed(); if (discogsCandidate.discogs_url) reprocessReferenceUrl(discogsCandidate.discogs_url); }}>Use as reference</Button>}>
+                    No MusicBrainz match, but Discogs has a possible one: {discogsCandidate.artist || 'Unknown artist'} - {discogsCandidate.album || 'Unknown album'}{discogsCandidate.year ? ` (${discogsCandidate.year})` : ''}.
+                  </Alert>
+                ) : <Alert severity="info">No duplicate candidates are attached to this review item yet. Prepare the release only after checking MusicBrainz.</Alert>) : null}
+              </div>
+            </div>
+            <div id="submission-mb-handoff" className="rounded-md border border-graphite-800 bg-graphite-900/70 p-4"><h2 className="text-sm font-semibold text-zinc-100">MusicBrainz Handoff</h2><p className="mt-1 text-sm text-zinc-400">The app prepares track-parser text. MusicBrainz publication stays on the MusicBrainz website in a separate tab.</p>{!isBeetsTarget && target ? <Alert severity="warning" sx={{ mt: 2 }}>This folder is not imported into Beets yet, so track-parser preparation and ID attachment are unavailable until it is imported. You can still add reference URLs and edit metadata below.</Alert> : null}<div className="mt-3 flex flex-wrap gap-2"><Button size="small" variant="contained" disabled={!target?.preflight.musicbrainz_ready || mbRun.status === 'running'} onClick={() => void runMusicBrainzPrepare()}>Prepare Submission</Button><Button size="small" variant="outlined" onClick={() => window.open(mbUrl, '_blank', 'noopener,noreferrer')}>Open MusicBrainz separately</Button></div>{mbRun.message ? <Alert severity={statusTone(mbRun.status)} sx={{ mt: 2 }}>{mbRun.message}</Alert> : null}<JobLink jobId={mbRun.jobId} /><TextField sx={{ mt: 3 }} fullWidth size="small" label="Published MusicBrainz release URL or MBID" value={mbInput} onChange={(event) => { setMbInput(event.target.value); setValidation(null); updateDraft({ ...draft, published: { ...(draft.published || {}), input: event.target.value } }); }} helperText="Paste the resulting MusicBrainz release URL here after the website confirms it exists." /><div className="mt-2 flex gap-2"><Button size="small" variant="outlined" disabled={!mbInput.trim()} onClick={() => void validatePublishedIds()}>Validate published IDs</Button>{release ? <Button size="small" variant="contained" disabled={!canApply || applyRun.status === 'running'} onClick={() => void applyPublishedIds()}>{APPLY_MBIDS_LABEL}</Button> : null}</div>{validation?.error ? <Alert severity="error" sx={{ mt: 2 }}>{validation.error}</Alert> : null}{validation?.message ? <Alert severity="info" sx={{ mt: 2 }}>{validation.message}</Alert> : null}{release ? <Alert severity={validation?.needs_confirmation ? 'warning' : 'success'} sx={{ mt: 2 }}>{release.title} / {release.albumartist} / {release.track_count} tracks. {validation?.mismatches?.length ? `${validation.mismatches.length} mismatch warning(s).` : 'Track mapping matched by position.'}</Alert> : null}{applyRun.message ? <Alert severity={statusTone(applyRun.status)} sx={{ mt: 2 }}>{applyRun.message}</Alert> : null}<JobLink jobId={applyRun.jobId} /></div>
           </section>
 
+          {(target?.preflight.current_stage === 'acoustid' || target?.preflight.current_stage === 'complete') ? (
           <section className="rounded-md border border-graphite-800 bg-graphite-900/70 p-4"><h2 className="text-sm font-semibold text-zinc-100">AcoustID Submission</h2><p className="mt-1 text-sm text-zinc-400">Submit {readyFingerprints} fingerprints for {tracks.length} tracks linked to {tracks.filter((track) => track.mb_trackid).length} MusicBrainz recordings.</p><div className="mt-3 grid gap-2 md:grid-cols-2">{tracks.map((track) => <div key={`fp-${track.item_id || track.file_path}`} className="rounded border border-graphite-800 bg-graphite-950/35 p-2 text-xs"><div className="truncate text-zinc-200">{track.track}. {track.title}</div><div className={track.mb_trackid && track.file_available ? 'text-emerald-300' : 'text-red-300'}>{track.fingerprint_status}</div></div>)}</div><div className="mt-3 flex flex-wrap gap-2"><Button size="small" variant="contained" disabled={!target?.preflight.acoustid_ready || acoustidRun.status === 'running' || readyFingerprints === 0} onClick={() => void runAcoustidSubmit()}>{SUBMIT_FINGERPRINTS_LABEL}</Button><Button size="small" variant="outlined" disabled={!acoustidRun.output} onClick={() => void copyText(acoustidRun.output, 'AcoustID output')}>Copy output</Button></div>{acoustidRun.message ? <Alert severity={statusTone(acoustidRun.status)} sx={{ mt: 2 }}>{acoustidRun.message}</Alert> : null}<JobLink jobId={acoustidRun.jobId} />{acoustidRun.output ? <pre className="mt-3 max-h-64 overflow-auto whitespace-pre-wrap rounded border border-graphite-800 bg-graphite-950/60 p-3 text-xs text-zinc-300">{acoustidRun.output}</pre> : null}</section>
+          ) : (
+            <div className="rounded-md border border-graphite-800 bg-graphite-900/70 p-4">
+              <h2 className="text-sm font-semibold text-zinc-100">AcoustID Submission</h2>
+              <p className="mt-1 text-sm text-zinc-500">Available after MusicBrainz recording IDs are attached.</p>
+            </div>
+          )}
+          </>
+          )}
         </div>
       </div>
 
