@@ -86,9 +86,7 @@ Thumbs.db
 /document.documentElement.clientWidth
 /document.documentElement.clientWidth+2
 
-# Local agent/operator notes and one-off probes
-AGENTS.md
-CLAUDE.md
+# Local one-off probes
 fix_vultures.py
 query_vultures.py
 library-*.png
@@ -96,5 +94,11 @@ library-*.png
 # Local runtime Beets configuration; commit config.yaml.example instead
 config.yaml
 # Unreviewed local docs drafts
-docs/
+docs/*
+!docs/AI_ENGINEERING_RULES.md
+!docs/ARCHITECTURE.md
+!docs/TECHNICAL_DEBT.md
+!docs/adr/
+docs/adr/*
+!docs/adr/*.md
 .playwright-mcp/
