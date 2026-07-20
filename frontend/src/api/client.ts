@@ -72,6 +72,7 @@ import type {
   ReimportDiskPayload,
   ReviewQueueParams,
   ReviewQueueResponse,
+  ReviewRecordingCandidate,
   RgidGroupDetailResponse,
   FolderPlaceholderReview,
   FolderPlaceholderMergePreview,
@@ -1142,8 +1143,19 @@ export function suggestItem(itemId: number): Promise<AiSuggestResponse> {
   return apiJson<AiSuggestResponse>(`/api/items/${itemId}/ai-suggest`, { method: 'POST' });
 }
 
-export function attachRecording(itemId: number, mbTrackId: string): Promise<JobStartResponse> {
-  return apiJson<JobStartResponse>(`/api/items/${itemId}/attach-recording`, jsonRequest('POST', { mb_trackid: mbTrackId }));
+export function attachRecording(
+  itemId: number,
+  mbTrackId: string,
+  options: { confirmed_conflicts?: boolean; candidate?: ReviewRecordingCandidate } = {},
+): Promise<JobStartResponse> {
+  return apiJson<JobStartResponse>(
+    `/api/items/${itemId}/attach-recording`,
+    jsonRequest('POST', {
+      mb_trackid: mbTrackId,
+      confirmed_conflicts: Boolean(options.confirmed_conflicts),
+      candidate: options.candidate,
+    }),
+  );
 }
 
 export function reimportDisk(payload: ReimportDiskPayload): Promise<JobStartResponse> {

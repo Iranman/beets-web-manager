@@ -44,8 +44,12 @@ class SingletonReviewQueryTests(unittest.TestCase):
         self.assertIn("AND COALESCE(items.mb_trackid, '') = ''", self._fn)
 
     def test_reuses_library_no_mb_type_so_existing_filters_pick_it_up(self):
+        # Window sized generously above the current block length rather than
+        # tightly, since this block has already grown once (extra evidence
+        # fields added after the initial singleton-review-queue feature) and
+        # a too-tight window silently breaks again on the next addition.
         block_start = self._fn.index("Singleton items (already imported")
-        block = self._fn[block_start:block_start + 2200]
+        block = self._fn[block_start:block_start + 4000]
         self.assertIn('"type": "library_no_mb"', block)
         self.assertIn('"target_kind": "item"', block)
 
@@ -93,7 +97,12 @@ class AttachRecordingEndpointTests(unittest.TestCase):
 class FrontendSingletonWiringTests(unittest.TestCase):
     def test_client_wrappers_present(self):
         self.assertIn("export function suggestItem(itemId: number)", CLIENT_SOURCE)
-        self.assertIn("export function attachRecording(itemId: number, mbTrackId: string)", CLIENT_SOURCE)
+        # attachRecording grew an options param (confirmed_conflicts,
+        # candidate) to support the recording-candidate-evidence feature --
+        # check the signature start rather than the full original one-liner.
+        self.assertIn("export function attachRecording(", CLIENT_SOURCE)
+        self.assertIn("itemId: number,", CLIENT_SOURCE)
+        self.assertIn("mbTrackId: string,", CLIENT_SOURCE)
         self.assertIn("/api/items/${itemId}/attach-recording", CLIENT_SOURCE)
 
     def test_review_item_type_carries_target_kind(self):

@@ -3,7 +3,7 @@
 Beets Web Control — standalone Flask app.
 Opens the beets library directly. No plugin system, no S6, no beet web.
 """
-import base64, copy, difflib, functools, hashlib, hmac, importlib, json, math, mimetypes, os, platform, re, secrets, shlex, shutil, socket, sqlite3, subprocess, sys, threading, time, unicodedata, uuid
+import base64, copy, difflib, functools, gzip, hashlib, hmac, importlib, json, math, mimetypes, os, platform, re, secrets, shlex, shutil, socket, sqlite3, subprocess, sys, threading, time, unicodedata, uuid
 import importlib.metadata
 import urllib.error, urllib.parse, urllib.request
 from backend.security import (OutboundPolicyError, bounded_rate_key_store_sweep, direct_peer_is_trusted, install_secure_urllib, validate_outbound_url)
@@ -2275,6 +2275,62 @@ def _content_security_policy(html: Optional[str] = None) -> str:
     )
 
 
+_COMPRESSIBLE_MIMETYPE_PREFIXES = ("application/json", "text/")
+_COMPRESS_MIN_BYTES = 1024  # skip tiny responses; gzip overhead isn't worth it below this
+
+
+@app.after_request
+def _compress_response(response):
+    """Gzip-compress JSON/text responses when the client accepts it.
+
+    Registered before _set_security_headers below, so (per Flask's
+    reverse-registration-order execution) it runs AFTER that hook --
+    compression must happen last, once CSP header computation has already
+    read the plaintext HTML body via get_data(as_text=True); compressing
+    first would hand it undecodable gzip bytes.
+
+    Added 2026-07-20: /api/library's summary response was measured at
+    ~28.7MB uncompressed for a 545-artist library, sent with no
+    Content-Encoding at all -- confirmed via curl that Accept-Encoding: gzip
+    from the client was simply never honored. JSON compresses very well
+    (typically 5-10x), so this targets the actual "page feels slow" residual
+    once the server-side cache-warming fix (see _refresh_library_cache)
+    eliminated the synchronous rebuild. Applies to every JSON/text response,
+    not just /api/library -- general-purpose, zero risk to response content
+    (bytes in, same bytes out after decompression), skips anything already
+    encoded or served via direct_passthrough (file downloads, static assets
+    with their own streaming).
+    """
+    try:
+        if response.direct_passthrough:
+            return response
+        if response.headers.get("Content-Encoding"):
+            return response
+        accept_encoding = request.headers.get("Accept-Encoding", "")
+        if "gzip" not in accept_encoding.lower():
+            return response
+        mimetype = (response.mimetype or "").lower()
+        if not mimetype.startswith(_COMPRESSIBLE_MIMETYPE_PREFIXES):
+            return response
+        data = response.get_data()
+        if len(data) < _COMPRESS_MIN_BYTES:
+            return response
+        compressed = gzip.compress(data, compresslevel=6)
+        if len(compressed) >= len(data):
+            return response
+        response.set_data(compressed)
+        response.headers["Content-Encoding"] = "gzip"
+        response.headers["Content-Length"] = str(len(compressed))
+        existing_vary = response.headers.get("Vary", "")
+        if "Accept-Encoding" not in existing_vary:
+            response.headers["Vary"] = (
+                f"{existing_vary}, Accept-Encoding" if existing_vary else "Accept-Encoding"
+            )
+    except Exception:
+        pass
+    return response
+
+
 @app.after_request
 def _set_security_headers(response):
     html_for_csp = None
@@ -2987,7 +3043,8 @@ def item_attach_recording(iid: int):
         return jsonify({"ok": False, "error": "mb_trackid is required"}), 400
     if not _MB_UUID_RE.match(mb_trackid):
         return jsonify({"ok": False, "error": "Invalid MusicBrainz UUID format"}), 400
-
+    confirmed_conflicts = bool(payload.get("confirmed_conflicts"))
+    candidate_context = payload.get("candidate") if isinstance(payload.get("candidate"), dict) else {}
     def _do(log, cancel_event=None):
         cfg = _write_job_beets_config(f"/tmp/beets_attach_recording_{iid}.yaml")
         base = [BEET_BIN, "-c", cfg]
@@ -3005,13 +3062,43 @@ def item_attach_recording(iid: int):
         r = _beet_run(base + ["move", query], log, timeout=120, env=_beet_env(), cancel=cancel_event)
         if r.returncode not in (0, -9, 124):
             log.append(f"  WARN beet move rc={r.returncode}")
+        log.append("Revalidating MusicBrainz recording details after attach.")
+        details = _fetch_mb_recording_details(mb_trackid)
+        linked_count = len(details.get("linked_releases") or []) if isinstance(details, dict) else 0
+        selected_release = (details.get("selected_release") or {}) if isinstance(details, dict) else {}
+        if confirmed_conflicts:
+            log.append("User confirmed visible candidate conflicts before attaching the Recording ID.")
+        if candidate_context:
+            log.append(f"Attached candidate safety result: {_s(candidate_context.get('safety_result') or 'unknown')}.")
+        if linked_count:
+            rel_title = _s(selected_release.get("album") or details.get("album") or "")
+            rel_year = _s(selected_release.get("year") or details.get("year") or "")
+            rgid = _s(selected_release.get("mb_releasegroupid") or details.get("mb_releasegroupid") or "")
+            log.append(f"MusicBrainz recording lookup returned {linked_count} linked release(s); selected release context: {rel_title or '(unknown release)'} {rel_year or ''} {rgid or ''}".strip())
+            if not rgid:
+                log.append("Album/release identity remains under review; no Release Group ID was attached from the recording candidate.")
+        else:
+            log.append("MusicBrainz recording lookup returned no linked releases; album identity remains under review.")
         _invalidate_lib_cache()
+        log.append("Review eligibility will be recalculated from the refreshed library state.")
         _trigger_plex_refresh(log)
         log.append("Recording ID attached and item synced/moved.")
-
     job = jobs.start_python(_do, label=f"Attach recording ID: item {iid}")
     return jsonify({"ok": True, "job_id": job.job_id})
 
+
+def _format_duration(seconds: Any) -> str:
+    try:
+        total = int(round(float(seconds or 0)))
+    except Exception:
+        total = 0
+    if total <= 0:
+        return ""
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
 
 def _item_ai_abs_path(item) -> str:
     path_text = _s(getattr(item, "path", "")).strip()
@@ -3095,6 +3182,256 @@ def _score_track_ai_candidate(current: Dict[str, Any], search_title: str,
     }
 
 
+def _track_ai_year(value: Any) -> str:
+    text = _s(value).strip()
+    m = re.match(r"^((?:19|20)\d{2})", text)
+    return m.group(1) if m else ""
+
+
+def _track_ai_parse_duration_seconds(value: Any) -> Optional[float]:
+    if value in (None, ""):
+        return None
+    try:
+        number = float(value)
+        if number <= 0:
+            return None
+        return number / 1000.0 if number > 10000 else number
+    except Exception:
+        pass
+    text = _s(value).strip()
+    if not text:
+        return None
+    parts = text.split(":")
+    try:
+        if len(parts) == 2:
+            return float(parts[0]) * 60.0 + float(parts[1])
+        if len(parts) == 3:
+            return float(parts[0]) * 3600.0 + float(parts[1]) * 60.0 + float(parts[2])
+    except Exception:
+        return None
+    return None
+
+
+def _track_ai_duration_seconds(current: Dict[str, Any]) -> Optional[float]:
+    return _track_ai_parse_duration_seconds(
+        current.get("duration_seconds")
+        or current.get("duration")
+        or current.get("length")
+    )
+
+
+def _track_ai_candidate_duration_seconds(candidate: Dict[str, Any], details: Dict[str, Any]) -> Optional[float]:
+    release = candidate.get("selected_release") or details.get("selected_release") or {}
+    return _track_ai_parse_duration_seconds(
+        release.get("duration_ms")
+        or candidate.get("duration_ms")
+        or details.get("recording_length_ms")
+        or candidate.get("duration")
+    )
+
+
+def _track_ai_release_match_score(current: Dict[str, Any], release: Dict[str, Any]) -> Dict[str, Any]:
+    local_album = _s(current.get("album") or "")
+    local_artist = _s(current.get("albumartist") or current.get("artist") or "")
+    local_year = _track_ai_year(current.get("year"))
+    release_album = _s(release.get("album") or "")
+    release_artist = _s(release.get("artist") or "")
+    release_year = _track_ai_year(release.get("year") or release.get("date"))
+    album_score = _track_ai_similarity(local_album, release_album) if local_album and release_album else 0.0
+    artist_score = _track_ai_similarity(local_artist, release_artist) if local_artist and release_artist else 0.0
+    year_match = bool(local_year and release_year and local_year == release_year)
+    year_delta = 99
+    if local_year and release_year:
+        try:
+            year_delta = abs(int(local_year) - int(release_year))
+        except Exception:
+            year_delta = 99
+    year_score = 1.0 if year_match else (0.75 if year_delta == 1 else (0.45 if year_delta <= 3 else 0.0))
+    total = album_score * 0.48 + artist_score * 0.24 + year_score * 0.28
+    return {
+        "album_score": round(album_score, 3),
+        "artist_score": round(artist_score, 3),
+        "year_score": round(year_score, 3),
+        "year_match": year_match,
+        "year_delta": year_delta if year_delta != 99 else None,
+        "total": round(total, 4),
+    }
+
+
+def _track_ai_best_linked_release(current: Dict[str, Any], candidate: Dict[str, Any], details: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    linked = details.get("linked_releases") or candidate.get("linked_releases") or []
+    if not linked:
+        selected = details.get("selected_release") or candidate.get("selected_release") or {}
+        return selected if isinstance(selected, dict) and selected else None
+    preferred_albumid = _s(candidate.get("mb_albumid") or details.get("mb_albumid") or "").strip().lower()
+
+    def _sort_key(release: Dict[str, Any]):
+        match = _track_ai_release_match_score(current, release)
+        preferred = 1 if preferred_albumid and _s(release.get("mb_albumid")).strip().lower() == preferred_albumid else 0
+        primary = _s(release.get("release_group_primary_type")).casefold()
+        albumish = 1 if primary == "album" else (0.5 if primary == "ep" else 0)
+        country = _s(release.get("country")).upper()
+        country_rank = 1 if country in {"US", "XW"} else 0
+        return (match["total"], match["album_score"], 1 if match["year_match"] else 0, preferred, albumish, country_rank)
+
+    ranked = sorted((r for r in linked if isinstance(r, dict)), key=_sort_key, reverse=True)
+    candidate["linked_releases"] = ranked
+    for release in ranked:
+        release["local_match"] = _track_ai_release_match_score(current, release)
+    return ranked[0] if ranked else None
+
+
+def _track_ai_match_status(score: float, strong: float = 0.82, fuzzy: float = 0.68) -> str:
+    if score >= strong:
+        return "yes"
+    if score >= fuzzy:
+        return "fuzzy"
+    return "no"
+
+
+def _enrich_track_ai_candidate(current: Dict[str, Any], candidate: Dict[str, Any], details: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    details = details or {}
+    mb_trackid = _s(candidate.get("mb_trackid") or details.get("recording_id") or "").strip().lower()
+    if mb_trackid and not details:
+        preferred_albumid = _s(candidate.get("mb_albumid") or next(iter(candidate.get("mb_albumids") or []), "")).strip()
+        details = _fetch_mb_recording_details(mb_trackid, preferred_albumid)
+    selected_release = _track_ai_best_linked_release(current, candidate, details) or {}
+    recording_title = _s(details.get("recording_title") or candidate.get("recording_title") or candidate.get("title") or "")
+    recording_artist = _s(details.get("recording_artist") or details.get("artist") or candidate.get("recording_artist") or candidate.get("artist") or "")
+    release_title = _s(selected_release.get("album") or details.get("album") or candidate.get("album") or "")
+    release_artist = _s(selected_release.get("artist") or details.get("albumartist") or candidate.get("release_artist") or "")
+    release_year = _track_ai_year(selected_release.get("year") or selected_release.get("date") or details.get("year") or candidate.get("year"))
+    local_title = _s(current.get("title") or "")
+    local_artist = _s(current.get("artist") or current.get("albumartist") or "")
+    local_album = _s(current.get("album") or "")
+    local_year = _track_ai_year(current.get("year"))
+    title_score = _track_ai_similarity(local_title, recording_title) if local_title and recording_title else 0.0
+    artist_score = max(
+        _track_ai_similarity(local_artist, recording_artist) if local_artist and recording_artist else 0.0,
+        _track_ai_similarity(_s(current.get("albumartist") or ""), recording_artist) if current.get("albumartist") and recording_artist else 0.0,
+    )
+    album_score = _track_ai_similarity(local_album, release_title) if local_album and release_title else 0.0
+    local_duration = _track_ai_duration_seconds(current)
+    suggested_duration = _track_ai_candidate_duration_seconds(candidate, {**details, "selected_release": selected_release})
+    duration_delta = None
+    duration_status = "unknown"
+    if local_duration and suggested_duration:
+        duration_delta = abs(local_duration - suggested_duration)
+        duration_status = "yes" if duration_delta <= 4 else ("tolerance" if duration_delta <= 10 else "conflict")
+    year_status = "unknown"
+    if local_year and release_year:
+        year_status = "yes" if local_year == release_year else "conflict"
+    release_group_id = _s(selected_release.get("mb_releasegroupid") or details.get("mb_releasegroupid") or candidate.get("mb_releasegroupid") or "").strip().lower()
+    local_release_group_id = _s(current.get("mb_releasegroupid") or "").strip().lower()
+    release_group_status = "unknown"
+    if local_release_group_id and release_group_id:
+        release_group_status = "yes" if local_release_group_id == release_group_id else "conflict"
+    linked_releases = candidate.get("linked_releases") or details.get("linked_releases") or []
+    matching_local_release = bool(
+        linked_releases
+        and any(
+            (_track_ai_similarity(local_album, _s(r.get("album") or "")) >= 0.78 if local_album else False)
+            and (not local_year or _track_ai_year(r.get("year") or r.get("date")) == local_year)
+            for r in linked_releases
+            if isinstance(r, dict)
+        )
+    )
+    conflicts: List[str] = []
+    if title_score and title_score < 0.68:
+        conflicts.append("title_conflict")
+    if artist_score and artist_score < 0.68:
+        conflicts.append("artist_conflict")
+    if local_album and release_title and album_score < 0.55:
+        conflicts.append("album_conflict")
+    if year_status == "conflict":
+        conflicts.append("year_conflict")
+    if duration_status == "conflict":
+        conflicts.append("duration_conflict")
+    if release_group_status == "conflict":
+        conflicts.append("release_group_conflict")
+    source = _s(candidate.get("source") or (candidate.get("_match_score") or {}).get("source") or "mb").lower()
+    acoustid_score = _audio_identity_score(candidate) if source == "acoustid" else 0.0
+    match_score = float((candidate.get("_match_score") or {}).get("total") or 0.0)
+    evidence_supported = source == "acoustid" or match_score >= 0.78 or float(candidate.get("score") or 0) >= 90
+    hard_conflict = "title_conflict" in conflicts or "artist_conflict" in conflicts
+    needs_confirmation = bool(conflicts and not hard_conflict)
+    if not mb_trackid:
+        safety_result = "No verified match"
+        safety_key = "none"
+        recommended_action = "Search MusicBrainz manually"
+    elif hard_conflict:
+        safety_result = "Conflict"
+        safety_key = "conflict"
+        recommended_action = "Reject candidate"
+    elif evidence_supported and not conflicts and title_score >= 0.82 and artist_score >= 0.72:
+        safety_result = "Safe to attach"
+        safety_key = "safe"
+        recommended_action = "Attach Recording ID"
+    else:
+        safety_result = "Needs review"
+        safety_key = "review"
+        recommended_action = "Confirm conflicts, then attach Recording ID" if conflicts else "Use this candidate after review"
+        needs_confirmation = True
+    reason = _s(candidate.get("reason") or "")
+    if not reason:
+        if source == "acoustid":
+            reason = "AcoustID fingerprint matched this recording; linked release context is ranked against local tags."
+        else:
+            reason = "MusicBrainz recording search matched the local title and artist clues."
+    if matching_local_release and len(linked_releases) > 1:
+        reason = f"{reason} Same recording appears on multiple releases; local album/year evidence selected the best linked release."
+    decision = {
+        "title_match": {"status": _track_ai_match_status(title_score), "score": round(title_score, 3), "local": local_title, "suggested": recording_title},
+        "artist_match": {"status": _track_ai_match_status(artist_score), "score": round(artist_score, 3), "local": local_artist, "suggested": recording_artist},
+        "album_match": {"status": _track_ai_match_status(album_score), "score": round(album_score, 3), "local": local_album, "suggested": release_title},
+        "year_match": {"status": year_status, "local": local_year, "suggested": release_year},
+        "duration_match": {"status": duration_status, "delta_seconds": round(duration_delta, 1) if duration_delta is not None else None},
+        "release_group_match": {"status": release_group_status, "local": local_release_group_id, "suggested": release_group_id},
+        "confidence_score": round(match_score or acoustid_score, 3),
+        "safety_result": safety_result,
+    }
+    candidate.update({
+        "candidate_type": "recording",
+        "match_method": source,
+        "source": source,
+        "mb_trackid": mb_trackid,
+        "mb_url": candidate.get("mb_url") or (f"https://musicbrainz.org/recording/{mb_trackid}" if mb_trackid else ""),
+        "musicbrainz_url": candidate.get("mb_url") or (f"https://musicbrainz.org/recording/{mb_trackid}" if mb_trackid else ""),
+        "recording_title": recording_title,
+        "recording_artist": recording_artist,
+        "title": recording_title or candidate.get("title", ""),
+        "artist": recording_artist or candidate.get("artist", ""),
+        "selected_release": selected_release,
+        "linked_releases": linked_releases,
+        "same_recording_release_count": len(linked_releases),
+        "matching_local_release_found": matching_local_release,
+        "release_title": release_title,
+        "release_artist": release_artist,
+        "release_date": _s(selected_release.get("date") or details.get("date") or ""),
+        "release_year": release_year,
+        "album": release_title or candidate.get("album", ""),
+        "year": release_year or candidate.get("year", ""),
+        "mb_albumid": _s(selected_release.get("mb_albumid") or details.get("mb_albumid") or candidate.get("mb_albumid") or "").strip().lower(),
+        "mb_releasegroupid": release_group_id,
+        "mb_releasegroupurl": _s(selected_release.get("mb_releasegroupurl") or details.get("mb_releasegroupurl") or ""),
+        "track_number": _s(selected_release.get("track_number") or selected_release.get("track") or ""),
+        "medium_position": selected_release.get("medium_position"),
+        "country": _s(selected_release.get("country") or candidate.get("country") or ""),
+        "medium_format": _s(selected_release.get("medium_format") or selected_release.get("media_format") or candidate.get("medium_format") or ""),
+        "acoustid_score": round(acoustid_score, 3),
+        "confidence": "high" if safety_key == "safe" else ("low" if safety_key in {"conflict", "none"} else "medium"),
+        "confidence_score": round(match_score or acoustid_score, 3),
+        "reason": reason,
+        "conflicts": conflicts,
+        "recommended_action": recommended_action,
+        "requires_confirmation": needs_confirmation,
+        "safety_result": safety_result,
+        "safety_key": safety_key,
+        "decision": decision,
+    })
+    return candidate
+
+
 def _compact_track_ai_candidate(candidate: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     c = candidate or {}
     score = c.get("_match_score") or {}
@@ -3102,21 +3439,51 @@ def _compact_track_ai_candidate(candidate: Optional[Dict[str, Any]]) -> Dict[str
         candidate_index = int(c.get("candidate_index", -1))
     except Exception:
         candidate_index = -1
+    selected_release = c.get("selected_release") or {}
     return {
         "candidate_index": candidate_index,
+        "candidate_type": _s(c.get("candidate_type") or "recording"),
         "mb_trackid": _s(c.get("mb_trackid", "")),
-        "mb_url": _s(c.get("mb_url", "")),
+        "mb_url": _s(c.get("mb_url") or c.get("musicbrainz_url") or ""),
+        "musicbrainz_url": _s(c.get("musicbrainz_url") or c.get("mb_url") or ""),
         "title": _s(c.get("title", "")),
         "artist": _s(c.get("artist", "")),
+        "recording_title": _s(c.get("recording_title") or c.get("title") or ""),
+        "recording_artist": _s(c.get("recording_artist") or c.get("artist") or ""),
         "album": _s(c.get("album", "")),
         "year": _s(c.get("year", "")),
+        "release_title": _s(c.get("release_title") or c.get("album") or ""),
+        "release_artist": _s(c.get("release_artist") or selected_release.get("artist") or ""),
+        "release_date": _s(c.get("release_date") or selected_release.get("date") or ""),
+        "release_year": _s(c.get("release_year") or c.get("year") or ""),
         "country": _s(c.get("country", "")),
+        "medium_format": _s(c.get("medium_format") or c.get("media_format") or ""),
+        "track_number": _s(c.get("track_number") or c.get("track") or ""),
+        "medium_position": c.get("medium_position"),
         "duration": _s(c.get("duration", "")),
         "source": _s(c.get("source") or score.get("source") or "mb"),
-        "score": int(c.get("score") or 0),
-        "match_total": round(float(score.get("total") or 0), 3),
+        "match_method": _s(c.get("match_method") or c.get("source") or score.get("source") or "mb"),
+        "score": c.get("score") or 0,
+        "match_total": round(float(score.get("total") or c.get("confidence_score") or 0), 3),
+        "confidence": _s(c.get("confidence") or ""),
+        "confidence_score": c.get("confidence_score"),
         "score_breakdown": score,
+        "decision": c.get("decision") or {},
+        "conflicts": c.get("conflicts") or [],
+        "recommended_action": _s(c.get("recommended_action") or ""),
+        "requires_confirmation": bool(c.get("requires_confirmation")),
+        "safety_result": _s(c.get("safety_result") or ""),
+        "safety_key": _s(c.get("safety_key") or ""),
+        "reason": _s(c.get("reason") or ""),
+        "acoustid_score": c.get("acoustid_score"),
+        "mb_albumid": _s(c.get("mb_albumid", "")),
         "mb_albumids": c.get("mb_albumids", []) or [],
+        "mb_releasegroupid": _s(c.get("mb_releasegroupid", "")),
+        "mb_releasegroupurl": _s(c.get("mb_releasegroupurl", "")),
+        "selected_release": selected_release,
+        "linked_releases": (c.get("linked_releases") or [])[:12],
+        "same_recording_release_count": c.get("same_recording_release_count") or len(c.get("linked_releases") or []),
+        "matching_local_release_found": bool(c.get("matching_local_release_found")),
     }
 
 
@@ -3156,7 +3523,12 @@ def _track_ai_evidence_packet(iid: int, *, filename: str,
         "selected_candidate": (
             _compact_track_ai_candidate(selected_candidate) if selected_candidate else {}
         ),
+        "selected_recording_candidate": (
+            _compact_track_ai_candidate(selected_candidate) if selected_candidate else {}
+        ),
         "top_candidates": [_compact_track_ai_candidate(c) for c in candidates[:8]],
+        "recording_candidates": [_compact_track_ai_candidate(c) for c in candidates[:8]],
+        "missing_id_type": "Recording ID",
         "source_counts": {
             "acoustid": len(acoustid_candidates),
             "musicbrainz": max(0, len(candidates) - len(acoustid_candidates)),
@@ -3207,6 +3579,11 @@ def ai_suggest(iid):
         "label":       _s(getattr(item, "label", "")) or "",
         "mb_trackid":  _s(getattr(item, "mb_trackid", "")) or "",
         "mb_albumid":  _s(getattr(item, "mb_albumid", "")) or "",
+        "mb_releasegroupid": _s(getattr(item, "mb_releasegroupid", "")) or "",
+        "filename": filename,
+        "source_path": item_path,
+        "duration_seconds": float(getattr(item, "length", 0) or 0),
+        "duration": _format_duration(float(getattr(item, "length", 0) or 0)),
     }
 
     # ── Pre-process: extract artist/title from "Artist - Title" filenames ──────
@@ -3264,9 +3641,15 @@ def ai_suggest(iid):
             )
             mb_candidates.append(c)
     mb_candidates.sort(key=lambda c: c.get("_match_score", {}).get("total", 0), reverse=True)
+    mb_candidates = mb_candidates[:8]
+    for c in mb_candidates:
+        try:
+            _enrich_track_ai_candidate(current, c)
+        except Exception as exc:
+            c["enrichment_error"] = _s(exc)
+    mb_candidates.sort(key=lambda c: c.get("_match_score", {}).get("total", 0), reverse=True)
     for idx, c in enumerate(mb_candidates):
         c["candidate_index"] = idx
-    mb_candidates = mb_candidates[:8]
 
     mb_section = ""
     if mb_candidates:
@@ -3436,6 +3819,7 @@ def ai_suggest(iid):
                         or next(iter(selected_candidate.get("mb_albumids") or []), "")
                     )
                     details = _fetch_mb_recording_details(mb_trackid, preferred_albumid)
+                    _enrich_track_ai_candidate(current, selected_candidate, details)
                     # Fields MB fills authoritatively (override AI guesses)
                     _mb_authoritative = {"artist", "mb_albumid", "mb_artistid",
                                          "track", "tracktotal", "disc", "disctotal",
@@ -3447,6 +3831,21 @@ def ai_suggest(iid):
                     mb_albumid = (suggestions.get("mb_albumid") or "").strip()
                 except Exception:
                     pass
+        if selected_candidate:
+            selected_packet = _compact_track_ai_candidate(selected_candidate)
+            suggestions["candidate_type"] = "recording"
+            suggestions["candidate_evidence"] = selected_packet
+            suggestions["selected_recording_candidate"] = selected_packet
+            suggestions["selected_release"] = selected_packet.get("selected_release") or {}
+            suggestions["linked_releases"] = selected_packet.get("linked_releases") or []
+            suggestions["conflicts"] = selected_packet.get("conflicts") or []
+            suggestions["recommended_action"] = selected_packet.get("recommended_action") or ""
+            suggestions["requires_confirmation"] = bool(selected_packet.get("requires_confirmation"))
+            suggestions["safety_result"] = selected_packet.get("safety_result") or ""
+            suggestions["confidence_score"] = selected_packet.get("confidence_score")
+            suggestions["match_method"] = selected_packet.get("match_method") or selected_packet.get("source")
+        suggestions["recording_candidates"] = [_compact_track_ai_candidate(c) for c in mb_candidates[:8]]
+        suggestions["missing_id_type"] = "Recording ID"
         if re.match(_MB_RE, (suggestions.get("mb_albumid") or ""), re.I):
             suggestions["mb_album_url"] = (
                 f"https://musicbrainz.org/release/{suggestions['mb_albumid']}")
@@ -6789,6 +7188,34 @@ def _folder_track_search_titles(source_folder: str, existing_album_id: int = 0,
     return titles
 
 
+def _musicbrainz_transient_error(ex: Exception) -> bool:
+    code = getattr(ex, "code", None)
+    if code in {429, 500, 502, 503, 504}:
+        return True
+    reason = getattr(ex, "reason", "")
+    details = " ".join(
+        str(part)
+        for part in (
+            ex,
+            reason,
+            getattr(reason, "reason", ""),
+            getattr(reason, "strerror", ""),
+        )
+        if part
+    ).lower()
+    return any(marker in details for marker in (
+        "timed out",
+        "temporarily",
+        "unexpected_eof",
+        "eof occurred in violation of protocol",
+        "connection reset",
+        "connection aborted",
+        "remote end closed connection",
+        "remote disconnected",
+        "server disconnected",
+    ))
+
+
 def _mb_release_search_by_folder_tracks(source_folder: str,
                                         existing_album_id: int = 0,
                                         artist: str = "",
@@ -6807,7 +7234,6 @@ def _mb_release_search_by_folder_tracks(source_folder: str,
         )
 
     release_hits: Dict[str, Dict[str, Any]] = {}
-    transient_codes = {429, 500, 502, 503, 504}
     used_title_only_fallback = False
     for pos, title in enumerate(titles, start=1):
         data: Dict[str, Any] = {}
@@ -6826,19 +7252,17 @@ def _mb_release_search_by_folder_tracks(source_folder: str,
                 headers={"User-Agent": "BeetsWebControl/1.0 (beets-webcontrol)"},
             )
             data = {}
-            for attempt in range(1, 3):
+            for attempt in range(1, 4):
                 try:
                     with _ur.urlopen(req, timeout=25) as resp:
                         data = json.loads(resp.read())
                     break
                 except Exception as ex:
-                    code = getattr(ex, "code", None)
-                    reason = str(getattr(ex, "reason", "") or "").lower()
-                    transient = code in transient_codes or "timed out" in reason or "temporarily" in reason
-                    if transient and attempt < 2:
+                    transient = _musicbrainz_transient_error(ex)
+                    if transient and attempt < 3:
                         if log is not None:
                             log.append(
-                                f"  MB recording search transient error for {title!r}; retrying"
+                                f"  MB recording search transient error for {title!r}; retrying ({attempt}/3)"
                             )
                         time.sleep(1.5)
                         continue
@@ -10618,7 +11042,7 @@ def match_album(aid):
 _lib_cache: Optional[dict] = None
 _lib_cache_ts: float = 0.0
 _lib_cache_lock = threading.Lock()
-_LIB_CACHE_TTL = 90.0  # 90 seconds — stays fresh between 2-min frontend polls
+_LIB_CACHE_TTL = 180.0  # comfortably longer than _auto_scan_loop's 2-min proactive rebuild tick, so a page visit essentially never has to pay for a synchronous rebuild
 
 _DOWNLOADS_ROOTS = ["/data/torrents", "/data/downloads", "/tmp"]
 _MUSIC_LIBRARY_ROOT = "/data/media/music"
@@ -11910,6 +12334,36 @@ def library_full():
         return jsonify(_library_payload_for_response(
             cached_payload, include_tracks, include_disk_only))
 
+    payload = _refresh_library_cache()
+    return jsonify(_library_payload_for_response(
+        payload, include_tracks, include_disk_only))
+
+
+def _refresh_library_cache() -> dict:
+    """Build a fresh library payload and store it as the shared cache.
+
+    Safe to call from a request handler or the background auto-scan loop
+    below -- no Flask request context needed. Splitting this out of
+    library_full() lets the background loop proactively rebuild the cache
+    on its own schedule instead of just invalidating it, so a page visit
+    almost always hits an already-warm cache instead of paying for a full
+    rebuild synchronously (a large library's cold build can take ~25s+).
+    """
+    global _lib_cache, _lib_cache_ts
+    payload = _build_library_payload()
+    with _lib_cache_lock:
+        _lib_cache    = payload
+        _lib_cache_ts = time.time()
+    return payload
+
+
+def _build_library_payload() -> dict:
+    """Walk /data/media/music on disk + inject library items whose files are
+    missing (shown in red). Pure builder -- no caching or request handling,
+    so both library_full() and the background cache-warmer can call it.
+    Do not change this traversal logic without a side-by-side parity check
+    (see CLAUDE.md's "/api/library is high risk" note).
+    """
     # Build lookup: file path → beets item (for import-status annotation)
     # Beets stores paths relative to the music root (e.g. "Artist/Album/song.flac").
     # We register BOTH the relative form AND the absolute form so the disk-walk lookup works.
@@ -12375,11 +12829,7 @@ def library_full():
         "stats":   {"artists": total_artists, "albums": total_albums, "tracks": total_tracks},
         "library_version": Path(LIB_PATH).stat().st_mtime if Path(LIB_PATH).exists() else time.time(),
     }
-    with _lib_cache_lock:
-        _lib_cache    = payload
-        _lib_cache_ts = time.time()
-    return jsonify(_library_payload_for_response(
-        payload, include_tracks, include_disk_only))
+    return payload
 
 
 # ── Acquisition queue ─────────────────────────────────────────────────────────
@@ -14694,7 +15144,8 @@ def import_review_queue():
     try:
         with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:
             singleton_rows = con.execute(
-                "SELECT items.id, items.artist, items.title, items.album, items.year, "
+                "SELECT items.id, items.artist, items.albumartist, items.title, items.album, items.year, "
+                "items.track, items.disc, items.length, items.mb_trackid, items.mb_albumid, "
                 "items.path, items.added "
                 "FROM items "
                 "WHERE (items.album_id IS NULL OR items.album_id = 0) "
@@ -14710,16 +15161,47 @@ def import_review_queue():
             abs_path = item_path if item_path.startswith("/") else str(MUSIC_ROOT / item_path)
             title = _s(r["title"])
             artist = _s(r["artist"])
+            albumartist = _s(r["albumartist"])
+            album = _s(r["album"])
+            year = int(r["year"] or 0)
+            track_number = int(r["track"] or 0)
+            duration_seconds = float(r["length"] or 0)
+            current_ids = {
+                "mb_trackid": _s(r["mb_trackid"]),
+                "mb_albumid": _s(r["mb_albumid"]),
+            }
+            local_current = {
+                "filename": Path(abs_path).name if abs_path else "",
+                "source_path": abs_path,
+                "title": title,
+                "artist": artist,
+                "album": album,
+                "albumartist": albumartist,
+                "year": str(year) if year else "",
+                "track": track_number or "",
+                "disc": int(r["disc"] or 0) or "",
+                "duration_seconds": duration_seconds,
+                "duration": _format_duration(duration_seconds),
+                "mb_trackid": current_ids["mb_trackid"],
+                "mb_albumid": current_ids["mb_albumid"],
+            }
             rows.append({
                 "id": f"item:{int(r['id'])}",
                 "type": "library_no_mb",
                 "target_kind": "item",
                 "status": "Needs recording ID",
                 "status_key": "needs_mb_id",
+                "missing_id_type": "Recording ID",
                 "title": title or Path(abs_path).stem or "(unknown title)",
                 "artist": artist,
-                "album": _s(r["album"]),
-                "year": int(r["year"] or 0),
+                "album": album,
+                "albumartist": albumartist,
+                "year": year,
+                "track": track_number or "",
+                "duration": _format_duration(duration_seconds),
+                "duration_seconds": duration_seconds,
+                "mb_trackid": current_ids["mb_trackid"],
+                "mb_albumid": current_ids["mb_albumid"],
                 "album_id": 0,
                 "item_id": int(r["id"]),
                 "first_item_id": int(r["id"]),
@@ -14728,6 +15210,12 @@ def import_review_queue():
                 "folder": str(Path(abs_path).parent) if abs_path else "",
                 "folder_name": Path(abs_path).parent.name if abs_path else "",
                 "sort_ts": float(r["added"] or 0),
+                "evidence": {
+                    "missing_id_type": "Recording ID",
+                    "current": local_current,
+                    "fingerprint": {"status": "not_checked", "acoustid_status": "not_checked"},
+                    "recording_candidates": [],
+                },
             })
     except Exception:
         pass
@@ -23396,7 +23884,14 @@ def _record_scan():
         _SCAN_STATE_FILE.write_text(str(time.time()))
     except Exception:
         pass
-    _invalidate_lib_cache()
+    # Rebuild here (in this background watcher thread) rather than just
+    # invalidating -- otherwise the cache sits cold for up to
+    # _QUICK_SCAN_INTERVAL until the next auto-scan tick, and the next
+    # visitor pays for the rebuild synchronously.
+    try:
+        _refresh_library_cache()
+    except Exception:
+        _invalidate_lib_cache()
 
 def _do_scan_job() -> str:
     """Start a Python-native library scan. Returns job_id."""
@@ -25048,7 +25543,7 @@ def _run_normalize_artists_if_needed():
 
 def _auto_scan_loop():
     """Two-tier auto-scan (no button needed):
-    - Every 2 min  → invalidate lib cache so next /api/library gets fresh disk state
+    - Every 2 min  → proactively rebuild the lib cache in the background
     - Every 30 min → full DB reconciliation (remove stale entries) + auto-normalize names
     """
     time.sleep(30)   # let Flask finish starting
@@ -25077,8 +25572,16 @@ def _auto_scan_loop():
                             break
                 threading.Thread(target=_post_scan, daemon=True).start()
             # ── Quick tick (every 2 min) ──────────────────────────────────────
+            # Rebuild in-place rather than just invalidating: this used to
+            # only invalidate, which forced whichever visitor loaded /library
+            # next to pay for the full rebuild synchronously (confirmed the
+            # dominant cause of "library takes forever to load every time" --
+            # the cache was rarely surviving more than ~2 minutes). Doing the
+            # rebuild here keeps the page fast without giving up the "stay
+            # in sync with external disk changes" behavior this loop exists
+            # for.
             elif now - last_quick >= _QUICK_SCAN_INTERVAL:
-                _invalidate_lib_cache()
+                _refresh_library_cache()
                 last_quick = now
         except Exception as _e:
             import logging as _lg

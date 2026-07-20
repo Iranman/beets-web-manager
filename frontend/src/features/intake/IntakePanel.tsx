@@ -625,8 +625,44 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
     }
   }, [path]);
 
+  // A cold scan of a large downloads folder can genuinely take 40-60+
+  // seconds (confirmed live: 2217 folders / 14461 files took ~41s server-side)
+  // with nothing else in the UI changing for the whole wait -- easy to read
+  // as hung rather than working. This just keeps a visible, ticking sign of
+  // life instead of a static "Previewing..." label.
+  const [scanElapsedSeconds, setScanElapsedSeconds] = useState(0);
+  useEffect(() => {
+    if (!scanning) {
+      setScanElapsedSeconds(0);
+      return undefined;
+    }
+    const startedAt = Date.now();
+    setScanElapsedSeconds(0);
+    const intervalId = window.setInterval(() => {
+      setScanElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+    return () => window.clearInterval(intervalId);
+  }, [scanning]);
+
+  // preflight.folders is capped by the backend to the first 100 entries for
+  // the preview table ("showing first 100" note below) -- it is NOT the
+  // full set. newFolders (this filtered array) must only be used to render
+  // that capped preview list. The real total eligible for Import All is
+  // audio_folders - already_in_library_folders, matching what
+  // PreflightSummary already displays as "New folders". Using
+  // newFolders.length anywhere that claims to describe the actual scope of
+  // the Import All operation (the confirm dialog, the summary text) was a
+  // real bug: a library with 2217 new folders showed "100 new folders" in
+  // the confirm dialog immediately before the user committed to the import,
+  // silently misrepresenting the scale of a real, mutating operation by
+  // more than 20x (confirmed live 2026-07-20).
   const newFolders = useMemo(
     () => preflight?.folders.filter((folder) => !folder.already_in_library) ?? [],
+    [preflight],
+  );
+
+  const newFolderCount = useMemo(
+    () => (preflight ? Math.max(0, preflight.audio_folders - preflight.already_in_library_folders) : 0),
     [preflight],
   );
 
@@ -692,12 +728,12 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
             />
             <div className="flex flex-wrap gap-2">
               <Button disabled={scanning || Boolean(jobId)} variant="outlined" onClick={() => void scan()}>
-                {scanning ? 'Previewing...' : 'Preview Import All'}
+                {scanning ? `Previewing... ${scanElapsedSeconds}s` : 'Preview Import All'}
               </Button>
               {!jobId ? (
                 <Button
-                  disabled={importing || scanning || !preflight || newFolders.length === 0}
-                  title={!preflight ? 'Preview Import All first' : newFolders.length === 0 ? 'No new source folders in the latest preview' : ''}
+                  disabled={importing || scanning || !preflight || newFolderCount === 0}
+                  title={!preflight ? 'Preview Import All first' : newFolderCount === 0 ? 'No new source folders in the latest preview' : ''}
                   variant="contained"
                   onClick={() => setConfirmOpen(true)}
                 >
@@ -741,6 +777,12 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
             <Chip label="Eligible matches import" size="small" color="success" variant="outlined" />
             <Chip label="Unsafe matches stay in Review" size="small" color="warning" variant="outlined" />
           </div>
+          {scanning ? (
+            <div className="text-xs text-zinc-500">
+              Scanning the source folder{scanElapsedSeconds > 0 ? ` (${scanElapsedSeconds}s elapsed)` : ''} — a large
+              downloads folder can take a minute or more on the first pass. This is still working.
+            </div>
+          ) : null}
         </CardContent>
         {scanning ? <LinearProgress /> : null}
       </Card>
@@ -757,10 +799,10 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
             <CardContent className="flex flex-col gap-3 lg:flex-row lg:items-center">
               <div className="min-w-0 flex-1">
                 <div className="text-sm font-medium text-zinc-200">
-                  {newFolders.length} new folder{newFolders.length !== 1 ? 's' : ''} in the Import All preview
+                  {newFolderCount} new folder{newFolderCount !== 1 ? 's' : ''} eligible for Import All
                 </div>
                 <div className="mt-1 text-xs text-zinc-500">
-                  {failedImportFolders > 0 ? `${failedImportFolders} folder(s) are under failed_imports. ` : ''}
+                  {failedImportFolders > 0 ? `${failedImportFolders} folder(s) in this preview are under failed_imports. ` : ''}
                   Import All will run as one backend job, import eligible matches, and keep unsafe folders in Review.
                 </div>
               </div>
@@ -769,7 +811,7 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
                   Re-scan
                 </Button>
                 <Button
-                  disabled={importing || newFolders.length === 0}
+                  disabled={importing || newFolderCount === 0}
                   variant="contained"
                   onClick={() => setConfirmOpen(true)}
                 >
@@ -806,7 +848,7 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
       <ConfirmStartDialog
         busy={importing}
         fileCount={preflight?.audio_files ?? 0}
-        folderCount={newFolders.length}
+        folderCount={newFolderCount}
         open={confirmOpen}
         path={path.trim() || DEFAULT_PATH}
         onClose={() => setConfirmOpen(false)}

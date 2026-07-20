@@ -27,13 +27,126 @@ _JUNK_TITLE_RE = re.compile(
 )
 
 
+def _mb_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8", errors="replace").strip()
+        except Exception:
+            return ""
+    return str(value).strip()
+
+
+def _mb_int(value: Any, default: int = 0) -> int:
+    try:
+        if value in (None, ""):
+            return default
+        return int(value)
+    except Exception:
+        return default
+
+
+def _mb_credit_text(credits: Any) -> str:
+    parts: List[str] = []
+    for credit in credits or []:
+        if not isinstance(credit, dict):
+            continue
+        name = _mb_text(credit.get("name") or (credit.get("artist") or {}).get("name"))
+        if not name:
+            continue
+        join = _mb_text(credit.get("joinphrase"))
+        parts.append(f"{name}{join}")
+    return "".join(parts).strip()
+
+
+def _mb_first_artist_id(credits: Any) -> str:
+    for credit in credits or []:
+        if isinstance(credit, dict):
+            artist_id = _mb_text((credit.get("artist") or {}).get("id"))
+            if artist_id:
+                return artist_id
+    return ""
+
+
+def _mb_release_track_count(release: Dict[str, Any]) -> int:
+    total = 0
+    for medium in release.get("media") or []:
+        total += _mb_int(medium.get("track-count"), 0)
+    return total
+
+
+def _mb_release_track_for_recording(release: Dict[str, Any], mb_trackid: str) -> tuple:
+    target = _mb_text(mb_trackid).lower()
+    for medium in release.get("media") or []:
+        for track in medium.get("tracks") or []:
+            recording = track.get("recording") or {}
+            if _mb_text(recording.get("id")).lower() == target:
+                return medium, track
+    return {}, {}
+
+
+def _mb_first_label(release: Dict[str, Any]) -> str:
+    for entry in release.get("label-info") or []:
+        if not isinstance(entry, dict):
+            continue
+        label = _mb_text((entry.get("label") or {}).get("name"))
+        if label:
+            return label
+    return ""
+
+
+def _compact_mb_recording_release(release: Dict[str, Any], mb_trackid: str) -> Dict[str, Any]:
+    release_id = _mb_text(release.get("id"))
+    release_group = release.get("release-group") or {}
+    release_group_id = _mb_text(release_group.get("id"))
+    medium, track = _mb_release_track_for_recording(release, mb_trackid)
+    track_recording = track.get("recording") or {}
+    release_artist = _mb_credit_text(release.get("artist-credit"))
+    date = _mb_text(release.get("date"))
+    medium_position = _mb_int(medium.get("position"), 0)
+    track_position = _mb_int(track.get("position"), 0)
+    track_number = _mb_text(track.get("number") or track.get("position"))
+    medium_format = _mb_text(medium.get("format"))
+    duration_ms = _mb_int(track.get("length") or track_recording.get("length"), 0)
+    track_count = _mb_release_track_count(release)
+    return {
+        "mb_albumid": release_id,
+        "mb_url": f"https://musicbrainz.org/release/{release_id}" if release_id else "",
+        "album": _mb_text(release.get("title")),
+        "artist": release_artist,
+        "date": date,
+        "year": date[:4] if date[:4].isdigit() else "",
+        "country": _mb_text(release.get("country")),
+        "status": _mb_text(release.get("status")),
+        "label": _mb_first_label(release),
+        "mb_releasegroupid": release_group_id,
+        "mb_releasegroupurl": f"https://musicbrainz.org/release-group/{release_group_id}" if release_group_id else "",
+        "release_group_primary_type": _mb_text(release_group.get("primary-type")),
+        "release_group_secondary_types": release_group.get("secondary-types") or [],
+        "disc": str(medium_position) if medium_position else "",
+        "medium_position": medium_position or None,
+        "medium_format": medium_format,
+        "media_format": medium_format,
+        "track": track_number,
+        "track_number": track_number,
+        "track_position": track_position or None,
+        "tracktotal": str(_mb_int(medium.get("track-count"), 0)) if medium else "",
+        "tracks": track_count,
+        "track_count": track_count,
+        "duration_ms": duration_ms or None,
+    }
+
+
 def _fetch_mb_recording_details(mb_trackid: str, preferred_albumid: str = "") -> dict:
     """Fetch full recording details from MusicBrainz.
-    Returns a dict suitable for merging into suggestions:
-    artist (with feat.), albumartist, album, year, track, tracktotal,
-    disc, disctotal, label, genre, mb_albumid, mb_artistid."""
+
+    The response keeps all linked releases so callers can compare a recording
+    against local album/year tags instead of treating the first release as the
+    only valid album context.
+    """
     url = (f"https://musicbrainz.org/ws/2/recording/{mb_trackid}"
-           "?inc=releases+release-groups+artist-credits+genres+label-info&fmt=json")
+           "?inc=releases+release-groups+artist-credits+media+genres+label-info&fmt=json")
     req = _ur.Request(url, headers={"User-Agent": "BeetsWebControl/1.0"})
     try:
         with _ur.urlopen(req, timeout=10) as r:
@@ -41,58 +154,49 @@ def _fetch_mb_recording_details(mb_trackid: str, preferred_albumid: str = "") ->
     except Exception:
         return {}
 
-    result: dict = {}
+    result: dict = {
+        "recording_id": _mb_text(data.get("id") or mb_trackid),
+        "recording_title": _mb_text(data.get("title")),
+        "recording_first_release_date": _mb_text(data.get("first-release-date")),
+        "recording_length_ms": _mb_int(data.get("length"), 0) or None,
+    }
 
     credits = data.get("artist-credit", [])
-    if credits:
-        parts = []
-        for c in credits:
-            if isinstance(c, dict):
-                name = c.get("name") or (c.get("artist") or {}).get("name", "")
-                jp   = c.get("joinphrase", "")
-                parts.append((name, jp))
-        if parts:
-            artist_str = "".join(n + jp for n, jp in parts).strip()
-            result["artist"] = artist_str
-        first = credits[0] if credits else {}
-        if isinstance(first, dict):
-            aid = (first.get("artist") or {}).get("id", "")
-            if aid:
-                result["mb_artistid"] = aid
+    artist_str = _mb_credit_text(credits)
+    if artist_str:
+        result["artist"] = artist_str
+        result["recording_artist"] = artist_str
+    artist_id = _mb_first_artist_id(credits)
+    if artist_id:
+        result["mb_artistid"] = artist_id
 
-    genres = sorted(data.get("genres", []),
-                    key=lambda g: g.get("count", 0), reverse=True)
+    genres = sorted(data.get("genres", []), key=lambda g: g.get("count", 0), reverse=True)
     if genres:
-        result["genre"] = genres[0].get("name", "")
+        result["genre"] = _mb_text(genres[0].get("name"))
 
     releases = data.get("releases", [])
-    if not releases:
+    linked_releases = [
+        _compact_mb_recording_release(r, mb_trackid)
+        for r in releases
+        if isinstance(r, dict)
+    ]
+    result["linked_releases"] = linked_releases
+    result["same_recording_release_count"] = len(linked_releases)
+    if not linked_releases:
         return result
+
     _CR = {"US": 0, "USA": 0, "XW": 1, "WORLDWIDE": 1, "GB": 2, "CA": 3, "AU": 4}
-    best = None
-    if preferred_albumid:
-        best = next((r for r in releases if r.get("id") == preferred_albumid), None)
+    preferred = _mb_text(preferred_albumid).lower()
+    best = next((r for r in linked_releases if preferred and _mb_text(r.get("mb_albumid")).lower() == preferred), None)
     if not best:
-        rec_title_norm = re.sub(r"[^a-z0-9]+", " ", str(data.get("title") or "").casefold()).strip()
-        rec_artist_norm = re.sub(r"[^a-z0-9]+", " ", str(result.get("artist") or "").casefold()).strip()
+        rec_title_norm = re.sub(r"[^a-z0-9]+", " ", _mb_text(data.get("title")).casefold()).strip()
+        rec_artist_norm = re.sub(r"[^a-z0-9]+", " ", artist_str.casefold()).strip()
 
-        def _release_track_count(r):
-            try:
-                return sum(int(m.get("track-count") or 0) for m in (r.get("media") or []))
-            except Exception:
-                return 0
-
-        def _release_primary_type(r):
-            return str(((r.get("release-group") or {}).get("primary-type") or "")).casefold()
-
-        def _albumish_penalty(r):
-            title_norm = re.sub(r"[^a-z0-9]+", " ", str(r.get("title") or "").casefold()).strip()
-            track_count = _release_track_count(r)
-            primary_type = _release_primary_type(r)
-            single_like = (
-                primary_type == "single"
-                or (rec_title_norm and title_norm == rec_title_norm and 0 < track_count <= 2)
-            )
+        def _albumish_penalty(release: Dict[str, Any]) -> int:
+            title_norm = re.sub(r"[^a-z0-9]+", " ", _mb_text(release.get("album")).casefold()).strip()
+            track_count = _mb_int(release.get("track_count") or release.get("tracks"), 0)
+            primary_type = _mb_text(release.get("release_group_primary_type")).casefold()
+            single_like = primary_type == "single" or (rec_title_norm and title_norm == rec_title_norm and 0 < track_count <= 2)
             if single_like:
                 return 3
             if primary_type == "album":
@@ -101,63 +205,40 @@ def _fetch_mb_recording_details(mb_trackid: str, preferred_albumid: str = "") ->
                 return 1
             return 2
 
-        def _release_artist_text(r):
-            credits = r.get("artist-credit") or []
-            names = []
-            for credit in credits:
-                if isinstance(credit, dict):
-                    name = credit.get("name") or (credit.get("artist") or {}).get("name", "")
-                    if name:
-                        names.append(str(name))
-            return " ".join(names).strip()
-
-        def _release_artist_penalty(r):
-            rel_artist_norm = re.sub(
-                r"[^a-z0-9]+",
-                " ",
-                _release_artist_text(r).casefold(),
-            ).strip()
+        def _release_artist_penalty(release: Dict[str, Any]) -> int:
+            rel_artist_norm = re.sub(r"[^a-z0-9]+", " ", _mb_text(release.get("artist")).casefold()).strip()
             if not rec_artist_norm or not rel_artist_norm:
                 return 1
-            if (
-                rel_artist_norm == rec_artist_norm
-                or rel_artist_norm in rec_artist_norm
-                or rec_artist_norm in rel_artist_norm
-            ):
+            if rel_artist_norm == rec_artist_norm or rel_artist_norm in rec_artist_norm or rec_artist_norm in rel_artist_norm:
                 return 0
             if rel_artist_norm in {"various artists", "various"}:
                 return 3
             return 2
 
-        def _rrank(r):
-            cc = _CR.get((r.get("country") or "").upper(), 99)
-            yr = (r.get("date") or "9999")[:4]
-            return (_albumish_penalty(r), _release_artist_penalty(r), cc, yr)
-        best = min(releases, key=_rrank)
+        def _rrank(release: Dict[str, Any]):
+            cc = _CR.get(_mb_text(release.get("country")).upper(), 99)
+            yr = _mb_text(release.get("year") or "9999")[:4] or "9999"
+            return (_albumish_penalty(release), _release_artist_penalty(release), cc, yr)
 
-    result["mb_albumid"] = best.get("id", "")
-    result["album"]      = best.get("title", "")
-    date = (best.get("date") or "")[:4]
-    if date:
-        result["year"] = date
+        best = min(linked_releases, key=_rrank)
 
-    li = best.get("label-info", [])
-    if li and isinstance(li, list):
-        lbl = (li[0].get("label") or {}).get("name", "")
-        if lbl:
-            result["label"] = lbl
-
-    media = best.get("media", [])
-    result["disctotal"] = str(len(media)) if media else ""
-    for medium in media:
-        for trk in medium.get("tracks", []):
-            rec_id = (trk.get("recording") or {}).get("id", "")
-            if rec_id == mb_trackid:
-                result["track"]      = str(trk.get("number") or trk.get("position") or "")
-                result["tracktotal"] = str(medium.get("track-count", ""))
-                result["disc"]       = str(medium.get("position") or 1)
-                break
-
+    result["selected_release"] = best
+    result["mb_albumid"] = best.get("mb_albumid", "")
+    result["album"] = best.get("album", "")
+    result["albumartist"] = best.get("artist", "")
+    result["year"] = best.get("year", "")
+    result["date"] = best.get("date", "")
+    result["country"] = best.get("country", "")
+    result["label"] = best.get("label", "") or result.get("label", "")
+    result["mb_releasegroupid"] = best.get("mb_releasegroupid", "")
+    result["mb_releasegroupurl"] = best.get("mb_releasegroupurl", "")
+    result["release_group_primary_type"] = best.get("release_group_primary_type", "")
+    result["medium_format"] = best.get("medium_format", "")
+    result["media_format"] = best.get("media_format", "")
+    result["track"] = best.get("track", "")
+    result["tracktotal"] = best.get("tracktotal", "")
+    result["disc"] = best.get("disc", "")
+    result["disctotal"] = str(max(1, len({r.get("medium_position") for r in linked_releases if r.get("medium_position")}))) if linked_releases else ""
     return result
 
 

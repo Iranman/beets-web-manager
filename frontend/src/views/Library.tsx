@@ -127,6 +127,40 @@ function artistArtUrl(artist: LibraryArtist, libraryVersion?: number) {
   return '';
 }
 
+// Every ArtistCard/detail header mounts its own useArtistArtUrl instance, and
+// a large library can have hundreds of artists with no cached image at once
+// (773 artists, 328 needing a fetch, confirmed live 2026-07-20). Without a
+// shared cap, all of them fired /api/artist-image-url simultaneously on
+// mount -- flooding both the browser's per-origin connection limit and the
+// backend's Waitress thread pool (WEBCONTROL_THREADS, default 8), badly
+// enough that even the already-fast, already-cached /api/library request
+// got stuck queued behind hundreds of rivals for 20+ seconds. This queue
+// caps how many of these run at once; everything past the cap waits its
+// turn instead of piling on all at once.
+const ARTIST_IMAGE_FETCH_CONCURRENCY = 4;
+let activeArtistImageFetches = 0;
+const artistImageFetchQueue: Array<() => void> = [];
+
+function runArtistImageFetchThrottled<T>(task: () => Promise<T>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const run = () => {
+      activeArtistImageFetches += 1;
+      task()
+        .then(resolve, reject)
+        .finally(() => {
+          activeArtistImageFetches -= 1;
+          const next = artistImageFetchQueue.shift();
+          if (next) next();
+        });
+    };
+    if (activeArtistImageFetches < ARTIST_IMAGE_FETCH_CONCURRENCY) {
+      run();
+    } else {
+      artistImageFetchQueue.push(run);
+    }
+  });
+}
+
 // Falls back to an album cover immediately, then swaps in a real locally-cached
 // artist photo (fetched from Discogs and stored under /api/artist-image-cache)
 // once available, so artists aren't stuck showing a borrowed album cover forever.
@@ -139,7 +173,7 @@ function useArtistArtUrl(artist: LibraryArtist, libraryVersion?: number) {
     setFetchedUrl('');
     if (hasCachedImage || !artistName) return undefined;
     let cancelled = false;
-    getArtistImageUrl(artistName)
+    runArtistImageFetchThrottled(() => getArtistImageUrl(artistName))
       .then((res) => {
         if (!cancelled && res.ok && res.url) setFetchedUrl(res.url);
       })

@@ -56,6 +56,124 @@ export interface ReviewCandidate {
   score?: number | string;
 }
 
+export interface RecordingLocalEvidence {
+  filename?: string;
+  source_path?: string;
+  title?: string;
+  artist?: string;
+  album?: string;
+  albumartist?: string;
+  year?: number | string;
+  track?: number | string;
+  disc?: number | string;
+  duration?: string;
+  duration_seconds?: number;
+  mb_trackid?: string;
+  mb_albumid?: string;
+  mb_releasegroupid?: string;
+  fingerprint_status?: string;
+}
+
+export interface RecordingLinkedRelease {
+  mb_albumid?: string;
+  mb_url?: string;
+  album?: string;
+  artist?: string;
+  date?: string;
+  year?: string;
+  country?: string;
+  status?: string;
+  label?: string;
+  mb_releasegroupid?: string;
+  mb_releasegroupurl?: string;
+  release_group_primary_type?: string;
+  release_group_secondary_types?: string[];
+  disc?: string;
+  medium_position?: number | null;
+  medium_format?: string;
+  media_format?: string;
+  track?: string;
+  track_number?: string;
+  track_position?: number | null;
+  tracktotal?: string;
+  tracks?: number;
+  track_count?: number;
+  duration_ms?: number | null;
+  local_match?: {
+    album_score?: number;
+    artist_score?: number;
+    year_score?: number;
+    year_match?: boolean;
+    year_delta?: number | null;
+    total?: number;
+  };
+}
+
+export interface RecordingMatchField {
+  status?: 'yes' | 'no' | 'fuzzy' | 'conflict' | 'unknown' | 'tolerance';
+  score?: number;
+  local?: string;
+  suggested?: string;
+  delta_seconds?: number | null;
+}
+
+export interface RecordingMatchDecision {
+  title_match?: RecordingMatchField;
+  artist_match?: RecordingMatchField;
+  album_match?: RecordingMatchField;
+  year_match?: RecordingMatchField;
+  duration_match?: RecordingMatchField;
+  release_group_match?: RecordingMatchField;
+  confidence_score?: number;
+  safety_result?: string;
+}
+
+export interface ReviewRecordingCandidate {
+  candidate_index?: number;
+  candidate_type?: 'recording' | 'release' | 'release_group';
+  mb_trackid?: string;
+  mb_url?: string;
+  musicbrainz_url?: string;
+  title?: string;
+  artist?: string;
+  recording_title?: string;
+  recording_artist?: string;
+  album?: string;
+  year?: string | number;
+  release_title?: string;
+  release_artist?: string;
+  release_date?: string;
+  release_year?: string | number;
+  mb_albumid?: string;
+  mb_albumids?: string[];
+  mb_releasegroupid?: string;
+  mb_releasegroupurl?: string;
+  track_number?: string;
+  medium_position?: number | null;
+  country?: string;
+  medium_format?: string;
+  media_format?: string;
+  duration?: string;
+  source?: string;
+  match_method?: string;
+  score?: number | string;
+  match_total?: number | string;
+  confidence?: string;
+  confidence_score?: number | null;
+  acoustid_score?: number | null;
+  score_breakdown?: Record<string, number | string>;
+  selected_release?: RecordingLinkedRelease;
+  linked_releases?: RecordingLinkedRelease[];
+  same_recording_release_count?: number;
+  matching_local_release_found?: boolean;
+  decision?: RecordingMatchDecision;
+  conflicts?: string[];
+  recommended_action?: string;
+  requires_confirmation?: boolean;
+  safety_result?: string;
+  safety_key?: 'safe' | 'review' | 'conflict' | 'none' | string;
+  reason?: string;
+}
 export interface ReviewPreflight {
   ok?: boolean;
   matches?: number;
@@ -83,6 +201,18 @@ export interface ReviewPreflight {
 
 export interface ReviewEvidence {
   top_candidates?: ReviewCandidate[];
+  current?: RecordingLocalEvidence;
+  recording_candidates?: ReviewRecordingCandidate[];
+  selected_recording_candidate?: ReviewRecordingCandidate;
+  missing_id_type?: string;
+  fingerprint?: {
+    status?: string;
+    acoustid_status?: string;
+    score?: number;
+    acoustid_id?: string;
+    mb_trackid?: string;
+    mb_releasegroupid?: string;
+  };
   preflight?: ReviewPreflight | null;
   folder?: {
     path?: string;
@@ -106,7 +236,12 @@ export interface ReviewItem {
   title?: string;
   artist?: string;
   album?: string;
+  albumartist?: string;
   year?: number | string;
+  track?: number | string;
+  disc?: number | string;
+  duration?: string;
+  duration_seconds?: number;
   album_id?: number;
   first_item_id?: number;
   item_id?: number;
@@ -120,10 +255,12 @@ export interface ReviewItem {
   confidence?: string;
   reason?: string;
   mb_albumid?: string;
+  mb_trackid?: string;
   mb_releasegroupid?: string;
   mb_releasegroupurl?: string;
   mb_url?: string;
   mb_valid?: boolean;
+  missing_id_type?: string;
   existing_album_ids?: number[];
   existing_album_id?: number;
   sort_ts?: number;
@@ -1698,6 +1835,20 @@ export interface PluginInstallLogResponse extends ApiOkResponse {
 
 export interface AiSuggestion {
   candidate_index?: number;
+  candidate_type?: 'recording' | 'release' | 'release_group';
+  mb_trackid?: string;
+  match_method?: string;
+  candidate_evidence?: ReviewRecordingCandidate;
+  selected_recording_candidate?: ReviewRecordingCandidate;
+  recording_candidates?: ReviewRecordingCandidate[];
+  selected_release?: RecordingLinkedRelease;
+  linked_releases?: RecordingLinkedRelease[];
+  conflicts?: string[];
+  recommended_action?: string;
+  requires_confirmation?: boolean;
+  safety_result?: string;
+  confidence_score?: number | null;
+  missing_id_type?: string;
   mb_albumid?: string;
   representative_mb_albumid?: string;
   mb_releasegroupid?: string;
@@ -1722,7 +1873,6 @@ export interface AiSuggestion {
   candidate_identity_error?: string;
   representative_release_group_id?: string;
   rejected_representative_release_id?: string;
-  confidence_score?: number | null;
   review_evidence?: ReviewEvidence;
   origin_type?: ReviewOriginType;
   origin_label?: string;
@@ -1752,6 +1902,8 @@ export interface AiSuggestResponse extends ApiOkResponse {
    * here on purpose, just typed as-is so item-level callers can read it. */
   suggestions?: AiSuggestion & { mb_trackid?: string };
   mb_candidates?: ReviewCandidate[];
+  selected_candidate?: ReviewCandidate | ReviewRecordingCandidate;
+  recording_candidates?: ReviewRecordingCandidate[];
   acoustid_candidates?: unknown[];
   evidence?: ReviewEvidence;
 }
