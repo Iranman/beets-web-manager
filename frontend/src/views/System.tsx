@@ -166,8 +166,14 @@ function ConfigActionDialog({
   );
 }
 
+// 32, not the naive 12-char password-policy minimum: it must match app.py's
+// real BEETS_WEB_AUTH_MIN_LENGTH default (also enforced server-side by
+// _password_min_length() in routes_setup.py), or a password can pass this
+// UI check, save successfully, and still 401 on the very next request. If
+// you deploy with a customized BEETS_WEB_AUTH_MIN_LENGTH, update this too.
+const PASSWORD_MIN_LENGTH = 32;
 const PASSWORD_REQUIREMENTS: Array<{ label: string; test: (v: string) => boolean }> = [
-  { label: 'At least 12 characters', test: (v) => v.length >= 12 },
+  { label: `At least ${PASSWORD_MIN_LENGTH} characters`, test: (v) => v.length >= PASSWORD_MIN_LENGTH },
   { label: 'An uppercase letter', test: (v) => /[A-Z]/.test(v) },
   { label: 'A lowercase letter', test: (v) => /[a-z]/.test(v) },
   { label: 'A number', test: (v) => /[0-9]/.test(v) },

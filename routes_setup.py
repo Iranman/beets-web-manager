@@ -47,7 +47,7 @@ _ENV_EXAMPLE_FILE = Path(os.environ.get("SETUP_ENV_EXAMPLE_FILE", str(Path(__fil
 _ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 _BLOCKED_ENV_NAMES = {"SETUP_ENV_FILE", "SETUP_ENV_EXAMPLE_FILE", "SETUP_SETTINGS_FILE", "SETUP_COMPLETE_FILE"}
 _SECRET_ENV_PARTS = ("KEY", "TOKEN", "PASSWORD", "SECRET")
-_PASSWORD_MIN_LENGTH = 12
+_PASSWORD_MIN_LENGTH_FLOOR = 12
 _PASSWORD_SPECIAL_RE = re.compile(r"[^A-Za-z0-9]")
 _PASSWORD_UPPER_RE = re.compile(r"[A-Z]")
 _PASSWORD_LOWER_RE = re.compile(r"[a-z]")
@@ -72,16 +72,40 @@ def _fallback_auth_secret_usable(value: str) -> bool:
     return compact not in _FALLBACK_PLACEHOLDER_AUTH_SECRETS
 
 
+def _password_min_length() -> int:
+    """Never let the password-strength minimum be weaker than app.py's real
+    auth-secret usability floor (_MIN_AUTH_SECRET_LENGTH, default 32, bounded
+    [24,256] via BEETS_WEB_AUTH_MIN_LENGTH) -- otherwise a password can pass
+    this check, save successfully, and still fail _auth_secret_is_usable()
+    on the very next request, locking the browser out immediately after a
+    "successful" save. Real incident this fixes (2026-07-20): an 18-char
+    password satisfied the original hardcoded 12-char floor here, saved, and
+    then 401'd on every subsequent request because it was under app.py's
+    separate 32-char gate. _PASSWORD_MIN_LENGTH_FLOOR (12, the literal spec
+    minimum) only applies if the operator lowers BEETS_WEB_AUTH_MIN_LENGTH
+    below it, which _env_int's own [24,256] bound never actually allows in
+    practice -- so in effect this always resolves to the real auth floor.
+    """
+    try:
+        configured = int(os.environ.get("BEETS_WEB_AUTH_MIN_LENGTH", "32"))
+    except ValueError:
+        configured = 32
+    configured = max(24, min(256, configured))
+    return max(_PASSWORD_MIN_LENGTH_FLOOR, configured)
+
+
 def _password_requirements_unmet(password: str) -> List[str]:
     """Returns unmet BEETS_WEB_PASSWORD requirements (empty list = passes).
 
     Requirements match what the setup UI displays and enforces client-side:
-    at least 12 characters, one uppercase letter, one lowercase letter, one
-    number, and one special (non-alphanumeric) character.
+    at least _password_min_length() characters, one uppercase letter, one
+    lowercase letter, one number, and one special (non-alphanumeric)
+    character.
     """
     unmet: List[str] = []
-    if len(password) < _PASSWORD_MIN_LENGTH:
-        unmet.append(f"at least {_PASSWORD_MIN_LENGTH} characters")
+    min_length = _password_min_length()
+    if len(password) < min_length:
+        unmet.append(f"at least {min_length} characters")
     if not _PASSWORD_UPPER_RE.search(password):
         unmet.append("an uppercase letter")
     if not _PASSWORD_LOWER_RE.search(password):

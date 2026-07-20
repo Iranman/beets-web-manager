@@ -114,7 +114,7 @@ Save that value from your container logs, or regenerate a fresh one any time fro
 
 For **browser access**, set `BEETS_WEB_PASSWORD` (paired with `BEETS_WEB_USERNAME`, default `admin`). The server sends `WWW-Authenticate: Basic` on an unauthenticated request, so your browser's native credential prompt handles sign-in — there is no in-app login page. Passwords must meet these requirements (enforced server-side when you save it, and shown live as a strength meter in the System page):
 
-- At least 12 characters
+- At least 32 characters (matches `BEETS_WEB_AUTH_MIN_LENGTH`, the same floor the app uses to decide whether *any* configured secret is usable — a shorter password can never be accepted here, because it would immediately fail that separate check and lock browser access out on the next request)
 - One uppercase letter
 - One lowercase letter
 - One number
@@ -194,7 +194,7 @@ Yes. AI is optional everywhere it's used for matching. A missing/invalid AI key,
 This means neither `BEETS_WEB_AUTH_TOKEN` nor `BEETS_WEB_PASSWORD` resolved to a usable value when the process started. On a fresh install this shouldn't happen — the app auto-generates a token on first boot specifically to avoid this lockout (check your container logs for the one-time printed value). If you still hit this, check that `/config` is writable (the generated token is persisted to `/config/.auth_token`) and that `BEETS_WEB_AUTH_DISABLED` isn't accidentally set to a falsy-looking-but-truthy value.
 
 **I set `BEETS_WEB_PASSWORD` but saving it was rejected.**
-Passwords must be at least 12 characters and include an uppercase letter, a lowercase letter, a number, and a special character. The System page's password field shows a live strength meter and a checklist of which requirements are still unmet.
+Passwords must be at least 32 characters (the same floor `_MIN_AUTH_SECRET_LENGTH`/`BEETS_WEB_AUTH_MIN_LENGTH` uses to decide whether a secret is usable at all) and include an uppercase letter, a lowercase letter, a number, and a special character. The System page's password field shows a live strength meter and a checklist of which requirements are still unmet.
 
 **Where do I check whether MusicBrainz, AcoustID, AI, and Plex are actually reachable right now?**
 `GET /api/setup/status` reports each integration's configured/not-configured state without making network calls. For a live connectivity check, use `POST /api/setup/test/{ai,musicbrainz,acoustid,plex}` — each integration is tested and reported independently, so one being down or misconfigured never hides or blocks the results of the others. The System page's Integrations panel has a "Test connections" button that runs all four and shows a ✓ Connected / ⚠ Warning / ✗ Not Configured badge per integration.
