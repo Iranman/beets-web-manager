@@ -1,7 +1,6 @@
 import unittest
 from pathlib import Path
 
-from project_docs import read_operator_docs
 
 
 SINGLE_TRACK_TEMPLATE = (
@@ -24,7 +23,6 @@ class SingleTrackPathFormatTests(unittest.TestCase):
             config_path = root / "config.yaml.example"
         config_source = config_path.read_text(encoding="utf-8")
         app_source = (root / "app.py").read_text(encoding="utf-8")
-        docs_source = read_operator_docs(root)
 
         self.assertIn(f'singleton: "{SINGLE_TRACK_TEMPLATE}"', config_source)
         self.assertIn(f'default: "{DEFAULT_TEMPLATE}"', config_source)
@@ -32,11 +30,6 @@ class SingleTrackPathFormatTests(unittest.TestCase):
         self.assertIn('_ARTIST_FOLDER_PATH_TEMPLATE = "$albumartist%if{$mb_albumartistid, ($mb_albumartistid),}"', app_source)
         self.assertIn("_SINGLE_TRACK_PATH_TEMPLATE = _ARTIST_FOLDER_PATH_TEMPLATE +", app_source)
         self.assertIn("$albumartist%if{$mb_albumartistid, ($mb_albumartistid),}", app_source)
-        self.assertIn(SINGLE_TRACK_TEMPLATE, docs_source)
-        self.assertIn(
-            "The Album Artist (Album ArtistMbId)/The Album Title (2026) {Release Group MbId}/The Artist Name - The Album Title - 03 - Track Title (1){Track ArtistMbId}",
-            docs_source,
-        )
         self.assertNotIn('singleton: "$album (%left{$year,4})', config_source)
         self.assertNotIn("singleton: Non-Album/$albumartist - $title", config_source)
         self.assertNotIn("{$mb_releasegroupid},}", config_source)

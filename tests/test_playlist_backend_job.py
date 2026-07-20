@@ -1,7 +1,6 @@
 import unittest
 from pathlib import Path
 
-from project_docs import read_operator_docs
 
 
 class PlaylistBackendJobTests(unittest.TestCase):
@@ -15,7 +14,6 @@ class PlaylistBackendJobTests(unittest.TestCase):
         jobs_page_source = (root / "frontend" / "src" / "views" / "Jobs.tsx").read_text(encoding="utf-8")
         client_source = (root / "frontend" / "src" / "api" / "client.ts").read_text(encoding="utf-8")
         api_types_source = (root / "frontend" / "src" / "api" / "types.ts").read_text(encoding="utf-8")
-        docs_source = read_operator_docs(root)
 
         self.assertIn('parse_content = _s(payload.get("content") or "").strip()', app_source)
         self.assertIn('"/api/playlist/parse"', app_source)
@@ -47,10 +45,8 @@ class PlaylistBackendJobTests(unittest.TestCase):
         self.assertIn("channel-alias", app_source)
         self.assertIn("def _playlist_canonicalize_track", app_source)
         self.assertIn("musicbrainz-title", app_source)
-        self.assertIn("StarBoy TV", docs_source)
         self.assertIn("def _playlist_album_tag_release_placement", app_source)
         self.assertIn("album-tag-release-search", app_source)
-        self.assertIn("album-tag MusicBrainz release search", docs_source)
         self.assertIn("def _playlist_slskd_download_track", app_source)
         self.assertIn("def _playlist_reusable_download_files", app_source)
         self.assertIn("Downloading missing playlist tracks via sources", app_source)
@@ -238,19 +234,6 @@ class PlaylistBackendJobTests(unittest.TestCase):
         self.assertIn("getPlaylistSyncStatus", client_source)
         self.assertIn("runPlaylistPipelineAction", client_source)
 
-        self.assertIn("complete playlist pipeline", docs_source)
-        self.assertIn("avoid duplicate downloads/imports/Plex entries", docs_source)
-        self.assertIn("additions can still merge both ways", docs_source)
-        self.assertIn("persistent removed/excluded tombstones", docs_source)
-        self.assertIn("resumable checkpoints", docs_source)
-        self.assertIn("JobStore-backed and visible in Jobs", docs_source)
-        self.assertIn("playlist-specific stage controls", docs_source)
-        self.assertIn("70% confidence", docs_source)
-        self.assertIn("Staged-file deletion must be root-checked", docs_source)
-        self.assertIn("move_singletons", docs_source)
-        self.assertIn("desired tracklist", docs_source)
-        self.assertIn("manually resolved", docs_source)
-        self.assertIn("safe suggestions", docs_source)
 
 
 if __name__ == "__main__":

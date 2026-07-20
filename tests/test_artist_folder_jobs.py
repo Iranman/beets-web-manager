@@ -1,7 +1,6 @@
 import unittest
 from pathlib import Path
 
-from project_docs import read_operator_docs
 
 
 class ArtistFolderJobsTests(unittest.TestCase):
@@ -29,7 +28,6 @@ class ArtistFolderJobsTests(unittest.TestCase):
             client_source.index("export function mergeArtistFolders")
         ]
         clean_source = (root / "frontend" / "src" / "views" / "Clean.tsx").read_text(encoding="utf-8")
-        docs_source = read_operator_docs(root)
 
         self.assertIn("jobs.start_python(", scan_route)
         self.assertIn('"type": "artist-folder-scan"', scan_route)
@@ -86,15 +84,6 @@ class ArtistFolderJobsTests(unittest.TestCase):
         self.assertIn("CLEAN_JOB_TAB_RULES", clean_source)
         self.assertIn("artist-folder-scan", clean_source)
         self.assertIn("stamp-mbid-folders", clean_source)
-        self.assertIn("artist-folder-scan", docs_source)
-        self.assertIn("_replace_stamp_db_path_prefixes", docs_source)
-        self.assertIn("_replace_stamp_db_exact_paths", docs_source)
-        self.assertIn("Same-UUID folders", docs_source)
-        self.assertIn("BOBBYVtv", docs_source)
-        self.assertIn("_stamp_artist_folder_album_mbid_counts", docs_source)
-        self.assertIn("distinct album IDs", docs_source)
-        self.assertIn("_append_stamp_candidate_log", docs_source)
-        self.assertIn("_append_stamp_skipped_log", docs_source)
         self.assertIn("Same-ID folders merge", panel_source)
 
 

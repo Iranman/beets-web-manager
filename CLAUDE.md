@@ -35,8 +35,15 @@ python -m py_compile app.py helpers_mb.py job_engine.py routes_jobs.py routes_li
 python -m unittest discover -s tests -p "test_*.py"
 python scripts/security_secret_scan.py
 python scripts/validate_compose_security.py
+```
+
+Deployment configuration validation, when checking a configured deployment environment:
+
+```powershell
 python scripts/verify_security_config.py
 ```
+
+`verify_security_config.py` may fail in a bare checkout when required environment values are unset or example files intentionally contain placeholders. Do not add real credentials to make this pass locally.
 
 Frontend:
 

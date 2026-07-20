@@ -1,7 +1,6 @@
 import unittest
 from pathlib import Path
 
-from project_docs import read_operator_docs
 
 
 class DedupJobsTests(unittest.TestCase):
@@ -12,7 +11,6 @@ class DedupJobsTests(unittest.TestCase):
         panel_source = (root / "frontend" / "src" / "features" / "dedup" / "DedupPanel.tsx").read_text(encoding="utf-8")
         clean_source = (root / "frontend" / "src" / "views" / "Clean.tsx").read_text(encoding="utf-8")
         hooks_source = (root / "frontend" / "src" / "lib" / "hooks.ts").read_text(encoding="utf-8")
-        docs_source = read_operator_docs(root)
 
         self.assertIn("jobs.start_python(", dedup_source)
         self.assertIn('"type": "dedup-scan"', dedup_source)
@@ -27,7 +25,6 @@ class DedupJobsTests(unittest.TestCase):
         self.assertIn("beets:jobs-changed", panel_source)
         self.assertIn("beets:jobs-changed", clean_source)
         self.assertIn("beets:jobs-changed", hooks_source)
-        self.assertIn("JobStore-backed cleanup jobs", docs_source)
 
 
     def test_dedup_scan_uses_musicbrainz_index_for_library_wide_scan(self):

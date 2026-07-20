@@ -67,6 +67,8 @@ Shared matching results should consistently represent:
 - Human-readable explanation.
 - Final action eligibility and review requirement.
 
+AcoustID/fingerprinting evidence is preferred over text-only matching when available, but conflicts still require review.
+
 A correct release-group candidate must not be rejected merely because one title differs when AcoustID, recording identity, duration, and track position provide strong evidence. Conversely, a matching track count alone must not override conflicting fingerprint or recording evidence.
 
 ## Mutation Safety
@@ -109,6 +111,7 @@ Re-running or resuming a job must not create duplicate staging folders, download
 - Never expose credentials, tokens, cookies, authorization headers, signed URLs, or secret values in logs, API responses, frontend state, fixtures, or committed files.
 - Redact raw exceptions and subprocess output before returning them to the browser when they may contain secrets.
 - Store runtime credentials in environment variables, approved config files, or Docker secrets, not source files.
+- Do not print token values from runtime config, compose files, environment variables, logs, or provider responses.
 - Keep secret scans and outbound-security tests passing.
 
 ## Testing Requirements

@@ -87,6 +87,8 @@ Thumbs.db
 /document.documentElement.clientWidth+2
 
 # Local one-off probes
+AGENTS.md.bak-*
+CLAUDE.md.bak-*
 fix_vultures.py
 query_vultures.py
 library-*.png
@@ -101,4 +103,10 @@ docs/*
 !docs/adr/
 docs/adr/*
 !docs/adr/*.md
+!docs/operations/
+docs/operations/*
+!docs/operations/*.md
+!docs/incidents/
+docs/incidents/*
+!docs/incidents/*.md
 .playwright-mcp/
