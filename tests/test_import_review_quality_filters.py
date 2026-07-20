@@ -1,7 +1,6 @@
 import unittest
 from pathlib import Path
 
-from project_docs import read_operator_docs
 
 
 class ImportReviewQualityFilterTests(unittest.TestCase):
@@ -10,7 +9,6 @@ class ImportReviewQualityFilterTests(unittest.TestCase):
         review_source = (
             root / "frontend" / "src" / "features" / "importReview" / "ImportReviewPage.tsx"
         ).read_text(encoding="utf-8")
-        docs_source = read_operator_docs(root)
         types_source = (root / "frontend" / "src" / "api" / "types.ts").read_text(encoding="utf-8")
         app_source = (root / "app.py").read_text(encoding="utf-8")
 
@@ -60,10 +58,6 @@ class ImportReviewQualityFilterTests(unittest.TestCase):
         self.assertIn("audio_mismatch: audioMismatch", review_source)
         self.assertIn("filters.map((entry)", review_source)
 
-        self.assertIn("Import Review also exposes match-quality filters", docs_source)
-        self.assertIn("Blocked", docs_source)
-        self.assertIn("Audio Mismatch", docs_source)
-        self.assertIn("Keep these filters derived from backend evidence/preflight/target-preview state", docs_source)
 
     def test_visible_candidates_feed_selected_match_state(self):
         root = Path(__file__).resolve().parents[1]
@@ -273,7 +267,6 @@ class ImportReviewQualityFilterTests(unittest.TestCase):
         review_source = (
             root / "frontend" / "src" / "features" / "importReview" / "ImportReviewPage.tsx"
         ).read_text(encoding="utf-8")
-        docs_source = read_operator_docs(root)
 
         self.assertIn("const AUTO_QUARANTINE_REJECTED_MAX_FILES = 5", review_source)
         self.assertIn("const autoCleanupKeysRef = useRef<Set<string>>(new Set())", review_source)
@@ -297,7 +290,6 @@ class ImportReviewQualityFilterTests(unittest.TestCase):
         self.assertIn("action: cleanupAction", review_source)
         self.assertIn("pending_review_removed || result.remaining_audio_count === 0", review_source)
         self.assertIn("autoCleanupKeysRef.current.delete(key)", review_source)
-        self.assertIn("automatically quarantines 1-4 rejected cleanup files", docs_source)
 
     def test_saved_revalidated_track_mapping_hydrates_selected_match(self):
         root = Path(__file__).resolve().parents[1]

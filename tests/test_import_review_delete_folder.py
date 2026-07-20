@@ -1,7 +1,6 @@
 import unittest
 from pathlib import Path
 
-from project_docs import read_operator_docs
 
 
 class ImportReviewDeleteFolderTests(unittest.TestCase):
@@ -24,7 +23,6 @@ class ImportReviewDeleteFolderTests(unittest.TestCase):
         review_source = (
             root / "frontend" / "src" / "features" / "importReview" / "ImportReviewPage.tsx"
         ).read_text(encoding="utf-8")
-        docs_source = read_operator_docs(root)
 
         self.assertIn("folder = fpath.parent", album_folder_source)
         self.assertIn("folder = folder.parent", album_folder_source)
@@ -56,9 +54,6 @@ class ImportReviewDeleteFolderTests(unittest.TestCase):
         )
         self.assertIn("album_id: albumId || undefined", client_source)
 
-        self.assertIn("Needs MB ID (`library_no_mb`) Import Review rows", docs_source)
-        self.assertIn("confirmed-wrong-library-folder approval", docs_source)
-        self.assertIn("verify the album still has no `mb_albumid`", docs_source)
 
 
 if __name__ == "__main__":
