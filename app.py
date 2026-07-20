@@ -22636,7 +22636,7 @@ _AI_BATCH_IMPORTED_FOLDER_STATUSES = {"completed", "imported"}
 _AI_BATCH_REVIEW_FOLDER_STATUSES = {"review_created", "review_required"}
 _AI_BATCH_POLICY_WARNING_STATUSES = {"policy_rejected", "completed_with_fallback", "handled_warning"}
 _AI_BATCH_REPLACEMENT_FOLDER_STATUSES = {"replacement_queued", "replacement_unavailable"}
-_AI_BATCH_FAILED_FOLDER_STATUSES = {"failed", "import_failed", "ai_failed", "timed_out"}
+_AI_BATCH_FAILED_FOLDER_STATUSES = {"failed", "import_failed", "ai_failed", "timed_out", "retry_limit_exceeded"}
 _AI_BATCH_SKIPPED_FOLDER_STATUSES = {"skipped", "canceled"}
 _AI_BATCH_TERMINAL_FOLDER_STATUSES = (
     _AI_BATCH_IMPORTED_FOLDER_STATUSES
@@ -22647,6 +22647,7 @@ _AI_BATCH_TERMINAL_FOLDER_STATUSES = (
     | _AI_BATCH_SKIPPED_FOLDER_STATUSES
 )
 _AI_BATCH_RETRYABLE_FOLDER_STATUSES = {"failed", "import_failed", "ai_failed", "timed_out", "replacement_unavailable"}
+_AI_BATCH_MAX_FOLDER_RETRIES = 3
 _AI_BATCH_FORMAT_POLICY_HANDLED_MESSAGE = _MUSIC_FORMAT_POLICY_HANDLED_MESSAGE
 
 
@@ -22840,7 +22841,28 @@ def _ai_batch_recalculate_batch_state(state: Dict[str, Any], log: Optional[list]
     processed = int(state.get("folders_processed") or 0)
     if previous_status in {"canceled"}:
         return False
-    if total <= 0 or unfinished > 0 or processed < total:
+    if unfinished > 0:
+        # Self-heal a contradictory persisted state: folders genuinely still
+        # unfinished (e.g. left at "ai_queued" by an interrupted/buggy prior
+        # run) but state["status"] stuck at a terminal value from an earlier
+        # premature finalize. Nothing else ever walks status back off a
+        # terminal value, so without this a batch in this state stays stuck
+        # forever -- recover/retry both short-circuit to a no-op "reconnect"
+        # because they trust the (wrong) terminal status. Reopening to
+        # "running" lets the existing stale-heartbeat detection in
+        # _ai_batch_reconcile_state correctly classify it as recoverable.
+        if previous_status in _AI_BATCH_TERMINAL_STATUSES:
+            state["status"] = "running"
+            state["current_step"] = "reopened: unfinished folder work found"
+            state["completed_at"] = None
+            if log is not None:
+                log.append(
+                    f"Batch status corrected: {unfinished} folder(s) still unfinished; "
+                    f"reopening from {previous_status}."
+                )
+            return True
+        return False
+    if total <= 0 or processed < total:
         return False
     attention = int(state.get("folders_attention") or 0) + int(state.get("folders_skipped") or 0)
     next_status = "completed_with_warnings" if attention else "completed"
@@ -23423,10 +23445,27 @@ def _run_ai_batch_import(batch_job_id: str, scan_path: str, log: list, cancel_ev
         state["retry_count"] = int(state.get("retry_count") or 0) + 1
     log.append("batch created" if not recover else ("batch retry started" if retry_failed else "batch recovery started"))
     log.append(f"source scan started: {scan_path}")
-    _ai_batch_commit(state, update_state)
 
     folder_states = state.setdefault("folder_states", {})
     if not recover or not folder_states:
+        # Commit "running" before the (potentially slow) disk walk below so a
+        # poller sees progress immediately. Deliberately NOT done for the
+        # recover/retry branch: _ai_batch_commit unconditionally calls
+        # _ai_batch_recalculate_batch_state, which finalizes the batch to a
+        # terminal status the instant it sees zero *unfinished* folders --
+        # true of the pre-reconciliation snapshot here, since "failed" and
+        # "timed_out" count as terminal, not unfinished. Committing at this
+        # point mutates state["status"] in place on the same dict the
+        # reconciliation loop below runs against, so the just-set "running"
+        # got silently overwritten back to a terminal status before
+        # reconciliation ever ran -- and the terminal check right after this
+        # block then bailed out immediately, leaving the reconciled
+        # "ai_queued" folders persisted but never actually reprocessed
+        # (confirmed live: retry logged "151 requeued" immediately followed
+        # by "batch is terminal", with none of them reprocessed). The single
+        # commit after the if/else below now always sees fully-reconciled
+        # folder_states first.
+        _ai_batch_commit(state, update_state)
         folders = _ai_batch_find_audio_dirs(scan_path)
         log.append(f"folders discovered count: {len(folders)}")
         for folder in folders:
@@ -23443,13 +23482,23 @@ def _run_ai_batch_import(batch_job_id: str, scan_path: str, log: list, cancel_ev
             src = folder.get("source_folder", "")
             status = _ai_batch_effective_folder_status(folder)
             if retry_failed and status in _AI_BATCH_RETRYABLE_FOLDER_STATUSES:
+                prior_retries = int(folder.get("retry_count") or 0)
+                if prior_retries >= _AI_BATCH_MAX_FOLDER_RETRIES:
+                    _ai_batch_mark_folder(
+                        state, fid,
+                        status="retry_limit_exceeded",
+                        current_step=f"retry limit ({_AI_BATCH_MAX_FOLDER_RETRIES}) reached; needs manual review",
+                        failure_reason=folder.get("failure_reason") or folder.get("ai_suggest_error") or "retry limit reached",
+                    )
+                    terminal += 1
+                    continue
                 folder.update({
                     "status": "ai_queued",
                     "current_step": "retryable failure requeued",
                     "ai_suggest_status": "queued",
                     "failure_reason": "",
                     "ai_suggest_error": "",
-                    "retry_count": int(folder.get("retry_count") or 0) + 1,
+                    "retry_count": prior_retries + 1,
                 })
                 requeued += 1
                 continue
@@ -23533,10 +23582,29 @@ def _start_ai_batch_job(scan_path: str, recover_batch_job_id: str = "", *, retry
     )
     job_id_holder["job_id"] = job.job_id
     job_id_ready.set()
-    state = _ai_batch_load_state(batch_job_id) or _ai_batch_initial_state(batch_job_id, scan_path)
-    state["job_id"] = job.job_id
-    state["status"] = "running"
-    _ai_batch_commit(state, job.update_state)
+    if recover_batch_job_id:
+        # The worker thread (unblocked above) runs its own load -> reconcile
+        # -> commit cycle inside _run_ai_batch_import, including requeuing
+        # retryable folders back to "ai_queued". _ai_batch_commit
+        # unconditionally calls _ai_batch_recalculate_batch_state, which
+        # finalizes the batch to a terminal status whenever it sees zero
+        # unfinished folders — true of the pre-reconciliation snapshot, since
+        # "failed"/"timed_out" count as terminal, not unfinished. Loading and
+        # committing a second, independent copy of the state here raced that
+        # worker: this thread's stale pre-retry load could win the write race
+        # and silently flip a just-requeued retry batch straight back to
+        # "completed_with_warnings" with the old, un-requeued folder data
+        # (confirmed live: retry logged "151 requeued" but the persisted
+        # state kept all 151 at retry_count 0, status unchanged). Just read
+        # state for the response; let the worker own every write during
+        # recovery/retry.
+        state = _ai_batch_load_state(batch_job_id) or _ai_batch_initial_state(batch_job_id, scan_path)
+        state["job_id"] = job.job_id
+    else:
+        state = _ai_batch_load_state(batch_job_id) or _ai_batch_initial_state(batch_job_id, scan_path)
+        state["job_id"] = job.job_id
+        state["status"] = "running"
+        _ai_batch_commit(state, job.update_state)
     return jsonify({"ok": True, "job_id": job.job_id, "batch_job_id": batch_job_id, "state": _ai_batch_public_state(state)})
 
 @app.post("/api/ai-batch-skip")
@@ -23644,6 +23712,14 @@ def ai_batch_import_recover():
     state = _ai_batch_reconcile_state(state)
     source_path = _s(state.get("source_path") or payload.get("path") or "/data/torrents/music").strip()
     batch_job_id = state.get("batch_job_id") or ident
+    # A worker for this batch_job_id is already running: reconnect instead of
+    # spawning a second jobs.start_python() worker. Without this check, two
+    # near-simultaneous recover/retry calls (a double-click, a retried
+    # frontend request) could both pass the checks below and both start a
+    # concurrent _run_ai_batch_import worker against the same durable state
+    # file, racing each other's reads/writes/folder claims.
+    if state.get("worker_alive"):
+        return jsonify({"ok": True, "job_id": state.get("job_id") or batch_job_id, "batch_job_id": batch_job_id, "state": _ai_batch_public_state(state), "reconnected": True})
     retryable = int(state.get("folders_retryable") or 0)
     if retry_failed and retryable <= 0:
         return jsonify({"ok": True, "job_id": state.get("job_id") or batch_job_id, "batch_job_id": batch_job_id, "state": _ai_batch_public_state(state), "reconnected": True})
