@@ -662,7 +662,14 @@ function missingIdType(item: ReviewItem): string {
 }
 
 function recordingCandidateKey(candidate: ReviewRecordingCandidate, fallback: number): string {
-  return (candidate.mb_trackid || `${candidate.candidate_index ?? fallback}`).trim().toLowerCase();
+  const mbTrackId = candidate.mb_trackid?.trim().toLowerCase();
+  if (mbTrackId) return `recording:${mbTrackId}`;
+  return [
+    'evidence',
+    String(candidate.candidate_index ?? fallback),
+    candidate.recording_title || candidate.title || '',
+    candidate.recording_artist || candidate.artist || '',
+  ].join(':').toLowerCase();
 }
 
 function asRecordingCandidate(raw: unknown): ReviewRecordingCandidate | null {
@@ -680,19 +687,7 @@ function asRecordingCandidate(raw: unknown): ReviewRecordingCandidate | null {
   return hasRecordingShape ? candidate : null;
 }
 
-function recordingCandidatesFrom(response?: AiSuggestResponse, item?: ReviewItem): ReviewRecordingCandidate[] {
-  const suggestion = response?.suggestions ?? response?.suggestion;
-  const rawCandidates: unknown[] = [
-    suggestion?.selected_recording_candidate,
-    suggestion?.candidate_evidence,
-    response?.selected_candidate,
-    response?.evidence?.selected_recording_candidate,
-    item?.evidence?.selected_recording_candidate,
-    ...(suggestion?.recording_candidates ?? []),
-    ...(response?.recording_candidates ?? []),
-    ...(response?.evidence?.recording_candidates ?? []),
-    ...(item?.evidence?.recording_candidates ?? []),
-  ];
+function compactRecordingCandidates(rawCandidates: unknown[]): ReviewRecordingCandidate[] {
   const seen = new Set<string>();
   const candidates: ReviewRecordingCandidate[] = [];
   rawCandidates.forEach((raw, index) => {
@@ -706,9 +701,82 @@ function recordingCandidatesFrom(response?: AiSuggestResponse, item?: ReviewItem
   return candidates;
 }
 
-function selectedRecordingCandidate(response: AiSuggestResponse | undefined, item: ReviewItem, mbid: string): ReviewRecordingCandidate | undefined {
-  const candidates = recordingCandidatesFrom(response, item);
-  return candidates.find((candidate) => sameMbid(candidate.mb_trackid, mbid)) || candidates[0];
+function firstUsableRecordingCandidateList(...sources: Array<unknown[] | undefined>): unknown[] {
+  for (const source of sources) {
+    if (source && compactRecordingCandidates(source).length > 0) return source;
+  }
+  return [];
+}
+
+function confirmedCandidateEvidence(
+  suggestion: AiSuggestion | undefined,
+  explicitCandidates: ReviewRecordingCandidate[],
+): ReviewRecordingCandidate | null {
+  const candidate = asRecordingCandidate(suggestion?.candidate_evidence);
+  if (!candidate || !isMusicBrainzUuid(candidate.mb_trackid)) return null;
+  if (suggestion?.mb_trackid && sameMbid(candidate.mb_trackid, suggestion.mb_trackid)) return candidate;
+  if (explicitCandidates.some((explicit) => sameMbid(explicit.mb_trackid, candidate.mb_trackid))) return candidate;
+  return null;
+}
+
+function responseRecordingCandidateInputs(response?: AiSuggestResponse): unknown[] {
+  if (!response) return [];
+  const suggestion = response.suggestions ?? response.suggestion;
+  const candidateList = firstUsableRecordingCandidateList(
+    suggestion?.recording_candidates,
+    response.recording_candidates,
+    response.evidence?.recording_candidates,
+    suggestion?.review_evidence?.recording_candidates,
+  );
+  if (candidateList.length) return candidateList;
+
+  const explicitRaw: unknown[] = [
+    suggestion?.selected_recording_candidate,
+    response.evidence?.selected_recording_candidate,
+    response.selected_candidate,
+  ];
+  const explicitCandidates = compactRecordingCandidates(explicitRaw);
+  const candidateEvidence = confirmedCandidateEvidence(suggestion, explicitCandidates);
+  return candidateEvidence ? [...explicitRaw, candidateEvidence] : explicitRaw;
+}
+
+function itemEvidenceRecordingCandidateInputs(item?: ReviewItem): unknown[] {
+  const evidence = item?.evidence;
+  if (!evidence) return [];
+  const candidateList = firstUsableRecordingCandidateList(evidence.recording_candidates);
+  return candidateList.length ? candidateList : [evidence.selected_recording_candidate];
+}
+
+// Temporary compatibility adapter: prefer the newest AI-suggest response and
+// fall back to persisted item evidence only until the shared matching-result
+// contract gives the frontend one canonical recording-candidate shape.
+function recordingCandidatesFrom(response?: AiSuggestResponse, item?: ReviewItem): ReviewRecordingCandidate[] {
+  const responseCandidates = compactRecordingCandidates(responseRecordingCandidateInputs(response));
+  if (responseCandidates.length) return responseCandidates;
+  return compactRecordingCandidates(itemEvidenceRecordingCandidateInputs(item));
+}
+
+function backendSelectedRecordingCandidate(response: AiSuggestResponse | undefined, item: ReviewItem): ReviewRecordingCandidate | undefined {
+  const responseCandidates = compactRecordingCandidates(responseRecordingCandidateInputs(response));
+  const useCurrentResponse = responseCandidates.length > 0;
+  const suggestion = useCurrentResponse ? response?.suggestions ?? response?.suggestion : undefined;
+  const explicitRaw: unknown[] = useCurrentResponse
+    ? [suggestion?.selected_recording_candidate, response?.evidence?.selected_recording_candidate, response?.selected_candidate]
+    : [item.evidence?.selected_recording_candidate];
+  const explicitCandidates = compactRecordingCandidates(explicitRaw);
+  const candidateEvidence = useCurrentResponse ? confirmedCandidateEvidence(suggestion, explicitCandidates) : null;
+  const selectedByExplicitField = [...explicitCandidates, ...(candidateEvidence ? [candidateEvidence] : [])]
+    .find((candidate) => isMusicBrainzUuid(candidate.mb_trackid));
+  if (selectedByExplicitField) return selectedByExplicitField;
+  if (useCurrentResponse && isMusicBrainzUuid(suggestion?.mb_trackid)) {
+    return responseCandidates.find((candidate) => sameMbid(candidate.mb_trackid, suggestion?.mb_trackid));
+  }
+  return undefined;
+}
+
+function recordingCandidateMatchingEnteredId(candidates: ReviewRecordingCandidate[], mbid: string): ReviewRecordingCandidate | undefined {
+  if (!isMusicBrainzUuid(mbid)) return undefined;
+  return candidates.find((candidate) => sameMbid(candidate.mb_trackid, mbid));
 }
 
 function localEvidenceForItem(item: ReviewItem, response?: AiSuggestResponse): RecordingLocalEvidence {
@@ -735,18 +803,63 @@ function localEvidenceForItem(item: ReviewItem, response?: AiSuggestResponse): R
   };
 }
 
-function recordingCandidateScoreText(candidate: ReviewRecordingCandidate): string {
-  const raw = candidate.confidence_score ?? candidate.acoustid_score ?? candidate.match_total ?? candidate.score;
-  const score = typeof raw === 'number' ? raw : Number(raw);
-  if (!Number.isFinite(score)) return valueLabel(candidate.confidence);
-  return score > 1 ? `${Math.round(score)}%` : formatPercent(score);
+type RecordingCandidateMetric = {
+  label: string;
+  value: string;
+  toneClass: string;
+};
+
+function numericMetricValue(value: unknown): number | null {
+  const score = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(score) ? score : null;
 }
 
-function recordingCandidateScoreClass(candidate: ReviewRecordingCandidate): string {
-  const raw = candidate.confidence_score ?? candidate.acoustid_score ?? candidate.match_total ?? candidate.score;
-  return scoreClass(raw === null ? undefined : raw);
+function normalizedMetricValue(value: unknown): { value: string; toneClass: string } {
+  const score = numericMetricValue(value);
+  if (score !== null && score >= 0 && score <= 1) {
+    return { value: formatPercent(score), toneClass: scoreClass(score) };
+  }
+  return { value: valueLabel(value), toneClass: 'text-zinc-500' };
 }
 
+function rawMetricValue(value: unknown): { value: string; toneClass: string } {
+  return { value: valueLabel(value), toneClass: 'text-zinc-500' };
+}
+
+function recordingCandidateMetric(candidate: ReviewRecordingCandidate): RecordingCandidateMetric {
+  if (candidate.confidence_score !== null && candidate.confidence_score !== undefined) {
+    return { label: 'Match confidence', ...normalizedMetricValue(candidate.confidence_score) };
+  }
+  if (candidate.match_total !== null && candidate.match_total !== undefined) {
+    const score = numericMetricValue(candidate.match_total);
+    if (score !== null && score >= 0 && score <= 1) {
+      return { label: 'Match confidence', ...normalizedMetricValue(candidate.match_total) };
+    }
+    return { label: 'Candidate score', ...rawMetricValue(candidate.match_total) };
+  }
+  if (candidate.acoustid_score !== null && candidate.acoustid_score !== undefined) {
+    return { label: 'AcoustID score', ...normalizedMetricValue(candidate.acoustid_score) };
+  }
+  if (candidate.score !== null && candidate.score !== undefined) {
+    return { label: 'Candidate score', ...rawMetricValue(candidate.score) };
+  }
+  return { label: 'Confidence', ...rawMetricValue(candidate.confidence) };
+}
+
+function recordingCandidateRowLabel({
+  isBackendSelected,
+  matchesEnteredId,
+  isFirstBackendCandidate,
+}: {
+  isBackendSelected: boolean;
+  matchesEnteredId: boolean;
+  isFirstBackendCandidate: boolean;
+}): string {
+  if (isBackendSelected) return 'Backend selected candidate';
+  if (matchesEnteredId) return 'Candidate matching entered ID';
+  if (isFirstBackendCandidate) return 'First backend candidate';
+  return 'Backend alternate candidate';
+}
 function DetailRow({
   label,
   value,
@@ -801,15 +914,18 @@ function MatchSummaryRow({ label, field }: { label: string; field?: { status?: s
 
 function RecordingCandidateRow({
   candidate,
-  index,
-  selected,
+  isBackendSelected,
+  matchesEnteredId,
+  isFirstBackendCandidate,
   onUseCandidate,
 }: {
   candidate: ReviewRecordingCandidate;
-  index: number;
-  selected: boolean;
+  isBackendSelected: boolean;
+  matchesEnteredId: boolean;
+  isFirstBackendCandidate: boolean;
   onUseCandidate: (mbid: string) => void;
 }) {
+  const metric = recordingCandidateMetric(candidate);
   const recordingUrl = candidate.musicbrainz_url || candidate.mb_url || musicBrainzRecordingUrl(candidate.mb_trackid);
   const releaseUrl = musicBrainzUrl(candidate.mb_albumid || candidate.selected_release?.mb_albumid);
   const rgUrl = candidate.mb_releasegroupurl || musicBrainzReleaseGroupUrl(candidate.mb_releasegroupid || candidate.selected_release?.mb_releasegroupid);
@@ -819,12 +935,14 @@ function RecordingCandidateRow({
     candidate.country || candidate.selected_release?.country,
     candidate.medium_format || candidate.media_format || candidate.selected_release?.medium_format || candidate.selected_release?.media_format,
   ].filter(Boolean).join(' / ');
+  const label = recordingCandidateRowLabel({ isBackendSelected, matchesEnteredId, isFirstBackendCandidate });
+  const canUseRecordingId = isMusicBrainzUuid(candidate.mb_trackid);
   return (
-    <div className={`rounded border px-2 py-2 text-xs ${selected ? 'border-sky-300 bg-sky-50' : 'border-graphite-200 bg-white'}`}>
+    <div className={`rounded border px-2 py-2 text-xs ${matchesEnteredId ? 'border-sky-300 bg-sky-50' : 'border-graphite-200 bg-white'}`}>
       <div className="flex flex-wrap items-center gap-2">
-        <span className="font-semibold text-zinc-900">{index === 0 ? 'Backend selected candidate' : 'Backend alternate candidate'}</span>
-        {selected ? <Chip size="small" color="info" label="Selected" /> : null}
-        <span className={recordingCandidateScoreClass(candidate)}>{recordingCandidateScoreText(candidate)}</span>
+        <span className="font-semibold text-zinc-900">{label}</span>
+        {matchesEnteredId ? <Chip size="small" color="info" label="Entered ID" /> : null}
+        <span className={metric.toneClass}>{metric.label}: {metric.value}</span>
         {candidate.match_method || candidate.source ? <span className="text-zinc-500">{candidate.match_method || candidate.source}</span> : null}
         {candidate.safety_result ? <span className="font-medium text-zinc-700">{candidate.safety_result}</span> : null}
       </div>
@@ -835,7 +953,7 @@ function RecordingCandidateRow({
       {candidate.reason ? <div className="mt-1 text-zinc-600">{candidate.reason}</div> : null}
       {candidate.conflicts?.length ? <div className="mt-1 font-medium text-amber-800">Conflicts: {candidate.conflicts.join(', ')}</div> : null}
       <div className="mt-2 flex flex-wrap gap-2">
-        <Button size="small" variant={selected ? 'contained' : 'outlined'} onClick={() => onUseCandidate(candidate.mb_trackid || '')} disabled={!candidate.mb_trackid}>
+        <Button size="small" variant={matchesEnteredId ? 'contained' : 'outlined'} onClick={() => onUseCandidate(candidate.mb_trackid || '')} disabled={!canUseRecordingId}>
           Use Recording ID
         </Button>
         {recordingUrl ? <Button size="small" variant="text" href={recordingUrl} target="_blank" rel="noreferrer">Recording</Button> : null}
@@ -859,23 +977,33 @@ function RecordingIdEvidencePanel({
 }) {
   const local = localEvidenceForItem(item, response);
   const candidates = recordingCandidatesFrom(response, item);
-  const selectedCandidate = selectedRecordingCandidate(response, item, mbid);
-  const candidate = selectedCandidate || candidates[0];
-  const decision = candidate?.decision;
+  const backendSelectedCandidate = backendSelectedRecordingCandidate(response, item);
+  const candidateMatchingEnteredId = recordingCandidateMatchingEnteredId(candidates, mbid);
+  const displayCandidate = backendSelectedCandidate || candidateMatchingEnteredId || candidates[0];
+  const displayMetric = displayCandidate ? recordingCandidateMetric(displayCandidate) : null;
+  const displayReason = displayCandidate && backendSelectedCandidate && sameMbid(displayCandidate.mb_trackid, backendSelectedCandidate.mb_trackid)
+    ? 'Backend selected candidate'
+    : displayCandidate && candidateMatchingEnteredId && sameMbid(displayCandidate.mb_trackid, candidateMatchingEnteredId.mb_trackid)
+      ? 'Candidate matching entered ID'
+      : displayCandidate
+        ? 'First backend candidate'
+        : '';
+  const decision = displayCandidate?.decision;
   const localYear = evidenceYear(local.year);
-  const suggestedYear = evidenceYear(candidate?.release_year ?? candidate?.year ?? candidate?.selected_release?.year ?? candidate?.release_date);
-  const linkedReleases = candidate?.linked_releases ?? [];
-  const recordingUrl = candidate?.musicbrainz_url || candidate?.mb_url || musicBrainzRecordingUrl(candidate?.mb_trackid || mbid);
-  const releaseUrl = musicBrainzUrl(candidate?.mb_albumid || candidate?.selected_release?.mb_albumid);
-  const rgUrl = candidate?.mb_releasegroupurl || musicBrainzReleaseGroupUrl(candidate?.mb_releasegroupid || candidate?.selected_release?.mb_releasegroupid);
+  const suggestedYear = evidenceYear(displayCandidate?.release_year ?? displayCandidate?.year ?? displayCandidate?.selected_release?.year ?? displayCandidate?.release_date);
+  const linkedReleases = displayCandidate?.linked_releases ?? [];
+  const recordingUrl = displayCandidate?.musicbrainz_url || displayCandidate?.mb_url || musicBrainzRecordingUrl(displayCandidate?.mb_trackid || mbid);
+  const releaseUrl = musicBrainzUrl(displayCandidate?.mb_albumid || displayCandidate?.selected_release?.mb_albumid);
+  const rgUrl = displayCandidate?.mb_releasegroupurl || musicBrainzReleaseGroupUrl(displayCandidate?.mb_releasegroupid || displayCandidate?.selected_release?.mb_releasegroupid);
 
   return (
     <div className="mt-3 rounded border border-cyan-200 bg-cyan-50 p-3 text-xs text-zinc-700">
       <div className="flex flex-wrap items-center gap-2">
         <span className="font-semibold text-zinc-900">Recording ID review</span>
         <Chip size="small" color="info" label={`Missing ID type: ${missingIdType(item)}`} />
-        {candidate?.safety_result ? <Chip size="small" variant="outlined" label={candidate.safety_result} /> : null}
-        {candidate?.recommended_action ? <Chip size="small" variant="outlined" label={candidate.recommended_action} /> : null}
+        {displayReason ? <Chip size="small" variant="outlined" label={displayReason} /> : null}
+        {displayCandidate?.safety_result ? <Chip size="small" variant="outlined" label={displayCandidate.safety_result} /> : null}
+        {displayCandidate?.recommended_action ? <Chip size="small" variant="outlined" label={displayCandidate.recommended_action} /> : null}
       </div>
 
       <div className="mt-3 grid gap-3 lg:grid-cols-2">
@@ -897,24 +1025,25 @@ function RecordingIdEvidencePanel({
 
         <div className="rounded border border-white/70 bg-white/80 p-3">
           <div className="font-semibold text-zinc-900">Suggested MusicBrainz / AcoustID match</div>
-          {candidate ? (
+          {displayCandidate ? (
             <div className="mt-2 grid grid-cols-2 gap-2">
-              <DetailRow label="Suggested Recording ID" value={candidate.mb_trackid} href={recordingUrl} mono />
-              <DetailRow label="AcoustID score/confidence" value={recordingCandidateScoreText(candidate)} />
-              <DetailRow label="Recording title" value={candidate.recording_title || candidate.title} />
-              <DetailRow label="Recording artist credit" value={candidate.recording_artist || candidate.artist} />
-              <DetailRow label="Release ID" value={candidate.mb_albumid || candidate.selected_release?.mb_albumid} href={releaseUrl} mono />
-              <DetailRow label="Release Group ID" value={candidate.mb_releasegroupid || candidate.selected_release?.mb_releasegroupid} href={rgUrl} mono />
-              <DetailRow label="Release title" value={candidate.release_title || candidate.album || candidate.selected_release?.album} />
-              <DetailRow label="Release year/date" value={candidate.release_year || candidate.year || candidate.release_date || candidate.selected_release?.year || candidate.selected_release?.date} />
-              <DetailRow label="Backend status" value={candidate.safety_result || candidate.safety_key} />
-              <DetailRow label="Recommended action" value={candidate.recommended_action} />
+              <DetailRow label="Displayed candidate" value={displayReason} />
+              {displayMetric ? <DetailRow label={displayMetric.label} value={displayMetric.value} /> : null}
+              <DetailRow label="Suggested Recording ID" value={displayCandidate.mb_trackid} href={recordingUrl} mono />
+              <DetailRow label="Recording title" value={displayCandidate.recording_title || displayCandidate.title} />
+              <DetailRow label="Recording artist credit" value={displayCandidate.recording_artist || displayCandidate.artist} />
+              <DetailRow label="Release ID" value={displayCandidate.mb_albumid || displayCandidate.selected_release?.mb_albumid} href={releaseUrl} mono />
+              <DetailRow label="Release Group ID" value={displayCandidate.mb_releasegroupid || displayCandidate.selected_release?.mb_releasegroupid} href={rgUrl} mono />
+              <DetailRow label="Release title" value={displayCandidate.release_title || displayCandidate.album || displayCandidate.selected_release?.album} />
+              <DetailRow label="Release year/date" value={displayCandidate.release_year || displayCandidate.year || displayCandidate.release_date || displayCandidate.selected_release?.year || displayCandidate.selected_release?.date} />
+              <DetailRow label="Backend status" value={displayCandidate.safety_result || displayCandidate.safety_key} />
+              <DetailRow label="Recommended action" value={displayCandidate.recommended_action} />
             </div>
           ) : (
             <div className="mt-2 text-zinc-500">Run AI Suggest to load backend recording candidates.</div>
           )}
-          {candidate?.reason ? <div className="mt-2 text-zinc-700">{candidate.reason}</div> : null}
-          {candidate?.conflicts?.length ? <div className="mt-2 font-medium text-amber-800">Backend conflicts: {candidate.conflicts.join(', ')}</div> : null}
+          {displayCandidate?.reason ? <div className="mt-2 text-zinc-700">{displayCandidate.reason}</div> : null}
+          {displayCandidate?.conflicts?.length ? <div className="mt-2 font-medium text-amber-800">Backend conflicts: {displayCandidate.conflicts.join(', ')}</div> : null}
           {decision?.year_match?.status === 'conflict' ? (
             <div className="mt-2 rounded border border-amber-200 bg-amber-50 px-2 py-1.5 text-amber-900">
               <div className="font-semibold">Year conflict</div>
@@ -942,7 +1071,7 @@ function RecordingIdEvidencePanel({
         <div className="mt-3 rounded border border-white/70 bg-white/80 p-3">
           <div className="font-semibold text-zinc-900">Same recording appears on {linkedReleases.length} releases</div>
           <div className="mt-1 text-zinc-600">
-            {candidate?.matching_local_release_found ? 'Backend marked a local album/year release context.' : 'No backend local album/year preference was reported.'}
+            {displayCandidate?.matching_local_release_found ? 'Backend marked a local album/year release context.' : 'No backend local album/year preference was reported.'}
           </div>
           <div className="mt-2 grid gap-2 md:grid-cols-2">
             {linkedReleases.slice(0, 4).map((release, index) => {
@@ -962,21 +1091,25 @@ function RecordingIdEvidencePanel({
       {candidates.length ? (
         <div id={`recording-candidates-${item.id}`} className="mt-3 space-y-2">
           <div className="font-semibold text-zinc-900">Backend recording candidates</div>
-          {candidates.map((candidateRow, index) => (
-            <RecordingCandidateRow
-              key={recordingCandidateKey(candidateRow, index)}
-              candidate={candidateRow}
-              index={index}
-              selected={sameMbid(candidateRow.mb_trackid, mbid)}
-              onUseCandidate={onUseCandidate}
-            />
-          ))}
+          {candidates.map((candidateRow, index) => {
+            const isBackendSelected = Boolean(backendSelectedCandidate && sameMbid(candidateRow.mb_trackid, backendSelectedCandidate.mb_trackid));
+            const matchesEnteredId = Boolean(candidateMatchingEnteredId && sameMbid(candidateRow.mb_trackid, candidateMatchingEnteredId.mb_trackid));
+            return (
+              <RecordingCandidateRow
+                key={recordingCandidateKey(candidateRow, index)}
+                candidate={candidateRow}
+                isBackendSelected={isBackendSelected}
+                matchesEnteredId={matchesEnteredId}
+                isFirstBackendCandidate={index === 0}
+                onUseCandidate={onUseCandidate}
+              />
+            );
+          })}
         </div>
       ) : null}
     </div>
   );
 }
-
 function initialMbid(item: ReviewItem): string {
   if (item.target_kind === 'item') return item.mb_trackid || '';
   return item.mb_releasegroupid || item.mb_albumid || '';
@@ -3754,15 +3887,15 @@ export function ImportReviewPage({
       try {
         const response = await suggestItem(item.item_id);
         const s = response.suggestions ?? response.suggestion;
-        const candidate = selectedRecordingCandidate(response, item, s?.mb_trackid || '');
-        const mbTrackId = s?.mb_trackid || candidate?.mb_trackid || '';
+        const backendCandidate = backendSelectedRecordingCandidate(response, item);
+        const mbTrackId = s?.mb_trackid || backendCandidate?.mb_trackid || '';
         setSuggestions((current) => ({ ...current, [item.id]: response }));
         if (mbTrackId) {
           setMbids((current) => ({ ...current, [item.id]: mbTrackId }));
         }
         setAction(item.id, {
           status: 'success',
-          message: s?.reason || candidate?.reason || (mbTrackId ? 'AI suggestion ready. Review the backend recording evidence before attaching.' : 'No confident recording match found.'),
+          message: s?.reason || backendCandidate?.reason || (mbTrackId ? 'AI suggestion ready. Review the backend recording evidence before attaching.' : 'No confident recording match found.'),
         });
       } catch (err) {
         setAction(item.id, { status: 'error', message: err instanceof Error ? err.message : String(err) });
