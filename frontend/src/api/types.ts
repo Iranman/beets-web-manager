@@ -758,6 +758,10 @@ export interface AiBatchFolderState {
   detected_album?: string;
   suggested_release_group_id?: string;
   failure_reason?: string;
+  retry_count?: number;
+  retry_exhausted?: boolean;
+  max_retries?: number;
+  manual_review_required?: boolean;
 }
 
 export interface AiBatchState {
