@@ -480,11 +480,21 @@ function JobLog({
                   <div key={folder.folder_id} className="grid gap-2 rounded border border-graphite-800 px-2 py-2 text-sm sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
                     <div className="min-w-0">
                       <div className="truncate text-zinc-200">{folderName(folder.source_folder)}</div>
+                      {folder.retry_exhausted ? (
+                        <div className="truncate text-xs text-amber-400">
+                          Retry limit reached ({folder.retry_count ?? folder.max_retries ?? '?'}/{folder.max_retries ?? '?'}) — manual review required
+                        </div>
+                      ) : null}
                       <div className="truncate text-xs text-zinc-500">
                         {folder.failure_reason || folder.ai_suggest_error || folder.current_step || 'Needs review'}
                       </div>
                     </div>
-                    <Chip label={folderStatusLabel(folder.status)} size="small" variant="outlined" />
+                    <div className="flex items-center gap-1">
+                      {folder.retry_exhausted || folder.manual_review_required ? (
+                        <Chip label="Manual review" size="small" color="warning" variant="outlined" />
+                      ) : null}
+                      <Chip label={folderStatusLabel(folder.status)} size="small" variant="outlined" />
+                    </div>
                   </div>
                 ))}
               </div>

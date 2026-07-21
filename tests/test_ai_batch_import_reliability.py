@@ -136,11 +136,16 @@ class AiBatchImportReliabilityTests(unittest.TestCase):
         self.assertIn('state["job_id"] = job_id', run_fn)
 
         start_fn = section(APP, "def _start_ai_batch_job(", "@app.post(\"/api/ai-batch-skip\")")
-        self.assertIn("job_id_ready = threading.Event()", start_fn)
-        self.assertIn("job_id_ready.wait(timeout=", start_fn)
+        # Renamed from job_id_ready -> handoff_ready when the worker-lifetime
+        # active-worker registry and explicit startup-handoff validation
+        # were added (see tests/test_ai_batch_retry_race.py); the underlying
+        # synchronization behavior this test protects -- the worker waits
+        # for and stamps the real job_id before committing -- is unchanged.
+        self.assertIn("handoff_ready = threading.Event()", start_fn)
+        self.assertIn("handoff_ready.wait(timeout=", start_fn)
         self.assertIn("job_id_holder.get(\"job_id\", \"\")", start_fn)
         self.assertIn("job_id_holder[\"job_id\"] = job.job_id", start_fn)
-        self.assertIn("job_id_ready.set()", start_fn)
+        self.assertIn("handoff_ready.set()", start_fn)
 
     def test_status_endpoint_returns_404_and_distinguishes_missing_state(self):
         # A missing AI batch state must never come back as a plain 200 ok:false

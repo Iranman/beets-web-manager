@@ -22509,6 +22509,173 @@ _ai_batch_state_lock = threading.RLock()
 _ai_batch_control_lock = threading.Lock()
 _ai_batch_controls: Dict[str, Dict[str, Any]] = {}
 
+# Sole arbiter of "is a worker starting or running for this batch_job_id in
+# this process," authoritative for the worker's *entire* lifetime -- from
+# the moment startup is reserved until the worker thread actually exits.
+#
+# An earlier version of this registry (_ai_batch_active_starts) was released
+# as soon as _start_ai_batch_job()'s own start sequence finished (job_id
+# persisted, worker unblocked), on the theory that JobStore's own
+# job.status == "running" would remain the reliable signal after that point.
+# That left a real post-start/pre-heartbeat window open: a second recover
+# request could land after the first _start_ai_batch_job() call had already
+# returned (reservation released) but before the newly-unblocked worker
+# thread had reconciled/committed its first post-start state. During that
+# window _ai_batch_recalculate_batch_state's finalize branch -- reading the
+# still-pre-reconciliation, all-terminal-looking folder_states snapshot --
+# stamps state["worker_alive"] = False, so the second request's own
+# worker_alive check (fed by that stale snapshot) failed to see the new
+# worker as active and started a second one for the same batch_job_id.
+#
+# Values:
+#   missing from the dict  -- no worker reserved or active
+#   None                   -- startup reserved, job_id not allocated yet
+#   <job_id> (str)          -- worker created and active
+#
+# This registry is deliberately independent of state-file content -- it is
+# the sole source of truth for "is a worker already starting/running for
+# this batch," so it stays correct even when every thread's own state
+# snapshot is stale.
+#
+# Process-local only: correct because this app's supported runtime is one
+# Waitress process with a thread pool (see `if __name__ == "__main__":`,
+# `waitress.serve(..., threads=_env_int("WEBCONTROL_THREADS", ...))`), not
+# multiple worker processes or containers sharing one state directory. If
+# that deployment model ever changes, this lock alone would no longer be
+# sufficient and would need a durable/file-based reservation instead.
+_ai_batch_worker_lock = threading.Lock()
+_ai_batch_active_workers: Dict[str, Optional[str]] = {}
+_AI_BATCH_WORKER_MISSING = object()
+
+
+def _ai_batch_reserve_worker(batch_job_id: str) -> bool:
+    """Atomically claim the right to start a worker for batch_job_id.
+
+    Returns True if the caller may proceed to call jobs.start_python(); False
+    if another worker is already reserved-starting or active for this batch.
+    On True, the caller owns the entry and must eventually call either
+    _ai_batch_promote_worker (handing ownership to the worker thread, which
+    then owns the eventual _ai_batch_release_worker call) or
+    _ai_batch_release_worker(batch_job_id, expected=None) itself if startup
+    fails before a worker thread can take ownership."""
+    with _ai_batch_worker_lock:
+        if batch_job_id in _ai_batch_active_workers:
+            return False
+        _ai_batch_active_workers[batch_job_id] = None
+        return True
+
+
+def _ai_batch_promote_worker(batch_job_id: str, job_id: str) -> bool:
+    """Atomically move a reservation from "startup reserved" to "active with
+    job_id", once jobs.start_python() has returned and the job_id
+    association has been durably persisted. Must happen before the worker
+    thread is unblocked to do real work. Returns False if the entry is no
+    longer present (defensive; should not happen in normal operation since
+    only the reserving caller promotes its own reservation)."""
+    with _ai_batch_worker_lock:
+        if batch_job_id not in _ai_batch_active_workers:
+            return False
+        _ai_batch_active_workers[batch_job_id] = job_id
+        return True
+
+
+def _ai_batch_release_worker(batch_job_id: str, expected: Optional[str]) -> None:
+    """Release batch_job_id's registry entry, but only if it still equals
+    `expected` -- an ownership check so a stale worker's cleanup (e.g. an old
+    job_id from a previous, already-superseded reservation) can never remove
+    a newer worker's registration. Pass expected=None to release an
+    unpromoted startup reservation (a failed start); pass the real job_id to
+    release a promoted, completed/failed worker."""
+    with _ai_batch_worker_lock:
+        if _ai_batch_active_workers.get(batch_job_id, _AI_BATCH_WORKER_MISSING) == expected:
+            _ai_batch_active_workers.pop(batch_job_id, None)
+
+
+def _ai_batch_worker_registered(batch_job_id: str) -> bool:
+    """True if a worker is startup-reserved or actively running for
+    batch_job_id in this process, per the process-local active-worker
+    registry -- independent of persisted state-file content."""
+    if not batch_job_id:
+        return False
+    with _ai_batch_worker_lock:
+        return batch_job_id in _ai_batch_active_workers
+
+
+def _ai_batch_active_worker_job_id(batch_job_id: str) -> str:
+    """Return the promoted job_id for batch_job_id, or "" if no worker is
+    registered at all, or if a worker is startup-reserved but not yet
+    promoted (job_id not allocated yet)."""
+    if not batch_job_id:
+        return ""
+    with _ai_batch_worker_lock:
+        return _ai_batch_active_workers.get(batch_job_id) or ""
+
+
+def _ai_batch_release_worker_any(batch_job_id: str, owned_job_id: str) -> None:
+    """Release batch_job_id's registry entry regardless of which startup
+    outcome actually applies to this worker: tries the promoted-token
+    release first (the common case, once _ai_batch_promote_worker
+    succeeded), then the unpromoted-reservation release (startup aborted,
+    timed out, or failed before promotion). Both calls are the same
+    ownership-safe compare-and-pop as _ai_batch_release_worker -- at most
+    one of the two expected values can ever match the live registry entry
+    for this batch_job_id at a given moment (reservation is exclusive, so
+    no other caller's entry can be sitting in between), so trying both in
+    sequence is safe and idempotent regardless of outcome, without needing
+    a separate mutable "was this promoted" flag shared between threads."""
+    if owned_job_id:
+        _ai_batch_release_worker(batch_job_id, expected=owned_job_id)
+    _ai_batch_release_worker(batch_job_id, expected=None)
+
+
+class _AiBatchStartupAbortedError(Exception):
+    """Raised inside the AI batch worker wrapper (_do, in
+    _start_ai_batch_job) when the startup handoff was never validly
+    completed -- the handoff wait timed out, _start_ai_batch_job explicitly
+    aborted after the worker thread was already spawned, no job_id was
+    ever assigned, or the active-worker registry does not (yet, or no
+    longer) show this worker's own job_id as promoted. In every such case
+    the worker must exit without calling _run_ai_batch_import: there was
+    no durable, registry-confirmed authorization to do real batch work.
+    Caught by the wrapper's own try/finally; PythonJob._run's existing
+    exception handling records this as a normal job failure (a concise
+    message in the job log, not a traceback) -- never as successful batch
+    processing."""
+
+
+def _ai_batch_validate_worker_handoff(
+    batch_job_id: str, owned_job_id: str, *, signaled: bool, aborted: bool,
+) -> None:
+    """Raise _AiBatchStartupAbortedError unless every part of the startup
+    handoff was validly completed. Extracted from the worker wrapper (_do,
+    in _start_ai_batch_job) as a small, directly unit-testable function --
+    exercising the handoff-timeout and startup-abort paths behaviorally
+    would otherwise require either a real 10-second wait on
+    threading.Event.wait's timeout, or patching internals of a closure that
+    isn't otherwise reachable from outside _start_ai_batch_job. Not pure:
+    it reads live process-local active-worker registry state
+    (_ai_batch_active_worker_job_id) to confirm ownership.
+
+    Does not use timing or the mere presence of owned_job_id as proof that
+    startup succeeded: `signaled` must be the actual return value of
+    handoff_ready.wait(...) (True only when _start_ai_batch_job explicitly
+    signaled a decision, never inferred from a timeout), and ownership is
+    confirmed by re-reading the live active-worker registry rather than
+    trusting owned_job_id's mere presence (which is set well before
+    promotion is attempted, and stays set even if promotion later fails)."""
+    if not signaled:
+        # _start_ai_batch_job never completed a handoff decision within the
+        # bound (e.g. its own thread died unexpectedly mid-startup) -- do
+        # not assume success from silence.
+        raise _AiBatchStartupAbortedError("AI batch startup handoff timed out")
+    if aborted:
+        raise _AiBatchStartupAbortedError("AI batch startup was aborted")
+    if not owned_job_id:
+        raise _AiBatchStartupAbortedError("AI batch startup has no job ID")
+    if _ai_batch_active_worker_job_id(batch_job_id) != owned_job_id:
+        raise _AiBatchStartupAbortedError("AI batch worker ownership was not promoted")
+
+
 _AI_BATCH_TERMINAL_STATUSES = {"completed", "completed_with_warnings", "failed", "canceled"}
 _AI_BATCH_QUEUED_FOLDER_STATUSES = {"queued", "ai_queued"}
 _AI_BATCH_RUNNING_FOLDER_STATUSES = {"claimed", "scanning", "ai_running", "importing", "retrying"}
@@ -22534,6 +22701,7 @@ _AI_BATCH_TERMINAL_FOLDER_STATUSES = (
     | _AI_BATCH_SKIPPED_FOLDER_STATUSES
 )
 _AI_BATCH_RETRYABLE_FOLDER_STATUSES = {"failed", "import_failed", "ai_failed", "timed_out", "replacement_unavailable"}
+_AI_BATCH_MAX_FOLDER_RETRIES = 3
 _AI_BATCH_FORMAT_POLICY_HANDLED_MESSAGE = _MUSIC_FORMAT_POLICY_HANDLED_MESSAGE
 
 
@@ -22565,6 +22733,24 @@ def _ai_batch_write_state(state: Dict[str, Any]) -> None:
     tmp = path.with_suffix(f".{uuid.uuid4().hex}.tmp")
     tmp.write_text(json.dumps(_ai_batch_json_safe(state), indent=2, sort_keys=True), encoding="utf-8")
     os.replace(str(tmp), str(path))
+
+
+def _ai_batch_persist_job_association(batch_job_id: str, job_id: str) -> None:
+    """Durably associate job_id with batch_job_id before the worker thread
+    is unblocked, so an immediate status poll can find this batch by job_id.
+
+    Deliberately bypasses _ai_batch_commit: that function unconditionally
+    calls _ai_batch_recalculate_batch_state, whose finalize logic requires
+    fully-reconciled folder_states to make a correct decision. For a
+    recover/retry start, folder_states is still the pre-reconciliation
+    snapshot at this point -- only the worker's own reconciliation step
+    (inside _run_ai_batch_import) makes it safe to recalculate. A plain,
+    targeted write avoids re-triggering that premature-finalize bug."""
+    with _ai_batch_state_lock:
+        state = _ai_batch_load_state(batch_job_id) or _ai_batch_initial_state(batch_job_id, "")
+        state["job_id"] = job_id
+        state["batch_job_id"] = batch_job_id
+        _ai_batch_write_state(state)
 
 
 def _ai_batch_load_state(identifier: str) -> Optional[Dict[str, Any]]:
@@ -22699,7 +22885,17 @@ def _ai_batch_recompute_counts(state: Dict[str, Any]) -> None:
     state["folders_failed"] = sum(status_counts.get(status, 0) for status in _AI_BATCH_FAILED_FOLDER_STATUSES)
     state["folders_skipped"] = sum(status_counts.get(status, 0) for status in _AI_BATCH_SKIPPED_FOLDER_STATUSES)
     state["folders_unfinished"] = sum(status_counts.get(status, 0) for status in _AI_BATCH_UNFINISHED_FOLDER_STATUSES)
-    state["folders_retryable"] = sum(status_counts.get(status, 0) for status in _AI_BATCH_RETRYABLE_FOLDER_STATUSES)
+    # Counted per-folder rather than via status_counts: a folder that has
+    # exhausted _AI_BATCH_MAX_FOLDER_RETRIES keeps its original status
+    # (e.g. "failed") for operator-UI compatibility, so status alone can't
+    # distinguish it from one that hasn't been retried yet. retry_exhausted
+    # is the field that must exclude it here, or a folder stuck at its cap
+    # would keep inflating folders_retryable forever.
+    state["folders_retryable"] = sum(
+        1 for folder in folders
+        if _ai_batch_normalize_folder_outcome(folder) in _AI_BATCH_RETRYABLE_FOLDER_STATUSES
+        and not folder.get("retry_exhausted")
+    )
     state["folders_attention"] = (
         state["folders_review"]
         + state["folders_warning"]
@@ -22727,7 +22923,28 @@ def _ai_batch_recalculate_batch_state(state: Dict[str, Any], log: Optional[list]
     processed = int(state.get("folders_processed") or 0)
     if previous_status in {"canceled"}:
         return False
-    if total <= 0 or unfinished > 0 or processed < total:
+    if unfinished > 0:
+        # Self-heal a contradictory persisted state: folders genuinely still
+        # unfinished (e.g. left at "ai_queued" by an interrupted/buggy prior
+        # run) but state["status"] stuck at a terminal value from an earlier
+        # premature finalize. Nothing else ever walks status back off a
+        # terminal value, so without this a batch in this state stays stuck
+        # forever -- recover/retry both short-circuit to a no-op "reconnect"
+        # because they trust the (wrong) terminal status. Reopening to
+        # "running" lets the existing stale-heartbeat detection in
+        # _ai_batch_reconcile_state correctly classify it as recoverable.
+        if previous_status in _AI_BATCH_TERMINAL_STATUSES:
+            state["status"] = "running"
+            state["current_step"] = "reopened: unfinished folder work found"
+            state["completed_at"] = None
+            if log is not None:
+                log.append(
+                    f"Batch status corrected: {unfinished} folder(s) still unfinished; "
+                    f"reopening from {previous_status}."
+                )
+            return True
+        return False
+    if total <= 0 or processed < total:
         return False
     attention = int(state.get("folders_attention") or 0) + int(state.get("folders_skipped") or 0)
     next_status = "completed_with_warnings" if attention else "completed"
@@ -22901,10 +23118,27 @@ def _ai_batch_reconcile_state(state: Dict[str, Any]) -> Dict[str, Any]:
     now = time.time()
     job_id = _s(state.get("job_id"))
     job = jobs.get(job_id) if job_id else None
-    worker_alive = bool(job and job.status == "running")
+    batch_job_id = _s(state.get("batch_job_id"))
+    registry_active = _ai_batch_worker_registered(batch_job_id)
+    worker_alive = bool(job and job.status == "running") or registry_active
     state["worker_alive"] = worker_alive
     heartbeat = float(state.get("heartbeat_at") or 0)
     state["heartbeat_age_seconds"] = max(0.0, now - heartbeat) if heartbeat else None
+    if registry_active:
+        # A worker is registered (startup-reserved or actively running) for
+        # this batch in this process. This call is happening from a route
+        # handler thread, not the registered worker itself (the worker never
+        # calls _ai_batch_reconcile_state -- see _ai_batch_active_workers'
+        # docstring above), so `state` here may be the pre-reconciliation
+        # snapshot from before that worker's own retry/requeue pass commits.
+        # Recalculating/finalizing against it would stomp worker_alive back
+        # to False via _ai_batch_recalculate_batch_state's finalize branch
+        # (which trusts folder_states to be reconciled) and could persist a
+        # premature terminal status ahead of the real worker's own
+        # reconciliation. Defer entirely: the registered worker's own
+        # commits are the sole source of truth until it releases its
+        # registration.
+        return state
     changed = _ai_batch_recalculate_batch_state(state)
     unfinished = int(state.get("folders_unfinished") or 0)
     if state.get("status") in {"running", "stale"} and not worker_alive:
@@ -23310,10 +23544,17 @@ def _run_ai_batch_import(batch_job_id: str, scan_path: str, log: list, cancel_ev
         state["retry_count"] = int(state.get("retry_count") or 0) + 1
     log.append("batch created" if not recover else ("batch retry started" if retry_failed else "batch recovery started"))
     log.append(f"source scan started: {scan_path}")
-    _ai_batch_commit(state, update_state)
 
     folder_states = state.setdefault("folder_states", {})
     if not recover or not folder_states:
+        # Commit "running" before the (potentially slow) disk walk below so a
+        # poller sees progress immediately. Deliberately NOT done for the
+        # recover/retry branch: _ai_batch_commit unconditionally recalculates
+        # batch status from folder_states, and pre-reconciliation folder
+        # data would make it finalize a terminal status before reconciliation
+        # runs. The single commit after the if/else below always sees
+        # fully-reconciled folder_states first.
+        _ai_batch_commit(state, update_state)
         folders = _ai_batch_find_audio_dirs(scan_path)
         log.append(f"folders discovered count: {len(folders)}")
         for folder in folders:
@@ -23330,13 +23571,34 @@ def _run_ai_batch_import(batch_job_id: str, scan_path: str, log: list, cancel_ev
             src = folder.get("source_folder", "")
             status = _ai_batch_effective_folder_status(folder)
             if retry_failed and status in _AI_BATCH_RETRYABLE_FOLDER_STATUSES:
+                prior_retries = int(folder.get("retry_count") or 0)
+                if prior_retries >= _AI_BATCH_MAX_FOLDER_RETRIES:
+                    # Status/failure_reason are deliberately left as-is
+                    # ("failed"/"timed_out"/etc) rather than switched to a
+                    # new status value: the existing operator UI already
+                    # renders that status as an attention-needing failure,
+                    # and switching to an unrecognized status risks the
+                    # folder silently disappearing from the attention list.
+                    # retry_exhausted/manual_review_required are the signal
+                    # that further automatic retry_failed=true calls must
+                    # not touch this folder (see _ai_batch_recompute_counts'
+                    # folders_retryable exclusion below).
+                    _ai_batch_mark_folder(
+                        state, fid,
+                        retry_exhausted=True,
+                        max_retries=_AI_BATCH_MAX_FOLDER_RETRIES,
+                        manual_review_required=True,
+                        current_step=f"retry limit ({_AI_BATCH_MAX_FOLDER_RETRIES}) reached; needs manual review",
+                    )
+                    terminal += 1
+                    continue
                 folder.update({
                     "status": "ai_queued",
                     "current_step": "retryable failure requeued",
                     "ai_suggest_status": "queued",
                     "failure_reason": "",
                     "ai_suggest_error": "",
-                    "retry_count": int(folder.get("retry_count") or 0) + 1,
+                    "retry_count": prior_retries + 1,
                 })
                 requeued += 1
                 continue
@@ -23389,42 +23651,223 @@ def _run_ai_batch_import(batch_job_id: str, scan_path: str, log: list, cancel_ev
     return _ai_batch_public_state(state)
 
 
+def _ai_batch_reconnect_response(batch_job_id: str):
+    """Build a response for a caller that lost the race to
+    _ai_batch_reserve_worker. The winner may not have been promoted to a
+    real job_id yet (a brief window between winning the reservation and
+    _ai_batch_persist_job_association/_ai_batch_promote_worker). Poll the
+    active-worker registry -- not stale batch JSON -- briefly, so a losing
+    caller's response carries the real job_id whenever this call directly
+    observes a promoted registry entry.
+
+    Successful reconnection requires directly observing a promoted, live
+    registry entry for this batch during the bounded poll below.
+    Persisted state["job_id"], JobStore job existence, or a JobStore
+    status of "success" do NOT prove a given JobStore job is *this*
+    startup attempt: any of those could be a stale association left by an
+    older successful run of the same batch_job_id, or a job that belongs
+    to a different batch entirely if state ever got crossed. Proving
+    current-attempt identity would need a durable per-start token --
+    a larger persistence/CAS change tracked as future debt (see
+    ARCH-010), not implemented here. So this function never infers success
+    from anything persisted; it only trusts what it directly observes in
+    the live registry.
+
+    Three distinct outcomes:
+      - job_id observed within the bound: ok=True, reconnected=True.
+      - still startup-reserved (unpromoted) when the bound expires: a
+        truthful, retryable "still starting" response.
+      - the registry entry disappeared before this call ever observed a
+        promoted job_id: this attempt's outcome cannot be proven from
+        here, so a truthful, retryable "unconfirmed" response -- the
+        caller should refresh normal batch status to resolve it, rather
+        than being told either a false success or a false failure."""
+    job_id = ""
+    startup_disappeared = False
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+        job_id = _ai_batch_active_worker_job_id(batch_job_id)
+        if job_id:
+            break
+        if not _ai_batch_worker_registered(batch_job_id):
+            startup_disappeared = True
+            break
+        time.sleep(0.02)
+
+    if job_id:
+        existing = _ai_batch_find_state(batch_job_id)
+        if existing:
+            existing = _ai_batch_reconcile_state(existing)
+        return jsonify({
+            "ok": True,
+            "job_id": job_id,
+            "batch_job_id": batch_job_id,
+            "state": _ai_batch_public_state(existing) if existing else {},
+            "reconnected": True,
+        })
+    if startup_disappeared:
+        startup_message = (
+            "The startup reservation ended before an active worker could be confirmed. "
+            "Refresh batch status and retry if needed."
+        )
+        return jsonify({
+            "ok": False,
+            "reconnected": False,
+            "retryable": True,
+            "startup_unconfirmed": True,
+            "batch_job_id": batch_job_id,
+            "message": startup_message,
+            "error": startup_message,
+        }), 409
+    return jsonify({
+        "ok": False,
+        "reconnected": False,
+        "retryable": True,
+        "startup_in_progress": True,
+        "batch_job_id": batch_job_id,
+        "error": "AI batch worker is still starting; retry shortly.",
+    }), 409
+
+
 def _start_ai_batch_job(scan_path: str, recover_batch_job_id: str = "", *, retry_failed: bool = False):
     batch_job_id = recover_batch_job_id or uuid.uuid4().hex
-    with _ai_batch_control_lock:
-        _ai_batch_controls[batch_job_id] = {"pause": False, "skip_current": False, "skip_folder_ids": set()}
-    if not recover_batch_job_id:
-        state = _ai_batch_initial_state(batch_job_id, scan_path)
-        _ai_batch_commit(state, None)
 
-    # jobs.start_python() spawns its worker thread before returning, and the
-    # JobStore job_id doesn't exist until that call returns — so the worker
-    # waits here rather than racing the main thread for it. Without this, the
-    # worker's own state commits (which happen repeatedly during scanning/AI
-    # matching) can win the race and permanently stamp job_id="" into the
-    # persisted state, making the batch unfindable by the ID the frontend polls.
+    # Atomic check-then-start protection: _ai_batch_reserve_worker is the
+    # sole arbiter of "is a worker already starting/running for this batch,"
+    # independent of any (possibly stale) state-file read, and remains
+    # authoritative for the worker's entire lifetime (see
+    # _ai_batch_active_workers' docstring). Two threads calling this
+    # function concurrently for the same batch_job_id -- e.g. a
+    # double-clicked retry, a retried frontend request, or a second recover
+    # arriving after this call already returned but before the worker it
+    # started has reconciled/committed anything -- must result in exactly
+    # one jobs.start_python() call; every loser reconnects instead.
+    if not _ai_batch_reserve_worker(batch_job_id):
+        return _ai_batch_reconnect_response(batch_job_id)
+
+    # Explicit startup handoff state, owned by this one _start_ai_batch_job
+    # invocation and closed over by its worker thread below. Two separate
+    # events rather than a single flag: handoff_ready alone can't
+    # distinguish "the wait timed out" from "the wait was signaled because
+    # startup succeeded" from "the wait was signaled because startup was
+    # explicitly aborted" -- the worker must tell all three apart before it
+    # is ever allowed to call _run_ai_batch_import. job_id_holder carries
+    # the allocated job_id (set once, immediately after jobs.start_python()
+    # returns) -- its mere presence is NOT proof that startup succeeded
+    # (startup can still fail after this point); the worker separately
+    # re-checks the registry itself (_ai_batch_active_worker_job_id) as the
+    # actual proof that this job_id was durably promoted.
     job_id_holder: Dict[str, str] = {}
-    job_id_ready = threading.Event()
+    handoff_ready = threading.Event()
+    startup_aborted = threading.Event()
 
     def _do(log, cancel_event=None, update_state=None):
-        job_id_ready.wait(timeout=10)
-        return _run_ai_batch_import(
-            batch_job_id, scan_path, log, cancel_event, update_state,
-            recover=bool(recover_batch_job_id), retry_failed=retry_failed, job_id=job_id_holder.get("job_id", ""),
-        )
+        signaled = handoff_ready.wait(timeout=10)
+        owned_job_id = job_id_holder.get("job_id", "")
+        try:
+            _ai_batch_validate_worker_handoff(
+                batch_job_id, owned_job_id,
+                signaled=signaled, aborted=startup_aborted.is_set(),
+            )
+            return _run_ai_batch_import(
+                batch_job_id, scan_path, log, cancel_event, update_state,
+                recover=bool(recover_batch_job_id), retry_failed=retry_failed, job_id=owned_job_id,
+            )
+        finally:
+            # Ownership-safe regardless of which startup outcome applies:
+            # releases whichever token (the promoted job_id, or the
+            # unpromoted None reservation) this worker actually holds. See
+            # _ai_batch_release_worker_any.
+            _ai_batch_release_worker_any(batch_job_id, owned_job_id)
 
-    job = jobs.start_python(
-        _do,
-        label=f"AI Batch Import: {Path(scan_path).name}" + (" retry" if retry_failed else ""),
-        metadata={"type": "ai-batch-import", "batch_job_id": batch_job_id, "source_path": scan_path},
-    )
-    job_id_holder["job_id"] = job.job_id
-    job_id_ready.set()
-    state = _ai_batch_load_state(batch_job_id) or _ai_batch_initial_state(batch_job_id, scan_path)
-    state["job_id"] = job.job_id
-    state["status"] = "running"
-    _ai_batch_commit(state, job.update_state)
-    return jsonify({"ok": True, "job_id": job.job_id, "batch_job_id": batch_job_id, "state": _ai_batch_public_state(state)})
+    worker_spawned = False
+    startup_committed = False
+    try:
+        with _ai_batch_control_lock:
+            _ai_batch_controls[batch_job_id] = {"pause": False, "skip_current": False, "skip_folder_ids": set()}
+        if not recover_batch_job_id:
+            state = _ai_batch_initial_state(batch_job_id, scan_path)
+            _ai_batch_commit(state, None)
+
+        # jobs.start_python() spawns its worker thread before returning, and
+        # the JobStore job_id doesn't exist until that call returns — so the
+        # worker waits here rather than racing the main thread for it. The
+        # worker must not be unblocked (and allowed to write batch state)
+        # until the job_id association below is durably persisted and the
+        # registry has been promoted to the real job_id, or an immediate
+        # status poll (by job_id) could miss the batch entirely, and a
+        # concurrent reconnecting caller could observe a reservation with no
+        # job_id for longer than necessary.
+        job = jobs.start_python(
+            _do,
+            label=f"AI Batch Import: {Path(scan_path).name}" + (" retry" if retry_failed else ""),
+            metadata={"type": "ai-batch-import", "batch_job_id": batch_job_id, "source_path": scan_path},
+        )
+        # From this point on, a worker thread exists and is blocked waiting
+        # for handoff_ready. Cleanup responsibility transfers to it
+        # immediately: any failure below must abort+signal so the worker
+        # exits right away, instead of this function popping the registry
+        # itself and leaving the worker to block for up to 10s and then run
+        # unregistered, unvalidated batch work (see _AiBatchStartupAbortedError).
+        worker_spawned = True
+        job_id_holder["job_id"] = job.job_id
+        if recover_batch_job_id:
+            # Targeted job_id association only -- not a full _ai_batch_commit.
+            # The worker thread (still blocked below) owns the reconcile ->
+            # commit cycle inside _run_ai_batch_import; a second independent
+            # commit here would race it with a stale pre-reconciliation
+            # snapshot (see _ai_batch_persist_job_association's docstring).
+            _ai_batch_persist_job_association(batch_job_id, job.job_id)
+            state = _ai_batch_load_state(batch_job_id) or _ai_batch_initial_state(batch_job_id, scan_path)
+        else:
+            state = _ai_batch_load_state(batch_job_id) or _ai_batch_initial_state(batch_job_id, scan_path)
+            state["job_id"] = job.job_id
+            state["status"] = "running"
+            _ai_batch_commit(state, job.update_state)
+        if not _ai_batch_promote_worker(batch_job_id, job.job_id):
+            # Should not happen in normal operation (we are the sole owner
+            # of our own reservation); treat as a startup failure so the
+            # except block below aborts the already-spawned worker cleanly.
+            raise RuntimeError(f"failed to promote AI batch worker registration for {batch_job_id}")
+        # The worker must not be unblocked before the registry reflects its
+        # real job_id, so a concurrent reconnect never observes a
+        # startup-reserved-but-unpromoted entry for longer than necessary.
+        #
+        # Build the complete response *before* signaling handoff_ready:
+        # once the worker is authorized it may immediately start real batch
+        # work concurrently with the rest of this function, so nothing
+        # failure-prone (state serialization, jsonify, etc.) may remain
+        # after that point -- otherwise a failure here would report a
+        # startup failure to the caller while the worker keeps running.
+        response = jsonify({"ok": True, "job_id": job.job_id, "batch_job_id": batch_job_id, "state": _ai_batch_public_state(state)})
+        # Once startup_committed is True the handoff is irrevocable: the
+        # worker is authorized, the caller will receive success, and the
+        # except block below must not abort a worker that may already be
+        # running.
+        startup_committed = True
+        handoff_ready.set()
+        return response
+    except Exception:
+        if not worker_spawned:
+            # No worker thread was ever created (jobs.start_python() itself
+            # raised, or something before it did) -- nothing to hand off
+            # to, so this function retains sole ownership of releasing the
+            # still-unpromoted reservation.
+            _ai_batch_release_worker(batch_job_id, expected=None)
+        elif not startup_committed:
+            # A worker thread already exists and startup has not yet been
+            # committed: abort it immediately rather than leaving it to
+            # block on handoff_ready for up to 10s and then proceed
+            # regardless. The worker's own finally releases whichever token
+            # applies (see _do above) -- this function must not also pop
+            # the registry here, or a third request could reserve and
+            # start a second worker before the aborted one actually exits
+            # and releases.
+            startup_aborted.set()
+            handoff_ready.set()
+        # else: startup_committed is True -- the handoff is irrevocable, the
+        # worker is authorized and may already be running; do not abort it.
+        raise
 
 @app.post("/api/ai-batch-skip")
 def ai_batch_skip():
@@ -23531,6 +23974,27 @@ def ai_batch_import_recover():
     state = _ai_batch_reconcile_state(state)
     source_path = _s(state.get("source_path") or payload.get("path") or "/data/torrents/music").strip()
     batch_job_id = state.get("batch_job_id") or ident
+    # Route-level optimization, not the correctness guarantee: this early
+    # return avoids the retryable/terminal-status checks and a redundant
+    # _start_ai_batch_job call when a worker is already known (via the
+    # process-local active-worker registry -- see _ai_batch_active_workers)
+    # to be running for this batch_job_id. The actual duplicate-start
+    # protection lives in _start_ai_batch_job's own _ai_batch_reserve_worker
+    # call below, so it holds even if this check is ever skipped, stale, or
+    # bypassed by a future caller.
+    #
+    # worker_alive alone is not enough to claim reconnected=True: it is
+    # True for a startup-reserved-but-unpromoted entry too (see
+    # _ai_batch_reconcile_state), which has no real job_id yet. Require an
+    # actually-promoted job_id; an unpromoted-but-registered batch defers to
+    # _ai_batch_reconnect_response's own truthful, bounded-poll response
+    # instead of reporting success with batch_job_id standing in for a
+    # job_id that doesn't exist.
+    active_job_id = _ai_batch_active_worker_job_id(batch_job_id)
+    if active_job_id:
+        return jsonify({"ok": True, "job_id": active_job_id, "batch_job_id": batch_job_id, "state": _ai_batch_public_state(state), "reconnected": True})
+    if _ai_batch_worker_registered(batch_job_id):
+        return _ai_batch_reconnect_response(batch_job_id)
     retryable = int(state.get("folders_retryable") or 0)
     if retry_failed and retryable <= 0:
         return jsonify({"ok": True, "job_id": state.get("job_id") or batch_job_id, "batch_job_id": batch_job_id, "state": _ai_batch_public_state(state), "reconnected": True})
