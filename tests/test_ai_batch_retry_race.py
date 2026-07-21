@@ -35,46 +35,71 @@ class StartAiBatchJobRaceTests(unittest.TestCase):
         )
 
     def test_reservation_guards_the_whole_start_sequence(self):
-        # The registry reservation must span the whole start sequence, and
-        # -- unlike the earlier startup-only reservation -- must NOT be
-        # unconditionally released in the finally block: only a startup
-        # failure (handed_off still False) may release it here, since a
-        # successful start hands ownership to the worker thread's own
-        # finally (see test_successful_handoff_transfers_release_ownership).
         self.assertIn("if not _ai_batch_reserve_worker(batch_job_id):", self.fn)
         self.assertIn("return _ai_batch_reconnect_response(batch_job_id)", self.fn)
         reserve_pos = self.fn.index("if not _ai_batch_reserve_worker(batch_job_id):")
-        try_pos = self.fn.index("try:")
-        finally_pos = self.fn.index("finally:")
-        release_pos = self.fn.index('_ai_batch_release_worker(batch_job_id, expected=None)')
-        self.assertLess(reserve_pos, try_pos)
-        self.assertLess(try_pos, finally_pos)
-        self.assertLess(finally_pos, release_pos)
+        outer_try_pos = self.fn.index("\n    worker_spawned = False\n    try:")
+        except_pos = self.fn.index("\n    except Exception:")
+        release_pos = self.fn.index("_ai_batch_release_worker(batch_job_id, expected=None)")
+        self.assertLess(reserve_pos, outer_try_pos)
+        self.assertLess(outer_try_pos, except_pos)
+        self.assertLess(except_pos, release_pos)
 
-    def test_successful_handoff_transfers_release_ownership(self):
-        # The bug this replaces: the old reservation was released as soon as
-        # _start_ai_batch_job() itself returned, well before the worker it
-        # started had committed anything -- leaving a window where a second
-        # caller could reserve and start a duplicate worker. The fix must
-        # only release-on-exit when startup failed (handed_off is False);
-        # once promotion succeeds, the worker wrapper's own finally is the
-        # sole owner of the eventual release.
-        self.assertIn("handed_off = False", self.fn)
-        self.assertIn("handed_off = True", self.fn)
-        finally_block = self.fn[self.fn.index("\n    finally:"):]
-        self.assertIn("if not handed_off:", finally_block)
-        promote_pos = self.fn.index("if not _ai_batch_promote_worker(batch_job_id, job.job_id):")
-        handed_off_true_pos = self.fn.index("handed_off = True")
-        set_pos = self.fn.index("job_id_ready.set()")
-        self.assertLess(promote_pos, handed_off_true_pos)
-        self.assertLess(handed_off_true_pos, set_pos)
+    def test_worker_spawned_flag_controls_cleanup_ownership(self):
+        # The bug this replaces (the "post-spawn startup-abort" case): once
+        # jobs.start_python() has returned, a worker thread already exists
+        # and is blocked waiting for the handoff decision. A later failure
+        # (job-id association raising, promotion returning False or
+        # raising) must NOT let this function pop the registry itself --
+        # that used to leave the still-blocked worker to time out after 10s
+        # and then run anyway, unregistered. worker_spawned distinguishes
+        # "no thread exists yet, this function still owns cleanup" from
+        # "a thread exists, cleanup must transfer to it via abort+signal."
+        self.assertIn("worker_spawned = False", self.fn)
+        self.assertIn("worker_spawned = True", self.fn)
+        spawn_pos = self.fn.index("job = jobs.start_python(")
+        spawned_true_pos = self.fn.index("worker_spawned = True")
+        self.assertLess(spawn_pos, spawned_true_pos)
+        except_block = self.fn[self.fn.index("\n    except Exception:"):]
+        self.assertIn("if worker_spawned:", except_block)
+        self.assertIn("startup_aborted.set()", except_block)
+        self.assertIn("handoff_ready.set()", except_block)
+        self.assertIn("else:", except_block)
+        self.assertIn("_ai_batch_release_worker(batch_job_id, expected=None)", except_block)
+        self.assertIn("raise", except_block)
+        # Abort+signal must come first in the worker_spawned branch, so the
+        # blocked worker is unblocked immediately rather than waiting out
+        # its full timeout.
+        if_worker_spawned_pos = except_block.index("if worker_spawned:")
+        else_pos = except_block.index("else:")
+        aborted_set_pos = except_block.index("startup_aborted.set()")
+        ready_set_pos = except_block.index("handoff_ready.set()")
+        self.assertLess(if_worker_spawned_pos, aborted_set_pos)
+        self.assertLess(aborted_set_pos, ready_set_pos)
+        self.assertLess(ready_set_pos, else_pos)
+
+    def test_worker_wrapper_validates_handoff_before_running_batch_work(self):
+        # Do not use timing or the mere presence of job_id_holder["job_id"]
+        # as proof startup succeeded: the worker must run the extracted
+        # _ai_batch_validate_worker_handoff check (see
+        # HandoffValidationHelperTests for its own behavior) before ever
+        # calling _run_ai_batch_import, passing the real wait() return
+        # value and the abort flag -- not inferring either from timing.
+        do_block = self.fn[self.fn.index("def _do("):self.fn.index("worker_spawned = False")]
+        self.assertIn("signaled = handoff_ready.wait(timeout=10)", do_block)
+        self.assertIn("owned_job_id = job_id_holder.get(\"job_id\", \"\")", do_block)
+        validate_pos = do_block.index("_ai_batch_validate_worker_handoff(")
+        run_pos = do_block.index("return _run_ai_batch_import(")
+        self.assertLess(validate_pos, run_pos)
+        validate_call = do_block[validate_pos:run_pos]
+        self.assertIn("signaled=signaled", validate_call)
+        self.assertIn("aborted=startup_aborted.is_set()", validate_call)
 
     def test_worker_wrapper_releases_ownership_safely_in_finally(self):
-        do_block = self.fn[self.fn.index("def _do("):self.fn.index("job = jobs.start_python(")]
-        self.assertIn("owned_job_id = job_id_holder.get(\"job_id\", \"\")", do_block)
+        do_block = self.fn[self.fn.index("def _do("):self.fn.index("worker_spawned = False")]
         try_pos = do_block.index("try:")
         finally_pos = do_block.index("finally:")
-        release_pos = do_block.index("_ai_batch_release_worker(batch_job_id, expected=owned_job_id)")
+        release_pos = do_block.index("_ai_batch_release_worker_any(batch_job_id, owned_job_id)")
         self.assertLess(try_pos, finally_pos)
         self.assertLess(finally_pos, release_pos)
 
@@ -82,6 +107,15 @@ class StartAiBatchJobRaceTests(unittest.TestCase):
         self.assertNotIn("start_python(", self.reconnect_fn)
         self.assertIn("_ai_batch_active_worker_job_id(batch_job_id)", self.reconnect_fn)
         self.assertIn('"reconnected": True,', self.reconnect_fn)
+
+    def test_reconnect_response_never_claims_success_without_a_real_job_id(self):
+        # Must not fall back to the bare batch_job_id while still claiming
+        # reconnected=True -- that would be indistinguishable from a real
+        # reconnection to a caller, even though no active worker exists.
+        self.assertNotIn('"job_id": job_id or (existing or {}).get("job_id") or batch_job_id,', self.reconnect_fn)
+        self.assertIn('"startup_failed": True,', self.reconnect_fn)
+        self.assertIn('"startup_in_progress": True,', self.reconnect_fn)
+        self.assertIn('"retryable": True,', self.reconnect_fn)
 
     def test_recover_path_uses_targeted_association_not_full_commit(self):
         # The bug: an unconditional _ai_batch_commit() call after the worker
@@ -106,7 +140,7 @@ class StartAiBatchJobRaceTests(unittest.TestCase):
         # the batch or observe an unpromoted reservation for too long.
         branch_pos = self.fn.index("if recover_batch_job_id:")
         promote_pos = self.fn.index("if not _ai_batch_promote_worker(batch_job_id, job.job_id):")
-        set_pos = self.fn.index("job_id_ready.set()")
+        set_pos = self.fn.index("handoff_ready.set()")
         self.assertLess(branch_pos, promote_pos)
         self.assertLess(promote_pos, set_pos)
 
@@ -494,6 +528,67 @@ class BehavioralTestCase(unittest.TestCase):
             state_file.unlink()
 
 
+class HandoffValidationHelperTests(BehavioralTestCase):
+    """_ai_batch_validate_worker_handoff is a pure function extracted from
+    the worker wrapper specifically so the handoff-timeout and
+    startup-abort paths (required test: item 9, "handoff-timeout test
+    without real 10s sleep") are directly unit-testable without a real 10s
+    threading.Event wait or any thread scheduling."""
+
+    def test_timeout_not_signaled_raises_without_any_sleep(self):
+        with self.assertRaises(APP._AiBatchStartupAbortedError) as ctx:
+            APP._ai_batch_validate_worker_handoff(
+                self.batch_job_id, "some-job-id", signaled=False, aborted=False,
+            )
+        self.assertIn("timed out", str(ctx.exception))
+
+    def test_explicit_abort_raises_even_when_signaled(self):
+        with self.assertRaises(APP._AiBatchStartupAbortedError) as ctx:
+            APP._ai_batch_validate_worker_handoff(
+                self.batch_job_id, "some-job-id", signaled=True, aborted=True,
+            )
+        self.assertIn("aborted", str(ctx.exception))
+
+    def test_missing_job_id_raises(self):
+        with self.assertRaises(APP._AiBatchStartupAbortedError) as ctx:
+            APP._ai_batch_validate_worker_handoff(
+                self.batch_job_id, "", signaled=True, aborted=False,
+            )
+        self.assertIn("job ID", str(ctx.exception))
+
+    def test_unpromoted_registry_raises_even_with_a_job_id_in_hand(self):
+        # The registry, not the mere presence of a job_id string, is the
+        # proof of a valid handoff -- promotion never happened here.
+        with self.assertRaises(APP._AiBatchStartupAbortedError) as ctx:
+            APP._ai_batch_validate_worker_handoff(
+                self.batch_job_id, "some-job-id", signaled=True, aborted=False,
+            )
+        self.assertIn("ownership", str(ctx.exception))
+
+    def test_valid_promoted_handoff_does_not_raise(self):
+        APP._ai_batch_reserve_worker(self.batch_job_id)
+        APP._ai_batch_promote_worker(self.batch_job_id, "some-job-id")
+        try:
+            APP._ai_batch_validate_worker_handoff(
+                self.batch_job_id, "some-job-id", signaled=True, aborted=False,
+            )
+        finally:
+            APP._ai_batch_release_worker(self.batch_job_id, expected="some-job-id")
+
+    def test_mismatched_promoted_job_id_raises(self):
+        # A different job_id was promoted for this batch (e.g. a newer
+        # worker superseded this one) -- this caller's own job_id is stale.
+        APP._ai_batch_reserve_worker(self.batch_job_id)
+        APP._ai_batch_promote_worker(self.batch_job_id, "the-other-job-id")
+        try:
+            with self.assertRaises(APP._AiBatchStartupAbortedError):
+                APP._ai_batch_validate_worker_handoff(
+                    self.batch_job_id, "some-job-id", signaled=True, aborted=False,
+                )
+        finally:
+            APP._ai_batch_release_worker(self.batch_job_id, expected="the-other-job-id")
+
+
 class SimultaneousRecoverStartsExactlyOneWorkerTests(BehavioralTestCase):
     """Required behavioral test: simultaneous recover/retry (also covers the
     "startup reservation collision" case -- many concurrent callers racing
@@ -877,6 +972,246 @@ class WorkerExceptionCleanupTests(BehavioralTestCase):
 
         # A later valid recover is not permanently blocked.
         self.assertTrue(APP._ai_batch_reserve_worker(self.batch_job_id))
+        APP._ai_batch_release_worker(self.batch_job_id, expected=None)
+
+
+class _PostSpawnStartupFailureBehaviorMixin:
+    """Shared assertions for a post-spawn startup failure: jobs.start_python()
+    has already succeeded (a worker thread exists and is blocked on the
+    handoff), but something after that raises or otherwise fails. This
+    exact shape is the confirmed blocker fixed in this update: previously
+    the worker ignored job_id_ready.wait()'s return value and, after a real
+    10s timeout, ran _run_ai_batch_import() anyway -- unregistered and
+    unvalidated. Must fail against b0df112."""
+
+    def _assert_post_spawn_failure_is_handled_safely(self, run_calls):
+        with APP.app.test_client() as client:
+            resp = client.post(
+                "/api/ai-batch-import/recover",
+                json={"batch_job_id": self.batch_job_id, "retry_failed": True},
+            )
+        payload = resp.get_json()
+        self.assertFalse(payload.get("ok"), f"request must report startup failure, got: {payload}")
+
+        matching_jobs = [j for j in APP.jobs.all() if (j.metadata or {}).get("batch_job_id") == self.batch_job_id]
+        self.assertEqual(len(matching_jobs), 1, "exactly one JobStore job should have been created")
+        job = matching_jobs[0]
+        self.track_job(job.job_id)
+
+        # Must abort promptly -- not wait out the (dangerous) 10s handoff
+        # timeout before the worker notices anything is wrong.
+        self.assertTrue(
+            _wait_until(lambda: job.status != "running", timeout=2),
+            "worker did not abort promptly; it must not silently wait out the handoff timeout",
+        )
+        self.assertEqual(job.status, "failed", "an aborted startup must settle as a normal job failure, never success")
+        self.assertEqual(run_calls, [], "_run_ai_batch_import must never run after a post-spawn startup failure")
+
+        self.assertTrue(
+            _wait_until(lambda: not APP._ai_batch_worker_registered(self.batch_job_id), timeout=5),
+            "registry must be released once the aborted worker exits",
+        )
+        # A later legitimate recovery must be possible -- no stuck reservation.
+        self.assertTrue(APP._ai_batch_reserve_worker(self.batch_job_id), "a later valid recover must be able to reserve again")
+        APP._ai_batch_release_worker(self.batch_job_id, expected=None)
+
+
+class AssociationPersistenceFailureAbortsWorkerTests(_PostSpawnStartupFailureBehaviorMixin, BehavioralTestCase):
+    """Required test (item 7): _ai_batch_persist_job_association raising
+    after jobs.start_python() has already spawned the worker thread."""
+
+    def test_association_persistence_failure_aborts_worker_without_running_batch_import(self):
+        folders = {"f1": _make_folder(self.batch_job_id, "f1", status="failed")}
+        _write_batch_state(self.batch_job_id, folders)
+
+        run_calls = []
+
+        def fake_run(batch_job_id, scan_path, log, cancel_event=None, update_state=None, **kwargs):
+            run_calls.append(batch_job_id)
+            return {"status": "completed_with_warnings"}
+
+        def raising_persist(batch_job_id, job_id):
+            raise RuntimeError("simulated association-write failure")
+
+        with mock.patch.object(APP, "_ai_batch_persist_job_association", side_effect=raising_persist), \
+             mock.patch.object(APP, "_run_ai_batch_import", side_effect=fake_run):
+            self._assert_post_spawn_failure_is_handled_safely(run_calls)
+
+
+class PromotionFailureAbortsWorkerTests(_PostSpawnStartupFailureBehaviorMixin, BehavioralTestCase):
+    """Required tests (item 8): _ai_batch_promote_worker returning False, and
+    _ai_batch_promote_worker raising -- both after jobs.start_python() has
+    already spawned the worker thread."""
+
+    def _run_scenario(self, promote_side_effect):
+        folders = {"f1": _make_folder(self.batch_job_id, "f1", status="failed")}
+        _write_batch_state(self.batch_job_id, folders)
+
+        run_calls = []
+
+        def fake_run(batch_job_id, scan_path, log, cancel_event=None, update_state=None, **kwargs):
+            run_calls.append(batch_job_id)
+            return {"status": "completed_with_warnings"}
+
+        with mock.patch.object(APP, "_ai_batch_promote_worker", side_effect=promote_side_effect), \
+             mock.patch.object(APP, "_run_ai_batch_import", side_effect=fake_run):
+            self._assert_post_spawn_failure_is_handled_safely(run_calls)
+
+    def test_promote_worker_returning_false_aborts_worker(self):
+        self._run_scenario(lambda batch_job_id, job_id: False)
+
+    def test_promote_worker_raising_aborts_worker(self):
+        def raising_promote(batch_job_id, job_id):
+            raise RuntimeError("simulated promotion failure")
+        self._run_scenario(raising_promote)
+
+
+class PauseOwnershipTests(BehavioralTestCase):
+    """Required test (item 10): pause must not release active-worker
+    registry ownership, and a concurrent recover/retry request must
+    reconnect to the same active job rather than starting a second worker."""
+
+    def test_pause_does_not_release_ownership_and_recover_reconnects(self):
+        folders = {"f1": _make_folder(self.batch_job_id, "f1", status="failed")}
+        _write_batch_state(self.batch_job_id, folders)
+
+        worker_entered = threading.Event()
+        release_worker = threading.Event()
+        start_calls = []
+        real_start_python = APP.jobs.start_python
+
+        def counting_start_python(fn, label="", metadata=None):
+            start_calls.append(metadata)
+            return real_start_python(fn, label=label, metadata=metadata)
+
+        def blocked_run(batch_job_id, scan_path, log, cancel_event=None, update_state=None, **kwargs):
+            worker_entered.set()
+            release_worker.wait(timeout=10)
+            return {"status": "completed_with_warnings"}
+
+        with mock.patch.object(APP.jobs, "start_python", side_effect=counting_start_python), \
+             mock.patch.object(APP, "_run_ai_batch_import", side_effect=blocked_run):
+            with APP.app.test_request_context():
+                resp = APP._start_ai_batch_job(_behavioral_scan_path(), recover_batch_job_id=self.batch_job_id, retry_failed=True)
+            payload = json.loads(resp.get_data(as_text=True))
+            job_id = payload.get("job_id")
+            self.assertTrue(job_id)
+            self.track_job(job_id)
+            self.assertTrue(worker_entered.wait(timeout=5), "worker never started")
+
+            with APP.app.test_client() as client:
+                pause_resp = client.post("/api/ai-batch-pause", json={"batch_job_id": self.batch_job_id})
+            self.assertTrue(pause_resp.get_json().get("ok"))
+
+            # Ownership must remain with the active worker after pause.
+            self.assertEqual(
+                APP._ai_batch_active_worker_job_id(self.batch_job_id), job_id,
+                "pause must not release active-worker registry ownership",
+            )
+
+            with APP.app.test_client() as client:
+                recover_resp = client.post(
+                    "/api/ai-batch-import/recover",
+                    json={"batch_job_id": self.batch_job_id, "retry_failed": True},
+                )
+            recover_payload = recover_resp.get_json()
+
+            self.assertEqual(len(start_calls), 1, "pause + recover must not start a second worker")
+            self.assertTrue(recover_payload.get("ok"))
+            self.assertTrue(recover_payload.get("reconnected"), "recover must reconnect to the paused-but-active worker")
+            self.assertEqual(recover_payload.get("job_id"), job_id)
+
+            release_worker.set()
+            self.assertTrue(
+                _wait_until(lambda: APP.jobs.get(job_id).status != "running", timeout=5),
+                "worker never finished after release",
+            )
+
+        self.assertTrue(
+            _wait_until(lambda: not APP._ai_batch_worker_registered(self.batch_job_id), timeout=5),
+            "registry must clear once the worker actually completes",
+        )
+
+
+class StopOwnershipTests(BehavioralTestCase):
+    """Required test (item 11): stop must trigger JobStore cancellation, but
+    the active-worker registry must keep ownership until the worker thread
+    actually exits -- JobStore's kill() is only a cooperative cancellation
+    request, not proof the thread has stopped running. The registry tracks
+    real thread lifetime, not just JobStore status."""
+
+    def test_stop_triggers_kill_but_ownership_persists_until_worker_exits(self):
+        folders = {"f1": _make_folder(self.batch_job_id, "f1", status="failed")}
+        _write_batch_state(self.batch_job_id, folders)
+
+        worker_entered = threading.Event()
+        release_worker = threading.Event()
+        start_calls = []
+        real_start_python = APP.jobs.start_python
+
+        def counting_start_python(fn, label="", metadata=None):
+            start_calls.append(metadata)
+            return real_start_python(fn, label=label, metadata=metadata)
+
+        def blocked_run(batch_job_id, scan_path, log, cancel_event=None, update_state=None, **kwargs):
+            worker_entered.set()
+            # Deliberately ignores cancel_event, the same way a real
+            # long-running step would until its own next cooperative
+            # checkpoint -- simulates "the underlying worker thread has not
+            # exited yet" after stop requests cancellation.
+            release_worker.wait(timeout=10)
+            return {"status": "canceled"}
+
+        with mock.patch.object(APP.jobs, "start_python", side_effect=counting_start_python), \
+             mock.patch.object(APP, "_run_ai_batch_import", side_effect=blocked_run):
+            with APP.app.test_request_context():
+                resp = APP._start_ai_batch_job(_behavioral_scan_path(), recover_batch_job_id=self.batch_job_id, retry_failed=True)
+            payload = json.loads(resp.get_data(as_text=True))
+            job_id = payload.get("job_id")
+            self.assertTrue(job_id)
+            self.track_job(job_id)
+            self.assertTrue(worker_entered.wait(timeout=5), "worker never started")
+            job = APP.jobs.get(job_id)
+
+            with APP.app.test_client() as client:
+                stop_resp = client.post("/api/ai-batch-stop", json={"batch_job_id": self.batch_job_id})
+            self.assertTrue(stop_resp.get_json().get("ok"))
+
+            # JobStore cancellation was requested...
+            self.assertTrue(job._cancel.is_set(), "stop must request JobStore cancellation")
+            # ...but the worker thread is still alive: our mock ignores the
+            # cooperative cancel event, just like real long-running work
+            # would until its own next checkpoint.
+            self.assertEqual(job.status, "running")
+            # Ownership must remain assigned until the wrapper's own finally
+            # actually runs -- not merely because kill() was requested.
+            self.assertEqual(
+                APP._ai_batch_active_worker_job_id(self.batch_job_id), job_id,
+                "registry ownership must persist until the worker thread actually exits",
+            )
+
+            # A second start/recover attempt must not create a duplicate
+            # worker while the first thread is still alive.
+            with APP.app.test_client() as client:
+                recover_resp = client.post(
+                    "/api/ai-batch-import/recover",
+                    json={"batch_job_id": self.batch_job_id, "retry_failed": True},
+                )
+            recover_payload = recover_resp.get_json()
+            self.assertEqual(len(start_calls), 1, "a stopped-but-not-yet-exited worker must not allow a second start")
+            self.assertTrue(recover_payload.get("reconnected"), "recover must reconnect to the still-alive stopped worker")
+
+            release_worker.set()
+            self.assertTrue(
+                _wait_until(lambda: job.status != "running", timeout=5),
+                "worker never finished after release",
+            )
+
+        self.assertTrue(
+            _wait_until(lambda: not APP._ai_batch_worker_registered(self.batch_job_id), timeout=5),
+            "registry must clear once the stopped worker actually exits",
+        )
+        self.assertTrue(APP._ai_batch_reserve_worker(self.batch_job_id), "a later legitimate recovery must be possible")
         APP._ai_batch_release_worker(self.batch_job_id, expected=None)
 
 
