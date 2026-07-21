@@ -1522,6 +1522,30 @@ class WrongBatchSuccessfulJobNotAcceptedTests(BehavioralTestCase):
         self.assertNotEqual(payload.get("job_id"), other_job.job_id)
 
 
+class StartupUnconfirmedResponseContractTests(BehavioralTestCase):
+    def test_startup_unconfirmed_response_has_operator_error_message_and_no_worker(self):
+        folders = {"f1": _make_folder(self.batch_job_id, "f1", status="failed")}
+        _write_batch_state(self.batch_job_id, folders)
+
+        self.assertTrue(APP._ai_batch_reserve_worker(self.batch_job_id))
+        APP._ai_batch_release_worker(self.batch_job_id, expected=None)
+
+        with mock.patch.object(APP.jobs, "start_python", wraps=APP.jobs.start_python) as start_python:
+            with APP.app.test_request_context():
+                resp, status_code = APP._ai_batch_reconnect_response(self.batch_job_id)
+        payload = json.loads(resp.get_data(as_text=True))
+
+        self.assertEqual(status_code, 409)
+        self.assertTrue(payload.get("startup_unconfirmed"))
+        self.assertTrue(payload.get("retryable"))
+        self.assertFalse(payload.get("reconnected"))
+        self.assertEqual(payload.get("error"), payload.get("message"))
+        self.assertIn("Refresh batch status", payload.get("error", ""))
+        self.assertIn("retry if needed", payload.get("error", ""))
+        self.assertNotIn("job_id", payload)
+        start_python.assert_not_called()
+
+
 class HistoricalSuccessfulJobWithNoReservationTests(BehavioralTestCase):
     """Required test 3: no active registry entry at all, only a persisted
     old successful job -- must not return successful reconnection."""

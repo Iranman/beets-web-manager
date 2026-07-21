@@ -23819,13 +23819,18 @@ def _ai_batch_reconnect_response(batch_job_id: str):
             "reconnected": True,
         })
     if startup_disappeared:
+        startup_message = (
+            "The startup reservation ended before an active worker could be confirmed. "
+            "Refresh batch status and retry if needed."
+        )
         return jsonify({
             "ok": False,
             "reconnected": False,
             "retryable": True,
             "startup_unconfirmed": True,
             "batch_job_id": batch_job_id,
-            "message": "The startup reservation ended before an active worker could be confirmed. Refresh batch status and retry if needed.",
+            "message": startup_message,
+            "error": startup_message,
         }), 409
     return jsonify({
         "ok": False,
