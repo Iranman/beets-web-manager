@@ -22761,11 +22761,13 @@ def _ai_batch_validate_worker_handoff(
 ) -> None:
     """Raise _AiBatchStartupAbortedError unless every part of the startup
     handoff was validly completed. Extracted from the worker wrapper (_do,
-    in _start_ai_batch_job) as a small, pure, directly unit-testable
-    function -- exercising the handoff-timeout and startup-abort paths
-    behaviorally would otherwise require either a real 10-second wait on
+    in _start_ai_batch_job) as a small, directly unit-testable function --
+    exercising the handoff-timeout and startup-abort paths behaviorally
+    would otherwise require either a real 10-second wait on
     threading.Event.wait's timeout, or patching internals of a closure that
-    isn't otherwise reachable from outside _start_ai_batch_job.
+    isn't otherwise reachable from outside _start_ai_batch_job. Not pure:
+    it reads live process-local active-worker registry state
+    (_ai_batch_active_worker_job_id) to confirm ownership.
 
     Does not use timing or the mere presence of owned_job_id as proof that
     startup succeeded: `signaled` must be the actual return value of
@@ -23806,21 +23808,41 @@ def _ai_batch_reconnect_response(batch_job_id: str):
         # looks like (reserve -> promote -> run -> release can all complete
         # inside this function's own 20ms poll interval, especially with a
         # mocked/instant worker in tests). Distinguish by checking whether a
-        # job_id was actually persisted and JobStore still knows about it --
-        # if so, this was a real (if fast) run, not a failure.
+        # job_id was actually persisted and JobStore confirms a legitimate
+        # run -- if so, this was a real (if fast) run, not a failure.
+        # JobStore existence alone is not enough: a worker that aborted via
+        # _AiBatchStartupAbortedError (or failed for a genuine reason) also
+        # leaves a JobStore job behind, with status "failed" -- that must
+        # not be reported as a successful reconnection.
         fallback_job_id = _s((existing or {}).get("job_id"))
         fallback_job = jobs.get(fallback_job_id) if fallback_job_id else None
         if fallback_job is not None:
+            # The registry entry is released in the worker's own finally,
+            # which runs after _run_ai_batch_import returns/raises but
+            # before that result actually propagates back out to
+            # PythonJob._run and flips job.status off "running" -- so a
+            # job can briefly still read "running" here immediately after
+            # its registry entry disappeared, for either outcome (success
+            # or startup-abort). Give it a brief bounded window to settle
+            # to its real terminal status rather than guessing from an
+            # inherently transient "running".
+            settle_deadline = time.time() + 0.5
+            while fallback_job.status == "running" and time.time() < settle_deadline:
+                time.sleep(0.02)
+        if fallback_job is not None and fallback_job.status == "success":
             job_id = fallback_job_id
         else:
-            return jsonify({
+            error_payload = {
                 "ok": False,
                 "reconnected": False,
                 "retryable": True,
                 "startup_failed": True,
                 "batch_job_id": batch_job_id,
                 "error": "AI batch worker startup failed before it could be reached; retry the request.",
-            }), 409
+            }
+            if fallback_job is not None:
+                error_payload["job_id"] = fallback_job_id
+            return jsonify(error_payload), 409
     if job_id:
         if existing:
             existing = _ai_batch_reconcile_state(existing)
@@ -23893,6 +23915,7 @@ def _start_ai_batch_job(scan_path: str, recover_batch_job_id: str = "", *, retry
             _ai_batch_release_worker_any(batch_job_id, owned_job_id)
 
     worker_spawned = False
+    startup_committed = False
     try:
         with _ai_batch_control_lock:
             _ai_batch_controls[batch_job_id] = {"pause": False, "skip_current": False, "skip_folder_ids": set()}
@@ -23943,25 +23966,41 @@ def _start_ai_batch_job(scan_path: str, recover_batch_job_id: str = "", *, retry
         # The worker must not be unblocked before the registry reflects its
         # real job_id, so a concurrent reconnect never observes a
         # startup-reserved-but-unpromoted entry for longer than necessary.
+        #
+        # Build the complete response *before* signaling handoff_ready:
+        # once the worker is authorized it may immediately start real batch
+        # work concurrently with the rest of this function, so nothing
+        # failure-prone (state serialization, jsonify, etc.) may remain
+        # after that point -- otherwise a failure here would report a
+        # startup failure to the caller while the worker keeps running.
+        response = jsonify({"ok": True, "job_id": job.job_id, "batch_job_id": batch_job_id, "state": _ai_batch_public_state(state)})
+        # Once startup_committed is True the handoff is irrevocable: the
+        # worker is authorized, the caller will receive success, and the
+        # except block below must not abort a worker that may already be
+        # running.
+        startup_committed = True
         handoff_ready.set()
-        return jsonify({"ok": True, "job_id": job.job_id, "batch_job_id": batch_job_id, "state": _ai_batch_public_state(state)})
+        return response
     except Exception:
-        if worker_spawned:
-            # A worker thread already exists: abort it immediately rather
-            # than leaving it to block on handoff_ready for up to 10s and
-            # then proceed regardless. The worker's own finally releases
-            # whichever token applies (see _do above) -- this function must
-            # not also pop the registry here, or a third request could
-            # reserve and start a second worker before the aborted one
-            # actually exits and releases.
-            startup_aborted.set()
-            handoff_ready.set()
-        else:
+        if not worker_spawned:
             # No worker thread was ever created (jobs.start_python() itself
             # raised, or something before it did) -- nothing to hand off
             # to, so this function retains sole ownership of releasing the
             # still-unpromoted reservation.
             _ai_batch_release_worker(batch_job_id, expected=None)
+        elif not startup_committed:
+            # A worker thread already exists and startup has not yet been
+            # committed: abort it immediately rather than leaving it to
+            # block on handoff_ready for up to 10s and then proceed
+            # regardless. The worker's own finally releases whichever token
+            # applies (see _do above) -- this function must not also pop
+            # the registry here, or a third request could reserve and
+            # start a second worker before the aborted one actually exits
+            # and releases.
+            startup_aborted.set()
+            handoff_ready.set()
+        # else: startup_committed is True -- the handoff is irrevocable, the
+        # worker is authorized and may already be running; do not abort it.
         raise
 
 @app.post("/api/ai-batch-skip")
@@ -24071,15 +24110,25 @@ def ai_batch_import_recover():
     batch_job_id = state.get("batch_job_id") or ident
     # Route-level optimization, not the correctness guarantee: this early
     # return avoids the retryable/terminal-status checks and a redundant
-    # _start_ai_batch_job call when a worker is already known (via
-    # _ai_batch_reconcile_state, itself backed by the process-local
-    # active-worker registry -- see _ai_batch_active_workers) to be running
-    # for this batch_job_id. The actual duplicate-start protection lives in
-    # _start_ai_batch_job's own _ai_batch_reserve_worker call below, so it
-    # holds even if this check is ever skipped, stale, or bypassed by a
-    # future caller.
-    if state.get("worker_alive"):
-        return jsonify({"ok": True, "job_id": state.get("job_id") or batch_job_id, "batch_job_id": batch_job_id, "state": _ai_batch_public_state(state), "reconnected": True})
+    # _start_ai_batch_job call when a worker is already known (via the
+    # process-local active-worker registry -- see _ai_batch_active_workers)
+    # to be running for this batch_job_id. The actual duplicate-start
+    # protection lives in _start_ai_batch_job's own _ai_batch_reserve_worker
+    # call below, so it holds even if this check is ever skipped, stale, or
+    # bypassed by a future caller.
+    #
+    # worker_alive alone is not enough to claim reconnected=True: it is
+    # True for a startup-reserved-but-unpromoted entry too (see
+    # _ai_batch_reconcile_state), which has no real job_id yet. Require an
+    # actually-promoted job_id; an unpromoted-but-registered batch defers to
+    # _ai_batch_reconnect_response's own truthful, bounded-poll response
+    # instead of reporting success with batch_job_id standing in for a
+    # job_id that doesn't exist.
+    active_job_id = _ai_batch_active_worker_job_id(batch_job_id)
+    if active_job_id:
+        return jsonify({"ok": True, "job_id": active_job_id, "batch_job_id": batch_job_id, "state": _ai_batch_public_state(state), "reconnected": True})
+    if _ai_batch_worker_registered(batch_job_id):
+        return _ai_batch_reconnect_response(batch_job_id)
     retryable = int(state.get("folders_retryable") or 0)
     if retry_failed and retryable <= 0:
         return jsonify({"ok": True, "job_id": state.get("job_id") or batch_job_id, "batch_job_id": batch_job_id, "state": _ai_batch_public_state(state), "reconnected": True})
