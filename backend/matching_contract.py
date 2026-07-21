@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
+import math
 import re
 import unicodedata
 
@@ -13,6 +14,21 @@ _MB_UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
     re.IGNORECASE,
 )
+
+# Real field names produced by app.py's _score_track_ai_candidate(). Nothing
+# outside this set is ever copied into browser-visible JSON, regardless of
+# what a caller stuffs into candidate["_match_score"].
+_ALLOWED_SCORE_FIELDS = {
+    "title_score",
+    "artist_score",
+    "album_score",
+    "year_score",
+    "mb_score",
+    "acoustid_bonus",
+    "total",
+    "source",
+}
+_ALLOWED_SCORE_STRING_FIELDS = {"source"}
 
 
 def _s(value: Any) -> str:
@@ -36,17 +52,25 @@ def _year(value: Any) -> str:
     return match.group(1) if match else ""
 
 
-def _number(value: Any) -> Optional[float]:
+def _finite_number(value: Any) -> Optional[float]:
+    """Reject NaN/Infinity/non-numeric input so it can never reach JSON."""
+    if isinstance(value, bool):
+        return None
     try:
-        if value in (None, ""):
-            return None
-        return float(value)
+        number = float(value)
     except Exception:
         return None
+    if not math.isfinite(number):
+        return None
+    return number
+
+
+def _number(value: Any) -> Optional[float]:
+    return _finite_number(value)
 
 
 def _duration_seconds(value: Any) -> Optional[float]:
-    number = _number(value)
+    number = _finite_number(value)
     if number is not None and number > 0:
         return number / 1000.0 if number > 10000 else number
     text = _s(value)
@@ -55,6 +79,8 @@ def _duration_seconds(value: Any) -> Optional[float]:
     try:
         parts = [float(part) for part in text.split(":")]
     except Exception:
+        return None
+    if any(not math.isfinite(part) for part in parts):
         return None
     if len(parts) == 2:
         return parts[0] * 60.0 + parts[1]
@@ -102,18 +128,42 @@ def _int_or_none(value: Any) -> Optional[int]:
 
 
 def _round_score(value: Any) -> float:
-    try:
-        return round(max(0.0, min(1.0, float(value or 0))), 3)
-    except Exception:
+    number = _finite_number(value)
+    if number is None:
         return 0.0
+    return round(max(0.0, min(1.0, number)), 3)
 
 
-def _audio_score(candidate: Mapping[str, Any]) -> float:
-    try:
-        raw = float(candidate.get("score") or 0)
-    except Exception:
+def _normalized_raw_score(candidate: Mapping[str, Any]) -> float:
+    """Normalize candidate['score'] to 0..1. Callers decide whether this raw
+    figure is allowed to mean anything -- see the fingerprint-provenance
+    gating in build_recording_matching_decision. Never treat this alone as
+    fingerprint evidence."""
+    number = _finite_number(candidate.get("score"))
+    if number is None:
         return 0.0
-    return _round_score(raw / 100.0 if raw > 1 else raw)
+    return _round_score(number / 100.0 if number > 1 else number)
+
+
+def _sanitize_score_breakdown(raw: Any) -> Dict[str, Any]:
+    """Allowlist-only copy of candidate['_match_score']. Unknown keys
+    (secrets, provider payloads, headers, nested objects) are dropped."""
+    if not isinstance(raw, Mapping):
+        return {}
+    out: Dict[str, Any] = {}
+    for key in _ALLOWED_SCORE_FIELDS:
+        if key not in raw:
+            continue
+        value = raw[key]
+        if key in _ALLOWED_SCORE_STRING_FIELDS:
+            text = _s(value)
+            if text and len(text) <= 32 and re.match(r"^[a-zA-Z0-9_.\-]+$", text):
+                out[key] = text
+            continue
+        number = _finite_number(value)
+        if number is not None:
+            out[key] = round(number, 6)
+    return out
 
 
 def _safe_release(release: Mapping[str, Any]) -> Dict[str, Any]:
@@ -174,6 +224,18 @@ def _field(local: str, suggested: str, score: float) -> Dict[str, Any]:
 
 @dataclass(frozen=True)
 class AiState:
+    """AI provenance for a single enrichment call.
+
+    ``state_known=False`` (the default) means the caller did not evaluate AI
+    at this boundary -- e.g. Import Review enriches every AcoustID/MusicBrainz
+    candidate *before* the AI request has even been sent. Serializing
+    configured/attempted/available as False in that situation would assert a
+    fact ("AI is not configured") that is not actually known and may be
+    false. Only pass a real AiState when configured/attempted/available and
+    the AI contribution are genuinely known at the call site.
+    """
+
+    state_known: bool = False
     configured: bool = False
     attempted: bool = False
     available: bool = False
@@ -181,6 +243,16 @@ class AiState:
     contribution: Mapping[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
+        if not self.state_known:
+            return {
+                "state_known": False,
+                "status": "not_evaluated_at_this_boundary",
+                "configured": None,
+                "attempted": None,
+                "available": None,
+                "unavailability_reason": "",
+                "contribution": {},
+            }
         contribution = self.contribution if isinstance(self.contribution, Mapping) else {}
         safe_contribution = {
             "candidate_index": contribution.get("candidate_index"),
@@ -191,6 +263,8 @@ class AiState:
             "reason": _s(contribution.get("reason")),
         }
         return {
+            "state_known": True,
+            "status": "evaluated",
             "configured": bool(self.configured),
             "attempted": bool(self.attempted),
             "available": bool(self.available),
@@ -210,7 +284,7 @@ class MatchingDecision:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "contract_version": 1,
+            "contract_version": 2,
             "input": self.input,
             "identity": self.identity,
             "evidence": self.evidence,
@@ -220,22 +294,33 @@ class MatchingDecision:
         }
 
     def to_review_recording_candidate(self) -> Dict[str, Any]:
-        recording_id = _s(next(iter(self.identity.get("recording_ids") or []), ""))
-        release_id = _s(self.identity.get("release_id") or "")
-        release_group_id = _s(self.identity.get("release_group_id") or "")
-        recording = self.evidence.get("musicbrainz", {}).get("recording", {})
-        release = self.evidence.get("musicbrainz", {}).get("selected_release", {})
-        acoustid = self.evidence.get("acoustid", {})
+        identity = self.identity
+        decision = self.decision
+        evidence = self.evidence
+        recording = evidence.get("musicbrainz", {}).get("recording", {})
+        release = evidence.get("musicbrainz", {}).get("selected_release", {})
+        acoustid = evidence.get("acoustid", {})
+        # Display continuity: show whatever recording ID the candidate
+        # evaluated to even when identity is in conflict/unresolved -- the
+        # *decision* fields (safety_key, conflicts, requires_confirmation)
+        # are what prevent unsafe use, not hiding the ID.
+        display_recording_id = _s(
+            identity.get("resolved_recording_id")
+            or identity.get("evaluated_candidate_recording_id")
+            or next(iter(identity.get("recording_ids") or []), "")
+        )
+        release_id = _s(identity.get("release_id") or "")
+        release_group_id = _s(identity.get("release_group_id") or "")
         source = _s(self.candidate.get("source") or self.candidate.get("match_method") or "mb")
         if source == "musicbrainz":
             source = "mb"
-        confidence_score = self.decision.get("confidence_score")
+        confidence_score = decision.get("confidence_score")
         return {
             "candidate_index": self.candidate.get("candidate_index", -1),
             "candidate_type": "recording",
-            "mb_trackid": recording_id,
-            "mb_url": f"https://musicbrainz.org/recording/{recording_id}" if recording_id else "",
-            "musicbrainz_url": f"https://musicbrainz.org/recording/{recording_id}" if recording_id else "",
+            "mb_trackid": display_recording_id,
+            "mb_url": f"https://musicbrainz.org/recording/{display_recording_id}" if display_recording_id else "",
+            "musicbrainz_url": f"https://musicbrainz.org/recording/{display_recording_id}" if display_recording_id else "",
             "title": _s(recording.get("title")),
             "artist": _s(recording.get("artist_credit")),
             "recording_title": _s(recording.get("title")),
@@ -248,24 +333,27 @@ class MatchingDecision:
             "release_year": _s(release.get("year")),
             "country": _s(release.get("country")),
             "medium_format": _s(release.get("medium_format")),
-            "track_number": _s(self.identity.get("track_number") or release.get("track_number")),
-            "medium_position": self.identity.get("medium_position"),
+            "track_number": _s(identity.get("track_number") or release.get("track_number")),
+            "medium_position": identity.get("medium_position"),
             "duration": _s(self.candidate.get("duration")),
             "source": source,
             "match_method": source,
             "score": self.candidate.get("score") or 0,
             "match_total": confidence_score,
-            "confidence": _s(self.decision.get("confidence_tier")),
+            "confidence": _s(decision.get("confidence_tier")),
             "confidence_score": confidence_score,
-            "score_breakdown": self.evidence.get("score_breakdown", {}),
-            "decision": self.decision,
-            "conflicts": list(self.decision.get("conflicts") or []),
-            "warnings": list(self.decision.get("warnings") or []),
-            "recommended_action": _s(self.decision.get("recommended_action")),
-            "requires_confirmation": bool(self.decision.get("requires_confirmation")),
-            "safety_result": _s(self.decision.get("safety_result")),
-            "safety_key": _s(self.decision.get("safety_key")),
-            "reason": _s(self.decision.get("reason")),
+            "score_breakdown": evidence.get("score_breakdown", {}),
+            "decision": decision,
+            "conflicts": list(decision.get("conflicts") or []),
+            "warnings": list(decision.get("warnings") or []),
+            "review_required": bool(decision.get("review_required")),
+            "action_eligibility": decision.get("action_eligibility") or {},
+            "eligibility_reason": _s(decision.get("eligibility_reason") or ""),
+            "recommended_action": _s(decision.get("recommended_action")),
+            "requires_confirmation": bool(decision.get("requires_confirmation")),
+            "safety_result": _s(decision.get("safety_result")),
+            "safety_key": _s(decision.get("safety_key")),
+            "reason": _s(decision.get("reason")),
             "acoustid_score": acoustid.get("score"),
             "mb_albumid": release_id,
             "release_id": release_id,
@@ -276,12 +364,12 @@ class MatchingDecision:
                 f"https://musicbrainz.org/release-group/{release_group_id}" if release_group_id else ""
             ),
             "selected_release": release,
-            "linked_releases": self.evidence.get("musicbrainz", {}).get("linked_releases", [])[:12],
+            "linked_releases": evidence.get("musicbrainz", {}).get("linked_releases", [])[:12],
             "same_recording_release_count": int(
-                self.evidence.get("musicbrainz", {}).get("same_recording_release_count") or 0
+                evidence.get("musicbrainz", {}).get("same_recording_release_count") or 0
             ),
             "matching_local_release_found": bool(
-                self.evidence.get("release_group", {}).get("matching_local_release_found")
+                evidence.get("release_group", {}).get("matching_local_release_found")
             ),
             "matching_contract": self.to_dict(),
         }
@@ -301,38 +389,82 @@ def build_recording_matching_decision(
 
     The serializer is intentionally additive: it preserves existing
     ReviewRecordingCandidate keys while keeping release-group identity distinct
-    from release evidence.
+    from release evidence, deterministic Recording ID sources distinct from
+    AI's opinion, and verified AcoustID evidence distinct from any other
+    numeric score.
     """
-    current = current or {}
-    candidate = candidate or {}
-    details = details or {}
-    selected_release = (
+    current = current if isinstance(current, Mapping) else {}
+    candidate = candidate if isinstance(candidate, Mapping) else {}
+    details = details if isinstance(details, Mapping) else {}
+    raw_selected_release = (
         selected_release
-        or candidate.get("selected_release")
-        or details.get("selected_release")
-        or {}
+        if selected_release is not None
+        else (candidate.get("selected_release") or details.get("selected_release") or {})
     )
-    linked_releases = linked_releases if linked_releases is not None else (
-        candidate.get("linked_releases") or details.get("linked_releases") or []
+    raw_linked_releases = (
+        linked_releases
+        if linked_releases is not None
+        else (candidate.get("linked_releases") or details.get("linked_releases") or [])
     )
+    if isinstance(raw_linked_releases, (str, bytes)) or not isinstance(raw_linked_releases, Sequence):
+        raw_linked_releases = []
     similarity = similarity_fn or _similarity
 
-    score_breakdown = dict(candidate.get("_match_score") or {})
+    score_breakdown = _sanitize_score_breakdown(candidate.get("_match_score"))
     source = _s(candidate.get("source") or candidate.get("match_method") or score_breakdown.get("source") or "mb").lower()
-    release = _safe_release(selected_release if isinstance(selected_release, Mapping) else {})
-    safe_linked = _safe_linked_releases(linked_releases if isinstance(linked_releases, Sequence) else [])
+    release = _safe_release(raw_selected_release if isinstance(raw_selected_release, Mapping) else {})
+    safe_linked = _safe_linked_releases(raw_linked_releases)
 
-    recording_id = _uuid(candidate.get("mb_trackid") or details.get("recording_id"))
-    release_id = _uuid(
-        release.get("release_id")
-        or details.get("mb_albumid")
-        or candidate.get("mb_albumid")
-        or next(iter(candidate.get("mb_albumids") or []), "")
+    # ---- Recording ID provenance: every source collected independently ----
+    candidate_recording_id = _uuid(candidate.get("mb_trackid"))
+    details_recording_id = _uuid(details.get("recording_id"))
+    existing_recording_id = _uuid(current.get("mb_trackid"))
+
+    fingerprint_attempted = bool(candidate.get("fingerprint_attempted"))
+    fingerprint_matched = bool(candidate.get("fingerprint_matched"))
+    fingerprint_status = _s(
+        candidate.get("fingerprint_status")
+        or candidate.get("acoustid_status")
+        or candidate.get("acoustid_verification")
+    ).lower()
+    acoustid_mapped_recording_id = _uuid(candidate.get("mapped_recording_id")) or (
+        candidate_recording_id if fingerprint_matched else ""
     )
-    release_group_id = _uuid(
-        release.get("release_group_id")
-        or details.get("mb_releasegroupid")
-        or candidate.get("mb_releasegroupid")
+    acoustid_id_value = _s(candidate.get("acoustid_id"))
+
+    ai_state = ai_state if ai_state is not None else AiState()
+    ai_payload = ai_state.to_dict()
+    ai_recording_id = _uuid((ai_payload.get("contribution") or {}).get("mb_trackid"))
+
+    deterministic_ids = {
+        name: rid
+        for name, rid in (("candidate", candidate_recording_id), ("musicbrainz_details", details_recording_id))
+        if rid
+    }
+    distinct_deterministic = set(deterministic_ids.values())
+    recording_id_source_conflict = len(distinct_deterministic) > 1
+    resolved_recording_id = "" if recording_id_source_conflict else next(iter(distinct_deterministic), "")
+    recording_id = resolved_recording_id
+
+    # ---- Release / release-group ID provenance: independent sources ----
+    candidate_release_id = _uuid(candidate.get("mb_albumid") or next(iter(candidate.get("mb_albumids") or []), ""))
+    details_release_id = _uuid(details.get("mb_albumid"))
+    selected_release_id = _uuid(release.get("release_id"))
+    candidate_rg_id = _uuid(candidate.get("mb_releasegroupid"))
+    details_rg_id = _uuid(details.get("mb_releasegroupid"))
+    selected_rg_id = _uuid(release.get("release_group_id"))
+
+    rg_values = {v for v in (candidate_rg_id, details_rg_id, selected_rg_id) if v}
+    release_group_source_conflict = len(rg_values) > 1
+    release_group_id = "" if release_group_source_conflict else next(iter(rg_values), "")
+    # Release IDs may legitimately differ across sources (same recording on
+    # several editions) -- prefer the most specific (selected) value for
+    # display/decision, but expose every source untouched for provenance.
+    release_id = selected_release_id or details_release_id or candidate_release_id
+
+    linked_release_ids = {r.get("release_id") for r in safe_linked if r.get("release_id")}
+    selected_release_not_linked = bool(
+        selected_release_id and linked_release_ids and selected_release_id not in linked_release_ids
     )
 
     local_title = _s(current.get("title"))
@@ -350,7 +482,7 @@ def build_recording_matching_decision(
         details.get("recording_artist")
         or details.get("artist")
         or candidate.get("recording_artist")
-        or (selected_release.get("artist") if isinstance(selected_release, Mapping) else "")
+        or (raw_selected_release.get("artist") if isinstance(raw_selected_release, Mapping) else "")
         or candidate.get("artist")
     )
     release_title = _s(release.get("title") or details.get("album") or candidate.get("album"))
@@ -385,7 +517,7 @@ def build_recording_matching_decision(
     if local_release_group_id and release_group_id:
         release_group_status = "yes" if local_release_group_id == release_group_id else "conflict"
 
-    selected_track_number = selected_release.get("track") if isinstance(selected_release, Mapping) else ""
+    selected_track_number = raw_selected_release.get("track") if isinstance(raw_selected_release, Mapping) else ""
     track_number = _s(release.get("track_number") or selected_track_number)
     suggested_track = _int_or_none(track_number)
     position_status = "unknown"
@@ -402,7 +534,7 @@ def build_recording_matching_decision(
     )
 
     missing: List[str] = []
-    if not recording_id:
+    if not resolved_recording_id:
         missing.append("recording_id_missing")
     if not release_group_id:
         missing.append("release_group_id_missing")
@@ -412,46 +544,75 @@ def build_recording_matching_decision(
         missing.append("linked_releases_missing")
 
     warnings: List[str] = []
-    ai_payload = (ai_state or AiState()).to_dict()
-    ai_recording = _uuid((ai_payload.get("contribution") or {}).get("mb_trackid"))
-    if ai_recording and recording_id and ai_recording != recording_id:
+    if not release_group_id:
+        warnings.append("release_group_id_missing")
+    identity_recording_id_for_ai_check = resolved_recording_id or candidate_recording_id
+    if ai_recording_id and identity_recording_id_for_ai_check and ai_recording_id != identity_recording_id_for_ai_check:
         warnings.append("ai_recording_conflict")
 
-    acoustid_score = _audio_score(candidate) if source == "acoustid" else 0.0
-    try:
-        match_total = float(score_breakdown.get("total") or 0)
-    except Exception:
-        match_total = 0.0
-    confidence_score = _round_score(match_total or acoustid_score)
-
-    fingerprint_status = _s(
-        candidate.get("fingerprint_status")
-        or candidate.get("acoustid_status")
-        or candidate.get("acoustid_verification")
-    ).lower()
-    existing_recording_id = _uuid(current.get("mb_trackid"))
-    recording_conflict = bool(existing_recording_id and recording_id and existing_recording_id != recording_id)
-    fingerprint_conflict = bool(
-        fingerprint_status in {"mismatch", "conflict", "rejected"}
-        or candidate.get("acoustid_mismatch") is True
+    # ---- Fingerprint (AcoustID) evidence: explicit provenance required ----
+    fingerprint_mismatch = bool(
+        fingerprint_status in {"mismatch", "conflict", "rejected"} or candidate.get("acoustid_mismatch") is True
     )
-    strong_acoustid = bool(source == "acoustid" and recording_id and acoustid_score >= 0.8)
-    duration_agrees = duration_status in {"yes", "tolerance", "unknown"}
-    position_agrees = position_status in {"yes", "unknown"}
+    raw_normalized_score = _normalized_raw_score(candidate)
+    if fingerprint_matched:
+        acoustid_score = raw_normalized_score
+        musicbrainz_search_score = 0.0
+    elif source == "acoustid":
+        # Claimed AcoustID origin without explicit verification: never
+        # treated as fingerprint evidence, and not repurposed as MB
+        # relevance either -- the number's meaning is unconfirmed.
+        acoustid_score = 0.0
+        musicbrainz_search_score = 0.0
+    else:
+        acoustid_score = 0.0
+        musicbrainz_search_score = raw_normalized_score
+    heuristic_score = _round_score(score_breakdown.get("total"))
+    confidence_score = _round_score(max(heuristic_score, acoustid_score))
+
+    fingerprint_recording_mismatch = bool(
+        fingerprint_matched
+        and acoustid_mapped_recording_id
+        and candidate_recording_id
+        and acoustid_mapped_recording_id != candidate_recording_id
+    )
+    existing_recording_conflict = bool(
+        existing_recording_id and resolved_recording_id and existing_recording_id != resolved_recording_id
+    )
+
+    strong_acoustid = bool(
+        fingerprint_matched
+        and fingerprint_status == "matched"
+        and not fingerprint_mismatch
+        and not fingerprint_recording_mismatch
+        and not recording_id_source_conflict
+        and acoustid_mapped_recording_id
+        and resolved_recording_id
+        and acoustid_score >= 0.8
+    )
+
+    # Missing evidence is neither positive nor negative corroboration --
+    # only "yes"/"tolerance" (duration) or "yes" (position) may downgrade a
+    # title mismatch. "unknown" must never substitute for real agreement.
+    duration_supports = duration_status in {"yes", "tolerance"}
+    position_supports = position_status == "yes"
     title_only_strong = bool(
         title_score < 0.82
         and strong_acoustid
         and artist_score >= 0.72
-        and duration_agrees
-        and position_agrees
-        and not recording_conflict
-        and not fingerprint_conflict
+        and not existing_recording_conflict
+        and not fingerprint_mismatch
+        and (duration_supports or position_supports)
     )
 
     conflicts: List[str] = []
-    if fingerprint_conflict:
+    if fingerprint_mismatch:
         conflicts.append("fingerprint_conflict")
-    if recording_conflict:
+    if fingerprint_recording_mismatch:
+        conflicts.append("fingerprint_recording_mismatch")
+    if recording_id_source_conflict:
+        conflicts.append("recording_id_source_conflict")
+    if existing_recording_conflict:
         conflicts.append("recording_id_conflict")
     if local_title and recording_title and title_score < 0.68 and not title_only_strong:
         conflicts.append("title_conflict")
@@ -467,40 +628,45 @@ def build_recording_matching_decision(
         conflicts.append("release_group_conflict")
     if position_status == "conflict" and not strong_acoustid:
         conflicts.append("track_position_conflict")
+    if release_group_source_conflict:
+        conflicts.append("release_group_id_source_conflict")
+    if selected_release_not_linked:
+        conflicts.append("selected_release_not_linked")
     if title_only_strong:
         warnings.append("title_mismatch_with_strong_recording_evidence")
     if len(safe_linked) > 1:
         warnings.append("same_recording_on_multiple_releases")
 
-    evidence_supported = bool(
-        strong_acoustid
-        or confidence_score >= 0.78
-        or _audio_score(candidate) >= 0.9
-    )
-    hard_conflicts = {
+    evidence_supported = bool(strong_acoustid or confidence_score >= 0.78)
+    hard_conflict_names = {
         "fingerprint_conflict",
+        "fingerprint_recording_mismatch",
+        "recording_id_source_conflict",
         "recording_id_conflict",
         "title_conflict",
         "artist_conflict",
         "release_group_conflict",
     }
-    has_hard_conflict = any(conflict in hard_conflicts for conflict in conflicts)
+    has_hard_conflict = any(c in hard_conflict_names for c in conflicts)
     attach_eligible = bool(
-        recording_id
+        resolved_recording_id
         and evidence_supported
         and not conflicts
-        and (
-            (title_score >= 0.82 and artist_score >= 0.72)
-            or title_only_strong
-        )
+        and release_group_id
+        and not selected_release_not_linked
+        and ((title_score >= 0.82 and artist_score >= 0.72) or title_only_strong)
     )
 
-    if not recording_id:
+    if not resolved_recording_id:
         safety_result = "No verified match"
         safety_key = "none"
         confidence_tier = "low"
         recommended_action = "Search MusicBrainz manually"
-        eligibility_reason = "No MusicBrainz Recording ID is available."
+        eligibility_reason = (
+            "Deterministic Recording ID sources disagree; resolve before attaching."
+            if recording_id_source_conflict
+            else "No MusicBrainz Recording ID is available."
+        )
     elif has_hard_conflict:
         safety_result = "Conflict"
         safety_key = "conflict"
@@ -513,12 +679,18 @@ def build_recording_matching_decision(
         confidence_tier = "medium"
         recommended_action = "Confirm conflicts, then attach Recording ID"
         eligibility_reason = "Candidate has review-only conflicts: " + ", ".join(conflicts)
+    elif not release_group_id:
+        safety_result = "Needs review"
+        safety_key = "review"
+        confidence_tier = "medium"
+        recommended_action = "Attach Recording ID only after review"
+        eligibility_reason = "Only recording identity is supported; release-group identity is missing."
     elif attach_eligible:
         safety_result = "Safe to attach"
         safety_key = "safe"
         confidence_tier = "high"
         recommended_action = "Attach Recording ID"
-        eligibility_reason = "Recording ID can be attached from deterministic evidence."
+        eligibility_reason = "Recording ID can be attached from deterministic evidence without additional review."
     else:
         safety_result = "Needs review"
         safety_key = "review"
@@ -526,10 +698,16 @@ def build_recording_matching_decision(
         recommended_action = "Use this candidate after review"
         eligibility_reason = "Candidate needs human review before attaching Recording ID."
 
+    review_required = safety_key != "safe"
+    requires_confirmation = review_required
+    attach_without_review = safety_key == "safe"
+
     reason = _s(candidate.get("reason"))
     if not reason:
-        if source == "acoustid":
+        if source == "acoustid" and fingerprint_matched:
             reason = "AcoustID fingerprint matched this recording; linked release context is ranked against local tags."
+        elif source == "acoustid":
+            reason = "AcoustID-labeled candidate without confirmed fingerprint verification."
         else:
             reason = "MusicBrainz recording search matched the local title and artist clues."
     if matching_local_release and len(safe_linked) > 1:
@@ -556,16 +734,36 @@ def build_recording_matching_decision(
     identity_payload = {
         "release_group_id": release_group_id,
         "release_id": release_id,
-        "recording_ids": [recording_id] if recording_id else [],
+        "recording_ids": [resolved_recording_id] if resolved_recording_id else [],
+        "resolved_recording_id": resolved_recording_id,
+        "evaluated_candidate_recording_id": candidate_recording_id,
+        "recording_id_sources": {
+            "candidate": candidate_recording_id,
+            "musicbrainz_details": details_recording_id,
+            "local_existing": existing_recording_id,
+            "acoustid": acoustid_mapped_recording_id,
+            "ai": ai_recording_id,
+        },
+        "recording_id_source_conflict": recording_id_source_conflict,
+        "release_identity_sources": {
+            "candidate_release_id": candidate_release_id,
+            "details_release_id": details_release_id,
+            "selected_release_id": selected_release_id,
+            "candidate_release_group_id": candidate_rg_id,
+            "details_release_group_id": details_rg_id,
+            "selected_release_group_id": selected_rg_id,
+        },
+        "release_group_source_conflict": release_group_source_conflict,
+        "selected_release_not_linked": selected_release_not_linked,
         "medium_position": release.get("medium_position"),
         "track_number": track_number,
     }
     musicbrainz_payload = {
         "recording": {
-            "id": recording_id,
+            "id": resolved_recording_id,
             "title": recording_title,
             "artist_credit": recording_artist,
-            "url": f"https://musicbrainz.org/recording/{recording_id}" if recording_id else "",
+            "url": f"https://musicbrainz.org/recording/{resolved_recording_id}" if resolved_recording_id else "",
         },
         "selected_release": {
             **release,
@@ -580,9 +778,12 @@ def build_recording_matching_decision(
         "musicbrainz": musicbrainz_payload,
         "acoustid": {
             "present": source == "acoustid",
+            "fingerprint_attempted": fingerprint_attempted,
+            "fingerprint_matched": fingerprint_matched,
+            "status": fingerprint_status or ("not_attempted" if not fingerprint_attempted else "no_result"),
             "score": acoustid_score,
-            "acoustid_id": _s(candidate.get("acoustid_id")),
-            "status": fingerprint_status or ("candidate" if source == "acoustid" else "not_attempted"),
+            "acoustid_id": acoustid_id_value,
+            "mapped_recording_id": acoustid_mapped_recording_id,
         },
         "tracklist": {
             "medium_position": release.get("medium_position"),
@@ -626,21 +827,23 @@ def build_recording_matching_decision(
             "suggested": release_group_id,
         },
         "position_match": {"status": position_status, "local": local_track, "suggested": suggested_track},
+        "acoustid_score": acoustid_score,
+        "musicbrainz_search_score": musicbrainz_search_score,
+        "heuristic_score": heuristic_score,
         "confidence_score": confidence_score,
         "confidence_tier": confidence_tier,
         "reason": reason,
         "conflicts": conflicts,
         "warnings": warnings,
-        "review_required": bool(not attach_eligible or conflicts),
+        "review_required": review_required,
         "action_eligibility": {
-            "attach_recording_id": attach_eligible,
-            "submit_metadata": True,
+            "attach_without_review": attach_without_review,
             "destructive_use": False,
         },
         "eligibility_reason": eligibility_reason,
         "destructive_use_permitted": False,
         "recommended_action": recommended_action,
-        "requires_confirmation": bool(conflicts),
+        "requires_confirmation": requires_confirmation,
         "safety_result": safety_result,
         "safety_key": safety_key,
     }
@@ -654,7 +857,7 @@ def build_recording_matching_decision(
             "candidate_index": candidate.get("candidate_index", -1),
             "source": source,
             "match_method": _s(candidate.get("match_method") or source),
-            "score": candidate.get("score") or 0,
+            "score": _finite_number(candidate.get("score")) or 0,
             "duration": candidate.get("duration", ""),
             "mb_albumids": list(candidate.get("mb_albumids") or ([] if not release_id else [release_id])),
         },

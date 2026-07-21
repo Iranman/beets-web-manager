@@ -293,7 +293,7 @@ from backend.beets_config import (
     filter_job_plugins as _filter_job_plugins,
 )
 from backend.mb_alignment import summarize_mb_track_alignment
-from backend.matching_contract import build_recording_matching_decision
+from backend.matching_contract import AiState, build_recording_matching_decision
 from backend.import_guard import (
     existing_track_can_block_downloaded_replacement as _guard_existing_track_can_block_downloaded_replacement,
     filter_wanted_tracks_against_missing as _guard_filter_wanted_tracks_against_missing,
@@ -3290,7 +3290,8 @@ def _track_ai_match_status(score: float, strong: float = 0.82, fuzzy: float = 0.
     return "no"
 
 
-def _enrich_track_ai_candidate(current: Dict[str, Any], candidate: Dict[str, Any], details: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def _enrich_track_ai_candidate(current: Dict[str, Any], candidate: Dict[str, Any], details: Optional[Dict[str, Any]] = None,
+                               *, ai_state: Optional[AiState] = None) -> Dict[str, Any]:
     details = details or {}
     mb_trackid = _s(candidate.get("mb_trackid") or details.get("recording_id") or "").strip().lower()
     if mb_trackid and not details:
@@ -3305,6 +3306,7 @@ def _enrich_track_ai_candidate(current: Dict[str, Any], candidate: Dict[str, Any
         details=details,
         selected_release=selected_release,
         linked_releases=linked_releases,
+        ai_state=ai_state,
         similarity_fn=_track_ai_similarity,
     )
     candidate.update(matching_result.to_review_recording_candidate())
@@ -3313,7 +3315,10 @@ def _enrich_track_ai_candidate(current: Dict[str, Any], candidate: Dict[str, Any
 
 def _compact_track_ai_candidate(candidate: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     c = candidate or {}
-    score = c.get("_match_score") or {}
+    # Use the sanitized score_breakdown written by the matching contract
+    # (build_recording_matching_decision), never the raw candidate["_match_score"]
+    # -- the raw dict is untrusted and must never reach browser-visible JSON.
+    score = c.get("score_breakdown") or {}
     try:
         candidate_index = int(c.get("candidate_index", -1))
     except Exception:
@@ -3447,6 +3452,7 @@ def ai_suggest(iid):
     # runs unconditionally, so a missing/invalid key still yields a match.
     api_key = os.environ.get("OPENAI_API_KEY", "")
     ai_available = bool(api_key)
+    ai_configured = ai_available  # preserved for later boundary; ai_available itself may be mutated below
 
     item_path = _item_ai_abs_path(item)
     filename = Path(item_path or _s(item.path)).name
@@ -3518,7 +3524,17 @@ def ai_suggest(iid):
         mid = c.get("mb_trackid", "")
         if mid and mid not in seen_ids:
             seen_ids.add(mid)
-            c["source"] = c.get("source") or ("acoustid" if c in acoustid_cands else "mb")
+            is_acoustid = c in acoustid_cands
+            c["source"] = c.get("source") or ("acoustid" if is_acoustid else "mb")
+            # Explicit fingerprint provenance: true only for candidates that
+            # actually came back from a successful AcoustID lookup, not
+            # inferred later from source string or score alone.
+            c["fingerprint_attempted"] = bool(item_path)
+            c["fingerprint_matched"] = bool(is_acoustid)
+            c["fingerprint_status"] = c.get("fingerprint_status") or (
+                "matched" if is_acoustid else ("no_result" if item_path else "not_attempted")
+            )
+            c["mapped_recording_id"] = mid if is_acoustid else ""
             c["_match_score"] = _score_track_ai_candidate(
                 current,
                 _mb_t,
@@ -3617,6 +3633,11 @@ def ai_suggest(iid):
             ai_available = False
             ai_unavailable_reason = _classify_openai_error(exc)
 
+    # Captured before the fallback below overwrites `suggestions` with a
+    # mechanically-derived (non-AI) guess, so the matching contract never
+    # claims AI contributed when it did not actually respond.
+    ai_contributed = suggestions is not None
+
     if suggestions is None:
         # AI unavailable/failed -- fall back to the top-ranked AcoustID/
         # MusicBrainz candidate (already gathered above) instead of
@@ -3706,7 +3727,27 @@ def ai_suggest(iid):
                         or next(iter(selected_candidate.get("mb_albumids") or []), "")
                     )
                     details = _fetch_mb_recording_details(mb_trackid, preferred_albumid)
-                    _enrich_track_ai_candidate(current, selected_candidate, details)
+                    # All facts below are genuinely known at this point in
+                    # the request (AI has already been attempted, and the
+                    # fallback path -- if AI failed -- has already run), so
+                    # this is the one call site where a real AiState can be
+                    # reported instead of "not evaluated at this boundary".
+                    ai_state_for_selected = AiState(
+                        state_known=True,
+                        configured=ai_configured,
+                        attempted=ai_configured,
+                        available=ai_contributed,
+                        unavailability_reason=ai_unavailable_reason,
+                        contribution=(
+                            {
+                                "mb_trackid": suggestions.get("mb_trackid", ""),
+                                "confidence": suggestions.get("confidence", ""),
+                                "reason": suggestions.get("reason", ""),
+                            }
+                            if ai_contributed else {}
+                        ),
+                    )
+                    _enrich_track_ai_candidate(current, selected_candidate, details, ai_state=ai_state_for_selected)
                     # Fields MB fills authoritatively (override AI guesses)
                     _mb_authoritative = {"artist", "mb_albumid", "mb_artistid",
                                          "track", "tracktotal", "disc", "disctotal",
