@@ -134,9 +134,17 @@ class StartAiBatchJobRaceTests(unittest.TestCase):
         # reconnected=True -- that would be indistinguishable from a real
         # reconnection to a caller, even though no active worker exists.
         self.assertNotIn('"job_id": job_id or (existing or {}).get("job_id") or batch_job_id,', self.reconnect_fn)
-        self.assertIn('"startup_failed": True,', self.reconnect_fn)
+        self.assertIn('"startup_unconfirmed": True,', self.reconnect_fn)
         self.assertIn('"startup_in_progress": True,', self.reconnect_fn)
         self.assertIn('"retryable": True,', self.reconnect_fn)
+
+    def test_reconnect_response_never_infers_success_from_jobstore(self):
+        # JobStore existence or status alone must never be used to decide
+        # reconnected=True -- only a directly-observed, promoted registry
+        # entry may. See HandoffValidationHelperTests-adjacent design note
+        # in _ai_batch_reconnect_response's docstring.
+        self.assertNotIn("jobs.get(", self.reconnect_fn)
+        self.assertNotIn('.status == "success"', self.reconnect_fn)
 
     def test_recover_path_uses_targeted_association_not_full_commit(self):
         # The bug: an unconditional _ai_batch_commit() call after the worker
@@ -680,23 +688,34 @@ class SimultaneousRecoverStartsExactlyOneWorkerTests(BehavioralTestCase):
                 t.join(timeout=10)
 
             self.assertEqual(len(results), 6, f"not all concurrent requests completed: {results}")
-            for r in results:
-                self.assertTrue(r.get("ok"), f"request failed: {r}")
-            # Identify the winner directly by response shape (the one
-            # response without "reconnected") rather than by set-uniqueness
-            # over job_id: a losing response that lands in the truthful
-            # startup_in_progress/startup_failed 409 branches carries no
-            # job_id at all (never a fake batch_job_id fallback), so
-            # set-uniqueness alone can't reliably locate the real JobStore
-            # key if any loser hits one of those branches.
-            winners = [r for r in results if not r.get("reconnected")]
-            self.assertEqual(len(winners), 1, f"expected exactly one non-reconnected winner response: {results}")
-            winner_job_id = winners[0].get("job_id")
+            # Identify the winner directly by response shape: the one
+            # response that is both successful and not a reconnection.
+            # Losers may land in one of two shapes: a real reconnection to
+            # the winner's job (reconnected=True), or -- if the winner's
+            # (here, fast-mocked) worker finishes and releases the registry
+            # before a loser's poll ever observes the promoted job_id -- a
+            # truthful, retryable "unconfirmed" ambiguity. Neither loser
+            # shape may ever claim false success.
+            winners = [r for r in results if r.get("ok") and not r.get("reconnected")]
+            self.assertEqual(len(winners), 1, f"expected exactly one successful non-reconnected winner response: {results}")
+            winner = winners[0]
+            winner_job_id = winner.get("job_id")
             self.assertTrue(winner_job_id)
             self.track_job(winner_job_id)
-            # Every response must reference the one real job/batch identity.
-            job_ids = {r.get("job_id") for r in results}
-            self.assertEqual(len(job_ids), 1, f"responses disagree on job_id: {job_ids}")
+
+            losers = [r for r in results if r is not winner]
+            for r in losers:
+                if r.get("reconnected"):
+                    self.assertTrue(r.get("ok"), f"a reconnected response must be ok: {r}")
+                    self.assertEqual(r.get("job_id"), winner_job_id, f"a reconnected response must reference the winner's job_id: {r}")
+                else:
+                    self.assertFalse(r.get("ok"), f"a non-reconnected loser response must not claim success: {r}")
+                    self.assertTrue(r.get("retryable"), f"a non-reconnected loser response must be retryable: {r}")
+                    self.assertTrue(
+                        r.get("startup_in_progress") or r.get("startup_unconfirmed"),
+                        f"unexpected loser response shape: {r}",
+                    )
+
             # The winner's worker thread call into the mocked
             # _run_ai_batch_import happens asynchronously; wait for it while
             # the patch is still active (see WorkerCompletionCleanupTests).
@@ -711,9 +730,6 @@ class SimultaneousRecoverStartsExactlyOneWorkerTests(BehavioralTestCase):
             len(start_calls), 1,
             f"jobs.start_python() must be called exactly once for concurrent recover requests, got {len(start_calls)}",
         )
-        # The loser responses must say so.
-        reconnected_count = sum(1 for r in results if r.get("reconnected"))
-        self.assertEqual(reconnected_count, 5, "exactly 5 of 6 requests should reconnect to the existing worker")
         # Registry entry must not be left stuck after the winner finishes.
         _wait_until(lambda: self.batch_job_id not in APP._ai_batch_active_workers, timeout=5)
         with APP._ai_batch_worker_lock:
@@ -732,6 +748,7 @@ class StartupReservationCollisionDuringUnpromotedWindowTests(BehavioralTestCase)
 
         entered_start_python = threading.Event()
         proceed = threading.Event()
+        worker_release = threading.Event()
         start_calls = []
         real_start_python = APP.jobs.start_python
 
@@ -741,7 +758,12 @@ class StartupReservationCollisionDuringUnpromotedWindowTests(BehavioralTestCase)
             proceed.wait(timeout=10)
             return real_start_python(fn, label=label, metadata=metadata)
 
-        def fake_run_ai_batch_import(batch_job_id, scan_path, log, cancel_event=None, update_state=None, **kwargs):
+        def blocking_run_ai_batch_import(batch_job_id, scan_path, log, cancel_event=None, update_state=None, **kwargs):
+            # Stays active/registered after promotion, so the second
+            # caller's poll deterministically observes the promoted job_id
+            # rather than racing a near-instant run-and-release against its
+            # own 20ms poll interval.
+            worker_release.wait(timeout=10)
             return {"status": "completed_with_warnings"}
 
         first_holder = {}
@@ -753,7 +775,7 @@ class StartupReservationCollisionDuringUnpromotedWindowTests(BehavioralTestCase)
                 )
 
         with mock.patch.object(APP.jobs, "start_python", side_effect=blocking_start_python), \
-             mock.patch.object(APP, "_run_ai_batch_import", side_effect=fake_run_ai_batch_import):
+             mock.patch.object(APP, "_run_ai_batch_import", side_effect=blocking_run_ai_batch_import):
             first_thread = threading.Thread(target=call_first)
             first_thread.start()
             self.assertTrue(entered_start_python.wait(timeout=5), "first call never reached jobs.start_python()")
@@ -768,8 +790,7 @@ class StartupReservationCollisionDuringUnpromotedWindowTests(BehavioralTestCase)
             # Let the first call's jobs.start_python() proceed shortly after
             # the second call starts its bounded poll (_ai_batch_reconnect_
             # response waits up to 2s), so the second call observes the real
-            # promotion landing instead of exhausting its poll and falling
-            # back to the bare batch_job_id.
+            # promotion landing instead of exhausting its poll.
             threading.Timer(0.3, proceed.set).start()
 
             with APP.app.test_request_context():
@@ -781,8 +802,15 @@ class StartupReservationCollisionDuringUnpromotedWindowTests(BehavioralTestCase)
             first_thread.join(timeout=10)
             self.assertFalse(first_thread.is_alive(), "first _start_ai_batch_job call did not complete")
 
-        first_payload = json.loads(first_holder["response"].get_data(as_text=True))
-        self.track_job(first_payload.get("job_id"))
+            first_payload = json.loads(first_holder["response"].get_data(as_text=True))
+            first_job_id = first_payload.get("job_id")
+            self.track_job(first_job_id)
+
+            worker_release.set()
+            self.assertTrue(
+                _wait_until(lambda: APP.jobs.get(first_job_id).status != "running", timeout=5),
+                "worker never finished after release",
+            )
 
         self.assertEqual(
             len(start_calls), 1,
@@ -1415,6 +1443,156 @@ class RecoverRouteUnpromotedReservationTests(BehavioralTestCase):
         self.assertTrue(third_payload.get("ok"))
         self.assertTrue(third_payload.get("reconnected"))
         self.assertEqual(third_payload.get("job_id"), first_job_id)
+
+
+def _start_old_job(batch_job_id: str, label: str):
+    """Start and run to completion a real, fast, successful JobStore job
+    tagged with batch_job_id -- used to simulate a persisted job_id
+    association pointing at an older (or wrong-batch) completed run."""
+    job = APP.jobs.start_python(
+        lambda log, cancel=None: {"status": "completed_with_warnings"},
+        label=label,
+        metadata={"type": "ai-batch-import", "batch_job_id": batch_job_id},
+    )
+    assert _wait_until(lambda: job.status != "running", timeout=5), "old job never finished"
+    assert job.status == "success"
+    return job
+
+
+class StaleSameBatchSuccessfulJobNotAcceptedTests(BehavioralTestCase):
+    """Required test 1: an older, genuinely successful JobStore job for the
+    SAME batch_job_id must never be accepted as proof of the CURRENT
+    startup attempt just because it's referenced by persisted state and
+    JobStore confirms it succeeded. Must fail against 58a65a0."""
+
+    def test_stale_same_batch_success_is_not_accepted(self):
+        folders = {"f1": _make_folder(self.batch_job_id, "f1", status="failed")}
+        state = _write_batch_state(self.batch_job_id, folders)
+        old_job = _start_old_job(self.batch_job_id, "old same-batch run")
+        self.track_job(old_job.job_id)
+        state["job_id"] = old_job.job_id
+        APP._ai_batch_write_state(state)
+
+        # A new startup reservation is created, then disappears before
+        # ever promoting -- e.g. a startup abort.
+        self.assertTrue(APP._ai_batch_reserve_worker(self.batch_job_id))
+        APP._ai_batch_release_worker(self.batch_job_id, expected=None)
+
+        with APP.app.test_request_context():
+            resp, status_code = APP._ai_batch_reconnect_response(self.batch_job_id)
+        payload = json.loads(resp.get_data(as_text=True))
+
+        self.assertEqual(status_code, 409)
+        self.assertFalse(payload.get("ok"))
+        self.assertFalse(payload.get("reconnected"))
+        self.assertTrue(payload.get("retryable"))
+        self.assertTrue(payload.get("startup_unconfirmed"))
+        self.assertNotEqual(payload.get("job_id"), old_job.job_id, "the stale successful job must not be accepted as this attempt")
+
+
+class WrongBatchSuccessfulJobNotAcceptedTests(BehavioralTestCase):
+    """Required test 2: a successful JobStore job that actually belongs to
+    a *different* batch_job_id must never be accepted, even if this
+    batch's persisted state happens to reference it (a stale/crossed
+    association). Must fail against 58a65a0."""
+
+    def test_wrong_batch_success_is_not_accepted(self):
+        folders = {"f1": _make_folder(self.batch_job_id, "f1", status="failed")}
+        state = _write_batch_state(self.batch_job_id, folders)
+        other_batch_id = f"other-batch-{uuid_hex()}"
+        other_job = _start_old_job(other_batch_id, "unrelated batch run")
+        self.track_job(other_job.job_id)
+        # Simulate a stale/crossed association: this batch's persisted
+        # state points at a job that belongs to a different batch.
+        state["job_id"] = other_job.job_id
+        APP._ai_batch_write_state(state)
+
+        self.assertTrue(APP._ai_batch_reserve_worker(self.batch_job_id))
+        APP._ai_batch_release_worker(self.batch_job_id, expected=None)
+
+        with APP.app.test_request_context():
+            resp, status_code = APP._ai_batch_reconnect_response(self.batch_job_id)
+        payload = json.loads(resp.get_data(as_text=True))
+
+        self.assertEqual(status_code, 409)
+        self.assertFalse(payload.get("ok"))
+        self.assertFalse(payload.get("reconnected"))
+        self.assertTrue(payload.get("retryable"))
+        self.assertTrue(payload.get("startup_unconfirmed"))
+        self.assertNotEqual(payload.get("job_id"), other_job.job_id)
+
+
+class HistoricalSuccessfulJobWithNoReservationTests(BehavioralTestCase):
+    """Required test 3: no active registry entry at all, only a persisted
+    old successful job -- must not return successful reconnection."""
+
+    def test_no_reservation_and_old_success_cannot_reconnect(self):
+        folders = {"f1": _make_folder(self.batch_job_id, "f1", status="failed")}
+        state = _write_batch_state(self.batch_job_id, folders)
+        old_job = _start_old_job(self.batch_job_id, "old run, no reservation")
+        self.track_job(old_job.job_id)
+        state["job_id"] = old_job.job_id
+        APP._ai_batch_write_state(state)
+
+        self.assertFalse(APP._ai_batch_worker_registered(self.batch_job_id))
+
+        with APP.app.test_request_context():
+            resp, status_code = APP._ai_batch_reconnect_response(self.batch_job_id)
+        payload = json.loads(resp.get_data(as_text=True))
+
+        self.assertEqual(status_code, 409)
+        self.assertFalse(payload.get("ok"))
+        self.assertFalse(payload.get("reconnected"))
+
+
+class LegitimateFastCompletionReportsUnconfirmedTests(BehavioralTestCase):
+    """Required test 4: a real current worker that reserves, promotes,
+    runs, completes, and releases before the losing caller ever observes
+    its promoted registry entry must still get the conservative
+    startup_unconfirmed 409 -- never a false reconnected=True -- since the
+    losing caller never directly observed the live promotion. This is
+    intentionally conservative; the normal status endpoint remains the
+    source of truth for what actually happened."""
+
+    def test_fast_completion_without_observed_promotion_is_unconfirmed(self):
+        folders = {"f1": _make_folder(self.batch_job_id, "f1", status="failed")}
+        _write_batch_state(self.batch_job_id, folders)
+
+        def fast_run(batch_job_id, scan_path, log, cancel_event=None, update_state=None, **kwargs):
+            return {"status": "completed_with_warnings"}
+
+        with mock.patch.object(APP, "_run_ai_batch_import", side_effect=fast_run):
+            with APP.app.test_request_context():
+                resp = APP._start_ai_batch_job(_behavioral_scan_path(), recover_batch_job_id=self.batch_job_id, retry_failed=True)
+            payload = json.loads(resp.get_data(as_text=True))
+            job_id = payload.get("job_id")
+            self.assertTrue(job_id)
+            self.track_job(job_id)
+            # Wait for the real worker to fully complete and release its
+            # registry entry while the mock is still active.
+            self.assertTrue(
+                _wait_until(lambda: not APP._ai_batch_worker_registered(self.batch_job_id), timeout=5),
+                "worker never completed and released",
+            )
+            self.assertTrue(_wait_until(lambda: APP.jobs.get(job_id).status != "running", timeout=5))
+
+        # The losing caller polls only after the registry has already
+        # emptied -- it never directly observed the live promotion.
+        with APP.app.test_request_context():
+            resp2, status_code = APP._ai_batch_reconnect_response(self.batch_job_id)
+        payload2 = json.loads(resp2.get_data(as_text=True))
+        self.assertEqual(status_code, 409)
+        self.assertFalse(payload2.get("ok"))
+        self.assertFalse(payload2.get("reconnected"))
+        self.assertTrue(payload2.get("startup_unconfirmed"))
+
+        # The normal batch-status endpoint remains the source of truth and
+        # accurately reflects the completed batch.
+        with APP.app.test_client() as client:
+            status_resp = client.get("/api/ai-batch-import/status", query_string={"batch_job_id": self.batch_job_id})
+        status_payload = status_resp.get_json()
+        self.assertTrue(status_payload.get("ok"))
+        self.assertEqual(status_payload["state"].get("job_id"), job_id)
 
 
 class _LosingCallerPostSpawnFailureBehaviorMixin:

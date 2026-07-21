@@ -23769,23 +23769,32 @@ def _ai_batch_reconnect_response(batch_job_id: str):
     _ai_batch_reserve_worker. The winner may not have been promoted to a
     real job_id yet (a brief window between winning the reservation and
     _ai_batch_persist_job_association/_ai_batch_promote_worker). Poll the
-    active-worker registry -- not stale batch JSON -- briefly rather than
-    immediately falling back to batch_job_id, so a losing caller's response
-    still carries the real, stable job_id in the common case instead of a
-    technically-valid but different-looking identifier.
+    active-worker registry -- not stale batch JSON -- briefly, so a losing
+    caller's response carries the real job_id whenever this call directly
+    observes a promoted registry entry.
 
-    Must never report reconnected=True without a real, registry-confirmed
-    job_id: falling back to the bare batch_job_id while still claiming
-    success would be indistinguishable from an actually-reconnected
-    response to a caller, even though there is no active worker to
-    reconnect to. Three distinct outcomes instead:
+    Successful reconnection requires directly observing a promoted, live
+    registry entry for this batch during the bounded poll below.
+    Persisted state["job_id"], JobStore job existence, or a JobStore
+    status of "success" do NOT prove a given JobStore job is *this*
+    startup attempt: any of those could be a stale association left by an
+    older successful run of the same batch_job_id, or a job that belongs
+    to a different batch entirely if state ever got crossed. Proving
+    current-attempt identity would need a durable per-start token --
+    a larger persistence/CAS change tracked as future debt (see
+    ARCH-010), not implemented here. So this function never infers success
+    from anything persisted; it only trusts what it directly observes in
+    the live registry.
+
+    Three distinct outcomes:
       - job_id observed within the bound: ok=True, reconnected=True.
       - still startup-reserved (unpromoted) when the bound expires: a
         truthful, retryable "still starting" response.
-      - the reservation disappeared entirely before ever promoting (the
-        winner's startup aborted and released before this call could
-        observe a job_id): a truthful, retryable "startup failed"
-        response."""
+      - the registry entry disappeared before this call ever observed a
+        promoted job_id: this attempt's outcome cannot be proven from
+        here, so a truthful, retryable "unconfirmed" response -- the
+        caller should refresh normal batch status to resolve it, rather
+        than being told either a false success or a false failure."""
     job_id = ""
     startup_disappeared = False
     deadline = time.time() + 2.0
@@ -23798,52 +23807,8 @@ def _ai_batch_reconnect_response(batch_job_id: str):
             break
         time.sleep(0.02)
 
-    existing = _ai_batch_find_state(batch_job_id) if (job_id or startup_disappeared) else None
-    if not job_id and startup_disappeared:
-        # The registry entry disappeared before this call ever observed a
-        # promoted job_id. That's ambiguous by itself: it's the genuine
-        # startup-abort case (nothing was ever durably associated, or
-        # promotion failed and the worker aborted before we polled), but it
-        # is *also* what a legitimately fast, already-fully-finished worker
-        # looks like (reserve -> promote -> run -> release can all complete
-        # inside this function's own 20ms poll interval, especially with a
-        # mocked/instant worker in tests). Distinguish by checking whether a
-        # job_id was actually persisted and JobStore confirms a legitimate
-        # run -- if so, this was a real (if fast) run, not a failure.
-        # JobStore existence alone is not enough: a worker that aborted via
-        # _AiBatchStartupAbortedError (or failed for a genuine reason) also
-        # leaves a JobStore job behind, with status "failed" -- that must
-        # not be reported as a successful reconnection.
-        fallback_job_id = _s((existing or {}).get("job_id"))
-        fallback_job = jobs.get(fallback_job_id) if fallback_job_id else None
-        if fallback_job is not None:
-            # The registry entry is released in the worker's own finally,
-            # which runs after _run_ai_batch_import returns/raises but
-            # before that result actually propagates back out to
-            # PythonJob._run and flips job.status off "running" -- so a
-            # job can briefly still read "running" here immediately after
-            # its registry entry disappeared, for either outcome (success
-            # or startup-abort). Give it a brief bounded window to settle
-            # to its real terminal status rather than guessing from an
-            # inherently transient "running".
-            settle_deadline = time.time() + 0.5
-            while fallback_job.status == "running" and time.time() < settle_deadline:
-                time.sleep(0.02)
-        if fallback_job is not None and fallback_job.status == "success":
-            job_id = fallback_job_id
-        else:
-            error_payload = {
-                "ok": False,
-                "reconnected": False,
-                "retryable": True,
-                "startup_failed": True,
-                "batch_job_id": batch_job_id,
-                "error": "AI batch worker startup failed before it could be reached; retry the request.",
-            }
-            if fallback_job is not None:
-                error_payload["job_id"] = fallback_job_id
-            return jsonify(error_payload), 409
     if job_id:
+        existing = _ai_batch_find_state(batch_job_id)
         if existing:
             existing = _ai_batch_reconcile_state(existing)
         return jsonify({
@@ -23853,6 +23818,15 @@ def _ai_batch_reconnect_response(batch_job_id: str):
             "state": _ai_batch_public_state(existing) if existing else {},
             "reconnected": True,
         })
+    if startup_disappeared:
+        return jsonify({
+            "ok": False,
+            "reconnected": False,
+            "retryable": True,
+            "startup_unconfirmed": True,
+            "batch_job_id": batch_job_id,
+            "message": "The startup reservation ended before an active worker could be confirmed. Refresh batch status and retry if needed.",
+        }), 409
     return jsonify({
         "ok": False,
         "reconnected": False,
