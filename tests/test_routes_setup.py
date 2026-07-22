@@ -287,6 +287,44 @@ class RoutesSetupPluginLoaderDiagnosticsTests(unittest.TestCase):
             second = self.client.get("/api/setup/status")
         self.assertEqual(second.status_code, 200)
 
+    # -- 3b. Nonzero loader result with multi-value cookie/token stderr -------
+    def test_nonzero_loader_result_redacts_multivalue_cookies_and_tokens(self):
+        # Route-level regression for both defects: a failing loader whose
+        # stderr contains a multi-value Cookie/Set-Cookie header (defect 1)
+        # is redacted through this module's several redaction call sites in
+        # sequence (subprocess boundary, failure-line extraction, loader
+        # error detail, integration detail/note serialization -- defect 2's
+        # repeated-application path) without leaking any cookie value or
+        # corrupting the placeholder anywhere in the serialized response.
+        self._write_config()
+        stderr = (
+            "Cookie: session=alpha; refresh=bravo\n"
+            "Set-Cookie: access=charlie; Path=/; HttpOnly\n"
+            "token=delta\n"
+        )
+        fake_proc = mock.Mock(returncode=1, stdout="", stderr=stderr)
+        with self._env(), \
+             mock.patch.object(self.module, "_beet_binary", return_value=(True, "beet")), \
+             mock.patch.object(self.module.subprocess, "run", return_value=fake_proc):
+            response = self.client.get("/api/setup/status")
+
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertFalse(body["beets"]["plugin_loader_ok"])
+        self.assertEqual(body["status"], "warning")
+
+        text = response.get_data(as_text=True)
+        for forbidden in ("alpha", "bravo", "charlie", "delta"):
+            self.assertNotIn(forbidden, text)
+        # No raw header text (cookie names/values) should leak either.
+        self.assertNotIn("session=", text)
+        self.assertNotIn("access=", text)
+        # No stray-bracket corruption from redacting the same text at
+        # multiple layers (plugin_loader_error, plugin_failures, and any
+        # integration detail/note built from it).
+        self.assertNotIn("]]", text)
+        self.assertIn(body["beets"]["plugin_loader_error"], text)
+
     # -- 6. Redaction ---------------------------------------------------------------
     def test_redaction_covers_named_secrets_headers_cookies_urls_and_query_strings(self):
         self._write_config()
@@ -351,6 +389,63 @@ class RoutesSetupPluginLoaderDiagnosticsTests(unittest.TestCase):
             redacted = module._redact_diagnostic_text(raw)
             self.assertNotIn("abc123", redacted, raw)
             self.assertIn("[redacted]", redacted, raw)
+
+    def test_redact_diagnostic_text_cookie_header_redacts_entire_value(self):
+        # Defect: the cookie-header pattern used to only redact the first
+        # token after `Cookie:`/`Set-Cookie:`, e.g.
+        # `Cookie: session=alpha; refresh=bravo` could leave `refresh=bravo`
+        # exposed. The whole header value through end-of-line must be
+        # redacted, regardless of how many cookie pairs or attributes it
+        # carries, and case-insensitively.
+        module = self.module
+        cases = [
+            "Cookie: session=alpha; refresh=bravo",
+            "Cookie: a=alpha; b=bravo; c=charlie",
+            "Set-Cookie: session=alpha; Path=/; HttpOnly",
+            "Set-Cookie: access=alpha; refresh=bravo; Secure; SameSite=Lax",
+            "cookie: lower=alpha; second=bravo",
+        ]
+        for raw in cases:
+            redacted = module._redact_diagnostic_text(raw)
+            for value in ("alpha", "bravo", "charlie"):
+                self.assertNotIn(value, redacted, raw)
+            self.assertIn("[redacted]", redacted, raw)
+
+    def test_redact_diagnostic_text_does_not_consume_following_line(self):
+        # The end-of-line-bounded cookie pattern must stop at the line
+        # boundary and must not swallow subsequent, unrelated diagnostic
+        # text on the next line.
+        module = self.module
+        raw = "Cookie: session=alpha; refresh=bravo\nnext diagnostic line unaffected"
+        redacted = module._redact_diagnostic_text(raw)
+        self.assertNotIn("alpha", redacted)
+        self.assertNotIn("bravo", redacted)
+        self.assertIn("next diagnostic line unaffected", redacted)
+
+    def test_redact_diagnostic_text_is_idempotent(self):
+        # Defect: `_redact_diagnostic_text()` is genuinely called more than
+        # once on the same (already-redacted) text in production --
+        # subprocess stdout/stderr boundary, failure-line extraction, and
+        # integration payload serialization all call it in sequence -- so
+        # repeated calls must reach a fixed point after the first pass,
+        # with no accumulation of stray `]` characters and no corruption
+        # of an existing `[redacted]` marker.
+        module = self.module
+        cases = [
+            "token=abc",
+            "Authorization: Bearer abc",
+            "Cookie: session=abc; refresh=def",
+            "https://user:password@example.test/",
+            "https://example.test/?api_key=abc&token=def",
+            "DISCOGS_USER_TOKEN=abc",
+        ]
+        for raw in cases:
+            first = module._redact_diagnostic_text(raw)
+            second = module._redact_diagnostic_text(first)
+            third = module._redact_diagnostic_text(second)
+            self.assertEqual(first, second, raw)
+            self.assertEqual(second, third, raw)
+            self.assertNotIn("]]", first, raw)
 
     # -- 7. Optional credentials ------------------------------------------------
     def test_optional_credentials_absent_does_not_block_setup(self):

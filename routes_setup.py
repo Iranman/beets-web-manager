@@ -487,10 +487,22 @@ _REDACTED = "[redacted]"
 # discogs_user_token, access_token, refresh_token, client_secret,
 # user_token, auth_token all end in a covered keyword and are redacted by
 # this single pattern without needing to enumerate every provider name.
+#
+# The negative lookahead after the separator keeps this idempotent:
+# `_redact_diagnostic_text()` is applied repeatedly to the same text today
+# (subprocess stdout/stderr boundary, failure-line extraction, and
+# integration payload serialization each call it), so a value that is
+# already exactly the `[redacted]` placeholder (optionally quoted, any
+# case) must be left alone rather than re-matched -- otherwise the bare
+# alternative's excluded-character class (which stops short of `]` so it
+# doesn't swallow a trailing brace/bracket from surrounding structured
+# text) partially re-matches the placeholder and strands its closing
+# bracket, appending an extra `]` on every additional pass.
 _SECRET_KV_RE = re.compile(
     r"""(?ix)
     \b([a-z0-9_-]*?(?:api[_-]?key|client[_-]?secret|token|password|secret|auth))
     (\s*[:=]\s*)
+    (?!['"]?\[redacted\]['"]?)
     (?:"([^"]*)"|'([^']*)'|([^\s,;}\]&]+))
     """,
     re.VERBOSE,
@@ -500,20 +512,48 @@ _SECRET_KV_RE = re.compile(
 # scheme prefix (the scheme itself is not secret and is kept for context).
 _AUTH_HEADER_RE = re.compile(r"(?i)\b(Authorization|Proxy-Authorization)(\s*:\s*)(?:(Bearer|Basic)(\s+))?(\S+)")
 
-# Cookie / Set-Cookie header values.
-_COOKIE_HEADER_RE = re.compile(r"(?i)\b(Set-Cookie|Cookie)(\s*:\s*)(\S+)")
+# Cookie / Set-Cookie header values -- redact the entire header value through
+# end-of-line (not just the first token) so multi-value headers like
+# `Cookie: session=alpha; refresh=bravo` don't leave later cookie pairs
+# exposed. `[^\r\n]*` stops at the line boundary so it never consumes a
+# following diagnostic line, and replacing the whole match unconditionally
+# with the header name/separator/marker makes this self-healing and
+# idempotent regardless of what (if anything) an earlier redaction pass
+# left behind in the header value.
+_COOKIE_HEADER_RE = re.compile(r"(?im)\b(Set-Cookie|Cookie)(\s*:\s*)[^\r\n]*")
 
 # Credentials embedded in a URL's userinfo, e.g. https://user:password@host/
 _URL_CREDENTIAL_RE = re.compile(r"(?i)\b([a-z][a-z0-9+.\-]*://)[^\s/@]+@")
+
+# Defense-in-depth cleanup: collapses a `[redacted]`/`[REDACTED]` marker
+# followed by one or more stray `]` characters back down to a single clean
+# marker. This mops up the specific corruption shape produced when *any*
+# secret-shaped regex (including app.py's imported `_redact_security_text`,
+# which this module does not control) re-scans text that already contains
+# our placeholder: its bare-value character class also stops short of `]`,
+# so it partially re-matches the placeholder and strands a trailing `]`
+# rather than leaving it untouched. Applied as the last step of
+# `_redact_diagnostic_text()` so the function is a safe fixed point after
+# one pass no matter which upstream layer produced the placeholder.
+_STRAY_REDACTED_BRACKET_RE = re.compile(r"(?i)(\[redacted\])\]+")
 
 
 def _redact_diagnostic_text(text: str) -> str:
     """Redact secret-bearing diagnostic text before it can reach the System
     page. Covers named key/value secrets (quoted or bare, any prefix ending
     in api_key/token/password/secret/auth), Authorization/Proxy-Authorization
-    headers (Bearer/Basic or bare), Cookie/Set-Cookie headers, query-string
-    credentials, and credentials embedded in a URL's userinfo. Safe to call
-    more than once on the same text (idempotent defense-in-depth)."""
+    headers (Bearer/Basic or bare), Cookie/Set-Cookie headers (the entire
+    header value through end-of-line, not just the first cookie pair),
+    query-string credentials, and credentials embedded in a URL's userinfo.
+
+    This function is genuinely called more than once on the same text in
+    production -- `_run_beet_diagnostic()` redacts stdout/stderr at the
+    subprocess boundary, `_diagnostic_failure_lines()` and the loader-error
+    detail line then redact lines extracted from that already-redacted
+    text, and `_integration_status()` redacts note/detail again at
+    serialization -- so it must be idempotent: calling it again on its own
+    output must return that output unchanged, with no accumulation of
+    stray `]` characters and no corruption of an existing placeholder."""
     redacted = str(text or "")
     try:
         # Reuse app.py's generic secret-assignment/control-char sanitizer
@@ -532,6 +572,7 @@ def _redact_diagnostic_text(text: str) -> str:
     redacted = _COOKIE_HEADER_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}{_REDACTED}", redacted)
     redacted = _URL_CREDENTIAL_RE.sub(lambda m: f"{m.group(1)}{_REDACTED}@", redacted)
     redacted = _SECRET_KV_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}{_REDACTED}", redacted)
+    redacted = _STRAY_REDACTED_BRACKET_RE.sub(lambda m: m.group(1), redacted)
     return redacted
 
 
