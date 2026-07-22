@@ -98,7 +98,17 @@ YAML
 test "$(id -u)" != "0"
 beet -c /config/config.yaml version
 beet -c /config/config.yaml config
-beet -c /config/config.yaml -vv version
+# Exact command /api/setup/status now runs as its plugin-loader probe
+# (routes_setup.py's _BEET_LOADER_PROBE_ARGS) -- `beet plugins` does not
+# exist in Beets 2.12.0, so this is the supported, real replacement. Assert
+# its exit code explicitly (not just via the overall `set -eu` script exit)
+# so a regression here fails with an unambiguous marker.
+if beet -c /config/config.yaml -vv version; then
+  echo "SETUP_DIAGNOSTIC_LOADER_PROBE_OK"
+else
+  echo "SETUP_DIAGNOSTIC_LOADER_PROBE_FAILED"
+  exit 1
+fi
 python -c "import discogs_client; print('discogs client importable')"
 beet -c /config/config.yaml help >/tmp/beet-help.txt
 fpcalc -version
@@ -126,6 +136,13 @@ beet -c /config/config.yaml import -q --quiet-fallback asis /tmp/import-smoke
             self.assertNotIn(bad.lower(), output.lower())
         for expected in ("lastgenre", "listenbrainz", "musicbrainz", "discpath", "replaygain", "ffmpeg", "discogs client importable"):
             self.assertIn(expected, output.lower())
+        # Proves the exact command setup diagnostics now runs (`beet -c
+        # ... -vv version`) exits zero against a real fresh-install image
+        # with the default plugin set loaded -- and never uses the
+        # unsupported `beet plugins` command.
+        self.assertIn("SETUP_DIAGNOSTIC_LOADER_PROBE_OK", output)
+        self.assertNotIn("SETUP_DIAGNOSTIC_LOADER_PROBE_FAILED", output)
+        self.assertNotIn("beet -c /config/config.yaml plugins", output)
 
 
 if __name__ == "__main__":
