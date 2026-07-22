@@ -458,6 +458,8 @@ def _check_path(path_value: str, *, require_writable: bool) -> Dict[str, Any]:
 
 
 
+_BEETS_DIAGNOSTIC_COMMAND_FAILED = "Beets diagnostic command failed."
+
 _BEETS_PLUGIN_FAILURE_PATTERNS = (
     "error loading plugin",
     "modulenotfounderror",
@@ -571,7 +573,8 @@ def _run_beet_diagnostic(args: List[str], config_path: Path | None = None, timeo
             "stderr": _redact_diagnostic_text(proc.stderr or ""),
         }
     except Exception as ex:
-        return {"available": True, "path": beet_bin, "returncode": None, "stdout": "", "stderr": str(ex)}
+        app.logger.error("Beets diagnostic command failed: %s", type(ex).__name__)
+        return {"available": True, "path": beet_bin, "returncode": None, "stdout": "", "stderr": _BEETS_DIAGNOSTIC_COMMAND_FAILED}
 
 
 def _diagnostic_failure_lines(text: str) -> List[str]:
@@ -596,10 +599,17 @@ def _beets_plugin_diagnostics(config_path: Path) -> Dict[str, Any]:
     combined = "\n".join([plugin_probe.get("stdout", ""), plugin_probe.get("stderr", "")])
     failures = _diagnostic_failure_lines(combined)
     version_text = (version_probe.get("stdout") or version_probe.get("stderr") or "").strip().splitlines()
+    diagnostic_error = (
+        _BEETS_DIAGNOSTIC_COMMAND_FAILED
+        if version_probe.get("stderr") == _BEETS_DIAGNOSTIC_COMMAND_FAILED
+        or plugin_probe.get("stderr") == _BEETS_DIAGNOSTIC_COMMAND_FAILED
+        else ""
+    )
     return {
         "available": bool(version_probe.get("available")),
         "path": version_probe.get("path", ""),
         "version": version_text[0] if version_text else "",
+        "diagnostic_error": diagnostic_error,
         "configured_plugins": config_summary["plugins"],
         "pluginpath": config_summary["pluginpath"],
         "plugin_failures": failures,

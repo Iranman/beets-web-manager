@@ -25,6 +25,7 @@ RGID = "11111111-1111-1111-1111-111111111111"
 RELEASE_ID = "22222222-2222-2222-2222-222222222222"
 ALT_RELEASE_ID = "33333333-3333-3333-3333-333333333333"
 RECORDING_ID = "44444444-4444-4444-4444-444444444444"
+SENSITIVE_EXCEPTION_TEXT = '/database/internal/path token=super-secret-key Traceback... File "secret.py", line 7'
 
 
 
@@ -349,6 +350,45 @@ class ImportReviewManualIdBehaviorTests(unittest.TestCase):
         response = self._post(f"https://musicbrainz.org/recording/{RECORDING_ID}", target_kind="album")
         self.assertEqual(response.status_code, 400)
         self.assertIn("requires album Release or Release Group ID", response.get_json()["error"])
+
+    def assertNoSensitiveExceptionDetails(self, response):
+        text = response.get_data(as_text=True)
+        for forbidden in ("super-secret-key", "/database/internal/path", "Traceback", 'File "', "line 7"):
+            self.assertNotIn(forbidden, text)
+
+    def test_unexpected_manual_release_lookup_exception_is_sanitized(self):
+        with mock.patch.object(self.app_module, "_fetch_mb_release_tracklist", side_effect=RuntimeError(SENSITIVE_EXCEPTION_TEXT)):
+            response = self._post(f"https://musicbrainz.org/release/{RELEASE_ID}")
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.get_json()["error"], "MusicBrainz validation could not be completed.")
+        self.assertNoSensitiveExceptionDetails(response)
+
+    def test_manual_track_comparison_failure_does_not_leak_nested_error(self):
+        with mock.patch.object(self.app_module, "_fetch_mb_release_tracklist", return_value=_tracklist()), \
+             mock.patch.object(self.app_module, "_candidate_track_comparison_payload", return_value={"ok": False, "error": SENSITIVE_EXCEPTION_TEXT}):
+            response = self._post(f"https://musicbrainz.org/release/{RELEASE_ID}")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"], "Track comparison could not be completed.")
+        self.assertNoSensitiveExceptionDetails(response)
+
+    def test_candidate_track_endpoint_local_scan_exception_is_sanitized(self):
+        with mock.patch.object(self.app_module, "_candidate_track_local_candidates", side_effect=RuntimeError(SENSITIVE_EXCEPTION_TEXT)):
+            response = self.client.get(f"/api/candidates/{RELEASE_ID}/tracks?folder=/tmp/manual-album")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"], "Track comparison could not be completed.")
+        self.assertNoSensitiveExceptionDetails(response)
+
+    def test_candidate_track_endpoint_musicbrainz_error_is_sanitized(self):
+        with mock.patch.object(self.app_module, "_candidate_track_local_candidates", return_value=[]), \
+             mock.patch.object(self.app_module, "_fetch_mb_release_tracklist", return_value={"ok": False, "error": SENSITIVE_EXCEPTION_TEXT}):
+            response = self.client.get(f"/api/candidates/{RELEASE_ID}/tracks?folder=/tmp/manual-album")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"], "MusicBrainz lookup failed.")
+        self.assertNoSensitiveExceptionDetails(response)
 
     def test_manual_match_builder_keeps_target_preview_eligible_contract(self):
         selected = self.app_module._import_review_build_revalidated_match(
