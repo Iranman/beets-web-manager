@@ -60,7 +60,7 @@ def _load_app_for_manual_id_tests():
     tmp = tempfile.TemporaryDirectory()
     env = {
         "BEETSDIR": str(Path(tmp.name) / "config"),
-        "LIB_PATH": str(Path(tmp.name) / "config" / "musiclibrary.blb"),
+        "BEETS_LIBRARY": str(Path(tmp.name) / "config" / "musiclibrary.blb"),
         "AI_BATCH_STATE_DIR": str(Path(tmp.name) / "ai_batch_jobs"),
         "METADATA_CACHE_DIR": str(Path(tmp.name) / "cache"),
         "BEETS_TRANSACTION_DIR": str(Path(tmp.name) / "transactions"),
@@ -278,6 +278,10 @@ class ImportReviewManualIdBehaviorTests(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        try:
+            cls.app_module.lib._close()
+        except Exception:
+            pass
         cls.env_patcher.stop()
         cls.tmp.cleanup()
         sys.modules.pop("app", None)

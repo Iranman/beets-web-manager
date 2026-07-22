@@ -27,6 +27,12 @@ _up = urllib.parse
 
 os.environ.setdefault("BEETSDIR", "/config")
 
+def _s(v):
+    try:
+        return "" if v is None else str(v)
+    except Exception:
+        return ""
+
 # ── yt-dlp: probe preinstalled tools; runtime package/binary installs are disabled
 _ytdlp_ready = threading.Event()
 _YTDLP_PIP_PACKAGE = os.environ.get("YTDLP_PIP_PACKAGE", "yt-dlp[default,curl-cffi]").strip() or "yt-dlp[default,curl-cffi]"
