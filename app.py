@@ -17048,7 +17048,8 @@ def _candidate_track_comparison_payload(
     try:
         candidates = _candidate_track_local_candidates(folder)
     except Exception as ex:
-        return {"ok": False, "error": f"Local folder scan failed: {ex}"}
+        app.logger.error("Import Review local folder scan failed: %s", type(ex).__name__)
+        return {"ok": False, "error": "Track comparison could not be completed."}
 
     selected_rgid = _extract_mb_uuid(release_group_id)
     rep_id = _extract_mb_uuid(mb_albumid)
@@ -17152,7 +17153,7 @@ def _candidate_track_comparison_payload(
     if not tracklist.get("ok"):
         return {
             "ok": False,
-            "error": tracklist.get("error", "MB tracklist fetch failed"),
+            "error": "MusicBrainz lookup failed.",
         }
     return _candidate_track_build_comparison(
         mb_albumid,
@@ -17216,6 +17217,22 @@ def _manual_review_wrong_type_response(target_kind: str, entity_type: str) -> Tu
     }, 400
 
 
+def _manual_review_public_comparison_error(error: Any) -> str:
+    text = _s(error or "").strip()
+    lower = text.lower()
+    if not text:
+        return "Track comparison could not be completed."
+    if "none of the local tracks match" in lower:
+        return "The ID is valid, but none of the local tracks match this release."
+    if "release group lookup returned no usable releases" in lower:
+        return "MusicBrainz release group lookup returned no usable releases."
+    if "representative release id rejected" in lower or "does not belong to selected release group" in lower:
+        return "The selected Release does not belong to the expected Release Group."
+    if "no representative release" in lower:
+        return "No representative release under the selected Release Group could be loaded."
+    return "Track comparison could not be completed."
+
+
 def _manual_review_validate_album_identifier(parsed: Dict[str, str], payload: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
     entity_type = parsed.get("entity_type") or "unknown"
     mbid = parsed.get("mbid") or ""
@@ -17263,14 +17280,13 @@ def _manual_review_validate_album_identifier(parsed: Dict[str, str], payload: Di
         release_group_id=release_group_id if entity_type == "release-group" else "",
     )
     if not comparison.get("ok"):
-        error = _s(comparison.get("error") or "MusicBrainz ID validation failed.")
         return {
             "ok": False,
             "entity_type": entity_type,
             "mbid": mbid,
             "representative_release_id": resolved_release_id,
             "release_group_id": release_group_id,
-            "error": error,
+            "error": _manual_review_public_comparison_error(comparison.get("error")),
         }, 400
     representative_release_id = _extract_mb_uuid(
         _s(comparison.get("representative_release_id") or comparison.get("mb_albumid") or resolved_release_id)
@@ -17393,10 +17409,14 @@ def import_review_manual_id_validate():
     if not parsed.get("ok"):
         return jsonify(parsed), 400
     target_kind = _s(payload.get("target_kind") or "").strip().lower()
-    if target_kind == "item":
-        body, status = _manual_review_validate_recording_identifier(parsed, payload)
-    else:
-        body, status = _manual_review_validate_album_identifier(parsed, payload)
+    try:
+        if target_kind == "item":
+            body, status = _manual_review_validate_recording_identifier(parsed, payload)
+        else:
+            body, status = _manual_review_validate_album_identifier(parsed, payload)
+    except Exception as ex:
+        app.logger.error("Manual MusicBrainz validation failed: %s", type(ex).__name__)
+        return jsonify({"ok": False, "error": "MusicBrainz validation could not be completed."}), 500
     return jsonify(body), status
 
 def _target_preview_year(value: Any) -> str:
@@ -29414,15 +29434,17 @@ def _fetch_mb_release_tracklist(mb_albumid: str, log: Optional[List[str]] = None
             transient = code in transient_codes or "timed out" in reason or "temporarily" in reason
             if transient and attempt < 3:
                 if log is not None:
+                    public_reason = code if code is not None else "transient network error"
                     log.append(
-                        f"  MB fetch transient error ({code or reason or ex}); "
+                        f"  MB fetch transient error ({public_reason}); "
                         f"retrying {attempt + 1}/3"
                     )
                 time.sleep(1.5 * attempt)
                 continue
             if log is not None:
-                log.append(f"  MB fetch failed: {ex}")
-            return {"ok": False, "error": str(ex), "tracks": []}
+                log.append("  MB fetch failed: MusicBrainz lookup failed.")
+            app.logger.error("MusicBrainz release lookup failed: %s", type(ex).__name__)
+            return {"ok": False, "error": "MusicBrainz lookup failed.", "tracks": []}
 
     release_artist_info = _playlist_artist_credit_info(mb_data.get("artist-credit") or [])
     release_artist = release_artist_info.get("albumartist", "")

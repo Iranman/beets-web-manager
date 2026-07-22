@@ -12,6 +12,7 @@ import sys
 import tempfile
 import types
 import unittest
+import unittest.mock as mock
 from pathlib import Path
 
 
@@ -77,6 +78,26 @@ class RoutesSetupStatusTests(unittest.TestCase):
         r = self.client.get("/api/setup/status")
         settings = r.get_json()["settings"]
         self.assertNotIn("verysecretvalue123", str(settings))
+
+    def test_status_sanitizes_beets_diagnostic_exceptions(self):
+        sensitive = "/database/internal/path token=super-secret-key Traceback... File \"secret.py\", line 7"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_dir = root / "config"
+            config_dir.mkdir()
+            config_file = config_dir / "config.yaml"
+            config_file.write_text("plugins: musicbrainz\n", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"BEETSDIR": str(config_dir), "BEETS_CONFIG": str(config_file)}, clear=False), \
+                 mock.patch.object(self.module, "_beet_binary", return_value=(True, "beet")), \
+                 mock.patch.object(self.module.subprocess, "run", side_effect=RuntimeError(sensitive)):
+                response = self.client.get("/api/setup/status")
+
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertEqual(body["beets"]["diagnostic_error"], "Beets diagnostic command failed.")
+        text = response.get_data(as_text=True)
+        for forbidden in ("super-secret-key", "/database/internal/path", "Traceback", 'File "', "line 7"):
+            self.assertNotIn(forbidden, text)
 
     def test_status_reports_demo_mode_flag(self):
         r = self.client.get("/api/setup/status")
