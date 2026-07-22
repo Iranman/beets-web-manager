@@ -143,31 +143,51 @@ def _safe_plain_text(value: Any, *, max_length: int = 256) -> str:
     return text[:max_length]
 
 
-def _safe_release_int(value: Any) -> Optional[int]:
-    """Strict integer sanitizer for externally sourced release fields.
+# Practical, conservative bounds per release numeric field. Zero fails
+# closed for all four -- no producer in this codebase legitimately emits a
+# zero medium/track position, track count, or duration.
+_MIN_MEDIUM_POSITION = 1
+_MAX_MEDIUM_POSITION = 999
+_MIN_TRACK_POSITION = 1
+_MAX_TRACK_POSITION = 100_000
+_MIN_TRACK_COUNT = 1
+_MAX_TRACK_COUNT = 100_000
+_MIN_DURATION_MS = 1
+_MAX_DURATION_MS = 86_400_000  # 24 hours: generous bound for one audio track
+
+
+def _safe_release_int(value: Any, *, minimum: int, maximum: int) -> Optional[int]:
+    """Strict, field-bounded integer sanitizer for externally sourced
+    release fields.
 
     Accepts only plain ints, finite integer-valued floats, and clean
     digit-only strings (optionally signed). Never calls str()/repr() on a
     rejected value -- mappings, lists, booleans, NaN/Infinity, and custom
-    objects fail closed to None without ever being stringified.
+    objects fail closed to None without ever being stringified. A value
+    parsed outside [minimum, maximum] is also rejected to None; it is never
+    clamped to the nearest bound.
     """
     if isinstance(value, bool):
         return None
     if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        if not math.isfinite(value):
+        parsed = value
+    elif isinstance(value, float):
+        if not math.isfinite(value) or not value.is_integer():
             return None
-        return int(value) if value.is_integer() else None
-    if isinstance(value, str):
+        parsed = int(value)
+    elif isinstance(value, str):
         text = value.strip()
         if not text or not re.match(r"^-?\d+$", text):
             return None
         try:
-            return int(text)
+            parsed = int(text)
         except Exception:
             return None
-    return None
+    else:
+        return None
+    if parsed < minimum or parsed > maximum:
+        return None
+    return parsed
 
 
 def _round_score(value: Any) -> float:
@@ -296,10 +316,16 @@ def _safe_release(release: Mapping[str, Any]) -> Dict[str, Any]:
     safe_date = _safe_plain_text(release.get("date"), max_length=32)
     safe_year_text = _safe_plain_text(release.get("year"), max_length=16)
     year = _year(safe_year_text or safe_date)
-    medium_position = _safe_release_int(release.get("medium_position"))
+    medium_position = _safe_release_int(
+        release.get("medium_position"), minimum=_MIN_MEDIUM_POSITION, maximum=_MAX_MEDIUM_POSITION
+    )
     track_number = _safe_plain_text(release.get("track_number") or release.get("track"), max_length=16)
-    track_count = _safe_release_int(release.get("track_count") or release.get("tracks"))
-    duration_ms = _safe_release_int(release.get("duration_ms"))
+    track_count = _safe_release_int(
+        release.get("track_count") or release.get("tracks"), minimum=_MIN_TRACK_COUNT, maximum=_MAX_TRACK_COUNT
+    )
+    duration_ms = _safe_release_int(
+        release.get("duration_ms"), minimum=_MIN_DURATION_MS, maximum=_MAX_DURATION_MS
+    )
     disc_text = _safe_plain_text(release.get("disc"), max_length=16)
     if not disc_text and medium_position:
         disc_text = str(medium_position)
@@ -326,7 +352,9 @@ def _safe_release(release: Mapping[str, Any]) -> Dict[str, Any]:
         "disc": disc_text,
         "track_number": track_number,
         "track": track_number,
-        "track_position": _safe_release_int(release.get("track_position")),
+        "track_position": _safe_release_int(
+            release.get("track_position"), minimum=_MIN_TRACK_POSITION, maximum=_MAX_TRACK_POSITION
+        ),
         "tracktotal": _safe_plain_text(release.get("tracktotal"), max_length=16),
         "tracks": track_count,
         "track_count": track_count,
@@ -647,7 +675,14 @@ def build_recording_matching_decision(
 
     selected_track_number = release.get("track") or release.get("track_number")
     track_number = _s(release.get("track_number") or selected_track_number)
-    suggested_track = _int_or_none(track_number)
+    # Prefer the dedicated, bounded numeric field; fall back to parsing the
+    # display track_number string when no explicit position was supplied.
+    # A malformed track_position (e.g. negative or absurdly large) is
+    # already None here -- _safe_release() rejected it -- so it correctly
+    # leaves position evidence "unknown" rather than fabricating a conflict.
+    suggested_track = release.get("track_position")
+    if suggested_track is None:
+        suggested_track = _int_or_none(track_number)
     position_status = "unknown"
     if local_track is not None and suggested_track is not None:
         position_status = "yes" if local_track == suggested_track else "conflict"

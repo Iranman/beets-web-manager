@@ -11,6 +11,15 @@ from backend.matching_contract import (
     AiState,
     build_recording_matching_decision,
     _safe_release,
+    _safe_release_int,
+    _MIN_MEDIUM_POSITION,
+    _MAX_MEDIUM_POSITION,
+    _MIN_TRACK_POSITION,
+    _MAX_TRACK_POSITION,
+    _MIN_TRACK_COUNT,
+    _MAX_TRACK_COUNT,
+    _MIN_DURATION_MS,
+    _MAX_DURATION_MS,
 )
 
 
@@ -1303,10 +1312,17 @@ class MatchingContractReleaseScalarSanitizationTests(unittest.TestCase):
 
 
 class MatchingContractReleaseNumericSanitizationTests(unittest.TestCase):
-    """_safe_release() numeric fields must fail closed on malformed input
-    without ever stringifying the rejected value."""
+    """Round 3: release numeric fields must have field-specific bounds.
+    Negative and implausibly large values fail closed instead of surviving
+    into browser-visible evidence, and rejected values are never clamped."""
 
-    _NUMERIC_FIELDS = ("medium_position", "track_count", "duration_ms", "track_position")
+    _FIELD_BOUNDS = {
+        "medium_position": (_MIN_MEDIUM_POSITION, _MAX_MEDIUM_POSITION),
+        "track_position": (_MIN_TRACK_POSITION, _MAX_TRACK_POSITION),
+        "track_count": (_MIN_TRACK_COUNT, _MAX_TRACK_COUNT),
+        "duration_ms": (_MIN_DURATION_MS, _MAX_DURATION_MS),
+    }
+    _NUMERIC_FIELDS = tuple(_FIELD_BOUNDS)
 
     def _release_with(self, field, value):
         release = dict(_release())
@@ -1334,16 +1350,133 @@ class MatchingContractReleaseNumericSanitizationTests(unittest.TestCase):
         self.assertEqual(result["medium_position"], 2)
         self.assertEqual(result["track_count"], 12)
 
-    def test_extremely_large_value_does_not_crash(self):
-        result = _safe_release(self._release_with("duration_ms", 10 ** 15))
-        self.assertEqual(result["duration_ms"], 10 ** 15)
+    def test_negative_and_huge_values_are_rejected_not_clamped(self):
+        # The round-3 fix: these used to survive verbatim (or pass through
+        # unchanged for track_position, which had no prior constraint).
+        result = _safe_release({
+            **_release(),
+            "medium_position": -1,
+            "track_position": -2,
+            "track_count": 10 ** 15,
+            "duration_ms": 10 ** 15,
+        })
+        for field in self._NUMERIC_FIELDS:
+            self.assertIsNone(result[field])
 
-    def test_negative_value_is_handled_explicitly(self):
-        # Not a documented business rule to reject negatives outright (no
-        # prior constraint existed here) -- this only pins that a negative
-        # int passes through as an int, never as a stringified object.
-        result = _safe_release(self._release_with("track_position", -1))
-        self.assertEqual(result["track_position"], -1)
+    def test_disc_does_not_fall_back_to_rejected_medium_position(self):
+        result = _safe_release({**_release(), "disc": "", "medium_position": -1})
+        self.assertEqual(result["disc"], "")
+
+    def test_boundary_values_per_field(self):
+        for field, (minimum, maximum) in self._FIELD_BOUNDS.items():
+            cases = [
+                (minimum, minimum),
+                (str(minimum), minimum),
+                (float(minimum), minimum),
+                (maximum, maximum),
+                (str(maximum), maximum),
+                (minimum - 1, None),
+                (maximum + 1, None),
+                (-1, None),
+                (0, None),
+                (10 ** 15, None),
+                (float(minimum) + 0.5, None),
+                (str(minimum - 1), None),
+                (str(10 ** 15), None),
+                (True, None),
+                ({}, None),
+                ([], None),
+                (object(), None),
+                (float("nan"), None),
+                (float("inf"), None),
+            ]
+            for value, expected in cases:
+                with self.subTest(field=field, value=value, expected=expected):
+                    self.assertEqual(
+                        _safe_release_int(value, minimum=minimum, maximum=maximum), expected
+                    )
+                    result = _safe_release(self._release_with(field, value))
+                    self.assertEqual(result[field], expected)
+
+
+class MatchingContractMalformedReleaseNumericEvidenceTests(unittest.TestCase):
+    """Round 3, sections 6 & 7: a malformed selected-release must not leak
+    rejected numeric values into any serialized representation, and must
+    not affect duration or position matching evidence."""
+
+    _MALICIOUS_RELEASE = {
+        **_release(),
+        "medium_position": -1,
+        "track_position": -2,
+        "track_count": 10 ** 15,
+        "duration_ms": 10 ** 15,
+    }
+
+    def test_rejected_values_absent_from_every_representation(self):
+        decision = build_recording_matching_decision(
+            current=_local(), candidate=_candidate(), selected_release=self._MALICIOUS_RELEASE,
+            linked_releases=[self._MALICIOUS_RELEASE],
+        )
+        payload = decision.to_dict()
+        compat = decision.to_review_recording_candidate()
+        for rendered in (json.dumps(payload), json.dumps(compat)):
+            self.assertNotIn(str(10 ** 15), rendered)
+        selected = payload["evidence"]["musicbrainz"]["selected_release"]
+        self.assertIsNone(selected["medium_position"])
+        self.assertIsNone(selected["track_position"])
+        self.assertIsNone(selected["track_count"])
+        self.assertIsNone(selected["duration_ms"])
+        for linked in payload["evidence"]["musicbrainz"]["linked_releases"]:
+            self.assertIsNone(linked["duration_ms"])
+            self.assertIsNone(linked["track_count"])
+        matching_contract = compat["matching_contract"]
+        self.assertIsNone(
+            matching_contract["evidence"]["musicbrainz"]["selected_release"]["duration_ms"]
+        )
+        self.assertIsNone(compat["selected_release"]["medium_position"])
+
+    def test_malformed_duration_is_treated_as_missing_not_conflict(self):
+        decision = build_recording_matching_decision(
+            current=_local(duration_seconds=180),
+            candidate=_candidate(),
+            selected_release={**_release(), "duration_ms": 10 ** 15},
+        ).to_dict()
+        self.assertIsNone(decision["evidence"]["duration"]["suggested_seconds"])
+        self.assertEqual(decision["evidence"]["duration"]["status"], "unknown")
+        self.assertNotIn("duration_conflict", decision["decision"]["conflicts"])
+
+    def test_malformed_position_is_treated_as_missing_not_conflict(self):
+        decision = build_recording_matching_decision(
+            current=_local(track=3),
+            candidate=_candidate(),
+            selected_release={**_release(), "track_number": "", "track_position": -2},
+        ).to_dict()
+        self.assertEqual(decision["evidence"]["tracklist"]["position_match"], "unknown")
+        self.assertNotIn("track_position_conflict", decision["decision"]["conflicts"])
+
+    def test_malformed_position_does_not_falsely_agree(self):
+        decision = build_recording_matching_decision(
+            current=_local(track=3),
+            candidate=_candidate(),
+            selected_release={**_release(), "track_number": "", "track_position": 100_001},
+        ).to_dict()
+        self.assertEqual(decision["evidence"]["tracklist"]["position_match"], "unknown")
+
+    def test_legitimate_boundary_values_remain_accepted(self):
+        decision = build_recording_matching_decision(
+            current=_local(track=17, duration_seconds=245.0),
+            candidate=_candidate(),
+            selected_release={
+                **_release(),
+                "medium_position": 2,
+                "track_position": 17,
+                "track_count": 24,
+                "duration_ms": 245000,
+            },
+        ).to_dict()
+        self.assertEqual(decision["identity"]["medium_position"], 2)
+        self.assertEqual(decision["decision"]["position_match"]["status"], "yes")
+        self.assertEqual(decision["evidence"]["duration"]["status"], "yes")
 
 
 class MatchingContractMalformedInputTests(unittest.TestCase):
@@ -1686,6 +1819,47 @@ class AppBoundaryFingerprintAndSanitizationRegressionTests(unittest.TestCase):
         self.assertEqual(selected["country"], "US")
         self.assertEqual(selected["status"], "Official")
         self.assertEqual(selected["label"], "Example Records")
+
+    def test_malformed_release_numeric_values_do_not_survive_compaction(self):
+        malicious_release = {
+            "mb_albumid": RELEASE_ID,
+            "mb_releasegroupid": RGID,
+            "medium_position": -1,
+            "track_position": -2,
+            "track_count": 10 ** 15,
+            "duration_ms": 10 ** 15,
+        }
+        candidate = _candidate(selected_release=malicious_release)
+        enriched = _enrich(_local(), candidate)
+        compacted = APP._compact_track_ai_candidate(enriched)
+        rendered = json.dumps(compacted)
+        self.assertNotIn(str(10 ** 15), rendered)
+        selected = compacted["selected_release"]
+        self.assertIsNone(selected["medium_position"])
+        self.assertIsNone(selected["track_position"])
+        self.assertIsNone(selected["track_count"])
+        self.assertIsNone(selected["duration_ms"])
+        contract_evidence = compacted["matching_contract"]["evidence"]
+        self.assertEqual(contract_evidence["duration"]["status"], "unknown")
+        self.assertEqual(contract_evidence["tracklist"]["position_match"], "unknown")
+
+    def test_legitimate_release_numeric_values_survive_compaction(self):
+        clean_release = {
+            "mb_albumid": RELEASE_ID,
+            "mb_releasegroupid": RGID,
+            "medium_position": 2,
+            "track_position": 17,
+            "track_count": 24,
+            "duration_ms": 245000,
+        }
+        candidate = _candidate(selected_release=clean_release)
+        enriched = _enrich(_local(), candidate)
+        compacted = APP._compact_track_ai_candidate(enriched)
+        selected = compacted["selected_release"]
+        self.assertEqual(selected["medium_position"], 2)
+        self.assertEqual(selected["track_position"], 17)
+        self.assertEqual(selected["track_count"], 24)
+        self.assertEqual(selected["duration_ms"], 245000)
 
 
 if __name__ == "__main__":
