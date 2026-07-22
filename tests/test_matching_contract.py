@@ -461,8 +461,262 @@ class MatchingContractFingerprintProvenanceTests(unittest.TestCase):
             candidate=_acoustid_candidate(mapped_recording_id=ACOUSTID_MAPPED_MISMATCH_ID),
             selected_release=_release(),
         ).to_dict()
-        self.assertIn("fingerprint_recording_mismatch", decision["decision"]["conflicts"])
+        self.assertIn("fingerprint_recording_id_conflict", decision["decision"]["conflicts"])
         self.assertEqual(decision["decision"]["safety_key"], "conflict")
+
+
+class MatchingContractFingerprintStateMachineTests(unittest.TestCase):
+    """Round 2, blocker 1: fingerprint provenance must be one coherent
+    state, not independently-trusted truthy fields. Contradictory
+    combinations must fail closed."""
+
+    def _decision(self, **fingerprint_overrides):
+        candidate = _candidate(
+            source="acoustid", score=97, mb_trackid=RECORDING_ID,
+            _match_score=_match_score(total=0.94, source="acoustid"),
+        )
+        candidate.update(fingerprint_overrides)
+        return build_recording_matching_decision(
+            current=_local(), candidate=candidate, selected_release=_release()
+        ).to_dict()
+
+    def test_1_attempted_matched_status_matched_is_verified(self):
+        d = self._decision(
+            fingerprint_attempted=True, fingerprint_matched=True, fingerprint_status="matched",
+            mapped_recording_id=RECORDING_ID,
+        )
+        self.assertEqual(d["evidence"]["acoustid"]["provenance_state"], "verified")
+        self.assertGreaterEqual(d["decision"]["acoustid_score"], 0.8)
+        self.assertEqual(d["decision"]["safety_key"], "safe")
+
+    def test_2_attempted_matched_status_verified_is_verified(self):
+        d = self._decision(
+            fingerprint_attempted=True, fingerprint_matched=True, fingerprint_status="verified",
+            mapped_recording_id=RECORDING_ID,
+        )
+        self.assertEqual(d["evidence"]["acoustid"]["provenance_state"], "verified")
+        self.assertEqual(d["decision"]["safety_key"], "safe")
+
+    def test_3_not_attempted_but_matched_is_invalid_provenance(self):
+        d = self._decision(
+            fingerprint_attempted=False, fingerprint_matched=True, fingerprint_status="matched",
+            mapped_recording_id=RECORDING_ID,
+        )
+        self.assertEqual(d["evidence"]["acoustid"]["provenance_state"], "invalid_provenance")
+        self.assertIn("fingerprint_provenance_conflict", d["decision"]["conflicts"])
+        self.assertEqual(d["decision"]["safety_key"], "conflict")
+        self.assertFalse(d["decision"]["action_eligibility"]["attach_without_review"])
+        self.assertEqual(d["decision"]["acoustid_score"], 0.0)
+
+    def test_4_attempted_but_not_matched_status_matched_is_invalid_provenance(self):
+        d = self._decision(
+            fingerprint_attempted=True, fingerprint_matched=False, fingerprint_status="matched",
+            mapped_recording_id=RECORDING_ID,
+        )
+        self.assertEqual(d["evidence"]["acoustid"]["provenance_state"], "invalid_provenance")
+        self.assertIn("fingerprint_provenance_conflict", d["decision"]["conflicts"])
+        self.assertEqual(d["decision"]["safety_key"], "conflict")
+
+    def test_5_status_mismatch_is_mismatch(self):
+        d = self._decision(
+            fingerprint_attempted=True, fingerprint_matched=True, fingerprint_status="mismatch",
+            mapped_recording_id=RECORDING_ID,
+        )
+        self.assertEqual(d["evidence"]["acoustid"]["provenance_state"], "mismatch")
+        self.assertIn("fingerprint_conflict", d["decision"]["conflicts"])
+        self.assertEqual(d["decision"]["safety_key"], "conflict")
+
+    def test_6_not_attempted_not_matched_status_verified_is_invalid_provenance(self):
+        d = self._decision(
+            fingerprint_attempted=False, fingerprint_matched=False, fingerprint_status="verified",
+            mapped_recording_id=RECORDING_ID,
+        )
+        self.assertEqual(d["evidence"]["acoustid"]["provenance_state"], "invalid_provenance")
+        self.assertIn("fingerprint_provenance_conflict", d["decision"]["conflicts"])
+
+    def test_7_attempted_with_missing_status_is_attempted_no_match(self):
+        d = self._decision(fingerprint_attempted=True, fingerprint_status="", mapped_recording_id=RECORDING_ID)
+        self.assertEqual(d["evidence"]["acoustid"]["provenance_state"], "attempted_no_match")
+        self.assertNotIn("fingerprint_provenance_conflict", d["decision"]["conflicts"])
+        self.assertEqual(d["decision"]["acoustid_score"], 0.0)
+
+    def test_8_matched_with_missing_attempted_is_invalid_provenance(self):
+        d = self._decision(fingerprint_matched=True, fingerprint_status="matched", mapped_recording_id=RECORDING_ID)
+        self.assertEqual(d["evidence"]["acoustid"]["provenance_state"], "invalid_provenance")
+        self.assertIn("fingerprint_provenance_conflict", d["decision"]["conflicts"])
+
+    def test_9_valid_status_score_below_threshold_is_incomplete(self):
+        candidate = _candidate(
+            source="acoustid", score=10, mb_trackid=RECORDING_ID,
+            _match_score=_match_score(total=0.94, source="acoustid"),
+            fingerprint_attempted=True, fingerprint_matched=True, fingerprint_status="matched",
+            mapped_recording_id=RECORDING_ID,
+        )
+        d = build_recording_matching_decision(
+            current=_local(), candidate=candidate, selected_release=_release()
+        ).to_dict()
+        self.assertEqual(d["evidence"]["acoustid"]["provenance_state"], "incomplete")
+        self.assertEqual(d["decision"]["acoustid_score"], 0.0)
+
+    def test_10_valid_status_missing_mapped_id_is_incomplete(self):
+        d = self._decision(
+            fingerprint_attempted=True, fingerprint_matched=True, fingerprint_status="matched",
+            mapped_recording_id="",
+        )
+        self.assertEqual(d["evidence"]["acoustid"]["provenance_state"], "incomplete")
+        self.assertIn("acoustid_mapped_recording_id_missing", d["warnings"])
+        self.assertEqual(d["decision"]["acoustid_score"], 0.0)
+
+    def test_only_verified_state_produces_strong_fingerprint_evidence(self):
+        for state_name, overrides in (
+            ("verified", dict(fingerprint_attempted=True, fingerprint_matched=True, fingerprint_status="matched", mapped_recording_id=RECORDING_ID)),
+            ("not_attempted", dict(fingerprint_attempted=False, fingerprint_matched=False, fingerprint_status="", mapped_recording_id="")),
+            ("invalid_provenance", dict(fingerprint_attempted=False, fingerprint_matched=True, fingerprint_status="matched", mapped_recording_id=RECORDING_ID)),
+        ):
+            with self.subTest(state=state_name):
+                d = self._decision(**overrides)
+                is_verified = d["evidence"]["acoustid"]["provenance_state"] == "verified"
+                self.assertEqual(d["decision"]["acoustid_score"] >= 0.8, is_verified)
+
+
+class MatchingContractMappedRecordingIdTests(unittest.TestCase):
+    """Round 2, blockers 2 & 3: mapped_recording_id must never be
+    synthesized, and must be compared against the full resolved
+    deterministic Recording ID (candidate + MusicBrainz details), not the
+    candidate alone."""
+
+    def _verified_candidate(self, mb_trackid="", mapped_recording_id=""):
+        return _candidate(
+            source="acoustid", score=97, mb_trackid=mb_trackid,
+            fingerprint_attempted=True, fingerprint_matched=True, fingerprint_status="matched",
+            mapped_recording_id=mapped_recording_id,
+            _match_score=_match_score(total=0.94, source="acoustid"),
+        )
+
+    def test_1_candidate_details_mapped_all_agree(self):
+        d = build_recording_matching_decision(
+            current=_local(),
+            candidate=self._verified_candidate(mb_trackid=RECORDING_ID, mapped_recording_id=RECORDING_ID),
+            details={"recording_id": RECORDING_ID},
+            selected_release=_release(),
+        ).to_dict()
+        self.assertEqual(d["decision"]["conflicts"], [])
+        self.assertEqual(d["decision"]["safety_key"], "safe")
+
+    def test_2_candidate_missing_details_a_mapped_a(self):
+        d = build_recording_matching_decision(
+            current=_local(),
+            candidate=self._verified_candidate(mb_trackid="", mapped_recording_id=RECORDING_ID),
+            details={"recording_id": RECORDING_ID},
+            selected_release=_release(),
+        ).to_dict()
+        self.assertNotIn("fingerprint_recording_id_conflict", d["decision"]["conflicts"])
+        self.assertEqual(d["identity"]["resolved_recording_id"], RECORDING_ID)
+
+    def test_3_candidate_missing_details_a_mapped_b(self):
+        d = build_recording_matching_decision(
+            current=_local(),
+            candidate=self._verified_candidate(mb_trackid="", mapped_recording_id=DETAILS_RECORDING_ID),
+            details={"recording_id": RECORDING_ID},
+            selected_release=_release(),
+        ).to_dict()
+        self.assertIn("fingerprint_recording_id_conflict", d["decision"]["conflicts"])
+        self.assertEqual(d["decision"]["safety_key"], "conflict")
+        self.assertFalse(d["decision"]["action_eligibility"]["attach_without_review"])
+        self.assertEqual(d["identity"]["recording_id_sources"]["musicbrainz_details"], RECORDING_ID)
+        self.assertEqual(d["identity"]["recording_id_sources"]["acoustid"], DETAILS_RECORDING_ID)
+
+    def test_4_candidate_a_details_missing_mapped_a(self):
+        d = build_recording_matching_decision(
+            current=_local(),
+            candidate=self._verified_candidate(mb_trackid=RECORDING_ID, mapped_recording_id=RECORDING_ID),
+            details={},
+            selected_release=_release(),
+        ).to_dict()
+        self.assertNotIn("fingerprint_recording_id_conflict", d["decision"]["conflicts"])
+
+    def test_5_candidate_a_details_missing_mapped_b(self):
+        d = build_recording_matching_decision(
+            current=_local(),
+            candidate=self._verified_candidate(mb_trackid=RECORDING_ID, mapped_recording_id=DETAILS_RECORDING_ID),
+            details={},
+            selected_release=_release(),
+        ).to_dict()
+        self.assertIn("fingerprint_recording_id_conflict", d["decision"]["conflicts"])
+        self.assertEqual(d["decision"]["safety_key"], "conflict")
+
+    def test_6_candidate_a_details_b_mapped_a_review_still_required(self):
+        d = build_recording_matching_decision(
+            current=_local(),
+            candidate=self._verified_candidate(mb_trackid=RECORDING_ID, mapped_recording_id=RECORDING_ID),
+            details={"recording_id": DETAILS_RECORDING_ID},
+            selected_release=_release(),
+        ).to_dict()
+        self.assertIn("recording_id_source_conflict", d["decision"]["conflicts"])
+        self.assertNotIn("fingerprint_recording_id_conflict", d["decision"]["conflicts"])
+        self.assertEqual(d["identity"]["resolved_recording_id"], "")
+        self.assertFalse(d["decision"]["action_eligibility"]["attach_without_review"])
+
+    def test_7_candidate_a_details_b_mapped_b_review_still_required(self):
+        d = build_recording_matching_decision(
+            current=_local(),
+            candidate=self._verified_candidate(mb_trackid=RECORDING_ID, mapped_recording_id=DETAILS_RECORDING_ID),
+            details={"recording_id": DETAILS_RECORDING_ID},
+            selected_release=_release(),
+        ).to_dict()
+        self.assertIn("recording_id_source_conflict", d["decision"]["conflicts"])
+        self.assertEqual(d["identity"]["resolved_recording_id"], "")
+        self.assertFalse(d["decision"]["action_eligibility"]["attach_without_review"])
+
+    def test_8_candidate_a_details_b_mapped_c(self):
+        third_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        d = build_recording_matching_decision(
+            current=_local(),
+            candidate=self._verified_candidate(mb_trackid=RECORDING_ID, mapped_recording_id=third_id),
+            details={"recording_id": DETAILS_RECORDING_ID},
+            selected_release=_release(),
+        ).to_dict()
+        self.assertIn("recording_id_source_conflict", d["decision"]["conflicts"])
+        self.assertEqual(d["identity"]["resolved_recording_id"], "")
+
+    def test_9_no_deterministic_id_only_mapped(self):
+        d = build_recording_matching_decision(
+            current=_local(),
+            candidate=self._verified_candidate(mb_trackid="", mapped_recording_id=RECORDING_ID),
+            details={},
+            selected_release=_release(),
+        ).to_dict()
+        self.assertEqual(d["identity"]["resolved_recording_id"], "")
+        self.assertEqual(d["identity"]["recording_id_sources"]["acoustid"], RECORDING_ID)
+        self.assertEqual(d["decision"]["safety_key"], "none")
+        self.assertTrue(d["decision"]["requires_confirmation"])
+
+    def test_10_verified_status_claimed_but_mapped_id_invalid(self):
+        d = build_recording_matching_decision(
+            current=_local(),
+            candidate=self._verified_candidate(mb_trackid=RECORDING_ID, mapped_recording_id="not-a-uuid"),
+            details={},
+            selected_release=_release(),
+        ).to_dict()
+        self.assertEqual(d["evidence"]["acoustid"]["provenance_state"], "incomplete")
+        self.assertEqual(d["decision"]["acoustid_score"], 0.0)
+
+    def test_old_unsafe_reproduction_now_blocks_attach_without_review(self):
+        # The bug being fixed: candidate Recording ID missing, MB-details
+        # Recording ID = A, AcoustID mapped Recording ID = B, fingerprint
+        # verified with a high score. This used to mark A safe with no
+        # conflict because only the candidate ID (never present here) was
+        # compared against the mapping.
+        d = build_recording_matching_decision(
+            current=_local(),
+            candidate=self._verified_candidate(mb_trackid="", mapped_recording_id=DETAILS_RECORDING_ID),
+            details={"recording_id": RECORDING_ID},
+            selected_release=_release(),
+        ).to_dict()
+        self.assertIn("fingerprint_recording_id_conflict", d["decision"]["conflicts"])
+        self.assertFalse(d["decision"]["action_eligibility"]["attach_without_review"])
+        self.assertEqual(d["identity"]["recording_id_sources"]["musicbrainz_details"], RECORDING_ID)
+        self.assertEqual(d["identity"]["recording_id_sources"]["acoustid"], DETAILS_RECORDING_ID)
 
 
 class MatchingContractEvidenceAgreementTests(unittest.TestCase):
@@ -871,6 +1125,76 @@ class MatchingContractCompatibilityRegressionTests(unittest.TestCase):
         self.assertNotIn("album_conflict", payload["conflicts"])
 
 
+class MatchingContractSelectedReleaseSanitizationTests(unittest.TestCase):
+    """Round 2, blocker 4: nested selected-release fields
+    (release_group_secondary_types, local_match) must be allowlist-
+    sanitized, never copied as arbitrary nested data."""
+
+    _LEAKY_RELEASE = {
+        "mb_albumid": RELEASE_ID,
+        "mb_releasegroupid": RGID,
+        "album": "Correct Album",
+        "artist": "Example Artist",
+        "release_group_secondary_types": [
+            "Compilation",
+            {"token": "sk-release-secret"},
+            ["nested-secret"],
+        ],
+        "local_match": {
+            "album_score": 0.9,
+            "artist_score": 0.85,
+            "year_score": 1.0,
+            "year_match": True,
+            "year_delta": 0,
+            "total": 0.91,
+            "provider_payload": "sk-local-secret",
+            "Authorization": "Bearer secret",
+            "token": "secret",
+            "unexpected_nested": {"secret": "nested"},
+        },
+    }
+
+    def test_release_group_secondary_types_drops_nested_entries(self):
+        payload = build_recording_matching_decision(
+            current=_local(), candidate=_candidate(), selected_release=self._LEAKY_RELEASE
+        ).to_dict()
+        types = payload["evidence"]["musicbrainz"]["selected_release"]["release_group_secondary_types"]
+        self.assertEqual(types, ["Compilation"])
+        rendered = json.dumps(payload)
+        self.assertNotIn("sk-release-secret", rendered)
+        self.assertNotIn("nested-secret", rendered)
+
+    def test_local_match_keeps_only_allowlisted_fields(self):
+        payload = build_recording_matching_decision(
+            current=_local(), candidate=_candidate(), selected_release=self._LEAKY_RELEASE
+        ).to_dict()
+        local_match = payload["evidence"]["musicbrainz"]["selected_release"]["local_match"]
+        self.assertEqual(
+            local_match,
+            {
+                "album_score": 0.9, "artist_score": 0.85, "year_score": 1.0,
+                "year_match": True, "year_delta": 0, "total": 0.91,
+            },
+        )
+
+    def test_no_secrets_survive_in_any_representation(self):
+        decision = build_recording_matching_decision(
+            current=_local(), candidate=_candidate(), selected_release=self._LEAKY_RELEASE,
+            linked_releases=[self._LEAKY_RELEASE],
+        )
+        for rendered in (
+            json.dumps(decision.to_dict()),
+            json.dumps(decision.to_review_recording_candidate()),
+        ):
+            self.assertNotIn("sk-release-secret", rendered)
+            self.assertNotIn("sk-local-secret", rendered)
+            self.assertNotIn("Authorization", rendered)
+            self.assertNotIn("nested-secret", rendered)
+            self.assertNotIn("unexpected_nested", rendered)
+        payload = decision.to_dict()
+        self.assertIn("Compilation", json.dumps(payload["evidence"]["musicbrainz"]["linked_releases"]))
+
+
 class MatchingContractMalformedInputTests(unittest.TestCase):
     """Section 13: the contract must fail closed, never invent identity."""
 
@@ -1118,6 +1442,55 @@ class AppBoundaryIntegrationTests(unittest.TestCase):
             "requires_confirmation", "safety_result", "safety_key", "recommended_action", "reason",
         ):
             self.assertIn(key, compacted)
+
+
+@unittest.skipIf(APP is None, f"app.py could not be imported for boundary tests: {_APP_IMPORT_ERROR}")
+class AppBoundaryFingerprintAndSanitizationRegressionTests(unittest.TestCase):
+    """Round 2 regressions at the real _enrich_track_ai_candidate /
+    _compact_track_ai_candidate boundary: contradictory fingerprint
+    provenance, details-vs-mapped-ID conflict, and selected-release secret
+    injection must all be caught here, not just at the builder level."""
+
+    def test_contradictory_provenance_is_not_safe_at_compact_boundary(self):
+        candidate = _candidate(
+            source="acoustid", score=97, mb_trackid=RECORDING_ID,
+            fingerprint_attempted=False, fingerprint_matched=True, fingerprint_status="matched",
+            mapped_recording_id=RECORDING_ID,
+            _match_score=_match_score(total=0.94, source="acoustid"),
+        )
+        enriched = _enrich(_local(), candidate)
+        compacted = APP._compact_track_ai_candidate(enriched)
+        self.assertIn("fingerprint_provenance_conflict", compacted["conflicts"])
+        self.assertFalse(compacted["action_eligibility"]["attach_without_review"])
+        self.assertTrue(compacted["requires_confirmation"])
+
+    def test_details_versus_mapped_id_conflict_survives_compaction(self):
+        candidate = _candidate(
+            source="acoustid", score=97, mb_trackid="",
+            fingerprint_attempted=True, fingerprint_matched=True, fingerprint_status="matched",
+            mapped_recording_id=DETAILS_RECORDING_ID,
+            _match_score=_match_score(total=0.94, source="acoustid"),
+        )
+        enriched = _enrich(_local(), candidate, details={"recording_id": RECORDING_ID})
+        compacted = APP._compact_track_ai_candidate(enriched)
+        self.assertIn("fingerprint_recording_id_conflict", compacted["conflicts"])
+        self.assertFalse(compacted["action_eligibility"]["attach_without_review"])
+        self.assertTrue(compacted["requires_confirmation"])
+
+    def test_selected_release_secrets_do_not_survive_compaction(self):
+        leaky_release = {
+            "mb_albumid": RELEASE_ID,
+            "mb_releasegroupid": RGID,
+            "release_group_secondary_types": ["Compilation", {"token": "sk-release-secret"}],
+            "local_match": {"total": 0.9, "provider_payload": "sk-local-secret"},
+        }
+        candidate = _candidate(selected_release=leaky_release)
+        enriched = _enrich(_local(), candidate)
+        compacted = APP._compact_track_ai_candidate(enriched)
+        rendered = json.dumps(compacted)
+        self.assertNotIn("sk-release-secret", rendered)
+        self.assertNotIn("sk-local-secret", rendered)
+        self.assertIn("Compilation", rendered)
 
 
 if __name__ == "__main__":

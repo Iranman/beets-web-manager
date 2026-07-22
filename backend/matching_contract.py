@@ -166,6 +166,86 @@ def _sanitize_score_breakdown(raw: Any) -> Dict[str, Any]:
     return out
 
 
+_FINGERPRINT_MISMATCH_STATUSES = {"mismatch", "conflict", "rejected"}
+_FINGERPRINT_VALID_STATUSES = {"matched", "verified"}
+
+
+def _classify_fingerprint_provenance(
+    *, attempted: bool, matched: bool, status: str, mapped_recording_id: str,
+    acoustid_score: float, threshold: float = 0.8,
+) -> str:
+    """Classify AcoustID fingerprint evidence as one coherent state instead of
+    trusting attempted/matched/status as independent truthy fields.
+    Contradictory combinations (e.g. matched=True with attempted=False) fail
+    closed -- they are never treated as verified evidence, regardless of
+    what any individual field claims. Returns one of: verified,
+    not_attempted, attempted_no_match, mismatch, invalid_provenance,
+    incomplete."""
+    if status in _FINGERPRINT_MISMATCH_STATUSES:
+        return "mismatch"
+    if attempted and matched and status in _FINGERPRINT_VALID_STATUSES:
+        if mapped_recording_id and acoustid_score >= threshold:
+            return "verified"
+        return "incomplete"
+    if not attempted and matched:
+        return "invalid_provenance"
+    if attempted and not matched and status in _FINGERPRINT_VALID_STATUSES:
+        return "invalid_provenance"
+    if not attempted and not matched and status in _FINGERPRINT_VALID_STATUSES:
+        return "invalid_provenance"
+    if attempted and not matched:
+        return "attempted_no_match"
+    return "not_attempted"
+
+
+def _safe_string_list(value: Any, *, max_items: int = 12, max_length: int = 80) -> List[str]:
+    """Allow only bounded, deduplicated scalar strings. Mappings, lists,
+    bytes, numbers, and any other nested/non-string entry are dropped
+    entirely rather than coerced."""
+    if not isinstance(value, (list, tuple)):
+        return []
+    out: List[str] = []
+    seen = set()
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        text = item.strip()[:max_length]
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+        if len(out) >= max_items:
+            break
+    return out
+
+
+# Exact fields produced by app.py's _track_ai_release_match_score() -- the
+# only real producer of release["local_match"]. Never a general "copy all
+# scalar values" rule: unknown keys (secrets, provider payloads) are dropped.
+_ALLOWED_LOCAL_MATCH_NUMERIC_FIELDS = {"album_score", "artist_score", "year_score", "total"}
+
+
+def _safe_local_match(value: Any) -> Dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    out: Dict[str, Any] = {}
+    for key in _ALLOWED_LOCAL_MATCH_NUMERIC_FIELDS:
+        number = _finite_number(value.get(key))
+        if number is not None:
+            out[key] = round(number, 4)
+    if isinstance(value.get("year_match"), bool):
+        out["year_match"] = value["year_match"]
+    if "year_delta" in value:
+        year_delta = value.get("year_delta")
+        if year_delta is None:
+            out["year_delta"] = None
+        else:
+            number = _finite_number(year_delta)
+            if number is not None:
+                out["year_delta"] = int(number)
+    return out
+
+
 def _safe_release(release: Mapping[str, Any]) -> Dict[str, Any]:
     release_id = _uuid(release.get("mb_albumid") or release.get("release_id"))
     release_group_id = _uuid(release.get("mb_releasegroupid") or release.get("release_group_id"))
@@ -204,8 +284,8 @@ def _safe_release(release: Mapping[str, Any]) -> Dict[str, Any]:
         "track_count": track_count,
         "duration_ms": duration_ms,
         "release_group_primary_type": _s(release.get("release_group_primary_type")),
-        "release_group_secondary_types": list(release.get("release_group_secondary_types") or []),
-        "local_match": dict(release.get("local_match") or {}) if isinstance(release.get("local_match"), Mapping) else {},
+        "release_group_secondary_types": _safe_string_list(release.get("release_group_secondary_types")),
+        "local_match": _safe_local_match(release.get("local_match")),
     }
 
 
@@ -427,9 +507,9 @@ def build_recording_matching_decision(
         or candidate.get("acoustid_status")
         or candidate.get("acoustid_verification")
     ).lower()
-    acoustid_mapped_recording_id = _uuid(candidate.get("mapped_recording_id")) or (
-        candidate_recording_id if fingerprint_matched else ""
-    )
+    # Never synthesized from candidate/details/local/AI Recording IDs -- only
+    # the explicit AcoustID lookup result may populate this.
+    acoustid_mapped_recording_id = _uuid(candidate.get("mapped_recording_id"))
     acoustid_id_value = _s(candidate.get("acoustid_id"))
 
     ai_state = ai_state if ai_state is not None else AiState()
@@ -550,16 +630,23 @@ def build_recording_matching_decision(
     if ai_recording_id and identity_recording_id_for_ai_check and ai_recording_id != identity_recording_id_for_ai_check:
         warnings.append("ai_recording_conflict")
 
-    # ---- Fingerprint (AcoustID) evidence: explicit provenance required ----
-    fingerprint_mismatch = bool(
-        fingerprint_status in {"mismatch", "conflict", "rejected"} or candidate.get("acoustid_mismatch") is True
-    )
+    # ---- Fingerprint (AcoustID) evidence: coherent state, not independent
+    # truthy fields. A candidate claiming matched=True without attempted=True
+    # (or any other internally contradictory combination) fails closed --
+    # it is classified, never trusted at face value.
     raw_normalized_score = _normalized_raw_score(candidate)
-    if fingerprint_matched:
+    fingerprint_state = _classify_fingerprint_provenance(
+        attempted=fingerprint_attempted,
+        matched=fingerprint_matched,
+        status=fingerprint_status,
+        mapped_recording_id=acoustid_mapped_recording_id,
+        acoustid_score=raw_normalized_score,
+    )
+    if fingerprint_state == "verified":
         acoustid_score = raw_normalized_score
         musicbrainz_search_score = 0.0
     elif source == "acoustid":
-        # Claimed AcoustID origin without explicit verification: never
+        # Claimed AcoustID origin without confirmed verification: never
         # treated as fingerprint evidence, and not repurposed as MB
         # relevance either -- the number's meaning is unconfirmed.
         acoustid_score = 0.0
@@ -570,25 +657,26 @@ def build_recording_matching_decision(
     heuristic_score = _round_score(score_breakdown.get("total"))
     confidence_score = _round_score(max(heuristic_score, acoustid_score))
 
-    fingerprint_recording_mismatch = bool(
-        fingerprint_matched
+    # The AcoustID mapping is compared against the full resolved deterministic
+    # Recording ID (candidate + MusicBrainz details), not the candidate alone.
+    # When candidate/details already disagree, resolved_recording_id is ""
+    # and this comparison is skipped -- AcoustID must never pick a winner
+    # for that disagreement.
+    fingerprint_recording_id_conflict = bool(
+        fingerprint_state == "verified"
+        and resolved_recording_id
         and acoustid_mapped_recording_id
-        and candidate_recording_id
-        and acoustid_mapped_recording_id != candidate_recording_id
+        and acoustid_mapped_recording_id != resolved_recording_id
     )
     existing_recording_conflict = bool(
         existing_recording_id and resolved_recording_id and existing_recording_id != resolved_recording_id
     )
 
     strong_acoustid = bool(
-        fingerprint_matched
-        and fingerprint_status == "matched"
-        and not fingerprint_mismatch
-        and not fingerprint_recording_mismatch
+        fingerprint_state == "verified"
+        and not fingerprint_recording_id_conflict
         and not recording_id_source_conflict
-        and acoustid_mapped_recording_id
         and resolved_recording_id
-        and acoustid_score >= 0.8
     )
 
     # Missing evidence is neither positive nor negative corroboration --
@@ -601,15 +689,16 @@ def build_recording_matching_decision(
         and strong_acoustid
         and artist_score >= 0.72
         and not existing_recording_conflict
-        and not fingerprint_mismatch
         and (duration_supports or position_supports)
     )
 
     conflicts: List[str] = []
-    if fingerprint_mismatch:
+    if fingerprint_state == "mismatch":
         conflicts.append("fingerprint_conflict")
-    if fingerprint_recording_mismatch:
-        conflicts.append("fingerprint_recording_mismatch")
+    if fingerprint_state == "invalid_provenance":
+        conflicts.append("fingerprint_provenance_conflict")
+    if fingerprint_recording_id_conflict:
+        conflicts.append("fingerprint_recording_id_conflict")
     if recording_id_source_conflict:
         conflicts.append("recording_id_source_conflict")
     if existing_recording_conflict:
@@ -632,6 +721,8 @@ def build_recording_matching_decision(
         conflicts.append("release_group_id_source_conflict")
     if selected_release_not_linked:
         conflicts.append("selected_release_not_linked")
+    if fingerprint_state == "incomplete" and fingerprint_attempted and fingerprint_matched and not acoustid_mapped_recording_id:
+        warnings.append("acoustid_mapped_recording_id_missing")
     if title_only_strong:
         warnings.append("title_mismatch_with_strong_recording_evidence")
     if len(safe_linked) > 1:
@@ -640,7 +731,8 @@ def build_recording_matching_decision(
     evidence_supported = bool(strong_acoustid or confidence_score >= 0.78)
     hard_conflict_names = {
         "fingerprint_conflict",
-        "fingerprint_recording_mismatch",
+        "fingerprint_provenance_conflict",
+        "fingerprint_recording_id_conflict",
         "recording_id_source_conflict",
         "recording_id_conflict",
         "title_conflict",
@@ -781,6 +873,7 @@ def build_recording_matching_decision(
             "fingerprint_attempted": fingerprint_attempted,
             "fingerprint_matched": fingerprint_matched,
             "status": fingerprint_status or ("not_attempted" if not fingerprint_attempted else "no_result"),
+            "provenance_state": fingerprint_state,
             "score": acoustid_score,
             "acoustid_id": acoustid_id_value,
             "mapped_recording_id": acoustid_mapped_recording_id,
