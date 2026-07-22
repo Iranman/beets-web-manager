@@ -127,6 +127,49 @@ def _int_or_none(value: Any) -> Optional[int]:
         return None
 
 
+def _safe_plain_text(value: Any, *, max_length: int = 256) -> str:
+    """Strict plain-text sanitizer for externally sourced release fields.
+
+    Only a real `str` is ever accepted -- mappings, lists, tuples, sets,
+    bytes, numbers, booleans, and custom objects are dropped outright.
+    Never calls str()/repr() on a rejected value, so a malformed object can
+    never reach browser-visible JSON as its stringified or repr'd form.
+    """
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if not text:
+        return ""
+    return text[:max_length]
+
+
+def _safe_release_int(value: Any) -> Optional[int]:
+    """Strict integer sanitizer for externally sourced release fields.
+
+    Accepts only plain ints, finite integer-valued floats, and clean
+    digit-only strings (optionally signed). Never calls str()/repr() on a
+    rejected value -- mappings, lists, booleans, NaN/Infinity, and custom
+    objects fail closed to None without ever being stringified.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return None
+        return int(value) if value.is_integer() else None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or not re.match(r"^-?\d+$", text):
+            return None
+        try:
+            return int(text)
+        except Exception:
+            return None
+    return None
+
+
 def _round_score(value: Any) -> float:
     number = _finite_number(value)
     if number is None:
@@ -249,12 +292,17 @@ def _safe_local_match(value: Any) -> Dict[str, Any]:
 def _safe_release(release: Mapping[str, Any]) -> Dict[str, Any]:
     release_id = _uuid(release.get("mb_albumid") or release.get("release_id"))
     release_group_id = _uuid(release.get("mb_releasegroupid") or release.get("release_group_id"))
-    title = _s(release.get("album") or release.get("title"))
-    year = _year(release.get("year") or release.get("date"))
-    medium_position = _int_or_none(release.get("medium_position"))
-    track_number = _s(release.get("track_number") or release.get("track"))
-    track_count = _int_or_none(release.get("track_count") or release.get("tracks"))
-    duration_ms = _int_or_none(release.get("duration_ms"))
+    title = _safe_plain_text(release.get("album") or release.get("title"))
+    safe_date = _safe_plain_text(release.get("date"), max_length=32)
+    safe_year_text = _safe_plain_text(release.get("year"), max_length=16)
+    year = _year(safe_year_text or safe_date)
+    medium_position = _safe_release_int(release.get("medium_position"))
+    track_number = _safe_plain_text(release.get("track_number") or release.get("track"), max_length=16)
+    track_count = _safe_release_int(release.get("track_count") or release.get("tracks"))
+    duration_ms = _safe_release_int(release.get("duration_ms"))
+    disc_text = _safe_plain_text(release.get("disc"), max_length=16)
+    if not disc_text and medium_position:
+        disc_text = str(medium_position)
     return {
         "release_id": release_id,
         "mb_albumid": release_id,
@@ -266,24 +314,24 @@ def _safe_release(release: Mapping[str, Any]) -> Dict[str, Any]:
         ),
         "title": title,
         "album": title,
-        "artist": _s(release.get("artist") or release.get("release_artist")),
-        "date": _s(release.get("date")),
+        "artist": _safe_plain_text(release.get("artist") or release.get("release_artist")),
+        "date": safe_date,
         "year": year,
-        "country": _s(release.get("country")),
-        "status": _s(release.get("status")),
-        "label": _s(release.get("label")),
-        "medium_format": _s(release.get("medium_format") or release.get("media_format")),
-        "media_format": _s(release.get("medium_format") or release.get("media_format")),
+        "country": _safe_plain_text(release.get("country"), max_length=64),
+        "status": _safe_plain_text(release.get("status"), max_length=64),
+        "label": _safe_plain_text(release.get("label")),
+        "medium_format": _safe_plain_text(release.get("medium_format") or release.get("media_format"), max_length=64),
+        "media_format": _safe_plain_text(release.get("medium_format") or release.get("media_format"), max_length=64),
         "medium_position": medium_position,
-        "disc": _s(release.get("disc") or medium_position or ""),
+        "disc": disc_text,
         "track_number": track_number,
         "track": track_number,
-        "track_position": _int_or_none(release.get("track_position")),
-        "tracktotal": _s(release.get("tracktotal")),
+        "track_position": _safe_release_int(release.get("track_position")),
+        "tracktotal": _safe_plain_text(release.get("tracktotal"), max_length=16),
         "tracks": track_count,
         "track_count": track_count,
         "duration_ms": duration_ms,
-        "release_group_primary_type": _s(release.get("release_group_primary_type")),
+        "release_group_primary_type": _safe_plain_text(release.get("release_group_primary_type"), max_length=64),
         "release_group_secondary_types": _safe_string_list(release.get("release_group_secondary_types")),
         "local_match": _safe_local_match(release.get("local_match")),
     }
@@ -562,7 +610,7 @@ def build_recording_matching_decision(
         details.get("recording_artist")
         or details.get("artist")
         or candidate.get("recording_artist")
-        or (raw_selected_release.get("artist") if isinstance(raw_selected_release, Mapping) else "")
+        or release.get("artist")
         or candidate.get("artist")
     )
     release_title = _s(release.get("title") or details.get("album") or candidate.get("album"))
@@ -597,7 +645,7 @@ def build_recording_matching_decision(
     if local_release_group_id and release_group_id:
         release_group_status = "yes" if local_release_group_id == release_group_id else "conflict"
 
-    selected_track_number = raw_selected_release.get("track") if isinstance(raw_selected_release, Mapping) else ""
+    selected_track_number = release.get("track") or release.get("track_number")
     track_number = _s(release.get("track_number") or selected_track_number)
     suggested_track = _int_or_none(track_number)
     position_status = "unknown"

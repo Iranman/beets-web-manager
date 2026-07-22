@@ -10,6 +10,7 @@ from pathlib import Path
 from backend.matching_contract import (
     AiState,
     build_recording_matching_decision,
+    _safe_release,
 )
 
 
@@ -1195,6 +1196,156 @@ class MatchingContractSelectedReleaseSanitizationTests(unittest.TestCase):
         self.assertIn("Compilation", json.dumps(payload["evidence"]["musicbrainz"]["linked_releases"]))
 
 
+class _SecretStringer:
+    """An object whose __str__/__repr__ would leak a secret if a sanitizer
+    ever fell back to stringifying a rejected value instead of dropping it."""
+
+    def __str__(self):
+        return "OBJECT-STR-SECRET"
+
+    def __repr__(self):
+        return "OBJECT-REPR-SECRET"
+
+
+class MatchingContractReleaseScalarSanitizationTests(unittest.TestCase):
+    """Final blocker: _safe_release() scalar text fields must never
+    stringify arbitrary external objects (dicts, lists, custom objects)
+    into browser-visible JSON."""
+
+    _LEAKY_SCALAR_RELEASE = {
+        "mb_albumid": RELEASE_ID,
+        "mb_releasegroupid": RGID,
+        "album": {"token": "sk-album-secret"},
+        "title": ["nested-title-secret"],
+        "artist": {"Authorization": "Bearer artist-secret"},
+        "date": {"secret": "date-secret"},
+        "year": ["year-secret"],
+        "country": {"Authorization": "Bearer country-secret"},
+        "status": ["nested-status-secret"],
+        "label": {"token": "sk-label-secret"},
+        "medium_format": {"secret": "format-secret"},
+        "media_format": ["media-format-secret"],
+        "disc": {"secret": "disc-secret"},
+        "track_number": ["track-secret"],
+        "tracktotal": {"secret": "tracktotal-secret"},
+        "release_group_primary_type": {"secret": "primary-secret"},
+    }
+
+    _SECRET_NEEDLES = [
+        "sk-album-secret", "nested-title-secret", "artist-secret",
+        "date-secret", "year-secret", "country-secret",
+        "nested-status-secret", "sk-label-secret", "format-secret",
+        "media-format-secret", "disc-secret", "track-secret",
+        "tracktotal-secret", "primary-secret",
+    ]
+
+    def test_scalar_secrets_do_not_survive_safe_release(self):
+        rendered = json.dumps(_safe_release(self._LEAKY_SCALAR_RELEASE))
+        for needle in self._SECRET_NEEDLES:
+            self.assertNotIn(needle, rendered)
+
+    def test_scalar_secrets_do_not_survive_decision_serialization(self):
+        decision = build_recording_matching_decision(
+            current=_local(), candidate=_candidate(), selected_release=self._LEAKY_SCALAR_RELEASE,
+            linked_releases=[self._LEAKY_SCALAR_RELEASE],
+        )
+        for rendered in (
+            json.dumps(decision.to_dict()),
+            json.dumps(decision.to_review_recording_candidate()),
+        ):
+            for needle in self._SECRET_NEEDLES:
+                self.assertNotIn(needle, rendered)
+
+    def test_custom_object_str_and_repr_do_not_leak(self):
+        release = dict(_release())
+        release["label"] = _SecretStringer()
+        release["status"] = _SecretStringer()
+        result = _safe_release(release)
+        rendered = json.dumps(result)
+        self.assertNotIn("OBJECT-STR-SECRET", rendered)
+        self.assertNotIn("OBJECT-REPR-SECRET", rendered)
+        self.assertEqual(result["label"], "")
+        self.assertEqual(result["status"], "")
+
+    def test_legitimate_release_scalar_fields_are_preserved(self):
+        release = {
+            "album": "Correct Album",
+            "artist": "Correct Artist",
+            "date": "1988-05-01",
+            "year": "1988",
+            "country": "US",
+            "status": "Official",
+            "label": "Example Records",
+            "medium_format": "CD",
+            "disc": "1",
+            "track_number": "3",
+            "tracktotal": "10",
+            "release_group_primary_type": "Album",
+        }
+        result = _safe_release(release)
+        self.assertEqual(result["album"], "Correct Album")
+        self.assertEqual(result["artist"], "Correct Artist")
+        self.assertEqual(result["date"], "1988-05-01")
+        self.assertEqual(result["year"], "1988")
+        self.assertEqual(result["country"], "US")
+        self.assertEqual(result["status"], "Official")
+        self.assertEqual(result["label"], "Example Records")
+        self.assertEqual(result["medium_format"], "CD")
+        self.assertEqual(result["disc"], "1")
+        self.assertEqual(result["track_number"], "3")
+        self.assertEqual(result["tracktotal"], "10")
+        self.assertEqual(result["release_group_primary_type"], "Album")
+
+    def test_whitespace_is_stripped_and_length_is_bounded(self):
+        result = _safe_release({"label": "  Padded Label  ", "status": "x" * 500})
+        self.assertEqual(result["label"], "Padded Label")
+        self.assertLessEqual(len(result["status"]), 64)
+
+
+class MatchingContractReleaseNumericSanitizationTests(unittest.TestCase):
+    """_safe_release() numeric fields must fail closed on malformed input
+    without ever stringifying the rejected value."""
+
+    _NUMERIC_FIELDS = ("medium_position", "track_count", "duration_ms", "track_position")
+
+    def _release_with(self, field, value):
+        release = dict(_release())
+        release[field] = value
+        return release
+
+    def test_malformed_numeric_inputs_fail_closed(self):
+        malformed = [True, False, {"secret": "x"}, ["x"], object(), float("nan"), float("inf"), float("-inf")]
+        for field in self._NUMERIC_FIELDS:
+            for value in malformed:
+                with self.subTest(field=field, value=value):
+                    result = _safe_release(self._release_with(field, value))
+                    self.assertIsNone(result[field])
+
+    def test_malformed_numeric_inputs_never_stringify(self):
+        rendered = json.dumps(_safe_release(self._release_with("medium_position", _SecretStringer())))
+        self.assertNotIn("OBJECT-STR-SECRET", rendered)
+        self.assertNotIn("OBJECT-REPR-SECRET", rendered)
+
+    def test_valid_integer_and_numeric_string_are_accepted(self):
+        release = dict(_release())
+        release["medium_position"] = 2
+        release["track_count"] = "12"
+        result = _safe_release(release)
+        self.assertEqual(result["medium_position"], 2)
+        self.assertEqual(result["track_count"], 12)
+
+    def test_extremely_large_value_does_not_crash(self):
+        result = _safe_release(self._release_with("duration_ms", 10 ** 15))
+        self.assertEqual(result["duration_ms"], 10 ** 15)
+
+    def test_negative_value_is_handled_explicitly(self):
+        # Not a documented business rule to reject negatives outright (no
+        # prior constraint existed here) -- this only pins that a negative
+        # int passes through as an int, never as a stringified object.
+        result = _safe_release(self._release_with("track_position", -1))
+        self.assertEqual(result["track_position"], -1)
+
+
 class MatchingContractMalformedInputTests(unittest.TestCase):
     """Section 13: the contract must fail closed, never invent identity."""
 
@@ -1491,6 +1642,50 @@ class AppBoundaryFingerprintAndSanitizationRegressionTests(unittest.TestCase):
         self.assertNotIn("sk-release-secret", rendered)
         self.assertNotIn("sk-local-secret", rendered)
         self.assertIn("Compilation", rendered)
+
+    def test_selected_release_scalar_secrets_do_not_survive_compaction(self):
+        leaky_release = {
+            "mb_albumid": RELEASE_ID,
+            "mb_releasegroupid": RGID,
+            "album": {"token": "sk-album-secret"},
+            "artist": {"Authorization": "Bearer artist-secret"},
+            "date": {"secret": "date-secret"},
+            "country": {"secret": "country-secret"},
+            "status": ["nested-status-secret"],
+            "label": {"token": "sk-label-secret"},
+            "medium_format": ["format-secret"],
+            "release_group_primary_type": {"secret": "primary-secret"},
+        }
+        candidate = _candidate(selected_release=leaky_release)
+        enriched = _enrich(_local(), candidate)
+        compacted = APP._compact_track_ai_candidate(enriched)
+        rendered = json.dumps(compacted)
+        for needle in (
+            "sk-album-secret", "artist-secret", "date-secret", "country-secret",
+            "nested-status-secret", "sk-label-secret", "format-secret", "primary-secret",
+        ):
+            self.assertNotIn(needle, rendered)
+
+    def test_legitimate_selected_release_scalar_fields_survive_compaction(self):
+        clean_release = {
+            "mb_albumid": RELEASE_ID,
+            "mb_releasegroupid": RGID,
+            "album": "Correct Album",
+            "artist": "Correct Artist",
+            "date": "1988-05-01",
+            "country": "US",
+            "status": "Official",
+            "label": "Example Records",
+        }
+        candidate = _candidate(selected_release=clean_release)
+        enriched = _enrich(_local(), candidate)
+        compacted = APP._compact_track_ai_candidate(enriched)
+        selected = compacted["selected_release"]
+        self.assertEqual(selected["album"], "Correct Album")
+        self.assertEqual(selected["artist"], "Correct Artist")
+        self.assertEqual(selected["country"], "US")
+        self.assertEqual(selected["status"], "Official")
+        self.assertEqual(selected["label"], "Example Records")
 
 
 if __name__ == "__main__":
