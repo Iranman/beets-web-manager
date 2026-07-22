@@ -4358,6 +4358,27 @@ export function ImportReviewPage({
           setAction(item.id, { status: 'idle', message: '' });
           return;
         }
+        // A per-item attachment is already running on the backend -- never
+        // a confirmation dialog for this one, just a concise warning; the
+        // in-flight attachment owns this item until it finishes.
+        if (body?.code === 'attachment_in_progress') {
+          setAction(item.id, {
+            status: 'warning',
+            message: body.error || 'A Recording ID attachment is already running for this item.',
+          });
+          return;
+        }
+        // The backend-computed matching decision moved on since it was
+        // displayed (drv2 schema mismatch or the candidate itself changed) --
+        // safety/eligibility are never recalculated client-side, so surface
+        // a clear refresh prompt rather than retrying blind.
+        if (body?.code === 'matching_decision_stale') {
+          setAction(item.id, {
+            status: 'warning',
+            message: body.error || 'The matching decision has changed since it was displayed; refresh the review item.',
+          });
+          return;
+        }
       }
       const message = err instanceof Error ? err.message : String(err);
       const aiWarning = optionalAiWarning(message);
@@ -4393,6 +4414,21 @@ export function ImportReviewPage({
       removeLocalItem(item);
       void pollJobBackground(started.job_id, item, label, false);
     } catch (err) {
+      const body = apiErrorBody(err);
+      if (body?.code === 'attachment_in_progress') {
+        setAction(item.id, {
+          status: 'warning',
+          message: body.error || 'A Recording ID attachment is already running for this item.',
+        });
+        return;
+      }
+      if (body?.code === 'matching_decision_stale') {
+        setAction(item.id, {
+          status: 'warning',
+          message: body.error || 'The matching decision has changed since it was displayed; refresh the review item.',
+        });
+        return;
+      }
       setAction(item.id, { status: 'error', message: err instanceof Error ? err.message : String(err) });
     }
   }, [pollJobBackground, removeLocalItem, setAction]);

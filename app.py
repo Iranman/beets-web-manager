@@ -2306,10 +2306,41 @@ def _redact_secret_assignment_match(match: "re.Match[str]") -> str:
     return f"{match.group(1)}{match.group(2)}{_REDACTED_SECRET}"
 
 
+# Matches userinfo credentials embedded directly in a URL, e.g.
+# "https://user:password@example.test/" -- these don't have a
+# "keyword: value" shape so _SECRET_ASSIGNMENT_RE never sees them.
+_URL_CREDENTIALS_RE = re.compile(r"(?i)\b([a-z][a-z0-9+.\-]*://)[^\s/@]+:[^\s/@]+@")
+
+
 def _redact_security_text(value: Any) -> str:
     text = _s(value)
     text = _CONTROL_CHAR_RE.sub("?", text)
+    text = _URL_CREDENTIALS_RE.sub(lambda m: f"{m.group(1)}{_REDACTED_SECRET}@", text)
     return _SECRET_ASSIGNMENT_RE.sub(_redact_secret_assignment_match, text)
+
+
+_CONFIRMATION_REASON_MAX_LEN = 500
+
+
+def _sanitize_confirmation_reason(value: Any) -> str:
+    """Safe, bounded, single-line projection of a user-supplied
+    confirmed-review confirmation reason. This is untrusted free text that
+    flows into the transaction reason/metadata, the per-change reason, and
+    job logs -- normalize newlines/tabs to spaces, redact anything that
+    looks like a secret (Authorization/Cookie/api_key/password/URL
+    credentials), collapse whitespace, and bound the length. Callers must
+    use only this sanitized value everywhere and never store or log the
+    raw one."""
+    text = _s(value)
+    if not text:
+        return ""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = text.replace("\n", " ").replace("\t", " ")
+    text = _redact_security_text(text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > _CONFIRMATION_REASON_MAX_LEN:
+        text = text[:_CONFIRMATION_REASON_MAX_LEN].rstrip()
+    return text
 
 
 def _is_public_endpoint() -> bool:
@@ -2842,12 +2873,61 @@ def _run_item_metadata_restore(item_id: int, fields: Dict[str, Any], log: List[s
     return True
 
 
+# ── attach-recording: per-item reservation + strict subprocess outcomes ───────
+#
+# Concurrency: keyed by Beets item id, process-local, and deliberately
+# narrow to this one feature -- two concurrent attach-recording requests for
+# the SAME item can never race each other into conflicting mutations, while
+# unrelated items proceed fully in parallel. Do NOT reuse _IMPORT_JOB_LOCK
+# (global/cross-feature) or add any global attachment lock.
+_ATTACH_RECORDING_RESERVATIONS_LOCK = threading.Lock()
+_ATTACH_RECORDING_RESERVED_ITEMS: set = set()
+
+
+def _reserve_attach_recording_item(item_id: int) -> bool:
+    with _ATTACH_RECORDING_RESERVATIONS_LOCK:
+        if item_id in _ATTACH_RECORDING_RESERVED_ITEMS:
+            return False
+        _ATTACH_RECORDING_RESERVED_ITEMS.add(item_id)
+        return True
+
+
+def _release_attach_recording_item(item_id: int) -> None:
+    with _ATTACH_RECORDING_RESERVATIONS_LOCK:
+        _ATTACH_RECORDING_RESERVED_ITEMS.discard(item_id)
+
+
+class AttachRecordingCancelled(RuntimeError):
+    """Raised when a beet subprocess stage of the attach-recording /
+    recording-ID-rollback workflow was cancelled (rc=-9), so callers can
+    tell an intentional cancellation apart from an ordinary failure."""
+
+
+def _require_attach_stage_success(result, stage: str) -> None:
+    """Strict outcome gate for one beet subprocess stage of the
+    attach-recording / recording-ID-rollback workflows. Only rc=0 counts as
+    success for this identity mutation -- a cancelled (-9) or timed-out
+    (124) stage must never be treated as success, and the caller must not
+    run any later stage after this raises."""
+    if result.returncode == 0:
+        return
+    if result.returncode == -9:
+        raise AttachRecordingCancelled(f"{stage} cancelled")
+    if result.returncode == 124:
+        raise RuntimeError(f"{stage} timed out")
+    raise RuntimeError(f"{stage} failed")
+
+
 def _run_item_recording_id_restore(item_id: int, fields: Dict[str, Any], log: List[str], cancel_event=None) -> bool:
     """Undo executor for attach-recording: restores the previous
     Recording/Release/Release-Group IDs and re-runs the same
     modify+mbsync+write+move sequence attach-recording used, so the file's
     on-disk tags and library path go back in sync with the pre-attach IDs
-    (not just the beets database row)."""
+    (not just the beets database row). Returns True only when every
+    required stage actually succeeded (rc=0) -- a cancelled, timed-out, or
+    failed stage must never be reported as a successful restore, and the
+    caller must not mark the source transaction "Rolled Back" for a False
+    return."""
     mb_trackid = _s((fields or {}).get("mb_trackid", "")).strip().lower()
     mb_albumid = _s((fields or {}).get("mb_albumid", "")).strip().lower()
     mb_releasegroupid = _s((fields or {}).get("mb_releasegroupid", "")).strip().lower()
@@ -2855,20 +2935,22 @@ def _run_item_recording_id_restore(item_id: int, fields: Dict[str, Any], log: Li
     base = [BEET_BIN, "-c", cfg]
     query = f"id:{item_id}"
     parts = [f"mb_trackid={mb_trackid}", f"mb_albumid={mb_albumid}", f"mb_releasegroupid={mb_releasegroupid}"]
-    r = _beet_run(base + ["modify", "--yes", "--nowrite", query] + parts, log, timeout=60, env=_beet_env(), cancel=cancel_event)
-    if r.returncode not in (0, -9, 124):
-        log.append(f"  [rollback] Recording ID restore failed for item {item_id} (rc={r.returncode}).")
+    try:
+        r = _beet_run(base + ["modify", "--yes", "--nowrite", query] + parts, log, timeout=60, env=_beet_env(), cancel=cancel_event)
+        _require_attach_stage_success(r, "rollback modify")
+        if mb_trackid:
+            r = _beet_run(base + ["mbsync", query], log, timeout=60, env=_beet_env(), cancel=cancel_event)
+            _require_attach_stage_success(r, "rollback mbsync")
+        r = _beet_run(base + ["write", "--yes", query], log, timeout=60, env=_beet_env(), cancel=cancel_event)
+        _require_attach_stage_success(r, "rollback write")
+        r = _beet_run(base + ["move", query], log, timeout=60, env=_beet_env(), cancel=cancel_event)
+        _require_attach_stage_success(r, "rollback move")
+    except AttachRecordingCancelled:
+        log.append(f"  [rollback] Recording ID restore cancelled for item {item_id}.")
         return False
-    if mb_trackid:
-        r = _beet_run(base + ["mbsync", query], log, timeout=60, env=_beet_env(), cancel=cancel_event)
-        if r.returncode not in (0, -9, 124):
-            log.append(f"  [rollback] WARN mbsync rc={r.returncode} while restoring item {item_id}.")
-    r = _beet_run(base + ["write", "--yes", query], log, timeout=60, env=_beet_env(), cancel=cancel_event)
-    if r.returncode not in (0, -9, 124):
-        log.append(f"  [rollback] WARN write rc={r.returncode} while restoring item {item_id}.")
-    r = _beet_run(base + ["move", query], log, timeout=60, env=_beet_env(), cancel=cancel_event)
-    if r.returncode not in (0, -9, 124):
-        log.append(f"  [rollback] WARN move rc={r.returncode} while restoring item {item_id}.")
+    except Exception as ex:
+        log.append(f"  [rollback] Recording ID restore failed for item {item_id}: {_redact_security_text(str(ex))[:200]}")
+        return False
     _invalidate_lib_cache()
     log.append(f"  [rollback] Restored recording identity for item {item_id}.")
     return True
@@ -3272,240 +3354,348 @@ def item_attach_recording(iid: int):
     confirmed review, or must be rejected outright: every client-supplied
     safety/confidence/eligibility field is ignored, and the matching
     decision is rebuilt from the current trusted MusicBrainz/AcoustID
-    candidate set for this item at request time."""
-    item = lib.get_item(iid)
-    if not item:
-        return jsonify({"ok": False, "error": "Item not found"}), 404
+    candidate set for this item at request time.
+
+    Concurrency: a per-item reservation (_reserve_attach_recording_item) is
+    held from just before the final idempotency check through the async
+    mutation job, so two concurrent requests for the SAME item can never
+    race -- the second gets 409 attachment_in_progress immediately. The
+    item is re-read after the reservation is acquired and every check below
+    (candidates, decision, existing identity) runs against that fresh read,
+    never a snapshot taken before the reservation. After the beet stages
+    all report success, the item is re-read again and the actual persisted
+    mb_trackid/mb_albumid/mb_releasegroupid are what get audited as
+    "Completed" -- never the pre-mutation candidate-expected identity."""
     payload = request.get_json(silent=True) or {}
     mb_trackid = _s(payload.get("mb_trackid") or "").strip().lower()
     if not mb_trackid:
-        return jsonify({"ok": False, "error": "mb_trackid is required"}), 400
+        return jsonify({"ok": False, "error": "mb_trackid is required.", "code": "recording_id_required"}), 400
     if not _MB_UUID_RE.match(mb_trackid):
-        return jsonify({"ok": False, "error": "Invalid MusicBrainz UUID format"}), 400
+        return jsonify({"ok": False, "error": "Invalid MusicBrainz Recording ID format.", "code": "invalid_recording_id"}), 400
 
     mode = _s(payload.get("mode") or "safe").strip().lower()
     if mode not in ("safe", "confirmed_review"):
         return jsonify({"ok": False, "error": "Unknown attachment mode.", "code": "invalid_mode"}), 400
 
-    try:
-        current, candidates, item_path, filename = _reconstruct_track_recording_candidates(item, iid)
-    except Exception as exc:
+    if lib.get_item(iid) is None:
+        return jsonify({"ok": False, "error": "Item not found.", "code": "review_item_not_found"}), 404
+
+    if not _reserve_attach_recording_item(iid):
         return jsonify({
             "ok": False,
-            "error": "Unable to rebuild trusted MusicBrainz/AcoustID evidence for this item.",
-            "detail": _s(exc),
-            "code": "matching_evidence_unavailable",
-        }), 503
-
-    candidate = next(
-        (c for c in candidates if _s(c.get("mb_trackid", "")).strip().lower() == mb_trackid),
-        None,
-    )
-    if candidate is None:
-        return jsonify({
-            "ok": False,
-            "error": "This Recording ID is not part of the current trusted candidate set for this item.",
-            "code": "candidate_not_in_trusted_set",
-        }), 400
-
-    decision = candidate.get("decision") or {}
-    action_eligibility = decision.get("action_eligibility") or {}
-    review_required = bool(decision.get("review_required"))
-    requires_confirmation = bool(decision.get("requires_confirmation"))
-    conflicts = list(decision.get("conflicts") or [])
-    warnings = list(decision.get("warnings") or [])
-    identity = (candidate.get("matching_contract") or {}).get("identity") or {}
-    resolved_recording_id = _s(identity.get("resolved_recording_id"))
-    computed_version = _s(candidate.get("decision_version") or "")
-    submitted_version = _s(payload.get("decision_version") or "").strip()
-    sanitized_candidate = _compact_track_ai_candidate(candidate)
-
-    def _stale_response():
-        return jsonify({
-            "ok": False,
-            "error": "The matching decision has changed since it was displayed; refresh the review item.",
-            "code": "matching_decision_stale",
-            "candidate": sanitized_candidate,
+            "error": "A Recording ID attachment is already running for this item.",
+            "code": "attachment_in_progress",
         }), 409
 
-    confirmation_reason = ""
-    if mode == "safe":
-        if submitted_version and submitted_version != computed_version:
-            return _stale_response()
-        if not resolved_recording_id or resolved_recording_id != mb_trackid:
+    job_started = False
+    try:
+        # Re-read after acquiring the reservation -- every check from here
+        # on runs against this fresh item, not the pre-reservation snapshot,
+        # so a concurrent mutation between the two reads can't be missed.
+        item = lib.get_item(iid)
+        if item is None:
+            return jsonify({"ok": False, "error": "Item not found.", "code": "review_item_not_found"}), 404
+
+        try:
+            current, candidates, item_path, filename = _reconstruct_track_recording_candidates(item, iid)
+        except Exception as exc:
+            app.logger.error(
+                "attach-recording candidate reconstruction failed for item %s: %s: %s",
+                iid, type(exc).__name__, _redact_security_text(str(exc))[:300],
+            )
             return jsonify({
                 "ok": False,
-                "error": "Requested Recording ID does not match the backend-resolved Recording ID.",
-                "code": "recording_id_mismatch",
-                "candidate": sanitized_candidate,
-            }), 409
-        if (not action_eligibility.get("attach_without_review") or review_required
-                or requires_confirmation or conflicts):
+                "error": "Unable to rebuild trusted MusicBrainz/AcoustID evidence for this item.",
+                "code": "matching_evidence_unavailable",
+            }), 503
+
+        candidate = next(
+            (c for c in candidates if _s(c.get("mb_trackid", "")).strip().lower() == mb_trackid),
+            None,
+        )
+        if candidate is None:
             return jsonify({
                 "ok": False,
-                "error": "This candidate requires explicit confirmed review before it can be attached.",
-                "code": "review_confirmation_required",
-                "candidate": sanitized_candidate,
-            }), 409
-    else:
-        if payload.get("confirm") is not True:
-            return jsonify({
-                "ok": False,
-                "error": "Explicit confirmation is required for confirmed-review attachment.",
-                "code": "review_confirmation_required",
+                "error": "This Recording ID is not part of the current trusted candidate set for this item.",
+                "code": "candidate_not_in_trusted_set",
             }), 400
-        confirmation_reason = _s(payload.get("confirmation_reason") or "").strip()
-        if not confirmation_reason:
+
+        decision = candidate.get("decision") or {}
+        action_eligibility = decision.get("action_eligibility") or {}
+        review_required = bool(decision.get("review_required"))
+        requires_confirmation = bool(decision.get("requires_confirmation"))
+        conflicts = list(decision.get("conflicts") or [])
+        warnings = list(decision.get("warnings") or [])
+        identity = (candidate.get("matching_contract") or {}).get("identity") or {}
+        resolved_recording_id = _s(identity.get("resolved_recording_id"))
+        computed_version = _s(candidate.get("decision_version") or "")
+        submitted_version = _s(payload.get("decision_version") or "").strip()
+        sanitized_candidate = _compact_track_ai_candidate(candidate)
+
+        def _stale_response():
             return jsonify({
                 "ok": False,
-                "error": "A confirmation reason is required for confirmed-review attachment.",
-                "code": "confirmation_reason_required",
-            }), 400
-        if not submitted_version:
-            return jsonify({
-                "ok": False,
-                "error": "decision_version is required for confirmed-review attachment.",
+                "error": "The matching decision has changed since it was displayed; refresh the review item.",
                 "code": "matching_decision_stale",
-            }), 400
-        if submitted_version != computed_version:
-            return _stale_response()
-        # Confirmation only ever authorizes attaching this Recording ID --
-        # it never elevates the candidate's own safety/eligibility fields,
-        # and never authorizes any destructive follow-on action.
+                "candidate": sanitized_candidate,
+            }), 409
 
-    existing_mb_trackid = _s(getattr(item, "mb_trackid", "")).strip().lower()
-    existing_mb_albumid = _s(getattr(item, "mb_albumid", "")).strip().lower()
-    existing_rgid = _s(getattr(item, "mb_releasegroupid", "")).strip().lower()
-    release_id = _s(candidate.get("release_id") or candidate.get("mb_albumid") or "").strip().lower()
-    release_group_id = _s(candidate.get("release_group_id") or candidate.get("mb_releasegroupid") or "").strip().lower()
+        confirmation_reason = ""
+        if mode == "safe":
+            if submitted_version and submitted_version != computed_version:
+                return _stale_response()
+            if not resolved_recording_id or resolved_recording_id != mb_trackid:
+                return jsonify({
+                    "ok": False,
+                    "error": "Requested Recording ID does not match the backend-resolved Recording ID.",
+                    "code": "recording_id_mismatch",
+                    "candidate": sanitized_candidate,
+                }), 409
+            if (not action_eligibility.get("attach_without_review") or review_required
+                    or requires_confirmation or conflicts):
+                return jsonify({
+                    "ok": False,
+                    "error": "This candidate requires explicit confirmed review before it can be attached.",
+                    "code": "review_confirmation_required",
+                    "candidate": sanitized_candidate,
+                }), 409
+        else:
+            if payload.get("confirm") is not True:
+                return jsonify({
+                    "ok": False,
+                    "error": "Explicit confirmation is required for confirmed-review attachment.",
+                    "code": "review_confirmation_required",
+                }), 400
+            confirmation_reason = _sanitize_confirmation_reason(payload.get("confirmation_reason"))
+            if not confirmation_reason:
+                return jsonify({
+                    "ok": False,
+                    "error": "A confirmation reason is required for confirmed-review attachment.",
+                    "code": "confirmation_reason_required",
+                }), 400
+            if not submitted_version:
+                return jsonify({
+                    "ok": False,
+                    "error": "decision_version is required for confirmed-review attachment.",
+                    "code": "matching_decision_stale",
+                }), 400
+            if submitted_version != computed_version:
+                return _stale_response()
+            # Confirmation only ever authorizes attaching this Recording ID --
+            # it never elevates the candidate's own safety/eligibility fields,
+            # and never authorizes any destructive follow-on action.
 
-    if (existing_mb_trackid == mb_trackid
-            and (not release_id or existing_mb_albumid == release_id)
-            and (not release_group_id or existing_rgid == release_group_id)):
-        return jsonify({
-            "ok": True,
-            "changed": False,
-            "reason": "already_attached",
-            "recording_id": mb_trackid,
-        })
+        existing_mb_trackid = _s(getattr(item, "mb_trackid", "")).strip().lower()
+        existing_mb_albumid = _s(getattr(item, "mb_albumid", "")).strip().lower()
+        existing_rgid = _s(getattr(item, "mb_releasegroupid", "")).strip().lower()
+        release_id = _s(candidate.get("release_id") or candidate.get("mb_albumid") or "").strip().lower()
+        release_group_id = _s(candidate.get("release_group_id") or candidate.get("mb_releasegroupid") or "").strip().lower()
 
-    before_snapshot = {
-        "mb_trackid": existing_mb_trackid,
-        "mb_albumid": existing_mb_albumid,
-        "mb_releasegroupid": existing_rgid,
-    }
-    after_snapshot = {
-        "mb_trackid": mb_trackid,
-        "mb_albumid": release_id,
-        "mb_releasegroupid": release_group_id,
-    }
-    tx = transactions.create(
-        operation_type="MusicBrainz Match",
-        initiating_user=_transaction_user_label(),
-        status="Running",
-        dry_run=False,
-        summary=f"Attach recording ID for item {iid} ({'confirmed review' if mode == 'confirmed_review' else 'safe attach'})",
-        reason=confirmation_reason or _s(decision.get("eligibility_reason") or ""),
-        source="Import Review attach-recording",
-        confidence={"overall": decision.get("confidence_score")},
-        changes=[{
+        if (existing_mb_trackid == mb_trackid
+                and (not release_id or existing_mb_albumid == release_id)
+                and (not release_group_id or existing_rgid == release_group_id)):
+            return jsonify({
+                "ok": True,
+                "changed": False,
+                "reason": "already_attached",
+                "recording_id": mb_trackid,
+            })
+
+        before_snapshot = {
+            "mb_trackid": existing_mb_trackid,
+            "mb_albumid": existing_mb_albumid,
+            "mb_releasegroupid": existing_rgid,
+        }
+        # Candidate-expected identity -- what we intend to persist. Kept
+        # distinct from the actually-persisted identity verified after the
+        # mutation (see _do below); never presented as persisted state
+        # until that verification succeeds.
+        candidate_identity = {
+            "mb_trackid": mb_trackid,
+            "mb_albumid": release_id,
+            "mb_releasegroupid": release_group_id,
+        }
+        change_entry = {
             "id": f"item:{iid}",
             "operation": "MusicBrainz Match",
             "track": current.get("title") or filename,
             "artist": current.get("artist") or "",
             "album": current.get("album") or "",
             "current_metadata": before_snapshot,
-            "new_metadata": after_snapshot,
-            "metadata_diff": metadata_diff(before_snapshot, after_snapshot),
+            "new_metadata": candidate_identity,
+            "metadata_diff": metadata_diff(before_snapshot, candidate_identity),
             "confidence": {"overall": decision.get("confidence_score")},
             "reason": confirmation_reason or _s(decision.get("eligibility_reason") or ""),
             "source": "Import Review attach-recording",
-        }],
-        rollback_available=True,
-        rollback_reason="Restores the previous Recording/Release/Release-Group IDs and resyncs tags from MusicBrainz.",
-        metadata={
-            "item_id": iid,
-            "mode": mode,
-            "decision_version": computed_version,
-            "resolved_recording_id": resolved_recording_id,
-            "conflicts": conflicts,
-            "warnings": warnings,
-            "review_required": review_required,
-            "requires_confirmation": requires_confirmation,
-            "confirmation_reason": confirmation_reason,
-        },
-    )
-    transactions.update(tx["id"], rollback={
-        "available": True,
-        "reason": "Restores the previous Recording/Release/Release-Group IDs and resyncs tags from MusicBrainz.",
-        "operations": [{
-            "type": "recording_id_restore",
-            "item_id": iid,
-            "fields": before_snapshot,
-            "reason": "Restore recording identity captured before attach-recording.",
-        }],
-    }, counts={"items": 1, "changes": 1})
-    audit_id = tx["id"]
+            "metadata": {"candidate_identity": dict(candidate_identity)},
+        }
+        tx = transactions.create(
+            operation_type="MusicBrainz Match",
+            initiating_user=_transaction_user_label(),
+            status="Running",
+            dry_run=False,
+            summary=f"Attach recording ID for item {iid} ({'confirmed review' if mode == 'confirmed_review' else 'safe attach'})",
+            reason=confirmation_reason or _s(decision.get("eligibility_reason") or ""),
+            source="Import Review attach-recording",
+            confidence={"overall": decision.get("confidence_score")},
+            changes=[change_entry],
+            rollback_available=True,
+            rollback_reason="Restores the previous Recording/Release/Release-Group IDs and resyncs tags from MusicBrainz.",
+            metadata={
+                "item_id": iid,
+                "mode": mode,
+                "decision_version": computed_version,
+                "resolved_recording_id": resolved_recording_id,
+                "conflicts": conflicts,
+                "warnings": warnings,
+                "review_required": review_required,
+                "requires_confirmation": requires_confirmation,
+                "confirmation_reason": confirmation_reason,
+                "candidate_identity": dict(candidate_identity),
+            },
+        )
+        transactions.update(tx["id"], rollback={
+            "available": True,
+            "reason": "Restores the previous Recording/Release/Release-Group IDs and resyncs tags from MusicBrainz.",
+            "operations": [{
+                "type": "recording_id_restore",
+                "item_id": iid,
+                "fields": before_snapshot,
+                "reason": "Restore recording identity captured before attach-recording.",
+            }],
+        }, counts={"items": 1, "changes": 1})
+        audit_id = tx["id"]
 
-    def _do(log, cancel_event=None):
-        transactions.update(audit_id, status="Running")
+        def _do(log, cancel_event=None):
+            transactions.update(audit_id, status="Running")
+            try:
+                cfg = _write_job_beets_config(f"/tmp/beets_attach_recording_{iid}.yaml")
+                base = [BEET_BIN, "-c", cfg]
+                query = f"id:{iid}"
+                r = _beet_run(base + ["modify", "--yes", "--nowrite", f"mb_trackid={mb_trackid}", query],
+                              log, timeout=120, env=_beet_env(), cancel=cancel_event)
+                _require_attach_stage_success(r, "modify")
+                r = _beet_run(base + ["mbsync", query], log, timeout=60, env=_beet_env(), cancel=cancel_event)
+                _require_attach_stage_success(r, "mbsync")
+                r = _beet_run(base + ["write", "--yes", query], log, timeout=120, env=_beet_env(), cancel=cancel_event)
+                _require_attach_stage_success(r, "write")
+                r = _beet_run(base + ["move", query], log, timeout=120, env=_beet_env(), cancel=cancel_event)
+                _require_attach_stage_success(r, "move")
+
+                # Truthfulness: never claim the candidate-expected identity
+                # was persisted without checking. Invalidate the cache and
+                # re-read the item so the audit reflects reality.
+                _invalidate_lib_cache()
+                persisted_item = lib.get_item(iid)
+                actual_mb_trackid = _s(getattr(persisted_item, "mb_trackid", "")).strip().lower() if persisted_item else ""
+                actual_mb_albumid = _s(getattr(persisted_item, "mb_albumid", "")).strip().lower() if persisted_item else ""
+                actual_rgid = _s(getattr(persisted_item, "mb_releasegroupid", "")).strip().lower() if persisted_item else ""
+
+                if actual_mb_trackid != mb_trackid:
+                    transactions.update(audit_id, status="Failed", logs=list(log)[-500:])
+                    transactions.append_log(
+                        audit_id,
+                        "ERROR: Requested Recording ID was not verified on the re-read item after mutation.",
+                    )
+                    raise RuntimeError("Recording ID did not verify after mutation")
+
+                persisted_identity = {
+                    "mb_trackid": actual_mb_trackid,
+                    "mb_albumid": actual_mb_albumid,
+                    "mb_releasegroupid": actual_rgid,
+                }
+                # Recording ID matched; a differing but legitimate release
+                # context is allowed -- record it truthfully rather than
+                # silently claiming the candidate's release context landed.
+                release_mismatch = bool(release_id) and actual_mb_albumid != release_id
+                rgid_mismatch = bool(release_group_id) and actual_rgid != release_group_id
+                if release_mismatch or rgid_mismatch:
+                    log.append(
+                        "Persisted release/release-group identity differs from the evaluated "
+                        "candidate; actual values recorded for audit, candidate expectation kept "
+                        "separate. Review recommended."
+                    )
+
+                log.append("Revalidating MusicBrainz recording details after attach.")
+                details = _fetch_mb_recording_details(mb_trackid)
+                linked_count = len(details.get("linked_releases") or []) if isinstance(details, dict) else 0
+                selected_release = (details.get("selected_release") or {}) if isinstance(details, dict) else {}
+                if mode == "confirmed_review":
+                    log.append(f"User confirmed this candidate before attaching the Recording ID: {confirmation_reason}")
+                if linked_count:
+                    rel_title = _s(selected_release.get("album") or details.get("album") or "")
+                    rel_year = _s(selected_release.get("year") or details.get("year") or "")
+                    rgid = _s(selected_release.get("mb_releasegroupid") or details.get("mb_releasegroupid") or "")
+                    log.append(f"MusicBrainz recording lookup returned {linked_count} linked release(s); selected release context: {rel_title or '(unknown release)'} {rel_year or ''} {rgid or ''}".strip())
+                    if not rgid:
+                        log.append("Album/release identity remains under review; no Release Group ID was attached from the recording candidate.")
+                else:
+                    log.append("MusicBrainz recording lookup returned no linked releases; album identity remains under review.")
+                log.append("Review eligibility will be recalculated from the refreshed library state.")
+                _trigger_plex_refresh(log)
+                log.append("Recording ID attached and item synced/moved.")
+
+                updated_change = dict(change_entry)
+                updated_change["current_metadata"] = before_snapshot
+                updated_change["new_metadata"] = persisted_identity
+                updated_change["metadata_diff"] = metadata_diff(before_snapshot, persisted_identity)
+                updated_change["metadata"] = {
+                    "candidate_identity": dict(candidate_identity),
+                    "persisted_identity": persisted_identity,
+                }
+                transactions.update(
+                    audit_id,
+                    status="Completed",
+                    logs=list(log)[-500:],
+                    changes=[updated_change],
+                    metadata={
+                        "candidate_identity": dict(candidate_identity),
+                        "persisted_identity": persisted_identity,
+                        "release_identity_mismatch": release_mismatch,
+                        "release_group_identity_mismatch": rgid_mismatch,
+                    },
+                )
+                return {
+                    "ok": True, "changed": True, "mode": mode, "recording_id": mb_trackid,
+                    "decision_version": computed_version, "audit_id": audit_id,
+                    "persisted_identity": persisted_identity,
+                }
+            except AttachRecordingCancelled as ex:
+                transactions.update(audit_id, status="Cancelled", logs=list(log)[-500:])
+                transactions.append_log(audit_id, f"Cancelled: {_redact_security_text(str(ex))[:200]}")
+                raise
+            except Exception as ex:
+                transactions.update(audit_id, status="Failed", logs=list(log)[-500:])
+                transactions.append_log(audit_id, f"ERROR: {_redact_security_text(str(ex))[:300]}")
+                raise
+            finally:
+                _release_attach_recording_item(iid)
+
         try:
-            cfg = _write_job_beets_config(f"/tmp/beets_attach_recording_{iid}.yaml")
-            base = [BEET_BIN, "-c", cfg]
-            query = f"id:{iid}"
-            r = _beet_run(base + ["modify", "--yes", "--nowrite", f"mb_trackid={mb_trackid}", query],
-                          log, timeout=120, env=_beet_env(), cancel=cancel_event)
-            if r.returncode not in (0, -9, 124):
-                raise RuntimeError(f"beet modify failed rc={r.returncode}")
-            r = _beet_run(base + ["mbsync", query], log, timeout=60, env=_beet_env(), cancel=cancel_event)
-            if r.returncode not in (0, -9, 124):
-                log.append(f"  WARN beet mbsync rc={r.returncode}")
-            r = _beet_run(base + ["write", "--yes", query], log, timeout=120, env=_beet_env(), cancel=cancel_event)
-            if r.returncode not in (0, -9, 124):
-                log.append(f"  WARN beet write rc={r.returncode}")
-            r = _beet_run(base + ["move", query], log, timeout=120, env=_beet_env(), cancel=cancel_event)
-            if r.returncode not in (0, -9, 124):
-                log.append(f"  WARN beet move rc={r.returncode}")
-            log.append("Revalidating MusicBrainz recording details after attach.")
-            details = _fetch_mb_recording_details(mb_trackid)
-            linked_count = len(details.get("linked_releases") or []) if isinstance(details, dict) else 0
-            selected_release = (details.get("selected_release") or {}) if isinstance(details, dict) else {}
-            if mode == "confirmed_review":
-                log.append(f"User confirmed this candidate before attaching the Recording ID: {confirmation_reason}")
-            if linked_count:
-                rel_title = _s(selected_release.get("album") or details.get("album") or "")
-                rel_year = _s(selected_release.get("year") or details.get("year") or "")
-                rgid = _s(selected_release.get("mb_releasegroupid") or details.get("mb_releasegroupid") or "")
-                log.append(f"MusicBrainz recording lookup returned {linked_count} linked release(s); selected release context: {rel_title or '(unknown release)'} {rel_year or ''} {rgid or ''}".strip())
-                if not rgid:
-                    log.append("Album/release identity remains under review; no Release Group ID was attached from the recording candidate.")
-            else:
-                log.append("MusicBrainz recording lookup returned no linked releases; album identity remains under review.")
-            _invalidate_lib_cache()
-            log.append("Review eligibility will be recalculated from the refreshed library state.")
-            _trigger_plex_refresh(log)
-            log.append("Recording ID attached and item synced/moved.")
-            transactions.update(audit_id, status="Completed", logs=list(log)[-500:])
-            return {
-                "ok": True, "changed": True, "mode": mode, "recording_id": mb_trackid,
-                "decision_version": computed_version, "audit_id": audit_id,
-            }
-        except Exception as ex:
-            transactions.update(audit_id, status="Failed", logs=list(log)[-500:])
-            transactions.append_log(audit_id, f"ERROR: {ex}")
-            raise
-
-    job = jobs.start_python(_do, label=f"Attach recording ID: item {iid}")
-    transactions.attach_job(audit_id, job.job_id)
-    return jsonify({
-        "ok": True,
-        "changed": True,
-        "mode": mode,
-        "recording_id": mb_trackid,
-        "decision_version": computed_version,
-        "audit_id": audit_id,
-        "job_id": job.job_id,
-    })
+            job = jobs.start_python(_do, label=f"Attach recording ID: item {iid}")
+        except Exception:
+            transactions.update(audit_id, status="Failed", logs=["ERROR: failed to start attachment job"])
+            return jsonify({
+                "ok": False,
+                "error": "Unable to start the attachment job.",
+                "code": "attachment_job_start_failed",
+            }), 500
+        # Ownership of the reservation transfers to the job from this point
+        # on (released in its own finally above) -- do not release here.
+        job_started = True
+        transactions.attach_job(audit_id, job.job_id)
+        return jsonify({
+            "ok": True,
+            "changed": True,
+            "mode": mode,
+            "recording_id": mb_trackid,
+            "decision_version": computed_version,
+            "audit_id": audit_id,
+            "job_id": job.job_id,
+        })
+    finally:
+        if not job_started:
+            _release_attach_recording_item(iid)
 
 
 def _format_duration(seconds: Any) -> str:

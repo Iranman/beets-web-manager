@@ -120,6 +120,33 @@ def _wait_job(job_id, timeout=10):
     return job
 
 
+def _apply_fake_beet_mutation(item, cmd, mb_details_payload):
+    """Realistic-enough fake beet mutation: attach-recording's persisted-
+    state verification (re-reads the item after the mutation and compares
+    actual mb_trackid/mb_albumid/mb_releasegroupid) requires the fake item
+    to actually change when a mocked beet subprocess "succeeds" -- a fake
+    that always returns rc=0 while leaving the item untouched would make
+    every attach job fail verification."""
+    if "modify" in cmd:
+        for part in cmd:
+            if part.startswith("mb_trackid="):
+                item.mb_trackid = part.split("=", 1)[1]
+            elif part.startswith("mb_albumid="):
+                item.mb_albumid = part.split("=", 1)[1]
+            elif part.startswith("mb_releasegroupid="):
+                item.mb_releasegroupid = part.split("=", 1)[1]
+    elif "mbsync" in cmd:
+        # Mirrors real beets: mbsync fills in release identity from
+        # whatever recording ID is currently on the item.
+        details = mb_details_payload or {}
+        release = details.get("selected_release") or {}
+        if item.mb_trackid:
+            item.mb_albumid = str(release.get("mb_albumid") or details.get("mb_albumid") or item.mb_albumid or "")
+            item.mb_releasegroupid = str(
+                release.get("mb_releasegroupid") or details.get("mb_releasegroupid") or item.mb_releasegroupid or ""
+            )
+
+
 @unittest.skipIf(APP is None, f"app.py could not be imported: {_APP_IMPORT_ERROR}")
 class AttachRecordingEnforcementTests(unittest.TestCase):
     """Shared plumbing: mock the item lookup and the trusted
@@ -132,9 +159,11 @@ class AttachRecordingEnforcementTests(unittest.TestCase):
         self.item = _fake_item()
         self.client = APP.app.test_client()
         self.beet_calls = []
+        self.addCleanup(APP._ATTACH_RECORDING_RESERVED_ITEMS.clear)
 
         def fake_beet_run(cmd, log, **kwargs):
             self.beet_calls.append(cmd)
+            _apply_fake_beet_mutation(self.item, cmd, self._mb_details_payload)
             return SimpleNamespace(returncode=0, stdout="", stderr="")
 
         self.fake_beet_run = fake_beet_run
@@ -444,9 +473,11 @@ class ManualIdAttachIntegrationTests(unittest.TestCase):
         self.item = _fake_item()
         self.client = APP.app.test_client()
         self.beet_calls = []
+        self.addCleanup(APP._ATTACH_RECORDING_RESERVED_ITEMS.clear)
 
         def fake_beet_run(cmd, log, **kwargs):
             self.beet_calls.append(cmd)
+            _apply_fake_beet_mutation(self.item, cmd, self._mb_details_payload)
             return SimpleNamespace(returncode=0, stdout="", stderr="")
 
         self._acoustid_candidates = [_acoustid_candidate()]
