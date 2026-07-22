@@ -430,5 +430,140 @@ class AttachRecordingEnforcementTests(unittest.TestCase):
         self.assertEqual(resp.get_json()["code"], "invalid_mode")
 
 
+@unittest.skipIf(APP is None, f"app.py could not be imported: {_APP_IMPORT_ERROR}")
+class ManualIdAttachIntegrationTests(unittest.TestCase):
+    """Integration coverage between the manual MusicBrainz-ID workflow
+    (/api/import-review/manual-id/validate, current main) and attach
+    enforcement (/api/items/<iid>/attach-recording, this branch). A manually
+    entered Recording ID must only ever become attachable by independently
+    reappearing in attach-recording's own trusted-candidate reconstruction --
+    manual validation showing "ok: true" must never itself confer attach
+    eligibility, and there must be no separate manual-attachment endpoint."""
+
+    def setUp(self):
+        self.item = _fake_item()
+        self.client = APP.app.test_client()
+        self.beet_calls = []
+
+        def fake_beet_run(cmd, log, **kwargs):
+            self.beet_calls.append(cmd)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        self._acoustid_candidates = [_acoustid_candidate()]
+        self._mb_details_payload = _mb_details()
+
+        self._patch(mock.patch.object(APP.lib, "get_item", side_effect=lambda iid: self.item))
+        self._patch(mock.patch.object(APP, "_acoustid_lookup_cached",
+                                       side_effect=lambda path: self._acoustid_candidates))
+        self._patch(mock.patch.object(APP, "_mb_recording_search", return_value=[]))
+        self._patch(mock.patch.object(APP, "_fetch_mb_recording_details",
+                                       side_effect=lambda *a, **k: self._mb_details_payload))
+        self._patch(mock.patch.object(APP, "_beet_run", side_effect=fake_beet_run))
+        self._patch(mock.patch.object(APP, "_invalidate_lib_cache", return_value=None))
+        self._patch(mock.patch.object(APP, "_trigger_plex_refresh", return_value=None))
+
+    def _patch(self, patcher):
+        obj = patcher.start()
+        self.addCleanup(patcher.stop)
+        return obj
+
+    def _manual_validate(self, mbid, item_id=9001):
+        return self.client.post(
+            "/api/import-review/manual-id/validate",
+            json={"musicbrainz_id": mbid, "target_kind": "item", "item_id": item_id},
+        )
+
+    def _attach(self, iid, payload):
+        return self.client.post(f"/api/items/{iid}/attach-recording", json=payload)
+
+    def test_manually_validated_id_that_matches_reconstructed_set_can_be_safely_attached(self):
+        manual_resp = self._manual_validate(RECORDING_ID)
+        self.assertEqual(manual_resp.status_code, 200)
+        manual_body = manual_resp.get_json()
+        self.assertTrue(manual_body["ok"])
+        self.assertEqual(manual_body["selected_recording_candidate"]["mb_trackid"], RECORDING_ID)
+
+        # The manual-validate call above never granted attach eligibility by
+        # itself -- this only succeeds because RECORDING_ID also comes back
+        # from attach-recording's own AcoustID/MB-search reconstruction.
+        resp = self._attach(9001, {"mb_trackid": RECORDING_ID, "mode": "safe"})
+        self.assertEqual(resp.status_code, 200)
+        body = resp.get_json()
+        self.assertTrue(body["ok"])
+        self.assertTrue(body["changed"])
+
+    def test_manually_validated_id_outside_trusted_set_cannot_bypass_enforcement(self):
+        # AcoustID/MB-search only ever surface RECORDING_ID for this item.
+        # ARBITRARY_UUID resolves fine against MusicBrainz (manual validation
+        # only checks the ID exists) but must still be rejected by
+        # attach-recording -- even with an explicit confirmation -- because
+        # it never appears in attach-recording's own reconstructed set.
+        manual_resp = self._manual_validate(ARBITRARY_UUID)
+        self.assertEqual(manual_resp.status_code, 200)
+        self.assertTrue(manual_resp.get_json()["ok"])
+
+        resp = self._attach(9001, {
+            "mb_trackid": ARBITRARY_UUID,
+            "mode": "confirmed_review",
+            "confirm": True,
+            "confirmation_reason": "I manually validated this on musicbrainz.org",
+            "decision_version": "drv1:doesnotmatter",
+        })
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.get_json()["code"], "candidate_not_in_trusted_set")
+        self.assertEqual(self.beet_calls, [])
+
+    def test_manual_validate_candidate_uses_same_matching_contract_shape_as_attach(self):
+        manual_candidate = self._manual_validate(RECORDING_ID).get_json()["selected_recording_candidate"]
+        _current, candidates, _path, _fn = APP._reconstruct_track_recording_candidates(self.item, 9001)
+        attach_candidate = next(c for c in candidates if c["mb_trackid"] == RECORDING_ID)
+        # Both are produced by _compact_track_ai_candidate() over a
+        # matching_result from the same matching-contract enrichment -- one
+        # shared shape, not a second parallel manual-only contract.
+        for key in ("decision", "matching_contract", "safety_result", "conflicts", "action_eligibility"):
+            self.assertIn(key, manual_candidate)
+            self.assertIn(key, attach_candidate)
+
+    def test_safe_mode_ignores_manual_validate_success_when_local_evidence_conflicts(self):
+        # Manual validation only confirms the ID resolves on MusicBrainz; it
+        # has no opinion on local-tag conflicts, so it reports ok=True even
+        # though this item's artist tag conflicts with the recording.
+        self.item.artist = "Somebody Else Entirely"
+        manual_resp = self._manual_validate(RECORDING_ID)
+        self.assertTrue(manual_resp.get_json()["ok"])
+
+        # That must not translate into safe-attach eligibility.
+        resp = self._attach(9001, {"mb_trackid": RECORDING_ID, "mode": "safe"})
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(resp.get_json()["code"], "review_confirmation_required")
+        self.assertEqual(self.beet_calls, [])
+
+    def test_confirmed_review_rejects_missing_decision_version_not_just_stale(self):
+        # Distinct from the stale-version case: decision_version omitted
+        # entirely must also be rejected for confirmed_review. Safe mode
+        # independently recomputes the whole decision at mutation time, so it
+        # alone may omit it (see PR description for that asymmetry).
+        resp = self._attach(9001, {
+            "mb_trackid": RECORDING_ID,
+            "mode": "confirmed_review",
+            "confirm": True,
+            "confirmation_reason": "reviewed",
+        })
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.get_json()["code"], "matching_decision_stale")
+        self.assertEqual(self.beet_calls, [])
+
+    def test_no_separate_manual_attachment_endpoint_exists(self):
+        # Attach enforcement must not create a second mutation path for
+        # manually-entered IDs -- manual-id/validate is read-only evidence
+        # lookup; the only route that ever writes tags is attach-recording.
+        rules = {str(rule) for rule in APP.app.url_map.iter_rules()}
+        manual_attach_routes = {
+            rule for rule in rules
+            if "manual" in rule.lower() and "attach" in rule.lower()
+        }
+        self.assertEqual(manual_attach_routes, set())
+
+
 if __name__ == "__main__":
     unittest.main()
