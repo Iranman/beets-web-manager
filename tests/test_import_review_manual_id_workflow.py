@@ -1,9 +1,15 @@
-"""Static regression checks for Import Review refresh and manual-MBID UX.
+"""Regression checks for Import Review refresh and manual-MBID UX.
 
-These assertions protect source structure only. The repository does not
-currently include executable React component tests for this page.
+The backend manual-ID tests exercise the real Flask route with external
+MusicBrainz/preflight calls mocked at the boundary. Frontend assertions remain
+structural because this repository does not include a React component runner.
 """
+import importlib
+import os
+import sys
+import tempfile
 import unittest
+import unittest.mock as mock
 from pathlib import Path
 
 
@@ -14,6 +20,62 @@ TYPES_SOURCE = (ROOT / "frontend" / "src" / "api" / "types.ts").read_text(encodi
 IMPORT_REVIEW_SOURCE = (
     ROOT / "frontend" / "src" / "features" / "importReview" / "ImportReviewPage.tsx"
 ).read_text(encoding="utf-8")
+
+RGID = "11111111-1111-1111-1111-111111111111"
+RELEASE_ID = "22222222-2222-2222-2222-222222222222"
+ALT_RELEASE_ID = "33333333-3333-3333-3333-333333333333"
+RECORDING_ID = "44444444-4444-4444-4444-444444444444"
+
+
+
+def _comparison(release_id: str = RELEASE_ID, rgid: str = RGID) -> dict:
+    return {
+        "ok": True,
+        "selected_release_group_id": rgid,
+        "mb_releasegroupid": rgid,
+        "representative_release_id": release_id,
+        "mb_albumid": release_id,
+        "identity_validated": True,
+        "mb_track_count": 1,
+        "local_track_count": 1,
+        "matched_count": 1,
+        "extra_count": 0,
+        "comparison": [{"status": "matched", "local_title": "Song", "mb_title": "Song"}],
+        "preflight": {"ok": True, "matches": 1, "expected": 1, "audio_count": 1, "match_ratio": 1.0, "source_match_ratio": 1.0},
+    }
+
+
+def _tracklist(release_id: str = RELEASE_ID, rgid: str = RGID) -> dict:
+    return {
+        "ok": True,
+        "release_group": rgid,
+        "mb_albumid": release_id,
+        "release_title": "Manual Album",
+        "release_artist": "Manual Artist",
+        "tracks": [{"title": "Song", "position": 1, "length": 180000}],
+    }
+
+
+def _load_app_for_manual_id_tests():
+    tmp = tempfile.TemporaryDirectory()
+    env = {
+        "BEETSDIR": str(Path(tmp.name) / "config"),
+        "LIB_PATH": str(Path(tmp.name) / "config" / "musiclibrary.blb"),
+        "AI_BATCH_STATE_DIR": str(Path(tmp.name) / "ai_batch_jobs"),
+        "METADATA_CACHE_DIR": str(Path(tmp.name) / "cache"),
+        "BEETS_TRANSACTION_DIR": str(Path(tmp.name) / "transactions"),
+        "BEETS_WEB_AUTH_DISABLED": "1",
+    }
+    Path(env["BEETSDIR"]).mkdir(parents=True, exist_ok=True)
+    for key in ("OPENAI_API_KEY", "OPENROUTER_API_KEY", "AI_API_KEY"):
+        env[key] = ""
+    patcher = mock.patch.dict(os.environ, env, clear=False)
+    patcher.start()
+    sys.path.insert(0, str(ROOT))
+    sys.modules.pop("app", None)
+    app_module = importlib.import_module("app")
+    app_module.app.config.update(TESTING=True)
+    return tmp, patcher, app_module
 
 
 def _section(source: str, start: str, end: str) -> str:
@@ -208,5 +270,91 @@ class ImportReviewMatchingSafetyUiTests(unittest.TestCase):
         self.assertIn("Matched using MusicBrainz and AcoustID", fn)
         self.assertIn("optionalAiWarning(message)", fn)
         self.assertIn("AI ranking was skipped because no provider is configured.", IMPORT_REVIEW_SOURCE)
+
+class ImportReviewManualIdBehaviorTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp, cls.env_patcher, cls.app_module = _load_app_for_manual_id_tests()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.env_patcher.stop()
+        cls.tmp.cleanup()
+        sys.modules.pop("app", None)
+
+    def setUp(self):
+        self.client = self.app_module.app.test_client()
+
+    def _post(self, value: str, target_kind: str = "album"):
+        return self.client.post(
+            "/api/import-review/manual-id/validate",
+            json={"musicbrainz_id": value, "target_kind": target_kind, "path": "/tmp/manual-album", "item_id": 42},
+        )
+
+    def test_release_url_resolves_release_group_and_importable_match_without_ai_keys(self):
+        with mock.patch.object(self.app_module, "_fetch_mb_release_tracklist", return_value=_tracklist()), \
+             mock.patch.object(self.app_module, "_candidate_track_comparison_payload", return_value=_comparison()), \
+             mock.patch.object(self.app_module, "_run_ai_release_preflight", return_value={"ok": True}):
+            response = self._post(f"https://musicbrainz.org/release/{RELEASE_ID}?foo=bar#frag")
+
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["entity_type"], "release")
+        self.assertEqual(body["release_group_id"], RGID)
+        self.assertEqual(body["representative_release_id"], RELEASE_ID)
+        self.assertEqual(body["selected_match"]["source"], "manual")
+        self.assertTrue(body["selected_match"]["is_importable"])
+
+    def test_release_group_url_selects_representative_release_before_validation(self):
+        candidates = [{"mb_albumid": ALT_RELEASE_ID, "mb_releasegroupid": RGID, "title": "Edition"}]
+        with mock.patch.object(self.app_module, "_mb_release_group_candidates", return_value=candidates), \
+             mock.patch.object(self.app_module, "_fetch_mb_release_tracklist", return_value=_tracklist(ALT_RELEASE_ID)), \
+             mock.patch.object(self.app_module, "_candidate_track_comparison_payload", return_value=_comparison(ALT_RELEASE_ID)), \
+             mock.patch.object(self.app_module, "_run_ai_release_preflight", return_value={"ok": True}):
+            response = self._post(f"https://musicbrainz.org/release-group/{RGID}/")
+
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertEqual(body["entity_type"], "release-group")
+        self.assertEqual(body["release_group_id"], RGID)
+        self.assertEqual(body["representative_release_id"], ALT_RELEASE_ID)
+        self.assertEqual(body["selected_match"]["representative_release_id"], ALT_RELEASE_ID)
+        self.assertEqual(body["release_group_candidates"], candidates)
+
+    def test_recording_url_validates_recording_for_singleton_item(self):
+        details = {
+            "recording_id": RECORDING_ID,
+            "recording_title": "Song",
+            "recording_artist": "Manual Artist",
+            "linked_releases": [{"mb_albumid": RELEASE_ID, "mb_releasegroupid": RGID}],
+        }
+        fake_item = type("Item", (), {"title": "Song", "artist": "Manual Artist", "album": "", "albumartist": "", "year": "", "length": 180})()
+        with mock.patch.object(self.app_module, "_fetch_mb_recording_details", return_value=details), \
+             mock.patch.object(self.app_module.lib, "get_item", return_value=fake_item):
+            response = self._post(f"https://musicbrainz.org/recording/{RECORDING_ID}", target_kind="item")
+
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertEqual(body["entity_type"], "recording")
+        self.assertEqual(body["mb_trackid"], RECORDING_ID)
+        self.assertEqual(body["selected_recording_candidate"]["mb_trackid"], RECORDING_ID)
+        self.assertEqual(body["recording_candidates"][0]["source"], "manual")
+
+    def test_wrong_entity_type_is_rejected_behaviorally(self):
+        response = self._post(f"https://musicbrainz.org/recording/{RECORDING_ID}", target_kind="album")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("requires album Release or Release Group ID", response.get_json()["error"])
+
+    def test_manual_match_builder_keeps_target_preview_eligible_contract(self):
+        selected = self.app_module._import_review_build_revalidated_match(
+            {"suggestion": {"confidence": "high"}},
+            _comparison(),
+            {"ok": True, "matches": 1, "expected": 1, "audio_count": 1, "match_ratio": 1.0, "source_match_ratio": 1.0},
+        )
+        self.assertEqual(selected["release_group_id"], RGID)
+        self.assertEqual(selected["representative_release_id"], RELEASE_ID)
+        self.assertTrue(selected["is_importable"])
+        self.assertTrue(selected["auto_fix_eligible"])
 if __name__ == "__main__":
     unittest.main()
