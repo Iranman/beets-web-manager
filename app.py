@@ -293,6 +293,7 @@ from backend.beets_config import (
     filter_job_plugins as _filter_job_plugins,
 )
 from backend.mb_alignment import summarize_mb_track_alignment
+from backend.matching_contract import AiState, build_recording_matching_decision
 from backend.import_guard import (
     existing_track_can_block_downloaded_replacement as _guard_existing_track_can_block_downloaded_replacement,
     filter_wanted_tracks_against_missing as _guard_filter_wanted_tracks_against_missing,
@@ -3289,157 +3290,41 @@ def _track_ai_match_status(score: float, strong: float = 0.82, fuzzy: float = 0.
     return "no"
 
 
-def _enrich_track_ai_candidate(current: Dict[str, Any], candidate: Dict[str, Any], details: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def _enrich_track_ai_candidate(current: Dict[str, Any], candidate: Dict[str, Any], details: Optional[Dict[str, Any]] = None,
+                               *, ai_state: Optional[AiState] = None) -> Dict[str, Any]:
     details = details or {}
     mb_trackid = _s(candidate.get("mb_trackid") or details.get("recording_id") or "").strip().lower()
     if mb_trackid and not details:
         preferred_albumid = _s(candidate.get("mb_albumid") or next(iter(candidate.get("mb_albumids") or []), "")).strip()
         details = _fetch_mb_recording_details(mb_trackid, preferred_albumid)
+
     selected_release = _track_ai_best_linked_release(current, candidate, details) or {}
-    recording_title = _s(details.get("recording_title") or candidate.get("recording_title") or candidate.get("title") or "")
-    recording_artist = _s(details.get("recording_artist") or details.get("artist") or candidate.get("recording_artist") or candidate.get("artist") or "")
-    release_title = _s(selected_release.get("album") or details.get("album") or candidate.get("album") or "")
-    release_artist = _s(selected_release.get("artist") or details.get("albumartist") or candidate.get("release_artist") or "")
-    release_year = _track_ai_year(selected_release.get("year") or selected_release.get("date") or details.get("year") or candidate.get("year"))
-    local_title = _s(current.get("title") or "")
-    local_artist = _s(current.get("artist") or current.get("albumartist") or "")
-    local_album = _s(current.get("album") or "")
-    local_year = _track_ai_year(current.get("year"))
-    title_score = _track_ai_similarity(local_title, recording_title) if local_title and recording_title else 0.0
-    artist_score = max(
-        _track_ai_similarity(local_artist, recording_artist) if local_artist and recording_artist else 0.0,
-        _track_ai_similarity(_s(current.get("albumartist") or ""), recording_artist) if current.get("albumartist") and recording_artist else 0.0,
-    )
-    album_score = _track_ai_similarity(local_album, release_title) if local_album and release_title else 0.0
-    local_duration = _track_ai_duration_seconds(current)
-    suggested_duration = _track_ai_candidate_duration_seconds(candidate, {**details, "selected_release": selected_release})
-    duration_delta = None
-    duration_status = "unknown"
-    if local_duration and suggested_duration:
-        duration_delta = abs(local_duration - suggested_duration)
-        duration_status = "yes" if duration_delta <= 4 else ("tolerance" if duration_delta <= 10 else "conflict")
-    year_status = "unknown"
-    if local_year and release_year:
-        year_status = "yes" if local_year == release_year else "conflict"
-    release_group_id = _s(selected_release.get("mb_releasegroupid") or details.get("mb_releasegroupid") or candidate.get("mb_releasegroupid") or "").strip().lower()
-    local_release_group_id = _s(current.get("mb_releasegroupid") or "").strip().lower()
-    release_group_status = "unknown"
-    if local_release_group_id and release_group_id:
-        release_group_status = "yes" if local_release_group_id == release_group_id else "conflict"
     linked_releases = candidate.get("linked_releases") or details.get("linked_releases") or []
-    matching_local_release = bool(
-        linked_releases
-        and any(
-            (_track_ai_similarity(local_album, _s(r.get("album") or "")) >= 0.78 if local_album else False)
-            and (not local_year or _track_ai_year(r.get("year") or r.get("date")) == local_year)
-            for r in linked_releases
-            if isinstance(r, dict)
-        )
+    matching_result = build_recording_matching_decision(
+        current=current,
+        candidate=candidate,
+        details=details,
+        selected_release=selected_release,
+        linked_releases=linked_releases,
+        ai_state=ai_state,
+        similarity_fn=_track_ai_similarity,
     )
-    conflicts: List[str] = []
-    if title_score and title_score < 0.68:
-        conflicts.append("title_conflict")
-    if artist_score and artist_score < 0.68:
-        conflicts.append("artist_conflict")
-    if local_album and release_title and album_score < 0.55:
-        conflicts.append("album_conflict")
-    if year_status == "conflict":
-        conflicts.append("year_conflict")
-    if duration_status == "conflict":
-        conflicts.append("duration_conflict")
-    if release_group_status == "conflict":
-        conflicts.append("release_group_conflict")
-    source = _s(candidate.get("source") or (candidate.get("_match_score") or {}).get("source") or "mb").lower()
-    acoustid_score = _audio_identity_score(candidate) if source == "acoustid" else 0.0
-    match_score = float((candidate.get("_match_score") or {}).get("total") or 0.0)
-    evidence_supported = source == "acoustid" or match_score >= 0.78 or float(candidate.get("score") or 0) >= 90
-    hard_conflict = "title_conflict" in conflicts or "artist_conflict" in conflicts
-    needs_confirmation = bool(conflicts and not hard_conflict)
-    if not mb_trackid:
-        safety_result = "No verified match"
-        safety_key = "none"
-        recommended_action = "Search MusicBrainz manually"
-    elif hard_conflict:
-        safety_result = "Conflict"
-        safety_key = "conflict"
-        recommended_action = "Reject candidate"
-    elif evidence_supported and not conflicts and title_score >= 0.82 and artist_score >= 0.72:
-        safety_result = "Safe to attach"
-        safety_key = "safe"
-        recommended_action = "Attach Recording ID"
-    else:
-        safety_result = "Needs review"
-        safety_key = "review"
-        recommended_action = "Confirm conflicts, then attach Recording ID" if conflicts else "Use this candidate after review"
-        needs_confirmation = True
-    reason = _s(candidate.get("reason") or "")
-    if not reason:
-        if source == "acoustid":
-            reason = "AcoustID fingerprint matched this recording; linked release context is ranked against local tags."
-        else:
-            reason = "MusicBrainz recording search matched the local title and artist clues."
-    if matching_local_release and len(linked_releases) > 1:
-        reason = f"{reason} Same recording appears on multiple releases; local album/year evidence selected the best linked release."
-    decision = {
-        "title_match": {"status": _track_ai_match_status(title_score), "score": round(title_score, 3), "local": local_title, "suggested": recording_title},
-        "artist_match": {"status": _track_ai_match_status(artist_score), "score": round(artist_score, 3), "local": local_artist, "suggested": recording_artist},
-        "album_match": {"status": _track_ai_match_status(album_score), "score": round(album_score, 3), "local": local_album, "suggested": release_title},
-        "year_match": {"status": year_status, "local": local_year, "suggested": release_year},
-        "duration_match": {"status": duration_status, "delta_seconds": round(duration_delta, 1) if duration_delta is not None else None},
-        "release_group_match": {"status": release_group_status, "local": local_release_group_id, "suggested": release_group_id},
-        "confidence_score": round(match_score or acoustid_score, 3),
-        "safety_result": safety_result,
-    }
-    candidate.update({
-        "candidate_type": "recording",
-        "match_method": source,
-        "source": source,
-        "mb_trackid": mb_trackid,
-        "mb_url": candidate.get("mb_url") or (f"https://musicbrainz.org/recording/{mb_trackid}" if mb_trackid else ""),
-        "musicbrainz_url": candidate.get("mb_url") or (f"https://musicbrainz.org/recording/{mb_trackid}" if mb_trackid else ""),
-        "recording_title": recording_title,
-        "recording_artist": recording_artist,
-        "title": recording_title or candidate.get("title", ""),
-        "artist": recording_artist or candidate.get("artist", ""),
-        "selected_release": selected_release,
-        "linked_releases": linked_releases,
-        "same_recording_release_count": len(linked_releases),
-        "matching_local_release_found": matching_local_release,
-        "release_title": release_title,
-        "release_artist": release_artist,
-        "release_date": _s(selected_release.get("date") or details.get("date") or ""),
-        "release_year": release_year,
-        "album": release_title or candidate.get("album", ""),
-        "year": release_year or candidate.get("year", ""),
-        "mb_albumid": _s(selected_release.get("mb_albumid") or details.get("mb_albumid") or candidate.get("mb_albumid") or "").strip().lower(),
-        "mb_releasegroupid": release_group_id,
-        "mb_releasegroupurl": _s(selected_release.get("mb_releasegroupurl") or details.get("mb_releasegroupurl") or ""),
-        "track_number": _s(selected_release.get("track_number") or selected_release.get("track") or ""),
-        "medium_position": selected_release.get("medium_position"),
-        "country": _s(selected_release.get("country") or candidate.get("country") or ""),
-        "medium_format": _s(selected_release.get("medium_format") or selected_release.get("media_format") or candidate.get("medium_format") or ""),
-        "acoustid_score": round(acoustid_score, 3),
-        "confidence": "high" if safety_key == "safe" else ("low" if safety_key in {"conflict", "none"} else "medium"),
-        "confidence_score": round(match_score or acoustid_score, 3),
-        "reason": reason,
-        "conflicts": conflicts,
-        "recommended_action": recommended_action,
-        "requires_confirmation": needs_confirmation,
-        "safety_result": safety_result,
-        "safety_key": safety_key,
-        "decision": decision,
-    })
+    candidate.update(matching_result.to_review_recording_candidate())
     return candidate
 
 
 def _compact_track_ai_candidate(candidate: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     c = candidate or {}
-    score = c.get("_match_score") or {}
+    # Use the sanitized score_breakdown written by the matching contract
+    # (build_recording_matching_decision), never the raw candidate["_match_score"]
+    # -- the raw dict is untrusted and must never reach browser-visible JSON.
+    score = c.get("score_breakdown") or {}
     try:
         candidate_index = int(c.get("candidate_index", -1))
     except Exception:
         candidate_index = -1
     selected_release = c.get("selected_release") or {}
+    decision = c.get("decision") if isinstance(c.get("decision"), dict) else {}
     return {
         "candidate_index": candidate_index,
         "candidate_type": _s(c.get("candidate_type") or "recording"),
@@ -3469,21 +3354,28 @@ def _compact_track_ai_candidate(candidate: Optional[Dict[str, Any]]) -> Dict[str
         "confidence_score": c.get("confidence_score"),
         "score_breakdown": score,
         "decision": c.get("decision") or {},
-        "conflicts": c.get("conflicts") or [],
-        "recommended_action": _s(c.get("recommended_action") or ""),
+        "conflicts": c.get("conflicts") or decision.get("conflicts") or [],
+        "warnings": c.get("warnings") or decision.get("warnings") or [],
+        "review_required": bool(c.get("review_required") or decision.get("review_required")),
+        "action_eligibility": decision.get("action_eligibility") or c.get("action_eligibility") or {},
+        "eligibility_reason": _s(decision.get("eligibility_reason") or c.get("eligibility_reason") or ""),
+        "recommended_action": _s(c.get("recommended_action") or decision.get("recommended_action") or ""),
         "requires_confirmation": bool(c.get("requires_confirmation")),
         "safety_result": _s(c.get("safety_result") or ""),
         "safety_key": _s(c.get("safety_key") or ""),
         "reason": _s(c.get("reason") or ""),
         "acoustid_score": c.get("acoustid_score"),
         "mb_albumid": _s(c.get("mb_albumid", "")),
+        "release_id": _s(c.get("release_id") or c.get("mb_albumid", "")),
         "mb_albumids": c.get("mb_albumids", []) or [],
         "mb_releasegroupid": _s(c.get("mb_releasegroupid", "")),
+        "release_group_id": _s(c.get("release_group_id") or c.get("mb_releasegroupid", "")),
         "mb_releasegroupurl": _s(c.get("mb_releasegroupurl", "")),
         "selected_release": selected_release,
         "linked_releases": (c.get("linked_releases") or [])[:12],
         "same_recording_release_count": c.get("same_recording_release_count") or len(c.get("linked_releases") or []),
         "matching_local_release_found": bool(c.get("matching_local_release_found")),
+        "matching_contract": c.get("matching_contract") or {},
     }
 
 
@@ -3560,6 +3452,7 @@ def ai_suggest(iid):
     # runs unconditionally, so a missing/invalid key still yields a match.
     api_key = os.environ.get("OPENAI_API_KEY", "")
     ai_available = bool(api_key)
+    ai_configured = ai_available  # preserved for later boundary; ai_available itself may be mutated below
 
     item_path = _item_ai_abs_path(item)
     filename = Path(item_path or _s(item.path)).name
@@ -3631,7 +3524,17 @@ def ai_suggest(iid):
         mid = c.get("mb_trackid", "")
         if mid and mid not in seen_ids:
             seen_ids.add(mid)
-            c["source"] = c.get("source") or ("acoustid" if c in acoustid_cands else "mb")
+            is_acoustid = c in acoustid_cands
+            c["source"] = c.get("source") or ("acoustid" if is_acoustid else "mb")
+            # Explicit fingerprint provenance: true only for candidates that
+            # actually came back from a successful AcoustID lookup, not
+            # inferred later from source string or score alone.
+            c["fingerprint_attempted"] = bool(item_path)
+            c["fingerprint_matched"] = bool(is_acoustid)
+            c["fingerprint_status"] = c.get("fingerprint_status") or (
+                "matched" if is_acoustid else ("no_result" if item_path else "not_attempted")
+            )
+            c["mapped_recording_id"] = mid if is_acoustid else ""
             c["_match_score"] = _score_track_ai_candidate(
                 current,
                 _mb_t,
@@ -3730,6 +3633,11 @@ def ai_suggest(iid):
             ai_available = False
             ai_unavailable_reason = _classify_openai_error(exc)
 
+    # Captured before the fallback below overwrites `suggestions` with a
+    # mechanically-derived (non-AI) guess, so the matching contract never
+    # claims AI contributed when it did not actually respond.
+    ai_contributed = suggestions is not None
+
     if suggestions is None:
         # AI unavailable/failed -- fall back to the top-ranked AcoustID/
         # MusicBrainz candidate (already gathered above) instead of
@@ -3819,7 +3727,27 @@ def ai_suggest(iid):
                         or next(iter(selected_candidate.get("mb_albumids") or []), "")
                     )
                     details = _fetch_mb_recording_details(mb_trackid, preferred_albumid)
-                    _enrich_track_ai_candidate(current, selected_candidate, details)
+                    # All facts below are genuinely known at this point in
+                    # the request (AI has already been attempted, and the
+                    # fallback path -- if AI failed -- has already run), so
+                    # this is the one call site where a real AiState can be
+                    # reported instead of "not evaluated at this boundary".
+                    ai_state_for_selected = AiState(
+                        state_known=True,
+                        configured=ai_configured,
+                        attempted=ai_configured,
+                        available=ai_contributed,
+                        unavailability_reason=ai_unavailable_reason,
+                        contribution=(
+                            {
+                                "mb_trackid": suggestions.get("mb_trackid", ""),
+                                "confidence": suggestions.get("confidence", ""),
+                                "reason": suggestions.get("reason", ""),
+                            }
+                            if ai_contributed else {}
+                        ),
+                    )
+                    _enrich_track_ai_candidate(current, selected_candidate, details, ai_state=ai_state_for_selected)
                     # Fields MB fills authoritatively (override AI guesses)
                     _mb_authoritative = {"artist", "mb_albumid", "mb_artistid",
                                          "track", "tracktotal", "disc", "disctotal",
