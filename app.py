@@ -1713,7 +1713,7 @@ _AUTH_PUBLIC_ENDPOINTS = {
 }
 _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)\b(api[_-]?key|token|password|secret|authorization|cookie|client[_-]?secret)"
-    r"(\s*[:=]\s*)([^\s,;}\]\"]+)"
+    r"(\s*[:=]\s*)(?:(?:Bearer|Basic)\s+)?(\[REDACTED\]|[^\s,;}\]\"]+)"
 )
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 _REDACTED_SECRET = "[REDACTED]"
@@ -2194,10 +2194,16 @@ def _json_security_error(status: int, message: str):
     return response
 
 
+def _redact_secret_assignment_match(match: "re.Match[str]") -> str:
+    if match.group(3) == _REDACTED_SECRET:
+        return match.group(0)
+    return f"{match.group(1)}{match.group(2)}{_REDACTED_SECRET}"
+
+
 def _redact_security_text(value: Any) -> str:
     text = _s(value)
     text = _CONTROL_CHAR_RE.sub("?", text)
-    return _SECRET_ASSIGNMENT_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}{_REDACTED_SECRET}", text)
+    return _SECRET_ASSIGNMENT_RE.sub(_redact_secret_assignment_match, text)
 
 
 def _is_public_endpoint() -> bool:

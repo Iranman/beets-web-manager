@@ -390,6 +390,34 @@ class ImportReviewManualIdBehaviorTests(unittest.TestCase):
         self.assertEqual(response.get_json()["error"], "MusicBrainz lookup failed.")
         self.assertNoSensitiveExceptionDetails(response)
 
+    def test_redact_security_text_fully_redacts_bearer_and_basic_auth_values(self):
+        redact = self.app_module._redact_security_text
+        cases = [
+            "Authorization: Bearer abc123xyzSECRETTOKEN",
+            "Authorization=Bearer abc123xyzSECRETTOKEN",
+            "Authorization: Basic dXNlcjpwYXNzd29yZA==",
+        ]
+        for text in cases:
+            result = redact(text)
+            self.assertNotIn("abc123xyzSECRETTOKEN", result)
+            self.assertNotIn("dXNlcjpwYXNzd29yZA==", result)
+            self.assertIn("[REDACTED]", result)
+
+    def test_redact_security_text_is_idempotent(self):
+        redact = self.app_module._redact_security_text
+        cases = [
+            "token=supersecretvalue",
+            "Authorization: Bearer abc123xyzSECRETTOKEN",
+            "api_key: my-secret-key-123",
+        ]
+        for text in cases:
+            first = redact(text)
+            second = redact(first)
+            third = redact(second)
+            self.assertEqual(first, second)
+            self.assertEqual(second, third)
+            self.assertNotIn("]]", third)
+
     def test_manual_match_builder_keeps_target_preview_eligible_contract(self):
         selected = self.app_module._import_review_build_revalidated_match(
             {"suggestion": {"confidence": "high"}},
