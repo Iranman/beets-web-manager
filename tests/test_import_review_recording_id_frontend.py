@@ -124,9 +124,12 @@ class ImportReviewRecordingIdFrontendTests(unittest.TestCase):
     def test_recording_rows_stay_out_of_album_match_state(self):
         self.assertIn("if (item.target_kind === 'item') return item.mb_trackid || '';", IMPORT_REVIEW_SOURCE)
         handler = _source_between(IMPORT_REVIEW_SOURCE, "const handleMbidChange = useCallback(", "const handleUseCandidate = useCallback(")
-        self.assertIn("if (item.target_kind === 'item')", handler)
-        self.assertIn("delete next[item.id];", handler)
+        self.assertNotIn("if (item.target_kind === 'item')", handler)
+        self.assertIn("MusicBrainz ID changed. Validate ID before importing.", handler)
         self.assertIn("delete targetPreviewKeysRef.current[item.id];", handler)
+        use_candidate = _source_between(IMPORT_REVIEW_SOURCE, "const handleUseCandidate = useCallback(", "const handleSelectMatch = useCallback(")
+        self.assertIn("if (activeItem.target_kind === 'item')", use_candidate)
+        self.assertIn("delete next[activeItem.id];", use_candidate)
 
 
 if __name__ == "__main__":
