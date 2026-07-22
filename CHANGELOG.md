@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The project uses Semantic Versioning.
 
+## Unreleased
+
+### Fixed
+
+- Issue #14: fresh Docker installs now use a coherent Beets/plugin dependency set, load bundled plugins from `/app/beetsplug`, keep optional Discogs non-interactive until configured, and initialize ReplayGain with the installed `ffmpeg` backend.
+
 ## v0.1.0 - 2026-07-16
 
 ### Added

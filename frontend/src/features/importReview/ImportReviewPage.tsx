@@ -40,11 +40,13 @@ import {
   suggestAlbum,
   suggestFolder,
   suggestItem,
+  validateManualMusicBrainzId,
 } from '../../api/client';
 import type {
   AiSuggestResponse,
   AiSuggestion,
   FolderStatsResponse,
+  ImportReviewManualIdResponse,
   ImportTargetPreviewResponse,
   JobStartResponse,
   RecordingLocalEvidence,
@@ -90,6 +92,16 @@ type TargetPreviewState = {
   error?: string;
 };
 
+type ManualValidationState = {
+  status: 'idle' | 'checking' | 'valid' | 'error';
+  message: string;
+  statusLines?: string[];
+  musicbrainzUrl?: string;
+  entityType?: ImportReviewManualIdResponse['entity_type'];
+  releaseGroupCandidates?: NonNullable<ImportReviewManualIdResponse['release_group_candidates']>;
+  selectedRecordingCandidate?: ReviewRecordingCandidate;
+};
+
 type SelectedMatch = {
   release_group_id: string;
   representative_release_id: string;
@@ -118,7 +130,19 @@ type SelectedMatch = {
   representative_release_group_id?: string;
   rejected_representative_release_id?: string;
   release_group_diagnostics?: Record<string, unknown>;
-  source: 'ai' | 'candidate' | 'manual';
+  source: 'ai' | 'candidate' | 'manual' | 'musicbrainz_acoustid' | 'musicbrainz' | string;
+  ai_available?: boolean;
+  ai_unavailable_reason?: string;
+  matching_method?: string;
+  warnings?: string[];
+  action_eligibility?: unknown;
+  eligibility_reason?: string;
+  matching_contract?: Record<string, unknown>;
+  acoustid_corroboration?: string;
+  fingerprint_conflicts?: string[];
+  recording_id_conflicts?: string[];
+  title_mismatch_warnings?: string[];
+  required_review?: boolean;
 };
 
 type ConfirmIntent =
@@ -261,6 +285,27 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
   return Promise.race([promise, timeout]).finally(() => {
     if (timer !== undefined) window.clearTimeout(timer);
   });
+}
+
+function isEditableTarget(target: EventTarget | null): boolean {
+  const element = target as HTMLElement | null;
+  const tag = element?.tagName?.toLowerCase() ?? '';
+  return tag === 'input' || tag === 'textarea' || tag === 'select' || Boolean(element?.isContentEditable);
+}
+
+function reviewQueueSnapshot(items: ReviewItem[], counts: ReviewCounts): string {
+  return JSON.stringify({
+    counts,
+    ids: items.map((item) => [item.id, reviewItemStateKey(item)]),
+  });
+}
+
+function hasUnsavedManualId(validations: Record<string, ManualValidationState>): boolean {
+  return Object.values(validations).some((state) => state.status === 'idle' && Boolean(state.message));
+}
+
+function reviewInteractionIsExpanded(): boolean {
+  return Boolean(document.querySelector('[role="dialog"], [aria-modal="true"], [aria-expanded="true"]'));
 }
 
 function isMusicLibraryPath(path?: string): boolean {
@@ -413,7 +458,7 @@ function matchReviewNote(item: ReviewItem): string {
     return `The selected release failed tracklist preflight (${preflight.matches ?? 0}/${preflight.expected ?? 0}). Pick a release that matches this folder before importing.`;
   }
   if (item.type === 'pending_ai' && !item.mb_valid) {
-    return 'No valid MusicBrainz release-group ID is selected yet. Use AI Suggest, paste a release-group ID, or delete the source folder if the files are wrong.';
+    return 'No valid MusicBrainz release-group ID is selected yet. Use Find Match, enter a MusicBrainz ID, or delete the source folder if the files are wrong.';
   }
   return '';
 }
@@ -1040,7 +1085,7 @@ function RecordingIdEvidencePanel({
               <DetailRow label="Recommended action" value={displayCandidate.recommended_action} />
             </div>
           ) : (
-            <div className="mt-2 text-zinc-500">Run AI Suggest to load backend recording candidates.</div>
+            <div className="mt-2 text-zinc-700">Use Find Match or Enter MusicBrainz ID to load backend recording evidence.</div>
           )}
           {displayCandidate?.reason ? <div className="mt-2 text-zinc-700">{displayCandidate.reason}</div> : null}
           {displayCandidate?.conflicts?.length ? <div className="mt-2 font-medium text-amber-800">Backend conflicts: {displayCandidate.conflicts.join(', ')}</div> : null}
@@ -1136,7 +1181,7 @@ function existingAlbumId(item: ReviewItem): number {
 }
 
 function targetPreviewKey(item: ReviewItem, selectedMatch?: SelectedMatch): string {
-  if (!selectedMatch || selectedMatch.source === 'manual') return '';
+  if (!selectedMatch) return '';
   const mapped = selectedMatch.track_mapping
     .map((row) => `${row.num}:${row.status}:${row.source_path || ''}:${row.mb_trackid || row.mb_title || row.local_title}`)
     .join('|');
@@ -1157,18 +1202,16 @@ function targetPreviewKey(item: ReviewItem, selectedMatch?: SelectedMatch): stri
 
 function actionLabel(item: ReviewItem, selectedMatch?: SelectedMatch, preview?: ImportTargetPreviewResponse): string {
   if (item.type === 'library_no_mb') return item.target_kind === 'item' ? 'Attach recording ID' : 'Match album';
-  const selectedCount = selectedMatch && selectedMatch.source !== 'manual'
-    ? selectedImportSourceFiles(selectedMatch, preview).length
-    : 0;
+  const selectedCount = selectedMatch ? selectedImportSourceFiles(selectedMatch, preview).length : 0;
   const previewCount = preview?.tracks_to_import_count ?? selectedCount;
   if (selectedMatch?.identity_validated === false) return 'Import blocked';
-  if (selectedMatch?.is_partial_import && selectedMatch.source !== 'manual') {
+  if (selectedMatch?.is_partial_import) {
     const n = Math.max(0, Math.min(selectedCount || previewCount, previewCount));
     return existingAlbumId(item)
       ? `Repair ${n} matched track${n === 1 ? '' : 's'}`
       : `Import ${n} matched track${n === 1 ? '' : 's'}`;
   }
-  if (selectedMatch?.auto_fix_eligible && selectedMatch.source !== 'manual') {
+  if (selectedMatch?.auto_fix_eligible) {
     return existingAlbumId(item) ? 'Complete Verified Repair' : 'Complete Verified Import';
   }
   return existingAlbumId(item) ? 'Repair with ID' : 'Import with ID';
@@ -1190,7 +1233,7 @@ function targetPreviewBlockReason(
   targetPreviewState?: TargetPreviewState,
 ): string {
   const importLike = item.type === 'pending_ai' && !existingAlbumId(item);
-  if (!importLike || !selectedMatch || selectedMatch.source === 'manual') return '';
+  if (!importLike || !selectedMatch) return '';
   if (!selectedMatch.is_importable) return '';
   if (!targetPreviewState || targetPreviewState.status === 'idle') {
     return 'Import blocked until the target path preview is available.';
@@ -1232,7 +1275,7 @@ function applyBlockReason(
   }
   const importLike = item.type === 'pending_ai' && !existingAlbumId(item);
   if (!importLike) {
-    if (selectedMatch?.preflight_status === 'failed' && selectedMatch.source !== 'manual') {
+    if (selectedMatch?.preflight_status === 'failed') {
       return 'Import blocked because this candidate failed tracklist preflight.';
     }
     return '';
@@ -1307,7 +1350,7 @@ function shouldShowReadyBucket(
 ): boolean {
   if (item.type === 'skipped' || hasAudioMismatchEvidence(item)) return false;
   if (shouldShowBlockedBucket(item, mbid, selectedMatch, targetPreviewState)) return false;
-  if (!selectedMatch || selectedMatch.source === 'manual') return false;
+  if (!selectedMatch) return false;
   if (!selectedMatch.is_importable) return false;
   if (!sameMbid(selectedMatch.release_group_id, mbid)) return false;
   if (!isMusicBrainzUuid(selectedMatch.release_group_id)) return false;
@@ -1326,7 +1369,7 @@ function blockedActionHint(reason: string): string {
   if (value.includes('music format preferences') || value.includes('format policy')) return 'Choose another source or update Music Format Preferences before retrying.';
   if (value.includes('target path')) return 'Fix the target path conflict, then retry this item.';
   if (value.includes('out of sync') || value.includes('visible musicbrainz match')) return 'Select the visible candidate again so the ID field and comparison agree.';
-  if (value.includes('release group id') || value.includes('valid musicbrainz')) return 'Select AI Suggest or paste a valid MusicBrainz Release Group ID.';
+  if (value.includes('release group id') || value.includes('valid musicbrainz')) return 'Use Find Match or enter a valid MusicBrainz Release or Release Group ID.';
   if (value.includes('preflight') || value.includes('tracklist') || value.includes('not importable')) return 'Choose a release that matches the files, or delete the source folder if the audio is wrong.';
   if (value.includes('no verified tracks') || value.includes('selected file count')) return 'Adjust the selected track mapping before importing.';
   return 'Resolve this block before importing; uncertain audio stays in review.';
@@ -1711,6 +1754,18 @@ function buildAiSelectedMatch(suggestion: AiSuggestion): SelectedMatch {
     candidate_identity_error: candidateIdentityError,
     representative_release_group_id: suggestion.representative_release_group_id || '',
     rejected_representative_release_id: suggestion.rejected_representative_release_id || '',
+    ai_available: suggestion.ai_available,
+    ai_unavailable_reason: suggestion.ai_unavailable_reason,
+    matching_method: suggestion.matching_method || suggestion.match_method,
+    warnings: suggestion.warnings,
+    action_eligibility: suggestion.action_eligibility,
+    eligibility_reason: suggestion.eligibility_reason,
+    matching_contract: suggestion.matching_contract,
+    acoustid_corroboration: suggestion.acoustid_corroboration,
+    fingerprint_conflicts: suggestion.fingerprint_conflicts,
+    recording_id_conflicts: suggestion.recording_id_conflicts,
+    title_mismatch_warnings: suggestion.title_mismatch_warnings,
+    required_review: suggestion.required_review,
     source: 'ai',
   };
 }
@@ -1720,6 +1775,127 @@ function savedSelectedMatch(item: ReviewItem): SelectedMatch | null {
   if (!suggestion?.track_mapping?.length) return null;
   const match = buildAiSelectedMatch(suggestionWithOrigin(item, suggestion));
   return match.track_mapping.length ? match : null;
+}
+
+type MatchingSafetyRow = { label: string; value: string; tone?: 'ok' | 'warn' | 'neutral' };
+
+function isRecordValue(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+}
+
+function safetyText(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'boolean') return value ? 'yes' : 'no';
+  if (typeof value === 'number') return Number.isFinite(value) ? String(value) : '';
+  if (typeof value === 'string') return value.trim();
+  if (Array.isArray(value)) return value.map(safetyText).filter(Boolean).join(', ');
+  if (isRecordValue(value)) {
+    const eligible = typeof value.eligible === 'boolean' ? (value.eligible ? 'eligible' : 'not eligible') : '';
+    const reason = safetyText(value.reason || value.eligibility_reason || value.status || value.decision);
+    return [eligible, reason].filter(Boolean).join(': ') || JSON.stringify(value).slice(0, 180);
+  }
+  return '';
+}
+
+function safetyList(...values: unknown[]): string[] {
+  const out: string[] = [];
+  for (const value of values) {
+    if (!value) continue;
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const text = safetyText(item);
+        if (text) out.push(text);
+      }
+    } else {
+      const text = safetyText(value);
+      if (text) out.push(text);
+    }
+  }
+  return [...new Set(out)];
+}
+
+function optionalAiWarning(message: string): string {
+  return /OPENAI_API_KEY not configured|OPENROUTER_API_KEY|AI_API_KEY|AI provider not configured|no AI provider/i.test(message)
+    ? 'AI ranking was skipped because no provider is configured.'
+    : '';
+}
+function matchingSafetyData(response?: AiSuggestResponse, selectedMatch?: SelectedMatch): { rows: MatchingSafetyRow[]; warnings: string[] } {
+  const suggestion = response?.suggestion ?? response?.suggestions;
+  const contract = isRecordValue(selectedMatch?.matching_contract)
+    ? selectedMatch?.matching_contract
+    : isRecordValue(suggestion?.matching_contract)
+      ? suggestion?.matching_contract
+      : isRecordValue(response?.matching_contract)
+        ? response?.matching_contract
+        : undefined;
+  const rows: MatchingSafetyRow[] = [];
+  const source = selectedMatch?.source || safetyText(suggestion?.matching_method || response?.matching_method || contract?.source);
+  if (source) rows.push({ label: 'Matching source', value: source.replace(/_/g, ' '), tone: 'neutral' });
+  const aiAvailable = selectedMatch?.ai_available ?? suggestion?.ai_available ?? response?.ai_available;
+  const aiReason = selectedMatch?.ai_unavailable_reason || suggestion?.ai_unavailable_reason || response?.ai_unavailable_reason || '';
+  if (aiAvailable !== undefined || aiReason) {
+    rows.push({
+      label: 'AI availability',
+      value: aiAvailable === false ? (aiReason || 'AI ranking is not configured.') : 'AI ranking available',
+      tone: aiAvailable === false ? 'warn' : 'ok',
+    });
+  }
+  const eligibility = selectedMatch?.action_eligibility ?? suggestion?.action_eligibility ?? response?.action_eligibility ?? contract?.action_eligibility;
+  const eligibilityText = safetyText(eligibility);
+  if (eligibilityText) rows.push({ label: 'Eligibility decision', value: eligibilityText, tone: /not|block|fail|ineligible/i.test(eligibilityText) ? 'warn' : 'ok' });
+  const eligibilityReason = selectedMatch?.eligibility_reason || suggestion?.eligibility_reason || response?.eligibility_reason || safetyText(contract?.eligibility_reason);
+  if (eligibilityReason) rows.push({ label: 'Eligibility reason', value: eligibilityReason, tone: /block|conflict|fail|review/i.test(eligibilityReason) ? 'warn' : 'neutral' });
+  const requiredReview = selectedMatch?.required_review ?? suggestion?.required_review ?? response?.required_review ?? contract?.required_review;
+  if (requiredReview !== undefined) rows.push({ label: 'Required review', value: safetyText(requiredReview), tone: requiredReview ? 'warn' : 'ok' });
+  const corroboration = selectedMatch?.acoustid_corroboration || suggestion?.acoustid_corroboration || response?.acoustid_corroboration || safetyText(contract?.acoustid_corroboration);
+  if (corroboration) rows.push({ label: 'AcoustID corroboration', value: corroboration, tone: /conflict|mismatch|no/i.test(corroboration) ? 'warn' : 'ok' });
+  const warnings = safetyList(
+    selectedMatch?.warnings,
+    suggestion?.warnings,
+    response?.warnings,
+    contract?.warnings,
+    selectedMatch?.fingerprint_conflicts,
+    suggestion?.fingerprint_conflicts,
+    response?.fingerprint_conflicts,
+    contract?.fingerprint_conflicts,
+    selectedMatch?.recording_id_conflicts,
+    suggestion?.recording_id_conflicts,
+    response?.recording_id_conflicts,
+    contract?.recording_id_conflicts,
+    selectedMatch?.title_mismatch_warnings,
+    suggestion?.title_mismatch_warnings,
+    response?.title_mismatch_warnings,
+    contract?.title_mismatch_warnings,
+  );
+  return { rows, warnings };
+}
+
+function MatchingSafetyPanel({ response, selectedMatch }: { response?: AiSuggestResponse; selectedMatch?: SelectedMatch }) {
+  const { rows, warnings } = matchingSafetyData(response, selectedMatch);
+  if (!rows.length && !warnings.length) return null;
+  return (
+    <div className="mt-3 rounded border border-graphite-200 bg-graphite-50 px-3 py-2 text-xs text-zinc-700" data-import-review-matching-safety>
+      <div className="font-semibold text-zinc-900">Backend matching safety</div>
+      {rows.length ? (
+        <div className="mt-2 grid gap-1 sm:grid-cols-2">
+          {rows.map((row) => (
+            <div key={`${row.label}:${row.value}`}>
+              <span className="font-medium text-zinc-900">{row.label}:</span>{' '}
+              <span className={row.tone === 'warn' ? 'text-amber-900' : row.tone === 'ok' ? 'text-emerald-800' : 'text-zinc-700'}>{row.value}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {warnings.length ? (
+        <div className="mt-2 rounded border border-amber-300 bg-amber-50 px-2 py-1.5 text-amber-950">
+          <div className="font-semibold">Warnings</div>
+          <ul className="mt-1 list-disc space-y-1 pl-4">
+            {warnings.map((warning) => <li key={warning}>{warning}</li>)}
+          </ul>
+        </div>
+      ) : null}
+    </div>
+  );
 }
 const TRACK_STATUS_COLORS: Record<TrackRow['status'], string> = {
   matched: 'text-emerald-700',
@@ -2557,9 +2733,14 @@ function ReviewCard({
   actionState,
   selectedMatch,
   targetPreviewState,
+  manualValidation,
+  manualFocusToken,
   onMbidChange,
   onUseCandidate,
   onSelectMatch,
+  onFocusManualEntry,
+  onValidateManualId,
+  onClearManualId,
   onSuggest,
   onApply,
   onDismiss,
@@ -2573,9 +2754,14 @@ function ReviewCard({
   actionState?: ActionState;
   selectedMatch?: SelectedMatch;
   targetPreviewState?: TargetPreviewState;
+  manualValidation?: ManualValidationState;
+  manualFocusToken: number;
   onMbidChange: (value: string) => void;
   onUseCandidate: (mbid: string) => void;
   onSelectMatch?: (match: SelectedMatch) => void;
+  onFocusManualEntry: () => void;
+  onValidateManualId: () => void;
+  onClearManualId: () => void;
   onSuggest: () => void;
   onApply: () => void;
   onDismiss: () => void;
@@ -2583,9 +2769,7 @@ function ReviewCard({
   onCleanupFiles: () => void;
   importJobActive?: boolean;
 }) {
-  const selectedConfidence = selectedMatch && selectedMatch.source !== 'manual'
-    ? selectedMatch.confidence_level
-    : null;
+  const selectedConfidence = selectedMatch ? selectedMatch.confidence_level : null;
   const selectedConfidenceScore = selectedMatch?.confidence_score ?? null;
   const selectedConfidenceText = selectedConfidence
     ? `${confidenceLabel(selectedConfidence)}${selectedConfidenceScore !== null ? ` (${formatPercent(selectedConfidenceScore)})` : ''}`
@@ -2608,7 +2792,7 @@ function ReviewCard({
   const navigate = useNavigate();
   const isLibraryNoMb = item.type === 'library_no_mb' && Boolean(item.album_id);
   const matchBucket = itemMatchBucket(item);
-  const selectedMatchActive = Boolean(selectedMatch && selectedMatch.source !== 'manual');
+  const selectedMatchActive = Boolean(selectedMatch);
   const audioMismatchActive = hasAudioMismatchEvidence(item);
   const applyBlockedReason = applyBlockReason(item, mbid, selectedMatch, targetPreviewState);
   const blockedActive = shouldShowBlockedBucket(item, mbid, selectedMatch, targetPreviewState);
@@ -2673,6 +2857,23 @@ function ReviewCard({
     if (item.path) params.set('path', item.path);
     navigate(`/submissions?${params.toString()}`);
   };
+  const manualInputRef = useRef<HTMLInputElement>(null);
+  const manualChecking = manualValidation?.status === 'checking';
+  const manualValid = manualValidation?.status === 'valid';
+  const manualError = manualValidation?.status === 'error';
+  const manualEntityLabel = manualValidation?.entityType === 'release-group'
+    ? 'Release Group'
+    : manualValidation?.entityType === 'recording'
+      ? 'Recording'
+      : manualValidation?.entityType === 'release'
+        ? 'Release'
+        : 'MusicBrainz ID';
+  useEffect(() => {
+    if (manualFocusToken > 0) {
+      manualInputRef.current?.focus();
+      manualInputRef.current?.select();
+    }
+  }, [manualFocusToken]);
 
   return (
     <Card variant="outlined" sx={{ borderRadius: 2, borderColor: 'rgba(15, 23, 42, 0.12)' }}>
@@ -2696,7 +2897,7 @@ function ReviewCard({
               ) : item.confidence ? (
                 <span className={`text-xs font-semibold ${confidenceClass(item.confidence)}`}>{item.confidence}</span>
               ) : null}
-              {selectedMatch?.auto_fix_eligible && selectedMatch.source !== 'manual' ? (
+              {selectedMatch?.auto_fix_eligible ? (
                 <Chip
                   size="small"
                   color="success"
@@ -2732,6 +2933,7 @@ function ReviewCard({
                 {visibleMatchNote}
               </div>
             ) : null}
+            <MatchingSafetyPanel response={suggestion} selectedMatch={selectedMatch} />
 
             {/* Once a visible candidate is selected, show that candidate's state instead of stale stored evidence. */}
             {isRecordingReview ? (
@@ -2741,7 +2943,7 @@ function ReviewCard({
                 mbid={mbid}
                 onUseCandidate={onUseCandidate}
               />
-            ) : selectedMatch && selectedMatch.source !== 'manual' ? (
+            ) : selectedMatch ? (
               <div className="mt-3 space-y-2 text-xs text-zinc-600">
                 <div>
                   <span>Selected candidate: </span>
@@ -2821,15 +3023,69 @@ function ReviewCard({
             ) : null}
             {item.album_id ? <Chip size="small" variant="outlined" label={`Album ${item.album_id}`} /> : null}
 
+            <Button size="small" variant="outlined" onClick={onFocusManualEntry} disabled={busy}>
+              Enter MusicBrainz ID
+            </Button>
             <TextField
-              label={item.target_kind === 'item' ? 'MusicBrainz Recording ID' : 'MusicBrainz Release Group ID'}
+              inputRef={manualInputRef}
+              label={item.target_kind === 'item' ? 'MusicBrainz Recording ID or URL' : 'MusicBrainz Release or Release Group ID/URL'}
               value={mbid}
               onChange={(event) => onMbidChange(event.target.value)}
               size="small"
               fullWidth
               disabled={busy}
-              helperText={item.target_kind === 'item' ? 'Identifies this specific track. Enter a recording UUID.' : 'The canonical album identity. Enter a release-group UUID.'}
+              helperText={item.target_kind === 'item' ? 'Paste a recording UUID or recording URL.' : 'Paste a release UUID, release-group UUID, or MusicBrainz URL.'}
+              slotProps={{ htmlInput: { 'data-import-review-manual-id': item.id } }}
+              sx={{ '& .MuiFormHelperText-root': { color: '#475569' } }}
             />
+            <div className="grid grid-cols-2 gap-2">
+              <Button size="small" variant="contained" onClick={onValidateManualId} disabled={busy || manualChecking || !mbid.trim()}>
+                {manualChecking ? 'Checking ID…' : 'Validate ID'}
+              </Button>
+              <Button size="small" variant="outlined" onClick={onClearManualId} disabled={busy || manualChecking || !mbid.trim()}>
+                Clear Manual ID
+              </Button>
+            </div>
+            {manualValidation?.message ? (
+              <div className={`rounded border px-2 py-1.5 text-xs ${manualError ? 'border-rose-200 bg-rose-50 text-rose-900' : manualValid ? 'border-emerald-200 bg-emerald-50 text-emerald-900' : 'border-sky-200 bg-sky-50 text-sky-900'}`}>
+                <div className="font-semibold">{manualValid ? `Valid ${manualEntityLabel}` : manualError ? 'MusicBrainz ID rejected' : 'Checking MusicBrainz ID'}</div>
+                <div className="mt-0.5">{manualValidation.message}</div>
+                {manualValidation.statusLines?.length ? (
+                  <ul className="mt-1 list-disc space-y-0.5 pl-4">
+                    {manualValidation.statusLines.map((line) => <li key={line}>{line}</li>)}
+                  </ul>
+                ) : null}
+                {manualValidation.releaseGroupCandidates?.length ? (
+                  <div className="mt-2">
+                    <div className="font-medium">Available releases</div>
+                    <ul className="mt-1 space-y-0.5">
+                      {manualValidation.releaseGroupCandidates.slice(0, 4).map((release) => (
+                        <li key={release.mb_albumid} className="truncate">
+                          {release.title || 'Untitled'} {release.date ? `(${release.date})` : ''} · {release.country || 'unknown'} · {release.track_count} tracks
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {manualValidation.musicbrainzUrl ? (
+                    <Button size="small" variant="outlined" href={manualValidation.musicbrainzUrl} target="_blank" rel="noreferrer">
+                      Open in MusicBrainz
+                    </Button>
+                  ) : null}
+                  {manualValid && item.target_kind !== 'item' ? (
+                    <Button size="small" variant="outlined" onClick={onValidateManualId} disabled={busy || manualChecking}>
+                      Use This Release
+                    </Button>
+                  ) : null}
+                  {manualValid && item.target_kind !== 'item' ? (
+                    <Button size="small" variant="text" onClick={onClearManualId} disabled={busy || manualChecking}>
+                      Choose Another Release
+                    </Button>
+                  ) : null}
+                </div>
+              </div>
+            ) : null}
 
             {item.target_kind !== 'item' && representativeRelease ? (
               <div className="rounded border border-graphite-200 bg-graphite-50 px-2 py-1.5 text-xs text-zinc-500">
@@ -2863,7 +3119,7 @@ function ReviewCard({
 
             <div className="grid grid-cols-2 gap-2">
               <Button size="small" variant="outlined" sx={blockedPanelActionButtonSx} onClick={onSuggest} disabled={busy}>
-                AI Suggest
+                Find Match
               </Button>
               <Button
                 size="small"
@@ -3156,7 +3412,12 @@ export function ImportReviewPage({
   const [actions, setActions] = useState<Record<string, ActionState>>({});
   const [selectedMatches, setSelectedMatches] = useState<Record<string, SelectedMatch>>({});
   const [targetPreviews, setTargetPreviews] = useState<Record<string, TargetPreviewState>>({});
+  const [manualValidations, setManualValidations] = useState<Record<string, ManualValidationState>>({});
+  const [manualFocusToken, setManualFocusToken] = useState(0);
+  const [activeItemId, setActiveItemId] = useState('');
+  const [queueUpdatesAvailable, setQueueUpdatesAvailable] = useState(false);
   const targetPreviewKeysRef = useRef<Record<string, string>>({});
+  const queueSnapshotRef = useRef('');
   const autoEnqueueKeysRef = useRef<Set<string>>(new Set());
   const autoCleanupKeysRef = useRef<Set<string>>(new Set());
   const reviewItemStateKeysRef = useRef<Record<string, string>>({});
@@ -3278,7 +3539,6 @@ export function ImportReviewPage({
       for (const id of changedIds) delete targetPreviewKeysRef.current[id];
       setSelectedMatches((current) => {
         const next = { ...current };
-        for (const id of changedIds) delete next[id];
         for (const id of Object.keys(next)) if (!liveIds.has(id)) delete next[id];
         for (const item of nextItems) {
           if (!next[item.id]) {
@@ -3296,16 +3556,21 @@ export function ImportReviewPage({
       });
       setActions((current) => {
         const next = { ...current };
-        for (const id of changedIds) delete next[id];
+        for (const id of Object.keys(next)) if (!liveIds.has(id)) delete next[id];
+        return next;
+      });
+      setManualValidations((current) => {
+        const next = { ...current };
         for (const id of Object.keys(next)) if (!liveIds.has(id)) delete next[id];
         return next;
       });
       setItems(nextItems);
       setCounts(response.counts ?? {});
       setOriginCounts(response.origin_counts ?? {});
+      queueSnapshotRef.current = reviewQueueSnapshot(nextItems, response.counts ?? {});
+      setQueueUpdatesAvailable(false);
       setMbids((current) => {
         const next = { ...current };
-        for (const id of changedIds) delete next[id];
         for (const id of Object.keys(next)) if (!liveIds.has(id)) delete next[id];
         for (const item of nextItems) {
           if (!next[item.id]) next[item.id] = initialMbid(item);
@@ -3326,10 +3591,18 @@ export function ImportReviewPage({
   useEffect(() => {
     if (!active) return;
     const id = window.setInterval(() => {
-      if (!document.hidden) void loadQueue(true);
-    }, 20000);
+      if (document.hidden || confirmIntent || isEditableTarget(document.activeElement) || hasUnsavedManualId(manualValidations) || reviewInteractionIsExpanded()) return;
+      void getReviewQueue({ limit: REVIEW_QUEUE_LIMIT, origin_type: sourceFilter })
+        .then((response) => {
+          const snapshot = reviewQueueSnapshot(response.items ?? [], response.counts ?? {});
+          if (queueSnapshotRef.current && snapshot !== queueSnapshotRef.current) {
+            setQueueUpdatesAvailable(true);
+          }
+        })
+        .catch(() => undefined);
+    }, 60000);
     return () => window.clearInterval(id);
-  }, [active, loadQueue]);
+  }, [active, confirmIntent, manualValidations, sourceFilter]);
 
   const visibleItems = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -3360,15 +3633,27 @@ export function ImportReviewPage({
     });
   }, [evidenceOnly, filter, items, mbids, query, selectedMatches, sourceFilter, targetPreviews]);
 
-  // Reset cursor when filters/search change; clamp when list shrinks
-  useEffect(() => { setCursor(0); }, [filter, sourceFilter, query, evidenceOnly]);
+  // Reset cursor when filters/search change; restore visible position by review item ID after queue updates.
+  useEffect(() => { setCursor(0); setActiveItemId(''); }, [filter, sourceFilter, query, evidenceOnly]);
   useEffect(() => {
-    if (visibleItems.length > 0) {
-      setCursor((c) => Math.min(c, visibleItems.length - 1));
+    if (visibleItems.length === 0) {
+      if (activeItemId) setActiveItemId('');
+      if (cursor !== 0) setCursor(0);
+      return;
     }
-  }, [visibleItems.length]);
+    const existingIndex = activeItemId ? visibleItems.findIndex((item) => item.id === activeItemId) : -1;
+    if (existingIndex >= 0) {
+      if (cursor !== existingIndex) setCursor(existingIndex);
+      return;
+    }
+    const nextIndex = Math.min(cursor, visibleItems.length - 1);
+    const nextId = visibleItems[nextIndex]?.id || '';
+    if (nextId && activeItemId !== nextId) setActiveItemId(nextId);
+    if (cursor !== nextIndex) setCursor(nextIndex);
+  }, [activeItemId, cursor, visibleItems]);
 
-  const activeItem = visibleItems[cursor] ?? null;
+  const activeIndex = activeItemId ? visibleItems.findIndex((item) => item.id === activeItemId) : cursor;
+  const activeItem = activeIndex >= 0 ? visibleItems[activeIndex] ?? null : null;
   const revalidatePendingCount = visibleItems.filter((item) => item.type === 'pending_ai').length;
 
   const handleRevalidateQueue = useCallback(async () => {
@@ -3427,7 +3712,7 @@ export function ImportReviewPage({
     if (!activeItem) return;
     const item = activeItem;
     const selectedMatch = selectedMatches[item.id];
-    if (!selectedMatch || selectedMatch.source === 'manual') return;
+    if (!selectedMatch) return;
     const key = targetPreviewKey(item, selectedMatch);
     if (!key || targetPreviewKeysRef.current[item.id] === key) return;
     targetPreviewKeysRef.current[item.id] = key;
@@ -3458,7 +3743,7 @@ export function ImportReviewPage({
       });
   }, [activeItem, selectedMatches]);
 
-  // Auto-start AI Suggest only while the Review tab is active and the item needs identification.
+  // Auto-start Find Match only while the Review tab is active and the item needs identification.
   // Fires only when the cursor moves to a new item; checks current state synchronously
   // so it won't re-fire after the suggestion arrives.
   useEffect(() => {
@@ -3877,7 +4162,7 @@ export function ImportReviewPage({
   }, [loadQueue, pollJobBackground]);
 
   const handleSuggest = useCallback(async (item: ReviewItem) => {
-    setAction(item.id, { status: 'running', message: 'Asking AI...' });
+    setAction(item.id, { status: 'running', message: 'Finding match...' });
     if (item.type === 'library_no_mb' && item.target_kind === 'item' && item.item_id) {
       // Singleton items are identified by recording, not release -- a
       // separate response shape (suggestions.mb_trackid, not
@@ -3893,12 +4178,22 @@ export function ImportReviewPage({
         if (mbTrackId) {
           setMbids((current) => ({ ...current, [item.id]: mbTrackId }));
         }
+        const aiAvailable = s?.ai_available ?? response.ai_available;
+        const aiReason = s?.ai_unavailable_reason || response.ai_unavailable_reason || 'AI ranking is not configured.';
         setAction(item.id, {
-          status: 'success',
-          message: s?.reason || backendCandidate?.reason || (mbTrackId ? 'AI suggestion ready. Review the backend recording evidence before attaching.' : 'No confident recording match found.'),
+          status: aiAvailable === false ? 'warning' : 'success',
+          message: s?.reason || backendCandidate?.reason || (mbTrackId
+            ? aiAvailable === false
+              ? `Recording evidence ready. ${aiReason}`
+              : 'Recording match evidence ready. Review the backend recording evidence before attaching.'
+            : aiAvailable === false
+              ? `No confident recording match found. ${aiReason}`
+              : 'No confident recording match found.'),
         });
       } catch (err) {
-        setAction(item.id, { status: 'error', message: err instanceof Error ? err.message : String(err) });
+        const message = err instanceof Error ? err.message : String(err);
+        const aiWarning = optionalAiWarning(message);
+        setAction(item.id, { status: aiWarning ? 'warning' : 'error', message: aiWarning || message });
       }
       return;
     }
@@ -3907,20 +4202,36 @@ export function ImportReviewPage({
         ? await suggestAlbum(item.album_id)
         : await suggestFolder(item.path || '');
       const suggestion = response.suggestion;
+      const backendSelectedMatch = response.selected_match as unknown as SelectedMatch | undefined;
       setSuggestions((current) => ({ ...current, [item.id]: response }));
-      if (suggestion?.mb_valid && suggestion.mb_albumid) {
+      if (backendSelectedMatch?.release_group_id) {
+        setMbids((current) => ({ ...current, [item.id]: backendSelectedMatch.release_group_id }));
+        setSelectedMatches((current) => ({ ...current, [item.id]: backendSelectedMatch }));
+        delete targetPreviewKeysRef.current[item.id];
+        setTargetPreviews((current) => { const next = { ...current }; delete next[item.id]; return next; });
+      } else if (suggestion?.mb_valid && suggestion.mb_albumid) {
         const rgid = suggestion.mb_releasegroupid || suggestion.mb_albumid || '';
         setMbids((current) => ({ ...current, [item.id]: rgid }));
         setSelectedMatches((current) => ({ ...current, [item.id]: buildAiSelectedMatch(suggestion) }));
         delete targetPreviewKeysRef.current[item.id];
         setTargetPreviews((current) => { const next = { ...current }; delete next[item.id]; return next; });
       }
+      const aiAvailable = suggestion?.ai_available ?? response.ai_available;
+      const aiReason = suggestion?.ai_unavailable_reason || response.ai_unavailable_reason || 'AI ranking is not configured.';
       setAction(item.id, {
-        status: 'success',
-        message: suggestion?.reason || 'AI suggestion ready. Verify the release-group ID before applying.',
+        status: aiAvailable === false ? 'warning' : 'success',
+        message: suggestion?.reason || (backendSelectedMatch
+          ? aiAvailable === false
+            ? `Matched using MusicBrainz and AcoustID. ${aiReason}`
+            : 'Match ready. Verify the release-group ID before applying.'
+          : aiAvailable === false
+            ? `No verified MusicBrainz match was selected. ${aiReason}`
+            : 'Find Match completed. Verify the release-group ID before applying.'),
       });
     } catch (err) {
-      setAction(item.id, { status: 'error', message: err instanceof Error ? err.message : String(err) });
+      const message = err instanceof Error ? err.message : String(err);
+      const aiWarning = optionalAiWarning(message);
+      setAction(item.id, { status: aiWarning ? 'warning' : 'error', message: aiWarning || message });
     }
   }, [setAction]);
 
@@ -3985,7 +4296,9 @@ export function ImportReviewPage({
       removeLocalItem(item);                          // advance cursor immediately
       void pollJobBackground(started.job_id, item, label, keepReviewAfterSuccess);
     } catch (err) {
-      setAction(item.id, { status: 'error', message: err instanceof Error ? err.message : String(err) });
+      const message = err instanceof Error ? err.message : String(err);
+      const aiWarning = optionalAiWarning(message);
+      setAction(item.id, { status: aiWarning ? 'warning' : 'error', message: aiWarning || message });
     }
   }, [pollJobBackground, removeLocalItem, selectedMatches, setAction, suggestions, targetPreviews]);
 
@@ -4014,7 +4327,9 @@ export function ImportReviewPage({
       if ((item.type === 'pending_ai' || item.type === 'skipped') && item.path) await deletePendingReview(item.path);
       removeLocalItem(item);
     } catch (err) {
-      setAction(item.id, { status: 'error', message: err instanceof Error ? err.message : String(err) });
+      const message = err instanceof Error ? err.message : String(err);
+      const aiWarning = optionalAiWarning(message);
+      setAction(item.id, { status: aiWarning ? 'warning' : 'error', message: aiWarning || message });
     }
   }, [removeLocalItem, setAction]);
 
@@ -4054,7 +4369,9 @@ export function ImportReviewPage({
         void loadQueue(true);
       }
     } catch (err) {
-      setAction(item.id, { status: 'error', message: err instanceof Error ? err.message : String(err) });
+      const message = err instanceof Error ? err.message : String(err);
+      const aiWarning = optionalAiWarning(message);
+      setAction(item.id, { status: aiWarning ? 'warning' : 'error', message: aiWarning || message });
     }
   }, [loadQueue, removeLocalItem, selectedMatches, setAction, targetPreviews]);
 
@@ -4066,7 +4383,7 @@ export function ImportReviewPage({
     if (actions[item.id]?.status === 'running') return;
     if (backgroundJobs[item.id]?.status === 'running' || backgroundJobs[item.id]?.status === 'still_running') return;
     const selectedMatch = selectedMatches[item.id];
-    if (!selectedMatch || selectedMatch.source === 'manual') return;
+    if (!selectedMatch) return;
     const previewState = currentTargetPreviewState(item, selectedMatch, targetPreviews);
     const preview = previewState?.status === 'ready' ? previewState.preview : undefined;
     const files = selectedCleanupSourceFiles(selectedMatch, preview);
@@ -4109,7 +4426,9 @@ export function ImportReviewPage({
       })
       .catch((err) => {
         autoCleanupKeysRef.current.delete(key);
-        setAction(item.id, { status: 'error', message: err instanceof Error ? err.message : String(err) });
+        const message = err instanceof Error ? err.message : String(err);
+        const aiWarning = optionalAiWarning(message);
+        setAction(item.id, { status: aiWarning ? 'warning' : 'error', message: aiWarning || message });
       });
   }, [active, activeItem, actions, backgroundJobs, loadQueue, removeLocalItem, selectedMatches, setAction, targetPreviews]);
 
@@ -4128,7 +4447,9 @@ export function ImportReviewPage({
       });
       void loadQueue(true);
     } catch (err) {
-      setAction(item.id, { status: 'error', message: err instanceof Error ? err.message : String(err) });
+      const message = err instanceof Error ? err.message : String(err);
+      const aiWarning = optionalAiWarning(message);
+      setAction(item.id, { status: aiWarning ? 'warning' : 'error', message: aiWarning || message });
     }
   }, [loadQueue, removeLocalItem, setAction]);
 
@@ -4200,52 +4521,28 @@ export function ImportReviewPage({
     .join(' + ');
   const hasExtraFilters = filter !== 'all' || sourceFilter !== 'all' || Boolean(query.trim()) || evidenceOnly;
 
-  const handlePrev = useCallback(() => setCursor((c) => Math.max(0, c - 1)), []);
-  const handleNext = useCallback(() => setCursor((c) => Math.min(visibleItems.length - 1, c + 1)), [visibleItems.length]);
-  const handleSkip = useCallback(() => setCursor((c) => Math.min(visibleItems.length - 1, c + 1)), [visibleItems.length]);
+  const moveToIndex = useCallback((nextIndex: number) => {
+    if (visibleItems.length < 1) return;
+    const clamped = Math.max(0, Math.min(visibleItems.length - 1, nextIndex));
+    setCursor(clamped);
+    setActiveItemId(visibleItems[clamped]?.id || '');
+  }, [visibleItems]);
+  const handlePrev = useCallback(() => moveToIndex(activeIndex - 1), [activeIndex, moveToIndex]);
+  const handleNext = useCallback(() => moveToIndex(activeIndex + 1), [activeIndex, moveToIndex]);
+  const handleSkip = useCallback(() => moveToIndex(activeIndex + 1), [activeIndex, moveToIndex]);
 
   // Stable per-item callbacks (avoid inline closures in the card render)
   const handleMbidChange = useCallback((value: string) => {
     if (!activeItem) return;
     const item = activeItem;
-    setMbids((c) => ({ ...c, [item.id]: value }));
-    if (item.target_kind === 'item') {
-      setSelectedMatches((current) => {
-        if (!current[item.id]) return current;
-        const next = { ...current };
-        delete next[item.id];
-        return next;
-      });
-      delete targetPreviewKeysRef.current[item.id];
-      return;
-    }
-    setSelectedMatches((current) => {
-      const prev = current[item.id];
-      return {
-        ...current,
-        [item.id]: {
-          release_group_id: value.trim(),
-          representative_release_id: '',
-          artist: prev?.artist || item.artist || '',
-          album: prev?.album || item.album || itemTitle(item),
-          year: prev?.year || String(item.year || ''),
-          track_match_count: null, total_tracks: null, local_track_count: null, track_mapping: [],
-          preflight_status: 'stale',
-          preflight_reason: 'Release Group ID was edited manually; select a visible match to refresh preflight before import.',
-          is_release_group_usable: isMusicBrainzUuid(value),
-          is_importable: false,
-          is_partial_import: false,
-          confidence_score: null,
-          confidence_level: isMusicBrainzUuid(value) ? 'low' : 'blocked',
-          auto_fix_eligible: false, auto_fix_requires_review: false,
-          auto_fix_reason: isMusicBrainzUuid(value)
-            ? 'Auto-fix blocked until a visible match refreshes track comparison and preflight.'
-            : 'Auto-fix blocked because this value is not a valid MusicBrainz Release Group ID.',
-          missing_track_count: 0, match_count: null, preflight_ok: null, source: 'manual',
-        } as SelectedMatch,
-      };
-    });
-    setTargetPreviews((c) => { const n = { ...c }; delete n[item.id]; return n; });
+    setMbids((current) => ({ ...current, [item.id]: value }));
+    setManualValidations((current) => ({
+      ...current,
+      [item.id]: value.trim()
+        ? { status: 'idle', message: 'MusicBrainz ID changed. Validate ID before importing.' }
+        : { status: 'idle', message: '' },
+    }));
+    setTargetPreviews((current) => { const next = { ...current }; delete next[item.id]; return next; });
     delete targetPreviewKeysRef.current[item.id];
   }, [activeItem]);
 
@@ -4267,29 +4564,121 @@ export function ImportReviewPage({
     if (!activeItem) return;
     setSelectedMatches((c) => ({ ...c, [activeItem.id]: match }));
     setMbids((c) => ({ ...c, [activeItem.id]: match.release_group_id }));
+    setManualValidations((c) => ({ ...c, [activeItem.id]: { status: 'valid', message: 'Backend match selected from visible evidence.' } }));
     setTargetPreviews((c) => { const n = { ...c }; delete n[activeItem.id]; return n; });
     delete targetPreviewKeysRef.current[activeItem.id];
   }, [activeItem]);
 
+  const handleFocusManualEntry = useCallback(() => {
+    setManualFocusToken((value) => value + 1);
+  }, []);
+
+  const handleClearManualId = useCallback(() => {
+    if (!activeItem) return;
+    const item = activeItem;
+    setMbids((current) => ({ ...current, [item.id]: '' }));
+    setManualValidations((current) => {
+      const next = { ...current };
+      delete next[item.id];
+      return next;
+    });
+    setSelectedMatches((current) => {
+      const next = { ...current };
+      delete next[item.id];
+      return next;
+    });
+    setTargetPreviews((current) => { const next = { ...current }; delete next[item.id]; return next; });
+    delete targetPreviewKeysRef.current[item.id];
+  }, [activeItem]);
+
+  const handleValidateManualId = useCallback(async () => {
+    if (!activeItem) return;
+    const item = activeItem;
+    const value = (mbids[item.id] ?? '').trim();
+    if (!value) {
+      setManualValidations((current) => ({ ...current, [item.id]: { status: 'error', message: 'This is not a valid MusicBrainz UUID or URL.' } }));
+      return;
+    }
+    setManualValidations((current) => ({
+      ...current,
+      [item.id]: { status: 'checking', message: 'Checking MusicBrainz ID…', statusLines: ['Checking MusicBrainz ID…'] },
+    }));
+    try {
+      const response = await validateManualMusicBrainzId({
+        review_item_id: item.id,
+        musicbrainz_id: value,
+        target_kind: item.target_kind,
+        path: item.path || '',
+        album_id: item.album_id || undefined,
+        existing_album_id: existingAlbumId(item) || undefined,
+        item_id: item.item_id || item.first_item_id || undefined,
+      });
+      if (item.target_kind === 'item') {
+        const candidate = response.selected_recording_candidate;
+        if (response.mb_trackid) setMbids((current) => ({ ...current, [item.id]: response.mb_trackid || value }));
+        if (candidate) {
+          setSuggestions((current) => ({
+            ...current,
+            [item.id]: {
+              ok: true,
+              suggestions: {
+                mb_trackid: response.mb_trackid,
+                selected_recording_candidate: candidate,
+                recording_candidates: response.recording_candidates,
+                reason: response.message,
+              },
+              recording_candidates: response.recording_candidates,
+              selected_candidate: candidate,
+              evidence: { ...(item.evidence ?? {}), selected_recording_candidate: candidate, recording_candidates: response.recording_candidates },
+            },
+          }));
+        }
+      } else if (response.selected_match) {
+        const match = response.selected_match as unknown as SelectedMatch;
+        setSelectedMatches((current) => ({ ...current, [item.id]: match }));
+        setMbids((current) => ({ ...current, [item.id]: match.release_group_id || response.release_group_id || value }));
+        setTargetPreviews((current) => { const next = { ...current }; delete next[item.id]; return next; });
+        delete targetPreviewKeysRef.current[item.id];
+      }
+      setManualValidations((current) => ({
+        ...current,
+        [item.id]: {
+          status: 'valid',
+          message: response.message || 'Manual MusicBrainz ID validated.',
+          statusLines: response.status_lines,
+          musicbrainzUrl: response.musicbrainz_url,
+          entityType: response.entity_type,
+          releaseGroupCandidates: response.release_group_candidates,
+          selectedRecordingCandidate: response.selected_recording_candidate,
+        },
+      }));
+      setAction(item.id, { status: 'success', message: response.message || 'Manual MusicBrainz ID validated.' });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setManualValidations((current) => ({ ...current, [item.id]: { status: 'error', message } }));
+      setAction(item.id, { status: 'warning', message });
+    }
+  }, [activeItem, mbids, setAction]);
+
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement | null)?.tagName?.toLowerCase() ?? '';
-      if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+      if (confirmIntent || isEditableTarget(e.target)) return;
       if (e.key === '[') { e.preventDefault(); handlePrev(); }
       if (e.key === ']') { e.preventDefault(); handleNext(); }
+      if (e.key.toLowerCase() === 'i') { e.preventDefault(); handleFocusManualEntry(); }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [handlePrev, handleNext]);
+  }, [confirmIntent, handleFocusManualEntry, handlePrev, handleNext]);
 
   return (
     <section className="flex flex-col gap-5">
       {/* Counts + action bar */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs">
-          <span className="text-zinc-400">{countFor(counts, 'all')} total</span>
-          {activeJobHiddenCount ? <span className="text-zinc-400">{activeJobHiddenCount} active job hidden</span> : null}
-          {unloadedReviewCount ? <span className="text-zinc-400">{unloadedReviewCount} not loaded</span> : null}
+          <span className="text-zinc-700">{countFor(counts, 'all')} total</span>
+          {activeJobHiddenCount ? <span className="text-zinc-700">{activeJobHiddenCount} active job hidden</span> : null}
+          {unloadedReviewCount ? <span className="text-zinc-700">{unloadedReviewCount} not loaded</span> : null}
           {(
             [
               { id: 'pending_ai', label: 'pending AI' },
@@ -4299,7 +4688,7 @@ export function ImportReviewPage({
           ).map(({ id, label }) => {
             const n = countFor(counts, id);
             return (
-              <span key={id} className="text-zinc-400">
+              <span key={id} className="text-zinc-700">
                 {n} {label}
               </span>
             );
@@ -4322,8 +4711,14 @@ export function ImportReviewPage({
               Refresh
             </Button>
           </div>
-          {revalidateMsg ? <span className="text-xs text-zinc-400">{revalidateMsg}</span> : null}
-          {cleanupMsg ? <span className="text-xs text-zinc-400">{cleanupMsg}</span> : null}
+          {queueUpdatesAvailable ? (
+            <span className="inline-flex items-center gap-2 text-xs font-medium text-zinc-700">
+              Review queue updates are available.
+              <Button size="small" variant="text" onClick={() => void loadQueue()} disabled={loading}>Load updates</Button>
+            </span>
+          ) : null}
+          {revalidateMsg ? <span className="text-xs text-zinc-700">{revalidateMsg}</span> : null}
+          {cleanupMsg ? <span className="text-xs text-zinc-700">{cleanupMsg}</span> : null}
         </div>
       </div>
 
@@ -4442,15 +4837,15 @@ export function ImportReviewPage({
             <button
               aria-label="Previous item"
               title="Previous [[]"
-              className="flex h-8 w-8 items-center justify-center rounded text-zinc-300 transition hover:bg-graphite-700 disabled:cursor-not-allowed disabled:opacity-30"
-              disabled={cursor === 0}
+              className="flex h-8 w-8 items-center justify-center rounded text-zinc-100 transition hover:bg-graphite-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300 disabled:cursor-not-allowed disabled:text-zinc-500"
+              disabled={activeIndex <= 0}
               onClick={handlePrev}
             >
               ←
             </button>
             <div className="min-w-0 flex-1 text-center">
-              <div className="text-[0.7rem] text-zinc-500">
-                {cursor + 1} of {visibleItems.length} shown · {filterCounts[filter]} in filter · {items.length} loaded of {filterCounts.all} total
+              <div className="text-[0.7rem] text-zinc-200">
+                {activeIndex + 1} of {visibleItems.length} shown · {filterCounts[filter]} in filter · {items.length} loaded of {filterCounts.all} total
                 {activeJobHiddenCount ? ` · ${activeJobHiddenCount} hidden by active jobs` : ''}
                 {unloadedReviewCount ? ` · ${unloadedReviewCount} beyond page limit` : ''}
               </div>
@@ -4463,15 +4858,15 @@ export function ImportReviewPage({
             <button
               aria-label="Next item"
               title="Next []]"
-              className="flex h-8 w-8 items-center justify-center rounded text-zinc-300 transition hover:bg-graphite-700 disabled:cursor-not-allowed disabled:opacity-30"
-              disabled={cursor >= visibleItems.length - 1}
+              className="flex h-8 w-8 items-center justify-center rounded text-zinc-100 transition hover:bg-graphite-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300 disabled:cursor-not-allowed disabled:text-zinc-500"
+              disabled={activeIndex >= visibleItems.length - 1}
               onClick={handleNext}
             >
               →
             </button>
             <button
-              className="rounded border border-graphite-600 px-3 py-1 text-xs font-medium text-zinc-400 transition hover:border-graphite-500 hover:text-zinc-200 disabled:opacity-30"
-              disabled={cursor >= visibleItems.length - 1}
+              className="rounded border border-graphite-400 px-3 py-1 text-xs font-medium text-zinc-100 transition hover:border-graphite-300 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300 disabled:border-graphite-700 disabled:text-zinc-500"
+              disabled={activeIndex >= visibleItems.length - 1}
               onClick={handleSkip}
             >
               Skip
@@ -4488,9 +4883,14 @@ export function ImportReviewPage({
               actionState={actions[activeItem.id]}
               selectedMatch={selectedMatches[activeItem.id]}
               targetPreviewState={currentTargetPreviewState(activeItem, selectedMatches[activeItem.id], targetPreviews)}
+              manualValidation={manualValidations[activeItem.id]}
+              manualFocusToken={manualFocusToken}
               onMbidChange={handleMbidChange}
               onUseCandidate={handleUseCandidate}
               onSelectMatch={handleSelectMatch}
+              onFocusManualEntry={handleFocusManualEntry}
+              onValidateManualId={handleValidateManualId}
+              onClearManualId={handleClearManualId}
               onSuggest={() => void handleSuggest(activeItem)}
               onApply={() => startApply(activeItem)}
               onDismiss={() => requestDismiss(activeItem)}
@@ -4513,22 +4913,3 @@ export function ImportReviewPage({
     </section>
   );
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

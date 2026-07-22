@@ -1368,6 +1368,13 @@ def _beet_env() -> dict:
     return env
 
 
+_BEETS_PLUGINPATH_CONFIG = (
+    "pluginpath:\n"
+    "  - /config/beetsplug\n"
+    "  - /app/beetsplug\n"
+)
+
+
 def _beet_import_timeout(source_path: str, minimum: int = 300, maximum: int = 1200) -> int:
     """Scale beet import timeout with album size while keeping a hard cap."""
     count = 0
@@ -1422,7 +1429,7 @@ def _write_plugin_job_beets_config(temp_path: str, command: str) -> str:
             plugins.append(command)
         Path(temp_path).write_text(
             "include:\n  - /config/config.yaml\n"
-            "pluginpath: /config/beetsplug\n"
+            + _BEETS_PLUGINPATH_CONFIG
             + (f"plugins: {' '.join(plugins)}\n" if plugins else "")
             + "lyrics:\n  auto: no\n"
             "replaygain:\n  auto: no\n"
@@ -1455,7 +1462,7 @@ def _write_job_beets_config(temp_path: str, extra: str = "") -> str:
             extra_block += "\n"
         Path(temp_path).write_text(
             "include:\n  - /config/config.yaml\n"
-            "pluginpath: /config/beetsplug\n"
+            + _BEETS_PLUGINPATH_CONFIG
             + (f"plugins: {plugins}\n" if plugins else "")
             + _JOB_PATHS_CONFIG_BLOCK
             + extra_block
@@ -2695,7 +2702,7 @@ def _write_fast_item_modify_config(path_value: str) -> str:
     try:
         Path(path_value).write_text(
             "include:\n  - /config/config.yaml\n"
-            "pluginpath: /config/beetsplug\n"
+            + _BEETS_PLUGINPATH_CONFIG
             + (f"plugins: {_plugins}\n" if _plugins else "")
             + "lyrics:\n  auto: no\n"
             "replaygain:\n  auto: no\n",
@@ -2883,7 +2890,7 @@ def retag_item(iid):
         try:
             Path(_rtcfg).write_text(
                 "include:\n  - /config/config.yaml\n"
-                "pluginpath: /config/beetsplug\n"
+                + _BEETS_PLUGINPATH_CONFIG
                 + (f"plugins: {_plugins}\n" if _plugins else "")
                 + _JOB_PATHS_CONFIG_BLOCK
                 + "lyrics:\n  auto: no\n"
@@ -10639,7 +10646,7 @@ def album_deduplicate(aid):
             _plugins = _beet_plugins()
             Path(_fmcfg).write_text(
                 "include:\n  - /config/config.yaml\n"
-                "pluginpath: /config/beetsplug\n"
+                + _BEETS_PLUGINPATH_CONFIG
                 + (f"plugins: {_plugins}\n" if _plugins else "")
                 + _JOB_PATHS_CONFIG_BLOCK
                 + "lyrics:\n  auto: no\n"
@@ -17158,6 +17165,234 @@ def candidate_tracks(mb_albumid: str):
     status = 200 if payload.get("ok") else 400
     return jsonify(payload), status
 
+
+_MB_ENTITY_PATH_RE = re.compile(
+    r"(?:^|/)("
+    r"release-group|release|recording"
+    r")/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:$|[/?#])",
+    re.I,
+)
+
+
+def _parse_manual_musicbrainz_identifier(raw_value: Any) -> Dict[str, str]:
+    text = _s(raw_value).strip()
+    if not text:
+        return {"ok": False, "error": "Enter a MusicBrainz UUID or URL."}
+    match = _MB_ENTITY_PATH_RE.search(text)
+    if match:
+        entity = match.group(1).lower()
+        return {"ok": True, "entity_type": entity, "mbid": match.group(2).lower()}
+    uuid_match = re.fullmatch(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+        text,
+        re.I,
+    )
+    if not uuid_match:
+        return {"ok": False, "error": "This is not a valid MusicBrainz UUID or URL."}
+    return {"ok": True, "entity_type": "unknown", "mbid": uuid_match.group(0).lower()}
+
+
+def _manual_review_album_folder(payload: Dict[str, Any]) -> str:
+    folder = _s(payload.get("path") or "").strip()
+    if folder:
+        return folder
+    existing_album_id = int(payload.get("existing_album_id") or payload.get("album_id") or 0)
+    return _album_folder_for_album_id(existing_album_id) if existing_album_id else ""
+
+
+def _manual_review_wrong_type_response(target_kind: str, entity_type: str) -> Tuple[Dict[str, Any], int]:
+    required = "Recording ID" if target_kind == "item" else "album Release or Release Group ID"
+    article = "a" if entity_type.lower().startswith(("release", "recording")) else "an"
+    return {
+        "ok": False,
+        "entity_type": entity_type,
+        "error": f"This ID is {article} {entity_type.replace('-', ' ').title()} ID, but this review item requires {required}.",
+    }, 400
+
+
+def _manual_review_validate_album_identifier(parsed: Dict[str, str], payload: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
+    entity_type = parsed.get("entity_type") or "unknown"
+    mbid = parsed.get("mbid") or ""
+    folder = _manual_review_album_folder(payload)
+    log: List[str] = []
+    release_group_candidates: List[Dict[str, Any]] = []
+    if entity_type == "recording":
+        return _manual_review_wrong_type_response("album", "Recording")
+
+    resolved_release_id = ""
+    release_group_id = ""
+    if entity_type in {"release", "unknown"}:
+        tracklist = _fetch_mb_release_tracklist(mbid, log)
+        if tracklist.get("ok"):
+            resolved_release_id = mbid
+            release_group_id = _extract_mb_uuid(tracklist.get("release_group", ""))
+            entity_type = "release"
+    if not resolved_release_id and entity_type in {"release-group", "unknown"}:
+        release_group_id = mbid
+        release_group_candidates = _mb_release_group_candidates(release_group_id, log)
+        if release_group_candidates:
+            resolved_release_id = _s(release_group_candidates[0].get("mb_albumid") or "").strip().lower()
+        if not resolved_release_id:
+            resolved_release_id = _resolve_release_group_to_release(
+                release_group_id,
+                log,
+                track_count=_folder_import_track_count(folder),
+            )
+        if resolved_release_id:
+            entity_type = "release-group"
+
+    if not resolved_release_id:
+        if entity_type == "release":
+            return {"ok": False, "entity_type": entity_type, "error": "MusicBrainz release lookup failed."}, 404
+        if entity_type == "release-group":
+            return {"ok": False, "entity_type": entity_type, "error": "MusicBrainz release group lookup returned no usable releases."}, 404
+        details = _fetch_mb_recording_details(mbid)
+        if details.get("recording_id"):
+            return _manual_review_wrong_type_response("album", "Recording")
+        return {"ok": False, "entity_type": "unknown", "error": "MusicBrainz did not return a release or release group for this ID."}, 404
+
+    comparison = _candidate_track_comparison_payload(
+        resolved_release_id,
+        folder,
+        release_group_id=release_group_id if entity_type == "release-group" else "",
+    )
+    if not comparison.get("ok"):
+        error = _s(comparison.get("error") or "MusicBrainz ID validation failed.")
+        return {
+            "ok": False,
+            "entity_type": entity_type,
+            "mbid": mbid,
+            "representative_release_id": resolved_release_id,
+            "release_group_id": release_group_id,
+            "error": error,
+        }, 400
+    representative_release_id = _extract_mb_uuid(
+        _s(comparison.get("representative_release_id") or comparison.get("mb_albumid") or resolved_release_id)
+    )
+    acoustic_preflight = _run_ai_release_preflight(
+        folder,
+        representative_release_id,
+        existing_album_id=int(payload.get("existing_album_id") or payload.get("album_id") or 0),
+    ) if representative_release_id else None
+    preflight = _import_review_revalidation_preflight(comparison, acoustic_preflight)
+    selected_match = _import_review_build_revalidated_match(
+        {
+            "suggestion": {
+                "mb_releasegroupid": release_group_id,
+                "representative_mb_albumid": representative_release_id,
+                "mb_albumid": representative_release_id,
+            },
+            "artist": _s(payload.get("artist") or ""),
+            "album": _s(payload.get("album") or ""),
+            "folder_name": Path(folder).name if folder else "",
+            "year": _s(payload.get("year") or ""),
+        },
+        comparison,
+        preflight,
+    )
+    selected_match["source"] = "manual"
+    release_group_id = selected_match.get("release_group_id") or release_group_id
+    representative_release_id = selected_match.get("representative_release_id") or representative_release_id or resolved_release_id
+    matched = int(selected_match.get("track_match_count") or 0)
+    local_count = int(selected_match.get("local_track_count") or 0)
+    total = int(selected_match.get("total_tracks") or 0)
+    status_lines = [
+        "Checking MusicBrainz ID...",
+        "Valid release" if entity_type == "release" else "Valid release group",
+        f"Resolved release group {release_group_id}" if release_group_id else "Release group could not be resolved",
+        f"Comparing {local_count} local file{'' if local_count == 1 else 's'} with {total} MusicBrainz track{'' if total == 1 else 's'}...",
+        f"{matched} matched, {max(0, total - matched)} need review",
+    ]
+    return {
+        "ok": True,
+        "entity_type": entity_type,
+        "input_mbid": mbid,
+        "release_group_id": release_group_id,
+        "representative_release_id": representative_release_id,
+        "musicbrainz_url": (
+            f"https://musicbrainz.org/release-group/{release_group_id}"
+            if entity_type == "release-group"
+            else f"https://musicbrainz.org/release/{representative_release_id}"
+        ),
+        "selected_match": selected_match,
+        "track_comparison": comparison,
+        "release_group_candidates": release_group_candidates[:12],
+        "status_lines": status_lines,
+        "message": selected_match.get("preflight_reason") or "Manual MusicBrainz ID validated.",
+    }, 200
+
+
+def _manual_review_validate_recording_identifier(parsed: Dict[str, str], payload: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
+    entity_type = parsed.get("entity_type") or "unknown"
+    mbid = parsed.get("mbid") or ""
+    if entity_type in {"release", "release-group"}:
+        return _manual_review_wrong_type_response("item", entity_type)
+    details = _fetch_mb_recording_details(mbid)
+    if not details.get("recording_id"):
+        if entity_type == "recording":
+            return {"ok": False, "entity_type": "recording", "error": "MusicBrainz recording lookup failed."}, 404
+        tracklist = _fetch_mb_release_tracklist(mbid, [])
+        if tracklist.get("ok"):
+            return _manual_review_wrong_type_response("item", "Release")
+        if _mb_release_group_candidates(mbid, []):
+            return _manual_review_wrong_type_response("item", "Release Group")
+        return {"ok": False, "entity_type": "unknown", "error": "MusicBrainz did not return a recording for this ID."}, 404
+
+    item_id = int(payload.get("item_id") or 0)
+    item = lib.get_item(item_id) if item_id else None
+    current = {
+        "title": _s(getattr(item, "title", "") or ""),
+        "artist": _s(getattr(item, "artist", "") or ""),
+        "album": _s(getattr(item, "album", "") or ""),
+        "albumartist": _s(getattr(item, "albumartist", "") or ""),
+        "year": _s(getattr(item, "year", "") or ""),
+        "duration_seconds": float(getattr(item, "length", 0) or 0) if item else 0,
+        "mb_releasegroupid": _s(getattr(item, "mb_releasegroupid", "") or ""),
+    }
+    candidate = {
+        "mb_trackid": mbid,
+        "source": "manual",
+        "score": 100,
+        "title": details.get("recording_title", ""),
+        "artist": details.get("recording_artist") or details.get("artist", ""),
+        "album": details.get("album", ""),
+        "year": details.get("year", ""),
+    }
+    _enrich_track_ai_candidate(current, candidate, details)
+    packet = _compact_track_ai_candidate(candidate)
+    linked_count = len(packet.get("linked_releases") or [])
+    return {
+        "ok": True,
+        "entity_type": "recording",
+        "input_mbid": mbid,
+        "mb_trackid": mbid,
+        "musicbrainz_url": f"https://musicbrainz.org/recording/{mbid}",
+        "selected_recording_candidate": packet,
+        "recording_candidates": [packet],
+        "status_lines": [
+            "Checking MusicBrainz ID...",
+            "Valid recording",
+            f"Found {linked_count} linked release{'' if linked_count == 1 else 's'}",
+            packet.get("safety_result") or "Recording evidence ready",
+        ],
+        "message": packet.get("reason") or "Manual MusicBrainz Recording ID validated.",
+    }, 200
+
+
+@app.post("/api/import-review/manual-id/validate")
+def import_review_manual_id_validate():
+    """Resolve a user-entered MusicBrainz UUID/URL through backend-owned validation."""
+    payload = request.get_json(silent=True) or {}
+    parsed = _parse_manual_musicbrainz_identifier(payload.get("musicbrainz_id") or payload.get("mbid") or "")
+    if not parsed.get("ok"):
+        return jsonify(parsed), 400
+    target_kind = _s(payload.get("target_kind") or "").strip().lower()
+    if target_kind == "item":
+        body, status = _manual_review_validate_recording_identifier(parsed, payload)
+    else:
+        body, status = _manual_review_validate_album_identifier(parsed, payload)
+    return jsonify(body), status
+
 def _target_preview_year(value: Any) -> str:
     match = re.search(r"\d{4}", _s(value))
     return match.group(0) if match else ""
@@ -19558,7 +19793,7 @@ def import_folder_with_id():
             _plugins = _beet_plugins()
             Path(temp_cfg).write_text(
                 "include:\n  - /config/config.yaml\n"
-                "pluginpath: /config/beetsplug\n"
+                + _BEETS_PLUGINPATH_CONFIG
                 + (f"plugins: {_plugins}\n" if _plugins else "")
                 + _JOB_PATHS_CONFIG_BLOCK
                 + "match:\n"
@@ -21336,7 +21571,7 @@ def reimport_disk():
         _plugins = _beet_plugins()
         Path(temp_cfg).write_text(
             "include:\n  - /config/config.yaml\n"
-            "pluginpath: /config/beetsplug\n"
+            + _BEETS_PLUGINPATH_CONFIG
             + (f"plugins: {_plugins}\n" if _plugins else "")
             + _JOB_PATHS_CONFIG_BLOCK
             + "import:\n"
@@ -24165,7 +24400,7 @@ def _ai_import_folder(folder_path: str, mb_albumid: str, suggestion: dict,
     try:
         Path(temp_cfg).write_text(
             "include:\n  - /config/config.yaml\n"
-            "pluginpath: /config/beetsplug\n"
+            + _BEETS_PLUGINPATH_CONFIG
             + (f"plugins: {_plugins}\n" if _plugins else "")
             + _JOB_PATHS_CONFIG_BLOCK
             + "import:\n  duplicate_action: remove\n"
@@ -25800,7 +26035,7 @@ def library_merge_artist_id():
         try:
             Path(_tmp_cfg).write_text(
                 "include:\n  - /config/config.yaml\n"
-                "pluginpath: /config/beetsplug\n"
+                + _BEETS_PLUGINPATH_CONFIG
                 + (f"plugins: {_plugins}\n" if _plugins else "")
                 + _JOB_PATHS_CONFIG_BLOCK
                 + "lyrics:\n  auto: no\nreplaygain:\n  auto: no\n"
@@ -25890,7 +26125,7 @@ def library_confirm_artist_alias():
         try:
             Path(_tmp_cfg).write_text(
                 "include:\n  - /config/config.yaml\n"
-                "pluginpath: /config/beetsplug\n"
+                + _BEETS_PLUGINPATH_CONFIG
                 + (f"plugins: {_plugins}\n" if _plugins else "")
                 + _JOB_PATHS_CONFIG_BLOCK
                 + "lyrics:\n  auto: no\nreplaygain:\n  auto: no\n"
@@ -48382,80 +48617,3 @@ if __name__ == "__main__":
         port=PORT,
         threads=_env_int("WEBCONTROL_THREADS", 8, minimum=1, maximum=64),
     )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

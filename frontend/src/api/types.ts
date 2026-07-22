@@ -265,6 +265,18 @@ export interface ReviewItem {
   existing_album_id?: number;
   sort_ts?: number;
   evidence?: ReviewEvidence;
+  ai_available?: boolean;
+  ai_unavailable_reason?: string;
+  matching_method?: string;
+  warnings?: string[];
+  action_eligibility?: unknown;
+  eligibility_reason?: string;
+  matching_contract?: Record<string, unknown>;
+  acoustid_corroboration?: string;
+  fingerprint_conflicts?: string[];
+  recording_id_conflicts?: string[];
+  title_mismatch_warnings?: string[];
+  required_review?: boolean;
   suggestion?: AiSuggestion;
   origin_type?: ReviewOriginType;
   origin_label?: string;
@@ -431,6 +443,19 @@ export interface SetupStatusResponse {
     available: boolean;
     path: string;
   };
+  beets?: {
+    available: boolean;
+    path?: string;
+    version?: string;
+    configured_plugins?: string[];
+    pluginpath?: string[];
+    plugin_failures?: string[];
+    plugins_returncode?: number | null;
+    replaygain_backend?: string;
+    replaygain_command?: string;
+    discogs_token_configured?: boolean;
+    listenbrainz_token_configured?: boolean;
+  };
   auth: {
     token_configured: boolean;
     token_auto_generated: boolean;
@@ -439,7 +464,9 @@ export interface SetupStatusResponse {
   integrations: Record<string, {
     configured: boolean;
     required: boolean;
+    state?: 'configured' | 'not_configured' | 'installed_but_disabled' | 'dependency_plugin_missing' | 'connection_test_failed' | 'connected' | string;
     note?: string;
+    detail?: string;
   }>;
   settings: Record<string, unknown>;
 }
@@ -1887,6 +1914,18 @@ export interface AiSuggestion {
   source_folder?: string;
   created_by_workflow?: string;
   /** Fallback Discogs match, set only when MusicBrainz search found nothing. */
+  ai_available?: boolean;
+  ai_unavailable_reason?: string;
+  matching_method?: string;
+  warnings?: string[];
+  action_eligibility?: unknown;
+  eligibility_reason?: string;
+  matching_contract?: Record<string, unknown>;
+  acoustid_corroboration?: string;
+  fingerprint_conflicts?: string[];
+  recording_id_conflicts?: string[];
+  title_mismatch_warnings?: string[];
+  required_review?: boolean;
   discogs_candidate?: {
     discogs_id?: number | string;
     discogs_url?: string;
@@ -1907,9 +1946,98 @@ export interface AiSuggestResponse extends ApiOkResponse {
   suggestions?: AiSuggestion & { mb_trackid?: string };
   mb_candidates?: ReviewCandidate[];
   selected_candidate?: ReviewCandidate | ReviewRecordingCandidate;
+  selected_match?: ImportReviewSelectedMatch;
   recording_candidates?: ReviewRecordingCandidate[];
   acoustid_candidates?: unknown[];
   evidence?: ReviewEvidence;
+  ai_available?: boolean;
+  ai_unavailable_reason?: string;
+  matching_method?: string;
+  warnings?: string[];
+  action_eligibility?: unknown;
+  eligibility_reason?: string;
+  matching_contract?: Record<string, unknown>;
+  acoustid_corroboration?: string;
+  fingerprint_conflicts?: string[];
+  recording_id_conflicts?: string[];
+  title_mismatch_warnings?: string[];
+  required_review?: boolean;
+}
+
+export interface ImportReviewSelectedMatch {
+  release_group_id: string;
+  representative_release_id: string;
+  artist: string;
+  album: string;
+  year: string;
+  track_match_count: number | null;
+  total_tracks: number | null;
+  local_track_count: number | null;
+  track_mapping: ImportWithIdPayload['track_mapping'];
+  preflight_status: 'passed' | 'failed' | 'stale' | 'not_run';
+  preflight_reason: string;
+  is_release_group_usable: boolean;
+  is_importable: boolean;
+  is_partial_import: boolean;
+  confidence_score: number | null;
+  confidence_level: 'high' | 'medium' | 'low' | 'blocked' | 'not_importable';
+  auto_fix_eligible: boolean;
+  auto_fix_requires_review: boolean;
+  auto_fix_reason: string;
+  missing_track_count: number;
+  match_count: number | null;
+  preflight_ok: boolean | null;
+  identity_validated?: boolean;
+  candidate_identity_error?: string;
+  representative_release_group_id?: string;
+  rejected_representative_release_id?: string;
+  release_group_diagnostics?: Record<string, unknown>;
+  source: 'ai' | 'candidate' | 'manual' | 'musicbrainz_acoustid' | 'musicbrainz' | string;
+  ai_available?: boolean;
+  ai_unavailable_reason?: string;
+  matching_method?: string;
+  warnings?: string[];
+  action_eligibility?: unknown;
+  eligibility_reason?: string;
+  matching_contract?: Record<string, unknown>;
+  acoustid_corroboration?: string;
+  fingerprint_conflicts?: string[];
+  recording_id_conflicts?: string[];
+  title_mismatch_warnings?: string[];
+  required_review?: boolean;
+}
+
+export interface ImportReviewManualIdPayload {
+  review_item_id: string;
+  musicbrainz_id: string;
+  target_kind?: string;
+  path?: string;
+  album_id?: number;
+  existing_album_id?: number;
+  item_id?: number;
+}
+
+export interface ImportReviewManualIdResponse extends ApiOkResponse {
+  entity_type: 'release' | 'release-group' | 'recording' | 'unknown';
+  input_mbid?: string;
+  release_group_id?: string;
+  representative_release_id?: string;
+  mb_trackid?: string;
+  musicbrainz_url?: string;
+  selected_match?: ImportReviewSelectedMatch;
+  selected_recording_candidate?: ReviewRecordingCandidate;
+  recording_candidates?: ReviewRecordingCandidate[];
+  release_group_candidates?: Array<{
+    mb_albumid: string;
+    title: string;
+    date: string;
+    country: string;
+    status: string;
+    track_count: number;
+  }>;
+  status_lines?: string[];
+  message?: string;
+  error?: string;
 }
 
 export interface ReimportDiskPayload {
@@ -2660,7 +2788,3 @@ export interface FolderPlaceholderApplySafeRenamesResult {
   total: number;
   summary: string;
 }
-
-
-
-

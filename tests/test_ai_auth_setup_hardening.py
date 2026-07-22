@@ -432,8 +432,8 @@ class FrontendIntegrationStatusUiTests(unittest.TestCase):
 
     def test_badge_shows_connected_warning_or_not_configured(self):
         self.assertIn("'Connected'", SYSTEM_SOURCE)
-        self.assertIn("'Warning'", SYSTEM_SOURCE)
-        self.assertIn("'Not Configured'", SYSTEM_SOURCE)
+        self.assertIn("'Connection test failed'", SYSTEM_SOURCE)
+        self.assertIn("'Not configured'", SYSTEM_SOURCE)
 
     def test_each_integration_test_updates_state_independently(self):
         fn = _function_source(SYSTEM_SOURCE, "const runIntegrationTests = useCallback(", "const markComplete = async")

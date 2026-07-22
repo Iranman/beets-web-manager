@@ -5,6 +5,8 @@ import type {
   AcquisitionQueueResponse,
   AiMatchHistoryResponse,
   AutoEnqueueImportPayload,
+  ImportReviewManualIdPayload,
+  ImportReviewManualIdResponse,
   ImportReviewRevalidatePayload,
   AutoEnqueueImportResponse,
   ImportReviewRevalidateResponse,
@@ -1141,6 +1143,10 @@ export function matchAlbum(albumId: number, mbId: string): Promise<JobStartRespo
 
 export function suggestItem(itemId: number): Promise<AiSuggestResponse> {
   return apiJson<AiSuggestResponse>(`/api/items/${itemId}/ai-suggest`, { method: 'POST' });
+}
+
+export function validateManualMusicBrainzId(payload: ImportReviewManualIdPayload): Promise<ImportReviewManualIdResponse> {
+  return apiJson<ImportReviewManualIdResponse>('/api/import-review/manual-id/validate', jsonRequest('POST', payload));
 }
 
 export function attachRecording(
