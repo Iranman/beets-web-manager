@@ -37,20 +37,26 @@ const INTEGRATION_TESTS: Record<IntegrationKey, () => Promise<SetupIntegrationTe
   plex: testSetupPlex,
 };
 
+type IntegrationStatus = SetupStatusResponse['integrations'][string];
+
 function integrationBadge(
-  configured: boolean,
-  required: boolean,
+  integration: IntegrationStatus,
   test: SetupIntegrationTestResponse | undefined,
   testing: boolean,
 ): { icon: string; label: string; tone: 'ok' | 'warn' | 'neutral' } {
   if (testing) return { icon: '…', label: 'testing', tone: 'neutral' };
   if (test) {
     if (test.status === 'ready') return { icon: '✓', label: 'Connected', tone: 'ok' };
-    if (test.status === 'not_configured') return { icon: '✗', label: 'Not Configured', tone: required ? 'warn' : 'neutral' };
-    return { icon: '⚠', label: 'Warning', tone: 'warn' };
+    if (test.status === 'not_configured') return { icon: '✗', label: 'Not configured', tone: integration.required ? 'warn' : 'neutral' };
+    return { icon: '⚠', label: 'Connection test failed', tone: 'warn' };
   }
-  if (configured) return { icon: '✓', label: 'Connected', tone: 'ok' };
-  return { icon: '✗', label: 'Not Configured', tone: required ? 'warn' : 'neutral' };
+  const state = integration.state || (integration.configured ? 'configured' : 'not_configured');
+  if (state === 'connected') return { icon: '✓', label: 'Connected', tone: 'ok' };
+  if (state === 'configured') return { icon: '✓', label: 'Configured', tone: 'ok' };
+  if (state === 'installed_but_disabled') return { icon: '○', label: 'Installed but disabled', tone: integration.required ? 'warn' : 'neutral' };
+  if (state === 'dependency_plugin_missing') return { icon: '⚠', label: 'Dependency/plugin missing', tone: 'warn' };
+  if (state === 'connection_test_failed') return { icon: '⚠', label: 'Connection test failed', tone: 'warn' };
+  return { icon: '✗', label: 'Not configured', tone: integration.required ? 'warn' : 'neutral' };
 }
 
 function initialFormValues(variables: SetupEnvVariable[]): Record<string, string> {
@@ -574,6 +580,11 @@ export default function System() {
           tone={status?.demo_mode ? 'warn' : 'neutral'}
         />
         <StatusCard
+          label="Beets"
+          value={status?.beets?.version || (status?.beets?.available ? 'available' : 'missing')}
+          tone={status?.beets?.available ? 'ok' : 'warn'}
+        />
+        <StatusCard
           label="fpcalc"
           value={status?.fpcalc.available ? 'available' : 'missing'}
           tone={status?.fpcalc.available ? 'ok' : 'warn'}
@@ -614,7 +625,7 @@ export default function System() {
               const key = name as IntegrationKey;
               const test = integrationTests[key];
               const testing = Boolean(integrationTesting[key]);
-              const badge = integrationBadge(integration.configured, integration.required, test, testing);
+              const badge = integrationBadge(integration, test, testing);
               const toneClass = badge.tone === 'ok' ? 'text-emerald-300' : badge.tone === 'warn' ? 'text-amber-300' : 'text-zinc-500';
               return (
                 <div key={name} className="border-t border-graphite-800 py-2 first:border-t-0">
@@ -629,10 +640,13 @@ export default function System() {
                     </span>
                   </div>
                   {test?.error && (
-                    <div className="mt-1 text-[0.68rem] text-amber-400/90">{test.error}</div>
+                    <div className="mt-1 text-[0.68rem] text-amber-300">{test.error}</div>
+                  )}
+                  {integration.detail && !test && (
+                    <div className="mt-1 text-[0.68rem] text-amber-300">{integration.detail}</div>
                   )}
                   {integration.note && !test && (
-                    <div className="mt-1 text-[0.68rem] text-zinc-500">{integration.note}</div>
+                    <div className="mt-1 text-[0.68rem] text-zinc-300">{integration.note}</div>
                   )}
                 </div>
               );
@@ -641,6 +655,22 @@ export default function System() {
         </section>
       )}
 
+      {status?.beets && (
+        <section className="rounded border border-graphite-800 bg-graphite-900 p-4">
+          <div className="mb-2 text-sm font-semibold text-zinc-100">Beets plugin diagnostics</div>
+          <div className="grid gap-2 text-[0.72rem] text-zinc-200 sm:grid-cols-2">
+            <div><span className="font-semibold text-zinc-100">Plugin path:</span> {status.beets.pluginpath?.join(' then ') || 'not configured'}</div>
+            <div><span className="font-semibold text-zinc-100">ReplayGain:</span> {status.beets.replaygain_backend || status.beets.replaygain_command || 'not configured'}</div>
+            <div><span className="font-semibold text-zinc-100">Enabled plugins:</span> {status.beets.configured_plugins?.length ?? 0}</div>
+            <div><span className="font-semibold text-zinc-100">Plugin loader:</span> {status.beets.plugins_returncode === 0 ? 'loaded' : 'check details'}</div>
+          </div>
+          {status.beets.plugin_failures?.length ? (
+            <Alert severity="warning" className="mt-3">
+              {status.beets.plugin_failures.join(' ')}
+            </Alert>
+          ) : null}
+        </section>
+      )}
       {status && (
         <section className="rounded border border-graphite-800 bg-graphite-900 p-4">
           <div className="mb-2 flex flex-wrap items-center justify-between gap-3">

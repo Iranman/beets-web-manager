@@ -431,6 +431,19 @@ export interface SetupStatusResponse {
     available: boolean;
     path: string;
   };
+  beets?: {
+    available: boolean;
+    path?: string;
+    version?: string;
+    configured_plugins?: string[];
+    pluginpath?: string[];
+    plugin_failures?: string[];
+    plugins_returncode?: number | null;
+    replaygain_backend?: string;
+    replaygain_command?: string;
+    discogs_token_configured?: boolean;
+    listenbrainz_token_configured?: boolean;
+  };
   auth: {
     token_configured: boolean;
     token_auto_generated: boolean;
@@ -439,7 +452,9 @@ export interface SetupStatusResponse {
   integrations: Record<string, {
     configured: boolean;
     required: boolean;
+    state?: 'configured' | 'not_configured' | 'installed_but_disabled' | 'dependency_plugin_missing' | 'connection_test_failed' | 'connected' | string;
     note?: string;
+    detail?: string;
   }>;
   settings: Record<string, unknown>;
 }

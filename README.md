@@ -68,6 +68,8 @@ npm run build
 
 Most runtime configuration comes from environment variables and `/config/config.yaml` inside the container. Secrets must be provided through `.env`, Docker secrets, or mounted secret files. Do not commit real credentials.
 
+Beets and the default plugin dependencies are installed during the image build. A clean image includes the bundled discpath plugin at /app/beetsplug, user plugins may be mounted at /config/beetsplug, and pluginpath searches /config/beetsplug before /app/beetsplug. Do not install Python packages manually inside the running container; it is intentionally non-root and read-only.
+
 See `.env.example` for the required and optional variables.
 
 ## Environment Variables
@@ -227,8 +229,9 @@ Backs up the beets database and configuration/state JSON files under `/config` â
 ## Updates
 
 ```bash
-docker compose pull   # or: docker compose build
-docker compose up -d
+docker compose build --no-cache beets
+docker compose up -d --force-recreate beets
+docker compose exec beets beet version
 ```
 
 Run `./scripts/backup.sh` first. There is no separate database-migration step â€” the beets library schema is managed by beets itself on next library open.

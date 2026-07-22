@@ -230,7 +230,16 @@ services:
       BEETSDIR: /config
       HOME: /config
       XDG_CONFIG_HOME: /config/.config
-      OPENAI_API_KEY: "${OPENAI_API_KEY:?set in .env}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
+      AI_API_KEY: "${AI_API_KEY:-}"
+      AI_BASE_URL: "${AI_BASE_URL:-}"
+      AI_MODEL: "${AI_MODEL:-}"
+      ACOUSTID_API_KEY: "${ACOUSTID_API_KEY:-}"
+      ACOUSTID_KEY: "${ACOUSTID_KEY:-}"
+      DISCOGS_TOKEN: "${DISCOGS_TOKEN:-}"
+      DISCOGS_USER_TOKEN: "${DISCOGS_USER_TOKEN:-}"
+      LISTENBRAINZ_TOKEN: "${LISTENBRAINZ_TOKEN:-}"
       PLEX_URL: http://192.168.0.250:32400
       PLEX_TOKEN: "${PLEX_TOKEN:?set in .env}"
       LIDARR_URL: http://192.168.0.250:8686
@@ -338,7 +347,7 @@ services:
       LIDARR_API_KEY: "${LIDARR_API_KEY:?set in .env}"
       AI_PROVIDER: openai
       AI_MODEL: gpt-4o
-      AI_API_KEY: "${AI_API_KEY:?set in .env}"
+      AI_API_KEY: "${AI_API_KEY:-}"
     ports:
       - "3000:3000"
     volumes:

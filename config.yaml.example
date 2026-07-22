@@ -1,5 +1,7 @@
-plugins: fetchart embedart convert scrub replaygain lastgenre chroma lyrics mbsync musicbrainz discogs deezer listenbrainz ftintitle fromfilename duplicates missing smartplaylist mbsubmit unimported plexsync discpath
-pluginpath: /config/beetsplug
+plugins: fetchart embedart convert scrub replaygain lastgenre chroma lyrics mbsync musicbrainz deezer listenbrainz ftintitle fromfilename duplicates missing smartplaylist mbsubmit unimported discpath
+pluginpath:
+  - /config/beetsplug
+  - /app/beetsplug
 directory: /data/media/music
 library: /config/musiclibrary.blb
 art_filename: albumart
@@ -43,7 +45,7 @@ fetchart:
 
 replaygain:
     auto: no
-    command: mp3gain
+    backend: ffmpeg
 
 scrub:
     auto: yes
@@ -73,7 +75,9 @@ lyrics:
     auto: yes
     sources: genius musixmatch
 
-# Set discogs.user_token via config secrets or leave blank to disable Discogs lookups.
+# Discogs support is installed in the image, but the Beets plugin is disabled by
+# default because it prompts for OAuth during plugin load when no token exists.
+# Add "discogs" to plugins only after setting discogs.user_token.
 discogs:
     user_token: ""
     username: changeme
