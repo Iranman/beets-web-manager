@@ -81,7 +81,7 @@ class ImportReviewQualityFilterTests(unittest.TestCase):
         self.assertIn("Once a visible candidate is selected, show that candidate's state instead of stale stored evidence.", review_source)
         self.assertIn("function shouldShowReadyBucket(", review_source)
         self.assertIn("if (shouldShowBlockedBucket(item, mbid, selectedMatch, targetPreviewState)) return false", review_source)
-        self.assertIn("if (!selectedMatch || selectedMatch.source === 'manual') return false", review_source)
+        self.assertIn("if (!selectedMatch) return false", review_source)
         self.assertIn("if (!selectedMatch.is_importable) return false", review_source)
         self.assertIn("if (selectedMatch.preflight_status !== 'passed') return false", review_source)
         self.assertIn("if (!preview || !preview.safe) return false", review_source)
@@ -102,9 +102,9 @@ class ImportReviewQualityFilterTests(unittest.TestCase):
         self.assertIn("Review required because this match is below the 60% auto-import threshold.", review_source)
         self.assertIn("Auto-import eligible — ${formatPercent(confidenceScore)} confidence.", review_source)
         self.assertIn("const autoFixRequiresReview = false", review_source)
-        self.assertIn("const selectedConfidence = selectedMatch && selectedMatch.source !== 'manual'", review_source)
+        self.assertIn("const selectedConfidence = selectedMatch ? selectedMatch.confidence_level : null", review_source)
         self.assertIn("selectedConfidenceText || (item.confidence ? `${item.confidence} confidence` : '')", review_source)
-        self.assertIn("const selectedMatchActive = Boolean(selectedMatch && selectedMatch.source !== 'manual')", review_source)
+        self.assertIn("const selectedMatchActive = Boolean(selectedMatch)", review_source)
         self.assertIn("const blockedActive = shouldShowBlockedBucket(item, mbid, selectedMatch, targetPreviewState)", review_source)
         self.assertIn("const visibleMatchBucket: MatchBucket = audioMismatchActive", review_source)
         self.assertIn(": blockedActive", review_source)
@@ -136,6 +136,8 @@ class ImportReviewQualityFilterTests(unittest.TestCase):
         self.assertIn("Save ID only", review_source)
         self.assertNotIn("Save Release Group ID", review_source)
         self.assertIn("getReviewQueue({ limit: REVIEW_QUEUE_LIMIT, origin_type: sourceFilter })", review_source)
+        self.assertNotIn("if (!selectedMatch || selectedMatch.source === 'manual') return '';", review_source)
+        self.assertNotIn("if (!importLike || !selectedMatch || selectedMatch.source === 'manual') return '';", review_source)
 
         self.assertIn("export function previewImportTarget", client_source)
         self.assertIn("'/api/folders/import-target-preview'", client_source)
@@ -349,8 +351,3 @@ class ImportReviewQualityFilterTests(unittest.TestCase):
         self.assertIn("'format_policy_rejected'", blocked_block)
 if __name__ == "__main__":
     unittest.main()
-
-
-
-
-

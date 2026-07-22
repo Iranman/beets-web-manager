@@ -41,7 +41,9 @@ class ImportReviewButtonContrastTests(unittest.TestCase):
         self.assertNotIn("Verify with fingerprint", IMPORT_REVIEW_SOURCE)
         self.assertIn("automatic verification", IMPORT_REVIEW_SOURCE)
         self.assertIn("Quarantine", IMPORT_REVIEW_SOURCE)
-        self.assertIn("AI Suggest", IMPORT_REVIEW_SOURCE)
+        self.assertIn("Find Match", IMPORT_REVIEW_SOURCE)
+        self.assertIn("Enter MusicBrainz ID", IMPORT_REVIEW_SOURCE)
+        self.assertIn("Validate ID", IMPORT_REVIEW_SOURCE)
         self.assertIn("Import with ID", IMPORT_REVIEW_SOURCE)
 
     def test_buttons_use_explicit_readable_tokens(self):
@@ -85,6 +87,11 @@ class ImportReviewButtonContrastTests(unittest.TestCase):
         self.assertIn("&.Mui-focusVisible", THEME_SOURCE)
         self.assertIn("boxShadow: `0 0 0 3px", THEME_SOURCE)
 
+    def test_import_review_dark_queue_controls_stay_readable(self):
+        self.assertIn("text-zinc-200", IMPORT_REVIEW_SOURCE)
+        self.assertIn("text-zinc-100 transition hover:bg-graphite-700", IMPORT_REVIEW_SOURCE)
+        self.assertIn("focus-visible:outline-sky-300", IMPORT_REVIEW_SOURCE)
+        self.assertIn("disabled:text-zinc-500", IMPORT_REVIEW_SOURCE)
     def test_blocked_panel_actions_use_local_contrast_styles(self):
         self.assertIn("blockedPanelActionButtonSx", IMPORT_REVIEW_SOURCE)
         self.assertIn("blockedPanelWarningButtonSx", IMPORT_REVIEW_SOURCE)

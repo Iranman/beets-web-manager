@@ -125,7 +125,7 @@ class FrontendSingletonWiringTests(unittest.TestCase):
         self.assertIn("item.target_kind === 'item' ? 'Attach recording ID' : 'Match album'", IMPORT_REVIEW_SOURCE)
 
     def test_mbid_field_label_reflects_recording_for_item_rows(self):
-        self.assertIn("item.target_kind === 'item' ? 'MusicBrainz Recording ID' : 'MusicBrainz Release Group ID'", IMPORT_REVIEW_SOURCE)
+        self.assertIn("item.target_kind === 'item' ? 'MusicBrainz Recording ID or URL' : 'MusicBrainz Release or Release Group ID/URL'", IMPORT_REVIEW_SOURCE)
 
     def test_album_only_actions_stay_hidden_for_item_rows(self):
         # isLibraryNoMb (gates "Prepare MB Submission" / "Add MBIDs", both
