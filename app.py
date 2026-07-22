@@ -2309,7 +2309,13 @@ def _redact_secret_assignment_match(match: "re.Match[str]") -> str:
 # Matches userinfo credentials embedded directly in a URL, e.g.
 # "https://user:password@example.test/" -- these don't have a
 # "keyword: value" shape so _SECRET_ASSIGNMENT_RE never sees them.
-_URL_CREDENTIALS_RE = re.compile(r"(?i)\b([a-z][a-z0-9+.\-]*://)[^\s/@]+:[^\s/@]+@")
+#
+# The username segment excludes ":" (unlike the password segment) so the
+# two adjacent unbounded runs can never both stretch across the same ":" --
+# without that, CodeQL correctly flags this as a polynomial-time regex on
+# attacker-controlled input (confirmation_reason flows straight into this).
+# Both segments are also length-capped as defense in depth.
+_URL_CREDENTIALS_RE = re.compile(r"(?i)\b([a-z][a-z0-9+.\-]*://)[^\s/@:]{1,256}:[^\s/@]{1,256}@")
 
 
 def _redact_security_text(value: Any) -> str:
