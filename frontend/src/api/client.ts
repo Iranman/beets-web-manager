@@ -35,6 +35,7 @@ import type {
   ImportWithIdPayload,
   JobResponse,
   JobStartResponse,
+  AttachRecordingResponse,
   LibraryImportAllLastResponse,
   DownloadAlbumPayload,
   LidarrArtistAlbumsResponse,
@@ -74,7 +75,6 @@ import type {
   ReimportDiskPayload,
   ReviewQueueParams,
   ReviewQueueResponse,
-  ReviewRecordingCandidate,
   RgidGroupDetailResponse,
   FolderPlaceholderReview,
   FolderPlaceholderMergePreview,
@@ -105,9 +105,20 @@ import type { LibraryTrack } from '../types/api';
 type ApiErrorBody = {
   ok?: boolean;
   error?: string;
+  code?: string;
+  candidate?: unknown;
 };
 
 const _CSRF_EXEMPT_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
+/** Reads the structured error body (code, sanitized candidate, ...) a
+ * backend rejection attached to its thrown Error -- e.g. distinguishing
+ * `review_confirmation_required` from other failures without parsing
+ * `err.message` text. Returns undefined for non-API errors or plain
+ * network failures. */
+export function apiErrorBody(err: unknown): ApiErrorBody | undefined {
+  return (err as { body?: ApiErrorBody } | null | undefined)?.body;
+}
 
 export async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
   const method = (init?.method ?? 'GET').toUpperCase();
@@ -124,11 +135,15 @@ export async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
   const body = (await response.json().catch(() => null)) as ApiErrorBody | null;
 
   if (!response.ok) {
-    throw new Error(body?.error || `HTTP ${response.status}`);
+    const err = new Error(body?.error || `HTTP ${response.status}`) as Error & { body?: ApiErrorBody };
+    err.body = body ?? undefined;
+    throw err;
   }
 
   if (body && body.ok === false) {
-    throw new Error(body.error || 'Request failed');
+    const err = new Error(body.error || 'Request failed') as Error & { body?: ApiErrorBody };
+    err.body = body;
+    throw err;
   }
 
   return body as T;
@@ -1152,14 +1167,31 @@ export function validateManualMusicBrainzId(payload: ImportReviewManualIdPayload
 export function attachRecording(
   itemId: number,
   mbTrackId: string,
-  options: { confirmed_conflicts?: boolean; candidate?: ReviewRecordingCandidate } = {},
-): Promise<JobStartResponse> {
-  return apiJson<JobStartResponse>(
+): Promise<AttachRecordingResponse> {
+  // Always "safe" mode: the backend independently re-derives eligibility
+  // from its own trusted candidate set and rejects anything that actually
+  // needs review (see confirmAttachRecording) -- this call never asserts
+  // safety/confidence/conflicts itself.
+  return apiJson<AttachRecordingResponse>(
+    `/api/items/${itemId}/attach-recording`,
+    jsonRequest('POST', { mb_trackid: mbTrackId, mode: 'safe' }),
+  );
+}
+
+export function confirmAttachRecording(
+  itemId: number,
+  mbTrackId: string,
+  decisionVersion: string,
+  confirmationReason: string,
+): Promise<AttachRecordingResponse> {
+  return apiJson<AttachRecordingResponse>(
     `/api/items/${itemId}/attach-recording`,
     jsonRequest('POST', {
       mb_trackid: mbTrackId,
-      confirmed_conflicts: Boolean(options.confirmed_conflicts),
-      candidate: options.candidate,
+      mode: 'confirmed_review',
+      confirm: true,
+      confirmation_reason: confirmationReason,
+      decision_version: decisionVersion,
     }),
   );
 }

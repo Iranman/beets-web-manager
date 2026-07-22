@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
+import hashlib
+import json
 import math
 import re
 import unicodedata
@@ -1038,3 +1040,33 @@ def build_recording_matching_decision(
             "mb_albumids": list(candidate.get("mb_albumids") or ([] if not release_id else [release_id])),
         },
     )
+
+
+def compute_decision_version(item_id: Any, decision: "MatchingDecision") -> str:
+    """Server-generated fingerprint of one candidate's matching decision.
+
+    Derived only from stable, already-sanitized decision fields (never
+    secrets or raw provider payloads) so a caller can detect that the
+    displayed decision is stale by the time an attach request arrives --
+    it proves the decision hasn't changed, it never grants authority on
+    its own.
+    """
+    identity = decision.identity
+    d = decision.decision
+    payload = {
+        "schema": 1,
+        "contract_version": 2,
+        "item_id": _s(item_id),
+        "resolved_recording_id": _s(identity.get("resolved_recording_id")),
+        "evaluated_candidate_recording_id": _s(identity.get("evaluated_candidate_recording_id")),
+        "release_id": _s(identity.get("release_id")),
+        "release_group_id": _s(identity.get("release_group_id")),
+        "conflicts": sorted(d.get("conflicts") or []),
+        "warnings": sorted(d.get("warnings") or []),
+        "review_required": bool(d.get("review_required")),
+        "requires_confirmation": bool(d.get("requires_confirmation")),
+        "safety_key": _s(d.get("safety_key")),
+    }
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(blob.encode("utf-8")).hexdigest()[:24]
+    return f"drv1:{digest}"

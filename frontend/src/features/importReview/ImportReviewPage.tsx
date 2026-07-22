@@ -21,10 +21,12 @@ import { apiGet } from '../../lib/api';
 import {
   albumAddMbids,
   albumMbsubmit,
+  apiErrorBody,
   attachRecording,
   autoEnqueueImport,
   cleanupReviewFiles,
   cleanupStaleReview,
+  confirmAttachRecording,
   deleteReviewFolder,
   deletePendingReview,
   getFolderStats,
@@ -45,6 +47,7 @@ import {
 import type {
   AiSuggestResponse,
   AiSuggestion,
+  AttachRecordingResponse,
   FolderStatsResponse,
   ImportReviewManualIdResponse,
   ImportTargetPreviewResponse,
@@ -148,7 +151,8 @@ type SelectedMatch = {
 type ConfirmIntent =
   | { kind: 'apply'; item: ReviewItem; mbid: string }
   | { kind: 'dismiss'; item: ReviewItem }
-  | { kind: 'delete_folder'; item: ReviewItem; folderStats?: FolderStatsResponse };
+  | { kind: 'delete_folder'; item: ReviewItem; folderStats?: FolderStatsResponse }
+  | { kind: 'attach_recording_confirm'; item: ReviewItem; mbid: string; candidate: ReviewRecordingCandidate };
 
 type BgJobStatus =
   | 'running'
@@ -3208,23 +3212,32 @@ function ConfirmDialog({
 }: {
   intent: ConfirmIntent | null;
   onClose: () => void;
-  onConfirm: () => void;
+  onConfirm: (reason?: string) => void;
 }) {
   const item = intent?.item;
   const deletingLibraryFolder = intent?.kind === 'delete_folder' && isMusicLibraryPath(item?.path);
   const wrongSourceNote = intent?.kind === 'delete_folder' ? wrongSourceEvidenceNote(item) : '';
+  const isAttachConfirm = intent?.kind === 'attach_recording_confirm';
+  const [reason, setReason] = useState('');
+  useEffect(() => { setReason(''); }, [intent]);
+  const reasonTrimmed = reason.trim();
+
   const title = intent?.kind === 'dismiss'
     ? 'Remove Review Item'
     : intent?.kind === 'delete_folder'
       ? deletingLibraryFolder ? 'Delete Library Folder' : 'Delete Source Folder'
-      : 'Start Tagging Job';
+      : isAttachConfirm
+        ? 'Confirm Recording ID (Review Required)'
+        : 'Start Tagging Job';
   const detail = intent?.kind === 'dismiss'
     ? 'This removes the folder from Pending Review only. Audio files are not deleted.'
     : intent?.kind === 'delete_folder'
       ? deletingLibraryFolder
         ? 'This permanently deletes this folder from the music library, removes matching Beets DB rows, and removes it from Pending Review. Use this only when the tracks are confirmed wrong.'
         : 'This permanently deletes the source folder from disk and removes it from Pending Review. Use this only when the tracks are confirmed wrong.'
-      : 'This starts a backend Beets job that can write tags and move files according to the configured path template.';
+      : isAttachConfirm
+        ? 'The backend flagged this candidate as needing human review before it can be attached. Confirming only attaches this Recording ID -- it does not authorize any other action.'
+        : 'This starts a backend Beets job that can write tags and move files according to the configured path template.';
 
   return (
     <Dialog open={Boolean(intent)} onClose={onClose} className="relative z-50">
@@ -3261,11 +3274,43 @@ function ConfirmDialog({
                   ) : null}
                 </div>
               ) : null}
+              {intent?.kind === 'attach_recording_confirm' ? (
+                <div className="mt-2 space-y-2 text-xs text-zinc-600">
+                  <div className="truncate font-mono">{intent.candidate.mb_trackid}</div>
+                  {(intent.candidate.conflicts || []).length ? (
+                    <div className="rounded border border-rose-200 bg-rose-50 px-2 py-1 text-rose-800">
+                      <div className="font-semibold">Conflicts</div>
+                      <div>{(intent.candidate.conflicts || []).join(', ')}</div>
+                    </div>
+                  ) : null}
+                  {(intent.candidate.warnings || []).length ? (
+                    <div className="rounded border border-amber-200 bg-amber-50 px-2 py-1 text-amber-800">
+                      <div className="font-semibold">Warnings</div>
+                      <div>{(intent.candidate.warnings || []).join(', ')}</div>
+                    </div>
+                  ) : null}
+                  <TextField
+                    fullWidth
+                    multiline
+                    minRows={2}
+                    size="small"
+                    label="Confirmation reason (required)"
+                    placeholder="Why is this the correct Recording ID despite the conflicts/warnings above?"
+                    value={reason}
+                    onChange={(e) => setReason(e.target.value)}
+                  />
+                </div>
+              ) : null}
             </div>
           ) : null}
           <div className="mt-5 flex justify-end gap-2">
             <Button variant="text" onClick={onClose}>Cancel</Button>
-            <Button color={intent?.kind === 'delete_folder' ? 'error' : 'primary'} variant="contained" onClick={onConfirm}>
+            <Button
+              color={intent?.kind === 'delete_folder' ? 'error' : 'primary'}
+              variant="contained"
+              disabled={isAttachConfirm && !reasonTrimmed}
+              onClick={() => onConfirm(reasonTrimmed)}
+            >
               {intent?.kind === 'delete_folder' ? deleteFolderActionLabel(item) : 'Confirm'}
             </Button>
           </div>
@@ -4248,14 +4293,14 @@ export function ImportReviewPage({
   const runApply = useCallback(async (item: ReviewItem, mbid: string) => {
     if (runningJobItemIdsRef.current.has(item.id)) return;
     setAction(item.id, { status: 'running', message: 'Starting backend job...' });
+    const sm = selectedMatches[item.id];
+    const representativeId = sm?.representative_release_id && sm.representative_release_id !== sm.release_group_id
+      ? sm.representative_release_id
+      : mbid;
     try {
-      let started: JobStartResponse;
+      let started: JobStartResponse | AttachRecordingResponse;
       const existingId = existingAlbumId(item);
-      const sm = selectedMatches[item.id];
       const releaseGroupId = sm?.release_group_id || selectedReleaseGroupId(item, mbid, suggestions[item.id]);
-      const representativeId = sm?.representative_release_id && sm.representative_release_id !== sm.release_group_id
-        ? sm.representative_release_id
-        : mbid;
       const preview = currentTargetPreviewState(item, sm, targetPreviews)?.preview;
       const unfilteredSelectedFiles = selectedImportSourceFiles(sm);
       const selectedSourceFiles = selectedImportSourceFiles(sm, preview);
@@ -4266,6 +4311,11 @@ export function ImportReviewPage({
 
       if (item.type === 'library_no_mb' && item.target_kind === 'item' && item.item_id) {
         started = await attachRecording(item.item_id, representativeId);
+        if (started.changed === false) {
+          setAction(item.id, { status: 'success', message: 'Recording ID already attached; no change needed.' });
+          removeLocalItem(item);
+          return;
+        }
       } else if (item.type === 'library_no_mb' && item.album_id) {
         started = await matchAlbum(item.album_id, representativeId);
       } else if (existingId) {
@@ -4296,11 +4346,56 @@ export function ImportReviewPage({
       removeLocalItem(item);                          // advance cursor immediately
       void pollJobBackground(started.job_id, item, label, keepReviewAfterSuccess);
     } catch (err) {
+      if (item.type === 'library_no_mb' && item.target_kind === 'item' && item.item_id) {
+        const body = apiErrorBody(err);
+        if (body?.code === 'review_confirmation_required' && body.candidate) {
+          setConfirmIntent({
+            kind: 'attach_recording_confirm',
+            item,
+            mbid: representativeId,
+            candidate: body.candidate as ReviewRecordingCandidate,
+          });
+          setAction(item.id, { status: 'idle', message: '' });
+          return;
+        }
+      }
       const message = err instanceof Error ? err.message : String(err);
       const aiWarning = optionalAiWarning(message);
       setAction(item.id, { status: aiWarning ? 'warning' : 'error', message: aiWarning || message });
     }
   }, [pollJobBackground, removeLocalItem, selectedMatches, setAction, suggestions, targetPreviews]);
+
+  // Separate from runApply on purpose: a confirmed-review attach must only
+  // ever be reachable through the explicit confirm dialog (see
+  // ConfirmDialog's 'attach_recording_confirm' branch), never through the
+  // same one-click path used for backend-declared-safe candidates.
+  const runConfirmedAttach = useCallback(async (
+    item: ReviewItem,
+    mbid: string,
+    candidate: ReviewRecordingCandidate,
+    reason: string,
+  ) => {
+    if (!item.item_id || runningJobItemIdsRef.current.has(item.id)) return;
+    setAction(item.id, { status: 'running', message: 'Starting backend job...' });
+    try {
+      const started = await confirmAttachRecording(item.item_id, mbid, candidate.decision_version || '', reason);
+      if (started.changed === false) {
+        setAction(item.id, { status: 'success', message: 'Recording ID already attached; no change needed.' });
+        removeLocalItem(item);
+        return;
+      }
+      if (!started.job_id) throw new Error('Backend did not return a job id');
+      const label = 'Attach recording ID (confirmed review)';
+      setBackgroundJobs((prev) => ({
+        ...prev,
+        [item.id]: { jobId: started.job_id!, status: 'running', label, message: `Job ${started.job_id} queued.`, item },
+      }));
+      removeLocalItem(item);
+      void pollJobBackground(started.job_id, item, label, false);
+    } catch (err) {
+      setAction(item.id, { status: 'error', message: err instanceof Error ? err.message : String(err) });
+    }
+  }, [pollJobBackground, removeLocalItem, setAction]);
 
   const requestDismiss = useCallback((item: ReviewItem) => {
     if (item.type === 'pending_ai' || item.type === 'skipped') { setConfirmIntent({ kind: 'dismiss', item }); return; }
@@ -4453,14 +4548,16 @@ export function ImportReviewPage({
     }
   }, [loadQueue, removeLocalItem, setAction]);
 
-  const confirm = useCallback(() => {
+  const confirm = useCallback((reason?: string) => {
     const intent = confirmIntent;
     setConfirmIntent(null);
     if (!intent) return;
     if (intent.kind === 'apply') void runApply(intent.item, intent.mbid);
     else if (intent.kind === 'dismiss') void runDismiss(intent.item);
-    else void runDeleteFolder(intent.item);
-  }, [confirmIntent, runApply, runDeleteFolder, runDismiss]);
+    else if (intent.kind === 'attach_recording_confirm') {
+      void runConfirmedAttach(intent.item, intent.mbid, intent.candidate, reason || '');
+    } else void runDeleteFolder(intent.item);
+  }, [confirmIntent, runApply, runConfirmedAttach, runDeleteFolder, runDismiss]);
 
   const selectFilter = useCallback((nextFilter: QueueFilter) => {
     setFilter(nextFilter);
