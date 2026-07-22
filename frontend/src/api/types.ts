@@ -450,7 +450,14 @@ export interface SetupStatusResponse {
     configured_plugins?: string[];
     pluginpath?: string[];
     plugin_failures?: string[];
+    /** Exit code of the supported plugin-loader probe (`beet -c <config>
+     * -vv version`) -- kept under its original name for compatibility, but
+     * it no longer reflects an unsupported `beet plugins` command. */
     plugins_returncode?: number | null;
+    plugin_loader_returncode?: number | null;
+    plugin_loader_ok?: boolean;
+    plugin_loader_timed_out?: boolean;
+    plugin_loader_error?: string;
     replaygain_backend?: string;
     replaygain_command?: string;
     discogs_token_configured?: boolean;
@@ -464,7 +471,7 @@ export interface SetupStatusResponse {
   integrations: Record<string, {
     configured: boolean;
     required: boolean;
-    state?: 'configured' | 'not_configured' | 'installed_but_disabled' | 'dependency_plugin_missing' | 'connection_test_failed' | 'connected' | string;
+    state?: 'configured' | 'not_configured' | 'installed_but_disabled' | 'dependency_plugin_missing' | 'plugin_loader_failed' | 'connection_test_failed' | 'connected' | string;
     note?: string;
     detail?: string;
   }>;

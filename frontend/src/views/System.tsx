@@ -55,8 +55,20 @@ function integrationBadge(
   if (state === 'configured') return { icon: '✓', label: 'Configured', tone: 'ok' };
   if (state === 'installed_but_disabled') return { icon: '○', label: 'Installed but disabled', tone: integration.required ? 'warn' : 'neutral' };
   if (state === 'dependency_plugin_missing') return { icon: '⚠', label: 'Dependency/plugin missing', tone: 'warn' };
+  if (state === 'plugin_loader_failed') return { icon: '⚠', label: 'Plugin loader failed', tone: 'warn' };
   if (state === 'connection_test_failed') return { icon: '⚠', label: 'Connection test failed', tone: 'warn' };
   return { icon: '✗', label: 'Not configured', tone: integration.required ? 'warn' : 'neutral' };
+}
+
+/** Reflects the backend-reported plugin-loader probe state only (never
+ * recomputed client-side from configured_plugins/plugin_failures) --
+ * `beets.available`/`plugin_loader_timed_out`/`plugin_loader_ok` are the
+ * single sources of truth from /api/setup/status. */
+function pluginLoaderLabel(beets: NonNullable<SetupStatusResponse['beets']>): string {
+  if (!beets.available) return 'unavailable';
+  if (beets.plugin_loader_timed_out) return 'timed out';
+  if (beets.plugin_loader_ok) return 'loaded';
+  return 'failed';
 }
 
 function initialFormValues(variables: SetupEnvVariable[]): Record<string, string> {
@@ -662,11 +674,16 @@ export default function System() {
             <div><span className="font-semibold text-zinc-100">Plugin path:</span> {status.beets.pluginpath?.join(' then ') || 'not configured'}</div>
             <div><span className="font-semibold text-zinc-100">ReplayGain:</span> {status.beets.replaygain_backend || status.beets.replaygain_command || 'not configured'}</div>
             <div><span className="font-semibold text-zinc-100">Enabled plugins:</span> {status.beets.configured_plugins?.length ?? 0}</div>
-            <div><span className="font-semibold text-zinc-100">Plugin loader:</span> {status.beets.plugins_returncode === 0 ? 'loaded' : 'check details'}</div>
+            <div><span className="font-semibold text-zinc-100">Plugin loader:</span> {pluginLoaderLabel(status.beets)}</div>
           </div>
           {status.beets.plugin_failures?.length ? (
             <Alert severity="warning" className="mt-3">
               {status.beets.plugin_failures.join(' ')}
+            </Alert>
+          ) : null}
+          {!status.beets.plugin_failures?.length && status.beets.plugin_loader_error ? (
+            <Alert severity="warning" className="mt-3">
+              {status.beets.plugin_loader_error}
             </Alert>
           ) : null}
         </section>
