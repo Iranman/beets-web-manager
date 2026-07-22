@@ -1369,6 +1369,13 @@ def _beet_env() -> dict:
     return env
 
 
+_BEETS_PLUGINPATH_CONFIG = (
+    "pluginpath:\n"
+    "  - /config/beetsplug\n"
+    "  - /app/beetsplug\n"
+)
+
+
 def _beet_import_timeout(source_path: str, minimum: int = 300, maximum: int = 1200) -> int:
     """Scale beet import timeout with album size while keeping a hard cap."""
     count = 0
@@ -1423,7 +1430,7 @@ def _write_plugin_job_beets_config(temp_path: str, command: str) -> str:
             plugins.append(command)
         Path(temp_path).write_text(
             "include:\n  - /config/config.yaml\n"
-            "pluginpath: /config/beetsplug\n"
+            + _BEETS_PLUGINPATH_CONFIG
             + (f"plugins: {' '.join(plugins)}\n" if plugins else "")
             + "lyrics:\n  auto: no\n"
             "replaygain:\n  auto: no\n"
@@ -1456,7 +1463,7 @@ def _write_job_beets_config(temp_path: str, extra: str = "") -> str:
             extra_block += "\n"
         Path(temp_path).write_text(
             "include:\n  - /config/config.yaml\n"
-            "pluginpath: /config/beetsplug\n"
+            + _BEETS_PLUGINPATH_CONFIG
             + (f"plugins: {plugins}\n" if plugins else "")
             + _JOB_PATHS_CONFIG_BLOCK
             + extra_block
@@ -2696,7 +2703,7 @@ def _write_fast_item_modify_config(path_value: str) -> str:
     try:
         Path(path_value).write_text(
             "include:\n  - /config/config.yaml\n"
-            "pluginpath: /config/beetsplug\n"
+            + _BEETS_PLUGINPATH_CONFIG
             + (f"plugins: {_plugins}\n" if _plugins else "")
             + "lyrics:\n  auto: no\n"
             "replaygain:\n  auto: no\n",
@@ -2884,7 +2891,7 @@ def retag_item(iid):
         try:
             Path(_rtcfg).write_text(
                 "include:\n  - /config/config.yaml\n"
-                "pluginpath: /config/beetsplug\n"
+                + _BEETS_PLUGINPATH_CONFIG
                 + (f"plugins: {_plugins}\n" if _plugins else "")
                 + _JOB_PATHS_CONFIG_BLOCK
                 + "lyrics:\n  auto: no\n"
@@ -10567,7 +10574,7 @@ def album_deduplicate(aid):
             _plugins = _beet_plugins()
             Path(_fmcfg).write_text(
                 "include:\n  - /config/config.yaml\n"
-                "pluginpath: /config/beetsplug\n"
+                + _BEETS_PLUGINPATH_CONFIG
                 + (f"plugins: {_plugins}\n" if _plugins else "")
                 + _JOB_PATHS_CONFIG_BLOCK
                 + "lyrics:\n  auto: no\n"
@@ -19486,7 +19493,7 @@ def import_folder_with_id():
             _plugins = _beet_plugins()
             Path(temp_cfg).write_text(
                 "include:\n  - /config/config.yaml\n"
-                "pluginpath: /config/beetsplug\n"
+                + _BEETS_PLUGINPATH_CONFIG
                 + (f"plugins: {_plugins}\n" if _plugins else "")
                 + _JOB_PATHS_CONFIG_BLOCK
                 + "match:\n"
@@ -21264,7 +21271,7 @@ def reimport_disk():
         _plugins = _beet_plugins()
         Path(temp_cfg).write_text(
             "include:\n  - /config/config.yaml\n"
-            "pluginpath: /config/beetsplug\n"
+            + _BEETS_PLUGINPATH_CONFIG
             + (f"plugins: {_plugins}\n" if _plugins else "")
             + _JOB_PATHS_CONFIG_BLOCK
             + "import:\n"
@@ -24093,7 +24100,7 @@ def _ai_import_folder(folder_path: str, mb_albumid: str, suggestion: dict,
     try:
         Path(temp_cfg).write_text(
             "include:\n  - /config/config.yaml\n"
-            "pluginpath: /config/beetsplug\n"
+            + _BEETS_PLUGINPATH_CONFIG
             + (f"plugins: {_plugins}\n" if _plugins else "")
             + _JOB_PATHS_CONFIG_BLOCK
             + "import:\n  duplicate_action: remove\n"
@@ -25728,7 +25735,7 @@ def library_merge_artist_id():
         try:
             Path(_tmp_cfg).write_text(
                 "include:\n  - /config/config.yaml\n"
-                "pluginpath: /config/beetsplug\n"
+                + _BEETS_PLUGINPATH_CONFIG
                 + (f"plugins: {_plugins}\n" if _plugins else "")
                 + _JOB_PATHS_CONFIG_BLOCK
                 + "lyrics:\n  auto: no\nreplaygain:\n  auto: no\n"
@@ -25818,7 +25825,7 @@ def library_confirm_artist_alias():
         try:
             Path(_tmp_cfg).write_text(
                 "include:\n  - /config/config.yaml\n"
-                "pluginpath: /config/beetsplug\n"
+                + _BEETS_PLUGINPATH_CONFIG
                 + (f"plugins: {_plugins}\n" if _plugins else "")
                 + _JOB_PATHS_CONFIG_BLOCK
                 + "lyrics:\n  auto: no\nreplaygain:\n  auto: no\n"

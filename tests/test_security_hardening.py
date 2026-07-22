@@ -88,7 +88,7 @@ class SecurityHardeningTests(unittest.TestCase):
         self.assertRegex(COMPOSE, r"BEETS_WEB_AUTH_TOKEN: \"\$\{BEETS_WEB_AUTH_TOKEN:\?set a strong owner token\}\"")
         self.assertRegex(COMPOSE, r"PUID: \$\{PUID:-1000\}")
         self.assertRegex(COMPOSE, r"PGID: \$\{PGID:-1000\}")
-        self.assertIn('OPENAI_API_KEY: "${OPENAI_API_KEY:?set in .env}"', COMPOSE)
+        self.assertIn('OPENAI_API_KEY: "${OPENAI_API_KEY:-}"', COMPOSE)
         self.assertIn('PLEX_TOKEN: "${PLEX_TOKEN:?set in .env}"', COMPOSE)
         self.assertIn('LIDARR_API_KEY: "${LIDARR_API_KEY:?set in .env}"', COMPOSE)
         self.assertIn('DIGARR_INITIAL_PASSWORD: "${DIGARR_INITIAL_PASSWORD:?set in .env}"', COMPOSE)

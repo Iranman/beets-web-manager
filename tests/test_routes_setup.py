@@ -66,8 +66,11 @@ class RoutesSetupStatusTests(unittest.TestCase):
         self.assertTrue(body["ok"])
         self.assertIn(body["status"], ("ready", "warning"))
         self.assertIn("integrations", body)
-        for key in ("ai", "musicbrainz", "acoustid", "plex"):
+        for key in ("ai", "musicbrainz", "acoustid", "discogs", "lastgenre", "listenbrainz", "discpath", "replaygain", "plex", "lidarr", "slskd"):
             self.assertIn(key, body["integrations"])
+            self.assertIn("state", body["integrations"][key])
+        self.assertIn("beets", body)
+        self.assertIn("plugin_failures", body["beets"])
 
     def test_status_masks_secret_looking_settings(self):
         self.client.post("/api/setup/settings", json={"ai_api_key": "sk-verysecretvalue123"})

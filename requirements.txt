@@ -3,25 +3,17 @@ Flask==3.1.0
 Werkzeug==3.1.3
 waitress==3.0.2
 
-# Beets + plugins referenced in config.yaml.example. fetchart, embedart, convert,
-# scrub, replaygain, lastgenre, chroma, lyrics, mbsync, musicbrainz, ftintitle,
-# fromfilename, duplicates, missing, smartplaylist, mbsubmit, unimported are
-# bundled with beets core. The packages below are the separate PyPI extras
-# those plugins need at runtime (verified present on PyPI as of 2026-07-16).
-beets==2.2.0
+# Beets plus the extras required by config.yaml.example's default plugin set.
+# Beets 2.12.0 is the pinned metadata-source plugin model used by both the
+# standalone image and Arr deployment.
+beets[chroma,discogs,embedart,fetchart,lastgenre,lastimport,lyrics,scrub]==2.12.0
+pylast==7.1.0
 typing_extensions==4.16.0
-pyacoustid==1.3.0
-python3-discogs-client==2.8
 deezer-python==2.1.0
 pylistenbrainz==0.5.1
 Pillow==10.4.0
 beautifulsoup4==4.12.3
-requests==2.32.3
-
-# NOTE: config.yaml.example's plugin list also includes "plexsync", a
-# third-party beets plugin not published under a confirmed PyPI name. If you
-# use plexsync, install it manually (commonly via `pip install git+<repo-url>`
-# for the specific fork you use) and add it to this file with a pinned commit.
+requests==2.32.5
 
 # yt-dlp download pipeline (installed here, not at runtime - _pip_install() in
 # app.py is intentionally a no-op; see Dockerfile comment)

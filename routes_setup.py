@@ -134,6 +134,8 @@ WEBCONTROL_PORT=8337
 OPENAI_API_KEY=
 OPENROUTER_API_KEY=
 AI_API_KEY=
+AI_BASE_URL=
+AI_MODEL=
 
 # Plex and Arr services
 PLEX_URL=
@@ -145,6 +147,7 @@ LIDARR_API_KEY=
 ACOUSTID_API_KEY=
 ACOUSTID_KEY=
 DISCOGS_TOKEN=
+DISCOGS_USER_TOKEN=
 LISTENBRAINZ_TOKEN=
 
 # SLSKD and Soulseek
@@ -454,6 +457,238 @@ def _check_path(path_value: str, *, require_writable: bool) -> Dict[str, Any]:
     return result
 
 
+
+_BEETS_PLUGIN_FAILURE_PATTERNS = (
+    "error loading plugin",
+    "modulenotfounderror",
+    "no module named",
+    "initialization failed",
+    "replaygain initialization failed",
+)
+
+
+def _redact_diagnostic_text(text: str) -> str:
+    redacted = str(text or "")
+    redacted = re.sub(
+        r"(?i)((?:api[_-]?key|token|password|secret)\s*[:=]\s*)([^\s,'\"]+)",
+        r"\1[redacted]",
+        redacted,
+    )
+    return redacted
+
+
+def _simple_yaml_scalar(value: str) -> str:
+    return str(value or "").strip().strip('"\'')
+
+
+def _parse_beets_config_summary(config_path: Path) -> Dict[str, Any]:
+    summary: Dict[str, Any] = {
+        "plugins": [],
+        "pluginpath": [],
+        "replaygain_backend": "",
+        "replaygain_command": "",
+        "discogs_token_configured": False,
+        "listenbrainz_token_configured": False,
+    }
+    try:
+        lines = config_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except Exception:
+        return summary
+    section = ""
+    list_key = ""
+    for raw in lines:
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(raw) - len(raw.lstrip(" "))
+        if indent == 0:
+            list_key = ""
+            if stripped.startswith("plugins:"):
+                value = stripped.split(":", 1)[1].strip()
+                if value:
+                    summary["plugins"].extend(p for p in value.split() if p)
+                else:
+                    list_key = "plugins"
+                section = "plugins"
+                continue
+            if stripped.startswith("pluginpath:"):
+                value = stripped.split(":", 1)[1].strip()
+                if value:
+                    summary["pluginpath"].append(_simple_yaml_scalar(value))
+                else:
+                    list_key = "pluginpath"
+                section = "pluginpath"
+                continue
+            section = stripped[:-1].strip() if stripped.endswith(":") else ""
+            continue
+        if list_key and stripped.startswith("-"):
+            value = _simple_yaml_scalar(stripped[1:].strip())
+            if value:
+                if list_key == "plugins":
+                    summary["plugins"].extend(p for p in value.split() if p)
+                else:
+                    summary["pluginpath"].append(value)
+            continue
+        if section == "replaygain" and stripped.startswith("backend:"):
+            summary["replaygain_backend"] = _simple_yaml_scalar(stripped.split(":", 1)[1])
+        elif section == "replaygain" and stripped.startswith("command:"):
+            summary["replaygain_command"] = _simple_yaml_scalar(stripped.split(":", 1)[1])
+        elif section == "discogs" and stripped.startswith("user_token:"):
+            summary["discogs_token_configured"] = bool(_simple_yaml_scalar(stripped.split(":", 1)[1]))
+        elif section == "listenbrainz" and stripped.startswith("token:"):
+            summary["listenbrainz_token_configured"] = bool(_simple_yaml_scalar(stripped.split(":", 1)[1]))
+    summary["plugins"] = list(dict.fromkeys(summary["plugins"]))
+    summary["pluginpath"] = list(dict.fromkeys(summary["pluginpath"]))
+    return summary
+
+
+def _beet_binary() -> Tuple[bool, str]:
+    configured = os.environ.get("BEET_BIN", "beet").strip() or "beet"
+    if os.path.isabs(configured) and Path(configured).exists():
+        return True, configured
+    resolved = shutil.which(configured)
+    return bool(resolved), resolved or configured
+
+
+def _run_beet_diagnostic(args: List[str], config_path: Path | None = None, timeout: int = 8) -> Dict[str, Any]:
+    available, beet_bin = _beet_binary()
+    if not available:
+        return {"available": False, "path": beet_bin, "returncode": None, "stdout": "", "stderr": "beet executable not found"}
+    cmd = [beet_bin]
+    if config_path and config_path.exists():
+        cmd.extend(["-c", str(config_path)])
+    cmd.extend(args)
+    env = {**os.environ}
+    if config_path:
+        env["BEETSDIR"] = str(config_path.parent)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
+        return {
+            "available": True,
+            "path": beet_bin,
+            "returncode": proc.returncode,
+            "stdout": _redact_diagnostic_text(proc.stdout or ""),
+            "stderr": _redact_diagnostic_text(proc.stderr or ""),
+        }
+    except Exception as ex:
+        return {"available": True, "path": beet_bin, "returncode": None, "stdout": "", "stderr": str(ex)}
+
+
+def _diagnostic_failure_lines(text: str) -> List[str]:
+    failures: List[str] = []
+    for line in str(text or "").splitlines():
+        lower = line.lower()
+        if any(pattern in lower for pattern in _BEETS_PLUGIN_FAILURE_PATTERNS):
+            failures.append(_redact_diagnostic_text(line.strip()))
+    return failures[:12]
+
+
+def _beets_plugin_diagnostics(config_path: Path) -> Dict[str, Any]:
+    config_summary = _parse_beets_config_summary(config_path)
+    version_probe = _run_beet_diagnostic(["version"], timeout=8)
+    plugin_probe = _run_beet_diagnostic(["plugins"], config_path=config_path, timeout=12) if config_path.exists() else {
+        "available": version_probe.get("available"),
+        "path": version_probe.get("path", ""),
+        "returncode": None,
+        "stdout": "",
+        "stderr": "beets config missing",
+    }
+    combined = "\n".join([plugin_probe.get("stdout", ""), plugin_probe.get("stderr", "")])
+    failures = _diagnostic_failure_lines(combined)
+    version_text = (version_probe.get("stdout") or version_probe.get("stderr") or "").strip().splitlines()
+    return {
+        "available": bool(version_probe.get("available")),
+        "path": version_probe.get("path", ""),
+        "version": version_text[0] if version_text else "",
+        "configured_plugins": config_summary["plugins"],
+        "pluginpath": config_summary["pluginpath"],
+        "plugin_failures": failures,
+        "plugins_returncode": plugin_probe.get("returncode"),
+        "replaygain_backend": config_summary.get("replaygain_backend") or "",
+        "replaygain_command": config_summary.get("replaygain_command") or "",
+        "discogs_token_configured": bool(
+            os.environ.get("DISCOGS_TOKEN")
+            or os.environ.get("DISCOGS_USER_TOKEN")
+            or config_summary.get("discogs_token_configured")
+        ),
+        "listenbrainz_token_configured": bool(
+            os.environ.get("LISTENBRAINZ_TOKEN")
+            or config_summary.get("listenbrainz_token_configured")
+        ),
+    }
+
+
+def _plugin_failure_for(failures: List[str], plugin: str) -> str:
+    plugin_l = plugin.lower()
+    for failure in failures:
+        lower = failure.lower()
+        if plugin_l in lower or (plugin_l == "replaygain" and "replaygain" in lower):
+            return failure
+    return ""
+
+
+def _integration_status(
+    *,
+    configured: bool,
+    required: bool = False,
+    state: str | None = None,
+    note: str = "",
+    detail: str = "",
+) -> Dict[str, Any]:
+    resolved_state = state or ("configured" if configured else "not_configured")
+    payload: Dict[str, Any] = {
+        "configured": bool(configured),
+        "required": bool(required),
+        "state": resolved_state,
+    }
+    if note:
+        payload["note"] = note
+    if detail:
+        payload["detail"] = detail
+    return payload
+
+
+def _plugin_integration_status(
+    name: str,
+    diagnostics: Dict[str, Any],
+    *,
+    required: bool = False,
+    configured_when_enabled: bool = True,
+    token_configured: bool | None = None,
+    note: str = "",
+) -> Dict[str, Any]:
+    plugins = set(diagnostics.get("configured_plugins") or [])
+    failures = list(diagnostics.get("plugin_failures") or [])
+    failure = _plugin_failure_for(failures, name)
+    if failure:
+        return _integration_status(
+            configured=False,
+            required=required,
+            state="dependency_plugin_missing",
+            detail=failure,
+        )
+    if name not in plugins:
+        return _integration_status(
+            configured=False,
+            required=required,
+            state="installed_but_disabled",
+            note="Plugin is installed but not enabled in config.yaml.",
+        )
+    if token_configured is not None:
+        return _integration_status(
+            configured=bool(token_configured),
+            required=required,
+            state="configured" if token_configured else "not_configured",
+            note=note,
+        )
+    return _integration_status(
+        configured=configured_when_enabled,
+        required=required,
+        state="configured" if configured_when_enabled else "not_configured",
+        note=note,
+    )
+
+
 @app.get("/api/setup/status")
 def setup_status():
     """Readiness snapshot: paths, beets config, fpcalc, and each optional
@@ -467,26 +702,88 @@ def setup_status():
     beets_config_path = Path(os.environ.get("BEETS_CONFIG", "/config/config.yaml"))
 
     fpcalc_path = shutil.which("fpcalc")
+    ffmpeg_path = shutil.which("ffmpeg")
+    diagnostics = _beets_plugin_diagnostics(beets_config_path)
+    configured_plugins = set(diagnostics.get("configured_plugins") or [])
+    plugin_failures = list(diagnostics.get("plugin_failures") or [])
+    replaygain_failure = _plugin_failure_for(plugin_failures, "replaygain")
+    replaygain_backend = diagnostics.get("replaygain_backend") or ""
+    replaygain_command = diagnostics.get("replaygain_command") or ""
 
     integrations = {
-        "ai": {
-            "configured": bool(
+        "ai": _integration_status(
+            configured=bool(
                 os.environ.get("OPENAI_API_KEY")
                 or os.environ.get("OPENROUTER_API_KEY")
                 or os.environ.get("AI_API_KEY")
             ),
-            "required": False,
-        },
-        "musicbrainz": {"configured": True, "required": True},  # public API, no key needed
-        "acoustid": {
-            "configured": bool(os.environ.get("ACOUSTID_API_KEY") or os.environ.get("ACOUSTID_KEY")),
-            "required": False,
-            "note": "Works without a key via a shared, rate-limited test key.",
-        },
-        "plex": {
-            "configured": bool(os.environ.get("PLEX_URL") and os.environ.get("PLEX_TOKEN")),
-            "required": False,
-        },
+            state="configured" if (
+                os.environ.get("OPENAI_API_KEY")
+                or os.environ.get("OPENROUTER_API_KEY")
+                or os.environ.get("AI_API_KEY")
+            ) else "not_configured",
+            note="Optional - not configured." if not (
+                os.environ.get("OPENAI_API_KEY")
+                or os.environ.get("OPENROUTER_API_KEY")
+                or os.environ.get("AI_API_KEY")
+            ) else "Optional provider configured.",
+        ),
+        "musicbrainz": _plugin_integration_status(
+            "musicbrainz",
+            diagnostics,
+            required=True,
+            note="Public MusicBrainz metadata source; no user API key required.",
+        ),
+        "acoustid": _integration_status(
+            configured=bool(fpcalc_path and "chroma" in configured_plugins and not _plugin_failure_for(plugin_failures, "chroma")),
+            state="configured" if fpcalc_path and "chroma" in configured_plugins and not _plugin_failure_for(plugin_failures, "chroma") else "dependency_plugin_missing",
+            note="Fingerprinting available; AcoustID key is optional but improves rate limits." if fpcalc_path else "fpcalc is missing.",
+        ),
+        "discogs": _plugin_integration_status(
+            "discogs",
+            diagnostics,
+            token_configured=bool(diagnostics.get("discogs_token_configured")),
+            note="Set DISCOGS_TOKEN or DISCOGS_USER_TOKEN to enable Discogs candidates.",
+        ),
+        "lastgenre": _plugin_integration_status("lastgenre", diagnostics),
+        "listenbrainz": _plugin_integration_status(
+            "listenbrainz",
+            diagnostics,
+            token_configured=bool(diagnostics.get("listenbrainz_token_configured")),
+            note="Set LISTENBRAINZ_TOKEN to enable ListenBrainz submission.",
+        ),
+        "discpath": _plugin_integration_status(
+            "discpath",
+            diagnostics,
+            note="User plugins load from /config/beetsplug before bundled plugins in /app/beetsplug.",
+        ),
+        "replaygain": _integration_status(
+            configured=bool(
+                "replaygain" in configured_plugins
+                and not replaygain_failure
+                and replaygain_backend == "ffmpeg"
+                and ffmpeg_path
+                and not replaygain_command
+            ),
+            state=(
+                "dependency_plugin_missing" if replaygain_failure
+                else "configured" if "replaygain" in configured_plugins and replaygain_backend == "ffmpeg" and ffmpeg_path and not replaygain_command
+                else "installed_but_disabled" if "replaygain" not in configured_plugins
+                else "dependency_plugin_missing"
+            ),
+            note="ReplayGain uses the installed ffmpeg backend." if replaygain_backend == "ffmpeg" else "ReplayGain must use an installed backend.",
+            detail=replaygain_failure,
+        ),
+        "plex": _integration_status(
+            configured=bool(os.environ.get("PLEX_URL") and os.environ.get("PLEX_TOKEN")),
+            note="Application Plex workflow; no default Beets plexsync plugin is required.",
+        ),
+        "lidarr": _integration_status(
+            configured=bool(os.environ.get("LIDARR_URL") and os.environ.get("LIDARR_API_KEY")),
+        ),
+        "slskd": _integration_status(
+            configured=bool(os.environ.get("SLSKD_URL") and (os.environ.get("SLSKD_API_KEY") or os.environ.get("SLSKD_API_KEY_FILE"))),
+        ),
     }
 
     blocking: list = []
@@ -535,6 +832,7 @@ def setup_status():
             "beets_config": {"path": str(beets_config_path), "exists": beets_config_path.exists()},
         },
         "fpcalc": {"available": bool(fpcalc_path), "path": fpcalc_path or ""},
+        "beets": diagnostics,
         "auth": auth_status,
         "integrations": integrations,
         "settings": {k: (_mask(v) if "key" in k.lower() or "token" in k.lower() else v)
