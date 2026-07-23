@@ -22,7 +22,16 @@ I made this because the beets web plugin just wasn't cutting it. Not only does t
 
 ## Screenshots
 
-Screenshots will be added as the public documentation is prepared.
+| | |
+| --- | --- |
+| **Library** | ![Library](screenshots/library.jpg) |
+| **Import — Import Source** | ![Import Source](screenshots/import-source.jpg) |
+| **Import — Review Queue** | ![Review Queue](screenshots/import-review-queue.jpg) |
+| **Playlists** | ![Playlists](screenshots/playlists.jpg) |
+| **Jobs / Library Cleanup** | ![Jobs](screenshots/jobs.jpg) |
+| **Submissions** | ![Submissions](screenshots/submissions.jpg) |
+| **Settings** | ![Settings](screenshots/settings.jpg) |
+| **Library Changes** | ![Library Changes](screenshots/library-changes.jpg) |
 
 ## Installation
 
