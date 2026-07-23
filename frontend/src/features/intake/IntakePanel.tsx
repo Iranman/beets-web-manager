@@ -8,7 +8,7 @@ import LinearProgress from '@mui/material/LinearProgress';
 import TextField from '@mui/material/TextField';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { fetchAlbumArt, getAiBatchStatus, pauseAiBatch, recoverAiBatch, retryLibraryImportAllFailed, runPreflight, skipAiBatch, startAiBatchImport, stopAiBatch } from '../../api/client';
+import { fetchAlbumArt, getAiBatchStatus, pauseAiBatch, reconcileArtwork, recoverAiBatch, retryLibraryImportAllFailed, runPreflight, skipAiBatch, startAiBatchImport, stopAiBatch } from '../../api/client';
 import type { AiBatchFolderState, AiBatchState, PreflightFolder, PreflightResponse } from '../../api/types';
 import { LogViewer } from '../../components/LogViewer';
 import { useJobPoll } from '../../lib/hooks';
@@ -309,14 +309,49 @@ function JobLog({
 
   // Retries only the artwork stage for an already-imported/verified album --
   // reuses the same Album Art Repair job the manual retry button uses, so a
-  // FetchArt failure never requires reimporting or retagging the album.
-  const retryArtwork = async (albumId: number) => {
+  // FetchArt failure never requires reimporting or retagging the album. Job
+  // creation alone never proves success: this polls the job to a terminal
+  // state, then calls the backend reconciliation endpoint, which re-verifies
+  // the album's actual on-disk art before the folder is ever cleared from
+  // "Needs attention" -- never trusts the job's own claimed outcome.
+  const [retryingArtworkAlbumId, setRetryingArtworkAlbumId] = useState<number | null>(null);
+  const [artworkRetryJobId, setArtworkRetryJobId] = useState<string | null>(null);
+  const [artworkRetryFolderId, setArtworkRetryFolderId] = useState<string | null>(null);
+  const { job: artworkRetryJob } = useJobPoll(artworkRetryJobId, Boolean(artworkRetryJobId));
+
+  useEffect(() => {
+    if (!artworkRetryJobId || !artworkRetryFolderId) return;
+    if (!artworkRetryJob || artworkRetryJob.status === 'running') return;
+    let active = true;
+    (async () => {
+      try {
+        const result = await reconcileArtwork(jobId, artworkRetryFolderId);
+        if (active) setBatchState(result.state);
+      } catch (err) {
+        if (active) setActionError(err instanceof Error ? err.message : String(err));
+      } finally {
+        if (active) {
+          setArtworkRetryJobId(null);
+          setArtworkRetryFolderId(null);
+          setRetryingArtworkAlbumId(null);
+        }
+      }
+    })();
+    return () => { active = false; };
+  }, [artworkRetryJob, artworkRetryJobId, artworkRetryFolderId, jobId]);
+
+  const retryArtwork = async (albumId: number, folderId: string) => {
+    if (retryingArtworkAlbumId) return; // one retry in flight at a time
     setActionError('');
+    setRetryingArtworkAlbumId(albumId);
     try {
-      await fetchAlbumArt(albumId);
-      setSkipNotice('Artwork retry started.');
+      const started = await fetchAlbumArt(albumId);
+      if (!started.job_id) throw new Error('Backend did not return a job id');
+      setArtworkRetryJobId(started.job_id);
+      setArtworkRetryFolderId(folderId);
     } catch (err) {
       setActionError(err instanceof Error ? err.message : String(err));
+      setRetryingArtworkAlbumId(null);
     }
   };
 
@@ -512,8 +547,13 @@ function JobLog({
                         <>
                           <Chip label="Artwork failed" size="small" color="warning" variant="outlined" />
                           {folder.album_id ? (
-                            <Button size="small" variant="outlined" onClick={() => void retryArtwork(folder.album_id!)}>
-                              Retry artwork
+                            <Button
+                              size="small"
+                              variant="outlined"
+                              disabled={retryingArtworkAlbumId !== null}
+                              onClick={() => void retryArtwork(folder.album_id!, folder.folder_id)}
+                            >
+                              {retryingArtworkAlbumId === folder.album_id ? 'Retrying…' : 'Retry artwork'}
                             </Button>
                           ) : null}
                         </>

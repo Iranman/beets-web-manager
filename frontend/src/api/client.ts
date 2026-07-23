@@ -1040,6 +1040,10 @@ export function fetchAlbumArt(albumId: number): Promise<JobStartResponse> {
   return apiJson<JobStartResponse>(`/api/albums/${albumId}/fetch-art`, { method: 'POST' });
 }
 
+export function reconcileArtwork(batchJobId: string, folderId: string): Promise<AiBatchStatusResponse> {
+  return apiJson<AiBatchStatusResponse>('/api/ai-batch/reconcile-artwork', jsonRequest('POST', { batch_job_id: batchJobId, folder_id: folderId }));
+}
+
 export function moveAlbumToLibrary(albumId: number): Promise<JobStartResponse> {
   return apiJson<JobStartResponse>(`/api/albums/${albumId}/move-to-library`, { method: 'POST' });
 }

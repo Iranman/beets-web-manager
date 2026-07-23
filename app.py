@@ -24380,11 +24380,20 @@ def _ai_batch_process_decisions(state: Dict[str, Any], log: list, cancel_event=N
                     f"  Preflight ok ({pf.get('matches',0)}/{pf.get('expected',0)} tracks, conf={conf}) - importing..."
                 )
                 try:
-                    import_result = _ai_import_folder(folder, mb_id, suggestion, log, cancel_event) or {}
+                    import_result = _ai_import_folder(folder, mb_id, suggestion, log, cancel_event)
+                    if not import_result:
+                        # _ai_import_folder raised nothing, so the import call
+                        # itself did not fail -- but every real return path
+                        # returns a populated dict, so an empty result here is
+                        # itself anomalous. Default the detail fields to
+                        # false/unknown rather than assuming success neither
+                        # this function nor the caller actually confirmed.
+                        log.append("  WARN: import completed but returned no result details.")
+                        import_result = {}
                     imported += 1
                     _ai_batch_mark_folder(
                         state, fid, status="imported", current_step="imported",
-                        metadata_imported=bool(import_result.get("metadata_imported", True)),
+                        metadata_imported=bool(import_result.get("metadata_imported", False)),
                         identity_verified=bool(import_result.get("identity_verified", False)),
                         artwork_status=_s(import_result.get("artwork_status") or "unknown"),
                         artwork_retryable=bool(import_result.get("artwork_retryable", False)),
@@ -24787,6 +24796,61 @@ def _start_ai_batch_job(scan_path: str, recover_batch_job_id: str = "", *, retry
         # else: startup_committed is True -- the handoff is irrevocable, the
         # worker is authorized and may already be running; do not abort it.
         raise
+
+@app.post("/api/ai-batch/reconcile-artwork")
+def ai_batch_reconcile_artwork():
+    """Reconcile a persisted AI-batch folder's artwork_status/artwork_retryable
+    against the album's actual current artwork state. Called by the Intake
+    UI after the manual artwork-retry job (POST /api/albums/<aid>/fetch-art,
+    started from a folder with artwork_retryable=true) reaches a terminal
+    state -- job creation alone never proves success, so this re-reads the
+    album and verifies real on-disk art via the same _album_art_status()
+    check the rest of the art-repair system already uses, rather than
+    trusting a client-claimed outcome."""
+    payload = request.get_json(silent=True) or {}
+    ident = _s(payload.get("batch_job_id") or payload.get("job_id")).strip()
+    folder_id = _s(payload.get("folder_id")).strip()
+    if not folder_id:
+        return jsonify({"ok": False, "error": "folder_id is required"}), 400
+    state = _ai_batch_find_state(ident) if ident else _ai_batch_latest_state()
+    if not state:
+        return jsonify({"ok": False, "error": "AI batch state not found"}), 404
+    folder = (state.get("folder_states") or {}).get(folder_id)
+    if not folder:
+        return jsonify({"ok": False, "error": "Folder not found in this batch"}), 404
+
+    try:
+        album_id = int(folder.get("album_id") or 0)
+    except Exception:
+        album_id = 0
+
+    if not album_id:
+        _ai_batch_mark_folder(
+            state, folder_id,
+            artwork_status="skipped_no_album",
+            artwork_retryable=False,
+        )
+        _ai_batch_write_state(state)
+        return jsonify({"ok": True, "state": _ai_batch_public_state(state)})
+
+    try:
+        art_status = _album_art_status(album_id)
+        has_art = bool(art_status and art_status.get("has_local_art"))
+    except Exception as ex:
+        # Fail closed: verification itself failing is never treated as
+        # success, and the exception text is never returned or persisted
+        # raw -- only ever through the shared redaction helper.
+        log_note = _redact_security_text(ex)
+        has_art = False
+        _ai_batch_mark_folder(state, folder_id, last_error=log_note)
+    _ai_batch_mark_folder(
+        state, folder_id,
+        artwork_status="fetched" if has_art else "failed",
+        artwork_retryable=not has_art,
+    )
+    _ai_batch_write_state(state)
+    return jsonify({"ok": True, "state": _ai_batch_public_state(state)})
+
 
 @app.post("/api/ai-batch-skip")
 def ai_batch_skip():
