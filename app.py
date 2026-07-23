@@ -24380,9 +24380,16 @@ def _ai_batch_process_decisions(state: Dict[str, Any], log: list, cancel_event=N
                     f"  Preflight ok ({pf.get('matches',0)}/{pf.get('expected',0)} tracks, conf={conf}) - importing..."
                 )
                 try:
-                    _ai_import_folder(folder, mb_id, suggestion, log, cancel_event)
+                    import_result = _ai_import_folder(folder, mb_id, suggestion, log, cancel_event) or {}
                     imported += 1
-                    _ai_batch_mark_folder(state, fid, status="imported", current_step="imported")
+                    _ai_batch_mark_folder(
+                        state, fid, status="imported", current_step="imported",
+                        metadata_imported=bool(import_result.get("metadata_imported", True)),
+                        identity_verified=bool(import_result.get("identity_verified", False)),
+                        artwork_status=_s(import_result.get("artwork_status") or "unknown"),
+                        artwork_retryable=bool(import_result.get("artwork_retryable", False)),
+                        album_id=import_result.get("album_id"),
+                    )
                 except Exception as ex:
                     outcome = _ai_batch_import_failure_outcome(str(ex))
                     log.append(f"  Import outcome: {outcome['reason']}")
@@ -24952,6 +24959,64 @@ def _prefer_album_mb_release(mb_albumid: str, log: list) -> str:
     return mb_albumid
 
 
+def _fetch_artwork_after_retag(aid: int, mb_albumid: str, log: List[str],
+                               cancel_event=None) -> Dict[str, Any]:
+    """Verify the persisted MusicBrainz identity, then fetch artwork.
+
+    An as-is import can't be relied on for artwork -- it initially lacks the
+    finalized MusicBrainz identity fetchart's sources search against. Only
+    run it once mbsync/write/move/recording-ID repair have all completed
+    and the album's persisted mb_albumid actually matches what this job
+    just imported; reuses the same single-album repair path as the manual
+    Album Art Repair retry action (POST /api/albums/<aid>/fetch-art), which
+    already verifies actual on-disk art after the fetch, not just rc==0.
+
+    Never raises for an artwork failure -- artwork is optional and must not
+    undo a successfully imported and verified album -- except to propagate
+    a genuine job cancellation.
+    """
+    identity_verified = False
+    try:
+        verify_album = lib.get_album(int(aid))
+        identity_verified = bool(
+            verify_album
+            and _s(getattr(verify_album, "mb_albumid", "")).strip().lower() == mb_albumid.strip().lower()
+        )
+    except Exception as ex:
+        log.append(f"  [identity] verification warning: {_redact_security_text(ex)}")
+
+    artwork_status = "skipped_identity_unverified"
+    artwork_retryable = False
+    if identity_verified:
+        try:
+            art_result = _repair_album_art(int(aid), log, cancel_event=cancel_event)
+        except Exception as ex:
+            art_result = {"status": "failed", "error": _s(ex)}
+        if cancel_event and cancel_event.is_set():
+            raise RuntimeError("cancelled")
+        art_status = art_result.get("status")
+        if art_status == "saved":
+            artwork_status = "fetched"
+            saved_path = _s(art_result.get("saved_path") or "")
+            log.append(f"  Artwork: fetched{f' ({Path(saved_path).name})' if saved_path else ''}.")
+        elif art_status == "skipped":
+            artwork_status = "already_present"
+            log.append("  Artwork: already present.")
+        else:
+            artwork_status = "failed"
+            artwork_retryable = True
+            reason = _redact_security_text(art_result.get("error") or "no art found")
+            log.append(f"  Artwork: failed — {reason}. Retry artwork from Album Art Repair.")
+    else:
+        log.append("  Artwork: skipped — MusicBrainz identity was not verified as persisted.")
+
+    return {
+        "identity_verified": identity_verified,
+        "artwork_status": artwork_status,
+        "artwork_retryable": artwork_retryable,
+    }
+
+
 def _ai_import_folder(folder_path: str, mb_albumid: str, suggestion: dict,
                       log: list, cancel_event=None):
     """Import a folder with a specific MB release ID, then apply
@@ -25035,7 +25100,13 @@ def _ai_import_folder(folder_path: str, mb_albumid: str, suggestion: dict,
         _invalidate_lib_cache()
         _trigger_plex_refresh(log, workflow="batch")
         log.append("  ✓ Done (as-is, no retag)")
-        return
+        return {
+            "album_id": None,
+            "metadata_imported": True,
+            "identity_verified": False,
+            "artwork_status": "skipped_no_album",
+            "artwork_retryable": False,
+        }
 
     # ── Step 3: stamp mb_albumid + retag ─────────────────────────────────────
     log.append(f"  Retagging album_id={aid} with MB data…")
@@ -25069,6 +25140,12 @@ def _ai_import_folder(folder_path: str, mb_albumid: str, suggestion: dict,
         cancel_event=cancel_event,
     )
 
+    # ── Step 4: verify persisted identity, then fetch artwork ────────────────
+    art_outcome = _fetch_artwork_after_retag(int(aid), mb_albumid, log, cancel_event=cancel_event)
+    identity_verified = art_outcome["identity_verified"]
+    artwork_status = art_outcome["artwork_status"]
+    artwork_retryable = art_outcome["artwork_retryable"]
+
     # Record AI match in history
     if suggestion:
         try:
@@ -25087,7 +25164,17 @@ def _ai_import_folder(folder_path: str, mb_albumid: str, suggestion: dict,
         log.append(f"  [auto-dedup] artist-folder check skipped: {ex}")
     _invalidate_lib_cache()
     _trigger_plex_refresh(log, workflow="batch")
-    log.append("  ✓ Done")
+    if artwork_status in ("fetched", "already_present"):
+        log.append("  ✓ Done")
+    else:
+        log.append("  ✓ Done (metadata); artwork needs retry")
+    return {
+        "album_id": int(aid),
+        "metadata_imported": True,
+        "identity_verified": identity_verified,
+        "artwork_status": artwork_status,
+        "artwork_retryable": artwork_retryable,
+    }
 
 
 @app.post("/api/ai-batch-import")

@@ -1046,6 +1046,12 @@ def setup_status():
             diagnostics,
             note="User plugins load from /config/beetsplug before bundled plugins in /app/beetsplug.",
         ),
+        "fetchart": _plugin_integration_status(
+            "fetchart",
+            diagnostics,
+            required=True,
+            note="Album artwork fetch; runs on import and again after MusicBrainz retagging.",
+        ),
         "replaygain": _replaygain_integration_status(diagnostics, ffmpeg_path),
         "plex": _integration_status(
             configured=bool(os.environ.get("PLEX_URL") and os.environ.get("PLEX_TOKEN")),

@@ -810,6 +810,11 @@ export interface AiBatchFolderState {
   retry_exhausted?: boolean;
   max_retries?: number;
   manual_review_required?: boolean;
+  metadata_imported?: boolean;
+  identity_verified?: boolean;
+  artwork_status?: string;
+  artwork_retryable?: boolean;
+  album_id?: number | null;
 }
 
 export interface AiBatchState {
