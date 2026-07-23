@@ -14,6 +14,7 @@ with every config/library/state path env var actually app.py reads
 (BEETS_LIBRARY, not the never-read LIB_PATH) explicitly overridden, so
 importing app.py cannot touch any real path on this machine.
 """
+import atexit
 import os
 import shutil
 import sys
@@ -27,7 +28,17 @@ from types import SimpleNamespace
 ROOT = Path(__file__).resolve().parents[1]
 
 _TMP_ROOT = Path(tempfile.mkdtemp(prefix="beets_post_retag_integration_"))
-unittest.addModuleCleanup(shutil.rmtree, str(_TMP_ROOT), ignore_errors=True)
+# Deliberately atexit, not unittest.addModuleCleanup: addModuleCleanup stores
+# callbacks in a single process-wide list (unittest.case._module_cleanups)
+# that is drained in full whenever ANY module's tests finish -- not scoped to
+# this module. Under `unittest discover`, every test module is imported
+# (registering its addModuleCleanup calls) before any test runs; the first
+# module whose tests finish then drains and fires every other module's
+# still-pending rmtree, deleting this module's own tmp root before its tests
+# ever run. This is exactly the "attempt to write a readonly database"
+# failure this module hit on GitHub Actions (order-dependent, so it didn't
+# reproduce locally). atexit.register only fires once, at real process exit.
+atexit.register(shutil.rmtree, str(_TMP_ROOT), ignore_errors=True)
 
 _ENV_OVERRIDES = {
     "BEETSDIR": str(_TMP_ROOT / "config"),
@@ -43,7 +54,7 @@ _ENV_OVERRIDES = {
 (_TMP_ROOT / "config").mkdir(parents=True, exist_ok=True)
 _env_patcher = mock.patch.dict(os.environ, _ENV_OVERRIDES, clear=False)
 _env_patcher.start()
-unittest.addModuleCleanup(_env_patcher.stop)
+atexit.register(_env_patcher.stop)
 
 
 def setUpModule():
@@ -56,9 +67,63 @@ def _import_app():
     return app_module
 
 
+def _bind_app_globals_to_this_test_module(app_module, tmp_root: Path) -> str:
+    """app.py's LIB_PATH/lib (and _AI_BATCH_STATE_DIR) are computed exactly
+    once at import time from os.environ. app.py is a process-wide singleton
+    (sys.modules['app']): under `unittest discover`, some OTHER test module
+    may import it first with its OWN env-var overrides, in which case setting
+    env vars in *this* module has zero effect on the already-bound globals --
+    this module's tests would then run against whatever path/Library the
+    first importer set up. Worse, if that other module's tests finish first
+    and its own addModuleCleanup(shutil.rmtree, ...) fires before this
+    module's tests run, the cached `lib` singleton's connection points at a
+    directory that no longer exists, and beets reports writes to it as
+    "attempt to write a readonly database" -- exactly the failure this
+    module hit on GitHub Actions' Linux runner (never reproduced on Windows,
+    where this module happened to be the first importer locally). Explicitly
+    rebinding these globals to this module's own tmp root, regardless of
+    import order, makes this module's behavior independent of what any other
+    test module already did to the shared `app` singleton. Called again in
+    setUp() before every test (not just once at import) -- a one-time,
+    import-time-only rebind can still be overwritten by a sibling module
+    using this identical pattern, if that sibling happens to import after
+    this one in the same process, regardless of which module's tests
+    actually run first.
+    """
+    from beets.library import Library
+    old_lib = getattr(app_module, "lib", None)
+    if old_lib is not None:
+        try:
+            old_lib._close()
+        except Exception:
+            pass
+    lib_path = str(tmp_root / "config" / "musiclibrary.blb")
+    app_module.LIB_PATH = lib_path
+    app_module.lib = Library(lib_path)
+    state_dir = tmp_root / "ai_batch_jobs"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    app_module._AI_BATCH_STATE_DIR = state_dir
+    return lib_path
+
+
+def _assert_path_owned_by_test(path, tmp_root: Path) -> None:
+    """Safety net before any raw DB mutation: refuse to touch a path that
+    isn't under this test module's own temp root, in case a future change
+    removes the rebind above or a mock leaves APP.LIB_PATH pointed elsewhere.
+    """
+    resolved = Path(path).resolve()
+    root_resolved = tmp_root.resolve()
+    if resolved != root_resolved and root_resolved not in resolved.parents:
+        raise AssertionError(
+            f"Refusing to mutate path outside this test's temp root: "
+            f"{resolved} is not under {root_resolved}"
+        )
+
+
 try:
     APP = _import_app()
     _APP_IMPORT_ERROR = None
+    _bind_app_globals_to_this_test_module(APP, _TMP_ROOT)
 except Exception as exc:  # pragma: no cover - environment-dependent
     APP = None
     _APP_IMPORT_ERROR = exc
@@ -93,6 +158,15 @@ class AiImportFolderSequenceTests(unittest.TestCase):
     are mocked; album discovery/persistence runs against a real library."""
 
     def setUp(self):
+        # Rebind immediately before every test, not just once at module
+        # import: if this module is loaded alongside another module using
+        # the identical pattern (e.g. via `python -m unittest mod_a mod_b`,
+        # or a different discovery order than this repo's own alphabetical
+        # default), whichever module's import-time rebind ran LAST would
+        # otherwise win process-wide for every test from every module,
+        # regardless of run order. Rebinding here guarantees this test sees
+        # its own root no matter what ran in between.
+        _bind_app_globals_to_this_test_module(APP, _TMP_ROOT)
         self.addCleanup(self._clear_library)
         self._clear_library()
         self.call_order = []
@@ -140,6 +214,7 @@ class AiImportFolderSequenceTests(unittest.TestCase):
         # The real beets Library is a module-level singleton shared across
         # every test in this process -- without this, album ids and
         # "recently added" discovery queries leak between tests.
+        _assert_path_owned_by_test(APP.LIB_PATH, _TMP_ROOT)
         import sqlite3
         try:
             con = sqlite3.connect(APP.LIB_PATH)
@@ -262,17 +337,55 @@ class AiImportFolderSequenceTests(unittest.TestCase):
                 APP._ai_import_folder("/tmp/incidents", MB_ALBUMID, {}, self.log, cancel_event)
         repair.assert_not_called()
 
-    def test_write_timeout_returncode_does_not_block_later_stages(self):
-        # 124 (timeout) is a soft-warn returncode elsewhere in this function
-        # (r2.returncode not in (0, -9, 124) is the only hard-fail check) --
-        # confirm it doesn't stop move/recording-repair/artwork either.
+    def test_write_timeout_returncode_raises_and_never_reaches_artwork(self):
+        # 124 (timeout) must never be silently treated as success for
+        # mbsync/write/move -- the persisted tag state for this album is
+        # unverified, so this must stop immediately rather than continue on
+        # to recording-ID repair or artwork fetching.
         def timeout_on_write(cmd, log, **kwargs):
             if "write" in cmd:
                 return SimpleNamespace(returncode=124, stdout="", stderr="")
             return SimpleNamespace(returncode=0, stdout="", stderr="")
-        with mock.patch.object(APP, "_beet_run", side_effect=timeout_on_write):
-            result = APP._ai_import_folder("/tmp/incidents", MB_ALBUMID, {}, self.log)
-        self.assertEqual(result["artwork_status"], "fetched")
+        with mock.patch.object(APP, "_beet_run", side_effect=timeout_on_write), \
+             mock.patch.object(APP, "_repair_album_art") as repair:
+            with self.assertRaises(RuntimeError):
+                APP._ai_import_folder("/tmp/incidents", MB_ALBUMID, {}, self.log)
+        repair.assert_not_called()
+
+    def test_mbsync_timeout_returncode_raises_and_never_reaches_artwork(self):
+        def timeout_on_mbsync(cmd, log, **kwargs):
+            if "mbsync" in cmd:
+                return SimpleNamespace(returncode=124, stdout="", stderr="")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        with mock.patch.object(APP, "_beet_run", side_effect=timeout_on_mbsync), \
+             mock.patch.object(APP, "_repair_album_art") as repair:
+            with self.assertRaises(RuntimeError):
+                APP._ai_import_folder("/tmp/incidents", MB_ALBUMID, {}, self.log)
+        repair.assert_not_called()
+
+    def test_move_timeout_returncode_raises_and_never_reaches_artwork(self):
+        def timeout_on_move(cmd, log, **kwargs):
+            if "move" in cmd:
+                return SimpleNamespace(returncode=124, stdout="", stderr="")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        with mock.patch.object(APP, "_beet_run", side_effect=timeout_on_move), \
+             mock.patch.object(APP, "_repair_album_art") as repair:
+            with self.assertRaises(RuntimeError):
+                APP._ai_import_folder("/tmp/incidents", MB_ALBUMID, {}, self.log)
+        repair.assert_not_called()
+
+    def test_import_timeout_returncode_raises_before_any_later_stage(self):
+        # Step 1 (the "import" beet_run call) already raises for any
+        # returncode >= 2, which includes 124 -- confirm that still holds.
+        def timeout_on_import(cmd, log, **kwargs):
+            if "import" in cmd:
+                return SimpleNamespace(returncode=124, stdout="", stderr="")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        with mock.patch.object(APP, "_beet_run", side_effect=timeout_on_import), \
+             mock.patch.object(APP, "_repair_album_art") as repair:
+            with self.assertRaises(RuntimeError):
+                APP._ai_import_folder("/tmp/incidents", MB_ALBUMID, {}, self.log)
+        repair.assert_not_called()
 
     def test_artwork_cancellation_propagates(self):
         cancel_event = threading.Event()

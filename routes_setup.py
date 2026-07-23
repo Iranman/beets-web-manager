@@ -995,19 +995,39 @@ def _fetchart_namespace_probe() -> Dict[str, bool]:
     one directory exclusively shadowing the other -- the exact failure a
     beetsplug/__init__.py package initializer previously caused. Never
     raises; a broken import here is itself the signal.
+
+    Deliberately avoids matching the literal string "site-packages" in a
+    resolved module's path -- that string is specific to one installation
+    layout and is absent for editable installs, some distro dist-packages
+    layouts, and other valid installed-package locations. Instead this
+    checks that the resolved module does not live under this app's own
+    bundled code directory, and cross-checks with importlib.metadata that
+    beets itself is a real installed distribution.
     """
     importable_in_process = False
     installed = False
     bundled_namespace_merged = False
+    app_root = str(Path(__file__).resolve().parent)
+
+    def _is_bundled(path_str: str) -> bool:
+        resolved = str(Path(path_str).resolve())
+        return resolved == app_root or resolved.startswith(app_root + os.sep)
+
     try:
         spec = importlib.util.find_spec("beetsplug.fetchart")
         importable_in_process = spec is not None
-        origin = str(spec.origin or "") if spec is not None else ""
-        installed = importable_in_process and "site-packages" in origin
+        origin_is_bundled = bool(spec and spec.origin) and _is_bundled(spec.origin)
+        try:
+            import importlib.metadata as _metadata
+            _metadata.distribution("beets")
+            beets_distribution_installed = True
+        except Exception:
+            beets_distribution_installed = False
+        installed = importable_in_process and beets_distribution_installed and not origin_is_bundled
         beetsplug_spec = importlib.util.find_spec("beetsplug")
         path_entries = [str(p) for p in list(getattr(beetsplug_spec, "submodule_search_locations", None) or [])]
         bundled_namespace_merged = (
-            len(path_entries) > 1 and any("site-packages" in p for p in path_entries)
+            len(path_entries) > 1 and any(not _is_bundled(p) for p in path_entries)
         )
     except Exception:
         pass

@@ -166,6 +166,15 @@ function folderStatusLabel(status?: string) {
   return labels[String(status || '')] || String(status || 'Unknown');
 }
 
+function artworkStatusChipLabel(status?: string) {
+  const labels: Record<string, string> = {
+    cancelled: 'Artwork retry cancelled',
+    timed_out: 'Artwork retry timed out',
+    failed: 'Artwork failed',
+  };
+  return labels[String(status || '')] || 'Artwork failed';
+}
+
 function folderName(path?: string) {
   if (!path) return '';
   return path.split(/[\\/]/).filter(Boolean).pop() || path;
@@ -325,7 +334,7 @@ function JobLog({
     let active = true;
     (async () => {
       try {
-        const result = await reconcileArtwork(jobId, artworkRetryFolderId);
+        const result = await reconcileArtwork(jobId, artworkRetryFolderId, artworkRetryJobId);
         if (active) setBatchState(result.state);
       } catch (err) {
         if (active) setActionError(err instanceof Error ? err.message : String(err));
@@ -545,7 +554,7 @@ function JobLog({
                       ) : null}
                       {folder.artwork_retryable ? (
                         <>
-                          <Chip label="Artwork failed" size="small" color="warning" variant="outlined" />
+                          <Chip label={artworkStatusChipLabel(folder.artwork_status)} size="small" color="warning" variant="outlined" />
                           {folder.album_id ? (
                             <Button
                               size="small"

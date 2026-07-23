@@ -60,6 +60,15 @@ class AiBatchImportReliabilityTests(unittest.TestCase):
         self.assertIn('import failed; queued for review', APP)
         self.assertIn('continue', section(APP, 'def _ai_batch_process_decisions', 'def _run_ai_batch_import'))
 
+    def test_empty_import_result_raises_instead_of_defaulting_to_imported(self):
+        # A falsy _ai_import_folder() result must never be papered over with
+        # a default {} while still counting as an "imported" folder -- it
+        # must raise so the existing except-branch (queued for review) runs.
+        call_site = section(APP, 'import_result = _ai_import_folder(folder, mb_id, suggestion, log, cancel_event)', 'except Exception as ex:')
+        self.assertIn('raise RuntimeError', call_site)
+        self.assertNotIn('import_result = {}', call_site)
+        self.assertNotIn('WARN: import completed but returned no result details', call_site)
+
     def test_refresh_reconnects_to_running_batch_state(self):
         self.assertIn('@app.get("/api/ai-batch-import/status")', APP)
         self.assertIn('def _ai_batch_find_state', APP)
