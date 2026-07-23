@@ -1237,6 +1237,10 @@ def _fetch_discogs_release(entity_type: str, entity_id: str) -> Dict[str, Any]:
 
 
 def _fetch_open_graph_metadata(url: str) -> Dict[str, Any]:
+    # Re-validated here, not just by the route's _validate_reference_url()
+    # call before this is reached -- this is the actual network sink, so it
+    # must not depend on every future caller remembering to check first.
+    validate_outbound_url(url)
     req = urllib.request.Request(url, headers={"User-Agent": "beets-web-manager reference-url fetcher"})
     with urllib.request.urlopen(req, timeout=_REFERENCE_URL_TIMEOUT) as resp:
         raw = resp.read(_REFERENCE_MAX_BYTES)
