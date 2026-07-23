@@ -1327,24 +1327,54 @@ export interface PlaylistResolveTrackResponse extends PlaylistDetailResponse {
   errors?: Array<{ track?: PlaylistTrack; error?: string }>;
 }
 
+/** Backend-computed action eligibility -- never assign or recompute these client-side. */
+export interface PlaylistActionEligibility {
+  playlist_resolve_without_review: boolean;
+  attach_without_review: boolean;
+  destructive_use: boolean;
+}
+
+/** Authoritative matching-contract decision, shared with Import Review (PR #19). */
+export interface PlaylistSuggestionDecision {
+  confidence_score?: number;
+  safety_key: 'safe' | 'review' | 'conflict' | 'none' | string;
+  review_required: boolean;
+  requires_confirmation: boolean;
+  conflicts: string[];
+  warnings: string[];
+  eligibility_reason: string;
+  action_eligibility: PlaylistActionEligibility;
+}
+
 export interface PlaylistTrackSuggestion {
   artist: string;
   title: string;
-  source: 'beets' | 'beets-title' | 'musicbrainz' | string;
-  confidence: number;
-  safe: boolean;
-  reason: string;
+  source: 'beets' | 'musicbrainz' | string;
   item_id?: number;
   mb_trackid?: string;
+  mb_albumid?: string;
+  mb_releasegroupid?: string;
   mb_url?: string;
   album?: string;
   year?: string;
-  title_score?: number;
-  artist_score?: number;
+  decision_version: string;
+  decision: PlaylistSuggestionDecision;
+  evidence?: {
+    acoustid?: Record<string, unknown>;
+    musicbrainz?: Record<string, unknown>;
+    library?: { item_id?: number | null; verified?: boolean };
+  };
+  /** @deprecated use decision.confidence_score */
+  confidence: number;
+  /** @deprecated use decision.action_eligibility.playlist_resolve_without_review */
+  safe: boolean;
+  /** @deprecated use decision.eligibility_reason */
+  reason: string;
 }
 
 export interface PlaylistSuggestionRow {
   track: PlaylistTrack;
+  track_key: string;
   suggestions: PlaylistTrackSuggestion[];
   best?: PlaylistTrackSuggestion | null;
 }
@@ -1356,9 +1386,34 @@ export interface PlaylistSuggestionsResponse extends ApiOkResponse {
   rows: PlaylistSuggestionRow[];
 }
 
-export interface PlaylistApplySuggestionsResponse extends PlaylistResolveTrackResponse {
-  suggested?: Array<{ track: PlaylistTrack; best?: PlaylistTrackSuggestion | null }>;
-  safe_count?: number;
+/** Minimal, non-authoritative submission for one applied suggestion row --
+ * the backend recomputes safety/eligibility fresh from track_key at apply
+ * time and ignores any other client-supplied field. */
+export interface PlaylistSuggestionSubmission {
+  track_key: string;
+  mb_trackid?: string;
+  item_id?: number;
+  decision_version: string;
+}
+
+export interface PlaylistSuggestionOutcomeRow {
+  track_key: string;
+  code?: string;
+  error?: string;
+  reason?: string;
+  conflicts?: string[];
+  candidate?: PlaylistTrackSuggestion;
+}
+
+export interface PlaylistApplySuggestionsResponse extends ApiOkResponse {
+  name: string;
+  changed: boolean;
+  applied: Array<{ track_key: string; artist: string; title: string }>;
+  unchanged: PlaylistSuggestionOutcomeRow[];
+  skipped_review: PlaylistSuggestionOutcomeRow[];
+  conflicts: PlaylistSuggestionOutcomeRow[];
+  stale: PlaylistSuggestionOutcomeRow[];
+  audit_id?: string | null;
 }
 
 export interface PlaylistPlexResult {

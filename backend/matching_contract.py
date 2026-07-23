@@ -542,6 +542,8 @@ def build_recording_matching_decision(
     linked_releases: Optional[Sequence[Mapping[str, Any]]] = None,
     ai_state: Optional[AiState] = None,
     similarity_fn: Optional[SimilarityFn] = None,
+    library_identity_verified: bool = False,
+    extra_conflicts: Sequence[str] = (),
 ) -> MatchingDecision:
     """Build the authoritative recording-candidate decision for Import Review.
 
@@ -806,6 +808,15 @@ def build_recording_matching_decision(
         conflicts.append("release_group_id_source_conflict")
     if selected_release_not_linked:
         conflicts.append("selected_release_not_linked")
+    # Caller-supplied conflicts (e.g. a playlist adapter's own competing-
+    # candidate-tie check) fold into the same conflicts list the rest of
+    # this function reasons about, so they participate in the safety-key
+    # ladder and the decision-version hash identically to every built-in
+    # conflict -- never bypassed or applied after the fact.
+    for name in extra_conflicts:
+        name = _s(name).strip()
+        if name and name not in conflicts:
+            conflicts.append(name)
     if fingerprint_state == "incomplete" and fingerprint_attempted and fingerprint_matched and not acoustid_mapped_recording_id:
         warnings.append("acoustid_mapped_recording_id_missing")
     if title_only_strong:
@@ -833,8 +844,23 @@ def build_recording_matching_decision(
         and not selected_release_not_linked
         and ((title_score >= 0.82 and artist_score >= 0.72) or title_only_strong)
     )
+    # Playlist-only bypass: an existing Beets library item can be safely
+    # bound to a playlist slot purely on a deterministic artist+title match
+    # -- it never mutates the item's own tags, so it doesn't need a
+    # MusicBrainz Recording ID or release-group evidence the way attaching
+    # one does. `library_identity_verified` is only ever True when the
+    # caller (the playlist adapter) has already confirmed the candidate
+    # item still exists in the library; it defaults False and is never set
+    # by Import Review, so `attach_eligible`/`attach_without_review` below
+    # are computed exactly as before for every existing caller.
+    library_eligible = bool(
+        library_identity_verified
+        and not conflicts
+        and title_score >= 0.94
+        and artist_score >= 0.90
+    )
 
-    if not resolved_recording_id:
+    if not resolved_recording_id and not library_eligible:
         safety_result = "No verified match"
         safety_key = "none"
         confidence_tier = "low"
@@ -856,18 +882,23 @@ def build_recording_matching_decision(
         confidence_tier = "medium"
         recommended_action = "Confirm conflicts, then attach Recording ID"
         eligibility_reason = "Candidate has review-only conflicts: " + ", ".join(conflicts)
-    elif not release_group_id:
+    elif resolved_recording_id and not release_group_id and not library_eligible:
         safety_result = "Needs review"
         safety_key = "review"
         confidence_tier = "medium"
         recommended_action = "Attach Recording ID only after review"
         eligibility_reason = "Only recording identity is supported; release-group identity is missing."
-    elif attach_eligible:
-        safety_result = "Safe to attach"
+    elif attach_eligible or library_eligible:
+        safety_result = "Safe to attach" if attach_eligible else "Safe (existing library identity)"
         safety_key = "safe"
         confidence_tier = "high"
-        recommended_action = "Attach Recording ID"
-        eligibility_reason = "Recording ID can be attached from deterministic evidence without additional review."
+        recommended_action = "Attach Recording ID" if attach_eligible else "Use existing library item"
+        eligibility_reason = (
+            "Recording ID can be attached from deterministic evidence without additional review."
+            if attach_eligible else
+            "Existing Beets library item deterministically matches artist and title; "
+            "no MusicBrainz Recording ID change is required."
+        )
     else:
         safety_result = "Needs review"
         safety_key = "review"
@@ -877,7 +908,14 @@ def build_recording_matching_decision(
 
     review_required = safety_key != "safe"
     requires_confirmation = review_required
-    attach_without_review = safety_key == "safe"
+    # Scoped to the recording-ID path specifically (never to the
+    # playlist-only library-identity bypass) -- safety_key can reach "safe"
+    # via `library_eligible` with no resolved Recording ID at all, and
+    # "attach_without_review" must never assert it's safe to attach an ID
+    # that doesn't exist. For every existing (non-playlist) caller this is
+    # exactly equivalent to the prior `safety_key == "safe"` computation,
+    # since library_eligible is always False there.
+    attach_without_review = bool(attach_eligible)
 
     reason = _s(candidate.get("reason"))
     if not reason:
@@ -1016,6 +1054,7 @@ def build_recording_matching_decision(
         "review_required": review_required,
         "action_eligibility": {
             "attach_without_review": attach_without_review,
+            "playlist_resolve_without_review": bool(attach_without_review or library_eligible),
             "destructive_use": False,
         },
         "eligibility_reason": eligibility_reason,
@@ -1085,6 +1124,7 @@ def compute_decision_version(item_id: Any, decision: "MatchingDecision") -> str:
         "safety_key": _s(d.get("safety_key")),
         "confidence_score": _finite_number(d.get("confidence_score")),
         "attach_without_review": bool(action_eligibility.get("attach_without_review")),
+        "playlist_resolve_without_review": bool(action_eligibility.get("playlist_resolve_without_review")),
         "destructive_use": bool(action_eligibility.get("destructive_use")),
         "eligibility_reason": _s(d.get("eligibility_reason")),
         "candidate_source": _s(candidate.get("source")),

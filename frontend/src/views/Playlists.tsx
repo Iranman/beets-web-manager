@@ -214,9 +214,8 @@ function scoreLabel(score: number | undefined): string {
 }
 
 function suggestionLabel(suggestion: PlaylistTrackSuggestion): string {
-  const confidence = scoreLabel(suggestion.confidence);
-  const source = suggestion.source === 'beets-title' ? 'beets' : suggestion.source;
-  return `${suggestion.artist ? `${suggestion.artist} - ` : ''}${suggestion.title}${confidence ? ` · ${confidence}` : ''} · ${source}`;
+  const confidence = scoreLabel(suggestion.decision?.confidence_score ?? suggestion.confidence);
+  return `${suggestion.artist ? `${suggestion.artist} - ` : ''}${suggestion.title}${confidence ? ` · ${confidence}` : ''} · ${suggestion.source}`;
 }
 
 function durationLabel(seconds: number | undefined): string {
@@ -1181,7 +1180,9 @@ export default function Playlists() {
     [qualityRows],
   );
   const suggestionsByTrack = useMemo(() => suggestionRowsByTrack(suggestionRows), [suggestionRows]);
-  const safeSuggestionCount = suggestionRows.filter((row) => row.best?.safe).length;
+  const safeSuggestionCount = suggestionRows.filter(
+    (row) => row.best?.decision?.action_eligibility?.playlist_resolve_without_review,
+  ).length;
   const savedPlaylistName = (parseResult as { name?: string } | null)?.name || '';
   const viewingSavedPlaylist = Boolean(
     (parseResult as { m3u?: string; manifest?: string } | null)?.m3u
@@ -1818,17 +1819,32 @@ export default function Playlists() {
 
   const handleApplySafeSuggestions = async () => {
     if (!savedPlaylistName) return;
+    const submissions = suggestionRows
+      .filter((row) => row.best?.decision?.action_eligibility?.playlist_resolve_without_review)
+      .map((row) => ({
+        track_key: row.track_key,
+        mb_trackid: row.best?.mb_trackid,
+        item_id: row.best?.item_id,
+        decision_version: row.best?.decision_version ?? '',
+      }))
+      .filter((s) => s.track_key);
+    if (!submissions.length) return;
     setApplyingSuggestions(true);
     setNotice(null);
     try {
-      const result = await applySafePlaylistSuggestions(savedPlaylistName);
-      setParseResult(result);
+      const result = await applySafePlaylistSuggestions(savedPlaylistName, submissions);
       setSuggestionRows([]);
       setResolveDraft(null);
-      setNotice({
-        severity: 'success',
-        message: `Applied ${(result.resolved_count ?? 0).toLocaleString()} safe suggestion(s). ${result.matched.length.toLocaleString()} available, ${result.missing.length.toLocaleString()} missing.`,
-      });
+      const detail = await getPlaylistDetails(savedPlaylistName, { mode: 'summary' });
+      setParseResult(detail);
+      const parts = [`${result.applied.length.toLocaleString()} applied`];
+      if (result.unchanged.length) parts.push(`${result.unchanged.length.toLocaleString()} already resolved`);
+      if (result.skipped_review.length) parts.push(`${result.skipped_review.length.toLocaleString()} need review`);
+      if (result.conflicts.length) parts.push(`${result.conflicts.length.toLocaleString()} conflicts`);
+      if (result.stale.length) {
+        parts.push(`${result.stale.length.toLocaleString()} stale (refresh suggestions)`);
+      }
+      setNotice({ severity: result.applied.length ? 'success' : 'info', message: parts.join(', ') });
       await loadPlaylists();
     } catch (err) {
       setNotice({ severity: 'error', message: err instanceof Error ? err.message : String(err) });

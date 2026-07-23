@@ -47377,129 +47377,261 @@ def _playlist_apply_manifest_replacements(clean_name: str,
     }
 
 
-def _playlist_suggestion_key(artist: str, title: str, source: str) -> tuple:
-    return (_norm(artist), _norm(title), _s(source).strip().lower())
-
-
-def _playlist_add_suggestion(out: List[Dict[str, Any]],
-                             seen: set,
-                             *,
-                             artist: str,
-                             title: str,
-                             source: str,
-                             confidence: float,
-                             safe: bool,
-                             reason: str,
-                             extra: Optional[Dict[str, Any]] = None) -> None:
-    artist = _playlist_clean_video_text(artist)
-    title = _playlist_clean_video_text(title)
-    if not title:
-        return
-    key = _playlist_suggestion_key(artist, title, source)
-    if key in seen:
-        return
-    seen.add(key)
-    row = {
-        "artist": artist,
-        "title": title,
-        "source": source,
-        "confidence": round(max(0.0, min(1.0, float(confidence or 0))), 3),
-        "safe": bool(safe),
-        "reason": reason,
-    }
-    if extra:
-        row.update(extra)
-    out.append(row)
-
-
-def _playlist_suggestions_for_track(track: Dict[str, Any],
-                                    index: Dict[str, Any],
-                                    *,
-                                    include_musicbrainz: bool = True,
-                                    limit: int = 5) -> List[Dict[str, Any]]:
-    row = _playlist_track_manifest_payload(track)
-    artist = _s(row.get("artist") or "").strip()
-    title = _s(row.get("title") or "").strip()
-    suggestions: List[Dict[str, Any]] = []
-    seen: set = set()
-
-    match = _match_track(artist, title)
-    if match:
-        item, score = match
-        cand_artist = _s(getattr(item, "artist", "")).strip()
-        cand_title = _s(getattr(item, "title", "")).strip()
-        title_score = _playlist_title_score(title, cand_title)
-        artist_score = _playlist_artist_name_score(artist, cand_artist) if artist else 1.0
-        confidence = min(1.0, float(score or 0))
-        _playlist_add_suggestion(
-            suggestions,
-            seen,
-            artist=cand_artist,
-            title=cand_title,
-            source="beets",
-            confidence=confidence,
-            safe=confidence >= 0.94 and title_score >= 0.92 and artist_score >= 0.82,
-            reason=f"Beets library match ({round(confidence * 100)}%)",
-            extra={
-                "item_id": int(getattr(item, "id", 0) or 0),
-                "album": _s(getattr(item, "album", "")).strip(),
-                "title_score": round(title_score, 3),
-                "artist_score": round(artist_score, 3),
-            },
+def _run_playlist_track_restore(playlist_name: str, fields: Dict[str, Any], log: List[str], cancel_event=None) -> bool:
+    """Undo executor for apply-safe-suggestions: restores one playlist's
+    desired-track manifest entry to its pre-apply artist/title. This never
+    touches a Beets item's own tags -- only this playlist's own manifest --
+    so, unlike attach-recording's rollback, there is no beet subprocess
+    sequence here, only a manifest read/write/verify. Returns True only
+    when the previous identity is confirmed present in the manifest after
+    the restore; never claim a restore that didn't verify."""
+    previous = (fields or {}).get("previous") or {}
+    applied = (fields or {}).get("applied") or {}
+    prev_artist = _s(previous.get("artist") or "").strip()
+    prev_title = _s(previous.get("title") or "").strip()
+    if not prev_title:
+        log.append(f"  [playlist-rollback] Missing previous title for {playlist_name!r}; skipped.")
+        return False
+    clean_name = _clean_playlist_name(playlist_name)
+    try:
+        result = _playlist_apply_manifest_replacements(
+            clean_name,
+            [{"track": applied, "replacement": {"artist": prev_artist, "title": prev_title}}],
+            source_label="rollback",
         )
+    except Exception as ex:
+        log.append(f"  [playlist-rollback] Restore failed for {clean_name}: {_redact_security_text(str(ex))[:200]}")
+        return False
+    if not result.get("resolved_count"):
+        log.append(f"  [playlist-rollback] Could not locate the resolved track to restore in {clean_name}.")
+        return False
+    reread_tracks = _playlist_clean_track_list(_playlist_read_manifest(clean_name).get("desired_tracks") or [])
+    want_artist = _norm(prev_artist)
+    want_title = _norm(prev_title)
+    if not any(_norm(t.get("artist") or "") == want_artist and _norm(t.get("title") or "") == want_title
+               for t in reread_tracks):
+        log.append(f"  [playlist-rollback] Previous identity did not verify after restore in {clean_name}.")
+        return False
+    log.append(f"  [playlist-rollback] Restored previous desired-track identity in {clean_name}.")
+    return True
 
-    title_key = _norm(title)
-    if title_key:
-        for cand in (index.get("by_title") or {}).get(title_key, [])[:8]:
-            cand_artist = _s(cand.get("artist") or cand.get("albumartist") or "").strip()
-            cand_title = _s(cand.get("title") or "").strip()
-            artist_score = _playlist_artist_name_score(artist, cand_artist) if artist else _playlist_payload_rank(cand)
-            confidence = min(1.0, max(0.0, artist_score))
-            _playlist_add_suggestion(
-                suggestions,
-                seen,
-                artist=cand_artist,
-                title=cand_title,
-                source="beets-title",
-                confidence=confidence,
-                safe=confidence >= 0.9,
-                reason=f"Same title in Beets ({round(confidence * 100)}% artist)",
-                extra={
-                    "item_id": int(cand.get("id") or 0),
-                    "album": _s(cand.get("album") or "").strip(),
-                    "artist_score": round(artist_score, 3),
-                },
-            )
+
+PLAYLIST_APPLY_RESERVATIONS_LOCK = threading.Lock()
+_PLAYLIST_APPLY_RESERVED_NAMES: set = set()
+
+
+def _reserve_playlist_apply(clean_name: str) -> bool:
+    with PLAYLIST_APPLY_RESERVATIONS_LOCK:
+        if clean_name in _PLAYLIST_APPLY_RESERVED_NAMES:
+            return False
+        _PLAYLIST_APPLY_RESERVED_NAMES.add(clean_name)
+        return True
+
+
+def _release_playlist_apply(clean_name: str) -> None:
+    with PLAYLIST_APPLY_RESERVATIONS_LOCK:
+        _PLAYLIST_APPLY_RESERVED_NAMES.discard(clean_name)
+
+
+def _playlist_track_key(clean_name: str, artist: str, title: str, occurrence: int) -> str:
+    """Stable, opaque identity for one missing-track slot in a playlist.
+
+    Derived from the playlist's own stable id, the normalized artist/title,
+    and this row's occurrence index among other rows sharing that same
+    identity -- never raw list position, candidate display order, or a
+    timestamp -- so intentional duplicate entries of the same song each get
+    their own distinguishable, reproducible key across requests as long as
+    the missing set itself hasn't changed shape.
+    """
+    stable_id = _playlist_stable_id(clean_name)
+    raw = f"{stable_id}\x1f{_norm(artist)}\x1f{_norm(title)}\x1f{int(occurrence)}"
+    return "ptk_" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+
+
+def _playlist_missing_rows_with_keys(clean_name: str,
+                                     missing_tracks: List[Dict[str, Any]]) -> List[Tuple[str, Dict[str, Any]]]:
+    occurrence_counts: Dict[tuple, int] = {}
+    out: List[Tuple[str, Dict[str, Any]]] = []
+    for track in missing_tracks or []:
+        artist = _s(track.get("artist") or "").strip()
+        title = _s(track.get("title") or "").strip()
+        ident = (_norm(artist), _norm(title))
+        occurrence = occurrence_counts.get(ident, 0)
+        occurrence_counts[ident] = occurrence + 1
+        out.append((_playlist_track_key(clean_name, artist, title, occurrence), track))
+    return out
+
+
+def _playlist_top_library_matches(artist: str, title: str,
+                                  limit: int = 3) -> List[Tuple[Dict[str, Any], float]]:
+    """Best-scoring distinct Beets items for artist/title, most confident first."""
+    candidates = _playlist_library_match_candidates()
+    rows = list((candidates.get("by_title") or {}).get(_norm(title), []) or [])
+    if not rows:
+        rows = list(candidates.get("all") or [])
+    best_by_item: Dict[int, Tuple[Dict[str, Any], float]] = {}
+    for row in rows:
+        score = _playlist_candidate_match_score(
+            artist, title, row.get("artist", ""), row.get("title", ""), row.get("quality") or {})
+        if score is None:
+            continue
+        payload = row.get("payload") or {}
+        item_id = int(payload.get("id") or 0)
+        if not item_id:
+            continue
+        prev = best_by_item.get(item_id)
+        if prev is None or score > prev[1]:
+            best_by_item[item_id] = (payload, score)
+    ranked = sorted(best_by_item.values(), key=lambda pair: pair[1], reverse=True)
+    return ranked[:max(1, limit)]
+
+
+def _playlist_raw_candidates_for_track(artist: str, title: str, *,
+                                       include_musicbrainz: bool,
+                                       limit: int) -> Tuple[List[Dict[str, Any]], bool]:
+    """Untrusted candidate inputs for build_recording_matching_decision().
+
+    Returns (candidates, ambiguous_tie). `ambiguous_tie` is True when two or
+    more distinct Beets library items score within 0.03 of each other for
+    this artist/title -- a genuine top-candidate tie must never be silently
+    resolved by picking whichever happens to sort first.
+    """
+    out: List[Dict[str, Any]] = []
+    seen_recording_ids: set = set()
+
+    top_matches = _playlist_top_library_matches(artist, title, limit=3)
+    ambiguous_tie = bool(
+        len(top_matches) >= 2 and (top_matches[0][1] - top_matches[1][1]) < 0.03
+    )
+
+    if top_matches:
+        payload, _score = top_matches[0]
+        item_path = _s(payload.get("path") or "").strip()
+        item_mbid = _s(payload.get("mb_trackid") or "").strip().lower()
+        fingerprint_attempted = False
+        fingerprint_matched = False
+        fingerprint_status = "not_attempted"
+        mapped_recording_id = ""
+        if item_path:
+            fingerprint_attempted = True
+            try:
+                mapped_ids = _acoustid_fingerprint_ids(item_path)
+            except Exception:
+                mapped_ids = []
+            if mapped_ids:
+                mapped_recording_id = mapped_ids[0]
+                fingerprint_matched = bool(item_mbid) and item_mbid in mapped_ids
+                fingerprint_status = "matched" if fingerprint_matched else ("mismatch" if item_mbid else "no_result")
+            else:
+                fingerprint_status = "no_result"
+        out.append({
+            "artist": _s(payload.get("artist") or "").strip(),
+            "title": _s(payload.get("title") or "").strip(),
+            "source": "beets",
+            "item_id": int(payload.get("id") or 0),
+            "mb_trackid": item_mbid,
+            "mb_albumid": _s(payload.get("mb_albumid") or ""),
+            "mb_releasegroupid": _s(payload.get("mb_releasegroupid") or ""),
+            "album": _s(payload.get("album") or ""),
+            "fingerprint_attempted": fingerprint_attempted,
+            "fingerprint_matched": fingerprint_matched,
+            "fingerprint_status": fingerprint_status,
+            "mapped_recording_id": mapped_recording_id,
+            "candidate_index": len(out),
+        })
+        if item_mbid:
+            seen_recording_ids.add(item_mbid)
 
     if include_musicbrainz:
-        for cand in _playlist_recording_search_candidates(title, artist)[:8]:
-            cand_artist = _playlist_primary_artist_name(cand.get("artist") or "")
-            cand_title = _s(cand.get("title") or "").strip()
-            mb_score = max(0.0, min(1.0, float(cand.get("score") or 0) / 100.0))
-            title_score = _playlist_title_score(title, cand_title)
-            artist_score = _playlist_artist_name_score(artist, cand_artist) if artist else 1.0
-            confidence = (mb_score * 0.45) + (title_score * 0.35) + (artist_score * 0.20)
-            _playlist_add_suggestion(
-                suggestions,
-                seen,
-                artist=cand_artist,
-                title=cand_title,
-                source="musicbrainz",
-                confidence=confidence,
-                safe=mb_score >= 0.95 and title_score >= 0.95 and artist_score >= 0.82,
-                reason=f"MusicBrainz recording ({round(confidence * 100)}%)",
-                extra={
-                    "mb_trackid": _s(cand.get("mb_trackid") or "").strip(),
-                    "mb_url": _s(cand.get("mb_url") or "").strip(),
-                    "album": _s(cand.get("album") or "").strip(),
-                    "year": _s(cand.get("year") or "").strip(),
-                    "title_score": round(title_score, 3),
-                    "artist_score": round(artist_score, 3),
-                },
-            )
+        for cand in _playlist_recording_search_candidates(title, artist)[:limit]:
+            mbid = _s(cand.get("mb_trackid") or "").strip().lower()
+            if not mbid or mbid in seen_recording_ids:
+                continue
+            seen_recording_ids.add(mbid)
+            out.append({
+                "artist": _playlist_primary_artist_name(cand.get("artist") or ""),
+                "title": _s(cand.get("title") or "").strip(),
+                "source": "musicbrainz",
+                "mb_trackid": mbid,
+                "album": _s(cand.get("album") or "").strip(),
+                "year": _s(cand.get("year") or "").strip(),
+                "fingerprint_attempted": False,
+                "fingerprint_matched": False,
+                "fingerprint_status": "not_attempted",
+                "mapped_recording_id": "",
+                "candidate_index": len(out),
+            })
 
-    suggestions.sort(key=lambda s: (not bool(s.get("safe")), -float(s.get("confidence") or 0), s.get("source", "")))
-    return suggestions[:max(1, min(int(limit or 5), 10))]
+    return out, ambiguous_tie
+
+
+def _playlist_decision_row(track_key: str, artist: str, title: str,
+                          candidate: Dict[str, Any], *,
+                          extra_conflicts: Tuple[str, ...] = ()) -> Dict[str, Any]:
+    current = {"title": title, "artist": artist}
+    library_identity_verified = candidate.get("source") == "beets"
+    matching_result = build_recording_matching_decision(
+        current=current,
+        candidate=candidate,
+        library_identity_verified=library_identity_verified,
+        extra_conflicts=extra_conflicts,
+    )
+    row = matching_result.to_review_recording_candidate()
+    row["decision_version"] = compute_decision_version(track_key, matching_result)
+    row["source"] = candidate.get("source")
+    if candidate.get("item_id"):
+        row["item_id"] = int(candidate["item_id"])
+    evidence = matching_result.evidence if isinstance(matching_result.evidence, dict) else {}
+    row["evidence"] = {
+        "acoustid": evidence.get("acoustid", {}),
+        "musicbrainz": evidence.get("musicbrainz", {}),
+        "library": {
+            "item_id": candidate.get("item_id"),
+            "verified": library_identity_verified and not extra_conflicts,
+        },
+    }
+    # Deprecated legacy fields (see _playlist_legacy_suggestion_fields):
+    # overwrites to_review_recording_candidate()'s tier-string "confidence"
+    # and match-explanation "reason" with the playlist-specific meanings
+    # documented on PlaylistSuggestionCandidate in the frontend types --
+    # this row is never shared with Import Review's own use of that helper.
+    row.update(_playlist_legacy_suggestion_fields(row))
+    return row
+
+
+def _playlist_decisions_for_track(clean_name: str, track_key: str, artist: str, title: str, *,
+                                  include_musicbrainz: bool = True,
+                                  limit: int = 5) -> List[Dict[str, Any]]:
+    raw_candidates, ambiguous_tie = _playlist_raw_candidates_for_track(
+        artist, title, include_musicbrainz=include_musicbrainz, limit=limit)
+    extra_conflicts = ("competing_candidates_tie",) if ambiguous_tie else ()
+    decisions = [
+        _playlist_decision_row(track_key, artist, title, cand, extra_conflicts=extra_conflicts)
+        for cand in raw_candidates
+    ]
+    decisions.sort(key=lambda d: (
+        not bool((d.get("decision") or {}).get("action_eligibility", {}).get("playlist_resolve_without_review")),
+        -float((d.get("decision") or {}).get("confidence_score") or 0),
+    ))
+    return decisions[:max(1, min(int(limit or 5), 10))]
+
+
+def _playlist_legacy_suggestion_fields(decision_row: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Deprecated top-level fields kept temporarily for frontend compatibility.
+
+    Derived only from the authoritative decision -- never assigned or
+    overridden independently -- so a stale client that still reads these
+    cannot see a safety signal the backend didn't compute.
+    """
+    if not decision_row:
+        return {"confidence": 0.0, "safe": False, "reason": ""}
+    decision = decision_row.get("decision") or {}
+    action_eligibility = decision.get("action_eligibility") or {}
+    return {
+        "confidence": round(float(decision.get("confidence_score") or 0), 3),
+        "safe": bool(action_eligibility.get("playlist_resolve_without_review")),
+        "reason": _s(decision.get("eligibility_reason") or ""),
+    }
 
 
 @app.post("/api/playlists/<path:name>/resolve-track")
@@ -47528,7 +47660,7 @@ def playlist_resolve_track(name):
 def playlist_suggestions(name):
     clean_name = _clean_playlist_name(_s(name))
     if not _playlist_saved_playlist_exists(clean_name):
-        return jsonify({"ok": False, "error": f"Playlist not found: {clean_name}"}), 404
+        return jsonify({"ok": False, "error": f"Playlist not found: {clean_name}", "code": "playlist_not_found"}), 404
     include_mb = request.args.get("musicbrainz", "1").strip().lower() not in {"0", "false", "no", "off"}
     try:
         limit = int(request.args.get("limit") or 5)
@@ -47536,23 +47668,27 @@ def playlist_suggestions(name):
         limit = 5
     index = _playlist_library_index()
     detail = _playlist_detail_payload(clean_name, index)
+    missing = detail.get("missing") or []
     rows = []
     safe_count = 0
-    for track in detail.get("missing") or []:
-        suggestions = _playlist_suggestions_for_track(
-            track, index, include_musicbrainz=include_mb, limit=limit)
-        best = suggestions[0] if suggestions else None
-        if best and best.get("safe"):
+    for track_key, track in _playlist_missing_rows_with_keys(clean_name, missing):
+        artist = _s(track.get("artist") or "").strip()
+        title = _s(track.get("title") or "").strip()
+        candidates = _playlist_decisions_for_track(
+            clean_name, track_key, artist, title, include_musicbrainz=include_mb, limit=limit)
+        best = candidates[0] if candidates else None
+        if best and bool((best.get("decision") or {}).get("action_eligibility", {}).get("playlist_resolve_without_review")):
             safe_count += 1
         rows.append({
             "track": track,
-            "suggestions": suggestions,
+            "track_key": track_key,
+            "suggestions": candidates,
             "best": best,
         })
     return jsonify({
         "ok": True,
         "name": clean_name,
-        "total_missing": len(detail.get("missing") or []),
+        "total_missing": len(missing),
         "safe_count": safe_count,
         "rows": rows,
     })
@@ -47562,37 +47698,247 @@ def playlist_suggestions(name):
 def playlist_apply_safe_suggestions(name):
     clean_name = _clean_playlist_name(_s(name))
     if not _playlist_saved_playlist_exists(clean_name):
-        return jsonify({"ok": False, "error": f"Playlist not found: {clean_name}"}), 404
+        return jsonify({"ok": False, "error": f"Playlist not found: {clean_name}", "code": "playlist_not_found"}), 404
+
     payload = request.get_json(silent=True) or {}
-    include_mb = bool(payload.get("musicbrainz", True))
-    index = _playlist_library_index()
-    detail = _playlist_detail_payload(clean_name, index)
-    replacements: List[Dict[str, Any]] = []
-    suggestion_rows = []
-    for track in detail.get("missing") or []:
-        suggestions = _playlist_suggestions_for_track(
-            track, index, include_musicbrainz=include_mb, limit=5)
-        best = suggestions[0] if suggestions else None
-        suggestion_rows.append({"track": track, "best": best})
-        if best and best.get("safe"):
-            replacements.append({
-                "track": track,
-                "replacement": {
-                    "artist": best.get("artist") or "",
-                    "title": best.get("title") or "",
-                },
+    submitted = payload.get("suggestions")
+    submitted = submitted if isinstance(submitted, list) else []
+
+    if not _reserve_playlist_apply(clean_name):
+        return jsonify({
+            "ok": False,
+            "error": "A suggestion application is already running for this playlist.",
+            "code": "playlist_update_in_progress",
+        }), 409
+
+    try:
+        index = _playlist_library_index()
+        detail = _playlist_detail_payload(clean_name, index)
+        missing = detail.get("missing") or []
+        by_key = dict(_playlist_missing_rows_with_keys(clean_name, missing))
+
+        applied: List[Dict[str, Any]] = []
+        unchanged: List[Dict[str, Any]] = []
+        skipped_review: List[Dict[str, Any]] = []
+        conflict_rows: List[Dict[str, Any]] = []
+        stale_rows: List[Dict[str, Any]] = []
+        replacements: List[Dict[str, Any]] = []
+        change_entries: List[Dict[str, Any]] = []
+
+        for entry in submitted:
+            if not isinstance(entry, dict):
+                continue
+            track_key = _s(entry.get("track_key") or "").strip()
+            submitted_mbid = _s(entry.get("mb_trackid") or "").strip().lower()
+            try:
+                submitted_item_id = int(entry.get("item_id") or 0)
+            except Exception:
+                submitted_item_id = 0
+            submitted_version = _s(entry.get("decision_version") or "").strip()
+
+            track = by_key.get(track_key)
+            if track is None:
+                stale_rows.append({
+                    "track_key": track_key,
+                    "code": "playlist_track_not_found",
+                    "error": "This track is no longer in the current missing-track set; refresh suggestions.",
+                })
+                continue
+
+            artist = _s(track.get("artist") or "").strip()
+            title = _s(track.get("title") or "").strip()
+            candidates = _playlist_decisions_for_track(
+                clean_name, track_key, artist, title, include_musicbrainz=True, limit=5)
+
+            candidate = None
+            for cand in candidates:
+                cand_mbid = _s(cand.get("mb_trackid") or "").strip().lower()
+                cand_item_id = int(cand.get("item_id") or 0)
+                if submitted_mbid and cand_mbid and cand_mbid == submitted_mbid:
+                    candidate = cand
+                    break
+                if not submitted_mbid and submitted_item_id and cand_item_id == submitted_item_id:
+                    candidate = cand
+                    break
+            if candidate is None:
+                conflict_rows.append({
+                    "track_key": track_key,
+                    "code": "candidate_not_in_trusted_set",
+                    "error": "This candidate is not part of the current trusted candidate set.",
+                })
+                continue
+
+            computed_version = _s(candidate.get("decision_version") or "")
+            if submitted_version and submitted_version != computed_version:
+                stale_rows.append({
+                    "track_key": track_key,
+                    "code": "playlist_suggestions_stale",
+                    "error": "The matching decision has changed since it was displayed; refresh suggestions.",
+                    "candidate": candidate,
+                })
+                continue
+
+            decision = candidate.get("decision") or {}
+            action_eligibility = decision.get("action_eligibility") or {}
+            if decision.get("review_required") or not action_eligibility.get("playlist_resolve_without_review"):
+                skipped_review.append({
+                    "track_key": track_key,
+                    "code": "playlist_review_required",
+                    "reason": _s(decision.get("eligibility_reason") or ""),
+                    "candidate": candidate,
+                })
+                continue
+            if decision.get("conflicts"):
+                conflict_rows.append({
+                    "track_key": track_key,
+                    "code": "playlist_conflict",
+                    "conflicts": list(decision.get("conflicts") or []),
+                    "candidate": candidate,
+                })
+                continue
+
+            resolved_artist = _s(candidate.get("artist") or "").strip()
+            resolved_title = _s(candidate.get("title") or "").strip()
+            if not resolved_title:
+                conflict_rows.append({
+                    "track_key": track_key,
+                    "code": "playlist_candidate_required",
+                    "error": "Candidate has no title.",
+                })
+                continue
+
+            if _norm(artist) == _norm(resolved_artist) and _norm(title) == _norm(resolved_title):
+                unchanged.append({"track_key": track_key, "ok": True, "changed": False, "reason": "already_resolved"})
+                continue
+
+            current_metadata = {
+                "artist": artist, "title": title,
+                "mb_trackid": "", "mb_releasegroupid": "",
+            }
+            candidate_identity = {
+                "artist": resolved_artist, "title": resolved_title,
+                "mb_trackid": _s(candidate.get("mb_trackid") or ""),
+                "mb_releasegroupid": _s(candidate.get("mb_releasegroupid") or ""),
+                "item_id": candidate.get("item_id"),
+            }
+            replacements.append({"track": track, "replacement": {"artist": resolved_artist, "title": resolved_title}})
+            change_entries.append({
+                "track_key": track_key,
+                "current_metadata": current_metadata,
+                "candidate_identity": candidate_identity,
+                "decision_version": computed_version,
+                "confidence": {"overall": decision.get("confidence_score")},
+                "reason": _s(decision.get("eligibility_reason") or ""),
+                "warnings": list(decision.get("warnings") or []),
+                "source": candidate.get("source"),
             })
-    result = _playlist_apply_manifest_replacements(
-        clean_name,
-        replacements,
-        index=index,
-        source_label="suggestion",
-    ) if replacements else _playlist_detail_payload(clean_name, index)
-    return jsonify({
-        **result,
-        "suggested": suggestion_rows,
-        "safe_count": len(replacements),
-    })
+
+        audit_id = None
+        if change_entries:
+            tx = transactions.create(
+                operation_type="Playlist Match",
+                initiating_user=_transaction_user_label(),
+                status="Running",
+                dry_run=False,
+                summary=f"Apply {len(change_entries)} safe playlist suggestion(s) for {clean_name}",
+                reason="Backend-verified safe playlist suggestion application",
+                source="Playlist suggestions apply-safe-suggestions",
+                confidence={"overall": None},
+                changes=[{
+                    "id": entry["track_key"],
+                    "operation": "Playlist Match",
+                    "track": entry["candidate_identity"]["title"],
+                    "artist": entry["candidate_identity"]["artist"],
+                    "current_metadata": entry["current_metadata"],
+                    "new_metadata": entry["candidate_identity"],
+                    "metadata_diff": metadata_diff(entry["current_metadata"], entry["candidate_identity"]),
+                    "candidate_identity": entry["candidate_identity"],
+                    "persisted_identity": {},
+                    "decision_version": entry["decision_version"],
+                    "confidence": entry["confidence"],
+                    "reason": entry["reason"],
+                    "warnings": entry["warnings"],
+                } for entry in change_entries],
+                rollback_available=True,
+                rollback_reason="Restores the previous desired-track artist/title for each resolved row.",
+                metadata={"playlist": clean_name, "rows": len(change_entries)},
+            )
+            audit_id = tx["id"]
+            transactions.update(audit_id, rollback={
+                "available": True,
+                "reason": "Restores the previous desired-track artist/title for each resolved row.",
+                "operations": [{
+                    "type": "playlist_track_restore",
+                    "playlist": clean_name,
+                    "track_key": entry["track_key"],
+                    "fields": {
+                        "previous": entry["current_metadata"],
+                        "applied": {
+                            "artist": entry["candidate_identity"]["artist"],
+                            "title": entry["candidate_identity"]["title"],
+                        },
+                    },
+                    "reason": "Restore desired-track identity captured before suggestion apply.",
+                } for entry in change_entries],
+            }, counts={"items": len(change_entries), "changes": len(change_entries)})
+
+            _playlist_apply_manifest_replacements(
+                clean_name, replacements, index=index, source_label="suggestion")
+
+            # Truthfulness: re-read the manifest after writing and verify
+            # every intended row actually landed before claiming success --
+            # never mark Completed on the strength of the in-memory return
+            # value from _playlist_apply_manifest_replacements alone.
+            reread_tracks = _playlist_clean_track_list(
+                _playlist_read_manifest(clean_name).get("desired_tracks") or [])
+            verified_keys = set()
+            for entry in change_entries:
+                want_artist = _norm(entry["candidate_identity"]["artist"])
+                want_title = _norm(entry["candidate_identity"]["title"])
+                if any(_norm(t.get("artist") or "") == want_artist and _norm(t.get("title") or "") == want_title
+                       for t in reread_tracks):
+                    verified_keys.add(entry["track_key"])
+                    applied.append({
+                        "track_key": entry["track_key"],
+                        "artist": entry["candidate_identity"]["artist"],
+                        "title": entry["candidate_identity"]["title"],
+                    })
+
+            if len(verified_keys) == len(change_entries):
+                transactions.update(audit_id, status="Completed")
+            else:
+                transactions.update(audit_id, status="Failed")
+                transactions.append_log(
+                    audit_id, "ERROR: one or more resolved rows did not verify after the manifest write.")
+                for entry in change_entries:
+                    if entry["track_key"] not in verified_keys:
+                        conflict_rows.append({
+                            "track_key": entry["track_key"],
+                            "code": "playlist_persistence_failed",
+                            "error": "Resolved identity did not verify after persistence.",
+                        })
+
+        if not applied and not unchanged and not skipped_review and not conflict_rows and stale_rows:
+            return jsonify({
+                "ok": False,
+                "error": "The missing-track set has changed since suggestions were displayed; refresh suggestions.",
+                "code": "playlist_suggestions_stale",
+                "stale": stale_rows,
+            }), 409
+
+        return jsonify({
+            "ok": True,
+            "name": clean_name,
+            "changed": bool(applied),
+            "applied": applied,
+            "unchanged": unchanged,
+            "skipped_review": skipped_review,
+            "conflicts": conflict_rows,
+            "stale": stale_rows,
+            "audit_id": audit_id,
+        })
+    finally:
+        _release_playlist_apply(clean_name)
 
 
 @app.get("/api/playlists/<path:name>/tracks")
@@ -49246,10 +49592,8 @@ def api_transaction_rollback(transaction_id):
             "rollback_available": False,
         }), 409
 
-    unsupported = [
-        op for op in operations
-        if op.get("type") != "metadata_restore" and op.get("type") != "recording_id_restore"
-    ]
+    _ROLLBACK_OP_TYPES = {"metadata_restore", "recording_id_restore", "playlist_track_restore"}
+    unsupported = [op for op in operations if op.get("type") not in _ROLLBACK_OP_TYPES]
     if unsupported:
         return jsonify({
             "ok": False,
@@ -49267,12 +49611,25 @@ def api_transaction_rollback(transaction_id):
                     log.append("  [rollback] Cancel requested.")
                     break
                 fields = op.get("fields") or {}
+                op_type = op.get("type")
+                if op_type == "playlist_track_restore":
+                    playlist_name = _s(op.get("playlist") or "").strip()
+                    if not playlist_name:
+                        failed_count += 1
+                        log.append("  [rollback] Missing playlist name; skipped operation.")
+                        continue
+                    restored = _run_playlist_track_restore(playlist_name, fields, log, cancel_event=cancel_event)
+                    if restored:
+                        ok_count += 1
+                    else:
+                        failed_count += 1
+                    continue
                 item_id = int(op.get("item_id") or 0)
                 if not item_id:
                     failed_count += 1
                     log.append("  [rollback] Missing item id; skipped operation.")
                     continue
-                if op.get("type") == "recording_id_restore":
+                if op_type == "recording_id_restore":
                     restored = _run_item_recording_id_restore(item_id, fields, log, cancel_event=cancel_event)
                 else:
                     restored = _run_item_metadata_restore(item_id, fields, log, cancel_event=cancel_event)
