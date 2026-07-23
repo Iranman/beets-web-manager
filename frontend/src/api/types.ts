@@ -168,6 +168,10 @@ export interface ReviewRecordingCandidate {
   matching_local_release_found?: boolean;
   decision?: RecordingMatchDecision;
   conflicts?: string[];
+  warnings?: string[];
+  review_required?: boolean;
+  action_eligibility?: { attach_without_review?: boolean; destructive_use?: boolean };
+  decision_version?: string;
   recommended_action?: string;
   requires_confirmation?: boolean;
   safety_result?: string;
@@ -749,6 +753,16 @@ export interface JobStartResponse extends ApiOkResponse {
   batch_job_id?: string;
   state?: AiBatchState;
   reconnected?: boolean;
+}
+
+export interface AttachRecordingResponse extends ApiOkResponse {
+  job_id?: string;
+  changed?: boolean;
+  reason?: string;
+  mode?: 'safe' | 'confirmed_review';
+  recording_id?: string;
+  decision_version?: string;
+  audit_id?: string;
 }
 
 

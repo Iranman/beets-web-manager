@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
+import hashlib
+import json
 import math
 import re
 import unicodedata
@@ -1038,3 +1040,59 @@ def build_recording_matching_decision(
             "mb_albumids": list(candidate.get("mb_albumids") or ([] if not release_id else [release_id])),
         },
     )
+
+
+def compute_decision_version(item_id: Any, decision: "MatchingDecision") -> str:
+    """Server-generated fingerprint of one candidate's matching decision.
+
+    Derived only from stable, already-sanitized decision fields (never
+    secrets, raw provider payloads, unstable timestamps, candidate display
+    order, or transient UI-only state) so a caller can detect that the
+    displayed decision is stale by the time an attach request arrives --
+    it proves the decision hasn't changed, it never grants authority on
+    its own.
+
+    Schema 2 (`drv2:`) widens the fingerprinted surface to (at least) the
+    full set of trusted evidence actually shown to the user and relied on
+    by the confirmed-review attach path: identity fields, conflicts/
+    warnings, review/confirmation flags, safety key, confidence score,
+    action eligibility, eligibility reason, candidate source, and
+    deterministic AcoustID fingerprint provenance. Schema 1 (`drv1:`)
+    omitted enough of that evidence that a stale decision could still pass
+    the version check. A `drv1:` value submitted against this schema will
+    simply never equal a freshly computed `drv2:` value, so it is
+    correctly rejected as stale by the caller's own version comparison --
+    no separate schema-detection code is required.
+    """
+    identity = decision.identity
+    d = decision.decision
+    evidence = decision.evidence if isinstance(decision.evidence, dict) else {}
+    acoustid = evidence.get("acoustid") or {}
+    candidate = decision.candidate if isinstance(decision.candidate, dict) else {}
+    action_eligibility = d.get("action_eligibility") or {}
+    payload = {
+        "schema": 2,
+        "contract_version": 2,
+        "item_id": _s(item_id),
+        "resolved_recording_id": _s(identity.get("resolved_recording_id")),
+        "evaluated_candidate_recording_id": _s(identity.get("evaluated_candidate_recording_id")),
+        "release_id": _s(identity.get("release_id")),
+        "release_group_id": _s(identity.get("release_group_id")),
+        "conflicts": sorted(d.get("conflicts") or []),
+        "warnings": sorted(d.get("warnings") or []),
+        "review_required": bool(d.get("review_required")),
+        "requires_confirmation": bool(d.get("requires_confirmation")),
+        "safety_key": _s(d.get("safety_key")),
+        "confidence_score": _finite_number(d.get("confidence_score")),
+        "attach_without_review": bool(action_eligibility.get("attach_without_review")),
+        "destructive_use": bool(action_eligibility.get("destructive_use")),
+        "eligibility_reason": _s(d.get("eligibility_reason")),
+        "candidate_source": _s(candidate.get("source")),
+        "fingerprint_attempted": bool(acoustid.get("fingerprint_attempted")),
+        "fingerprint_matched": bool(acoustid.get("fingerprint_matched")),
+        "fingerprint_status": _s(acoustid.get("status")),
+        "mapped_recording_id": _s(acoustid.get("mapped_recording_id")),
+    }
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(blob.encode("utf-8")).hexdigest()[:24]
+    return f"drv2:{digest}"
