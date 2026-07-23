@@ -51,7 +51,7 @@ class ConcurrencyTests(PlaylistSuggestionsRouteTestCase):
         row = self._safe_row()
         entered = threading.Event()
         release = threading.Event()
-        original = APP._playlist_apply_manifest_replacements
+        original = APP._playlist_replace_rows_by_id
 
         def slow_apply(*args, **kwargs):
             entered.set()
@@ -61,7 +61,7 @@ class ConcurrencyTests(PlaylistSuggestionsRouteTestCase):
         results = {}
 
         def run_first():
-            with mock.patch.object(APP, "_playlist_apply_manifest_replacements", slow_apply):
+            with mock.patch.object(APP, "_playlist_replace_rows_by_id", slow_apply):
                 results["first"] = self._apply_suggestions([row])
 
         t = threading.Thread(target=run_first)
@@ -86,7 +86,7 @@ class ConcurrencyTests(PlaylistSuggestionsRouteTestCase):
         APP._invalidate_lib_cache()
 
         both_entered = threading.Barrier(2, timeout=5)
-        original = APP._playlist_apply_manifest_replacements
+        original = APP._playlist_replace_rows_by_id
 
         def barrier_apply(*args, **kwargs):
             both_entered.wait()
@@ -113,7 +113,7 @@ class ConcurrencyTests(PlaylistSuggestionsRouteTestCase):
             "decision_version": other_best["decision_version"],
         }
 
-        with mock.patch.object(APP, "_playlist_apply_manifest_replacements", barrier_apply):
+        with mock.patch.object(APP, "_playlist_replace_rows_by_id", barrier_apply):
             t1 = threading.Thread(target=apply_for, args=(self.clean_name, row_a, "a"))
             t2 = threading.Thread(target=apply_for, args=(other_clean, row_b, "b"))
             t1.start()
@@ -142,7 +142,7 @@ class ConcurrencyTests(PlaylistSuggestionsRouteTestCase):
     def test_reservation_released_after_unhandled_exception(self):
         row = self._safe_row()
         with mock.patch.object(
-            APP, "_playlist_apply_manifest_replacements",
+            APP, "_playlist_replace_rows_by_id",
             side_effect=RuntimeError("simulated failure"),
         ):
             resp = self.client.post(
@@ -163,18 +163,18 @@ class PersistenceVerificationTests(PlaylistSuggestionsRouteTestCase):
         best = row["best"]
 
         # Simulate a write that silently no-ops (e.g. a filesystem issue) --
-        # the route re-reads the manifest afterward and must not claim
-        # success for a row that didn't actually land.
-        with mock.patch.object(APP, "_playlist_apply_manifest_replacements",
-                              return_value={"ok": True, "resolved_count": 0}):
+        # the route re-reads the manifest afterward by exact row_id and
+        # must not claim success for a row that didn't actually land.
+        with mock.patch.object(APP, "_playlist_replace_rows_by_id",
+                              return_value={"resolved_ids": set(), "not_found_ids": set()}):
             status, apply_body = self._apply_suggestions([{
                 "track_key": row["track_key"],
                 "mb_trackid": best.get("mb_trackid") or "",
                 "item_id": best.get("item_id"),
                 "decision_version": best["decision_version"],
             }])
-        self.assertEqual(status, 200)
-        self.assertEqual(apply_body["applied"], [])
+        self.assertEqual(status, 500)
+        self.assertEqual(apply_body["code"], "playlist_persistence_failed")
         self.assertEqual(apply_body["conflicts"][0]["code"], "playlist_persistence_failed")
         tx = APP.transactions.get(apply_body["audit_id"])
         self.assertEqual(tx["status"], "Failed")
@@ -226,8 +226,8 @@ class RollbackTests(PlaylistSuggestionsRouteTestCase):
         audit_id = apply_body["audit_id"]
 
         with mock.patch.object(
-            APP, "_playlist_apply_manifest_replacements",
-            return_value={"ok": True, "resolved_count": 0},
+            APP, "_playlist_replace_rows_by_id",
+            return_value={"resolved_ids": set(), "not_found_ids": set()},
         ):
             resp = self.client.post(f"/api/transactions/{audit_id}/rollback")
             job = _wait_job(resp.get_json()["job_id"])
@@ -247,7 +247,7 @@ class SecretRedactionTests(PlaylistSuggestionsRouteTestCase):
         best = row["best"]
 
         with mock.patch.object(
-            APP, "_playlist_apply_manifest_replacements",
+            APP, "_playlist_replace_rows_by_id",
             side_effect=RuntimeError(f"boom mysql://user:{secret}@db.internal/beets"),
         ):
             resp = self.client.post(

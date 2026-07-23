@@ -76,14 +76,67 @@ class PlaylistSuggestionPageTests(unittest.TestCase):
         self.assertNotIn("safe: true", region)
         self.assertNotIn("row.best?.safe,", region)
 
-    def test_apply_handler_reports_all_outcome_buckets(self):
+    def test_apply_handler_reports_success_outcome_counts(self):
         region = PAGE_SOURCE[
             PAGE_SOURCE.index("const handleApplySafeSuggestions"):
             PAGE_SOURCE.index("const handleRepairQualityRows")
         ]
-        for bucket in ("result.applied", "result.unchanged", "result.skipped_review",
-                      "result.conflicts", "result.stale"):
-            self.assertIn(bucket, region)
+        self.assertIn("result.applied", region)
+        self.assertIn("result.unchanged", region)
+
+    def test_apply_handler_uses_structured_error_body(self):
+        region = PAGE_SOURCE[
+            PAGE_SOURCE.index("const handleApplySafeSuggestions"):
+            PAGE_SOURCE.index("const handleRepairQualityRows")
+        ]
+        self.assertIn("apiErrorBody(err)", region)
+        self.assertIn("body?.code", region)
+
+    def test_apply_handler_refreshes_on_stale_without_clearing_first(self):
+        region = PAGE_SOURCE[
+            PAGE_SOURCE.index("const handleApplySafeSuggestions"):
+            PAGE_SOURCE.index("const handleRepairQualityRows")
+        ]
+        self.assertIn("'playlist_suggestions_stale'", region)
+        self.assertIn("handleLoadSuggestions()", region)
+        # The catch branch must not itself clear suggestionRows -- only the
+        # try (full-success) branch above does.
+        catch_start = region.index("} catch (err) {")
+        catch_region = region[catch_start:]
+        self.assertNotIn("setSuggestionRows([])", catch_region)
+
+    def test_apply_handler_handles_update_in_progress_without_clearing_rows(self):
+        region = PAGE_SOURCE[
+            PAGE_SOURCE.index("const handleApplySafeSuggestions"):
+            PAGE_SOURCE.index("const handleRepairQualityRows")
+        ]
+        self.assertIn("'playlist_update_in_progress'", region)
+
+    def test_apply_handler_reports_batch_rejected_counts_without_clearing_rows(self):
+        region = PAGE_SOURCE[
+            PAGE_SOURCE.index("const handleApplySafeSuggestions"):
+            PAGE_SOURCE.index("const handleRepairQualityRows")
+        ]
+        for code in (
+            "'playlist_batch_rejected'", "'playlist_review_required'", "'playlist_conflict'",
+            "'candidate_not_in_trusted_set'", "'decision_version_required'",
+            "'playlist_duplicate_submission'",
+        ):
+            self.assertIn(code, region)
+        self.assertIn("body?.stale?.length", region)
+        self.assertIn("body?.conflicts?.length", region)
+        self.assertIn("body?.skipped_review?.length", region)
+        self.assertIn("body?.invalid?.length", region)
+
+    def test_apply_handler_clears_rows_only_in_the_success_path(self):
+        region = PAGE_SOURCE[
+            PAGE_SOURCE.index("const handleApplySafeSuggestions"):
+            PAGE_SOURCE.index("const handleRepairQualityRows")
+        ]
+        try_start = region.index("try {")
+        catch_start = region.index("} catch (err) {")
+        try_region = region[try_start:catch_start]
+        self.assertIn("setSuggestionRows([])", try_region)
 
     def test_apply_handler_refreshes_detail_after_apply_not_from_response(self):
         """The apply response itself no longer carries a full playlist-detail

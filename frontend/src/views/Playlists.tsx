@@ -8,6 +8,7 @@ import MenuItem from '@mui/material/MenuItem';
 import TextField from '@mui/material/TextField';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  apiErrorBody,
   applySafePlaylistSuggestions,
   cleanupPlaylistQuality,
   createPlaylist,
@@ -1832,6 +1833,10 @@ export default function Playlists() {
     setApplyingSuggestions(true);
     setNotice(null);
     try {
+      // Apply is atomic: this only ever resolves once every submitted row
+      // validated cleanly. Only that full success clears the suggestion
+      // list and reloads playlist detail -- any rejection (caught below)
+      // must leave the rows visible for inspection.
       const result = await applySafePlaylistSuggestions(savedPlaylistName, submissions);
       setSuggestionRows([]);
       setResolveDraft(null);
@@ -1839,15 +1844,41 @@ export default function Playlists() {
       setParseResult(detail);
       const parts = [`${result.applied.length.toLocaleString()} applied`];
       if (result.unchanged.length) parts.push(`${result.unchanged.length.toLocaleString()} already resolved`);
-      if (result.skipped_review.length) parts.push(`${result.skipped_review.length.toLocaleString()} need review`);
-      if (result.conflicts.length) parts.push(`${result.conflicts.length.toLocaleString()} conflicts`);
-      if (result.stale.length) {
-        parts.push(`${result.stale.length.toLocaleString()} stale (refresh suggestions)`);
-      }
+      if (result.sync_required) parts.push('run the playlist sync to reflect this in the M3U/Plex');
       setNotice({ severity: result.applied.length ? 'success' : 'info', message: parts.join(', ') });
       await loadPlaylists();
     } catch (err) {
-      setNotice({ severity: 'error', message: err instanceof Error ? err.message : String(err) });
+      const body = apiErrorBody(err) as
+        | { code?: string; stale?: unknown[]; conflicts?: unknown[]; skipped_review?: unknown[]; invalid?: unknown[] }
+        | undefined;
+      const code = body?.code;
+      if (code === 'playlist_suggestions_stale' || code === 'playlist_track_not_found') {
+        setNotice({
+          severity: 'warning',
+          message: 'Suggestions changed. The list was refreshed; review it before applying.',
+        });
+        await handleLoadSuggestions();
+      } else if (code === 'playlist_update_in_progress') {
+        setNotice({ severity: 'warning', message: 'Another playlist update is already running.' });
+      } else if (code === 'playlist_batch_rejected'
+        || code === 'playlist_review_required'
+        || code === 'playlist_conflict'
+        || code === 'candidate_not_in_trusted_set'
+        || code === 'decision_version_required'
+        || code === 'playlist_duplicate_submission'
+        || code === 'playlist_candidate_required') {
+        const parts: string[] = [];
+        if (body?.stale?.length) parts.push(`${body.stale.length} stale`);
+        if (body?.conflicts?.length) parts.push(`${body.conflicts.length} conflicted`);
+        if (body?.skipped_review?.length) parts.push(`${body.skipped_review.length} need review`);
+        if (body?.invalid?.length) parts.push(`${body.invalid.length} invalid`);
+        setNotice({
+          severity: 'warning',
+          message: `Nothing was applied (${parts.join(', ') || 'batch rejected'}). Review the suggestions below.`,
+        });
+      } else {
+        setNotice({ severity: 'error', message: err instanceof Error ? err.message : String(err) });
+      }
     } finally {
       setApplyingSuggestions(false);
     }

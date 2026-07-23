@@ -1414,6 +1414,12 @@ export interface PlaylistApplySuggestionsResponse extends ApiOkResponse {
   conflicts: PlaylistSuggestionOutcomeRow[];
   stale: PlaylistSuggestionOutcomeRow[];
   audit_id?: string | null;
+  /** This operation only ever rewrites the desired-track manifest. */
+  manifest_updated?: boolean;
+  /** Always false today -- applying suggestions never regenerates the M3U. */
+  m3u_updated?: boolean;
+  /** True when a manifest change occurred that a later pipeline/sync run should pick up. */
+  sync_required?: boolean;
 }
 
 export interface PlaylistPlexResult {
