@@ -52,10 +52,22 @@ class BeetsFreshInstallPackagingTests(unittest.TestCase):
         self.assertNotIn("OPENAI_API_KEY:?", combined)
         self.assertNotIn("AI_API_KEY:?", combined)
 
+    def test_beetsplug_has_no_package_initializer(self):
+        # A beetsplug/__init__.py makes /app/beetsplug a regular package,
+        # which shadows (rather than merges with) the real beetsplug
+        # namespace package installed in site-packages -- the exact cause of
+        # "ModuleNotFoundError: No module named 'beetsplug.fetchart'" (and
+        # every other bundled Beets plugin) once /app is on sys.path.
+        # beetsplug must stay an implicit PEP 420 namespace package so
+        # Python merges the bundled and installed directories instead of
+        # one exclusively winning.
+        self.assertFalse((ROOT / "beetsplug" / "__init__.py").exists())
+        self.assertTrue((ROOT / "beetsplug" / "discpath.py").exists())
+
     def test_setup_status_reports_plugin_diagnostics(self):
         self.assertIn("def _beets_plugin_diagnostics", SETUP)
         self.assertIn('"beets": diagnostics', SETUP)
-        for key in ("musicbrainz", "acoustid", "discogs", "lastgenre", "listenbrainz", "discpath", "replaygain", "plex", "lidarr", "slskd"):
+        for key in ("musicbrainz", "acoustid", "discogs", "lastgenre", "listenbrainz", "discpath", "fetchart", "replaygain", "plex", "lidarr", "slskd"):
             self.assertIn(f'"{key}"', SETUP)
         self.assertIn("dependency_plugin_missing", SETUP)
         self.assertIn("installed_but_disabled", SETUP)
@@ -86,6 +98,7 @@ import:
   quiet_fallback: asis
 fetchart:
   auto: no
+  sources: filesystem
 embedart:
   auto: no
 lyrics:
@@ -98,6 +111,20 @@ YAML
 test "$(id -u)" != "0"
 beet -c /config/config.yaml version
 beet -c /config/config.yaml config
+# Direct, unambiguous proof fetchart resolves from the installed Beets
+# distribution (not shadowed by the bundled/mounted beetsplug directories)
+# and its runtime dependencies import -- this is the exact failure mode a
+# `beetsplug/__init__.py` package initializer previously caused: it made
+# /app/beetsplug a regular package, which shadows the real beetsplug
+# namespace package in site-packages instead of merging with it.
+python -c "
+import beetsplug.fetchart, beetsplug.discpath
+print('fetchart module:', beetsplug.fetchart.__file__)
+print('discpath module:', beetsplug.discpath.__file__)
+assert 'site-packages' in beetsplug.fetchart.__file__, 'fetchart did not resolve from the installed Beets distribution'
+assert '/app/beetsplug' in beetsplug.discpath.__file__, 'bundled discpath plugin was not found'
+"
+python -c "import requests, PIL; print('fetchart dependencies importable')"
 # Exact command /api/setup/status now runs as its plugin-loader probe
 # (routes_setup.py's _BEET_LOADER_PROBE_ARGS) -- `beet plugins` does not
 # exist in Beets 2.12.0, so this is the supported, real replacement. Assert
@@ -114,7 +141,18 @@ beet -c /config/config.yaml help >/tmp/beet-help.txt
 fpcalc -version
 mkdir -p /tmp/import-smoke
 ffmpeg -hide_banner -loglevel error -f lavfi -i sine=frequency=440:duration=1 -ac 2 -ar 44100 /tmp/import-smoke/smoke.wav
+ffmpeg -hide_banner -loglevel error -f lavfi -i color=c=blue:s=16x16 -frames:v 1 /tmp/import-smoke/cover.jpg
 beet -c /config/config.yaml import -q --quiet-fallback asis /tmp/import-smoke
+# Real, network-free fetchart run against the just-imported album -- proves
+# the plugin actually loads and executes, not just that the loader probe
+# above tolerates it. sources: filesystem finds the cover.jpg placed
+# beside the smoke track, so no network access is needed or attempted.
+if beet -c /config/config.yaml fetchart -q; then
+  echo "FETCHART_RUN_OK"
+else
+  echo "FETCHART_RUN_FAILED"
+  exit 1
+fi
 """
             proc = subprocess.run([
                 "docker", "run", "--rm",
@@ -143,6 +181,14 @@ beet -c /config/config.yaml import -q --quiet-fallback asis /tmp/import-smoke
         self.assertIn("SETUP_DIAGNOSTIC_LOADER_PROBE_OK", output)
         self.assertNotIn("SETUP_DIAGNOSTIC_LOADER_PROBE_FAILED", output)
         self.assertNotIn("beet -c /config/config.yaml plugins", output)
+        # Direct FetchArt packaging/execution assertions (Issue: FetchArt
+        # plugin load error in production) -- not merely inferred from the
+        # general loader probe above.
+        self.assertIn("fetchart module: /usr/local/lib/python3", output)
+        self.assertIn("discpath module: /app/beetsplug/discpath.py", output)
+        self.assertIn("fetchart dependencies importable", output)
+        self.assertIn("FETCHART_RUN_OK", output)
+        self.assertNotIn("FETCHART_RUN_FAILED", output)
 
 
 if __name__ == "__main__":

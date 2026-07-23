@@ -15,6 +15,7 @@ remain authoritative. This module only adds:
     (in addition to the existing /api/health — these use the unprefixed
     convention most container orchestrators expect by default)
 """
+import importlib.util
 import json
 import os
 import re
@@ -987,6 +988,107 @@ def _replaygain_integration_status(diagnostics: Dict[str, Any], ffmpeg_path: str
     )
 
 
+def _fetchart_namespace_probe() -> Dict[str, bool]:
+    """In-process check that beetsplug.fetchart actually resolves from the
+    installed Beets distribution, and that beetsplug's own __path__ shows a
+    real merge of more than one directory (bundled + installed) rather than
+    one directory exclusively shadowing the other -- the exact failure a
+    beetsplug/__init__.py package initializer previously caused. Never
+    raises; a broken import here is itself the signal.
+
+    Deliberately avoids matching the literal string "site-packages" in a
+    resolved module's path -- that string is specific to one installation
+    layout and is absent for editable installs, some distro dist-packages
+    layouts, and other valid installed-package locations. Instead this
+    checks that the resolved module does not live under this app's own
+    bundled code directory, and cross-checks with importlib.metadata that
+    beets itself is a real installed distribution.
+    """
+    importable_in_process = False
+    installed = False
+    bundled_namespace_merged = False
+    app_root = str(Path(__file__).resolve().parent)
+
+    def _is_bundled(path_str: str) -> bool:
+        resolved = str(Path(path_str).resolve())
+        return resolved == app_root or resolved.startswith(app_root + os.sep)
+
+    try:
+        spec = importlib.util.find_spec("beetsplug.fetchart")
+        importable_in_process = spec is not None
+        origin_is_bundled = bool(spec and spec.origin) and _is_bundled(spec.origin)
+        try:
+            import importlib.metadata as _metadata
+            _metadata.distribution("beets")
+            beets_distribution_installed = True
+        except Exception:
+            beets_distribution_installed = False
+        installed = importable_in_process and beets_distribution_installed and not origin_is_bundled
+        beetsplug_spec = importlib.util.find_spec("beetsplug")
+        path_entries = [str(p) for p in list(getattr(beetsplug_spec, "submodule_search_locations", None) or [])]
+        bundled_namespace_merged = (
+            len(path_entries) > 1 and any(not _is_bundled(p) for p in path_entries)
+        )
+    except Exception:
+        pass
+    return {
+        "importable_in_process": importable_in_process,
+        "installed": installed,
+        "bundled_namespace_merged": bundled_namespace_merged,
+    }
+
+
+def _fetchart_integration_status(diagnostics: Dict[str, Any]) -> Dict[str, Any]:
+    """FetchArt diagnostic distinguishing configured/installed/importable/
+    loadable-by-the-real-loader/namespace-merged/operational -- never
+    reports operational merely because "fetchart" appears in config.yaml,
+    find_spec() resolves something, or the dependency package is installed.
+    Operational requires the real `beet -vv version` loader probe to have
+    actually loaded it, with no recognized plugin-failure pattern, in
+    addition to every other signal.
+    """
+    plugin_failures = list(diagnostics.get("plugin_failures") or [])
+    fetchart_failure = _plugin_failure_for(plugin_failures, "fetchart")
+    configured_plugins = set(diagnostics.get("configured_plugins") or [])
+    configured = "fetchart" in configured_plugins
+    probe = _fetchart_namespace_probe()
+    loadable_by_beet_cli = bool(diagnostics.get("plugin_loader_ok")) and not fetchart_failure
+    operational = bool(
+        configured
+        and probe["installed"]
+        and probe["importable_in_process"]
+        and probe["bundled_namespace_merged"]
+        and loadable_by_beet_cli
+    )
+
+    if fetchart_failure:
+        base = _integration_status(
+            configured=False, required=True, state="dependency_plugin_missing",
+            detail=fetchart_failure, note="FetchArt plugin failed to load.",
+        )
+    elif not diagnostics.get("plugin_loader_ok"):
+        base = _loader_failed_status(diagnostics, required=True)
+    elif not configured:
+        base = _integration_status(
+            configured=False, required=True, state="installed_but_disabled",
+            note="FetchArt is installed but not enabled in config.yaml.",
+        )
+    else:
+        base = _integration_status(
+            configured=True, required=True, state="configured",
+            note="Album artwork fetch is loaded and operational." if operational
+            else "FetchArt is enabled but not confirmed operational.",
+        )
+    return {
+        **base,
+        "installed": probe["installed"],
+        "importable_in_process": probe["importable_in_process"],
+        "loadable_by_beet_cli": loadable_by_beet_cli,
+        "bundled_namespace_merged": probe["bundled_namespace_merged"],
+        "operational": operational,
+    }
+
+
 @app.get("/api/setup/status")
 def setup_status():
     """Readiness snapshot: paths, beets config, fpcalc, and each optional
@@ -1046,6 +1148,7 @@ def setup_status():
             diagnostics,
             note="User plugins load from /config/beetsplug before bundled plugins in /app/beetsplug.",
         ),
+        "fetchart": _fetchart_integration_status(diagnostics),
         "replaygain": _replaygain_integration_status(diagnostics, ffmpeg_path),
         "plex": _integration_status(
             configured=bool(os.environ.get("PLEX_URL") and os.environ.get("PLEX_TOKEN")),

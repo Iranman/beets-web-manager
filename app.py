@@ -10266,6 +10266,7 @@ def _repair_album_art(aid: int, log: List[str], cancel_event=None,
     if r.returncode == -9:
         restored = _album_art_restore_quarantine(aid, quarantine, log) if quarantine else 0
         return {**entry, "status": "failed", "source": "fetchart", "error": "cancelled", **quarantine, "restored_current_art": restored}
+    fetchart_timed_out = r.returncode == 124
     if r.returncode not in (0, 1):
         log.append(f"  fetchart returned rc={r.returncode}; checking for saved art anyway")
     status = _album_art_status(aid)
@@ -10289,7 +10290,10 @@ def _repair_album_art(aid: int, log: List[str], cancel_event=None,
             _album_art_cache[key] = url
     saved_path = _save_art_to_disk(url, _s(entry.get("album_dir") or "")) if url else ""
     if not saved_path:
-        error = "Discogs fallback download failed" if url else "No art found by fetchart or Discogs fallback"
+        if fetchart_timed_out and not url:
+            error = "fetchart timed out"
+        else:
+            error = "Discogs fallback download failed" if url else "No art found by fetchart or Discogs fallback"
         restored = _album_art_restore_quarantine(aid, quarantine, log) if quarantine else 0
         return {
             **entry,
@@ -10421,16 +10425,31 @@ def album_art_status(aid):
 @app.post("/api/albums/<int:aid>/fetch-art")
 def album_fetch_art(aid):
     """Run beet fetchart for a specific album, then fallback if needed."""
-    def _do(log, cancel_event=None):
+    def _do(log, cancel_event=None, update_state=None):
         result = _repair_album_art(aid, log, cancel_event)
+        error = _s(result.get("error") or "")
+        if error == "cancelled":
+            terminal_outcome = "cancelled"
+        elif "timed out" in error.lower():
+            terminal_outcome = "timed_out"
+        elif result.get("status") == "saved":
+            terminal_outcome = "success"
+        else:
+            terminal_outcome = "failed"
+        if update_state:
+            update_state(terminal_outcome=terminal_outcome)
         if result.get("status") != "saved":
-            raise RuntimeError(_s(result.get("error") or "album art repair failed"))
+            raise RuntimeError(error or "album art repair failed")
         saved_path = _s(result.get("saved_path") or result.get("local_art_path") or "")
         if saved_path:
             log.append(f"  Art saved: {Path(saved_path).name}")
         _invalidate_lib_cache()
         return result
-    job = jobs.start_python(_do, label=f"FetchArt: album {aid}")
+    job = jobs.start_python(
+        _do,
+        label=f"FetchArt: album {aid}",
+        metadata={"type": "album_art_repair", "album_id": aid},
+    )
     return jsonify({"ok": True, "job_id": job.job_id})
 
 
@@ -24380,9 +24399,25 @@ def _ai_batch_process_decisions(state: Dict[str, Any], log: list, cancel_event=N
                     f"  Preflight ok ({pf.get('matches',0)}/{pf.get('expected',0)} tracks, conf={conf}) - importing..."
                 )
                 try:
-                    _ai_import_folder(folder, mb_id, suggestion, log, cancel_event)
+                    import_result = _ai_import_folder(folder, mb_id, suggestion, log, cancel_event)
+                    if not import_result:
+                        # Every real return path from _ai_import_folder returns
+                        # a populated dict; a falsy result here means it
+                        # returned without raising but without confirming
+                        # anything, which is itself a failure -- raise so the
+                        # existing except-branch below handles it (queued for
+                        # review), instead of defaulting to false/unknown
+                        # fields while still marking this folder "imported".
+                        raise RuntimeError("Import completed without a verifiable result")
                     imported += 1
-                    _ai_batch_mark_folder(state, fid, status="imported", current_step="imported")
+                    _ai_batch_mark_folder(
+                        state, fid, status="imported", current_step="imported",
+                        metadata_imported=bool(import_result.get("metadata_imported", False)),
+                        identity_verified=bool(import_result.get("identity_verified", False)),
+                        artwork_status=_s(import_result.get("artwork_status") or "unknown"),
+                        artwork_retryable=bool(import_result.get("artwork_retryable", False)),
+                        album_id=import_result.get("album_id"),
+                    )
                 except Exception as ex:
                     outcome = _ai_batch_import_failure_outcome(str(ex))
                     log.append(f"  Import outcome: {outcome['reason']}")
@@ -24781,6 +24816,104 @@ def _start_ai_batch_job(scan_path: str, recover_batch_job_id: str = "", *, retry
         # worker is authorized and may already be running; do not abort it.
         raise
 
+@app.post("/api/ai-batch/reconcile-artwork")
+def ai_batch_reconcile_artwork():
+    """Reconcile a persisted AI-batch folder's artwork_status/artwork_retryable
+    against the album's actual current artwork state. Called by the Intake
+    UI after the manual artwork-retry job (POST /api/albums/<aid>/fetch-art,
+    started from a folder with artwork_retryable=true) reaches a terminal
+    state -- job creation alone never proves success, so this re-reads the
+    album and verifies real on-disk art via the same _album_art_status()
+    check the rest of the art-repair system already uses, rather than
+    trusting a client-claimed outcome.
+
+    batch_job_id, folder_id, and artwork_job_id are all required -- there is
+    no "latest batch" fallback, since guessing the wrong batch or the wrong
+    retry job would silently reconcile the wrong folder. The artwork job is
+    validated against the job store (must exist, must be this folder's
+    album, must be terminal) rather than trusted from the client, and the
+    album's real on-disk artwork always wins over what the job claims: a job
+    that reports failure/cancellation/timeout while art is verifiably
+    present still reconciles to "fetched"."""
+    payload = request.get_json(silent=True) or {}
+    batch_job_id = _s(payload.get("batch_job_id")).strip()
+    folder_id = _s(payload.get("folder_id")).strip()
+    artwork_job_id = _s(payload.get("artwork_job_id")).strip()
+    if not batch_job_id:
+        return jsonify({"ok": False, "error": "batch_job_id is required", "code": "batch_job_id_required"}), 400
+    if not folder_id:
+        return jsonify({"ok": False, "error": "folder_id is required", "code": "folder_id_required"}), 400
+    if not artwork_job_id:
+        return jsonify({"ok": False, "error": "artwork_job_id is required", "code": "artwork_job_id_required"}), 400
+
+    state = _ai_batch_find_state(batch_job_id)
+    if not state:
+        return jsonify({"ok": False, "error": "AI batch state not found"}), 404
+    folder = (state.get("folder_states") or {}).get(folder_id)
+    if not folder:
+        return jsonify({"ok": False, "error": "Folder not found in this batch"}), 404
+
+    try:
+        album_id = int(folder.get("album_id") or 0)
+    except Exception:
+        album_id = 0
+
+    if not album_id:
+        _ai_batch_mark_folder(
+            state, folder_id,
+            artwork_status="skipped_no_album",
+            artwork_retryable=False,
+        )
+        _ai_batch_write_state(state)
+        return jsonify({"ok": True, "state": _ai_batch_public_state(state)})
+
+    job = jobs.get(artwork_job_id)
+    if job is None:
+        return jsonify({"ok": False, "error": "Artwork job not found", "code": "artwork_job_not_found"}), 404
+    job_metadata = getattr(job, "metadata", {}) or {}
+    try:
+        job_album_id = int(job_metadata.get("album_id") or 0)
+    except Exception:
+        job_album_id = 0
+    if _s(job_metadata.get("type")) != "album_art_repair" or job_album_id != album_id:
+        return jsonify({"ok": False, "error": "Artwork job does not match this folder's album", "code": "artwork_job_mismatch"}), 400
+    if job.status == "running":
+        return jsonify({"ok": False, "error": "Artwork job has not finished yet", "code": "artwork_job_not_terminal"}), 409
+
+    try:
+        art_status = _album_art_status(album_id)
+        has_art = bool(art_status and art_status.get("has_local_art"))
+    except Exception as ex:
+        # Fail closed: verification itself failing is never treated as
+        # success, and the exception text is never returned or persisted
+        # raw -- only ever through the shared redaction helper.
+        log_note = _redact_security_text(ex)
+        has_art = False
+        _ai_batch_mark_folder(state, folder_id, last_error=log_note)
+
+    if has_art:
+        artwork_status = "fetched"
+        artwork_retryable = False
+    else:
+        job_state = getattr(job, "state", {}) or {}
+        terminal_outcome = _s(job_state.get("terminal_outcome") or "")
+        if terminal_outcome == "cancelled":
+            artwork_status = "cancelled"
+        elif terminal_outcome == "timed_out":
+            artwork_status = "timed_out"
+        else:
+            artwork_status = "failed"
+        artwork_retryable = True
+
+    _ai_batch_mark_folder(
+        state, folder_id,
+        artwork_status=artwork_status,
+        artwork_retryable=artwork_retryable,
+    )
+    _ai_batch_write_state(state)
+    return jsonify({"ok": True, "state": _ai_batch_public_state(state)})
+
+
 @app.post("/api/ai-batch-skip")
 def ai_batch_skip():
     payload = request.get_json(silent=True) or {}
@@ -24952,6 +25085,64 @@ def _prefer_album_mb_release(mb_albumid: str, log: list) -> str:
     return mb_albumid
 
 
+def _fetch_artwork_after_retag(aid: int, mb_albumid: str, log: List[str],
+                               cancel_event=None) -> Dict[str, Any]:
+    """Verify the persisted MusicBrainz identity, then fetch artwork.
+
+    An as-is import can't be relied on for artwork -- it initially lacks the
+    finalized MusicBrainz identity fetchart's sources search against. Only
+    run it once mbsync/write/move/recording-ID repair have all completed
+    and the album's persisted mb_albumid actually matches what this job
+    just imported; reuses the same single-album repair path as the manual
+    Album Art Repair retry action (POST /api/albums/<aid>/fetch-art), which
+    already verifies actual on-disk art after the fetch, not just rc==0.
+
+    Never raises for an artwork failure -- artwork is optional and must not
+    undo a successfully imported and verified album -- except to propagate
+    a genuine job cancellation.
+    """
+    identity_verified = False
+    try:
+        verify_album = lib.get_album(int(aid))
+        identity_verified = bool(
+            verify_album
+            and _s(getattr(verify_album, "mb_albumid", "")).strip().lower() == mb_albumid.strip().lower()
+        )
+    except Exception as ex:
+        log.append(f"  [identity] verification warning: {_redact_security_text(ex)}")
+
+    artwork_status = "skipped_identity_unverified"
+    artwork_retryable = False
+    if identity_verified:
+        try:
+            art_result = _repair_album_art(int(aid), log, cancel_event=cancel_event)
+        except Exception as ex:
+            art_result = {"status": "failed", "error": _s(ex)}
+        if cancel_event and cancel_event.is_set():
+            raise RuntimeError("cancelled")
+        art_status = art_result.get("status")
+        if art_status == "saved":
+            artwork_status = "fetched"
+            saved_path = _s(art_result.get("saved_path") or "")
+            log.append(f"  Artwork: fetched{f' ({Path(saved_path).name})' if saved_path else ''}.")
+        elif art_status == "skipped":
+            artwork_status = "already_present"
+            log.append("  Artwork: already present.")
+        else:
+            artwork_status = "failed"
+            artwork_retryable = True
+            reason = _redact_security_text(art_result.get("error") or "no art found")
+            log.append(f"  Artwork: failed — {reason}. Retry artwork from Album Art Repair.")
+    else:
+        log.append("  Artwork: skipped — MusicBrainz identity was not verified as persisted.")
+
+    return {
+        "identity_verified": identity_verified,
+        "artwork_status": artwork_status,
+        "artwork_retryable": artwork_retryable,
+    }
+
+
 def _ai_import_folder(folder_path: str, mb_albumid: str, suggestion: dict,
                       log: list, cancel_event=None):
     """Import a folder with a specific MB release ID, then apply
@@ -25035,7 +25226,13 @@ def _ai_import_folder(folder_path: str, mb_albumid: str, suggestion: dict,
         _invalidate_lib_cache()
         _trigger_plex_refresh(log, workflow="batch")
         log.append("  ✓ Done (as-is, no retag)")
-        return
+        return {
+            "album_id": None,
+            "metadata_imported": True,
+            "identity_verified": False,
+            "artwork_status": "skipped_no_album",
+            "artwork_retryable": False,
+        }
 
     # ── Step 3: stamp mb_albumid + retag ─────────────────────────────────────
     log.append(f"  Retagging album_id={aid} with MB data…")
@@ -25057,6 +25254,12 @@ def _ai_import_folder(folder_path: str, mb_albumid: str, suggestion: dict,
         r2 = _beet_run(base + args, log, timeout=tmo, env=env, cancel=cancel_event)
         if r2.returncode == -9:
             raise RuntimeError("cancelled")
+        if r2.returncode == 124:
+            # Unlike some other beet-subprocess call sites, a timeout here
+            # must never be treated as a soft warning: the persisted
+            # identity/tag state for this album is unverified, so silently
+            # continuing to artwork could stamp a false "imported" result.
+            raise RuntimeError(f"beet {cmd_label} timed out (rc=124)")
         out2 = _ANSI_RE.sub('', (r2.stdout + r2.stderr).strip())
         if out2:
             log.append(f"  [{cmd_label}] {out2[:200]}")
@@ -25068,6 +25271,12 @@ def _ai_import_folder(folder_path: str, mb_albumid: str, suggestion: dict,
         write_tags=True,
         cancel_event=cancel_event,
     )
+
+    # ── Step 4: verify persisted identity, then fetch artwork ────────────────
+    art_outcome = _fetch_artwork_after_retag(int(aid), mb_albumid, log, cancel_event=cancel_event)
+    identity_verified = art_outcome["identity_verified"]
+    artwork_status = art_outcome["artwork_status"]
+    artwork_retryable = art_outcome["artwork_retryable"]
 
     # Record AI match in history
     if suggestion:
@@ -25087,7 +25296,17 @@ def _ai_import_folder(folder_path: str, mb_albumid: str, suggestion: dict,
         log.append(f"  [auto-dedup] artist-folder check skipped: {ex}")
     _invalidate_lib_cache()
     _trigger_plex_refresh(log, workflow="batch")
-    log.append("  ✓ Done")
+    if artwork_status in ("fetched", "already_present"):
+        log.append("  ✓ Done")
+    else:
+        log.append("  ✓ Done (metadata); artwork needs retry")
+    return {
+        "album_id": int(aid),
+        "metadata_imported": True,
+        "identity_verified": identity_verified,
+        "artwork_status": artwork_status,
+        "artwork_retryable": artwork_retryable,
+    }
 
 
 @app.post("/api/ai-batch-import")

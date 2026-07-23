@@ -8,7 +8,7 @@ import LinearProgress from '@mui/material/LinearProgress';
 import TextField from '@mui/material/TextField';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { getAiBatchStatus, pauseAiBatch, recoverAiBatch, retryLibraryImportAllFailed, runPreflight, skipAiBatch, startAiBatchImport, stopAiBatch } from '../../api/client';
+import { fetchAlbumArt, getAiBatchStatus, pauseAiBatch, reconcileArtwork, recoverAiBatch, retryLibraryImportAllFailed, runPreflight, skipAiBatch, startAiBatchImport, stopAiBatch } from '../../api/client';
 import type { AiBatchFolderState, AiBatchState, PreflightFolder, PreflightResponse } from '../../api/types';
 import { LogViewer } from '../../components/LogViewer';
 import { useJobPoll } from '../../lib/hooks';
@@ -166,6 +166,15 @@ function folderStatusLabel(status?: string) {
   return labels[String(status || '')] || String(status || 'Unknown');
 }
 
+function artworkStatusChipLabel(status?: string) {
+  const labels: Record<string, string> = {
+    cancelled: 'Artwork retry cancelled',
+    timed_out: 'Artwork retry timed out',
+    failed: 'Artwork failed',
+  };
+  return labels[String(status || '')] || 'Artwork failed';
+}
+
 function folderName(path?: string) {
   if (!path) return '';
   return path.split(/[\\/]/).filter(Boolean).pop() || path;
@@ -268,7 +277,7 @@ function JobLog({
   const lastUpdateAge = ageFromTimestamp(batchState?.updated_at);
   const activeFolders = (batchState?.folders ?? []).filter((folder) => AI_BATCH_ACTIVE_FOLDER_STATUSES.has(folder.status));
   const attentionFolders = (batchState?.folders ?? [])
-    .filter((folder) => AI_BATCH_ATTENTION_FOLDER_STATUSES.has(folder.status))
+    .filter((folder) => AI_BATCH_ATTENTION_FOLDER_STATUSES.has(folder.status) || folder.artwork_retryable)
     .slice(0, 8);
   const importedCount = batchState?.folders_completed ?? 0;
   const reviewCount = batchState?.folders_review ?? 0;
@@ -304,6 +313,54 @@ function JobLog({
       await loadStatus(true);
     } catch (err) {
       setActionError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  // Retries only the artwork stage for an already-imported/verified album --
+  // reuses the same Album Art Repair job the manual retry button uses, so a
+  // FetchArt failure never requires reimporting or retagging the album. Job
+  // creation alone never proves success: this polls the job to a terminal
+  // state, then calls the backend reconciliation endpoint, which re-verifies
+  // the album's actual on-disk art before the folder is ever cleared from
+  // "Needs attention" -- never trusts the job's own claimed outcome.
+  const [retryingArtworkAlbumId, setRetryingArtworkAlbumId] = useState<number | null>(null);
+  const [artworkRetryJobId, setArtworkRetryJobId] = useState<string | null>(null);
+  const [artworkRetryFolderId, setArtworkRetryFolderId] = useState<string | null>(null);
+  const { job: artworkRetryJob } = useJobPoll(artworkRetryJobId, Boolean(artworkRetryJobId));
+
+  useEffect(() => {
+    if (!artworkRetryJobId || !artworkRetryFolderId) return;
+    if (!artworkRetryJob || artworkRetryJob.status === 'running') return;
+    let active = true;
+    (async () => {
+      try {
+        const result = await reconcileArtwork(jobId, artworkRetryFolderId, artworkRetryJobId);
+        if (active) setBatchState(result.state);
+      } catch (err) {
+        if (active) setActionError(err instanceof Error ? err.message : String(err));
+      } finally {
+        if (active) {
+          setArtworkRetryJobId(null);
+          setArtworkRetryFolderId(null);
+          setRetryingArtworkAlbumId(null);
+        }
+      }
+    })();
+    return () => { active = false; };
+  }, [artworkRetryJob, artworkRetryJobId, artworkRetryFolderId, jobId]);
+
+  const retryArtwork = async (albumId: number, folderId: string) => {
+    if (retryingArtworkAlbumId) return; // one retry in flight at a time
+    setActionError('');
+    setRetryingArtworkAlbumId(albumId);
+    try {
+      const started = await fetchAlbumArt(albumId);
+      if (!started.job_id) throw new Error('Backend did not return a job id');
+      setArtworkRetryJobId(started.job_id);
+      setArtworkRetryFolderId(folderId);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err));
+      setRetryingArtworkAlbumId(null);
     }
   };
 
@@ -486,12 +543,29 @@ function JobLog({
                         </div>
                       ) : null}
                       <div className="truncate text-xs text-zinc-500">
-                        {folder.failure_reason || folder.ai_suggest_error || folder.current_step || 'Needs review'}
+                        {folder.artwork_retryable
+                          ? 'Imported and tagged successfully; album artwork could not be fetched.'
+                          : folder.failure_reason || folder.ai_suggest_error || folder.current_step || 'Needs review'}
                       </div>
                     </div>
                     <div className="flex items-center gap-1">
                       {folder.retry_exhausted || folder.manual_review_required ? (
                         <Chip label="Manual review" size="small" color="warning" variant="outlined" />
+                      ) : null}
+                      {folder.artwork_retryable ? (
+                        <>
+                          <Chip label={artworkStatusChipLabel(folder.artwork_status)} size="small" color="warning" variant="outlined" />
+                          {folder.album_id ? (
+                            <Button
+                              size="small"
+                              variant="outlined"
+                              disabled={retryingArtworkAlbumId !== null}
+                              onClick={() => void retryArtwork(folder.album_id!, folder.folder_id)}
+                            >
+                              {retryingArtworkAlbumId === folder.album_id ? 'Retrying…' : 'Retry artwork'}
+                            </Button>
+                          ) : null}
+                        </>
                       ) : null}
                       <Chip label={folderStatusLabel(folder.status)} size="small" variant="outlined" />
                     </div>

@@ -68,7 +68,7 @@ class RoutesSetupStatusTests(unittest.TestCase):
         self.assertTrue(body["ok"])
         self.assertIn(body["status"], ("ready", "warning"))
         self.assertIn("integrations", body)
-        for key in ("ai", "musicbrainz", "acoustid", "discogs", "lastgenre", "listenbrainz", "discpath", "replaygain", "plex", "lidarr", "slskd"):
+        for key in ("ai", "musicbrainz", "acoustid", "discogs", "lastgenre", "listenbrainz", "discpath", "fetchart", "replaygain", "plex", "lidarr", "slskd"):
             self.assertIn(key, body["integrations"])
             self.assertIn("state", body["integrations"][key])
         self.assertIn("beets", body)
@@ -481,6 +481,124 @@ class RoutesSetupPluginLoaderDiagnosticsTests(unittest.TestCase):
         self.assertEqual(body["integrations"]["listenbrainz"]["state"], "not_configured")
         self.assertFalse(body["integrations"]["ai"]["required"])
         self.assertFalse(body["integrations"]["discogs"]["required"])
+
+
+class RoutesSetupFetchArtDiagnosticsTests(unittest.TestCase):
+    """FetchArt must never be reported operational merely because it
+    appears in config.yaml, find_spec() resolves something, or the
+    dependency package is installed -- operational requires the real
+    loader probe to have actually loaded it, in addition to every other
+    signal (installed, importable in-process, and the beetsplug namespace
+    actually merged rather than one directory shadowing the other)."""
+
+    def setUp(self):
+        self.flask_app, self.module = _load_routes_setup_against_stub_app()
+        self.client = self.flask_app.test_client()
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        self.config_dir = root / "config"
+        self.config_dir.mkdir()
+        self.config_file = self.config_dir / "config.yaml"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _write_config(self, plugins="fetchart musicbrainz"):
+        self.config_file.write_text(
+            f"plugins: {plugins}\n"
+            "pluginpath:\n  - /config/beetsplug\n  - /app/beetsplug\n",
+            encoding="utf-8",
+        )
+
+    def _env(self):
+        return mock.patch.dict(
+            os.environ,
+            {"BEETSDIR": str(self.config_dir), "BEETS_CONFIG": str(self.config_file)},
+            clear=False,
+        )
+
+    def test_operational_true_when_configured_and_loader_succeeds(self):
+        self._write_config()
+        fake_proc = mock.Mock(
+            returncode=0,
+            stdout="beets version 2.12.0\nplugins: fetchart, musicbrainz\n",
+            stderr="",
+        )
+        with self._env(), \
+             mock.patch.object(self.module, "_beet_binary", return_value=(True, "beet")), \
+             mock.patch.object(self.module.subprocess, "run", return_value=fake_proc):
+            response = self.client.get("/api/setup/status")
+
+        body = response.get_json()
+        fetchart = body["integrations"]["fetchart"]
+        self.assertEqual(fetchart["state"], "configured")
+        self.assertTrue(fetchart["installed"])
+        self.assertTrue(fetchart["importable_in_process"])
+        self.assertTrue(fetchart["bundled_namespace_merged"])
+        self.assertTrue(fetchart["loadable_by_beet_cli"])
+        self.assertTrue(fetchart["operational"])
+
+    def test_not_operational_when_configured_in_yaml_but_loader_never_ran(self):
+        # find_spec()/installed/importable can all be true (real beets is
+        # actually installed in this test environment) while the loader
+        # itself never successfully ran -- operational must still be false.
+        self._write_config()
+        with self._env(), \
+             mock.patch.object(self.module, "_beet_binary", return_value=(False, "")):
+            response = self.client.get("/api/setup/status")
+
+        body = response.get_json()
+        fetchart = body["integrations"]["fetchart"]
+        self.assertFalse(fetchart["operational"])
+        self.assertEqual(fetchart["state"], "plugin_loader_failed")
+
+    def test_not_operational_when_fetchart_plugin_fails_to_load(self):
+        self._write_config()
+        fake_proc = mock.Mock(
+            returncode=1, stdout="",
+            stderr="** error loading plugin fetchart\nModuleNotFoundError: No module named 'beetsplug.fetchart'\n",
+        )
+        with self._env(), \
+             mock.patch.object(self.module, "_beet_binary", return_value=(True, "beet")), \
+             mock.patch.object(self.module.subprocess, "run", return_value=fake_proc):
+            response = self.client.get("/api/setup/status")
+
+        body = response.get_json()
+        fetchart = body["integrations"]["fetchart"]
+        self.assertEqual(fetchart["state"], "dependency_plugin_missing")
+        self.assertFalse(fetchart["operational"])
+
+    def test_not_operational_when_installed_but_not_enabled(self):
+        self._write_config(plugins="musicbrainz")  # fetchart omitted
+        fake_proc = mock.Mock(returncode=0, stdout="beets version 2.12.0\nplugins: musicbrainz\n", stderr="")
+        with self._env(), \
+             mock.patch.object(self.module, "_beet_binary", return_value=(True, "beet")), \
+             mock.patch.object(self.module.subprocess, "run", return_value=fake_proc):
+            response = self.client.get("/api/setup/status")
+
+        body = response.get_json()
+        fetchart = body["integrations"]["fetchart"]
+        self.assertEqual(fetchart["state"], "installed_but_disabled")
+        self.assertFalse(fetchart["operational"])
+
+    def test_namespace_probe_reflects_real_in_process_environment(self):
+        # Direct, unmocked check of the actual in-process probe -- proves it
+        # runs real importlib.util.find_spec() calls, not a stub.
+        probe = self.module._fetchart_namespace_probe()
+        self.assertIn("importable_in_process", probe)
+        self.assertIn("installed", probe)
+        self.assertIn("bundled_namespace_merged", probe)
+
+    def test_diagnostic_does_not_expose_raw_paths_or_exceptions(self):
+        self._write_config()
+        with self._env(), \
+             mock.patch.object(self.module, "_beet_binary", return_value=(True, "beet")), \
+             mock.patch.object(self.module.subprocess, "run", side_effect=RuntimeError("/secret/internal/path token=sk-should-not-appear")):
+            response = self.client.get("/api/setup/status")
+
+        text = response.get_data(as_text=True)
+        self.assertNotIn("/secret/internal/path", text)
+        self.assertNotIn("sk-should-not-appear", text)
 
 
 class RoutesSetupTestConnectionTests(unittest.TestCase):
