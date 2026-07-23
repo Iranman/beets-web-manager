@@ -26,8 +26,10 @@ Reuses the fixtures/module import from test_import_review_attach_enforcement
 import json
 import os
 import threading
+import time
 import unittest
 import unittest.mock as mock
+import uuid
 from types import SimpleNamespace
 
 from tests.test_import_review_attach_enforcement import (
@@ -612,6 +614,195 @@ class SecuritySanitizationTests(_AttachIntegrityTestCase):
         tx = APP.transactions.get(audit_id)
         rendered = json.dumps(tx)
         self.assertNotIn("subprocess-stderr-secret", rendered)
+
+    def test_long_password_in_confirmation_reason_redacted_not_truncated_away(self):
+        # A prior pass fixed a fail-open bug where the URL-credential regex
+        # was length-capped at 256 chars per segment: a password longer than
+        # that survived redaction entirely (it wasn't merely truncated by
+        # the separate ~500-char confirmation_reason bound -- it was never
+        # matched at all). This proves a long password is actually redacted
+        # by _redact_security_text before the ~500-char bound in
+        # _sanitize_confirmation_reason ever truncates anything.
+        iid = 50006
+        self.add_item(iid)
+        long_password = _unique_secret(350, "longpw")
+        reason = f"See https://svcuser:{long_password}@example.test/path for context."
+        self.assertLess(len(reason), APP._CONFIRMATION_REASON_MAX_LEN,
+                         "test reason must fit under the bound unmodified so truncation isn't a confound")
+        resp = self._post_confirmed(iid, reason=reason)
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        audit_id = resp.get_json()["audit_id"]
+        _wait_job(resp.get_json()["job_id"])
+        tx = APP.transactions.get(audit_id)
+        stored = tx["metadata"]["confirmation_reason"]
+        self.assertNotIn(long_password, stored)
+        self.assertIn("example.test", stored)
+        self._assert_no_secrets(resp.get_json(), tx, tx.get("logs"), tx.get("changes"), tx.get("metadata"))
+        self.assertNotIn(long_password, json.dumps(tx))
+
+    def test_long_username_in_confirmation_reason_redacted(self):
+        iid = 50007
+        self.add_item(iid)
+        long_username = _unique_secret(300, "longuser")
+        reason = f"Credential was https://{long_username}:shortpw@example.test/ -- reviewed and reattached."
+        resp = self._post_confirmed(iid, reason=reason)
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        audit_id = resp.get_json()["audit_id"]
+        _wait_job(resp.get_json()["job_id"])
+        tx = APP.transactions.get(audit_id)
+        stored = tx["metadata"]["confirmation_reason"]
+        self.assertNotIn(long_username, stored)
+        self.assertNotIn("shortpw", stored)
+        self.assertIn("example.test", stored)
+
+    def test_candidate_reconstruction_exception_long_password_not_leaked(self):
+        iid = 50008
+        self.add_item(iid)
+        long_password = _unique_secret(400, "reconpw")
+
+        def raising_lookup(path):
+            raise RuntimeError(f"boom https://svcuser:{long_password}@internal.example/api")
+
+        with mock.patch.object(APP, "_acoustid_lookup_cached", side_effect=raising_lookup), \
+             mock.patch.object(APP.app.logger, "error") as mock_log:
+            resp = self._post_safe(iid)
+
+        self.assertEqual(resp.status_code, 503)
+        body = resp.get_json()
+        self.assertEqual(body["code"], "matching_evidence_unavailable")
+        rendered = json.dumps(body)
+        self.assertNotIn(long_password, rendered)
+
+        self.assertTrue(mock_log.called)
+        logged = " ".join(str(a) for call in mock_log.call_args_list for a in call.args)
+        self.assertNotIn(long_password, logged)
+
+        txs, _total = APP.transactions.list(limit=500)
+        self.assertNotIn(long_password, json.dumps(txs))
+        self.assertNotIn(iid, APP._ATTACH_RECORDING_RESERVED_ITEMS)
+
+
+# ── URL-credential redaction: direct unit coverage + adversarial perf ─────────
+
+def _unique_secret(length, tag):
+    """A unique, deterministic-enough-for-assertions secret value of an
+    exact character length, built from a random UUID rather than a
+    predictable literal like "password" -- so a passing assertion proves the
+    redactor actually matched this specific generated value, not merely that
+    some common keyword vanished. Only uses characters that are legal in
+    both the URL username and password grammar exercised here (no '/', '@',
+    ':', or whitespace)."""
+    base = f"{tag}-{uuid.uuid4().hex}-{uuid.uuid4().hex}"
+    if len(base) >= length:
+        return base[:length]
+    return (base * ((length // len(base)) + 1))[:length]
+
+
+@unittest.skipIf(APP is None, f"app.py could not be imported: {_APP_IMPORT_ERROR}")
+class URLCredentialRedactionUnitTests(unittest.TestCase):
+    """Direct coverage of _redact_security_text() / _URL_CREDENTIALS_RE,
+    independent of the attach-recording HTTP flow. A prior review pass
+    capped the username/password segments at 256 chars each to satisfy a
+    CodeQL polynomial-backtracking warning, but that cap made the regex
+    fail to match -- and therefore fail to redact -- any credential longer
+    than 256 chars. The fix removes the cap; because the username character
+    class already excludes ':', the ':' delimiter between username and
+    password is unambiguous without a length bound, so removing the cap
+    does not reintroduce backtracking risk."""
+
+    def test_short_url_credentials_are_redacted(self):
+        secret_user = _unique_secret(8, "u")
+        secret_pass = _unique_secret(8, "p")
+        text = f"failed against https://{secret_user}:{secret_pass}@example.test/path"
+        redacted = APP._redact_security_text(text)
+        self.assertNotIn(secret_user, redacted)
+        self.assertNotIn(secret_pass, redacted)
+        self.assertIn("https://", redacted)
+        self.assertIn("example.test", redacted)
+        self.assertIn(APP._REDACTED_SECRET, redacted)
+
+    def test_long_username_over_256_chars_is_redacted(self):
+        long_username = _unique_secret(300, "user")
+        self.assertGreater(len(long_username), 256)
+        text = f"https://{long_username}:shortpw@example.test/"
+        redacted = APP._redact_security_text(text)
+        self.assertNotIn(long_username, redacted)
+        self.assertNotIn("shortpw", redacted)
+        self.assertIn("example.test", redacted)
+        self.assertIn(APP._REDACTED_SECRET, redacted)
+
+    def test_long_password_over_256_chars_is_redacted(self):
+        long_password = _unique_secret(400, "pass")
+        self.assertGreater(len(long_password), 256)
+        text = f"https://shortuser:{long_password}@example.test/"
+        redacted = APP._redact_security_text(text)
+        self.assertNotIn(long_password, redacted)
+        self.assertNotIn("shortuser", redacted)
+        self.assertIn("example.test", redacted)
+        self.assertIn(APP._REDACTED_SECRET, redacted)
+
+    def test_both_username_and_password_over_256_chars_are_redacted(self):
+        long_username = _unique_secret(500, "bothuser")
+        long_password = _unique_secret(500, "bothpass")
+        text = f"https://{long_username}:{long_password}@example.test/"
+        redacted = APP._redact_security_text(text)
+        self.assertNotIn(long_username, redacted)
+        self.assertNotIn(long_password, redacted)
+        self.assertIn("example.test", redacted)
+
+    def test_scheme_and_host_remain_readable_after_redaction(self):
+        secret_user = _unique_secret(20, "ru")
+        secret_pass = _unique_secret(300, "rp")
+        text = f"https://{secret_user}:{secret_pass}@svc.internal.example.test:8443/path?x=1"
+        redacted = APP._redact_security_text(text)
+        self.assertIn("https://", redacted)
+        self.assertIn("svc.internal.example.test", redacted)
+        self.assertIn(":8443/path?x=1", redacted)
+
+    def test_redaction_is_idempotent_on_repeated_application(self):
+        secret_user = _unique_secret(20, "iu")
+        secret_pass = _unique_secret(300, "ip")
+        text = f"https://{secret_user}:{secret_pass}@example.test/"
+        once = APP._redact_security_text(text)
+        twice = APP._redact_security_text(once)
+        thrice = APP._redact_security_text(twice)
+        self.assertEqual(once, twice)
+        self.assertEqual(twice, thrice)
+        self.assertNotIn(secret_user, thrice)
+        self.assertNotIn(secret_pass, thrice)
+
+    def test_adversarial_colon_heavy_input_completes_quickly(self):
+        # Regression guard for the original CodeQL-flagged catastrophic
+        # backtracking: an attacker-controlled string with many ':'
+        # characters between "://" and a trailing "@" used to risk
+        # exponential/polynomial-time matching attempts if username and
+        # password segments could both stretch across the same ':'.
+        # Because the username class excludes ':', the engine can only ever
+        # take the username up to the *first* ':' and must hand everything
+        # else to the (':'-permitting) password segment in one pass -- this
+        # must stay true, and stay fast, whether or not either segment is
+        # length-capped.
+        text = "https://" + ("a:" * 50000) + "@example.test/"
+        start = time.monotonic()
+        redacted = APP._redact_security_text(text)
+        elapsed = time.monotonic() - start
+        self.assertLess(elapsed, 1.0,
+                         f"redaction of adversarial input took {elapsed:.3f}s -- possible backtracking regression")
+        self.assertIn("example.test", redacted)
+        self.assertIn(APP._REDACTED_SECRET, redacted)
+        self.assertNotIn("a:a:a", redacted)
+
+    def test_adversarial_input_with_no_trailing_at_sign_completes_quickly(self):
+        # Same adversarial shape but with NO terminating '@', so the regex
+        # engine must give up on the match entirely after scanning -- the
+        # worst case for a backtracking-prone pattern. Must still be fast.
+        text = "https://" + ("a:" * 50000) + "not-a-credential-suffix"
+        start = time.monotonic()
+        redacted = APP._redact_security_text(text)
+        elapsed = time.monotonic() - start
+        self.assertLess(elapsed, 1.0,
+                         f"redaction of unterminated adversarial input took {elapsed:.3f}s -- possible backtracking regression")
+        self.assertEqual(redacted, APP._CONTROL_CHAR_RE.sub("?", text))
 
 
 if __name__ == "__main__":
