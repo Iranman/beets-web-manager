@@ -65,6 +65,7 @@ import type {
   PlaylistApplySuggestionsResponse,
   PlaylistsResponse,
   PlaylistSuggestionsResponse,
+  PlaylistSuggestionSubmission,
   PlaylistSource,
   PlaylistTrack,
   PlaylistRowsResponse,
@@ -644,10 +645,13 @@ export function getPlaylistSuggestions(name: string): Promise<PlaylistSuggestion
   return apiJson<PlaylistSuggestionsResponse>(`/api/playlists/${encodeURIComponent(name)}/suggestions`);
 }
 
-export function applySafePlaylistSuggestions(name: string): Promise<PlaylistApplySuggestionsResponse> {
+export function applySafePlaylistSuggestions(
+  name: string,
+  suggestions: PlaylistSuggestionSubmission[],
+): Promise<PlaylistApplySuggestionsResponse> {
   return apiJson<PlaylistApplySuggestionsResponse>(
     `/api/playlists/${encodeURIComponent(name)}/apply-safe-suggestions`,
-    jsonRequest('POST', { musicbrainz: true }),
+    jsonRequest('POST', { suggestions }),
   );
 }
 

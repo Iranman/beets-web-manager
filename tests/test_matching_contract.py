@@ -800,7 +800,7 @@ class MatchingContractEligibilityTests(unittest.TestCase):
         self.assertNotIn("submit_metadata", decision["decision"]["action_eligibility"])
         self.assertEqual(
             set(decision["decision"]["action_eligibility"].keys()),
-            {"attach_without_review", "destructive_use"},
+            {"attach_without_review", "playlist_resolve_without_review", "destructive_use"},
         )
 
     def test_safe_candidate_is_attach_without_review(self):
