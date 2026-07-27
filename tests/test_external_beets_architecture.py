@@ -31,9 +31,11 @@ from backend.beets_client import (
 )
 from backend.beets_control_agent import (
     ALLOWED_COMMANDS,
+    JOBS,
     ControlAgentHandler,
     _handle_delete_album,
     is_safe_path,
+    require_command_capability,
 )
 from job_engine import Job, JobStore, _beet_run, _parse_remote_beet_command
 from routes_submissions import _submission_readiness
@@ -1164,6 +1166,119 @@ class TestJobCancellation(unittest.TestCase):
         self.assertEqual(job.status, "success")
         self.assertNotIn("[killed]", job.log)
 
+    @mock.patch("backend.beets_client.beets_client.cancel_job")
+    @mock.patch("backend.beets_client.beets_client.start_job")
+    @mock.patch("backend.beets_client.beets_client.get_job")
+    def test_cancel_confirmation_timeout_becomes_cancel_failed(self, mock_get, mock_start, mock_cancel):
+        """If the remote agent stays reachable but never reports a terminal status,
+        the bounded confirmation deadline must eventually give up rather than wait forever."""
+        mock_start.return_value = "remote-job-stuck"
+        mock_get.return_value = {"status": "running", "stdout": [], "stderr": []}
+
+        job = Job("stuck-cancel", ["/lsiopy/bin/beet", "import", "/data/torrents"], cancel_confirm_timeout=0.3)
+        time.sleep(0.1)
+        job.kill()
+        time.sleep(0.8)
+
+        self.assertEqual(job.status, "cancel_failed")
+        self.assertNotEqual(job.status, "cancelled")
+        self.assertNotEqual(job.returncode, 0)
+        self.assertTrue(any("not confirmed" in line for line in job.log))
+        self.assertEqual(
+            sum(1 for line in job.log if "not confirmed" in line), 1,
+            "confirmation-timeout diagnostic must not be logged more than once",
+        )
+
+    @mock.patch("backend.beets_client.beets_client.cancel_job")
+    @mock.patch("backend.beets_client.beets_client.start_job")
+    @mock.patch("backend.beets_client.beets_client.get_job")
+    def test_remote_success_just_before_cancel_timeout_is_preserved(self, mock_get, mock_start, mock_cancel):
+        """A real success reported before the confirmation deadline expires must win over the timeout."""
+        call_state = {"n": 0}
+
+        def get_job_side_effect(job_id):
+            call_state["n"] += 1
+            if call_state["n"] < 2:
+                return {"status": "running", "stdout": [], "stderr": []}
+            return {"status": "success", "returncode": 0, "stdout": ["done"], "stderr": []}
+
+        mock_start.return_value = "remote-job-late-success"
+        mock_get.side_effect = get_job_side_effect
+
+        job = Job("late-success", ["/lsiopy/bin/beet", "import", "/data/torrents"], cancel_confirm_timeout=5.0)
+        time.sleep(0.05)
+        job.kill()
+        time.sleep(0.6)
+
+        self.assertEqual(job.status, "success")
+        self.assertEqual(job.returncode, 0)
+
+    @mock.patch("backend.beets_client.beets_client.cancel_job")
+    @mock.patch("backend.beets_client.beets_client.start_job")
+    @mock.patch("backend.beets_client.beets_client.get_job")
+    def test_remote_failed_just_before_cancel_timeout_is_preserved(self, mock_get, mock_start, mock_cancel):
+        """A real failure reported before the confirmation deadline expires must win over the timeout."""
+        call_state = {"n": 0}
+
+        def get_job_side_effect(job_id):
+            call_state["n"] += 1
+            if call_state["n"] < 2:
+                return {"status": "running", "stdout": [], "stderr": []}
+            return {"status": "failed", "returncode": 2, "stdout": [], "stderr": ["boom"]}
+
+        mock_start.return_value = "remote-job-late-fail"
+        mock_get.side_effect = get_job_side_effect
+
+        job = Job("late-fail", ["/lsiopy/bin/beet", "import", "/data/torrents"], cancel_confirm_timeout=5.0)
+        time.sleep(0.05)
+        job.kill()
+        time.sleep(0.6)
+
+        self.assertEqual(job.status, "failed")
+        self.assertEqual(job.returncode, 2)
+
+    @mock.patch("backend.beets_client.beets_client.cancel_job")
+    @mock.patch("backend.beets_client.beets_client.start_job")
+    @mock.patch("backend.beets_client.beets_client.get_job")
+    def test_remote_cancelled_just_before_cancel_timeout_is_preserved(self, mock_get, mock_start, mock_cancel):
+        """A genuine remote cancellation confirmation before the deadline expires must be reported as cancelled."""
+        call_state = {"n": 0}
+
+        def get_job_side_effect(job_id):
+            call_state["n"] += 1
+            if call_state["n"] < 2:
+                return {"status": "running", "stdout": [], "stderr": []}
+            return {"status": "cancelled", "returncode": 130, "stdout": [], "stderr": []}
+
+        mock_start.return_value = "remote-job-late-cancel"
+        mock_get.side_effect = get_job_side_effect
+
+        job = Job("late-cancel", ["/lsiopy/bin/beet", "import", "/data/torrents"], cancel_confirm_timeout=5.0)
+        time.sleep(0.05)
+        job.kill()
+        time.sleep(0.6)
+
+        self.assertEqual(job.status, "cancelled")
+        self.assertEqual(job.returncode, 130)
+
+    @mock.patch("backend.beets_client.beets_client.cancel_job")
+    @mock.patch("backend.beets_client.beets_client.start_job")
+    @mock.patch("backend.beets_client.beets_client.get_job")
+    def test_cancel_job_negative_response_does_not_report_cancelled(self, mock_get, mock_start, mock_cancel):
+        """cancel_job() repeatedly raising (a rejected/negative response) must not be
+        treated as a confirmed cancellation, and must resolve via the bounded timeout."""
+        mock_start.return_value = "remote-job-reject-cancel"
+        mock_get.return_value = {"status": "running", "stdout": [], "stderr": []}
+        mock_cancel.side_effect = BeetsError("cancellation rejected by agent")
+
+        job = Job("reject-cancel", ["/lsiopy/bin/beet", "import", "/data/torrents"], cancel_confirm_timeout=0.3)
+        time.sleep(0.1)
+        job.kill()
+        time.sleep(0.8)
+
+        self.assertNotEqual(job.status, "cancelled")
+        self.assertEqual(job.status, "cancel_failed")
+
 
 class TestAcoustIDChromaCapability(unittest.TestCase):
     """Tests for AcoustID submit and Chroma plugin capability detection."""
@@ -1191,6 +1306,77 @@ class TestAcoustIDChromaCapability(unittest.TestCase):
         self.assertTrue(readiness["plugins"]["mbsubmit"])
         self.assertTrue(readiness["fpcalc_available"])
         self.assertTrue(readiness["pyacoustid_available"])
+        self.assertTrue(readiness["remote_reachable"])
+
+    @mock.patch("backend.beets_client.beets_client.get_status")
+    def test_submission_readiness_fails_closed_on_connection_failure(self, mock_status):
+        """A remote connection failure must report every capability unavailable,
+        never fall back to a local find_spec()/shutil.which() guess."""
+        mock_status.side_effect = BeetsUnavailableError("Beets Control Agent is unavailable")
+
+        from routes_submissions import _submission_readiness
+        readiness = _submission_readiness()
+        self.assertFalse(readiness["remote_reachable"])
+        self.assertFalse(readiness["plugins"]["chroma"])
+        self.assertFalse(readiness["plugins"]["mbsubmit"])
+        self.assertFalse(readiness["fpcalc_available"])
+        self.assertFalse(readiness["pyacoustid_available"])
+        self.assertIn("Beets Control Agent is unavailable", readiness["reason"])
+
+    @mock.patch("backend.beets_client.beets_client.get_status")
+    def test_submission_readiness_fails_closed_on_authentication_failure(self, mock_status):
+        """A remote authentication failure must also fail closed, not silently
+        report a stale/local capability guess."""
+        mock_status.side_effect = BeetsAuthError("401 Unauthorized")
+
+        from routes_submissions import _submission_readiness
+        readiness = _submission_readiness()
+        self.assertFalse(readiness["remote_reachable"])
+        self.assertFalse(readiness["plugins"]["chroma"])
+        self.assertFalse(readiness["plugins"]["mbsubmit"])
+
+    @mock.patch("backend.beets_client.beets_client.get_status")
+    def test_submission_readiness_fails_closed_on_malformed_response(self, mock_status):
+        """A response missing the expected "status": "ok" shape must fail closed
+        rather than partially trusting whatever fields happen to be present."""
+        mock_status.return_value = {"unexpected": "shape"}
+
+        from routes_submissions import _submission_readiness
+        readiness = _submission_readiness()
+        self.assertFalse(readiness["remote_reachable"])
+        self.assertFalse(readiness["plugins"]["chroma"])
+
+    @mock.patch("backend.beets_client.beets_client.get_status")
+    def test_submission_readiness_reports_chroma_unavailable_when_agent_says_so(self, mock_status):
+        """When the agent reaches a genuine 'ok' status but reports chroma as not
+        loaded (e.g. importable-but-failed-to-load), readiness must propagate that,
+        not silently flip it to available."""
+        mock_status.return_value = {
+            "status": "ok",
+            "fpcalc_available": True,
+            "pyacoustid_available": True,
+            "plugins": {"chroma": False, "mbsubmit": True, "musicbrainz": True},
+        }
+
+        from routes_submissions import _submission_readiness
+        readiness = _submission_readiness()
+        self.assertTrue(readiness["remote_reachable"])
+        self.assertFalse(readiness["plugins"]["chroma"])
+        self.assertTrue(readiness["plugins"]["mbsubmit"])
+
+    @mock.patch("backend.beets_client.beets_client.get_status")
+    def test_submission_readiness_reports_fpcalc_and_pyacoustid_unavailable(self, mock_status):
+        mock_status.return_value = {
+            "status": "ok",
+            "fpcalc_available": False,
+            "pyacoustid_available": False,
+            "plugins": {"chroma": False, "mbsubmit": True, "musicbrainz": True},
+        }
+
+        from routes_submissions import _submission_readiness
+        readiness = _submission_readiness()
+        self.assertFalse(readiness["fpcalc_available"])
+        self.assertFalse(readiness["pyacoustid_available"])
 
     @mock.patch.dict(os.environ, {"BEETS_WEB_AUTH_DISABLED": "1"})
     @mock.patch("routes_submissions._submission_readiness")
@@ -1237,6 +1423,189 @@ class TestAcoustIDChromaCapability(unittest.TestCase):
         from backend.beets_control_agent import ALLOWED_COMMANDS
         self.assertIn("mbsubmit", ALLOWED_COMMANDS)
         self.assertIn("submit", ALLOWED_COMMANDS)
+
+    def _run_status_with_beet_version_stdout(self, stdout: str) -> dict:
+        handler = ControlAgentHandler.__new__(ControlAgentHandler)
+        handler.headers = {}
+        handler.path = "/status"
+        responses = []
+        handler._send_json = lambda code, data: responses.append((code, data))
+
+        fake_result = mock.MagicMock(stdout=stdout, returncode=0)
+        with mock.patch("backend.beets_control_agent.subprocess.run", return_value=fake_result):
+            handler.do_GET()
+
+        self.assertEqual(len(responses), 1)
+        code, data = responses[0]
+        self.assertEqual(code, 200)
+        return data
+
+    def test_status_reports_chroma_unavailable_when_importable_but_not_loaded(self):
+        """A plugin that is importable but absent from beet version's loaded-plugins line
+        must be reported unavailable, not merely because its module can be imported."""
+        stdout = (
+            "beets version 2.4.0\n"
+            "Python version 3.12.11\n"
+            "plugins: convert, deezer, discpath, embedart, fetchart, lastgenre, "
+            "mbsubmit, mbsync, musicbrainz, scrub\n"
+        )
+        data = self._run_status_with_beet_version_stdout(stdout)
+        self.assertFalse(data["plugins"]["chroma"], "chroma is not in the loaded-plugins line and must report unavailable")
+        self.assertTrue(data["plugins"]["mbsubmit"])
+        self.assertTrue(data["plugins"]["musicbrainz"])
+
+    def test_status_reports_chroma_available_when_actually_loaded(self):
+        """When chroma genuinely appears in beet version's loaded-plugins line, report it available."""
+        stdout = (
+            "beets version 2.4.0\n"
+            "Python version 3.12.11\n"
+            "plugins: chroma, convert, deezer, discpath, embedart, fetchart, lastgenre, "
+            "mbsubmit, mbsync, musicbrainz, scrub\n"
+        )
+        data = self._run_status_with_beet_version_stdout(stdout)
+        self.assertTrue(data["plugins"]["chroma"])
+        self.assertTrue(data["plugins"]["mbsubmit"])
+
+
+class TestControlAgentCapabilityEnforcement(unittest.TestCase):
+    """Real handler tests proving the control agent itself blocks capability-gated
+    commands, independent of whatever the web-manager route already checks."""
+
+    def _post(self, path, body, headers=None):
+        handler = ControlAgentHandler.__new__(ControlAgentHandler)
+        handler.headers = dict(headers) if headers is not None else {"Authorization": "Bearer test-token"}
+        handler._authenticate = lambda: True
+        handler.path = path
+        payload = json.dumps(body).encode("utf-8")
+        handler.rfile = BytesIO(payload)
+        handler.headers["Content-Length"] = str(len(payload))
+        responses = []
+        handler._send_json = lambda code, data: responses.append((code, data))
+        handler.do_POST()
+        self.assertEqual(len(responses), 1, f"expected exactly one response for {path}")
+        return responses[0]
+
+    def test_commands_execute_accepts_submit_when_available(self):
+        with mock.patch("backend.beets_control_agent.get_loaded_beet_plugins", return_value={"chroma"}), \
+             mock.patch("backend.beets_control_agent.acquire_os_lock", return_value=None), \
+             mock.patch("backend.beets_control_agent.release_os_lock"), \
+             mock.patch("backend.beets_control_agent.subprocess.run") as mock_run:
+            mock_run.return_value = mock.MagicMock(returncode=0, stdout="usage", stderr="")
+            code, data = self._post("/commands/execute", {"command": "submit", "args": ["--help"]})
+            self.assertEqual(code, 200)
+            mock_run.assert_called_once()
+
+    def test_commands_execute_rejects_submit_when_unavailable(self):
+        with mock.patch("backend.beets_control_agent.get_loaded_beet_plugins", return_value=set()), \
+             mock.patch("backend.beets_control_agent.subprocess.run") as mock_run:
+            code, data = self._post("/commands/execute", {"command": "submit", "args": ["--help"]})
+            self.assertEqual(code, 409)
+            self.assertIn("reason", data)
+            mock_run.assert_not_called()
+
+    def test_jobs_create_accepts_submit_when_available(self):
+        fake_proc = mock.MagicMock()
+        fake_proc.communicate.return_value = ("usage", "")
+        fake_proc.returncode = 0
+        with mock.patch("backend.beets_control_agent.get_loaded_beet_plugins", return_value={"chroma"}), \
+             mock.patch("backend.beets_control_agent.acquire_os_lock", return_value=None), \
+             mock.patch("backend.beets_control_agent.release_os_lock"), \
+             mock.patch("backend.beets_control_agent.subprocess.Popen", return_value=fake_proc):
+            before_ids = set(JOBS)
+            code, data = self._post("/jobs/create", {"command": "submit", "args": ["--help"]})
+            try:
+                self.assertEqual(code, 200)
+                self.assertIn("job_id", data)
+                self.assertEqual(set(JOBS) - before_ids, {data["job_id"]})
+            finally:
+                for jid in list(JOBS):
+                    if jid not in before_ids:
+                        del JOBS[jid]
+
+    def test_jobs_create_rejects_submit_when_unavailable(self):
+        with mock.patch("backend.beets_control_agent.get_loaded_beet_plugins", return_value=set()):
+            before_ids = set(JOBS)
+            code, data = self._post("/jobs/create", {"command": "submit", "args": ["--help"]})
+            self.assertEqual(code, 409)
+            self.assertIn("reason", data)
+            self.assertEqual(set(JOBS), before_ids, "no job object should be created when capability is unavailable")
+
+    def test_mbsubmit_independently_accepted_when_available(self):
+        with mock.patch("backend.beets_control_agent.get_loaded_beet_plugins", return_value={"mbsubmit"}), \
+             mock.patch("backend.beets_control_agent.acquire_os_lock", return_value=None), \
+             mock.patch("backend.beets_control_agent.release_os_lock"), \
+             mock.patch("backend.beets_control_agent.subprocess.run") as mock_run:
+            mock_run.return_value = mock.MagicMock(returncode=0, stdout="usage", stderr="")
+            code, data = self._post("/commands/execute", {"command": "mbsubmit", "args": ["--help"]})
+            self.assertEqual(code, 200)
+
+    def test_mbsubmit_independently_rejected_when_unavailable(self):
+        with mock.patch("backend.beets_control_agent.get_loaded_beet_plugins", return_value={"chroma"}), \
+             mock.patch("backend.beets_control_agent.subprocess.run") as mock_run:
+            code, data = self._post("/commands/execute", {"command": "mbsubmit", "args": ["--help"]})
+            self.assertEqual(code, 409)
+            mock_run.assert_not_called()
+
+    def test_missing_authentication_returns_401(self):
+        handler = ControlAgentHandler.__new__(ControlAgentHandler)
+        handler.headers = {}
+        handler.path = "/commands/execute"
+        payload = json.dumps({"command": "submit", "args": []}).encode("utf-8")
+        handler.rfile = BytesIO(payload)
+        handler.headers["Content-Length"] = str(len(payload))
+        responses = []
+        handler._send_json = lambda code, data: responses.append((code, data))
+        with mock.patch("backend.beets_control_agent.BEETS_API_TOKEN", "real-token"):
+            handler.do_POST()
+        self.assertEqual(responses[0][0], 401)
+
+    def test_invalid_authentication_returns_401(self):
+        handler = ControlAgentHandler.__new__(ControlAgentHandler)
+        handler.headers = {"Authorization": "Bearer wrong-token"}
+        handler.path = "/commands/execute"
+        payload = json.dumps({"command": "submit", "args": []}).encode("utf-8")
+        handler.rfile = BytesIO(payload)
+        handler.headers["Content-Length"] = str(len(payload))
+        responses = []
+        handler._send_json = lambda code, data: responses.append((code, data))
+        with mock.patch("backend.beets_control_agent.BEETS_API_TOKEN", "real-token"):
+            handler.do_POST()
+        self.assertEqual(responses[0][0], 401)
+
+    def test_unknown_command_still_returns_allowlist_error(self):
+        with mock.patch("backend.beets_control_agent.get_loaded_beet_plugins", return_value={"chroma", "mbsubmit"}):
+            code, data = self._post("/commands/execute", {"command": "disallowed_plugin_xyz", "args": []})
+            self.assertEqual(code, 400)
+            self.assertIn("not in the allowlist", data["error"])
+
+    def test_capability_failure_returns_agent_provided_reason(self):
+        with mock.patch("backend.beets_control_agent.get_loaded_beet_plugins", return_value=set()):
+            code, data = self._post("/commands/execute", {"command": "submit", "args": []})
+            self.assertEqual(code, 409)
+            self.assertEqual(data["reason"], "Chroma is configured but the submit command is not registered")
+
+    def test_real_capability_probe_rejects_when_no_plugins_loaded(self):
+        """Exercises the real get_loaded_beet_plugins()/require_command_capability()
+        probe (not a mock of the capability dict) against a stubbed `beet version`."""
+        fake_version = mock.MagicMock(
+            stdout="beets version 2.4.0\nPython version 3.12.11\nplugins: discpath\n",
+            returncode=0,
+        )
+        with mock.patch("backend.beets_control_agent.subprocess.run", return_value=fake_version):
+            error = require_command_capability("submit")
+            self.assertIsNotNone(error)
+            self.assertIn("reason", error)
+            error2 = require_command_capability("mbsubmit")
+            self.assertIsNotNone(error2)
+
+    def test_real_capability_probe_accepts_when_plugin_loaded(self):
+        fake_version = mock.MagicMock(
+            stdout="beets version 2.4.0\nPython version 3.12.11\nplugins: chroma, discpath, mbsubmit\n",
+            returncode=0,
+        )
+        with mock.patch("backend.beets_control_agent.subprocess.run", return_value=fake_version):
+            self.assertIsNone(require_command_capability("submit"))
+            self.assertIsNone(require_command_capability("mbsubmit"))
 
 
 if __name__ == "__main__":

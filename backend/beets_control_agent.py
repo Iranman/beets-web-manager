@@ -22,6 +22,7 @@ import time
 import urllib.parse
 import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from typing import Optional
 from urllib.parse import parse_qs, urlparse
 
 # Configuration
@@ -42,6 +43,50 @@ ALLOWED_COMMANDS = {
 
 JOBS = {}
 JOBS_LOCK = threading.Lock()
+
+# Commands that require a specific plugin to have actually finished loading in the
+# authoritative Beets engine before they can run, and the response returned when
+# that plugin did not load. Keyed by ALLOWED_COMMANDS entry.
+_COMMAND_CAPABILITY_REQUIREMENTS = {
+    "submit": ("chroma", "AcoustID submission unavailable", "Chroma is configured but the submit command is not registered"),
+    "mbsubmit": ("mbsubmit", "MusicBrainz submission unavailable", "mbsubmit command is not registered"),
+}
+
+
+def get_loaded_beet_plugins() -> set:
+    """Return the set of plugins Beets actually finished loading, parsed from
+    `beet version`'s own "plugins: a, b, c" line.
+
+    Unlike a Python import check (e.g. importlib.util.find_spec), this only
+    includes plugins that survived Beets' own load() step, so a plugin that is
+    importable on disk but silently fails to initialize (as beetsplug.chroma
+    can, even with fpcalc/pyacoustid present) is correctly excluded.
+    """
+    try:
+        res = subprocess.run([BEET_BIN, "version"], capture_output=True, text=True, timeout=5)
+    except Exception:
+        return set()
+    for line in (res.stdout.splitlines() if res.stdout else []):
+        if line.startswith("plugins:"):
+            return {name.strip() for name in line[len("plugins:"):].split(",") if name.strip()}
+    return set()
+
+
+def require_command_capability(command: str) -> Optional[dict]:
+    """Return an error dict if `command` requires a runtime plugin capability that
+    is not currently loaded in the authoritative Beets engine, else None.
+
+    This is deliberately independent of the web-manager's own readiness check:
+    a caller hitting this agent's endpoints directly (bypassing the web-manager
+    route) must still be blocked before any subprocess or job is created.
+    """
+    requirement = _COMMAND_CAPABILITY_REQUIREMENTS.get(command)
+    if requirement is None:
+        return None
+    required_plugin, error_msg, reason = requirement
+    if required_plugin in get_loaded_beet_plugins():
+        return None
+    return {"error": error_msg, "reason": reason}
 
 
 def is_safe_path(path: str, allowed_types: list = None) -> bool:
@@ -351,6 +396,8 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 beets_ver = res.stdout.splitlines()[0] if res.stdout else "available"
             except Exception:
                 pass
+            # See get_loaded_beet_plugins() for why this is not a Python import check.
+            loaded_plugins = get_loaded_beet_plugins()
 
             db_healthy = os.path.exists(LIB_PATH) and os.access(LIB_PATH, os.R_OK)
             config_healthy = os.path.exists(os.path.join(BEETSDIR, "config.yaml"))
@@ -359,9 +406,9 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             import shutil, importlib.util
             fpcalc_p = shutil.which("fpcalc") or ""
             pyacoustid_avail = importlib.util.find_spec("acoustid") is not None
-            chroma_avail = importlib.util.find_spec("beetsplug.chroma") is not None
-            mbsubmit_avail = importlib.util.find_spec("beetsplug.mbsubmit") is not None
-            musicbrainz_avail = importlib.util.find_spec("beetsplug.musicbrainz") is not None
+            chroma_avail = "chroma" in loaded_plugins
+            mbsubmit_avail = "mbsubmit" in loaded_plugins
+            musicbrainz_avail = "musicbrainz" in loaded_plugins
 
             self._send_json(200, {
                 "status": "ok",
@@ -804,6 +851,11 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 self._send_json(400, {"error": f"Command '{command}' is not in the allowlist"})
                 return
 
+            capability_error = require_command_capability(command)
+            if capability_error is not None:
+                self._send_json(409, capability_error)
+                return
+
             if source_path:
                 allowed_roots = ["staging"] if command == "import" else ["music", "staging"]
                 if not is_safe_path(source_path, allowed_roots):
@@ -882,6 +934,11 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
 
             if not command or command not in ALLOWED_COMMANDS:
                 self._send_json(400, {"error": f"Command '{command}' is not in the allowlist"})
+                return
+
+            capability_error = require_command_capability(command)
+            if capability_error is not None:
+                self._send_json(409, capability_error)
                 return
 
             if source_path:

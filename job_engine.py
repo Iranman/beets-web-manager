@@ -39,6 +39,12 @@ class ParsedRemoteBeetCommand(NamedTuple):
     config_override: str = ""
 
 
+# How long Job._run() will keep polling for a *confirmed* remote terminal status
+# after cancellation is requested, before giving up and reporting cancel_failed
+# rather than waiting forever. Overridable per-Job for tests.
+REMOTE_CANCEL_CONFIRM_TIMEOUT = float(os.environ.get("BEETS_CANCEL_CONFIRM_TIMEOUT", "30.0"))
+
+
 def _is_beet_executable_token(token: str) -> bool:
     if not token:
         return False
@@ -150,7 +156,7 @@ def _beet_run(cmd, log, *, timeout=120, env=None, warn_msg=None, cancel=None):
 
 
 class Job:
-    def __init__(self, job_id: str, command: List[str], label: str = ""):
+    def __init__(self, job_id: str, command: List[str], label: str = "", cancel_confirm_timeout: Optional[float] = None):
         self.job_id      = job_id
         self.command     = command
         self.label       = label or " ".join(command)
@@ -163,6 +169,9 @@ class Job:
         self._cancel_requested = False
         self._cancel_failed = False
         self._state = "created"
+        self._cancel_confirm_timeout = (
+            REMOTE_CANCEL_CONFIRM_TIMEOUT if cancel_confirm_timeout is None else cancel_confirm_timeout
+        )
         self._lock = threading.Lock()
         threading.Thread(target=self._run, daemon=True).start()
 
@@ -265,6 +274,7 @@ class Job:
         # 5. Polling loop and cancellation confirmation
         seen_stdout = 0
         seen_stderr = 0
+        cancel_deadline: Optional[float] = None
 
         while True:
             with self._lock:
@@ -272,6 +282,11 @@ class Job:
                 cancel_err = self._cancel_failed
 
             if cancel_req:
+                if cancel_deadline is None:
+                    # Deadline starts the moment we first notice cancellation was
+                    # requested while a real remote job exists, using monotonic time
+                    # so wall-clock adjustments can't extend or shorten the wait.
+                    cancel_deadline = time.monotonic() + self._cancel_confirm_timeout
                 try:
                     beets_client.cancel_job(remote_id)
                 except Exception as exc:
@@ -331,6 +346,19 @@ class Job:
                         self.returncode = 1
                         self.finished_at = time.time()
                         break
+
+            if cancel_deadline is not None and time.monotonic() >= cancel_deadline:
+                with self._lock:
+                    err_msg = (
+                        f"  ⚠ Remote cancellation was not confirmed within "
+                        f"{self._cancel_confirm_timeout:.0f}s; giving up waiting."
+                    )
+                    if err_msg not in self.log:
+                        self.log.append(err_msg)
+                    self._state = "cancel_failed"
+                    self.returncode = 1
+                    self.finished_at = time.time()
+                break
 
             time.sleep(0.2)
 

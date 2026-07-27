@@ -239,35 +239,52 @@ def _config_has_acoustid_key(config_path: str = "/config/config.yaml") -> bool:
 
 
 def _submission_readiness() -> Dict[str, Any]:
-    configured = set(_read_beets_plugin_list())
-    remote_status = {}
+    """Report AcoustID/MusicBrainz submission capability strictly from the remote
+    Beets control agent's own /status response.
+
+    Fails closed: any connection failure, authentication failure, or malformed
+    response is reported as every capability being unavailable rather than
+    falling back to local `find_spec()`/`shutil.which()`/local Beets config
+    checks -- the web manager has no local Beets installation to inspect, so a
+    local fallback could only ever be a guess, not a fact.
+    """
+    remote_status = None
+    remote_error = ""
     try:
         remote_status = beets_client.get_status()
-    except Exception:
-        pass
+    except Exception as exc:
+        remote_error = str(exc)
 
-    remote_plugins = remote_status.get("plugins", {})
-    fpcalc_path = remote_status.get("fpcalc_path") or shutil.which("fpcalc") or ""
-    fpcalc_avail = remote_status.get("fpcalc_available") if "fpcalc_available" in remote_status else bool(fpcalc_path)
-    pyacoustid_avail = remote_status.get("pyacoustid_available") if "pyacoustid_available" in remote_status else (importlib.util.find_spec("acoustid") is not None)
+    if not isinstance(remote_status, dict) or remote_status.get("status") != "ok":
+        return {
+            "plugins": {"mbsubmit": False, "musicbrainz": False, "chroma": False, "mbsync": False},
+            "fpcalc_available": False,
+            "fpcalc_path": "",
+            "pyacoustid_available": False,
+            "acoustid_key_configured": bool(_acoustid_key() or _config_has_acoustid_key()),
+            "beet_available": False,
+            "remote_reachable": False,
+            "reason": remote_error or "Beets control agent status is unavailable or malformed",
+        }
 
-    chroma_avail = remote_plugins.get("chroma", "chroma" in configured)
-    mbsubmit_avail = remote_plugins.get("mbsubmit", "mbsubmit" in configured)
-    musicbrainz_avail = remote_plugins.get("musicbrainz", "musicbrainz" in configured)
-    mbsync_avail = remote_plugins.get("mbsync", "mbsync" in configured)
+    remote_plugins = remote_status.get("plugins")
+    if not isinstance(remote_plugins, dict):
+        remote_plugins = {}
 
     return {
         "plugins": {
-            "mbsubmit": bool(mbsubmit_avail),
-            "musicbrainz": bool(musicbrainz_avail),
-            "chroma": bool(chroma_avail),
-            "mbsync": bool(mbsync_avail),
+            "mbsubmit": bool(remote_plugins.get("mbsubmit", False)),
+            "musicbrainz": bool(remote_plugins.get("musicbrainz", False)),
+            "chroma": bool(remote_plugins.get("chroma", False)),
+            "mbsync": bool(remote_plugins.get("mbsync", False)),
         },
-        "fpcalc_available": bool(fpcalc_avail),
-        "fpcalc_path": fpcalc_path,
-        "pyacoustid_available": bool(pyacoustid_avail),
+        "fpcalc_available": bool(remote_status.get("fpcalc_available", False)),
+        "fpcalc_path": remote_status.get("fpcalc_path") or "",
+        "pyacoustid_available": bool(remote_status.get("pyacoustid_available", False)),
         "acoustid_key_configured": bool(_acoustid_key() or _config_has_acoustid_key()),
-        "beet_available": bool(BEET_BIN and Path(BEET_BIN).exists()),
+        "beet_available": True,
+        "remote_reachable": True,
+        "reason": "",
     }
 
 
