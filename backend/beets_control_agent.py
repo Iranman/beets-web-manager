@@ -37,7 +37,7 @@ BEET_BIN = os.environ.get("BEET_BIN", "beet")
 ALLOWED_COMMANDS = {
     "import", "update", "write", "move", "modify", "ls", "stats", "fields",
     "mbsync", "fetchart", "embedart", "lastgenre", "lastimport", "alt",
-    "version", "config", "check", "remove", "rm"
+    "version", "config", "check", "remove", "rm", "submit", "mbsubmit"
 }
 
 JOBS = {}

@@ -166,75 +166,157 @@ class Job:
 
     @property
     def status(self):
-        if self.finished_at is not None:
+        with self._lock:
+            if self.finished_at is not None:
+                if self._cancel_requested or self.returncode == 130:
+                    return "cancelled"
+                return "success" if self.returncode == 0 else "failed"
             if self._cancel_requested:
                 return "cancelled"
-            return "success" if self.returncode == 0 else "failed"
-        return "running"
+            return "running"
 
     def kill(self):
+        remote_id_to_cancel = None
         with self._lock:
+            if self.finished_at is not None:
+                return
             self._cancel_requested = True
-            if self._remote_job_id:
-                try:
-                    beets_client.cancel_job(self._remote_job_id)
-                except Exception:
-                    pass
-            self.log.append("[killed]")
+            if "[killed]" not in self.log:
+                self.log.append("[killed]")
+            remote_id_to_cancel = self._remote_job_id
+
+        if remote_id_to_cancel:
+            try:
+                beets_client.cancel_job(remote_id_to_cancel)
+            except Exception as exc:
+                with self._lock:
+                    err_msg = f"  ⚠ Remote cancellation request error: {exc}"
+                    if err_msg not in self.log:
+                        self.log.append(err_msg)
 
     def _run(self):
-        self.started_at = time.time()
-        r_status = "running"
-        try:
-            try:
-                parsed = _parse_remote_beet_command(self.command)
-            except Exception as exc:
-                self.log.append(f"  ⚠ Invalid command for job: {exc}")
-                self.returncode = 1
+        with self._lock:
+            self.started_at = time.time()
+            if self._cancel_requested:
+                self.returncode = 130
                 self.finished_at = time.time()
                 return
 
-            remote_id = beets_client.start_job(parsed.subcommand, args=parsed.args, label=self.label, config_override=parsed.config_override)
+        # 1. Parse command
+        try:
+            parsed = _parse_remote_beet_command(self.command)
+        except Exception as exc:
             with self._lock:
-                self._remote_job_id = remote_id
+                self.log.append(f"  ⚠ Invalid command for job: {exc}")
+                self.returncode = 1
+                self.finished_at = time.time()
+            return
 
-            if not remote_id:
-                raise BeetsError("Failed to start remote job on Beets agent")
+        # 2. Check cancel before dispatch
+        with self._lock:
+            if self._cancel_requested:
+                self.returncode = 130
+                self.finished_at = time.time()
+                return
 
-            seen_stdout = 0
-            seen_stderr = 0
-            while not self._cancel_requested:
+        # 3. Dispatch start_job
+        try:
+            remote_id = beets_client.start_job(
+                parsed.subcommand,
+                args=parsed.args,
+                label=self.label,
+                config_override=parsed.config_override
+            )
+        except Exception as exc:
+            with self._lock:
+                if self._cancel_requested:
+                    self.returncode = 130
+                else:
+                    self.log.append(f"ERROR: {exc}")
+                    self.returncode = 1
+                self.finished_at = time.time()
+            return
+
+        if not remote_id:
+            with self._lock:
+                if self._cancel_requested:
+                    self.returncode = 130
+                else:
+                    self.log.append("ERROR: Failed to start remote job on Beets agent")
+                    self.returncode = 1
+                self.finished_at = time.time()
+            return
+
+        # 4. Save remote_id and handle cancel requested during start_job dispatch
+        should_cancel_now = False
+        with self._lock:
+            self._remote_job_id = remote_id
+            if self._cancel_requested:
+                should_cancel_now = True
+
+        if should_cancel_now:
+            try:
+                beets_client.cancel_job(remote_id)
+            except Exception as exc:
+                with self._lock:
+                    err_msg = f"  ⚠ Remote cancellation request error: {exc}"
+                    if err_msg not in self.log:
+                        self.log.append(err_msg)
+
+        # 5. Polling loop
+        seen_stdout = 0
+        seen_stderr = 0
+        r_status = "running"
+
+        while True:
+            with self._lock:
+                is_cancelled = self._cancel_requested
+
+            try:
                 job_data = beets_client.get_job(remote_id)
                 r_status = job_data.get("status", "running")
                 r_stdout = job_data.get("stdout", [])
                 r_stderr = job_data.get("stderr", [])
 
-                if len(r_stdout) > seen_stdout:
-                    for line in r_stdout[seen_stdout:]:
-                        self.log.append(line)
-                    seen_stdout = len(r_stdout)
+                with self._lock:
+                    if len(r_stdout) > seen_stdout:
+                        for line in r_stdout[seen_stdout:]:
+                            self.log.append(line)
+                        seen_stdout = len(r_stdout)
 
-                if len(r_stderr) > seen_stderr:
-                    for line in r_stderr[seen_stderr:]:
-                        self.log.append(f"ERR: {line}")
-                    seen_stderr = len(r_stderr)
+                    if len(r_stderr) > seen_stderr:
+                        for line in r_stderr[seen_stderr:]:
+                            self.log.append(f"ERR: {line}")
+                        seen_stderr = len(r_stderr)
 
                 if r_status in ("success", "failed", "cancelled", "timeout"):
-                    self.returncode = job_data.get("returncode", 0 if r_status == "success" else 1)
-                    if r_status == "cancelled":
-                        self._cancel_requested = True
+                    with self._lock:
+                        if is_cancelled or r_status == "cancelled":
+                            self.returncode = 130
+                        else:
+                            self.returncode = job_data.get("returncode", 0 if r_status == "success" else 1)
+                        self.finished_at = time.time()
                     break
 
-                time.sleep(1.0)
+            except Exception as exc:
+                with self._lock:
+                    if not self._cancel_requested:
+                        self.log.append(f"ERROR: {exc}")
+                        self.returncode = 1
+                        self.finished_at = time.time()
+                        break
 
-            if self._cancel_requested and r_status == "running":
-                beets_client.cancel_job(remote_id)
-                self.returncode = 130
-        except Exception as exc:
-            self.log.append(f"ERROR: {exc}")
-            self.returncode = 1
-        finally:
-            self.finished_at = time.time()
+            if is_cancelled:
+                try:
+                    beets_client.cancel_job(remote_id)
+                except Exception:
+                    pass
+                with self._lock:
+                    self.returncode = 130
+                    self.finished_at = time.time()
+                break
+
+            time.sleep(0.2)
 
     def to_dict(self, include_log=False, include_result=True):
         d = {

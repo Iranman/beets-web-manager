@@ -7,6 +7,8 @@ import re
 import sqlite3
 import subprocess
 import tempfile
+import threading
+import time
 import unittest
 import urllib.error
 from io import BytesIO
@@ -1003,6 +1005,150 @@ class TestCommandNormalization(unittest.TestCase):
         res = _beet_run(cmd, log)
         self.assertEqual(res.returncode, 0)
         mock_run.assert_called_once_with("embedart", args=["-y", "album_id:20"], timeout=120.0, config_override="")
+
+    def test_submission_commands_in_allowlist(self):
+        """Verify submit (acoustid) and mbsubmit (musicbrainz) commands are in ALLOWED_COMMANDS."""
+        from backend.beets_control_agent import ALLOWED_COMMANDS
+        self.assertIn("submit", ALLOWED_COMMANDS)
+        self.assertIn("mbsubmit", ALLOWED_COMMANDS)
+
+
+class TestJobCancellation(unittest.TestCase):
+    @mock.patch("backend.beets_client.beets_client.cancel_job")
+    @mock.patch("backend.beets_client.beets_client.start_job")
+    def test_cancel_before_dispatch(self, mock_start, mock_cancel):
+        """Cancelling before start_job dispatch prevents remote job creation."""
+        job = Job.__new__(Job)
+        job.job_id = "pre-cancel-job"
+        job.command = ["/lsiopy/bin/beet", "import", "/data/torrents/music"]
+        job.label = "test"
+        job.created_at = time.time()
+        job.started_at = None
+        job.finished_at = None
+        job.returncode = None
+        job.log = []
+        job._remote_job_id = None
+        job._cancel_requested = True
+        job._lock = threading.Lock()
+
+        job._run()
+
+        mock_start.assert_not_called()
+        mock_cancel.assert_not_called()
+        self.assertEqual(job.status, "cancelled")
+        self.assertEqual(job.returncode, 130)
+
+    @mock.patch("backend.beets_client.beets_client.cancel_job")
+    @mock.patch("backend.beets_client.beets_client.start_job")
+    @mock.patch("backend.beets_client.beets_client.get_job")
+    def test_cancel_while_start_job_in_flight(self, mock_get, mock_start, mock_cancel):
+        """Cancelling while start_job is in flight cancels remote ID once assigned."""
+        import threading, time
+        start_event = threading.Event()
+        release_start = threading.Event()
+
+        def slow_start_job(subcommand, args=None, label="", config_override="", source_path=""):
+            start_event.set()
+            release_start.wait(timeout=2.0)
+            return "remote-job-888"
+
+        mock_start.side_effect = slow_start_job
+        mock_get.return_value = {"status": "running", "stdout": [], "stderr": []}
+
+        job = Job("in-flight-cancel", ["/lsiopy/bin/beet", "import", "/data/torrents/music"])
+        self.assertTrue(start_event.wait(timeout=2.0))
+
+        # Main thread issues kill() before start_job() returns
+        job.kill()
+
+        release_start.set()
+        time.sleep(0.3)
+
+        mock_cancel.assert_called_with("remote-job-888")
+        self.assertEqual(job.status, "cancelled")
+        self.assertEqual(job.returncode, 130)
+
+    @mock.patch("backend.beets_client.beets_client.cancel_job")
+    @mock.patch("backend.beets_client.beets_client.start_job")
+    @mock.patch("backend.beets_client.beets_client.get_job")
+    def test_cancel_after_id_assignment_during_polling(self, mock_get, mock_start, mock_cancel):
+        """Cancelling while polling reaches remote process and sets cancelled status."""
+        mock_start.return_value = "remote-job-777"
+        mock_get.return_value = {"status": "running", "stdout": ["working"], "stderr": []}
+
+        job = Job("poll-cancel", ["/lsiopy/bin/beet", "import", "/data/torrents/music"])
+        time.sleep(0.1)
+
+        job.kill()
+        time.sleep(0.3)
+
+        mock_cancel.assert_called_with("remote-job-777")
+        self.assertEqual(job.status, "cancelled")
+
+    @mock.patch("backend.beets_client.beets_client.cancel_job")
+    @mock.patch("backend.beets_client.beets_client.start_job")
+    @mock.patch("backend.beets_client.beets_client.get_job")
+    def test_remote_success_cannot_overwrite_cancelled_status(self, mock_get, mock_start, mock_cancel):
+        """If cancellation was requested, remote success status does not overwrite cancelled state."""
+        mock_start.return_value = "remote-job-666"
+        mock_get.return_value = {"status": "running", "stdout": ["working"], "stderr": []}
+
+        job = Job("success-race", ["/lsiopy/bin/beet", "import", "/data/torrents/music"])
+        time.sleep(0.05)
+        job.kill()
+        mock_get.return_value = {"status": "success", "returncode": 0, "stdout": ["done"], "stderr": []}
+        time.sleep(0.3)
+
+        self.assertEqual(job.status, "cancelled")
+        self.assertEqual(job.returncode, 130)
+
+    @mock.patch("backend.beets_client.beets_client.cancel_job")
+    @mock.patch("backend.beets_client.beets_client.start_job")
+    def test_start_job_failure_handled(self, mock_start, mock_cancel):
+        """Failure during start_job records error log and sets failed status."""
+        mock_start.side_effect = RuntimeError("Control agent unreachable")
+
+        job = Job("start-fail", ["/lsiopy/bin/beet", "import", "/data/torrents/music"])
+        time.sleep(0.2)
+
+        self.assertEqual(job.status, "failed")
+        self.assertEqual(job.returncode, 1)
+        self.assertIn("ERROR: Control agent unreachable", job.log)
+
+    @mock.patch("backend.beets_client.beets_client.cancel_job")
+    @mock.patch("backend.beets_client.beets_client.start_job")
+    @mock.patch("backend.beets_client.beets_client.get_job")
+    def test_repeated_kill_calls_idempotent(self, mock_get, mock_start, mock_cancel):
+        """Repeated kill calls do not duplicate logs or crash."""
+        mock_start.return_value = "remote-job-555"
+        mock_get.return_value = {"status": "running", "stdout": [], "stderr": []}
+
+        job = Job("repeat-kill", ["/lsiopy/bin/beet", "import", "/data/torrents/music"])
+        time.sleep(0.1)
+
+        job.kill()
+        job.kill()
+        job.kill()
+        time.sleep(0.3)
+
+        self.assertEqual(job.log.count("[killed]"), 1)
+        self.assertEqual(job.status, "cancelled")
+
+    @mock.patch("backend.beets_client.beets_client.cancel_job")
+    @mock.patch("backend.beets_client.beets_client.start_job")
+    @mock.patch("backend.beets_client.beets_client.get_job")
+    def test_kill_after_completion_is_no_op(self, mock_get, mock_start, mock_cancel):
+        """Calling kill after job completes does not alter completed state or add log lines."""
+        mock_start.return_value = "remote-job-444"
+        mock_get.return_value = {"status": "success", "returncode": 0, "stdout": ["done"], "stderr": []}
+
+        job = Job("post-complete-kill", ["/lsiopy/bin/beet", "version"])
+        time.sleep(0.3)
+
+        self.assertEqual(job.status, "success")
+        job.kill()
+        self.assertEqual(job.status, "success")
+        self.assertNotIn("[killed]", job.log)
 
 
 if __name__ == "__main__":
