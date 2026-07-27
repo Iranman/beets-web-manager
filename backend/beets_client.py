@@ -1,0 +1,314 @@
+"""Beets API Client — used by beets-web-manager to communicate with the Beets Control Agent.
+
+Replaces local subprocess execution and direct SQLite access with authenticated API calls.
+"""
+
+import json
+import os
+import urllib.error
+import urllib.parse
+import urllib.request
+from typing import Any, Dict, List, Optional
+
+
+class BeetsError(Exception):
+    """Base exception for Beets API client errors."""
+    pass
+
+
+class BeetsUnavailableError(BeetsError):
+    """Raised when the Beets Control Agent is unreachable or returning 50x errors."""
+    pass
+
+
+class BeetsAuthError(BeetsError):
+    """Raised when authentication with the Beets Control Agent fails (401)."""
+    pass
+
+
+class BeetsCommandError(BeetsError):
+    """Raised when a Beets command fails or returns a non-zero exit code."""
+    def __init__(self, message: str, returncode: int = 1, stdout: str = "", stderr: str = ""):
+        super().__init__(message)
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+class BeetsClient:
+    def __init__(self, base_url: Optional[str] = None, token: Optional[str] = None, timeout: float = 30.0):
+        self.base_url = (base_url or os.environ.get("BEETS_API_URL", "http://beets:8338")).rstrip("/")
+        self.token = token or os.environ.get("BEETS_API_TOKEN", "")
+        self.timeout = timeout
+
+    def _request(self, method: str, endpoint: str, data: Optional[Dict[str, Any]] = None, timeout: Optional[float] = None) -> Dict[str, Any]:
+        url = f"{self.base_url}{endpoint}"
+        req_timeout = timeout or self.timeout
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "beets-web-manager/1.0",
+        }
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+
+        body = json.dumps(data).encode("utf-8") if data is not None else None
+        req = urllib.request.Request(url, data=body, headers=headers, method=method)
+
+        try:
+            with urllib.request.urlopen(req, timeout=req_timeout) as resp:
+                resp_bytes = resp.read()
+                if not resp_bytes:
+                    return {}
+                return json.loads(resp_bytes.decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if exc.code == 401:
+                raise BeetsAuthError("Authentication with Beets Control Agent failed: 401 Unauthorized") from exc
+            err_body = ""
+            try:
+                err_body = exc.read().decode("utf-8")
+                err_json = json.loads(err_body)
+                msg = err_json.get("error", f"HTTP {exc.code}")
+            except Exception:
+                msg = f"HTTP {exc.code}: {err_body[:200]}"
+            if exc.code >= 500:
+                raise BeetsUnavailableError(f"Beets Control Agent error: {msg}") from exc
+            raise BeetsError(f"Beets API request error: {msg}") from exc
+        except urllib.error.URLError as exc:
+            raise BeetsUnavailableError(f"Beets Control Agent is unavailable at {self.base_url}: {exc.reason}") from exc
+        except Exception as exc:
+            raise BeetsUnavailableError(f"Failed to communicate with Beets Control Agent: {exc}") from exc
+
+    def health(self) -> Dict[str, Any]:
+        """Check Beets agent health status."""
+        return self._request("GET", "/health", timeout=5.0)
+
+    def version(self) -> Dict[str, Any]:
+        """Fetch Beets version and agent version."""
+        return self._request("GET", "/version", timeout=5.0)
+
+    def capabilities(self) -> Dict[str, Any]:
+        """Fetch agent capabilities and allowlisted commands."""
+        return self._request("GET", "/capabilities", timeout=5.0)
+
+    def config_status(self) -> Dict[str, Any]:
+        """Fetch configuration and database existence status."""
+        return self._request("GET", "/config/status", timeout=5.0)
+
+    def raw_sqlite_query(self, sql: str, params: tuple = ()) -> List[Dict[str, Any]]:
+        """Run a read-only SELECT query against the Beets database via the control agent."""
+        res = self._request("POST", "/library/raw_query", {"sql": sql, "params": list(params)})
+        return res.get("rows", [])
+
+    def run_command(self, command: str, args: Optional[List[str]] = None, timeout: float = 120.0, config_override: str = "") -> Dict[str, Any]:
+        """Execute a beet command synchronously on the Beets control agent."""
+        return self._request("POST", "/commands/execute", {
+            "command": command,
+            "args": args or [],
+            "timeout": timeout,
+            "config_override": config_override,
+        }, timeout=timeout + 5.0)
+
+    def start_job(self, command: str, args: Optional[List[str]] = None, label: str = "", config_override: str = "") -> str:
+        """Start a background job inside the Beets control agent."""
+        res = self._request("POST", "/jobs/create", {
+            "command": command,
+            "args": args or [],
+            "label": label,
+            "config_override": config_override,
+        })
+        return res.get("job_id", "")
+
+    def get_job(self, job_id: str) -> Dict[str, Any]:
+        """Fetch job details and logs."""
+        res = self._request("GET", f"/jobs/{job_id}")
+        return res.get("job", {})
+
+    def cancel_job(self, job_id: str) -> Dict[str, Any]:
+        """Cancel a running job."""
+        return self._request("POST", f"/jobs/{job_id}/cancel")
+
+    def read_tags(self, file_path: str) -> Dict[str, Any]:
+        """Read media tags from an audio file via the Beets agent."""
+        res = self._request("POST", "/tags/read", {"file_path": file_path})
+        return res.get("tags", {})
+
+    def write_tags(self, file_path: str, tags: Dict[str, Any]) -> Dict[str, Any]:
+        """Write media tags to an audio file via the Beets agent under OS file lock."""
+        return self._request("POST", "/tags/write", {"file_path": file_path, "tags": tags})
+
+    def move_file(self, source_path: str, target_path: str) -> Dict[str, Any]:
+        """Move or rename a file via the Beets agent under OS file lock."""
+        return self._request("POST", "/files/move", {"source_path": source_path, "target_path": target_path})
+
+    def delete_file(self, path: str) -> Dict[str, Any]:
+        """Delete a file or directory via the Beets agent under OS file lock."""
+        return self._request("POST", "/files/delete", {"path": path})
+
+    def mkdir(self, path: str) -> Dict[str, Any]:
+        """Create a directory via the Beets agent under OS file lock."""
+        return self._request("POST", "/files/mkdir", {"path": path})
+
+
+class RemoteSQLiteCursor:
+    def __init__(self, client: BeetsClient):
+        self.client = client
+        self._rows = []
+        self._idx = 0
+        self.row_factory = None
+
+    def execute(self, sql: str, params: tuple = ()):
+        res = self.client.raw_sqlite_query(sql, params)
+        if isinstance(res, list):
+            self._rows = res
+        else:
+            self._rows = []
+        self._idx = 0
+        return self
+
+    def fetchall(self):
+        rows = self._rows
+        self._rows = []
+        return rows
+
+    def fetchone(self):
+        if self._idx < len(self._rows):
+            row = self._rows[self._idx]
+            self._idx += 1
+            return row
+        return None
+
+
+class RemoteSQLiteConnection:
+    def __init__(self, client: BeetsClient):
+        self.client = client
+        self.row_factory = None
+
+    def cursor(self):
+        c = RemoteSQLiteCursor(self.client)
+        c.row_factory = self.row_factory
+        return c
+
+    def execute(self, sql: str, params: tuple = ()):
+        c = self.cursor()
+        c.execute(sql, params)
+        return c
+
+    def close(self):
+        pass
+
+    def commit(self):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        pass
+
+
+def get_db_connection(db_path: Optional[str] = None):
+    """Return a database connection — ALWAYS connects via RemoteSQLiteConnection.
+    Never opens local SQLite files in the web manager.
+    """
+    return RemoteSQLiteConnection(beets_client)
+
+
+class DictAttr:
+    """Dictionary wrapper providing attribute and item access."""
+    def __init__(self, data: Dict[str, Any]):
+        object.__setattr__(self, "_data", data or {})
+
+    def __getattr__(self, name: str) -> Any:
+        data = object.__getattribute__(self, "_data")
+        if name in data:
+            val = data[name]
+            if name == "path" and isinstance(val, (bytes, bytearray)):
+                return val.decode("utf-8", errors="replace")
+            return val
+        return ""
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        data = object.__getattribute__(self, "_data")
+        data[name] = value
+
+    def __getitem__(self, key: str) -> Any:
+        return self.__getattr__(key)
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        self.__setattr__(key, value)
+
+    def __contains__(self, key: str) -> bool:
+        return key in object.__getattribute__(self, "_data")
+
+    def get(self, key: str, default: Any = "") -> Any:
+        data = object.__getattribute__(self, "_data")
+        val = data.get(key, default)
+        return val if val is not None else default
+
+    def keys(self):
+        return object.__getattribute__(self, "_data").keys()
+
+    def values(self):
+        return object.__getattribute__(self, "_data").values()
+
+    def items(self):
+        return object.__getattribute__(self, "_data").items()
+
+    def to_dict(self) -> Dict[str, Any]:
+        return dict(object.__getattribute__(self, "_data"))
+
+
+class RemoteItem(DictAttr):
+    pass
+
+
+class RemoteAlbum(DictAttr):
+    def items(self) -> List[RemoteItem]:
+        aid = self.id
+        if not aid:
+            return []
+        rows = beets_client.raw_sqlite_query("SELECT * FROM items WHERE album_id = ? ORDER BY disc, track", (int(aid),))
+        return [RemoteItem(r) for r in rows]
+
+
+class RemoteLibrary:
+    def __init__(self, client: BeetsClient):
+        self.client = client
+
+    def get_item(self, iid: int) -> Optional[RemoteItem]:
+        if not iid:
+            return None
+        rows = self.client.raw_sqlite_query("SELECT * FROM items WHERE id = ?", (int(iid),))
+        return RemoteItem(rows[0]) if rows else None
+
+    def get_album(self, aid: int) -> Optional[RemoteAlbum]:
+        if not aid:
+            return None
+        rows = self.client.raw_sqlite_query("SELECT * FROM albums WHERE id = ?", (int(aid),))
+        return RemoteAlbum(rows[0]) if rows else None
+
+    def items(self, query: Any = None) -> List[RemoteItem]:
+        if isinstance(query, str) and query.startswith("album_id:"):
+            aid_str = query.split(":", 1)[1].strip()
+            if aid_str.isdigit():
+                rows = self.client.raw_sqlite_query("SELECT * FROM items WHERE album_id = ? ORDER BY disc, track", (int(aid_str),))
+                return [RemoteItem(r) for r in rows]
+        elif isinstance(query, str) and query.startswith("album:"):
+            album_name = query.split(":", 1)[1].strip()
+            rows = self.client.raw_sqlite_query("SELECT * FROM items WHERE album LIKE ? ORDER BY disc, track", (f"%{album_name}%",))
+            return [RemoteItem(r) for r in rows]
+        rows = self.client.raw_sqlite_query("SELECT * FROM items ORDER BY id")
+        return [RemoteItem(r) for r in rows]
+
+    def albums(self, query: Any = None) -> List[RemoteAlbum]:
+        if isinstance(query, str) and query.strip():
+            q_str = query.strip()
+            rows = self.client.raw_sqlite_query("SELECT * FROM albums WHERE album LIKE ? OR albumartist LIKE ? ORDER BY id", (f"%{q_str}%", f"%{q_str}%"))
+            return [RemoteAlbum(r) for r in rows]
+        rows = self.client.raw_sqlite_query("SELECT * FROM albums ORDER BY id")
+        return [RemoteAlbum(r) for r in rows]
+
+
+# Module singleton instances
+beets_client = BeetsClient()
+lib = RemoteLibrary(beets_client)

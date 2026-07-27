@@ -13,9 +13,8 @@ class SqliteDbTimeoutTests(unittest.TestCase):
         source = APP_SOURCE[start:end]
 
         self.assertIn("BEETS_SQLITE_TIMEOUT", source)
-        self.assertIn("sqlite3.connect(db_path, timeout=timeout)", source)
-        self.assertIn("PRAGMA busy_timeout", source)
-        self.assertIn("PRAGMA journal_mode=WAL", source)
+        self.assertIn("get_db_connection(path)", source)
+        self.assertNotIn("sqlite3.connect", source)
         self.assertIn("def _sqlite_write_retry", source)
         self.assertIn("database locked while", source)
         self.assertIn("return 30.0", source)

@@ -50,6 +50,9 @@ def _load_album_cleanup_helpers() -> Dict[str, Any]:
         "_album_cleanup_trash_path",
         "_album_cleanup_remove_empty_dirs",
         "_album_cleanup_remove_empty_tree",
+        "_read_file_media_tags",
+        "AUDIO_EXT",
+        "_ART_EXTS",
     }
     namespace: Dict[str, Any] = {
         "Any": Any,

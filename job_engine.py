@@ -28,50 +28,73 @@ def _summarize_result(value):
         return {"type": "list", "count": len(value)}
     return {"type": type(value).__name__, "value": str(value)[:160]}
 
+from backend.beets_client import beets_client, BeetsError, BeetsUnavailableError, BeetsAuthError, BeetsCommandError
+
+
 def _beet_run(cmd, log, *, timeout=120, env=None, warn_msg=None, cancel=None):
-    """Run a beet subprocess.
-    Polls every 250 ms so a cancel request kills the process immediately.
-    On TimeoutExpired logs a warning and returns rc=124 so callers can treat
-    it as a soft timeout rather than success or hard error."""
-    _POLL = 0.25
-    class _Killed:
-        returncode = -9; stdout = ""; stderr = ""
-    class _TimedOut:
-        returncode = 124; stdout = ""; stderr = ""
-    try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                text=True, env=env)
-        deadline = time.time() + timeout
-        while True:
-            try:
-                stdout, stderr = proc.communicate(timeout=_POLL)
-                class _R:
+    """Run a beet command via the external Beets Control Agent API."""
+    class _R:
+        def __init__(self, rc=0, out="", err=""):
+            self.returncode = rc
+            self.stdout = out
+            self.stderr = err
+
+    if isinstance(cmd, str):
+        cmd_list = cmd.split()
+    else:
+        cmd_list = list(cmd)
+
+    if cmd_list and cmd_list[0] == "beet":
+        cmd_list = cmd_list[1:]
+
+    config_override = ""
+    clean_cmd = []
+    skip_next = False
+    for i, token in enumerate(cmd_list):
+        if skip_next:
+            skip_next = False
+            continue
+        if token in ("-c", "--config"):
+            if i + 1 < len(cmd_list):
+                cfg_path = cmd_list[i + 1]
+                try:
+                    import os
+                    if os.path.exists(cfg_path):
+                        with open(cfg_path, "r", encoding="utf-8") as f:
+                            config_override = f.read()
+                except Exception:
                     pass
-                r = _R()
-                r.returncode = proc.returncode
-                r.stdout = stdout or ""
-                r.stderr = stderr or ""
-                return r
-            except subprocess.TimeoutExpired:
-                pass
-            if cancel is not None and cancel.is_set():
-                proc.kill()
-                proc.communicate()
-                log.append("  [killed by user]")
-                return _Killed()
-            if time.time() > deadline:
-                proc.kill()
-                proc.communicate()
-                step = ' '.join(cmd[3:5]) if len(cmd) > 4 else ' '.join(cmd)
-                log.append(warn_msg or
-                           f"  ⚠ '{step}' timed out after {timeout}s —"
-                           " files likely already in place, verify in library")
-                return _TimedOut()
+            skip_next = True
+            continue
+        clean_cmd.append(token)
+
+    if not clean_cmd:
+        return _R(1, "", "Empty command")
+
+    subcommand = clean_cmd[0]
+    args = clean_cmd[1:]
+
+    try:
+        res = beets_client.run_command(subcommand, args=args, timeout=float(timeout), config_override=config_override)
+        rc = res.get("returncode", 0)
+        stdout = res.get("stdout", "")
+        stderr = res.get("stderr", "")
+        if stdout:
+            for line in stdout.splitlines():
+                log.append(line)
+        if stderr:
+            for line in stderr.splitlines():
+                log.append(f"  ⚠ {line}")
+        return _R(rc, stdout, stderr)
+    except BeetsUnavailableError as exc:
+        log.append(f"  ⚠ Beets service unavailable: {exc}")
+        return _R(1, "", str(exc))
+    except BeetsAuthError as exc:
+        log.append(f"  ⚠ Beets authentication failed: {exc}")
+        return _R(1, "", str(exc))
     except Exception as exc:
         log.append(f"  ⚠ _beet_run error: {exc}")
-        class _R:
-            returncode = 1; stdout = ""; stderr = ""
-        return _R()
+        return _R(1, "", str(exc))
 
 
 class Job:
@@ -84,35 +107,97 @@ class Job:
         self.finished_at: Optional[float] = None
         self.returncode: Optional[int]    = None
         self.log: List[str]               = []
-        self._proc: Optional[subprocess.Popen] = None
+        self._remote_job_id: Optional[str] = None
+        self._cancel_requested = False
         self._lock = threading.Lock()
         threading.Thread(target=self._run, daemon=True).start()
 
     @property
     def status(self):
         if self.finished_at is not None:
+            if self._cancel_requested:
+                return "cancelled"
             return "success" if self.returncode == 0 else "failed"
         return "running"
 
     def kill(self):
         with self._lock:
-            if self._proc and self._proc.poll() is None:
-                self._proc.kill()
-                self.log.append("[killed]")
+            self._cancel_requested = True
+            if self._remote_job_id:
+                try:
+                    beets_client.cancel_job(self._remote_job_id)
+                except Exception:
+                    pass
+            self.log.append("[killed]")
 
     def _run(self):
         self.started_at = time.time()
+        r_status = "running"
         try:
+            cmd_list = list(self.command)
+            if cmd_list and cmd_list[0] == "beet":
+                cmd_list = cmd_list[1:]
+
+            config_override = ""
+            clean_cmd = []
+            skip_next = False
+            for i, token in enumerate(cmd_list):
+                if skip_next:
+                    skip_next = False
+                    continue
+                if token in ("-c", "--config"):
+                    if i + 1 < len(cmd_list):
+                        cfg_path = cmd_list[i + 1]
+                        try:
+                            import os
+                            if os.path.exists(cfg_path):
+                                with open(cfg_path, "r", encoding="utf-8") as f:
+                                    config_override = f.read()
+                        except Exception:
+                            pass
+                    skip_next = True
+                    continue
+                clean_cmd.append(token)
+
+            subcommand = clean_cmd[0] if clean_cmd else "version"
+            args = clean_cmd[1:] if len(clean_cmd) > 1 else []
+
+            remote_id = beets_client.start_job(subcommand, args=args, label=self.label, config_override=config_override)
             with self._lock:
-                self._proc = subprocess.Popen(
-                    self.command, stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT, text=True, bufsize=1,
-                )
-            for line in self._proc.stdout:
-                self.log.append(line.rstrip("\n"))
-                if len(self.log) > 5000:
-                    self.log = self.log[-5000:]
-            self.returncode = self._proc.wait()
+                self._remote_job_id = remote_id
+
+            if not remote_id:
+                raise BeetsError("Failed to start remote job on Beets agent")
+
+            seen_stdout = 0
+            seen_stderr = 0
+            while not self._cancel_requested:
+                job_data = beets_client.get_job(remote_id)
+                r_status = job_data.get("status", "running")
+                r_stdout = job_data.get("stdout", [])
+                r_stderr = job_data.get("stderr", [])
+
+                if len(r_stdout) > seen_stdout:
+                    for line in r_stdout[seen_stdout:]:
+                        self.log.append(line)
+                    seen_stdout = len(r_stdout)
+
+                if len(r_stderr) > seen_stderr:
+                    for line in r_stderr[seen_stderr:]:
+                        self.log.append(f"ERR: {line}")
+                    seen_stderr = len(r_stderr)
+
+                if r_status in ("success", "failed", "cancelled", "timeout"):
+                    self.returncode = job_data.get("returncode", 0 if r_status == "success" else 1)
+                    if r_status == "cancelled":
+                        self._cancel_requested = True
+                    break
+
+                time.sleep(1.0)
+
+            if self._cancel_requested and r_status == "running":
+                beets_client.cancel_job(remote_id)
+                self.returncode = 130
         except Exception as exc:
             self.log.append(f"ERROR: {exc}")
             self.returncode = 1

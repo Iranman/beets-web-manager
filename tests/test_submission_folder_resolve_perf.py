@@ -76,7 +76,7 @@ class ResolveFolderTargetPerfTests(unittest.TestCase):
 class TrackYearCapturedOnceTests(unittest.TestCase):
     def test_media_tag_track_payload_captures_year(self):
         fn = _function_source(ROUTES_SOURCE, "def _media_tag_track_payload(", "def _folder_cover_art_url(")
-        self.assertIn('year = int(getattr(mf, "year", 0)', fn)
+        self.assertTrue('year = int(getattr(mf, "year", 0)' in fn or 'year = int(tags.get("year", 0)' in fn)
         self.assertIn('"year": year,', fn)
 
     def test_summary_prefers_tag_derived_year_over_evidence_guess(self):

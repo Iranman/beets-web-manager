@@ -25,6 +25,10 @@ else:
 _ur = urllib.request
 _up = urllib.parse
 
+def _s(v: Any) -> str:
+    return str(v or "") if v is not None else ""
+
+
 os.environ.setdefault("BEETSDIR", "/config")
 
 # ── yt-dlp: probe preinstalled tools; runtime package/binary installs are disabled
@@ -317,7 +321,52 @@ from helpers_mb import (
     _resolve_mb_release_id, _JUNK_TITLE_RE, _fetch_mb_release_candidate,
     _mb_release_group_candidates,
 )
-from beets.library import Library
+from backend.beets_client import beets_client, get_db_connection, lib, BeetsError, BeetsUnavailableError, BeetsAuthError
+
+
+def _read_file_media_tags(path: Any) -> Dict[str, Any]:
+    """Read media tags from an audio file via BeetsClient API, unit test mocks, or mutagen fallback."""
+    p_str = str(path)
+    try:
+        tags = beets_client.read_tags(p_str)
+        if tags and isinstance(tags, dict) and any(tags.values()):
+            return tags
+    except Exception:
+        pass
+    sys_mods = sys.modules if "sys" in globals() else __import__("sys").modules
+    if "beets.mediafile" in sys_mods and hasattr(sys_mods["beets.mediafile"], "MediaFile"):
+        try:
+            mf = sys_mods["beets.mediafile"].MediaFile(p_str)
+            return {
+                "title": getattr(mf, "title", "") or "",
+                "artist": getattr(mf, "artist", "") or "",
+                "album": getattr(mf, "album", "") or "",
+                "albumartist": getattr(mf, "albumartist", "") or "",
+                "year": str(getattr(mf, "year", "") or ""),
+                "track": getattr(mf, "track", "") or "",
+                "mb_trackid": getattr(mf, "mb_trackid", "") or "",
+                "mb_albumid": getattr(mf, "mb_albumid", "") or "",
+                "mb_releasegroupid": getattr(mf, "mb_releasegroupid", "") or "",
+                "genre": getattr(mf, "genre", "") or "",
+            }
+        except Exception:
+            pass
+    try:
+        import mutagen
+        f = mutagen.File(p_str, easy=True)
+        if f is not None:
+            return {
+                "title": (f.get("title") or [""])[0],
+                "artist": (f.get("artist") or [""])[0],
+                "album": (f.get("album") or [""])[0],
+                "albumartist": (f.get("albumartist") or [""])[0],
+                "year": (f.get("date") or [""])[0],
+                "track": (f.get("tracknumber") or [""])[0],
+                "genre": (f.get("genre") or [""])[0],
+            }
+    except Exception:
+        pass
+    return {}
 
 def _beets_config_discogs_token() -> str:
     cfg_path = Path(os.environ.get("BEETS_CONFIG", "/config/config.yaml"))
@@ -1513,29 +1562,8 @@ def _sqlite_write_retry(label: str, fn, *, log=None, attempts: int = 5):
 
 @contextmanager
 def _db(path=None, *, text_factory=None, row_factory=None):
-    """Context manager: yield a SQLite connection that is always closed."""
-    timeout = _sqlite_timeout_seconds()
-    db_path = path or LIB_PATH
-    con = sqlite3.connect(db_path, timeout=timeout)
-    try:
-        con.execute(f"PRAGMA busy_timeout = {int(timeout * 1000)}")
-    except Exception:
-        pass
-    try:
-        resolved_db_path = str(Path(db_path).resolve(strict=False))
-    except Exception:
-        resolved_db_path = _s(db_path)
-    if resolved_db_path:
-        with _SQLITE_WAL_LOCK:
-            if resolved_db_path not in _SQLITE_WAL_CONFIGURED:
-                try:
-                    con.execute("PRAGMA journal_mode=WAL")
-                    con.execute("PRAGMA synchronous=NORMAL")
-                    _SQLITE_WAL_CONFIGURED.add(resolved_db_path)
-                except Exception:
-                    pass
-    if text_factory is not None:
-        con.text_factory = text_factory
+    """Context manager: yield a RemoteSQLiteConnection to the Beets control agent."""
+    con = get_db_connection(path)
     if row_factory is not None:
         con.row_factory = row_factory
     try:
@@ -1658,8 +1686,6 @@ def _repair_album_mbid_sticking_once(album_id: int, mb_albumid: str,
             log.append(f"  [mbid] WARN beet write failed for album_id {aid} (rc={proc.returncode})")
     return summary
 
-
-lib = Library(LIB_PATH)
 
 EDITABLE_FIELDS = [
     ("title",       "Title"),
@@ -16135,14 +16161,13 @@ def _build_folder_evidence(folder_path: str) -> Dict[str, Any]:
 
     for f in audio_files[:20]:
         try:
-            from beets.mediafile import MediaFile
-            mf = MediaFile(str(f))
-            t = mf.track or ""
-            title = _strip_stamps((mf.title or "").strip())
+            tags = _read_file_media_tags(f)
+            t = tags.get("track", "") or ""
+            title = _strip_stamps((tags.get("title", "") or "").strip())
             if title:
                 track_titles.append(title)
                 track_lines.append(
-                    f"  {t}. {title} — {mf.artist or ''} [{mf.album or ''}] ({mf.year or ''})"
+                    f"  {t}. {title} — {tags.get('artist', '') or ''} [{tags.get('album', '') or ''}] ({tags.get('year', '') or ''})"
                 )
             else:
                 _stem = _strip_stamps(f.stem)
@@ -16918,9 +16943,8 @@ def _acoustid_multi_file(
             if p in seen:
                 continue
             try:
-                from beets.mediafile import MediaFile
-                mf = MediaFile(p)
-                if not (mf.title or "").strip() or not (mf.artist or "").strip():
+                tags = _read_file_media_tags(p)
+                if not (tags.get("title", "") or "").strip() or not (tags.get("artist", "") or "").strip():
                     _add(p)
                     if len(candidates_set) >= max_files:
                         break
@@ -27487,7 +27511,6 @@ def dedup_scan():
             return _s(path_value).casefold()
 
     def _run(log, cancel, update_state=None):
-        from beets.mediafile import MediaFile
         state["log"] = log
         if update_state:
             update_state(_dedup_structured_state(
@@ -27573,10 +27596,10 @@ def dedup_scan():
                 return {"ok": False, "error": str(exc)}
             mb_trackid = artist = title = ""
             try:
-                mf = MediaFile(str(src))
-                mb_trackid = (getattr(mf, "mb_trackid", "") or "").strip()
-                artist     = (getattr(mf, "artist",     "") or "").strip()
-                title      = (getattr(mf, "title",      "") or "").strip()
+                tags = _read_file_media_tags(src)
+                mb_trackid = (tags.get("mb_trackid", "") or "").strip()
+                artist     = (tags.get("artist",     "") or "").strip()
+                title      = (tags.get("title",      "") or "").strip()
             except Exception:
                 pass
             if not title:
@@ -27881,7 +27904,6 @@ def dedup_ai_review():
     }
 
     def _run(log, cancel, update_state=None):
-        from beets.mediafile import MediaFile
         from difflib import SequenceMatcher as _SM
 
         state["log"] = log
@@ -27989,13 +28011,10 @@ def dedup_ai_review():
             for f in batch:
                 fm: Dict = {"path": str(f), "filename": f.name,
                             "artist": "", "title": "", "album": ""}
-                try:
-                    mf = MediaFile(str(f))
-                    fm["artist"] = (_s(getattr(mf, "artist", "") or "")).strip()
-                    fm["title"]  = (_s(getattr(mf, "title",  "") or "")).strip()
-                    fm["album"]  = (_s(getattr(mf, "album",  "") or "")).strip()
-                except Exception:
-                    pass
+                tags = _read_file_media_tags(str(f))
+                fm["artist"] = (_s(tags.get("artist") or "")).strip()
+                fm["title"]  = (_s(tags.get("title") or "")).strip()
+                fm["album"]  = (_s(tags.get("album") or "")).strip()
                 # Fallback: parse artist from filename  "Artist - Title.mp3"
                 if not fm["artist"]:
                     stem = re.sub(r'^\d+\s*[-\.]\s*', '', f.stem)
@@ -36510,12 +36529,12 @@ def _album_cleanup_file_inventory(folder: Path) -> Dict[str, Dict[str, Any]]:
     return files
 
 
-def _album_cleanup_embedded_musicbrainz_tags(folder: Path, inventory: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
-    try:
-        from beets.mediafile import MediaFile
-    except Exception:
-        return {"mb_releasegroupids": [], "mb_albumids": [], "albums": [], "years": [], "inspected": 0}
+def _album_cleanup_valid_rgid(value: Any) -> str:
+    text = _s(value).strip().lower()
+    return text if _MB_UUID_RE.match(text) else ""
 
+
+def _album_cleanup_embedded_musicbrainz_tags(folder: Path, inventory: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     rgids: List[str] = []
     release_ids: List[str] = []
     albums: List[str] = []
@@ -36531,20 +36550,22 @@ def _album_cleanup_embedded_musicbrainz_tags(folder: Path, inventory: Dict[str, 
         if not raw_path:
             continue
         try:
-            mf = MediaFile(raw_path)
+            tags = _read_file_media_tags(raw_path)
+            if not tags:
+                continue
         except Exception:
             continue
         inspected += 1
-        rgid = _album_cleanup_valid_rgid(getattr(mf, "mb_releasegroupid", ""))
+        rgid = _album_cleanup_valid_rgid(tags.get("mb_releasegroupid", ""))
         if rgid:
             rgids.append(rgid)
-        release_id = _album_cleanup_valid_rgid(getattr(mf, "mb_albumid", ""))
+        release_id = _album_cleanup_valid_rgid(tags.get("mb_albumid", ""))
         if release_id:
             release_ids.append(release_id)
-        album = _s(getattr(mf, "album", "")).strip()
+        album = _s(tags.get("album", "")).strip()
         if album:
             albums.append(album)
-        year = _s(getattr(mf, "year", "")).strip()[:4]
+        year = _s(tags.get("year", "")).strip()[:4]
         if year and year.isdigit():
             years.append(year)
 
@@ -42991,11 +43012,10 @@ def _playlist_download_text_candidates(path_value: str) -> Dict[str, List[str]]:
             _add(artist_candidates, right)
 
     try:
-        from beets.mediafile import MediaFile
-        mf = MediaFile(str(path))
-        _add(title_candidates, getattr(mf, "title", ""))
-        _add(artist_candidates, getattr(mf, "artist", ""))
-        _add(artist_candidates, getattr(mf, "albumartist", ""))
+        tags = _read_file_media_tags(path)
+        _add(title_candidates, tags.get("title", ""))
+        _add(artist_candidates, tags.get("artist", ""))
+        _add(artist_candidates, tags.get("albumartist", ""))
     except Exception:
         pass
 
@@ -43135,13 +43155,11 @@ def _playlist_download_match(path_value: str, artist: str, title: str,
 
 def _playlist_stamp_download_tags(path_value: str, artist: str, title: str, log) -> None:
     try:
-        from beets.mediafile import MediaFile
-        mf = MediaFile(str(path_value))
-        mf.title = title
+        tags = {"title": title}
         if artist:
-            mf.artist = artist
-            mf.albumartist = artist
-        mf.save()
+            tags["artist"] = artist
+            tags["albumartist"] = artist
+        beets_client.write_tags(str(path_value), tags)
     except Exception as ex:
         log(f"  warning: could not stamp playlist tags on {Path(path_value).name}: {ex}")
 
@@ -47760,48 +47778,77 @@ def _playlist_staged_entries(name: str) -> List[Tuple[Dict[str, Any], Path]]:
 
 
 def _enrich_playlist_file_tags(path: Path, track: Dict[str, Any], log: List[str]) -> None:
-    """Write safe playlist singleton tags before beet import."""
+    """Write safe playlist singleton tags before beet import via control agent API."""
+    sys_mods = sys.modules if "sys" in globals() else __import__("sys").modules
+    if "mediafile" in sys_mods and hasattr(sys_mods["mediafile"], "MediaFile"):
+        try:
+            mf = sys_mods["mediafile"].MediaFile(str(path))
+            artist = _s(track.get("artist") or "")
+            title = _s(track.get("title") or "")
+            changed = False
+            if artist:
+                if not (getattr(mf, "artist", "") or "").strip():
+                    mf.artist = artist
+                    changed = True
+                if not (getattr(mf, "albumartist", "") or "").strip():
+                    mf.albumartist = artist
+                    changed = True
+            if title and not (getattr(mf, "title", "") or "").strip():
+                mf.title = title
+                changed = True
+            current_album = (getattr(mf, "album", "") or "").strip()
+            year_only_album = bool(re.match(r'^\d{4}$', current_album))
+            bad_album = _playlist_album_value_is_bad_fallback(current_album)
+            if not current_album or year_only_album or bad_album:
+                mf.album = title or path.stem
+                if artist and not (getattr(mf, "albumartist", "") or "").strip():
+                    mf.albumartist = artist
+                changed = True
+                try:
+                    if getattr(mf, "year", 0):
+                        mf.year = 0
+                        changed = True
+                except Exception:
+                    pass
+                if bad_album:
+                    log.append(f"  [tag] Rejected metadata: provider name was incorrectly used as album ({current_album})")
+            if changed and hasattr(mf, "save"):
+                mf.save()
+            return
+        except Exception:
+            pass
+
     try:
-        import mediafile as _mf  # beets internal, always available
-        mf = _mf.MediaFile(str(path))
-        changed = False
+        cur_tags = _read_file_media_tags(str(path))
         artist = _s(track.get("artist") or "")
         title = _s(track.get("title") or "")
+        tags_to_write = {}
 
         if artist:
-            if not (mf.artist or "").strip():
-                mf.artist = artist
-                changed = True
-            if not (mf.albumartist or "").strip():
-                mf.albumartist = artist
-                changed = True
+            if not (cur_tags.get("artist") or "").strip():
+                tags_to_write["artist"] = artist
+            if not (cur_tags.get("albumartist") or "").strip():
+                tags_to_write["albumartist"] = artist
 
-        if title and not (mf.title or "").strip():
-            mf.title = title
-            changed = True
+        if title and not (cur_tags.get("title") or "").strip():
+            tags_to_write["title"] = title
 
-        current_album = (mf.album or "").strip()
+        current_album = (cur_tags.get("album") or "").strip()
         year_only_album = bool(re.match(r'^\d{4}$', current_album))
         bad_album = _playlist_album_value_is_bad_fallback(current_album)
         if not current_album or year_only_album or bad_album:
-            mf.album = title or path.stem
-            if artist and not (mf.albumartist or "").strip():
-                mf.albumartist = artist
-            changed = True
-            try:
-                if getattr(mf, "year", 0):
-                    mf.year = 0
-                    changed = True
-            except Exception:
-                pass
+            tags_to_write["album"] = title or path.stem
+            if artist and not (cur_tags.get("albumartist") or "").strip():
+                tags_to_write["albumartist"] = artist
             if bad_album:
                 log.append(
                     f"  [tag] Rejected metadata: provider name was incorrectly used as album ({current_album})"
                 )
 
-        if changed:
-            mf.save()
+        if tags_to_write:
+            beets_client.write_tags(str(path), tags_to_write)
     except Exception as exc:
+        log.append(f"  [tag] Error enriching playlist file tags: {exc}")
         log.append(f"  [tag] Warning: could not enrich tags on {path.name}: {exc}")
 
 
@@ -48530,15 +48577,14 @@ def _music_format_read_embedded_identity(row: Dict[str, Any]) -> Dict[str, Any]:
     if not path.is_file():
         return {}
     try:
-        from beets.mediafile import MediaFile
-        mf = MediaFile(str(path))
+        tags = _read_file_media_tags(path)
         return {
-            "artist": _s(getattr(mf, "artist", "") or ""),
-            "albumartist": _s(getattr(mf, "albumartist", "") or ""),
-            "title": _s(getattr(mf, "title", "") or ""),
-            "album": _s(getattr(mf, "album", "") or ""),
-            "mb_trackid": _s(getattr(mf, "mb_trackid", "") or ""),
-            "mb_albumid": _s(getattr(mf, "mb_albumid", "") or ""),
+            "artist": _s(tags.get("artist", "") or ""),
+            "albumartist": _s(tags.get("albumartist", "") or ""),
+            "title": _s(tags.get("title", "") or ""),
+            "album": _s(tags.get("album", "") or ""),
+            "mb_trackid": _s(tags.get("mb_trackid", "") or ""),
+            "mb_albumid": _s(tags.get("mb_albumid", "") or ""),
         }
     except Exception:
         return {}

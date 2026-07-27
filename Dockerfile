@@ -11,11 +11,7 @@ RUN npm run build
 # ---- Runtime stage ----------------------------------------------------------
 FROM python:3.12-slim-bookworm AS runtime
 
-# ffmpeg: audio conversion/replaygain; chromaprint (fpcalc): AcoustID fingerprinting.
-# git: needed for any pip package installed directly from a VCS URL.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg \
-    libchromaprint-tools \
     git \
     tini \
     && rm -rf /var/lib/apt/lists/*
@@ -32,21 +28,17 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app.py helpers_mb.py job_engine.py routes_jobs.py routes_lidarr.py routes_setup.py routes_submissions.py ./
 COPY backend/ ./backend/
-COPY beetsplug/ ./beetsplug/
 COPY tests/ ./tests/
 COPY config.yaml.example .env.example VERSION ./
 COPY --from=frontend /src/frontend/dist ./frontend/dist
 
-# /config: beets config + app JSON state + musiclibrary.blb
-# /data/media/music: music library root
-# /data/torrents: download/import staging root
-RUN mkdir -p /config /data/media/music /data/torrents \
-    && chown -R beets:beets /app /config /data
+RUN mkdir -p /web-manager-data \
+    && chown -R beets:beets /app /web-manager-data
 
-VOLUME ["/config", "/data/media/music", "/data/torrents"]
+VOLUME ["/web-manager-data"]
 
-ENV BEETSDIR=/config \
-    WEBCONTROL_PORT=8337 \
+ENV WEBCONTROL_PORT=8337 \
+    BEETS_API_URL=http://beets:8338 \
     PYTHONUNBUFFERED=1
 
 EXPOSE 8337

@@ -16,7 +16,7 @@ ARR_COMPOSE = (ROOT / "docker-compose.arrs.yml").read_text(encoding="utf-8")
 
 class BeetsFreshInstallPackagingTests(unittest.TestCase):
     def test_beets_version_and_runtime_dependencies_are_coherent(self):
-        self.assertIn("beets[chroma,discogs,embedart,fetchart,lastgenre,lastimport,lyrics,scrub]==2.12.0", REQ)
+        self.assertNotIn("beets[", REQ)
         self.assertIn("pylast==7.1.0", REQ)
         self.assertNotIn("beets==2.2.0", REQ)
         self.assertNotIn("python3-discogs-client==", REQ)

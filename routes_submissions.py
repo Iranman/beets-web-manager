@@ -420,17 +420,16 @@ def _media_tag_track_payload(file_path: Path, index: int) -> Dict[str, Any]:
     mb_trackid = ""
     if exists:
         try:
-            from beets.mediafile import MediaFile
-            mf = MediaFile(str(file_path))
-            title = _s(mf.title or "").strip()
-            artist = _s(mf.artist or "").strip()
-            album = _s(mf.album or "").strip()
-            albumartist = _s(getattr(mf, "albumartist", "") or artist).strip()
-            track = int(mf.track or 0)
-            disc = int(mf.disc or 0)
-            year = int(getattr(mf, "year", 0) or getattr(mf, "original_year", 0) or 0)
-            duration = float(mf.length or 0)
-            mb_trackid = _s(getattr(mf, "mb_trackid", "") or "").strip().lower()
+            from backend.beets_client import beets_client
+            tags = beets_client.read_tags(str(file_path))
+            title = _s(tags.get("title", "") or "").strip()
+            artist = _s(tags.get("artist", "") or "").strip()
+            album = _s(tags.get("album", "") or "").strip()
+            albumartist = _s(tags.get("albumartist", "") or artist).strip()
+            track = int(tags.get("track", 0) or 0)
+            disc = int(tags.get("disc", 0) or 0)
+            year = int(tags.get("year", 0) or 0)
+            mb_trackid = _s(tags.get("mb_trackid", "") or "").strip().lower()
             fmt = file_path.suffix.lstrip(".").upper()
         except Exception:
             pass
