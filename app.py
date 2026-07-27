@@ -27393,6 +27393,45 @@ def _dedup_job_result(kind: str, state: Dict[str, Any]) -> Dict[str, Any]:
         result["final_summary"] = state.get("final_summary")
     return result
 
+
+def _resolve_album_title_duplicate_candidate(
+    library: Any,
+    folder_raw: str,
+    track_title: str,
+    threshold: float = _MB_TRACK_PREFLIGHT_MATCH_THRESHOLD,
+    logger_instance: Optional[Any] = None,
+) -> Tuple[Optional[Any], str]:
+    """Find duplicate library track candidate by extracting folder album name and comparing track title.
+
+    Used by dedup_scan to match files where the source folder represents the album name.
+    Returns (candidate_item, match_type_str). Returns (None, "") on no match or query failure.
+    """
+    log = logger_instance or logger
+    if not track_title or not folder_raw:
+        return None, ""
+
+    folder_album = re.sub(r'\s*[\(\[]\d{4}[\)\]]\s*$', '', folder_raw).strip()
+    folder_album = re.sub(r'^\d{4}\s*[-–—]\s*', '', folder_album).strip()
+    folder_album = _restore_time_colon_title(folder_album)
+    if not folder_album:
+        return None, ""
+
+    try:
+        from difflib import SequenceMatcher
+        candidates = list(library.items(f"album:{folder_album}"))
+        for cand in candidates:
+            cand_title = (cand.title or '').lower()
+            score = SequenceMatcher(None, cand_title, track_title.lower()).ratio()
+            if score >= threshold:
+                return cand, f"album+title ({score:.0%})"
+    except BeetsError as ex:
+        log.warning("Album duplicate candidate search failed for '%s': %s", folder_album, ex)
+    except Exception as ex:
+        log.warning("Error during album+title duplicate candidate search: %s", ex)
+
+    return None, ""
+
+
 @app.post("/api/dedup/scan")
 def dedup_scan():
     """Start a background dedup scan; returns job_id immediately."""
@@ -27635,25 +27674,12 @@ def dedup_scan():
                     # 4. Album-folder + title match — catches beets-renamed files where
                     #    the source folder is "WILLOW (2019)" or "1999 - Californication"
                     if not lib_item and title:
-                        folder_raw   = src.parent.name          # e.g. "WILLOW (2019)" or "1999 - Californication"
-                        folder_album = re.sub(r'\s*[\(\[]\d{4}[\)\]]\s*$', '', folder_raw).strip()  # "WILLOW (2019)" → "WILLOW"
-                        folder_album = re.sub(r'^\d{4}\s*[-–—]\s*', '', folder_album).strip()        # "1999 - Californication" → "Californication"
-                        folder_album = _restore_time_colon_title(folder_album)
-                        if folder_album:
-                            try:
-                                from difflib import SequenceMatcher
-                                candidates = list(lib.items(f"album:{folder_album}"))
-                                for cand in candidates:
-                                    cand_title = (cand.title or '').lower()
-                                    score = SequenceMatcher(None, cand_title, title.lower()).ratio()
-                                    if score >= _MB_TRACK_PREFLIGHT_MATCH_THRESHOLD:
-                                        lib_item   = cand
-                                        match_type = f"album+title ({score:.0%})"
-                                        break
-                            except BeetsError as ex:
-                                logger.warning("Album duplicate candidate search failed for '%s': %s", folder_album, ex)
-                            except Exception as ex:
-                                logger.warning("Error during album+title duplicate candidate search: %s", ex)
+                        cand_item, cand_match_type = _resolve_album_title_duplicate_candidate(
+                            lib, src.parent.name, title, logger_instance=logger
+                        )
+                        if cand_item:
+                            lib_item = cand_item
+                            match_type = cand_match_type
 
                     # 5. AcoustID fingerprint fallback — when tags/size/text heuristics
                     #    found nothing, fingerprint the source file and look for a

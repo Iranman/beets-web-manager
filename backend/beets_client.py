@@ -35,6 +35,70 @@ class BeetsCommandError(BeetsError):
         self.stderr = stderr
 
 
+class ParsedQuery:
+    def __init__(self, target: str, field: Optional[str], value: str, operator: str = "equals"):
+        self.target = target  # "items" or "albums"
+        self.field = field    # field name e.g. "album_id", "mb_albumid", or None for bare text
+        self.value = value
+        self.operator = operator  # "equals", "contains", "singleton"
+
+    def __repr__(self):
+        return f"<ParsedQuery target={self.target!r} field={self.field!r} value={self.value!r} op={self.operator!r}>"
+
+
+def parse_query_term(term: str, target: str) -> ParsedQuery:
+    """Parse and validate a query term for target ('items' or 'albums'). Raises BeetsError on invalid syntax/field."""
+    if not isinstance(term, str):
+        raise BeetsError(f"Query term must be a string, got {type(term).__name__}")
+    q_str = term.strip()
+    if not q_str:
+        raise BeetsError("Query term cannot be empty or whitespace")
+
+    if ":" in q_str:
+        field, val = q_str.split(":", 1)
+        field = field.strip()
+        val = val.strip()
+        if not field:
+            raise BeetsError(f"Query field prefix cannot be empty in '{term}'")
+
+        if target == "items":
+            allowed_fields = {"album_id", "album", "artist", "title", "path", "mb_trackid", "mbid", "singleton"}
+            if field not in allowed_fields:
+                raise BeetsError(f"Unsupported query field '{field}' in '{term}'")
+            if not val and field != "singleton":
+                raise BeetsError(f"Query field '{field}' requires a non-empty value in '{term}'")
+            if field == "album_id":
+                if not val.isdigit():
+                    raise BeetsError(f"album_id must be an integer: {val!r}")
+                return ParsedQuery(target="items", field="album_id", value=val, operator="equals")
+            elif field == "singleton":
+                if val.lower() not in {"true", "false"}:
+                    raise BeetsError(f"singleton value must be 'true' or 'false': {val!r}")
+                return ParsedQuery(target="items", field="singleton", value=val.lower(), operator="singleton")
+            elif field in {"mb_trackid", "mbid"}:
+                return ParsedQuery(target="items", field="mb_trackid", value=val, operator="equals")
+            elif field == "path":
+                return ParsedQuery(target="items", field="path", value=val, operator="equals")
+            elif field in {"album", "artist", "title"}:
+                return ParsedQuery(target="items", field=field, value=val, operator="contains")
+
+        elif target == "albums":
+            allowed_fields = {"mb_albumid", "mb_releasegroupid", "album", "artist", "albumartist"}
+            if field not in allowed_fields:
+                raise BeetsError(f"Unsupported query field '{field}' in '{term}'")
+            if not val:
+                raise BeetsError(f"Query field '{field}' requires a non-empty value in '{term}'")
+            if field == "mb_albumid":
+                return ParsedQuery(target="albums", field="mb_albumid", value=val, operator="equals")
+            elif field == "mb_releasegroupid":
+                return ParsedQuery(target="albums", field="mb_releasegroupid", value=val, operator="equals")
+            elif field in {"album", "artist", "albumartist"}:
+                return ParsedQuery(target="albums", field=field, value=val, operator="contains")
+
+    # Bare-word query
+    return ParsedQuery(target=target, field=None, value=q_str, operator="contains")
+
+
 class BeetsClient:
     def __init__(self, base_url: Optional[str] = None, token: Optional[str] = None, timeout: float = 30.0):
         self.base_url = (base_url or os.environ.get("BEETS_API_URL", "http://beets:8338")).rstrip("/")
@@ -169,139 +233,119 @@ class BeetsClient:
         res = self._request("GET", f"/albums/{album_id}")
         return res.get("album")
 
-    def find_items_by_album_id(self, album_id: int) -> List[Dict[str, Any]]:
-        """Fetch all items belonging to album_id."""
-        res = self._request("GET", f"/items?album_id={album_id}")
-        return res.get("items", [])
+    def _fetch_all_paginated(self, endpoint_base: str, key: str, page_size: int = 500, safety_ceiling: int = 100000) -> List[Dict[str, Any]]:
+        """Helper to fetch all pages for endpoint_base with strict validation and error handling."""
+        sep = "&" if "?" in endpoint_base else "?"
+        all_results = []
+        seen_ids = set()
+        offset = 0
 
-    def find_items_by_path(self, path: str) -> List[Dict[str, Any]]:
-        """Fetch items by audio file path."""
-        res = self._request("GET", f"/items?path={urllib.parse.quote(path)}")
-        return res.get("items", [])
+        while True:
+            url = f"{endpoint_base}{sep}offset={offset}&limit={page_size}"
+            res = self._request("GET", url)
+            page_rows = res.get(key, [])
+            count = res.get("count", len(page_rows))
+            total = res.get("total")
+            has_more = res.get("has_more", False)
+            next_offset = res.get("next_offset")
+            resp_offset = res.get("offset")
 
-    def find_items_by_mbid(self, mbid: str) -> List[Dict[str, Any]]:
-        """Fetch items by MusicBrainz track ID."""
-        res = self._request("GET", f"/items?mbid={urllib.parse.quote(mbid)}")
-        return res.get("items", [])
+            if resp_offset is not None and resp_offset != offset:
+                raise BeetsError(f"Pagination offset mismatch: requested {offset}, got {resp_offset}")
+
+            if count != len(page_rows):
+                raise BeetsError(f"Pagination count mismatch: reported count {count} != actual rows length {len(page_rows)}")
+
+            if has_more and not page_rows:
+                raise BeetsError("Server returned empty page with has_more=True")
+
+            if has_more and next_offset is None:
+                raise BeetsError("Server returned has_more=True but next_offset is None")
+
+            if has_more and (next_offset is not None and next_offset <= offset):
+                raise BeetsError(f"Inconsistent next_offset progress: current {offset}, next {next_offset}")
+
+            if total is not None and (offset + len(page_rows) >= total) and has_more:
+                raise BeetsError(f"Inconsistent total metadata: offset {offset} + len {len(page_rows)} >= total {total} but has_more=True")
+
+            for row in page_rows:
+                row_id = row.get("id")
+                if row_id is None or not isinstance(row_id, int):
+                    raise BeetsError(f"Record missing valid integer ID: {row}")
+                if row_id in seen_ids:
+                    raise BeetsError(f"Duplicate ID {row_id} encountered across pagination pages")
+                seen_ids.add(row_id)
+
+            all_results.extend(page_rows)
+
+            if len(all_results) >= safety_ceiling:
+                raise BeetsError(f"Safety ceiling reached while paginating {key} ({len(all_results)} >= {safety_ceiling})")
+
+            if not has_more:
+                break
+
+            offset = next_offset
+
+        return all_results
+
+    def find_all_items_by_album_id(self, album_id: int) -> List[Dict[str, Any]]:
+        """Fetch all items belonging to album_id with complete pagination."""
+        return self._fetch_all_paginated(f"/items?album_id={int(album_id)}", "items", safety_ceiling=100000)
+
+    def find_all_items_by_mbid(self, mbid: str) -> List[Dict[str, Any]]:
+        """Fetch all items by MusicBrainz track ID with complete pagination."""
+        if not mbid or not mbid.strip():
+            raise BeetsError("MusicBrainz track ID cannot be empty")
+        return self._fetch_all_paginated(f"/items?mbid={urllib.parse.quote(mbid.strip())}", "items", safety_ceiling=100000)
+
+    def find_all_items_by_path(self, path: str) -> List[Dict[str, Any]]:
+        """Fetch all items by file path with complete pagination."""
+        if not path or not path.strip():
+            raise BeetsError("Path cannot be empty")
+        return self._fetch_all_paginated(f"/items?path={urllib.parse.quote(path.strip())}", "items", safety_ceiling=100000)
+
+    def find_all_items_by_singleton(self, is_singleton: bool) -> List[Dict[str, Any]]:
+        """Fetch all singleton items with complete pagination."""
+        val = "true" if is_singleton else "false"
+        return self._fetch_all_paginated(f"/items?singleton={val}", "items", safety_ceiling=100000)
+
+    def find_all_albums_by_mb_albumid(self, mb_albumid: str) -> List[Dict[str, Any]]:
+        """Fetch all albums by MusicBrainz release ID with complete pagination."""
+        if not mb_albumid or not mb_albumid.strip():
+            raise BeetsError("MusicBrainz album ID cannot be empty")
+        return self._fetch_all_paginated(f"/albums?mb_albumid={urllib.parse.quote(mb_albumid.strip())}", "albums", safety_ceiling=20000)
+
+    def find_all_albums_by_releasegroupid(self, rg_id: str) -> List[Dict[str, Any]]:
+        """Fetch all albums by MusicBrainz Release Group ID with complete pagination."""
+        if not rg_id or not rg_id.strip():
+            raise BeetsError("MusicBrainz releasegroup ID cannot be empty")
+        return self._fetch_all_paginated(f"/albums?mb_releasegroupid={urllib.parse.quote(rg_id.strip())}", "albums", safety_ceiling=20000)
 
     def find_all_items_for_term(self, query_str: str, page_size: int = 500, safety_ceiling: int = 100000) -> List[Dict[str, Any]]:
         """Fetch ALL matching items for a query term by fully paginating through all available pages with strict validation."""
         if not query_str or not query_str.strip():
             return []
-
-        all_items = []
-        seen_ids = set()
-        offset = 0
-
-        while True:
-            res = self._request("GET", f"/items?query={urllib.parse.quote(query_str.strip())}&offset={offset}&limit={page_size}")
-            page_items = res.get("items", [])
-            count = res.get("count", len(page_items))
-            total = res.get("total")
-            has_more = res.get("has_more", False)
-            next_offset = res.get("next_offset")
-            resp_offset = res.get("offset")
-
-            if resp_offset is not None and resp_offset != offset:
-                raise BeetsError(f"Pagination offset mismatch: requested {offset}, got {resp_offset}")
-
-            if count != len(page_items):
-                raise BeetsError(f"Pagination count mismatch: reported count {count} != actual items length {len(page_items)}")
-
-            if has_more and not page_items:
-                raise BeetsError("Server returned empty page with has_more=True")
-
-            if has_more and next_offset is None:
-                raise BeetsError("Server returned has_more=True but next_offset is None")
-
-            if has_more and (next_offset is not None and next_offset <= offset):
-                raise BeetsError(f"Inconsistent next_offset progress: current {offset}, next {next_offset}")
-
-            if total is not None and (offset + len(page_items) >= total) and has_more:
-                raise BeetsError(f"Inconsistent total metadata: offset {offset} + len {len(page_items)} >= total {total} but has_more=True")
-
-            for item in page_items:
-                item_id = item.get("id")
-                if item_id is None or not isinstance(item_id, int):
-                    raise BeetsError(f"Item record missing valid integer ID: {item}")
-                if item_id in seen_ids:
-                    raise BeetsError(f"Duplicate item ID {item_id} encountered across pagination pages")
-                seen_ids.add(item_id)
-
-            all_items.extend(page_items)
-
-            if len(all_items) >= safety_ceiling:
-                raise BeetsError(f"Safety ceiling reached while paginating item query ({len(all_items)} >= {safety_ceiling})")
-
-            if not has_more:
-                break
-
-            offset = next_offset
-
-        return all_items
+        return self._fetch_all_paginated(f"/items?query={urllib.parse.quote(query_str.strip())}", "items", page_size=page_size, safety_ceiling=safety_ceiling)
 
     def find_all_albums_for_term(self, query_str: str, page_size: int = 500, safety_ceiling: int = 20000) -> List[Dict[str, Any]]:
         """Fetch ALL matching albums for a query term by fully paginating through all available pages with strict validation."""
         if not query_str or not query_str.strip():
             return []
+        return self._fetch_all_paginated(f"/albums?query={urllib.parse.quote(query_str.strip())}", "albums", page_size=page_size, safety_ceiling=safety_ceiling)
 
-        all_albums = []
-        seen_ids = set()
-        offset = 0
+    def find_items_by_album_id(self, album_id: int) -> List[Dict[str, Any]]:
+        return self.find_all_items_by_album_id(album_id)
 
-        while True:
-            res = self._request("GET", f"/albums?query={urllib.parse.quote(query_str.strip())}&offset={offset}&limit={page_size}")
-            page_albums = res.get("albums", [])
-            count = res.get("count", len(page_albums))
-            total = res.get("total")
-            has_more = res.get("has_more", False)
-            next_offset = res.get("next_offset")
-            resp_offset = res.get("offset")
+    def find_items_by_path(self, path: str) -> List[Dict[str, Any]]:
+        return self.find_all_items_by_path(path)
 
-            if resp_offset is not None and resp_offset != offset:
-                raise BeetsError(f"Pagination offset mismatch: requested {offset}, got {resp_offset}")
-
-            if count != len(page_albums):
-                raise BeetsError(f"Pagination count mismatch: reported count {count} != actual albums length {len(page_albums)}")
-
-            if has_more and not page_albums:
-                raise BeetsError("Server returned empty page with has_more=True")
-
-            if has_more and next_offset is None:
-                raise BeetsError("Server returned has_more=True but next_offset is None")
-
-            if has_more and (next_offset is not None and next_offset <= offset):
-                raise BeetsError(f"Inconsistent next_offset progress: current {offset}, next {next_offset}")
-
-            if total is not None and (offset + len(page_albums) >= total) and has_more:
-                raise BeetsError(f"Inconsistent total metadata: offset {offset} + len {len(page_albums)} >= total {total} but has_more=True")
-
-            for album in page_albums:
-                album_id = album.get("id")
-                if album_id is None or not isinstance(album_id, int):
-                    raise BeetsError(f"Album record missing valid integer ID: {album}")
-                if album_id in seen_ids:
-                    raise BeetsError(f"Duplicate album ID {album_id} encountered across pagination pages")
-                seen_ids.add(album_id)
-
-            all_albums.extend(page_albums)
-
-            if len(all_albums) >= safety_ceiling:
-                raise BeetsError(f"Safety ceiling reached while paginating album query ({len(all_albums)} >= {safety_ceiling})")
-
-            if not has_more:
-                break
-
-            offset = next_offset
-
-        return all_albums
+    def find_items_by_mbid(self, mbid: str) -> List[Dict[str, Any]]:
+        return self.find_all_items_by_mbid(mbid)
 
     def find_items_by_query(self, query: str, limit: int = 500) -> List[Dict[str, Any]]:
-        """Find items matching query string (auto-paginates all matching pages)."""
         return self.find_all_items_for_term(query, page_size=limit)
 
     def find_albums_by_query(self, query: str, limit: int = 500) -> List[Dict[str, Any]]:
-        """Find albums matching query string (auto-paginates all matching pages)."""
         return self.find_all_albums_for_term(query, page_size=limit)
 
     def search_items_text(self, text: str, limit: int = 500) -> List[Dict[str, Any]]:
@@ -312,109 +356,19 @@ class BeetsClient:
         """Perform a parameterized bare-word text search across album fields (auto-paginates all matching pages)."""
         return self.find_all_albums_for_term(text, page_size=limit)
 
+    def find_all_items_by_bare_text(self, text: str, limit: int = 500) -> List[Dict[str, Any]]:
+        return self.search_items_text(text, limit=limit)
+
+    def find_all_albums_by_bare_text(self, text: str, limit: int = 500) -> List[Dict[str, Any]]:
+        return self.search_albums_text(text, limit=limit)
+
     def list_all_albums(self, page_size: int = 500, safety_ceiling: int = 20000) -> List[Dict[str, Any]]:
         """Fetch all albums by paginating through all available pages up to safety ceiling."""
-        all_albums = []
-        seen_ids = set()
-        offset = 0
-        while True:
-            res = self._request("GET", f"/albums?offset={offset}&limit={page_size}")
-            albums_page = res.get("albums", [])
-            count = res.get("count", len(albums_page))
-            total = res.get("total")
-            has_more = res.get("has_more", False)
-            next_offset = res.get("next_offset")
-            resp_offset = res.get("offset")
-
-            if resp_offset is not None and resp_offset != offset:
-                raise BeetsError(f"Pagination offset mismatch: requested {offset}, got {resp_offset}")
-
-            if count != len(albums_page):
-                raise BeetsError(f"Pagination count mismatch: reported count {count} != actual albums length {len(albums_page)}")
-
-            if has_more and not albums_page:
-                raise BeetsError("Server returned empty page with has_more=True")
-
-            if has_more and next_offset is None:
-                raise BeetsError("Server returned has_more=True but next_offset is None")
-
-            if has_more and (next_offset is not None and next_offset <= offset):
-                raise BeetsError(f"Inconsistent next_offset progress: current {offset}, next {next_offset}")
-
-            if total is not None and (offset + len(albums_page) >= total) and has_more:
-                raise BeetsError(f"Inconsistent total metadata: offset {offset} + len {len(albums_page)} >= total {total} but has_more=True")
-
-            for album in albums_page:
-                album_id = album.get("id")
-                if album_id is None or not isinstance(album_id, int):
-                    raise BeetsError(f"Album record missing valid integer ID: {album}")
-                if album_id in seen_ids:
-                    raise BeetsError(f"Duplicate album ID {album_id} encountered across pagination pages")
-                seen_ids.add(album_id)
-
-            all_albums.extend(albums_page)
-
-            if len(all_albums) >= safety_ceiling:
-                raise BeetsError(f"Safety ceiling reached while paginating albums ({len(all_albums)} >= {safety_ceiling})")
-
-            if not has_more:
-                break
-
-            offset = next_offset
-
-        return all_albums
+        return self._fetch_all_paginated("/albums", "albums", page_size=page_size, safety_ceiling=safety_ceiling)
 
     def list_all_items(self, page_size: int = 1000, safety_ceiling: int = 100000) -> List[Dict[str, Any]]:
         """Fetch all items by paginating through all available pages up to safety ceiling."""
-        all_items = []
-        seen_ids = set()
-        offset = 0
-        while True:
-            res = self._request("GET", f"/items?offset={offset}&limit={page_size}")
-            items_page = res.get("items", [])
-            count = res.get("count", len(items_page))
-            total = res.get("total")
-            has_more = res.get("has_more", False)
-            next_offset = res.get("next_offset")
-            resp_offset = res.get("offset")
-
-            if resp_offset is not None and resp_offset != offset:
-                raise BeetsError(f"Pagination offset mismatch: requested {offset}, got {resp_offset}")
-
-            if count != len(items_page):
-                raise BeetsError(f"Pagination count mismatch: reported count {count} != actual items length {len(items_page)}")
-
-            if has_more and not items_page:
-                raise BeetsError("Server returned empty page with has_more=True")
-
-            if has_more and next_offset is None:
-                raise BeetsError("Server returned has_more=True but next_offset is None")
-
-            if has_more and (next_offset is not None and next_offset <= offset):
-                raise BeetsError(f"Inconsistent next_offset progress: current {offset}, next {next_offset}")
-
-            if total is not None and (offset + len(items_page) >= total) and has_more:
-                raise BeetsError(f"Inconsistent total metadata: offset {offset} + len {len(items_page)} >= total {total} but has_more=True")
-
-            for item in items_page:
-                item_id = item.get("id")
-                if item_id is None or not isinstance(item_id, int):
-                    raise BeetsError(f"Item record missing valid integer ID: {item}")
-                if item_id in seen_ids:
-                    raise BeetsError(f"Duplicate item ID {item_id} encountered across pagination pages")
-                seen_ids.add(item_id)
-
-            all_items.extend(items_page)
-
-            if len(all_items) >= safety_ceiling:
-                raise BeetsError(f"Safety ceiling reached while paginating items ({len(all_items)} >= {safety_ceiling})")
-
-            if not has_more:
-                break
-
-            offset = next_offset
-
-        return all_items
+        return self._fetch_all_paginated("/items", "items", page_size=page_size, safety_ceiling=safety_ceiling)
 
     def update_item_fields(self, item_id: int, fields: Dict[str, Any]) -> Dict[str, Any]:
         """Update fields on item row in SQLite under lock."""
@@ -594,46 +548,6 @@ class RemoteLibrary:
         data = self.client.get_album(int(aid))
         return RemoteAlbum(data) if data else None
 
-    def _validate_item_term(self, term: str) -> None:
-        if not isinstance(term, str):
-            raise BeetsError(f"Query term must be a string, got {type(term).__name__}")
-        q_str = term.strip()
-        if not q_str:
-            raise BeetsError("Query term cannot be empty or whitespace")
-        if ":" in q_str:
-            field, val = q_str.split(":", 1)
-            field = field.strip()
-            if not field:
-                raise BeetsError(f"Query field prefix cannot be empty in '{term}'")
-            allowed_fields = {"album_id", "album", "artist", "title", "path", "mb_trackid", "mbid", "singleton"}
-            if field not in allowed_fields:
-                raise BeetsError(f"Unsupported query field '{field}' in '{term}'")
-            if not val.strip() and field not in {"singleton"}:
-                raise BeetsError(f"Query field '{field}' requires a non-empty value in '{term}'")
-            if field == "album_id":
-                if not val.strip().isdigit():
-                    raise BeetsError(f"album_id must be an integer: {val!r}")
-            elif field == "singleton":
-                if val.strip().lower() not in {"true", "false"}:
-                    raise BeetsError(f"singleton value must be 'true' or 'false': {val!r}")
-
-    def _validate_album_term(self, term: str) -> None:
-        if not isinstance(term, str):
-            raise BeetsError(f"Query term must be a string, got {type(term).__name__}")
-        q_str = term.strip()
-        if not q_str:
-            raise BeetsError("Query term cannot be empty or whitespace")
-        if ":" in q_str:
-            field, val = q_str.split(":", 1)
-            field = field.strip()
-            if not field:
-                raise BeetsError(f"Query field prefix cannot be empty in '{term}'")
-            allowed_fields = {"mb_albumid", "mb_releasegroupid", "album", "artist", "albumartist"}
-            if field not in allowed_fields:
-                raise BeetsError(f"Unsupported query field '{field}' in '{term}'")
-            if not val.strip():
-                raise BeetsError(f"Query field '{field}' requires a non-empty value in '{term}'")
-
     def items(self, query: Any = None) -> List[RemoteItem]:
         if query is None or query == [] or query == ():
             items_data = self.client.list_all_items()
@@ -648,11 +562,9 @@ class RemoteLibrary:
                 items_data = self.client.list_all_items()
                 return [RemoteItem(r) for r in items_data]
 
-            for term in query:
-                self._validate_item_term(term)
+            parsed_list = [parse_query_term(term, "items") for term in query]
 
-            first_term = query[0]
-            first_results = self.items(first_term)
+            first_results = self.items(query[0])
             if not first_results or len(query) == 1:
                 return first_results
 
@@ -673,9 +585,20 @@ class RemoteLibrary:
             return final_items
 
         if isinstance(query, str):
-            self._validate_item_term(query)
-            q_str = query.strip()
-            items_data = self.client.find_all_items_for_term(q_str)
+            pq = parse_query_term(query, "items")
+            if pq.field == "album_id":
+                items_data = self.client.find_all_items_by_album_id(int(pq.value))
+            elif pq.field == "mb_trackid":
+                items_data = self.client.find_all_items_by_mbid(pq.value)
+            elif pq.field == "path":
+                items_data = self.client.find_all_items_by_path(pq.value)
+            elif pq.field == "singleton":
+                items_data = self.client.find_all_items_by_singleton(pq.value == "true")
+            elif pq.field in {"album", "artist", "title"}:
+                items_data = self.client.find_all_items_for_term(f"{pq.field}:{pq.value}")
+            else:
+                items_data = self.client.find_all_items_for_term(pq.value)
+
             return [RemoteItem(r) for r in items_data]
 
         raise BeetsError(f"Unsupported RemoteLibrary items() query shape: {query!r}")
@@ -694,11 +617,9 @@ class RemoteLibrary:
                 albums_data = self.client.list_all_albums()
                 return [RemoteAlbum(r) for r in albums_data]
 
-            for term in query:
-                self._validate_album_term(term)
+            parsed_list = [parse_query_term(term, "albums") for term in query]
 
-            first_term = query[0]
-            first_results = self.albums(first_term)
+            first_results = self.albums(query[0])
             if not first_results or len(query) == 1:
                 return first_results
 
@@ -719,9 +640,16 @@ class RemoteLibrary:
             return final_albums
 
         if isinstance(query, str):
-            self._validate_album_term(query)
-            q_str = query.strip()
-            albums_data = self.client.find_all_albums_for_term(q_str)
+            pq = parse_query_term(query, "albums")
+            if pq.field == "mb_albumid":
+                albums_data = self.client.find_all_albums_by_mb_albumid(pq.value)
+            elif pq.field == "mb_releasegroupid":
+                albums_data = self.client.find_all_albums_by_releasegroupid(pq.value)
+            elif pq.field in {"album", "artist", "albumartist"}:
+                albums_data = self.client.find_all_albums_for_term(f"{pq.field}:{pq.value}")
+            else:
+                albums_data = self.client.find_all_albums_for_term(pq.value)
+
             return [RemoteAlbum(r) for r in albums_data]
 
         raise BeetsError(f"Unsupported RemoteLibrary albums() query shape: {query!r}")
