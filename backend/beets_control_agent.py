@@ -414,31 +414,44 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 sql_params = []
                 if album_id:
                     where_clause = "WHERE album_id = ?"
-                    sql_params.append(album_id)
+                    sql_params.append(int(album_id))
                 elif path_val:
                     where_clause = "WHERE path = ?"
                     sql_params.append(path_val)
                 elif mbid:
                     where_clause = "WHERE mb_trackid = ?"
                     sql_params.append(mbid)
-                elif query:
-                    if query.startswith("album:"):
-                        where_clause = "WHERE album LIKE ?"
-                        sql_params.append(f"%{query[6:]}%")
-                    elif query.startswith("artist:"):
-                        where_clause = "WHERE artist LIKE ?"
-                        sql_params.append(f"%{query[7:]}%")
-                    elif query.startswith("title:"):
-                        where_clause = "WHERE title LIKE ?"
-                        sql_params.append(f"%{query[6:]}%")
-                    elif query == "singleton:true":
+                elif query is not None:
+                    q_str = str(query).strip()
+                    if not q_str:
+                        where_clause = "WHERE 1 = 0"
+                    elif q_str.startswith("album:"):
+                        where_clause = "WHERE album LIKE ? ESCAPE '\\'"
+                        escaped = q_str[6:].strip().replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+                        sql_params.append(f"%{escaped}%")
+                    elif q_str.startswith("artist:"):
+                        where_clause = "WHERE artist LIKE ? ESCAPE '\\'"
+                        escaped = q_str[7:].strip().replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+                        sql_params.append(f"%{escaped}%")
+                    elif q_str.startswith("title:"):
+                        where_clause = "WHERE title LIKE ? ESCAPE '\\'"
+                        escaped = q_str[6:].strip().replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+                        sql_params.append(f"%{escaped}%")
+                    elif q_str.startswith("path:"):
+                        where_clause = "WHERE path = ?"
+                        sql_params.append(q_str[5:].strip())
+                    elif q_str.startswith("mb_trackid:") or q_str.startswith("mbid:"):
+                        where_clause = "WHERE mb_trackid = ?"
+                        sql_params.append(q_str.split(":", 1)[1].strip())
+                    elif q_str == "singleton:true":
                         where_clause = "WHERE album_id IS NULL OR album_id = 0"
-                    elif query == "singleton:false":
+                    elif q_str == "singleton:false":
                         where_clause = "WHERE album_id IS NOT NULL AND album_id != 0"
                     else:
-                        where_clause = "WHERE title LIKE ? OR artist LIKE ? OR album LIKE ?"
-                        pattern = f"%{query}%"
-                        sql_params.extend([pattern, pattern, pattern])
+                        escaped = q_str.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+                        pattern = f"%{escaped}%"
+                        where_clause = "WHERE (title LIKE ? ESCAPE '\\' OR artist LIKE ? ESCAPE '\\' OR album LIKE ? ESCAPE '\\' OR albumartist LIKE ? ESCAPE '\\' OR path LIKE ? ESCAPE '\\')"
+                        sql_params.extend([pattern, pattern, pattern, pattern, pattern])
 
                 cur.execute(f"SELECT COUNT(*) FROM items {where_clause}", sql_params)
                 total_count = cur.fetchone()[0]
@@ -518,17 +531,23 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 elif mb_releasegroupid:
                     where_clause = "WHERE mb_releasegroupid = ?"
                     sql_params.append(mb_releasegroupid)
-                elif query:
-                    if query.startswith("album:"):
-                        where_clause = "WHERE album LIKE ?"
-                        sql_params.append(f"%{query[6:]}%")
-                    elif query.startswith("artist:"):
-                        where_clause = "WHERE albumartist LIKE ? OR artist LIKE ?"
-                        pattern = f"%{query[7:]}%"
+                elif query is not None:
+                    q_str = str(query).strip()
+                    if not q_str:
+                        where_clause = "WHERE 1 = 0"
+                    elif q_str.startswith("album:"):
+                        where_clause = "WHERE album LIKE ? ESCAPE '\\'"
+                        escaped = q_str[6:].strip().replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+                        sql_params.append(f"%{escaped}%")
+                    elif q_str.startswith("artist:"):
+                        where_clause = "WHERE albumartist LIKE ? ESCAPE '\\' OR artist LIKE ? ESCAPE '\\'"
+                        escaped = q_str[7:].strip().replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+                        pattern = f"%{escaped}%"
                         sql_params.extend([pattern, pattern])
                     else:
-                        where_clause = "WHERE album LIKE ? OR albumartist LIKE ? OR artist LIKE ?"
-                        pattern = f"%{query}%"
+                        escaped = q_str.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+                        pattern = f"%{escaped}%"
+                        where_clause = "WHERE (album LIKE ? ESCAPE '\\' OR albumartist LIKE ? ESCAPE '\\' OR artist LIKE ? ESCAPE '\\')"
                         sql_params.extend([pattern, pattern, pattern])
 
                 cur.execute(f"SELECT COUNT(*) FROM albums {where_clause}", sql_params)

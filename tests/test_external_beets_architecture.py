@@ -17,6 +17,8 @@ from backend.beets_client import (
     BeetsClient,
     BeetsError,
     BeetsUnavailableError,
+    RemoteAlbum,
+    RemoteItem,
     RemoteLibrary,
     get_db_connection,
 )
@@ -191,34 +193,29 @@ class TestBeetsClientRemoteOnly(unittest.TestCase):
         client = mock.MagicMock(spec=BeetsClient)
         client.find_items_by_album_id.return_value = [{"id": 1, "title": "Track 1"}]
         client.find_items_by_query.return_value = [{"id": 1, "title": "Track 1"}]
-        client.find_albums_by_query.return_value = [{"id": 10, "album": "Kind of Blue"}]
+        client.search_albums_text.return_value = [{"id": 10, "album": "Kind of Blue"}]
 
         rlib = RemoteLibrary(client)
 
-        # album_id
         items = rlib.items("album_id:10")
         client.find_items_by_album_id.assert_called_with(10)
         self.assertEqual(len(items), 1)
 
-        # album text
         items = rlib.items("album:Kind of Blue")
         client.find_items_by_query.assert_called_with("album:Kind of Blue")
         self.assertEqual(len(items), 1)
 
-        # list term e.g. [f"album:{folder_album}"]
         items = rlib.items(["album:Kind of Blue"])
         self.assertEqual(len(items), 1)
 
-        # album search
         albums = rlib.albums("Kind of Blue")
-        client.find_albums_by_query.assert_called_with("Kind of Blue")
+        client.search_albums_text.assert_called_with("Kind of Blue")
         self.assertEqual(len(albums), 1)
 
     def test_large_library_client_auto_pagination(self):
         """Test that BeetsClient.list_all_items fetches all pages for >2500 items."""
         client = BeetsClient(base_url="http://127.0.0.1:8338", token="test")
 
-        # Mock _request to return 3 pages of items (1000 + 1000 + 500 = 2500 total)
         def mock_request(method, endpoint, data=None, timeout=None):
             if "offset=0" in endpoint:
                 page = [{"id": i, "title": f"Track {i}"} for i in range(1, 1001)]
@@ -283,6 +280,156 @@ class TestBeetsClientRemoteOnly(unittest.TestCase):
             timeout=10,
         )
         self.assertNotEqual(res.returncode, 0, "beet binary should not be installed in beets-web-manager image")
+
+
+class TestRemoteLibraryQuerySemantics(unittest.TestCase):
+    def setUp(self):
+        self.client = mock.MagicMock(spec=BeetsClient)
+        self.rlib = RemoteLibrary(self.client)
+
+    def test_bare_word_item_search(self):
+        item1 = {"id": 1, "artist": "311", "title": "Down", "album": "Voyager"}
+        item3 = {"id": 3, "artist": "Daft Punk", "title": "Voyager", "album": "Random Access Memories"}
+        self.client.search_items_text.return_value = [item1, item3]
+
+        items = self.rlib.items("Voyager")
+        self.client.search_items_text.assert_called_with("Voyager")
+        self.assertEqual(len(items), 2)
+        self.assertEqual(items[0].title, "Down")
+        self.assertEqual(items[1].artist, "Daft Punk")
+
+    def test_bare_word_album_search(self):
+        alb1 = {"id": 10, "albumartist": "311", "album": "Voyager"}
+        self.client.search_albums_text.return_value = [alb1]
+
+        albums = self.rlib.albums("Voyager")
+        self.client.search_albums_text.assert_called_with("Voyager")
+        self.assertEqual(len(albums), 1)
+        self.assertEqual(albums[0].album, "Voyager")
+
+    def test_two_term_intersection(self):
+        # term 1: album:Voyager -> items 1, 3
+        # term 2: artist:311 -> items 1, 2
+        item1 = {"id": 1, "artist": "311", "title": "Down", "album": "Voyager"}
+        item2 = {"id": 2, "artist": "311", "title": "Amber", "album": "From Chaos"}
+        item3 = {"id": 3, "artist": "Daft Punk", "title": "Voyager", "album": "Random Access Memories"}
+
+        def mock_query(q):
+            if q == "album:Voyager":
+                return [item1, item3]
+            elif q == "artist:311":
+                return [item1, item2]
+            return []
+
+        self.client.find_items_by_query.side_effect = mock_query
+
+        res = self.rlib.items(["album:Voyager", "artist:311"])
+        self.assertEqual(len(res), 1)
+        self.assertEqual(res[0].id, 1)
+
+    def test_three_term_intersection(self):
+        item1 = {"id": 1, "artist": "311", "title": "Down", "album": "Voyager"}
+        item2 = {"id": 2, "artist": "311", "title": "Amber", "album": "From Chaos"}
+        item3 = {"id": 3, "artist": "Daft Punk", "title": "Voyager", "album": "Random Access Memories"}
+
+        def mock_query(q):
+            if q == "album:Voyager":
+                return [item1, item3]
+            elif q == "artist:311":
+                return [item1, item2]
+            elif q == "title:Down":
+                return [item1]
+            return []
+
+        self.client.find_items_by_query.side_effect = mock_query
+
+        res = self.rlib.items(["album:Voyager", "artist:311", "title:Down"])
+        self.assertEqual(len(res), 1)
+        self.assertEqual(res[0].id, 1)
+
+    def test_empty_intersection(self):
+        item1 = {"id": 1, "artist": "311", "title": "Down", "album": "Voyager"}
+        item2 = {"id": 2, "artist": "Daft Punk", "title": "Voyager", "album": "Random Access Memories"}
+
+        def mock_query(q):
+            if q == "title:Down":
+                return [item1]
+            elif q == "artist:Daft Punk":
+                return [item2]
+            return []
+
+        self.client.find_items_by_query.side_effect = mock_query
+
+        res = self.rlib.items(["title:Down", "artist:Daft Punk"])
+        self.assertEqual(len(res), 0)
+
+    def test_duplicate_prevention_in_intersection(self):
+        item1 = {"id": 1, "artist": "311", "title": "Down", "album": "Voyager"}
+
+        self.client.find_items_by_query.return_value = [item1, item1]
+        res = self.rlib.items(["album:Voyager", "artist:311"])
+        self.assertEqual(len(res), 1)
+
+    def test_mixed_supported_and_unsupported_terms_raises(self):
+        with self.assertRaises(BeetsError):
+            self.rlib.items(["album:Voyager", "genre:rock"])
+
+    def test_malformed_terms_raise(self):
+        malformed_queries = [
+            "album_id:nope",
+            "singleton:maybe",
+            "album:",
+            ":value",
+            ":",
+        ]
+        for mq in malformed_queries:
+            with self.assertRaises(BeetsError, msg=f"Should raise for malformed: {mq}"):
+                self.rlib.items(mq)
+
+    def test_album_list_intersection(self):
+        alb1 = {"id": 10, "albumartist": "311", "album": "Voyager"}
+        alb2 = {"id": 20, "albumartist": "311", "album": "From Chaos"}
+
+        def mock_album_req(method, endpoint):
+            if "query=album%3AVoyager" in endpoint or "query=Voyager" in endpoint:
+                return {"albums": [alb1]}
+            elif "query=artist%3A311" in endpoint or "query=311" in endpoint:
+                return {"albums": [alb1, alb2]}
+            return {"albums": []}
+
+        self.client._request.side_effect = mock_album_req
+
+        res = self.rlib.albums(["album:Voyager", "artist:311"])
+        self.assertEqual(len(res), 1)
+        self.assertEqual(res[0].id, 10)
+
+    def test_large_paginated_intersection(self):
+        # 1200 items for term 1, 600 of which match term 2
+        items_t1 = [{"id": i, "artist": "311", "album": "Voyager"} for i in range(1, 1201)]
+        items_t2 = [{"id": i, "artist": "311", "album": "Voyager"} for i in range(1, 601)]
+
+        def mock_query(q):
+            if q == "album:Voyager":
+                return items_t1
+            elif q == "artist:311":
+                return items_t2
+            return []
+
+        self.client.find_items_by_query.side_effect = mock_query
+
+        res = self.rlib.items(["album:Voyager", "artist:311"])
+        self.assertEqual(len(res), 600)
+        self.assertEqual(res[0].id, 1)
+        self.assertEqual(res[-1].id, 600)
+
+    def test_duplicate_detection_regression(self):
+        """Test album+title duplicate matching path logic."""
+        item1 = {"id": 10, "title": "Till I Bust", "album": "Album 1"}
+        self.client.find_items_by_query.return_value = [item1]
+
+        res = self.rlib.items("album:Album 1")
+        self.assertEqual(len(res), 1)
+        self.assertEqual(res[0].title, "Till I Bust")
 
 
 if __name__ == "__main__":

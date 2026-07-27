@@ -194,6 +194,20 @@ class BeetsClient:
         res = self._request("GET", f"/albums?query={urllib.parse.quote(query)}&limit={limit}")
         return res.get("albums", [])
 
+    def search_items_text(self, text: str, limit: int = 500) -> List[Dict[str, Any]]:
+        """Perform a parameterized bare-word text search across item fields (title, artist, album, albumartist, path)."""
+        if not text or not text.strip():
+            return []
+        res = self._request("GET", f"/items?query={urllib.parse.quote(text.strip())}&limit={limit}")
+        return res.get("items", [])
+
+    def search_albums_text(self, text: str, limit: int = 500) -> List[Dict[str, Any]]:
+        """Perform a parameterized bare-word text search across album fields (album, albumartist, artist)."""
+        if not text or not text.strip():
+            return []
+        res = self._request("GET", f"/albums?query={urllib.parse.quote(text.strip())}&limit={limit}")
+        return res.get("albums", [])
+
     def list_all_albums(self, page_size: int = 500, safety_ceiling: int = 20000) -> List[Dict[str, Any]]:
         """Fetch all albums by paginating through all available pages up to safety ceiling."""
         all_albums = []
@@ -418,8 +432,52 @@ class RemoteLibrary:
         data = self.client.get_album(int(aid))
         return RemoteAlbum(data) if data else None
 
+    def _validate_item_term(self, term: str) -> None:
+        if not isinstance(term, str):
+            raise BeetsError(f"Query term must be a string, got {type(term).__name__}")
+        q_str = term.strip()
+        if not q_str:
+            raise BeetsError("Query term cannot be empty or whitespace")
+        if ":" in q_str:
+            field, val = q_str.split(":", 1)
+            field = field.strip()
+            if not field:
+                raise BeetsError(f"Query field prefix cannot be empty in '{term}'")
+            allowed_fields = {"album_id", "album", "artist", "title", "path", "mb_trackid", "mbid", "singleton"}
+            if field not in allowed_fields:
+                raise BeetsError(f"Unsupported query field '{field}' in '{term}'")
+            if not val.strip() and field not in {"singleton"}:
+                raise BeetsError(f"Query field '{field}' requires a non-empty value in '{term}'")
+            if field == "album_id":
+                if not val.strip().isdigit():
+                    raise BeetsError(f"album_id must be an integer: {val!r}")
+            elif field == "singleton":
+                if val.strip().lower() not in {"true", "false"}:
+                    raise BeetsError(f"singleton value must be 'true' or 'false': {val!r}")
+
+    def _validate_album_term(self, term: str) -> None:
+        if not isinstance(term, str):
+            raise BeetsError(f"Query term must be a string, got {type(term).__name__}")
+        q_str = term.strip()
+        if not q_str:
+            raise BeetsError("Query term cannot be empty or whitespace")
+        if ":" in q_str:
+            field, val = q_str.split(":", 1)
+            field = field.strip()
+            if not field:
+                raise BeetsError(f"Query field prefix cannot be empty in '{term}'")
+            allowed_fields = {"mb_albumid", "mb_releasegroupid", "album", "artist", "albumartist"}
+            if field not in allowed_fields:
+                raise BeetsError(f"Unsupported query field '{field}' in '{term}'")
+            if not val.strip():
+                raise BeetsError(f"Query field '{field}' requires a non-empty value in '{term}'")
+
     def items(self, query: Any = None) -> List[RemoteItem]:
-        if query is None or query == [] or query == () or query == "":
+        if query is None or query == [] or query == ():
+            items_data = self.client.list_all_items()
+            return [RemoteItem(r) for r in items_data]
+
+        if isinstance(query, str) and query == "":
             items_data = self.client.list_all_items()
             return [RemoteItem(r) for r in items_data]
 
@@ -427,46 +485,60 @@ class RemoteLibrary:
             if not query:
                 items_data = self.client.list_all_items()
                 return [RemoteItem(r) for r in items_data]
-            res_items = []
-            for q_term in query:
-                if isinstance(q_term, str):
-                    res_items.extend(self.items(q_term))
-                else:
-                    raise BeetsError(f"Unsupported query term in list: {q_term!r}")
-            return res_items
+
+            for term in query:
+                self._validate_item_term(term)
+
+            first_term = query[0]
+            first_results = self.items(first_term)
+            if not first_results or len(query) == 1:
+                return first_results
+
+            matching_ids = {item.id for item in first_results}
+            for term in query[1:]:
+                if not matching_ids:
+                    break
+                term_results = self.items(term)
+                term_ids = {item.id for item in term_results}
+                matching_ids = matching_ids & term_ids
+
+            seen = set()
+            final_items = []
+            for item in first_results:
+                if item.id in matching_ids and item.id not in seen:
+                    seen.add(item.id)
+                    final_items.append(item)
+            return final_items
 
         if isinstance(query, str):
+            self._validate_item_term(query)
             q_str = query.strip()
-            if q_str.startswith("album_id:"):
-                aid_str = q_str.split(":", 1)[1].strip()
-                if aid_str.isdigit():
-                    items_data = self.client.find_items_by_album_id(int(aid_str))
-                    return [RemoteItem(r) for r in items_data]
-            elif q_str.startswith("album:"):
-                items_data = self.client.find_items_by_query(q_str)
-                return [RemoteItem(r) for r in items_data]
-            elif q_str.startswith("artist:"):
-                items_data = self.client.find_items_by_query(q_str)
-                return [RemoteItem(r) for r in items_data]
-            elif q_str.startswith("title:"):
-                items_data = self.client.find_items_by_query(q_str)
-                return [RemoteItem(r) for r in items_data]
-            elif q_str.startswith("path:"):
-                path_val = q_str.split(":", 1)[1].strip()
-                items_data = self.client.find_items_by_path(path_val)
-                return [RemoteItem(r) for r in items_data]
-            elif q_str.startswith("mb_trackid:") or q_str.startswith("mbid:"):
-                mbid_val = q_str.split(":", 1)[1].strip()
-                items_data = self.client.find_items_by_mbid(mbid_val)
-                return [RemoteItem(r) for r in items_data]
-            elif q_str in {"singleton:true", "singleton:false"}:
-                items_data = self.client.find_items_by_query(q_str)
-                return [RemoteItem(r) for r in items_data]
+            if ":" in q_str:
+                field, val = q_str.split(":", 1)
+                field = field.strip()
+                val = val.strip()
+                if field == "album_id":
+                    items_data = self.client.find_items_by_album_id(int(val))
+                elif field in {"album", "artist", "title"}:
+                    items_data = self.client.find_items_by_query(f"{field}:{val}")
+                elif field == "path":
+                    items_data = self.client.find_items_by_path(val)
+                elif field in {"mb_trackid", "mbid"}:
+                    items_data = self.client.find_items_by_mbid(val)
+                elif field == "singleton":
+                    items_data = self.client.find_items_by_query(f"singleton:{val.lower()}")
+            else:
+                items_data = self.client.search_items_text(q_str)
+            return [RemoteItem(r) for r in items_data]
 
         raise BeetsError(f"Unsupported RemoteLibrary items() query shape: {query!r}")
 
     def albums(self, query: Any = None) -> List[RemoteAlbum]:
-        if query is None or query == [] or query == () or query == "":
+        if query is None or query == [] or query == ():
+            albums_data = self.client.list_all_albums()
+            return [RemoteAlbum(r) for r in albums_data]
+
+        if isinstance(query, str) and query == "":
             albums_data = self.client.list_all_albums()
             return [RemoteAlbum(r) for r in albums_data]
 
@@ -474,30 +546,49 @@ class RemoteLibrary:
             if not query:
                 albums_data = self.client.list_all_albums()
                 return [RemoteAlbum(r) for r in albums_data]
-            res_albums = []
-            for q_term in query:
-                if isinstance(q_term, str):
-                    res_albums.extend(self.albums(q_term))
-                else:
-                    raise BeetsError(f"Unsupported query term in list: {q_term!r}")
-            return res_albums
 
-        if isinstance(query, str) and query.strip():
+            for term in query:
+                self._validate_album_term(term)
+
+            first_term = query[0]
+            first_results = self.albums(first_term)
+            if not first_results or len(query) == 1:
+                return first_results
+
+            matching_ids = {album.id for album in first_results}
+            for term in query[1:]:
+                if not matching_ids:
+                    break
+                term_results = self.albums(term)
+                term_ids = {album.id for album in term_results}
+                matching_ids = matching_ids & term_ids
+
+            seen = set()
+            final_albums = []
+            for album in first_results:
+                if album.id in matching_ids and album.id not in seen:
+                    seen.add(album.id)
+                    final_albums.append(album)
+            return final_albums
+
+        if isinstance(query, str):
+            self._validate_album_term(query)
             q_str = query.strip()
-            if q_str.startswith("mb_albumid:"):
-                mb_id = q_str.split(":", 1)[1].strip()
-                res = self.client._request("GET", f"/albums?mb_albumid={urllib.parse.quote(mb_id)}")
-                return [RemoteAlbum(r) for r in res.get("albums", [])]
-            elif q_str.startswith("mb_releasegroupid:"):
-                rg_id = q_str.split(":", 1)[1].strip()
-                res = self.client._request("GET", f"/albums?mb_releasegroupid={urllib.parse.quote(rg_id)}")
-                return [RemoteAlbum(r) for r in res.get("albums", [])]
-            elif q_str.startswith("album:"):
-                search_term = q_str[6:].strip()
-                albums_data = self.client.find_albums_by_query(search_term)
-                return [RemoteAlbum(r) for r in albums_data]
-            elif ":" not in q_str:
-                albums_data = self.client.find_albums_by_query(q_str)
+            if ":" in q_str:
+                field, val = q_str.split(":", 1)
+                field = field.strip()
+                val = val.strip()
+                if field == "mb_albumid":
+                    res = self.client._request("GET", f"/albums?mb_albumid={urllib.parse.quote(val)}")
+                    return [RemoteAlbum(r) for r in res.get("albums", [])]
+                elif field == "mb_releasegroupid":
+                    res = self.client._request("GET", f"/albums?mb_releasegroupid={urllib.parse.quote(val)}")
+                    return [RemoteAlbum(r) for r in res.get("albums", [])]
+                elif field in {"album", "artist", "albumartist"}:
+                    res = self.client._request("GET", f"/albums?query={urllib.parse.quote(f'{field}:{val}')}")
+                    return [RemoteAlbum(r) for r in res.get("albums", [])]
+            else:
+                albums_data = self.client.search_albums_text(q_str)
                 return [RemoteAlbum(r) for r in albums_data]
 
         raise BeetsError(f"Unsupported RemoteLibrary albums() query shape: {query!r}")
