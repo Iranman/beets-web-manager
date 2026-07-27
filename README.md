@@ -224,17 +224,50 @@ Generates a few short, self-synthesized sine-wave WAV files (not copies of any r
 ./scripts/restore.sh <file.tar.gz>
 ```
 
-Backs up the beets database and configuration/state JSON files under `/config` — **not** your music library, which you should back up separately with your own storage/snapshot tooling.
+Back up `/config/config.yaml`, `/config/musiclibrary.blb`, plugin configuration, and web-manager state files under `/config` before upgrades or migrations — **not** your music library, which should be backed up separately with storage/snapshot tooling.
 
-## Updates
+## Manual Beets CLI and Shared Locking
+
+All manual CLI operations run inside the `beets` container. Mutating manual commands automatically respect the shared database file lock (`/config/.beet_db.lock`):
 
 ```bash
-docker compose build --no-cache beets
-docker compose up -d --force-recreate beets
-docker compose exec beets beet version
+# Run manual Beets CLI query
+docker compose exec beets /lsiopy/bin/beet ls artist:311
+
+# Verify installed core and custom plugins (including bundled discpath)
+docker compose exec beets /lsiopy/bin/beet plugins
+
+# Run manual import inside the Beets container
+docker compose exec beets /lsiopy/bin/beet import /data/torrents/music
 ```
 
-Run `./scripts/backup.sh` first. There is no separate database-migration step — the beets library schema is managed by beets itself on next library open.
+No second Beets database is created.
+
+## Architecture Migration & Upgrades
+
+```bash
+# 1. Back up config and library
+./scripts/backup.sh
+
+# 2. Rebuild both services with clean layers
+docker compose build --no-cache beets beets-web-manager
+
+# 3. Re-create and restart the stack
+docker compose up -d --force-recreate beets beets-web-manager
+
+# 4. Verify agent health and Beets version
+docker compose exec beets /lsiopy/bin/beet version
+curl -s http://127.0.0.1:8337/api/health
+```
+
+### Rollback
+
+If a rollback is required, restore the prior image tags and `/config` backup:
+
+```bash
+./scripts/restore.sh ./backups/beets-backup-<timestamp>.tar.gz
+docker compose up -d --force-recreate
+```
 
 ## Support Beets Web Manager
 

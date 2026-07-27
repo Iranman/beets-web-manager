@@ -4,14 +4,16 @@ This document describes the architecture that exists today and the intended dire
 
 ## Current Main Components
 
-- `app.py`: primary Flask application. Repository inspection found most API routes still registered here, including import review, library, cleanup, deduplication, playlists, Plex, configuration, and transactions. It also contains domain logic, provider calls, Beets subprocess calls, direct SQLite access, and filesystem mutation helpers.
+- `beets` (Beets Engine Container): authoritative Beets installation built from `Dockerfile.beets` pinned to `lscr.io/linuxserver/beets:2.4.0@sha256:4cce2967154e849ca5466469d934a4bb9d8d83c3acf2a5279da47bccd16518f1`. Contains the Beets CLI, `/config/config.yaml`, `/config/musiclibrary.blb`, bundled plugins (`/opt/beets-web-manager-agent/beetsplug/discpath.py`), and the HTTP control agent (`backend/beets_control_agent.py`) supervised under S6 (`/custom-services.d/beets-control-agent`). Port 8338 is internal-only.
+- `beets-web-manager` (Web Manager Container): lightweight Flask + React/Next application built from `Dockerfile`. Contains zero Beets binaries, zero Beets Python packages, and zero local SQLite database files. Communicates with the Beets engine strictly over internal HTTP using `BeetsClient` and `RemoteLibrary` (`backend/beets_client.py`).
+- `app.py`: primary Flask application serving the web interface, operator routes, import workflows, matching adjudication, job tracking, and proxying requests to the remote Beets control agent.
 - `routes_jobs.py`: split route module for `/api/jobs/*` job listing, lookup, and cancellation.
 - `routes_lidarr.py`: split route module for Lidarr/wanted endpoints.
-- `routes_setup.py`: split route module for setup and configuration checks.
+- `routes_setup.py`: split route module for setup, authentication, and configuration checks.
 - `routes_submissions.py`: split route module for MusicBrainz/AcoustID submission workflow and MBID attachment.
-- `job_engine.py`: in-memory `Job`, `PythonJob`, `JobStore`, structured state support, cooperative cancellation, log retention, and `_beet_run` subprocess wrapper.
+- `job_engine.py`: in-memory `Job`, `PythonJob`, `JobStore`, structured state support, cooperative cancellation, log retention, and remote control agent task integration.
 - `helpers_mb.py`: MusicBrainz and AcoustID helper functions. It has no `app.py` dependency and is the strongest current provider boundary.
-- `backend/`: partially extracted helper package. Notable modules include `album_match.py`, `audio_preferences.py`, `import_guard.py`, `mb_alignment.py`, `security.py`, `slskd.py`, `title_normalize.py`, `track_align.py`, and `transaction_engine.py`.
+- `backend/`: helper package containing `beets_client.py` (remote Beets API client), `beets_control_agent.py` (Beets container control agent), `album_match.py`, `audio_preferences.py`, `import_guard.py`, `mb_alignment.py`, `security.py`, `slskd.py`, `title_normalize.py`, `track_align.py`, and `transaction_engine.py`.
 - `frontend/src/`: React/Next/TypeScript frontend. `frontend/src/api/client.ts` centralizes API calls, `frontend/src/api/types.ts` centralizes many response shapes, and views/features are split under `views/` and `features/`.
 - `.github/workflows/`: CI covers Python syntax/unit tests, frontend typecheck/build, lint, Docker build, dependency audit, compose/security checks, and secret scan.
 
@@ -19,19 +21,21 @@ This document describes the architecture that exists today and the intended dire
 
 ```text
 Frontend
-  -> API routes
-  -> Application services
-  -> Domain decisions
-  -> Provider adapters and repositories
-  -> Beets, filesystem, database, and external services
+  -> Web Manager Routes (app.py, routes_*.py)
+  -> Remote Beets API Client (backend/beets_client.py)
+  -- HTTP (internal port 8338 with Bearer token) -->
+  -> Beets Control Agent (backend/beets_control_agent.py in beets container)
+  -> Beets CLI, SQLite DB (/config/musiclibrary.blb), & Media Filesystem
 ```
 
-Current migration status: incomplete. The `backend/` package and `helpers_mb.py` already provide useful extraction seams, but `app.py` still contains route handlers, domain decisions, provider orchestration, Beets calls, direct DB access, direct filesystem mutations, job orchestration, and UI-shaped response construction.
+Current migration status: External engine separation is complete. The web manager service has zero direct Beets imports or SQLite file handles, delegating all library, database, tag, and media mutations to the `beets` container via authenticated internal HTTP APIs.
 
 ## External Boundaries
 
-- Beets: command execution uses `BEET_BIN`, `_beet_env()`, `_beet_run()`, and direct command arrays in `app.py` and `routes_submissions.py`.
-- Beets database: `LIB_PATH` points to `/config/musiclibrary.blb` by default. `_db()` wraps SQLite access, but many code paths still call `sqlite3.connect(LIB_PATH)` directly.
+- Beets Engine & CLI: All library mutations, database queries, tag writes, and Beets commands run inside the `beets` container under control-agent supervision or manual CLI execution (`docker compose exec beets /lsiopy/bin/beet ...`).
+- Control Agent Supervision: LinuxServer S6 supervises `/opt/beets-web-manager-agent/beets_control_agent.py` at `/custom-services.d/beets-control-agent`. If the agent crashes, S6 restarts it automatically without terminating the container.
+- Database & Lock Ownership: The single authoritative database `/config/musiclibrary.blb` lives exclusively in the `beets` container. Mutating operations acquire the shared file lock `/config/.beet_db.lock`. Manual CLI commands and control agent jobs serialize on this lock.
+- Port Exposure: Control agent port 8338 is exposed internally to the Docker bridge network only (`expose: ["8338"]`). It is never published to host interfaces. Web manager port 8337 (`WEBCONTROL_PORT`) is published to localhost (`127.0.0.1:8337`) or behind a reverse proxy.
 - MusicBrainz and AcoustID: `helpers_mb.py` performs release, release-group, recording, and AcoustID lookup work. `routes_submissions.py` also performs MusicBrainz validation and AcoustID submission orchestration.
 - AI provider: `app.py` includes OpenAI-key checks and AI suggestion calls. AI availability is already modeled in some paths, but matching still needs one shared contract.
 - Download providers: SLSKD extraction exists in `backend/slskd.py`, while orchestration remains heavily in `app.py`.
