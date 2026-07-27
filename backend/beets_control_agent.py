@@ -344,7 +344,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
         path = parsed.path.rstrip("/")
         params = parse_qs(parsed.query)
 
-        if path == "/health":
+        if path in ("/health", "/status"):
             beets_ver = "unknown"
             try:
                 res = subprocess.run([BEET_BIN, "version"], capture_output=True, text=True, timeout=5)
@@ -356,6 +356,13 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             config_healthy = os.path.exists(os.path.join(BEETSDIR, "config.yaml"))
             discpath_found = os.path.exists("/opt/beets-web-manager-agent/beetsplug/discpath.py") or os.path.exists(os.path.join(BEETSDIR, "beetsplug", "discpath.py"))
 
+            import shutil, importlib.util
+            fpcalc_p = shutil.which("fpcalc") or ""
+            pyacoustid_avail = importlib.util.find_spec("acoustid") is not None
+            chroma_avail = importlib.util.find_spec("beetsplug.chroma") is not None
+            mbsubmit_avail = importlib.util.find_spec("beetsplug.mbsubmit") is not None
+            musicbrainz_avail = importlib.util.find_spec("beetsplug.musicbrainz") is not None
+
             self._send_json(200, {
                 "status": "ok",
                 "service": "beets-control-agent",
@@ -363,8 +370,14 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 "beets_version": beets_ver,
                 "db_healthy": db_healthy,
                 "config_healthy": config_healthy,
+                "fpcalc_available": bool(fpcalc_p),
+                "fpcalc_path": fpcalc_p,
+                "pyacoustid_available": pyacoustid_avail,
                 "plugins": {
-                    "discpath": discpath_found
+                    "discpath": discpath_found,
+                    "chroma": chroma_avail,
+                    "mbsubmit": mbsubmit_avail,
+                    "musicbrainz": musicbrainz_avail,
                 },
                 "beetsdir": BEETSDIR,
             })

@@ -47,6 +47,7 @@ from app import (  # noqa: E402
     jobs,
     lib,
 )
+from backend.beets_client import beets_client
 from backend.security import OutboundPolicyError, validate_outbound_url
 
 _SUBMISSION_ALLOWED_ROOTS = (MUSIC_ROOT, DOWNLOADS_ROOT)
@@ -239,17 +240,32 @@ def _config_has_acoustid_key(config_path: str = "/config/config.yaml") -> bool:
 
 def _submission_readiness() -> Dict[str, Any]:
     configured = set(_read_beets_plugin_list())
-    fpcalc_path = shutil.which("fpcalc") or ""
+    remote_status = {}
+    try:
+        remote_status = beets_client.get_status()
+    except Exception:
+        pass
+
+    remote_plugins = remote_status.get("plugins", {})
+    fpcalc_path = remote_status.get("fpcalc_path") or shutil.which("fpcalc") or ""
+    fpcalc_avail = remote_status.get("fpcalc_available") if "fpcalc_available" in remote_status else bool(fpcalc_path)
+    pyacoustid_avail = remote_status.get("pyacoustid_available") if "pyacoustid_available" in remote_status else (importlib.util.find_spec("acoustid") is not None)
+
+    chroma_avail = remote_plugins.get("chroma", "chroma" in configured)
+    mbsubmit_avail = remote_plugins.get("mbsubmit", "mbsubmit" in configured)
+    musicbrainz_avail = remote_plugins.get("musicbrainz", "musicbrainz" in configured)
+    mbsync_avail = remote_plugins.get("mbsync", "mbsync" in configured)
+
     return {
         "plugins": {
-            "mbsubmit": "mbsubmit" in configured,
-            "musicbrainz": "musicbrainz" in configured,
-            "chroma": "chroma" in configured,
-            "mbsync": "mbsync" in configured,
+            "mbsubmit": bool(mbsubmit_avail),
+            "musicbrainz": bool(musicbrainz_avail),
+            "chroma": bool(chroma_avail),
+            "mbsync": bool(mbsync_avail),
         },
-        "fpcalc_available": bool(fpcalc_path),
+        "fpcalc_available": bool(fpcalc_avail),
         "fpcalc_path": fpcalc_path,
-        "pyacoustid_available": importlib.util.find_spec("acoustid") is not None,
+        "pyacoustid_available": bool(pyacoustid_avail),
         "acoustid_key_configured": bool(_acoustid_key() or _config_has_acoustid_key()),
         "beet_available": bool(BEET_BIN and Path(BEET_BIN).exists()),
     }

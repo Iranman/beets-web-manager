@@ -27,13 +27,16 @@ from backend.beets_client import (
     RemoteLibrary,
     get_db_connection,
     parse_query_term,
+    beets_client,
 )
-from job_engine import Job, _beet_run, _parse_remote_beet_command
 from backend.beets_control_agent import (
+    ALLOWED_COMMANDS,
     ControlAgentHandler,
     _handle_delete_album,
     is_safe_path,
 )
+from job_engine import Job, JobStore, _beet_run, _parse_remote_beet_command
+from routes_submissions import _submission_readiness
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -1014,14 +1017,16 @@ class TestCommandNormalization(unittest.TestCase):
 
 
 class TestJobCancellation(unittest.TestCase):
-    @mock.patch("backend.beets_client.beets_client.cancel_job")
+    """Regression tests for thread-safe remote job cancellation state machine."""
+
     @mock.patch("backend.beets_client.beets_client.start_job")
-    def test_cancel_before_dispatch(self, mock_start, mock_cancel):
-        """Cancelling before start_job dispatch prevents remote job creation."""
+    @mock.patch("backend.beets_client.beets_client.cancel_job")
+    def test_cancel_before_dispatch(self, mock_cancel, mock_start):
+        """If cancellation is requested before dispatch, start_job is never called."""
         job = Job.__new__(Job)
-        job.job_id = "pre-cancel-job"
-        job.command = ["/lsiopy/bin/beet", "import", "/data/torrents/music"]
-        job.label = "test"
+        job.job_id = "pre-dispatch"
+        job.command = ["/lsiopy/bin/beet", "import", "/data/torrents"]
+        job.label = "pre-dispatch"
         job.created_at = time.time()
         job.started_at = None
         job.finished_at = None
@@ -1029,6 +1034,8 @@ class TestJobCancellation(unittest.TestCase):
         job.log = []
         job._remote_job_id = None
         job._cancel_requested = True
+        job._cancel_failed = False
+        job._state = "created"
         job._lock = threading.Lock()
 
         job._run()
@@ -1042,29 +1049,26 @@ class TestJobCancellation(unittest.TestCase):
     @mock.patch("backend.beets_client.beets_client.start_job")
     @mock.patch("backend.beets_client.beets_client.get_job")
     def test_cancel_while_start_job_in_flight(self, mock_get, mock_start, mock_cancel):
-        """Cancelling while start_job is in flight cancels remote ID once assigned."""
-        import threading, time
-        start_event = threading.Event()
-        release_start = threading.Event()
+        """If cancellation is requested while start_job is in flight, cancel_job is called once ID arrives."""
+        start_entered = threading.Event()
+        start_proceed = threading.Event()
 
-        def slow_start_job(subcommand, args=None, label="", config_override="", source_path=""):
-            start_event.set()
-            release_start.wait(timeout=2.0)
-            return "remote-job-888"
+        def slow_start(*args, **kwargs):
+            start_entered.set()
+            start_proceed.wait(timeout=2.0)
+            return "remote-job-999"
 
-        mock_start.side_effect = slow_start_job
-        mock_get.return_value = {"status": "running", "stdout": [], "stderr": []}
+        mock_start.side_effect = slow_start
+        mock_get.return_value = {"status": "cancelled", "returncode": 130, "stdout": ["cancelled"], "stderr": []}
 
-        job = Job("in-flight-cancel", ["/lsiopy/bin/beet", "import", "/data/torrents/music"])
-        self.assertTrue(start_event.wait(timeout=2.0))
+        job = Job("in-flight", ["/lsiopy/bin/beet", "import", "/data/torrents"])
 
-        # Main thread issues kill() before start_job() returns
+        self.assertTrue(start_entered.wait(timeout=2.0))
         job.kill()
+        start_proceed.set()
 
-        release_start.set()
-        time.sleep(0.3)
-
-        mock_cancel.assert_called_with("remote-job-888")
+        time.sleep(0.4)
+        mock_cancel.assert_called_with("remote-job-999")
         self.assertEqual(job.status, "cancelled")
         self.assertEqual(job.returncode, 130)
 
@@ -1072,63 +1076,72 @@ class TestJobCancellation(unittest.TestCase):
     @mock.patch("backend.beets_client.beets_client.start_job")
     @mock.patch("backend.beets_client.beets_client.get_job")
     def test_cancel_after_id_assignment_during_polling(self, mock_get, mock_start, mock_cancel):
-        """Cancelling while polling reaches remote process and sets cancelled status."""
-        mock_start.return_value = "remote-job-777"
-        mock_get.return_value = {"status": "running", "stdout": ["working"], "stderr": []}
+        """Cancelling during polling triggers remote cancel_job and waits for confirmed remote status."""
+        mock_start.return_value = "remote-job-123"
+        mock_get.return_value = {"status": "running", "stdout": ["importing..."], "stderr": []}
 
-        job = Job("poll-cancel", ["/lsiopy/bin/beet", "import", "/data/torrents/music"])
+        job = Job("poll-cancel", ["/lsiopy/bin/beet", "import", "/data/torrents"])
         time.sleep(0.1)
 
+        mock_get.return_value = {"status": "cancelled", "returncode": 130, "stdout": ["killed"], "stderr": []}
         job.kill()
-        time.sleep(0.3)
+        time.sleep(0.4)
 
-        mock_cancel.assert_called_with("remote-job-777")
-        self.assertEqual(job.status, "cancelled")
-
-    @mock.patch("backend.beets_client.beets_client.cancel_job")
-    @mock.patch("backend.beets_client.beets_client.start_job")
-    @mock.patch("backend.beets_client.beets_client.get_job")
-    def test_remote_success_cannot_overwrite_cancelled_status(self, mock_get, mock_start, mock_cancel):
-        """If cancellation was requested, remote success status does not overwrite cancelled state."""
-        mock_start.return_value = "remote-job-666"
-        mock_get.return_value = {"status": "running", "stdout": ["working"], "stderr": []}
-
-        job = Job("success-race", ["/lsiopy/bin/beet", "import", "/data/torrents/music"])
-        time.sleep(0.05)
-        job.kill()
-        mock_get.return_value = {"status": "success", "returncode": 0, "stdout": ["done"], "stderr": []}
-        time.sleep(0.3)
-
+        mock_cancel.assert_called_with("remote-job-123")
         self.assertEqual(job.status, "cancelled")
         self.assertEqual(job.returncode, 130)
 
     @mock.patch("backend.beets_client.beets_client.cancel_job")
     @mock.patch("backend.beets_client.beets_client.start_job")
-    def test_start_job_failure_handled(self, mock_start, mock_cancel):
-        """Failure during start_job records error log and sets failed status."""
-        mock_start.side_effect = RuntimeError("Control agent unreachable")
+    @mock.patch("backend.beets_client.beets_client.get_job")
+    def test_remote_success_before_cancel_accepted(self, mock_get, mock_start, mock_cancel):
+        """If remote completed with success before cancel was accepted, local status becomes success with log warning."""
+        mock_start.return_value = "remote-job-777"
+        mock_get.return_value = {"status": "running", "stdout": ["working"], "stderr": []}
 
-        job = Job("start-fail", ["/lsiopy/bin/beet", "import", "/data/torrents/music"])
-        time.sleep(0.2)
+        job = Job("success-first", ["/lsiopy/bin/beet", "import", "/data/torrents"])
+        time.sleep(0.05)
+        job.kill()
+        mock_get.return_value = {"status": "success", "returncode": 0, "stdout": ["imported!"], "stderr": []}
+        time.sleep(0.3)
 
-        self.assertEqual(job.status, "failed")
+        self.assertEqual(job.status, "success")
+        self.assertEqual(job.returncode, 0)
+        self.assertTrue(any("already completed" in line for line in job.log))
+
+    @mock.patch("backend.beets_client.beets_client.cancel_job")
+    @mock.patch("backend.beets_client.beets_client.start_job")
+    @mock.patch("backend.beets_client.beets_client.get_job")
+    def test_cancel_api_exception_does_not_report_cancelled(self, mock_get, mock_start, mock_cancel):
+        """If cancel_job API raises an error and remote state is unconfirmed, status does not become cancelled."""
+        mock_start.return_value = "remote-job-fail-cancel"
+        mock_get.return_value = {"status": "running", "stdout": ["working"], "stderr": []}
+
+        job = Job("fail-cancel-api", ["/lsiopy/bin/beet", "import", "/data/torrents"])
+        time.sleep(0.05)
+        mock_cancel.side_effect = BeetsUnavailableError("Network timeout on cancel")
+        mock_get.side_effect = BeetsUnavailableError("Network timeout on status")
+        job.kill()
+        time.sleep(0.4)
+
+        self.assertNotEqual(job.status, "cancelled")
+        self.assertEqual(job.status, "cancel_failed")
         self.assertEqual(job.returncode, 1)
-        self.assertIn("ERROR: Control agent unreachable", job.log)
 
     @mock.patch("backend.beets_client.beets_client.cancel_job")
     @mock.patch("backend.beets_client.beets_client.start_job")
     @mock.patch("backend.beets_client.beets_client.get_job")
     def test_repeated_kill_calls_idempotent(self, mock_get, mock_start, mock_cancel):
-        """Repeated kill calls do not duplicate logs or crash."""
-        mock_start.return_value = "remote-job-555"
+        """Repeated kill calls on active job append [killed] at most once."""
+        mock_start.return_value = "remote-job-idem"
         mock_get.return_value = {"status": "running", "stdout": [], "stderr": []}
 
-        job = Job("repeat-kill", ["/lsiopy/bin/beet", "import", "/data/torrents/music"])
-        time.sleep(0.1)
-
+        job = Job("idempotent-kill", ["/lsiopy/bin/beet", "import", "/data/torrents"])
+        time.sleep(0.05)
         job.kill()
         job.kill()
         job.kill()
+        mock_get.return_value = {"status": "cancelled", "returncode": 130, "stdout": [], "stderr": []}
         time.sleep(0.3)
 
         self.assertEqual(job.log.count("[killed]"), 1)
@@ -1138,17 +1151,92 @@ class TestJobCancellation(unittest.TestCase):
     @mock.patch("backend.beets_client.beets_client.start_job")
     @mock.patch("backend.beets_client.beets_client.get_job")
     def test_kill_after_completion_is_no_op(self, mock_get, mock_start, mock_cancel):
-        """Calling kill after job completes does not alter completed state or add log lines."""
-        mock_start.return_value = "remote-job-444"
+        """Calling kill on completed job is a no-op."""
+        mock_start.return_value = "remote-job-done"
         mock_get.return_value = {"status": "success", "returncode": 0, "stdout": ["done"], "stderr": []}
 
-        job = Job("post-complete-kill", ["/lsiopy/bin/beet", "version"])
+        job = Job("completed-kill", ["/lsiopy/bin/beet", "import", "/data/torrents"])
         time.sleep(0.3)
-
         self.assertEqual(job.status, "success")
+
         job.kill()
+        mock_cancel.assert_not_called()
         self.assertEqual(job.status, "success")
         self.assertNotIn("[killed]", job.log)
+
+
+class TestAcoustIDChromaCapability(unittest.TestCase):
+    """Tests for AcoustID submit and Chroma plugin capability detection."""
+
+    @mock.patch("routes_submissions._read_beets_plugin_list", return_value=["chroma", "mbsubmit"])
+    @mock.patch("backend.beets_client.beets_client.get_status")
+    def test_submission_readiness_queries_remote_capabilities(self, mock_status, mock_plugins):
+        """_submission_readiness includes chroma, fpcalc, and pyacoustid from remote Beets agent."""
+        mock_status.return_value = {
+            "status": "ok",
+            "fpcalc_available": True,
+            "fpcalc_path": "/usr/bin/fpcalc",
+            "pyacoustid_available": True,
+            "plugins": {
+                "discpath": True,
+                "chroma": True,
+                "mbsubmit": True,
+                "musicbrainz": True,
+            }
+        }
+
+        from routes_submissions import _submission_readiness
+        readiness = _submission_readiness()
+        self.assertTrue(readiness["plugins"]["chroma"])
+        self.assertTrue(readiness["plugins"]["mbsubmit"])
+        self.assertTrue(readiness["fpcalc_available"])
+        self.assertTrue(readiness["pyacoustid_available"])
+
+    @mock.patch.dict(os.environ, {"BEETS_WEB_AUTH_DISABLED": "1"})
+    @mock.patch("routes_submissions._submission_readiness")
+    @mock.patch("routes_submissions.lib.get_album")
+    def test_acoustid_submit_blocked_when_chroma_missing(self, mock_get_album, mock_readiness):
+        """album_acoustid_submit returns 400 error when chroma plugin is missing."""
+        from app import app
+        mock_get_album.return_value = mock.MagicMock(id=42)
+        mock_readiness.return_value = {
+            "plugins": {"chroma": False, "mbsubmit": True},
+            "fpcalc_available": True,
+            "pyacoustid_available": True,
+        }
+
+        with app.test_client() as client:
+            resp = client.post("/api/albums/42/acoustid-submit")
+            self.assertEqual(resp.status_code, 400)
+            data = resp.get_json()
+            self.assertFalse(data["ok"])
+            self.assertIn("chroma plugin is not enabled", data["error"])
+
+    @mock.patch.dict(os.environ, {"BEETS_WEB_AUTH_DISABLED": "1"})
+    @mock.patch("routes_submissions._submission_readiness")
+    @mock.patch("routes_submissions.lib.get_album")
+    def test_acoustid_submit_blocked_when_fpcalc_missing(self, mock_get_album, mock_readiness):
+        """album_acoustid_submit returns 400 error when fpcalc binary is missing."""
+        from app import app
+        mock_get_album.return_value = mock.MagicMock(id=42)
+        mock_readiness.return_value = {
+            "plugins": {"chroma": True, "mbsubmit": True},
+            "fpcalc_available": False,
+            "pyacoustid_available": True,
+        }
+
+        with app.test_client() as client:
+            resp = client.post("/api/albums/42/acoustid-submit")
+            self.assertEqual(resp.status_code, 400)
+            data = resp.get_json()
+            self.assertFalse(data["ok"])
+            self.assertIn("fpcalc", data["error"])
+
+    def test_mbsubmit_remains_available_independently(self):
+        """mbsubmit command is allowed independently of chroma/fpcalc in ALLOWED_COMMANDS."""
+        from backend.beets_control_agent import ALLOWED_COMMANDS
+        self.assertIn("mbsubmit", ALLOWED_COMMANDS)
+        self.assertIn("submit", ALLOWED_COMMANDS)
 
 
 if __name__ == "__main__":

@@ -146,6 +146,10 @@ class BeetsClient:
         """Check Beets agent health status."""
         return self._request("GET", "/health", timeout=5.0)
 
+    def get_status(self) -> Dict[str, Any]:
+        """Fetch status and plugin details from the Beets control agent."""
+        return self._request("GET", "/health", timeout=5.0)
+
     def version(self) -> Dict[str, Any]:
         """Fetch Beets version and agent version."""
         return self._request("GET", "/version", timeout=5.0)
