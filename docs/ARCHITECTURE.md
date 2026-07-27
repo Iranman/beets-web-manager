@@ -28,7 +28,7 @@ Frontend
   -> Beets CLI, SQLite DB (/config/musiclibrary.blb), & Media Filesystem
 ```
 
-Current migration status: External engine separation is complete. The web manager service has zero direct Beets imports or SQLite file handles, delegating all library, database, tag, and media mutations to the `beets` container via authenticated internal HTTP APIs.
+Current migration status: incomplete. External engine separation is complete; the web manager service has zero direct Beets imports or SQLite file handles, delegating all library, database, tag, and media mutations to the `beets` container via authenticated internal HTTP APIs.
 
 ## External Boundaries
 
