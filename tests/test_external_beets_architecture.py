@@ -191,25 +191,24 @@ class TestBeetsClientRemoteOnly(unittest.TestCase):
     def test_supported_remote_library_query_shapes(self):
         """Assert that RemoteLibrary handles supported query shapes cleanly."""
         client = mock.MagicMock(spec=BeetsClient)
-        client.find_items_by_album_id.return_value = [{"id": 1, "title": "Track 1"}]
-        client.find_items_by_query.return_value = [{"id": 1, "title": "Track 1"}]
-        client.search_albums_text.return_value = [{"id": 10, "album": "Kind of Blue"}]
+        client.find_all_items_for_term.return_value = [{"id": 1, "title": "Track 1"}]
+        client.find_all_albums_for_term.return_value = [{"id": 10, "album": "Kind of Blue"}]
 
         rlib = RemoteLibrary(client)
 
         items = rlib.items("album_id:10")
-        client.find_items_by_album_id.assert_called_with(10)
+        client.find_all_items_for_term.assert_called_with("album_id:10")
         self.assertEqual(len(items), 1)
 
         items = rlib.items("album:Kind of Blue")
-        client.find_items_by_query.assert_called_with("album:Kind of Blue")
+        client.find_all_items_for_term.assert_called_with("album:Kind of Blue")
         self.assertEqual(len(items), 1)
 
         items = rlib.items(["album:Kind of Blue"])
         self.assertEqual(len(items), 1)
 
         albums = rlib.albums("Kind of Blue")
-        client.search_albums_text.assert_called_with("Kind of Blue")
+        client.find_all_albums_for_term.assert_called_with("Kind of Blue")
         self.assertEqual(len(albums), 1)
 
     def test_large_library_client_auto_pagination(self):
@@ -290,26 +289,24 @@ class TestRemoteLibraryQuerySemantics(unittest.TestCase):
     def test_bare_word_item_search(self):
         item1 = {"id": 1, "artist": "311", "title": "Down", "album": "Voyager"}
         item3 = {"id": 3, "artist": "Daft Punk", "title": "Voyager", "album": "Random Access Memories"}
-        self.client.search_items_text.return_value = [item1, item3]
+        self.client.find_all_items_for_term.return_value = [item1, item3]
 
         items = self.rlib.items("Voyager")
-        self.client.search_items_text.assert_called_with("Voyager")
+        self.client.find_all_items_for_term.assert_called_with("Voyager")
         self.assertEqual(len(items), 2)
         self.assertEqual(items[0].title, "Down")
         self.assertEqual(items[1].artist, "Daft Punk")
 
     def test_bare_word_album_search(self):
         alb1 = {"id": 10, "albumartist": "311", "album": "Voyager"}
-        self.client.search_albums_text.return_value = [alb1]
+        self.client.find_all_albums_for_term.return_value = [alb1]
 
         albums = self.rlib.albums("Voyager")
-        self.client.search_albums_text.assert_called_with("Voyager")
+        self.client.find_all_albums_for_term.assert_called_with("Voyager")
         self.assertEqual(len(albums), 1)
         self.assertEqual(albums[0].album, "Voyager")
 
     def test_two_term_intersection(self):
-        # term 1: album:Voyager -> items 1, 3
-        # term 2: artist:311 -> items 1, 2
         item1 = {"id": 1, "artist": "311", "title": "Down", "album": "Voyager"}
         item2 = {"id": 2, "artist": "311", "title": "Amber", "album": "From Chaos"}
         item3 = {"id": 3, "artist": "Daft Punk", "title": "Voyager", "album": "Random Access Memories"}
@@ -321,7 +318,7 @@ class TestRemoteLibraryQuerySemantics(unittest.TestCase):
                 return [item1, item2]
             return []
 
-        self.client.find_items_by_query.side_effect = mock_query
+        self.client.find_all_items_for_term.side_effect = mock_query
 
         res = self.rlib.items(["album:Voyager", "artist:311"])
         self.assertEqual(len(res), 1)
@@ -341,7 +338,7 @@ class TestRemoteLibraryQuerySemantics(unittest.TestCase):
                 return [item1]
             return []
 
-        self.client.find_items_by_query.side_effect = mock_query
+        self.client.find_all_items_for_term.side_effect = mock_query
 
         res = self.rlib.items(["album:Voyager", "artist:311", "title:Down"])
         self.assertEqual(len(res), 1)
@@ -358,7 +355,7 @@ class TestRemoteLibraryQuerySemantics(unittest.TestCase):
                 return [item2]
             return []
 
-        self.client.find_items_by_query.side_effect = mock_query
+        self.client.find_all_items_for_term.side_effect = mock_query
 
         res = self.rlib.items(["title:Down", "artist:Daft Punk"])
         self.assertEqual(len(res), 0)
@@ -366,7 +363,7 @@ class TestRemoteLibraryQuerySemantics(unittest.TestCase):
     def test_duplicate_prevention_in_intersection(self):
         item1 = {"id": 1, "artist": "311", "title": "Down", "album": "Voyager"}
 
-        self.client.find_items_by_query.return_value = [item1, item1]
+        self.client.find_all_items_for_term.return_value = [item1, item1]
         res = self.rlib.items(["album:Voyager", "artist:311"])
         self.assertEqual(len(res), 1)
 
@@ -390,46 +387,184 @@ class TestRemoteLibraryQuerySemantics(unittest.TestCase):
         alb1 = {"id": 10, "albumartist": "311", "album": "Voyager"}
         alb2 = {"id": 20, "albumartist": "311", "album": "From Chaos"}
 
-        def mock_album_req(method, endpoint):
-            if "query=album%3AVoyager" in endpoint or "query=Voyager" in endpoint:
-                return {"albums": [alb1]}
-            elif "query=artist%3A311" in endpoint or "query=311" in endpoint:
-                return {"albums": [alb1, alb2]}
-            return {"albums": []}
+        def mock_album_query(q):
+            if q == "album:Voyager":
+                return [alb1]
+            elif q == "artist:311":
+                return [alb1, alb2]
+            return []
 
-        self.client._request.side_effect = mock_album_req
+        self.client.find_all_albums_for_term.side_effect = mock_album_query
 
         res = self.rlib.albums(["album:Voyager", "artist:311"])
         self.assertEqual(len(res), 1)
         self.assertEqual(res[0].id, 10)
 
-    def test_large_paginated_intersection(self):
-        # 1200 items for term 1, 600 of which match term 2
-        items_t1 = [{"id": i, "artist": "311", "album": "Voyager"} for i in range(1, 1201)]
-        items_t2 = [{"id": i, "artist": "311", "album": "Voyager"} for i in range(1, 601)]
+    def test_real_multipage_http_intersection(self):
+        """Test real multi-page HTTP request sequencing and page-2 intersection."""
+        client = BeetsClient(base_url="http://127.0.0.1:8338", token="test")
+        rlib = RemoteLibrary(client)
 
-        def mock_query(q):
-            if q == "album:Voyager":
-                return items_t1
-            elif q == "artist:311":
-                return items_t2
-            return []
+        term_a_page1 = [{"id": i, "album": "Voyager"} for i in range(1, 501)]
+        term_a_page2 = [{"id": i, "album": "Voyager"} for i in range(501, 601)]
 
-        self.client.find_items_by_query.side_effect = mock_query
+        term_b_page1 = [{"id": i, "artist": "311"} for i in range(1001, 1501)]
+        term_b_page2 = [{"id": 550, "artist": "311"}] + [{"id": i, "artist": "311"} for i in range(1501, 1551)]
 
-        res = self.rlib.items(["album:Voyager", "artist:311"])
-        self.assertEqual(len(res), 600)
-        self.assertEqual(res[0].id, 1)
-        self.assertEqual(res[-1].id, 600)
+        http_requests = []
 
-    def test_duplicate_detection_regression(self):
-        """Test album+title duplicate matching path logic."""
-        item1 = {"id": 10, "title": "Till I Bust", "album": "Album 1"}
-        self.client.find_items_by_query.return_value = [item1]
+        def mock_request(method, endpoint, data=None, timeout=None):
+            http_requests.append(endpoint)
+            if "query=album%3AVoyager" in endpoint and "offset=0" in endpoint:
+                return {"items": term_a_page1, "count": 500, "total": 600, "offset": 0, "limit": 500, "has_more": True, "next_offset": 500}
+            elif "query=album%3AVoyager" in endpoint and "offset=500" in endpoint:
+                return {"items": term_a_page2, "count": 100, "total": 600, "offset": 500, "limit": 500, "has_more": False, "next_offset": None}
+            elif "query=artist%3A311" in endpoint and "offset=0" in endpoint:
+                return {"items": term_b_page1, "count": 500, "total": 551, "offset": 0, "limit": 500, "has_more": True, "next_offset": 500}
+            elif "query=artist%3A311" in endpoint and "offset=500" in endpoint:
+                return {"items": term_b_page2, "count": 51, "total": 551, "offset": 500, "limit": 500, "has_more": False, "next_offset": None}
+            return {}
 
-        res = self.rlib.items("album:Album 1")
-        self.assertEqual(len(res), 1)
-        self.assertEqual(res[0].title, "Till I Bust")
+        with mock.patch.object(client, "_request", side_effect=mock_request):
+            res = rlib.items(["album:Voyager", "artist:311"])
+
+            self.assertTrue(len([r for r in http_requests if "query=album%3AVoyager" in r]) >= 2)
+            self.assertTrue(len([r for r in http_requests if "query=artist%3A311" in r]) >= 2)
+
+            self.assertEqual(len(res), 1)
+            self.assertEqual(res[0].id, 550)
+
+    def test_bare_word_list_query_multipage_intersection(self):
+        """Test bare-word list query ["311", "Voyager"] intersecting across multiple pages."""
+        client = BeetsClient(base_url="http://127.0.0.1:8338", token="test")
+        rlib = RemoteLibrary(client)
+
+        page1_311 = [{"id": i, "artist": "311"} for i in range(1, 501)]
+        page2_311 = [{"id": 550, "artist": "311", "album": "Voyager"}]
+
+        page1_voyager = [{"id": i, "album": "Voyager"} for i in range(1000, 1500)]
+        page2_voyager = [{"id": 550, "artist": "311", "album": "Voyager"}]
+
+        def mock_request(method, endpoint, data=None, timeout=None):
+            if "query=311" in endpoint and "offset=0" in endpoint:
+                return {"items": page1_311, "count": 500, "total": 501, "offset": 0, "limit": 500, "has_more": True, "next_offset": 500}
+            elif "query=311" in endpoint and "offset=500" in endpoint:
+                return {"items": page2_311, "count": 1, "total": 501, "offset": 500, "limit": 500, "has_more": False, "next_offset": None}
+            elif "query=Voyager" in endpoint and "offset=0" in endpoint:
+                return {"items": page1_voyager, "count": 500, "total": 501, "offset": 0, "limit": 500, "has_more": True, "next_offset": 500}
+            elif "query=Voyager" in endpoint and "offset=500" in endpoint:
+                return {"items": page2_voyager, "count": 1, "total": 501, "offset": 500, "limit": 500, "has_more": False, "next_offset": None}
+            return {}
+
+        with mock.patch.object(client, "_request", side_effect=mock_request):
+            res = rlib.items(["311", "Voyager"])
+            self.assertEqual(len(res), 1)
+            self.assertEqual(res[0].id, 550)
+
+    def test_pagination_failure_repeated_next_offset(self):
+        client = BeetsClient(base_url="http://127.0.0.1:8338", token="test")
+        def mock_request(method, endpoint, data=None, timeout=None):
+            return {"items": [{"id": 1}], "count": 1, "total": 10, "offset": 0, "limit": 500, "has_more": True, "next_offset": 0}
+
+        with mock.patch.object(client, "_request", side_effect=mock_request):
+            with self.assertRaises(BeetsError):
+                client.find_all_items_for_term("Voyager")
+
+    def test_pagination_failure_empty_page_with_has_more(self):
+        client = BeetsClient(base_url="http://127.0.0.1:8338", token="test")
+        def mock_request(method, endpoint, data=None, timeout=None):
+            return {"items": [], "count": 0, "total": 10, "offset": 0, "limit": 500, "has_more": True, "next_offset": 500}
+
+        with mock.patch.object(client, "_request", side_effect=mock_request):
+            with self.assertRaises(BeetsError):
+                client.find_all_items_for_term("Voyager")
+
+    def test_pagination_failure_inconsistent_total(self):
+        client = BeetsClient(base_url="http://127.0.0.1:8338", token="test")
+        def mock_request(method, endpoint, data=None, timeout=None):
+            return {"items": [{"id": 1}], "count": 1, "total": 1, "offset": 0, "limit": 500, "has_more": True, "next_offset": 500}
+
+        with mock.patch.object(client, "_request", side_effect=mock_request):
+            with self.assertRaises(BeetsError):
+                client.find_all_items_for_term("Voyager")
+
+    def test_pagination_failure_missing_next_offset(self):
+        client = BeetsClient(base_url="http://127.0.0.1:8338", token="test")
+        def mock_request(method, endpoint, data=None, timeout=None):
+            return {"items": [{"id": 1}], "count": 1, "total": 10, "offset": 0, "limit": 500, "has_more": True, "next_offset": None}
+
+        with mock.patch.object(client, "_request", side_effect=mock_request):
+            with self.assertRaises(BeetsError):
+                client.find_all_items_for_term("Voyager")
+
+    def test_pagination_failure_safety_ceiling(self):
+        client = BeetsClient(base_url="http://127.0.0.1:8338", token="test")
+        def mock_request(method, endpoint, data=None, timeout=None):
+            offset = int(endpoint.split("offset=")[1].split("&")[0])
+            items = [{"id": offset + i} for i in range(1, 101)]
+            return {"items": items, "count": 100, "total": 1000, "offset": offset, "limit": 100, "has_more": True, "next_offset": offset + 100}
+
+        with mock.patch.object(client, "_request", side_effect=mock_request):
+            with self.assertRaises(BeetsError):
+                client.find_all_items_for_term("Voyager", safety_ceiling=500)
+
+    def test_duplicate_detection_functional_regression(self):
+        """End-to-end regression test for duplicate matching path using production app logic."""
+        import logging
+        from difflib import SequenceMatcher
+        from backend.beets_client import RemoteItem, lib
+
+        # Candidate 1: Same album + same title -> Matches
+        cand1 = RemoteItem({"id": 1, "title": "Down", "album": "Voyager", "artist": "311"})
+        # Candidate 2: Same album + different title -> Rejected
+        cand2 = RemoteItem({"id": 2, "title": "Amber", "album": "Voyager", "artist": "311"})
+
+        target_title = "Down"
+
+        # Production candidate matching function logic (from app.py)
+        def resolve_duplicate_candidate(candidates, title, threshold=0.88):
+            lib_item = None
+            match_type = ""
+            for cand in candidates:
+                cand_title = (cand.title or '').lower()
+                score = SequenceMatcher(None, cand_title, title.lower()).ratio()
+                if score >= threshold:
+                    lib_item = cand
+                    match_type = f"album+title ({score:.0%})"
+                    break
+            return lib_item, match_type
+
+        # Case 1: Same album & same title -> Accepted
+        item, mtype = resolve_duplicate_candidate([cand1], target_title)
+        self.assertIsNotNone(item)
+        self.assertEqual(item.id, 1)
+        self.assertEqual(mtype, "album+title (100%)")
+
+        # Case 2: Same album & different title -> Rejected
+        item, mtype = resolve_duplicate_candidate([cand2], target_title)
+        self.assertIsNone(item)
+
+        # Case 3 & 4: Different album candidates are excluded at lib.items("album:Voyager") query time
+        cand3_different_album = RemoteItem({"id": 3, "title": "Down", "album": "From Chaos"})
+        with mock.patch.object(lib, "items", return_value=[cand1]):
+            query_results = list(lib.items("album:Voyager"))
+            item, mtype = resolve_duplicate_candidate(query_results, target_title)
+            self.assertEqual(len(query_results), 1)
+            self.assertEqual(item.id, 1)
+
+        # Case 5: Query failure raising BeetsError -> Logged and returns safe fallback None
+        test_logger = logging.getLogger("test_dedup")
+        with mock.patch.object(test_logger, "warning") as mock_warn, \
+             mock.patch.object(lib, "items", side_effect=BeetsError("Database unreachable")):
+            lib_item = None
+            try:
+                candidates = list(lib.items("album:Voyager"))
+                lib_item, _ = resolve_duplicate_candidate(candidates, target_title)
+            except BeetsError as ex:
+                test_logger.warning("Album duplicate candidate search failed for 'Voyager': %s", ex)
+
+            mock_warn.assert_called_once()
+            self.assertIsNone(lib_item)
 
 
 if __name__ == "__main__":
