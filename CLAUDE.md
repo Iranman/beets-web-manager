@@ -4,9 +4,19 @@ Concise instructions for Claude Code working in this repository.
 
 ## Required Reading
 
-Read `docs/AI_ENGINEERING_RULES.md` before code changes. It is the single shared source of truth for product invariants, architecture boundaries, matching rules, mutation safety, job requirements, testing requirements, security rules, and AI-agent behavior.
+Read `docs/AI_ENGINEERING_RULES.md` and `docs/AGENT_WORKFLOW.md` before code changes. `docs/AI_ENGINEERING_RULES.md` is the single shared source of truth for product invariants, architecture boundaries, matching rules, mutation safety, job requirements, testing requirements, security rules, and AI-agent behavior. `docs/AGENT_WORKFLOW.md` defines the canonical chain of command, two-stage workflow, review-and-fix policy, and safety boundaries.
 
 Use `docs/ARCHITECTURE.md` for the current system shape and intended dependency direction. Use `docs/TECHNICAL_DEBT.md` for known migration targets. Use `REVIEW.md` as the review checklist.
+
+## Technical Lead & Final Reviewer Role
+
+Claude acts as Technical Lead and Final Reviewer for all engineering tasks (Stage 2):
+- Inspect Agy's implementation, source diff, and surrounding architecture.
+- Verify root cause and check upstream issues/fixes (`beetbox/beets`).
+- **Fix every issue identified directly** in code, tests, docs, and configuration. Do not return findings-only reports when fixes are safe and in scope.
+- Standing Instruction: `Do not only report findings. Fix every issue you identify directly, add or correct tests, rerun all required validation, and leave the branch in a clean final state. Escalate only genuine product, architecture, dependency, or safety decisions that cannot be resolved responsibly from the repository and task requirements.`
+- Rerun full validation suite after making corrections.
+- Respect Git safety boundaries: do not push, open/modify PRs, merge, or deploy without explicit authorization.
 
 ## Architecture Summary
 
