@@ -16,8 +16,10 @@ import shutil
 import signal
 import sqlite3
 import subprocess
+import tempfile
 import threading
 import time
+import urllib.parse
 import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -38,37 +40,55 @@ ALLOWED_COMMANDS = {
     "version", "config", "check", "remove", "rm"
 }
 
-ALLOWED_ROOTS = [
-    os.path.abspath(BEETSDIR),
-    os.path.abspath(MUSIC_LIBRARY_PATH),
-    os.path.abspath(DOWNLOAD_PATH),
-    "/tmp",
-]
-
 JOBS = {}
 JOBS_LOCK = threading.Lock()
 
 
-def is_safe_path(path: str) -> bool:
-    """Verify that path stays strictly within allowed root directories without traversal."""
+def is_safe_path(path: str, allowed_types: list = None) -> bool:
+    """Verify that path stays strictly within allowed root directories without traversal or symlink escape."""
     if not path or not isinstance(path, str):
         return False
     if "\x00" in path:
         return False
-    norm = path.replace("\\", "/")
-    parts = norm.split("/")
-    if ".." in parts:
-        return False
-    for root in ("/config", "/data/media/music", "/data/torrents", "/tmp"):
-        norm_root = root.rstrip("/") + "/"
-        if norm == root or norm.startswith(norm_root):
-            return True
+
+    # Decode URL encoding if present
     try:
-        abs_path = os.path.abspath(path)
+        decoded = urllib.parse.unquote(path)
+    except Exception:
+        decoded = path
+
+    if "\x00" in decoded or "\\" in decoded:
+        return False
+
+    # Path must be absolute
+    if not decoded.startswith("/"):
+        return False
+
+    parts = decoded.split("/")
+    if ".." in parts or "." in parts:
+        return False
+
+    all_roots = {
+        "config": [os.path.abspath(BEETSDIR), "/config"],
+        "music": [os.path.abspath(MUSIC_LIBRARY_PATH), "/data/media/music"],
+        "staging": [os.path.abspath(DOWNLOAD_PATH), "/data/torrents"],
+        "tmp": ["/tmp", tempfile.gettempdir()],
+    }
+
+    roots_to_check = []
+    if allowed_types:
+        for t in allowed_types:
+            if t in all_roots:
+                roots_to_check.extend(all_roots[t])
+    else:
+        for r_list in all_roots.values():
+            roots_to_check.extend(r_list)
+
+    try:
+        abs_path = os.path.abspath(decoded)
         real_path = os.path.realpath(abs_path)
-        beets_dir = os.environ.get("BEETSDIR", "/config")
-        allowed = (beets_dir, "/config", "/data/media/music", "/data/torrents", "/tmp")
-        for root in allowed:
+
+        for root in roots_to_check:
             real_root = os.path.realpath(root)
             if real_path == real_root or real_path.startswith(real_root + os.sep) or real_path.startswith(real_root + "/"):
                 return True
@@ -142,6 +162,7 @@ class AgentJob:
                 tmp_cfg_path = f"/tmp/beets_job_cfg_{self.job_id}.yaml"
                 with open(tmp_cfg_path, "w", encoding="utf-8") as f:
                     f.write(self.config_override)
+                os.chmod(tmp_cfg_path, 0o600)
                 full_cmd.extend(["-c", tmp_cfg_path])
 
             full_cmd.extend(self.command)
@@ -201,10 +222,88 @@ class AgentJob:
         return d
 
 
+def _handle_delete_album(album_id: int, delete_files: bool = True) -> tuple:
+    lock = acquire_os_lock(read_only=False)
+    try:
+        if not os.path.exists(LIB_PATH):
+            return 404, {"error": "Database musiclibrary.blb not found"}
+
+        con = sqlite3.connect(LIB_PATH, timeout=30)
+        con.row_factory = sqlite3.Row
+        try:
+            cur = con.cursor()
+            cur.execute("SELECT * FROM albums WHERE id = ?", (album_id,))
+            album_row = cur.fetchone()
+            if not album_row:
+                return 404, {"error": f"Album {album_id} not found"}
+
+            album_dict = dict(album_row)
+            album_path = album_dict.get("path")
+            if isinstance(album_path, bytes):
+                try:
+                    album_path = album_path.decode("utf-8")
+                except Exception:
+                    album_path = str(album_path)
+
+            cur.execute("SELECT * FROM items WHERE album_id = ?", (album_id,))
+            item_rows = cur.fetchall()
+            item_files = []
+            for item in item_rows:
+                ipath = item["path"]
+                if isinstance(ipath, bytes):
+                    try:
+                        ipath = ipath.decode("utf-8")
+                    except Exception:
+                        ipath = str(ipath)
+                if ipath:
+                    item_files.append(ipath)
+
+            cur.execute("BEGIN TRANSACTION")
+            cur.execute("DELETE FROM items WHERE album_id = ?", (album_id,))
+            items_deleted = cur.rowcount
+            cur.execute("DELETE FROM albums WHERE id = ?", (album_id,))
+            albums_deleted = cur.rowcount
+            con.commit()
+
+            files_deleted = 0
+            file_errors = []
+            if delete_files:
+                for fpath in item_files:
+                    if fpath and is_safe_path(fpath, ["music", "staging"]) and os.path.exists(fpath):
+                        try:
+                            os.unlink(fpath)
+                            files_deleted += 1
+                        except Exception as exc:
+                            file_errors.append(f"Failed to delete {fpath}: {exc}")
+
+                if album_path and is_safe_path(album_path, ["music"]) and os.path.exists(album_path):
+                    try:
+                        if os.path.isdir(album_path) and not os.listdir(album_path):
+                            os.rmdir(album_path)
+                    except Exception:
+                        pass
+
+            return 200, {
+                "success": True,
+                "album_id": album_id,
+                "items_deleted": items_deleted,
+                "albums_deleted": albums_deleted,
+                "files_deleted": files_deleted,
+                "file_errors": file_errors,
+            }
+        except Exception as exc:
+            con.rollback()
+            return 500, {"error": f"Database transaction failed: {exc}"}
+        finally:
+            con.close()
+    finally:
+        release_os_lock(lock)
+
+
 class ControlAgentHandler(BaseHTTPRequestHandler):
-    def _send_json(self, status_code: int, data: dict):
-        body = json.dumps(data).encode("utf-8")
-        self.send_response(status_code)
+    def _send_json(self, code: int, data: dict):
+        body = json.dumps(data, indent=2).encode("utf-8")
+        self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -212,25 +311,27 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
 
     def _authenticate(self) -> bool:
         if not BEETS_API_TOKEN:
-            self._send_json(401, {"error": "Unauthorized: BEETS_API_TOKEN environment variable is missing on agent"})
+            self._send_json(500, {"error": "Control Agent misconfigured: BEETS_API_TOKEN is missing"})
             return False
-        auth_header = self.headers.get("Authorization", "")
-        if auth_header.startswith("Bearer "):
-            token = auth_header[7:].strip()
-            if hmac.compare_digest(token, BEETS_API_TOKEN):
-                return True
-        self._send_json(401, {"error": "Unauthorized: Invalid or missing BEETS_API_TOKEN"})
-        return False
+
+        header_token = self.headers.get("X-Beets-API-Token", "")
+        if not header_token:
+            auth_header = self.headers.get("Authorization", "")
+            if auth_header.startswith("Bearer "):
+                header_token = auth_header[7:]
+
+        if not hmac.compare_digest(header_token.strip(), BEETS_API_TOKEN.strip()):
+            self._send_json(401, {"error": "Unauthorized: invalid API token"})
+            return False
+        return True
 
     def log_message(self, format, *args):
-        msg = format % args
-        if "Authorization" in msg or (BEETS_API_TOKEN and BEETS_API_TOKEN in msg):
-            msg = "[REDACTED TOKEN]"
-        print(f"[BeetsControlAgent] {msg}")
+        pass  # Quiet HTTP handler logging
 
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/")
+        params = parse_qs(parsed.query)
 
         if path == "/health":
             beets_ver = "unknown"
@@ -242,6 +343,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
 
             db_healthy = os.path.exists(LIB_PATH) and os.access(LIB_PATH, os.R_OK)
             config_healthy = os.path.exists(os.path.join(BEETSDIR, "config.yaml"))
+            discpath_found = os.path.exists("/opt/beets-web-manager-agent/beetsplug/discpath.py") or os.path.exists(os.path.join(BEETSDIR, "beetsplug", "discpath.py"))
 
             self._send_json(200, {
                 "status": "ok",
@@ -250,6 +352,9 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 "beets_version": beets_ver,
                 "db_healthy": db_healthy,
                 "config_healthy": config_healthy,
+                "plugins": {
+                    "discpath": discpath_found
+                },
                 "beetsdir": BEETSDIR,
             })
             return
@@ -270,20 +375,139 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
         if path == "/capabilities":
             self._send_json(200, {
                 "allowed_commands": list(ALLOWED_COMMANDS),
-                "allowed_roots": ALLOWED_ROOTS,
                 "os_locking": True,
+                "strict_path_validation": True,
+                "read_only_raw_query": True,
             })
             return
 
-        if path == "/config/status":
-            cfg_file = os.path.join(BEETSDIR, "config.yaml")
-            self._send_json(200, {
-                "config_exists": os.path.exists(cfg_file),
-                "db_exists": os.path.exists(LIB_PATH),
-                "db_size": os.path.getsize(LIB_PATH) if os.path.exists(LIB_PATH) else 0,
-                "lock_exists": os.path.exists(LOCK_PATH),
-            })
+        if path == "/items":
+            album_id = params.get("album_id", [None])[0]
+            path_val = params.get("path", [None])[0]
+            mbid = params.get("mbid", [None])[0] or params.get("mb_trackid", [None])[0]
+            query = params.get("query", [None])[0]
+            limit = min(int(params.get("limit", [500])[0]), 2000)
+
+            if not os.path.exists(LIB_PATH):
+                self._send_json(404, {"error": "Database file musiclibrary.blb not found"})
+                return
+
+            lock = acquire_os_lock(read_only=True)
+            try:
+                con = sqlite3.connect(LIB_PATH, timeout=10)
+                con.row_factory = sqlite3.Row
+                cur = con.cursor()
+                if album_id:
+                    cur.execute("SELECT * FROM items WHERE album_id = ? LIMIT ?", (album_id, limit))
+                elif path_val:
+                    cur.execute("SELECT * FROM items WHERE path = ? LIMIT ?", (path_val, limit))
+                elif mbid:
+                    cur.execute("SELECT * FROM items WHERE mb_trackid = ? LIMIT ?", (mbid, limit))
+                elif query:
+                    cur.execute("SELECT * FROM items WHERE title LIKE ? OR artist LIKE ? OR album LIKE ? LIMIT ?",
+                                (f"%{query}%", f"%{query}%", f"%{query}%", limit))
+                else:
+                    cur.execute("SELECT * FROM items LIMIT ?", (limit,))
+                rows = [dict(r) for r in cur.fetchall()]
+                self._send_json(200, {"items": rows, "count": len(rows)})
+            except Exception as exc:
+                self._send_json(500, {"error": f"Database error: {exc}"})
+            finally:
+                release_os_lock(lock)
             return
+
+        if path.startswith("/items/"):
+            try:
+                item_id = int(path.split("/")[2])
+            except ValueError:
+                self._send_json(400, {"error": "Invalid item ID"})
+                return
+
+            if not os.path.exists(LIB_PATH):
+                self._send_json(404, {"error": "Database file musiclibrary.blb not found"})
+                return
+
+            lock = acquire_os_lock(read_only=True)
+            try:
+                con = sqlite3.connect(LIB_PATH, timeout=10)
+                con.row_factory = sqlite3.Row
+                cur = con.cursor()
+                cur.execute("SELECT * FROM items WHERE id = ?", (item_id,))
+                row = cur.fetchone()
+                if not row:
+                    self._send_json(404, {"error": f"Item {item_id} not found"})
+                else:
+                    self._send_json(200, {"item": dict(row)})
+            except Exception as exc:
+                self._send_json(500, {"error": f"Database error: {exc}"})
+            finally:
+                release_os_lock(lock)
+            return
+
+        if path == "/albums":
+            query = params.get("query", [None])[0]
+            mb_albumid = params.get("mb_albumid", [None])[0]
+            mb_releasegroupid = params.get("mb_releasegroupid", [None])[0]
+            limit = min(int(params.get("limit", [500])[0]), 2000)
+
+            if not os.path.exists(LIB_PATH):
+                self._send_json(404, {"error": "Database file musiclibrary.blb not found"})
+                return
+
+            lock = acquire_os_lock(read_only=True)
+            try:
+                con = sqlite3.connect(LIB_PATH, timeout=10)
+                con.row_factory = sqlite3.Row
+                cur = con.cursor()
+                if mb_albumid:
+                    cur.execute("SELECT * FROM albums WHERE mb_albumid = ? LIMIT ?", (mb_albumid, limit))
+                elif mb_releasegroupid:
+                    cur.execute("SELECT * FROM albums WHERE mb_releasegroupid = ? LIMIT ?", (mb_releasegroupid, limit))
+                elif query:
+                    cur.execute("SELECT * FROM albums WHERE album LIKE ? OR albumartist LIKE ? OR artist LIKE ? LIMIT ?",
+                                (f"%{query}%", f"%{query}%", f"%{query}%", limit))
+                else:
+                    cur.execute("SELECT * FROM albums LIMIT ?", (limit,))
+                rows = [dict(r) for r in cur.fetchall()]
+                self._send_json(200, {"albums": rows, "count": len(rows)})
+            except Exception as exc:
+                self._send_json(500, {"error": f"Database error: {exc}"})
+            finally:
+                release_os_lock(lock)
+            return
+
+        if path.startswith("/albums/"):
+            parts = path.split("/")
+            if len(parts) == 3:
+                try:
+                    album_id = int(parts[2])
+                except ValueError:
+                    self._send_json(400, {"error": "Invalid album ID"})
+                    return
+
+                if not os.path.exists(LIB_PATH):
+                    self._send_json(404, {"error": "Database file musiclibrary.blb not found"})
+                    return
+
+                lock = acquire_os_lock(read_only=True)
+                try:
+                    con = sqlite3.connect(LIB_PATH, timeout=10)
+                    con.row_factory = sqlite3.Row
+                    cur = con.cursor()
+                    cur.execute("SELECT * FROM albums WHERE id = ?", (album_id,))
+                    arow = cur.fetchone()
+                    if not arow:
+                        self._send_json(404, {"error": f"Album {album_id} not found"})
+                    else:
+                        adict = dict(arow)
+                        cur.execute("SELECT * FROM items WHERE album_id = ?", (album_id,))
+                        adict["items"] = [dict(r) for r in cur.fetchall()]
+                        self._send_json(200, {"album": adict})
+                except Exception as exc:
+                    self._send_json(500, {"error": f"Database error: {exc}"})
+                finally:
+                    release_os_lock(lock)
+                return
 
         if path == "/jobs":
             with JOBS_LOCK:
@@ -320,12 +544,28 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/library/raw_query":
-            sql = body.get("sql", "")
+            query = body.get("query", body.get("sql", "")).strip()
             params = body.get("params", [])
 
-            normalized_sql = sql.strip().upper()
-            if not (normalized_sql.startswith("SELECT") or normalized_sql.startswith("PRAGMA")):
-                self._send_json(400, {"error": "Only SELECT or PRAGMA queries are permitted via raw_query"})
+            if not query:
+                self._send_json(400, {"error": "Query string is required"})
+                return
+
+            clean_q = re.sub(r'/\*.*?\*/', '', query, flags=re.DOTALL)
+            clean_q = re.sub(r'--.*$', '', clean_q, flags=re.MULTILINE).strip()
+
+            forbidden = [
+                r"\bUPDATE\b", r"\bDELETE\b", r"\bINSERT\b", r"\bDROP\b",
+                r"\bCREATE\b", r"\bALTER\b", r"\bREPLACE\b", r"\bATTACH\b",
+                r"\bDETACH\b", r"\bVACUUM\b", r"\bPRAGMA\b", r"\bEXEC\b", r"\bEXECUTE\b"
+            ]
+            for pattern in forbidden:
+                if re.search(pattern, clean_q, re.IGNORECASE):
+                    self._send_json(400, {"error": f"Forbidden statement type: raw_query endpoint is strictly read-only SELECT queries"})
+                    return
+
+            if not re.match(r"^\s*(WITH\b|SELECT\b)", clean_q, re.IGNORECASE):
+                self._send_json(400, {"error": "Raw query must begin with SELECT or WITH ... SELECT"})
                 return
 
             if not os.path.exists(LIB_PATH):
@@ -334,16 +574,47 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
 
             lock_file = acquire_os_lock(read_only=True)
             try:
-                uri = f"file:{LIB_PATH}?mode=ro"
-                conn = sqlite3.connect(uri, uri=True, timeout=10.0)
-                conn.row_factory = sqlite3.Row
-                cursor = conn.cursor()
-                cursor.execute(sql, params)
-                rows = [dict(row) for row in cursor.fetchall()]
-                conn.close()
+                con = sqlite3.connect(LIB_PATH, timeout=10)
+                con.row_factory = sqlite3.Row
+                cur = con.cursor()
+                cur.execute(query, params)
+                rows = [dict(r) for r in cur.fetchmany(5000)]
+                con.close()
                 self._send_json(200, {"rows": rows, "count": len(rows)})
             except Exception as exc:
                 self._send_json(500, {"error": f"SQLite error: {exc}"})
+            finally:
+                release_os_lock(lock_file)
+            return
+
+        if path.startswith("/albums/") and path.endswith("/artpath"):
+            parts = path.split("/")
+            try:
+                album_id = int(parts[2])
+            except ValueError:
+                self._send_json(400, {"error": "Invalid album ID"})
+                return
+
+            artpath = body.get("artpath", "")
+            if not artpath or not is_safe_path(artpath, ["music"]):
+                self._send_json(403, {"error": f"Access denied for artpath: {artpath}"})
+                return
+
+            lock_file = acquire_os_lock(read_only=False)
+            try:
+                con = sqlite3.connect(LIB_PATH, timeout=10)
+                con.row_factory = sqlite3.Row
+                cur = con.cursor()
+                cur.execute("SELECT * FROM albums WHERE id = ?", (album_id,))
+                if not cur.fetchone():
+                    self._send_json(404, {"error": f"Album {album_id} not found"})
+                    return
+                cur.execute("UPDATE albums SET artpath = ? WHERE id = ?", (artpath, album_id))
+                con.commit()
+                con.close()
+                self._send_json(200, {"ok": True, "album_id": album_id, "artpath": artpath})
+            except Exception as exc:
+                self._send_json(500, {"error": f"Failed to set artpath: {exc}"})
             finally:
                 release_os_lock(lock_file)
             return
@@ -377,6 +648,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                     tmp_cfg_path = f"/tmp/beets_exec_cfg_{uuid.uuid4().hex}.yaml"
                     with open(tmp_cfg_path, "w", encoding="utf-8") as f:
                         f.write(config_override)
+                    os.chmod(tmp_cfg_path, 0o600)
                     full_cmd.extend(["-c", tmp_cfg_path])
 
                 full_cmd.extend(cmd_list)
@@ -445,7 +717,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
 
         if path == "/tags/read":
             file_path = body.get("file_path", "")
-            if not is_safe_path(file_path):
+            if not is_safe_path(file_path, ["music", "staging"]):
                 self._send_json(403, {"error": f"Access denied for path: {file_path}"})
                 return
             if not os.path.exists(file_path):
@@ -495,7 +767,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
         if path == "/tags/write":
             file_path = body.get("file_path", "")
             tags = body.get("tags", {})
-            if not is_safe_path(file_path):
+            if not is_safe_path(file_path, ["music", "staging"]):
                 self._send_json(403, {"error": f"Access denied for path: {file_path}"})
                 return
             if not os.path.exists(file_path):
@@ -534,7 +806,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
         if path == "/files/move":
             src = body.get("source_path", "")
             dst = body.get("target_path", "")
-            if not is_safe_path(src) or not is_safe_path(dst):
+            if not is_safe_path(src, ["music", "staging"]) or not is_safe_path(dst, ["music", "staging"]):
                 self._send_json(403, {"error": "Access denied for path outside allowed roots"})
                 return
             if not os.path.exists(src):
@@ -554,7 +826,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
 
         if path == "/files/delete":
             target = body.get("path", "")
-            if not is_safe_path(target):
+            if not is_safe_path(target, ["music", "staging"]):
                 self._send_json(403, {"error": f"Access denied for path: {target}"})
                 return
             if not os.path.exists(target):
@@ -576,7 +848,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
 
         if path == "/files/mkdir":
             target = body.get("path", "")
-            if not is_safe_path(target):
+            if not is_safe_path(target, ["music", "staging"]):
                 self._send_json(403, {"error": f"Access denied for path: {target}"})
                 return
 
@@ -589,6 +861,153 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             finally:
                 release_os_lock(lock_file)
             return
+
+        self._send_json(404, {"error": f"Endpoint not found: {path}"})
+
+    def do_PATCH(self):
+        if not self._authenticate():
+            return
+
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/")
+
+        content_len = int(self.headers.get("Content-Length", 0))
+        post_data = self.rfile.read(content_len) if content_len > 0 else b"{}"
+
+        try:
+            body = json.loads(post_data.decode("utf-8")) if post_data else {}
+        except Exception:
+            self._send_json(400, {"error": "Invalid JSON body"})
+            return
+
+        fields = body.get("fields", {})
+
+        if path.startswith("/items/"):
+            try:
+                item_id = int(path.split("/")[2])
+            except ValueError:
+                self._send_json(400, {"error": "Invalid item ID"})
+                return
+
+            if not fields:
+                self._send_json(400, {"error": "No fields provided"})
+                return
+
+            lock_file = acquire_os_lock(read_only=False)
+            try:
+                con = sqlite3.connect(LIB_PATH, timeout=10)
+                con.row_factory = sqlite3.Row
+                cur = con.cursor()
+                cur.execute("SELECT * FROM items WHERE id = ?", (item_id,))
+                if not cur.fetchone():
+                    self._send_json(404, {"error": f"Item {item_id} not found"})
+                    return
+
+                set_clause = ", ".join(f"{k} = ?" for k in fields.keys())
+                params = list(fields.values()) + [item_id]
+                cur.execute(f"UPDATE items SET {set_clause} WHERE id = ?", params)
+                con.commit()
+                cur.execute("SELECT * FROM items WHERE id = ?", (item_id,))
+                updated = dict(cur.fetchone())
+                con.close()
+                self._send_json(200, {"success": True, "item": updated})
+            except Exception as exc:
+                self._send_json(500, {"error": f"Failed to update item: {exc}"})
+            finally:
+                release_os_lock(lock_file)
+            return
+
+        if path.startswith("/albums/"):
+            try:
+                album_id = int(path.split("/")[2])
+            except ValueError:
+                self._send_json(400, {"error": "Invalid album ID"})
+                return
+
+            if not fields:
+                self._send_json(400, {"error": "No fields provided"})
+                return
+
+            lock_file = acquire_os_lock(read_only=False)
+            try:
+                con = sqlite3.connect(LIB_PATH, timeout=10)
+                con.row_factory = sqlite3.Row
+                cur = con.cursor()
+                cur.execute("SELECT * FROM albums WHERE id = ?", (album_id,))
+                if not cur.fetchone():
+                    self._send_json(404, {"error": f"Album {album_id} not found"})
+                    return
+
+                set_clause = ", ".join(f"{k} = ?" for k in fields.keys())
+                params = list(fields.values()) + [album_id]
+                cur.execute(f"UPDATE albums SET {set_clause} WHERE id = ?", params)
+                con.commit()
+                cur.execute("SELECT * FROM albums WHERE id = ?", (album_id,))
+                updated = dict(cur.fetchone())
+                con.close()
+                self._send_json(200, {"success": True, "album": updated})
+            except Exception as exc:
+                self._send_json(500, {"error": f"Failed to update album: {exc}"})
+            finally:
+                release_os_lock(lock_file)
+            return
+
+        self._send_json(404, {"error": f"Endpoint not found: {path}"})
+
+    def do_DELETE(self):
+        if not self._authenticate():
+            return
+
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/")
+
+        content_len = int(self.headers.get("Content-Length", 0))
+        post_data = self.rfile.read(content_len) if content_len > 0 else b"{}"
+        try:
+            body = json.loads(post_data.decode("utf-8")) if post_data else {}
+        except Exception:
+            body = {}
+
+        if path.startswith("/albums/") and path.endswith("/artpath"):
+            parts = path.split("/")
+            try:
+                album_id = int(parts[2])
+            except ValueError:
+                self._send_json(400, {"error": "Invalid album ID"})
+                return
+
+            lock_file = acquire_os_lock(read_only=False)
+            try:
+                con = sqlite3.connect(LIB_PATH, timeout=10)
+                con.row_factory = sqlite3.Row
+                cur = con.cursor()
+                cur.execute("SELECT * FROM albums WHERE id = ?", (album_id,))
+                if not cur.fetchone():
+                    self._send_json(404, {"error": f"Album {album_id} not found"})
+                    return
+                cur.execute("UPDATE albums SET artpath = '' WHERE id = ?", (album_id,))
+                con.commit()
+                con.close()
+                self._send_json(200, {"ok": True, "album_id": album_id, "artpath": ""})
+            except Exception as exc:
+                self._send_json(500, {"error": f"Failed to clear artpath: {exc}"})
+            finally:
+                release_os_lock(lock_file)
+            return
+
+        if path.startswith("/albums/"):
+            parts = path.split("/")
+            if len(parts) == 3:
+                try:
+                    album_id = int(parts[2])
+                except ValueError:
+                    self._send_json(400, {"error": "Invalid album ID"})
+                    return
+
+                delete_files = body.get("delete_files", True)
+                code, res = _handle_delete_album(album_id, delete_files=delete_files)
+                self._send_json(code, res)
+                return
 
         self._send_json(404, {"error": f"Endpoint not found: {path}"})
 

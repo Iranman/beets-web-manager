@@ -10159,32 +10159,14 @@ def _art_repair_attach_last_run(report: Dict[str, Any],
 
 def _album_art_clear_pointer(aid: int, album, log: List[str]) -> None:
     try:
-        album["artpath"] = b""
-        album.store()
-        return
-    except Exception:
-        pass
-    try:
-        with _db() as con:
-            con.execute("UPDATE albums SET artpath='' WHERE id=?", (aid,))
-            con.commit()
+        beets_client.clear_album_artpath(aid)
     except Exception as ex:
         log.append(f"  artpath clear warning: {ex}")
 
 
 def _album_art_set_pointer(aid: int, path: str, log: List[str]) -> None:
     try:
-        album = lib.get_album(aid)
-        if album:
-            album["artpath"] = _s(path).encode()
-            album.store()
-            return
-    except Exception:
-        pass
-    try:
-        with _db() as con:
-            con.execute("UPDATE albums SET artpath=? WHERE id=?", (_s(path), aid))
-            con.commit()
+        beets_client.set_album_artpath(aid, _s(path))
     except Exception as ex:
         log.append(f"  artpath restore warning: {ex}")
 
@@ -10331,10 +10313,7 @@ def _repair_album_art(aid: int, log: List[str], cancel_event=None,
         }
 
     try:
-        album_obj = lib.get_album(aid)
-        if album_obj:
-            album_obj["artpath"] = saved_path.encode()
-            album_obj.store()
+        beets_client.set_album_artpath(aid, saved_path)
         r = _beet_run(
             [BEET_BIN, "-c", "/config/config.yaml", "embedart", "-y", f"album_id:{aid}"],
             log,
@@ -10502,8 +10481,7 @@ def album_replace_art_from_url(aid):
         if not saved:
             raise RuntimeError("Image download failed or was not a supported image")
         try:
-            album_obj["artpath"] = saved.encode()
-            album_obj.store()
+            beets_client.set_album_artpath(aid, saved)
         except Exception as ex:
             raise RuntimeError(f"Could not update beets artpath: {ex}")
         log.append(f"Saved cover art: {Path(saved).name}")
@@ -10569,8 +10547,7 @@ def album_upload_art(aid):
         except Exception as ex:
             raise RuntimeError(f"Could not save uploaded cover art: {ex}")
         try:
-            album_obj["artpath"] = str(dest).encode()
-            album_obj.store()
+            beets_client.set_album_artpath(aid, str(dest))
         except Exception as ex:
             raise RuntimeError(f"Could not update beets artpath: {ex}")
         log.append(f"Uploaded cover art: {dest.name} ({dest.stat().st_size // 1024} KB)")
@@ -10634,15 +10611,9 @@ def album_delete_art(aid):
                 return jsonify({"ok": False, "error": f"Could not delete {p.name}: {ex}"}), 500
 
     try:
-        album["artpath"] = b""
-        album.store()
-    except Exception:
-        try:
-            with _db() as con:
-                con.execute("UPDATE albums SET artpath='' WHERE id=?", (aid,))
-                con.commit()
-        except Exception as ex:
-            return jsonify({"ok": False, "error": f"Could not clear artpath: {ex}"}), 500
+        beets_client.clear_album_artpath(aid)
+    except Exception as ex:
+        return jsonify({"ok": False, "error": f"Could not clear artpath: {ex}"}), 500
 
     _invalidate_lib_cache()
     return jsonify({
@@ -10654,67 +10625,37 @@ def album_delete_art(aid):
 
 @app.post("/api/albums/<int:aid>/remove")
 def album_remove(aid):
-    """Remove an album from the beets library (optionally delete files from disk).
-    Uses the beets Python API directly to avoid CLI flag compatibility issues."""
+    """Remove an album from the beets library and storage via control agent endpoint."""
     delete_files = bool((request.json or {}).get("delete_files", False))
 
-    # Validate album exists before queuing job
-    album = lib.get_album(aid)
+    album = beets_client.get_album(aid)
     if not album:
         return jsonify({"ok": False, "error": f"Album {aid} not found in library"}), 404
 
     def _do(log, cancel_event=None):
-        try:
-            album_obj = lib.get_album(aid)
-            if not album_obj:
-                raise RuntimeError(f"Album {aid} not found")
+        log.append(f"Removing album '{_s(album.get('album'))}' (id={aid}) via Beets Control Agent…")
+        res = beets_client.delete_album(aid, delete_files=delete_files)
+        if not res.get("success"):
+            err = res.get("error", "Album removal failed")
+            log.append(f"❌ Error: {err}")
+            raise RuntimeError(err)
 
-            items = list(album_obj.items())
-            log.append(f"Removing {len(items)} track(s) from album '{_s(getattr(album_obj,'album',''))}' (id={aid})…")
+        items_del = res.get("items_deleted", 0)
+        files_del = res.get("files_deleted", 0)
+        file_errs = res.get("file_errors", [])
+        for fe in file_errs:
+            log.append(f"  WARNING: {fe}")
 
-            _mroot_del = "/data/media/music"
-            removed_paths = []
-            for item in items:
-                p = _s(item.path)
-                # Resolve relative beets path to absolute for file operations
-                if p and not p.startswith("/"):
-                    p = _mroot_del + "/" + p
-                removed_paths.append(p)
-                if delete_files:
-                    try:
-                        Path(p).unlink(missing_ok=True)
-                        log.append(f"  Deleted: {Path(p).name}")
-                    except Exception as ex:
-                        log.append(f"  WARNING: could not delete {Path(p).name}: {ex}")
+        log.append(f"✓ Removed album from library ({items_del} DB tracks deleted)." +
+                   (f" {files_del} files deleted from disk." if delete_files else " Files kept on disk."))
+        _invalidate_lib_cache()
 
-            # Remove from DB via direct SQLite (lib.remove() not available in this version)
-            with _db() as con_rm:
-                con_rm.execute("DELETE FROM items WHERE album_id = ?", (aid,))
-                con_rm.execute("DELETE FROM albums WHERE id = ?", (aid,))
-                con_rm.commit()
-
-            # Clean up empty album folder
-            if delete_files and removed_paths:
-                try:
-                    aldir = Path(removed_paths[0]).parent
-                    remaining = [f for f in aldir.iterdir()
-                                 if f.suffix.lower() in {'.flac','.mp3','.m4a','.ogg','.opus','.wav'}]
-                    if not remaining:
-                        aldir.rmdir()
-                        log.append(f"  Removed empty folder: {aldir.name}")
-                except Exception:
-                    pass
-
-            log.append(f"✓ Removed album from library." +
-                       (" Files deleted from disk." if delete_files else " Files kept on disk."))
-            _invalidate_lib_cache()
-
-        except Exception as ex:
-            raise RuntimeError(f"Remove failed: {ex}")
-
-    label = f"Remove album {aid}" + (" + delete files" if delete_files else "")
-    job = jobs.start_python(_do, label=label)
-    return jsonify({"ok": True, "job_id": job.job_id})
+    job_id = jobs.create(
+        f"Remove Album: {_s(album.get('album') or f'id={aid}')}",
+        _do,
+        meta={"album_id": aid, "type": "album_remove", "delete_files": delete_files}
+    )
+    return jsonify({"ok": True, "job_id": job_id})
 
 
 @app.post("/api/albums/<int:aid>/rename")
@@ -47779,45 +47720,6 @@ def _playlist_staged_entries(name: str) -> List[Tuple[Dict[str, Any], Path]]:
 
 def _enrich_playlist_file_tags(path: Path, track: Dict[str, Any], log: List[str]) -> None:
     """Write safe playlist singleton tags before beet import via control agent API."""
-    sys_mods = sys.modules if "sys" in globals() else __import__("sys").modules
-    if "mediafile" in sys_mods and hasattr(sys_mods["mediafile"], "MediaFile"):
-        try:
-            mf = sys_mods["mediafile"].MediaFile(str(path))
-            artist = _s(track.get("artist") or "")
-            title = _s(track.get("title") or "")
-            changed = False
-            if artist:
-                if not (getattr(mf, "artist", "") or "").strip():
-                    mf.artist = artist
-                    changed = True
-                if not (getattr(mf, "albumartist", "") or "").strip():
-                    mf.albumartist = artist
-                    changed = True
-            if title and not (getattr(mf, "title", "") or "").strip():
-                mf.title = title
-                changed = True
-            current_album = (getattr(mf, "album", "") or "").strip()
-            year_only_album = bool(re.match(r'^\d{4}$', current_album))
-            bad_album = _playlist_album_value_is_bad_fallback(current_album)
-            if not current_album or year_only_album or bad_album:
-                mf.album = title or path.stem
-                if artist and not (getattr(mf, "albumartist", "") or "").strip():
-                    mf.albumartist = artist
-                changed = True
-                try:
-                    if getattr(mf, "year", 0):
-                        mf.year = 0
-                        changed = True
-                except Exception:
-                    pass
-                if bad_album:
-                    log.append(f"  [tag] Rejected metadata: provider name was incorrectly used as album ({current_album})")
-            if changed and hasattr(mf, "save"):
-                mf.save()
-            return
-        except Exception:
-            pass
-
     try:
         cur_tags = _read_file_media_tags(str(path))
         artist = _s(track.get("artist") or "")
@@ -47840,6 +47742,11 @@ def _enrich_playlist_file_tags(path: Path, track: Dict[str, Any], log: List[str]
             tags_to_write["album"] = title or path.stem
             if artist and not (cur_tags.get("albumartist") or "").strip():
                 tags_to_write["albumartist"] = artist
+            try:
+                if int(cur_tags.get("year", 0) or 0) > 0:
+                    tags_to_write["year"] = 0
+            except Exception:
+                pass
             if bad_album:
                 log.append(
                     f"  [tag] Rejected metadata: provider name was incorrectly used as album ({current_album})"

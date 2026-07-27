@@ -3,6 +3,7 @@ import sys
 import tempfile
 import types
 import unittest
+from unittest import mock
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
@@ -71,58 +72,24 @@ class PlaylistProviderAlbumGuardTests(unittest.TestCase):
             "_enrich_playlist_file_tags",
         ], ns)
 
-        class FakeMediaFile:
-            instances = {}
-            seed = {}
+        written_tags = {}
+        mock_client = mock.MagicMock()
+        mock_client.write_tags = lambda p, tags: written_tags.update(tags)
+        ns["beets_client"] = mock_client
+        ns["_read_file_media_tags"] = lambda p: {"artist": "", "albumartist": "", "title": "", "album": "SoundCloud", "year": 2026}
 
-            def __init__(self, path):
-                self.path = path
-                data = dict(self.seed[path])
-                self.artist = data.get("artist", "")
-                self.albumartist = data.get("albumartist", "")
-                self.title = data.get("title", "")
-                self.album = data.get("album", "")
-                self.year = data.get("year", 0)
-                self.saved = False
-                self.instances[path] = self
-
-            def save(self):
-                self.saved = True
-
-        fake_module = types.ModuleType("mediafile")
-        fake_module.MediaFile = FakeMediaFile
-        old_mediafile = sys.modules.get("mediafile")
-        sys.modules["mediafile"] = fake_module
-        try:
-            with tempfile.TemporaryDirectory() as tmp:
-                audio = Path(tmp) / "hoe phase.mp3"
-                audio.write_bytes(b"")
-                FakeMediaFile.seed[str(audio)] = {
-                    "artist": "",
-                    "albumartist": "",
-                    "title": "",
-                    "album": "SoundCloud",
-                    "year": 2026,
-                }
-                log = []
-                ns["_enrich_playlist_file_tags"](
-                    audio,
-                    {"artist": "1takejay", "title": "Hoe Phase"},
-                    log,
-                )
-                mf = FakeMediaFile.instances[str(audio)]
-                self.assertEqual(mf.album, "Hoe Phase")
-                self.assertEqual(mf.artist, "1takejay")
-                self.assertEqual(mf.albumartist, "1takejay")
-                self.assertEqual(mf.title, "Hoe Phase")
-                self.assertEqual(mf.year, 0)
-                self.assertTrue(mf.saved)
-                self.assertTrue(any("provider name" in line for line in log))
-        finally:
-            if old_mediafile is None:
-                sys.modules.pop("mediafile", None)
-            else:
-                sys.modules["mediafile"] = old_mediafile
+        log = []
+        ns["_enrich_playlist_file_tags"](
+            Path("hoe phase.mp3"),
+            {"artist": "1takejay", "title": "Hoe Phase"},
+            log,
+        )
+        self.assertEqual(written_tags.get("album"), "Hoe Phase")
+        self.assertEqual(written_tags.get("artist"), "1takejay")
+        self.assertEqual(written_tags.get("albumartist"), "1takejay")
+        self.assertEqual(written_tags.get("title"), "Hoe Phase")
+        self.assertEqual(written_tags.get("year"), 0)
+        self.assertTrue(any("provider name" in line for line in log))
 
     def test_empty_album_fallback_clears_upload_year(self):
         ns = self._namespace()
@@ -135,40 +102,19 @@ class PlaylistProviderAlbumGuardTests(unittest.TestCase):
             "_enrich_playlist_file_tags",
         ], ns)
 
-        class FakeMediaFile:
-            instance = None
+        written_tags = {}
+        mock_client = mock.MagicMock()
+        mock_client.write_tags = lambda p, tags: written_tags.update(tags)
+        ns["beets_client"] = mock_client
+        ns["_read_file_media_tags"] = lambda p: {"artist": "", "albumartist": "", "title": "", "album": "", "year": 2025}
 
-            def __init__(self, path):
-                self.artist = ""
-                self.albumartist = ""
-                self.title = ""
-                self.album = ""
-                self.year = 2025
-                self.saved = False
-                FakeMediaFile.instance = self
-
-            def save(self):
-                self.saved = True
-
-        fake_module = types.ModuleType("mediafile")
-        fake_module.MediaFile = FakeMediaFile
-        old_mediafile = sys.modules.get("mediafile")
-        sys.modules["mediafile"] = fake_module
-        try:
-            ns["_enrich_playlist_file_tags"](
-                Path("till i bust.mp3"),
-                {"artist": "1takejay", "title": "Till I Bust"},
-                [],
-            )
-            mf = FakeMediaFile.instance
-            self.assertEqual(mf.album, "Till I Bust")
-            self.assertEqual(mf.year, 0)
-            self.assertTrue(mf.saved)
-        finally:
-            if old_mediafile is None:
-                sys.modules.pop("mediafile", None)
-            else:
-                sys.modules["mediafile"] = old_mediafile
+        ns["_enrich_playlist_file_tags"](
+            Path("till i bust.mp3"),
+            {"artist": "1takejay", "title": "Till I Bust"},
+            [],
+        )
+        self.assertEqual(written_tags.get("album"), "Till I Bust")
+        self.assertEqual(written_tags.get("year"), 0)
 
     def test_verified_album_tag_is_preserved(self):
         ns = self._namespace()
@@ -181,40 +127,19 @@ class PlaylistProviderAlbumGuardTests(unittest.TestCase):
             "_enrich_playlist_file_tags",
         ], ns)
 
-        class FakeMediaFile:
-            instance = None
+        written_tags = {}
+        mock_client = mock.MagicMock()
+        mock_client.write_tags = lambda p, tags: written_tags.update(tags)
+        ns["beets_client"] = mock_client
+        ns["_read_file_media_tags"] = lambda p: {"artist": "AiritOut JuJu", "albumartist": "AiritOut JuJu", "title": "Track One", "album": "Trap Is In Session", "year": 2024}
 
-            def __init__(self, path):
-                self.artist = "AiritOut JuJu"
-                self.albumartist = "AiritOut JuJu"
-                self.title = "Track One"
-                self.album = "Trap Is In Session"
-                self.year = 2024
-                self.saved = False
-                FakeMediaFile.instance = self
-
-            def save(self):
-                self.saved = True
-
-        fake_module = types.ModuleType("mediafile")
-        fake_module.MediaFile = FakeMediaFile
-        old_mediafile = sys.modules.get("mediafile")
-        sys.modules["mediafile"] = fake_module
-        try:
-            ns["_enrich_playlist_file_tags"](
-                Path("track.mp3"),
-                {"artist": "AiritOut JuJu", "title": "Track One"},
-                [],
-            )
-            mf = FakeMediaFile.instance
-            self.assertEqual(mf.album, "Trap Is In Session")
-            self.assertEqual(mf.year, 2024)
-            self.assertFalse(mf.saved)
-        finally:
-            if old_mediafile is None:
-                sys.modules.pop("mediafile", None)
-            else:
-                sys.modules["mediafile"] = old_mediafile
+        ns["_enrich_playlist_file_tags"](
+            Path("track.mp3"),
+            {"artist": "AiritOut JuJu", "title": "Track One"},
+            [],
+        )
+        self.assertNotIn("album", written_tags)
+        self.assertNotIn("year", written_tags)
 
     def test_quality_and_repair_paths_mark_existing_provider_album_rows(self):
         ns = self._namespace()

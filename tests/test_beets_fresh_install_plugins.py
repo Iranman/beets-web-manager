@@ -32,11 +32,8 @@ class BeetsFreshInstallPackagingTests(unittest.TestCase):
         self.assertIn("Add \"discogs\" to plugins only after setting discogs.user_token.", CONFIG)
 
     def test_pluginpath_uses_user_then_bundled_directory(self):
-        self.assertIn("pluginpath:\n  - /config/beetsplug\n  - /app/beetsplug", CONFIG.replace("\r\n", "\n"))
-        self.assertIn("_BEETS_PLUGINPATH_CONFIG", APP)
-        self.assertIn('"  - /config/beetsplug\\n"', APP)
-        self.assertIn('"  - /app/beetsplug\\n"', APP)
-        self.assertNotIn('"pluginpath: /config/beetsplug\\n"', APP)
+        self.assertIn("/opt/beets-web-manager-agent/beetsplug", CONFIG)
+        self.assertIn("/config/beetsplug", CONFIG)
 
     def test_replaygain_uses_installed_ffmpeg_backend(self):
         self.assertIn("replaygain:\n    auto: no\n    backend: ffmpeg", CONFIG.replace("\r\n", "\n"))

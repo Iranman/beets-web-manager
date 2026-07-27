@@ -1,6 +1,9 @@
 services:
   beets:
-    image: lscr.io/linuxserver/beets:2.4.0@sha256:4cce2967154e849ca5466469d934a4bb9d8d83c3acf2a5279da47bccd16518f1
+    build:
+      context: .
+      dockerfile: Dockerfile.beets
+    image: beets-engine:2.4.0
     container_name: beets
     restart: unless-stopped
     environment:
@@ -14,11 +17,6 @@ services:
       - ./config:/config
       - ${MUSIC_LIBRARY_PATH:-./data/music}:/data/media/music
       - ${DOWNLOAD_PATH:-./data/downloads}:/data/torrents
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - |
-        /lsiopy/bin/python3 /config/backend/beets_control_agent.py &
-        exec /init
     expose:
       - "8338"
     healthcheck:

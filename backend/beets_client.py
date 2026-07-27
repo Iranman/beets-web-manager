@@ -95,8 +95,8 @@ class BeetsClient:
         return self._request("GET", "/config/status", timeout=5.0)
 
     def raw_sqlite_query(self, sql: str, params: tuple = ()) -> List[Dict[str, Any]]:
-        """Run a read-only SELECT query against the Beets database via the control agent."""
-        res = self._request("POST", "/library/raw_query", {"sql": sql, "params": list(params)})
+        """Run a strictly read-only SELECT query against the Beets database via the control agent."""
+        res = self._request("POST", "/library/raw_query", {"query": sql, "params": list(params)})
         return res.get("rows", [])
 
     def run_command(self, command: str, args: Optional[List[str]] = None, timeout: float = 120.0, config_override: str = "") -> Dict[str, Any]:
@@ -147,6 +147,72 @@ class BeetsClient:
     def mkdir(self, path: str) -> Dict[str, Any]:
         """Create a directory via the Beets agent under OS file lock."""
         return self._request("POST", "/files/mkdir", {"path": path})
+
+    # Purpose-built structured library methods
+    def get_item(self, item_id: int) -> Optional[Dict[str, Any]]:
+        """Fetch single item dict by ID."""
+        res = self._request("GET", f"/items/{item_id}")
+        return res.get("item")
+
+    def get_album(self, album_id: int) -> Optional[Dict[str, Any]]:
+        """Fetch single album dict by ID (includes items list)."""
+        res = self._request("GET", f"/albums/{album_id}")
+        return res.get("album")
+
+    def find_items_by_album_id(self, album_id: int) -> List[Dict[str, Any]]:
+        """Fetch all items belonging to album_id."""
+        res = self._request("GET", f"/items?album_id={album_id}")
+        return res.get("items", [])
+
+    def find_items_by_path(self, path: str) -> List[Dict[str, Any]]:
+        """Fetch items by audio file path."""
+        res = self._request("GET", f"/items?path={urllib.parse.quote(path)}")
+        return res.get("items", [])
+
+    def find_items_by_mbid(self, mbid: str) -> List[Dict[str, Any]]:
+        """Fetch items by MusicBrainz track ID."""
+        res = self._request("GET", f"/items?mbid={urllib.parse.quote(mbid)}")
+        return res.get("items", [])
+
+    def find_items_by_query(self, query: str, limit: int = 500) -> List[Dict[str, Any]]:
+        """Find items matching query string."""
+        res = self._request("GET", f"/items?query={urllib.parse.quote(query)}&limit={limit}")
+        return res.get("items", [])
+
+    def find_albums_by_query(self, query: str, limit: int = 500) -> List[Dict[str, Any]]:
+        """Find albums matching query string."""
+        res = self._request("GET", f"/albums?query={urllib.parse.quote(query)}&limit={limit}")
+        return res.get("albums", [])
+
+    def list_all_albums(self, limit: int = 5000) -> List[Dict[str, Any]]:
+        """List all albums up to limit."""
+        res = self._request("GET", f"/albums?limit={limit}")
+        return res.get("albums", [])
+
+    def list_all_items(self, limit: int = 10000) -> List[Dict[str, Any]]:
+        """List all items up to limit."""
+        res = self._request("GET", f"/items?limit={limit}")
+        return res.get("items", [])
+
+    def update_item_fields(self, item_id: int, fields: Dict[str, Any]) -> Dict[str, Any]:
+        """Update fields on item row in SQLite under lock."""
+        return self._request("PATCH", f"/items/{item_id}", {"fields": fields})
+
+    def update_album_fields(self, album_id: int, fields: Dict[str, Any]) -> Dict[str, Any]:
+        """Update fields on album row in SQLite under lock."""
+        return self._request("PATCH", f"/albums/{album_id}", {"fields": fields})
+
+    def set_album_artpath(self, album_id: int, artpath: str) -> Dict[str, Any]:
+        """Set artpath field on album in SQLite under lock."""
+        return self._request("POST", f"/albums/{album_id}/artpath", {"artpath": artpath})
+
+    def clear_album_artpath(self, album_id: int) -> Dict[str, Any]:
+        """Clear artpath field on album in SQLite under lock."""
+        return self._request("DELETE", f"/albums/{album_id}/artpath")
+
+    def delete_album(self, album_id: int, delete_files: bool = True) -> Dict[str, Any]:
+        """Perform transactional single-writer album deletion under lock."""
+        return self._request("DELETE", f"/albums/{album_id}", {"delete_files": delete_files})
 
 
 class RemoteSQLiteCursor:
@@ -257,6 +323,24 @@ class DictAttr:
     def to_dict(self) -> Dict[str, Any]:
         return dict(object.__getattribute__(self, "_data"))
 
+    def store(self):
+        raise NotImplementedError(
+            "Direct ORM .store() is not supported. Use beets_client.update_item_fields() "
+            "or beets_client.update_album_fields() to issue explicit remote updates."
+        )
+
+    def save(self):
+        raise NotImplementedError(
+            "Direct ORM .save() is not supported. Use beets_client.update_item_fields() "
+            "or beets_client.update_album_fields() to issue explicit remote updates."
+        )
+
+    def remove(self):
+        raise NotImplementedError(
+            "Direct ORM .remove() is not supported. Use beets_client.delete_album() "
+            "or beets_client.delete_file() to issue explicit remote deletions."
+        )
+
 
 class RemoteItem(DictAttr):
     pass
@@ -267,46 +351,59 @@ class RemoteAlbum(DictAttr):
         aid = self.id
         if not aid:
             return []
-        rows = beets_client.raw_sqlite_query("SELECT * FROM items WHERE album_id = ? ORDER BY disc, track", (int(aid),))
-        return [RemoteItem(r) for r in rows]
+        items_data = beets_client.find_items_by_album_id(int(aid))
+        return [RemoteItem(r) for r in items_data]
 
 
 class RemoteLibrary:
+    """Strict wrapper for legacy library call compatibility."""
     def __init__(self, client: BeetsClient):
         self.client = client
 
     def get_item(self, iid: int) -> Optional[RemoteItem]:
         if not iid:
             return None
-        rows = self.client.raw_sqlite_query("SELECT * FROM items WHERE id = ?", (int(iid),))
-        return RemoteItem(rows[0]) if rows else None
+        data = self.client.get_item(int(iid))
+        return RemoteItem(data) if data else None
 
     def get_album(self, aid: int) -> Optional[RemoteAlbum]:
         if not aid:
             return None
-        rows = self.client.raw_sqlite_query("SELECT * FROM albums WHERE id = ?", (int(aid),))
-        return RemoteAlbum(rows[0]) if rows else None
+        data = self.client.get_album(int(aid))
+        return RemoteAlbum(data) if data else None
 
     def items(self, query: Any = None) -> List[RemoteItem]:
+        if query is None or query == [] or query == () or query == "":
+            items_data = self.client.list_all_items()
+            return [RemoteItem(r) for r in items_data]
+        if isinstance(query, list) and not query:
+            items_data = self.client.list_all_items()
+            return [RemoteItem(r) for r in items_data]
         if isinstance(query, str) and query.startswith("album_id:"):
             aid_str = query.split(":", 1)[1].strip()
             if aid_str.isdigit():
-                rows = self.client.raw_sqlite_query("SELECT * FROM items WHERE album_id = ? ORDER BY disc, track", (int(aid_str),))
-                return [RemoteItem(r) for r in rows]
+                items_data = self.client.find_items_by_album_id(int(aid_str))
+                return [RemoteItem(r) for r in items_data]
         elif isinstance(query, str) and query.startswith("album:"):
             album_name = query.split(":", 1)[1].strip()
-            rows = self.client.raw_sqlite_query("SELECT * FROM items WHERE album LIKE ? ORDER BY disc, track", (f"%{album_name}%",))
-            return [RemoteItem(r) for r in rows]
-        rows = self.client.raw_sqlite_query("SELECT * FROM items ORDER BY id")
-        return [RemoteItem(r) for r in rows]
+            items_data = self.client.find_items_by_query(album_name)
+            return [RemoteItem(r) for r in items_data]
+        elif isinstance(query, str):
+            items_data = self.client.find_items_by_query(query)
+            return [RemoteItem(r) for r in items_data]
+        raise BeetsError(f"Unsupported RemoteLibrary items() query shape: {query!r}")
 
     def albums(self, query: Any = None) -> List[RemoteAlbum]:
+        if query is None or query == [] or query == () or query == "":
+            albums_data = self.client.list_all_albums()
+            return [RemoteAlbum(r) for r in albums_data]
+        if isinstance(query, list) and not query:
+            albums_data = self.client.list_all_albums()
+            return [RemoteAlbum(r) for r in albums_data]
         if isinstance(query, str) and query.strip():
-            q_str = query.strip()
-            rows = self.client.raw_sqlite_query("SELECT * FROM albums WHERE album LIKE ? OR albumartist LIKE ? ORDER BY id", (f"%{q_str}%", f"%{q_str}%"))
-            return [RemoteAlbum(r) for r in rows]
-        rows = self.client.raw_sqlite_query("SELECT * FROM albums ORDER BY id")
-        return [RemoteAlbum(r) for r in rows]
+            albums_data = self.client.find_albums_by_query(query.strip())
+            return [RemoteAlbum(r) for r in albums_data]
+        raise BeetsError(f"Unsupported RemoteLibrary albums() query shape: {query!r}")
 
 
 # Module singleton instances

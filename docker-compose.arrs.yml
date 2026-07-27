@@ -205,13 +205,11 @@ services:
     <<: *common-keys
     container_name: beets
     platform: linux/amd64
-    image: lscr.io/linuxserver/beets:2.4.0@sha256:4cce2967154e849ca5466469d934a4bb9d8d83c3acf2a5279da47bccd16518f1
+    build:
+      context: .
+      dockerfile: Dockerfile.beets
+    image: beets-engine:2.4.0
     user: "${BEETS_UID:-1000}:${BEETS_GID:-1000}"
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - |
-        /lsiopy/bin/python3 /config/backend/beets_control_agent.py &
-        exec /init
     security_opt:
       - no-new-privileges:true
     cap_drop:
