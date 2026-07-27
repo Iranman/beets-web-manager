@@ -226,7 +226,7 @@ def _handle_delete_album(album_id: int, delete_files: bool = True) -> tuple:
     lock = acquire_os_lock(read_only=False)
     try:
         if not os.path.exists(LIB_PATH):
-            return 404, {"error": "Database musiclibrary.blb not found"}
+            return 404, {"error": "Database musiclibrary.blb not found", "status": "failed", "database_deleted": False}
 
         con = sqlite3.connect(LIB_PATH, timeout=30)
         con.row_factory = sqlite3.Row
@@ -235,7 +235,7 @@ def _handle_delete_album(album_id: int, delete_files: bool = True) -> tuple:
             cur.execute("SELECT * FROM albums WHERE id = ?", (album_id,))
             album_row = cur.fetchone()
             if not album_row:
-                return 404, {"error": f"Album {album_id} not found"}
+                return 404, {"error": f"Album {album_id} not found", "status": "failed", "database_deleted": False}
 
             album_dict = dict(album_row)
             album_path = album_dict.get("path")
@@ -283,17 +283,28 @@ def _handle_delete_album(album_id: int, delete_files: bool = True) -> tuple:
                     except Exception:
                         pass
 
+            files_failed = len(file_errors)
+            if files_failed > 0:
+                status_str = "partial_failure"
+                success_flag = False
+            else:
+                status_str = "success"
+                success_flag = True
+
             return 200, {
-                "success": True,
+                "success": success_flag,
+                "status": status_str,
+                "database_deleted": True,
                 "album_id": album_id,
                 "items_deleted": items_deleted,
                 "albums_deleted": albums_deleted,
                 "files_deleted": files_deleted,
+                "files_failed": files_failed,
                 "file_errors": file_errors,
             }
         except Exception as exc:
             con.rollback()
-            return 500, {"error": f"Database transaction failed: {exc}"}
+            return 500, {"error": f"Database transaction failed: {exc}", "status": "failed", "database_deleted": False}
         finally:
             con.close()
     finally:
@@ -386,7 +397,8 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             path_val = params.get("path", [None])[0]
             mbid = params.get("mbid", [None])[0] or params.get("mb_trackid", [None])[0]
             query = params.get("query", [None])[0]
-            limit = min(int(params.get("limit", [500])[0]), 2000)
+            offset = max(int(params.get("offset", [0])[0]), 0)
+            limit = min(max(int(params.get("limit", [500])[0]), 1), 2000)
 
             if not os.path.exists(LIB_PATH):
                 self._send_json(404, {"error": "Database file musiclibrary.blb not found"})
@@ -397,19 +409,56 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 con = sqlite3.connect(LIB_PATH, timeout=10)
                 con.row_factory = sqlite3.Row
                 cur = con.cursor()
+
+                where_clause = ""
+                sql_params = []
                 if album_id:
-                    cur.execute("SELECT * FROM items WHERE album_id = ? LIMIT ?", (album_id, limit))
+                    where_clause = "WHERE album_id = ?"
+                    sql_params.append(album_id)
                 elif path_val:
-                    cur.execute("SELECT * FROM items WHERE path = ? LIMIT ?", (path_val, limit))
+                    where_clause = "WHERE path = ?"
+                    sql_params.append(path_val)
                 elif mbid:
-                    cur.execute("SELECT * FROM items WHERE mb_trackid = ? LIMIT ?", (mbid, limit))
+                    where_clause = "WHERE mb_trackid = ?"
+                    sql_params.append(mbid)
                 elif query:
-                    cur.execute("SELECT * FROM items WHERE title LIKE ? OR artist LIKE ? OR album LIKE ? LIMIT ?",
-                                (f"%{query}%", f"%{query}%", f"%{query}%", limit))
-                else:
-                    cur.execute("SELECT * FROM items LIMIT ?", (limit,))
+                    if query.startswith("album:"):
+                        where_clause = "WHERE album LIKE ?"
+                        sql_params.append(f"%{query[6:]}%")
+                    elif query.startswith("artist:"):
+                        where_clause = "WHERE artist LIKE ?"
+                        sql_params.append(f"%{query[7:]}%")
+                    elif query.startswith("title:"):
+                        where_clause = "WHERE title LIKE ?"
+                        sql_params.append(f"%{query[6:]}%")
+                    elif query == "singleton:true":
+                        where_clause = "WHERE album_id IS NULL OR album_id = 0"
+                    elif query == "singleton:false":
+                        where_clause = "WHERE album_id IS NOT NULL AND album_id != 0"
+                    else:
+                        where_clause = "WHERE title LIKE ? OR artist LIKE ? OR album LIKE ?"
+                        pattern = f"%{query}%"
+                        sql_params.extend([pattern, pattern, pattern])
+
+                cur.execute(f"SELECT COUNT(*) FROM items {where_clause}", sql_params)
+                total_count = cur.fetchone()[0]
+
+                cur.execute(f"SELECT * FROM items {where_clause} ORDER BY id LIMIT ? OFFSET ?", sql_params + [limit, offset])
                 rows = [dict(r) for r in cur.fetchall()]
-                self._send_json(200, {"items": rows, "count": len(rows)})
+                con.close()
+
+                has_more = (offset + len(rows)) < total_count
+                next_offset = (offset + len(rows)) if has_more else None
+
+                self._send_json(200, {
+                    "items": rows,
+                    "count": len(rows),
+                    "total": total_count,
+                    "offset": offset,
+                    "limit": limit,
+                    "has_more": has_more,
+                    "next_offset": next_offset
+                })
             except Exception as exc:
                 self._send_json(500, {"error": f"Database error: {exc}"})
             finally:
@@ -448,7 +497,8 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             query = params.get("query", [None])[0]
             mb_albumid = params.get("mb_albumid", [None])[0]
             mb_releasegroupid = params.get("mb_releasegroupid", [None])[0]
-            limit = min(int(params.get("limit", [500])[0]), 2000)
+            offset = max(int(params.get("offset", [0])[0]), 0)
+            limit = min(max(int(params.get("limit", [500])[0]), 1), 2000)
 
             if not os.path.exists(LIB_PATH):
                 self._send_json(404, {"error": "Database file musiclibrary.blb not found"})
@@ -459,17 +509,47 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 con = sqlite3.connect(LIB_PATH, timeout=10)
                 con.row_factory = sqlite3.Row
                 cur = con.cursor()
+
+                where_clause = ""
+                sql_params = []
                 if mb_albumid:
-                    cur.execute("SELECT * FROM albums WHERE mb_albumid = ? LIMIT ?", (mb_albumid, limit))
+                    where_clause = "WHERE mb_albumid = ?"
+                    sql_params.append(mb_albumid)
                 elif mb_releasegroupid:
-                    cur.execute("SELECT * FROM albums WHERE mb_releasegroupid = ? LIMIT ?", (mb_releasegroupid, limit))
+                    where_clause = "WHERE mb_releasegroupid = ?"
+                    sql_params.append(mb_releasegroupid)
                 elif query:
-                    cur.execute("SELECT * FROM albums WHERE album LIKE ? OR albumartist LIKE ? OR artist LIKE ? LIMIT ?",
-                                (f"%{query}%", f"%{query}%", f"%{query}%", limit))
-                else:
-                    cur.execute("SELECT * FROM albums LIMIT ?", (limit,))
+                    if query.startswith("album:"):
+                        where_clause = "WHERE album LIKE ?"
+                        sql_params.append(f"%{query[6:]}%")
+                    elif query.startswith("artist:"):
+                        where_clause = "WHERE albumartist LIKE ? OR artist LIKE ?"
+                        pattern = f"%{query[7:]}%"
+                        sql_params.extend([pattern, pattern])
+                    else:
+                        where_clause = "WHERE album LIKE ? OR albumartist LIKE ? OR artist LIKE ?"
+                        pattern = f"%{query}%"
+                        sql_params.extend([pattern, pattern, pattern])
+
+                cur.execute(f"SELECT COUNT(*) FROM albums {where_clause}", sql_params)
+                total_count = cur.fetchone()[0]
+
+                cur.execute(f"SELECT * FROM albums {where_clause} ORDER BY id LIMIT ? OFFSET ?", sql_params + [limit, offset])
                 rows = [dict(r) for r in cur.fetchall()]
-                self._send_json(200, {"albums": rows, "count": len(rows)})
+                con.close()
+
+                has_more = (offset + len(rows)) < total_count
+                next_offset = (offset + len(rows)) if has_more else None
+
+                self._send_json(200, {
+                    "albums": rows,
+                    "count": len(rows),
+                    "total": total_count,
+                    "offset": offset,
+                    "limit": limit,
+                    "has_more": has_more,
+                    "next_offset": next_offset
+                })
             except Exception as exc:
                 self._send_json(500, {"error": f"Database error: {exc}"})
             finally:
@@ -500,7 +580,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                         self._send_json(404, {"error": f"Album {album_id} not found"})
                     else:
                         adict = dict(arow)
-                        cur.execute("SELECT * FROM items WHERE album_id = ?", (album_id,))
+                        cur.execute("SELECT * FROM items WHERE album_id = ? ORDER BY disc, track", (album_id,))
                         adict["items"] = [dict(r) for r in cur.fetchall()]
                         self._send_json(200, {"album": adict})
                 except Exception as exc:
@@ -545,7 +625,9 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
 
         if path == "/library/raw_query":
             query = body.get("query", body.get("sql", "")).strip()
-            params = body.get("params", [])
+            params_list = body.get("params", [])
+            offset = max(int(body.get("offset", 0)), 0)
+            limit = min(max(int(body.get("limit", 1000)), 1), 5000)
 
             if not query:
                 self._send_json(400, {"error": "Query string is required"})
@@ -553,6 +635,11 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
 
             clean_q = re.sub(r'/\*.*?\*/', '', query, flags=re.DOTALL)
             clean_q = re.sub(r'--.*$', '', clean_q, flags=re.MULTILINE).strip()
+
+            if ";" in clean_q.rstrip(";"):
+                self._send_json(400, {"error": "Multiple SQL statements are not permitted"})
+                return
+            clean_q = clean_q.rstrip(";")
 
             forbidden = [
                 r"\bUPDATE\b", r"\bDELETE\b", r"\bINSERT\b", r"\bDROP\b",
@@ -577,10 +664,29 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 con = sqlite3.connect(LIB_PATH, timeout=10)
                 con.row_factory = sqlite3.Row
                 cur = con.cursor()
-                cur.execute(query, params)
-                rows = [dict(r) for r in cur.fetchmany(5000)]
+
+                count_sql = f"SELECT COUNT(*) FROM ({clean_q}) AS _total_subquery"
+                cur.execute(count_sql, params_list)
+                total_count = cur.fetchone()[0]
+
+                page_sql = f"SELECT * FROM ({clean_q}) AS _page_subquery LIMIT ? OFFSET ?"
+                cur.execute(page_sql, list(params_list) + [limit, offset])
+                rows = [dict(r) for r in cur.fetchall()]
                 con.close()
-                self._send_json(200, {"rows": rows, "count": len(rows)})
+
+                has_more = (offset + len(rows)) < total_count
+                next_offset = (offset + len(rows)) if has_more else None
+
+                self._send_json(200, {
+                    "rows": rows,
+                    "count": len(rows),
+                    "total": total_count,
+                    "offset": offset,
+                    "limit": limit,
+                    "has_more": has_more,
+                    "next_offset": next_offset,
+                    "truncated": has_more
+                })
             except Exception as exc:
                 self._send_json(500, {"error": f"SQLite error: {exc}"})
             finally:
@@ -624,17 +730,38 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             args = body.get("args", [])
             timeout = body.get("timeout", 120)
             config_override = body.get("config_override", "")
+            source_path = body.get("source_path", "")
+            target_path = body.get("target_path", "")
 
             if not command or command not in ALLOWED_COMMANDS:
                 self._send_json(400, {"error": f"Command '{command}' is not in the allowlist"})
                 return
 
-            for arg in args:
-                if str(arg).startswith("/") and not is_safe_path(str(arg)):
-                    self._send_json(403, {"error": f"Access denied for path outside allowed roots: {arg}"})
+            if source_path:
+                allowed_roots = ["staging"] if command == "import" else ["music", "staging"]
+                if not is_safe_path(source_path, allowed_roots):
+                    self._send_json(403, {"error": f"Access denied for source_path: {source_path}"})
                     return
 
-            cmd_list = [command] + [str(a) for a in args]
+            if target_path:
+                if not is_safe_path(target_path, ["music", "staging"]):
+                    self._send_json(403, {"error": f"Access denied for target_path: {target_path}"})
+                    return
+
+            for arg in args:
+                s_arg = str(arg)
+                if s_arg.startswith(".") or ".." in s_arg or "\\" in s_arg or "\x00" in s_arg:
+                    self._send_json(403, {"error": f"Invalid path parameter in command args: {arg}"})
+                    return
+                if s_arg.startswith("/") and not is_safe_path(s_arg, ["music", "staging", "config", "tmp"]):
+                    self._send_json(403, {"error": f"Access denied for path in command args: {arg}"})
+                    return
+
+            cmd_list = [command]
+            if source_path:
+                cmd_list.append(source_path)
+            cmd_list.extend([str(a) for a in args])
+
             mutating = command in {
                 "import", "update", "write", "move", "modify", "mbsync",
                 "fetchart", "embedart", "lastgenre", "alt", "remove", "rm"
@@ -684,18 +811,33 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             args = body.get("args", [])
             label = body.get("label", "")
             config_override = body.get("config_override", "")
+            source_path = body.get("source_path", "")
 
             if not command or command not in ALLOWED_COMMANDS:
                 self._send_json(400, {"error": f"Command '{command}' is not in the allowlist"})
                 return
 
+            if source_path:
+                allowed_roots = ["staging"] if command == "import" else ["music", "staging"]
+                if not is_safe_path(source_path, allowed_roots):
+                    self._send_json(403, {"error": f"Access denied for source_path: {source_path}"})
+                    return
+
             for arg in args:
-                if str(arg).startswith("/") and not is_safe_path(str(arg)):
-                    self._send_json(403, {"error": f"Access denied for path outside allowed roots: {arg}"})
+                s_arg = str(arg)
+                if s_arg.startswith(".") or ".." in s_arg or "\\" in s_arg or "\x00" in s_arg:
+                    self._send_json(403, {"error": f"Invalid path parameter in job args: {arg}"})
+                    return
+                if s_arg.startswith("/") and not is_safe_path(s_arg, ["music", "staging", "config", "tmp"]):
+                    self._send_json(403, {"error": f"Access denied for path in job args: {arg}"})
                     return
 
             job_id = uuid.uuid4().hex
-            cmd_list = [command] + [str(a) for a in args]
+            cmd_list = [command]
+            if source_path:
+                cmd_list.append(source_path)
+            cmd_list.extend([str(a) for a in args])
+
             job = AgentJob(job_id, cmd_list, label=label, config_override=config_override)
             with JOBS_LOCK:
                 JOBS[job_id] = job

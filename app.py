@@ -10635,19 +10635,30 @@ def album_remove(aid):
     def _do(log, cancel_event=None):
         log.append(f"Removing album '{_s(album.get('album'))}' (id={aid}) via Beets Control Agent…")
         res = beets_client.delete_album(aid, delete_files=delete_files)
-        if not res.get("success"):
-            err = res.get("error", "Album removal failed")
-            log.append(f"❌ Error: {err}")
-            raise RuntimeError(err)
 
+        status = res.get("status")
+        db_deleted = res.get("database_deleted", False)
         items_del = res.get("items_deleted", 0)
         files_del = res.get("files_deleted", 0)
+        files_failed = res.get("files_failed", 0)
         file_errs = res.get("file_errors", [])
-        for fe in file_errs:
-            log.append(f"  WARNING: {fe}")
 
-        log.append(f"✓ Removed album from library ({items_del} DB tracks deleted)." +
-                   (f" {files_del} files deleted from disk." if delete_files else " Files kept on disk."))
+        if status == "failed" or not db_deleted:
+            err = res.get("error", "Album removal failed")
+            log.append(f"❌ Error: {err}")
+            log.append(f"[AUDIT] Album ID {aid} removal FAILED: {err}")
+            raise RuntimeError(err)
+
+        if status == "partial_failure" or file_errs:
+            log.append(f"⚠️ Partial Failure: Album database record deleted ({items_del} DB tracks removed), but {files_failed} file(s) failed to delete from disk.")
+            for fe in file_errs:
+                log.append(f"  FAILED: {fe}")
+            log.append(f"[AUDIT] Album ID {aid} removal PARTIAL FAILURE: db_deleted=True, files_deleted={files_del}, files_failed={files_failed}")
+        else:
+            log.append(f"✓ Removed album from library ({items_del} DB tracks deleted)." +
+                       (f" {files_del} files deleted from disk." if delete_files else " Files kept on disk."))
+            log.append(f"[AUDIT] Album ID {aid} removal SUCCESS: db_deleted=True, files_deleted={files_del}")
+
         _invalidate_lib_cache()
 
     job_id = jobs.create(
@@ -27631,7 +27642,7 @@ def dedup_scan():
                         if folder_album:
                             try:
                                 from difflib import SequenceMatcher
-                                candidates = list(lib.items([f"album:{folder_album}"]))
+                                candidates = list(lib.items(f"album:{folder_album}"))
                                 for cand in candidates:
                                     cand_title = (cand.title or '').lower()
                                     score = SequenceMatcher(None, cand_title, title.lower()).ratio()
@@ -27639,8 +27650,10 @@ def dedup_scan():
                                         lib_item   = cand
                                         match_type = f"album+title ({score:.0%})"
                                         break
-                            except Exception:
-                                pass
+                            except BeetsError as ex:
+                                logger.warning("Album duplicate candidate search failed for '%s': %s", folder_album, ex)
+                            except Exception as ex:
+                                logger.warning("Error during album+title duplicate candidate search: %s", ex)
 
                     # 5. AcoustID fingerprint fallback — when tags/size/text heuristics
                     #    found nothing, fingerprint the source file and look for a

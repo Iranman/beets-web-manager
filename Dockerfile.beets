@@ -1,16 +1,16 @@
 # syntax=docker/dockerfile:1
 FROM lscr.io/linuxserver/beets:2.4.0@sha256:4cce2967154e849ca5466469d934a4bb9d8d83c3acf2a5279da47bccd16518f1
 
-# Create agent application and plugin directories
-RUN mkdir -p /opt/beets-web-manager-agent/beetsplug /etc/custom-services.d
+# Create agent application, plugin, and LinuxServer custom service directories
+RUN mkdir -p /opt/beets-web-manager-agent/beetsplug /custom-services.d
 
 # Copy agent application code and bundled custom plugins
 COPY backend/beets_control_agent.py /opt/beets-web-manager-agent/beets_control_agent.py
 COPY beetsplug/ /opt/beets-web-manager-agent/beetsplug/
 
-# Install S6 supervision service for the control agent
-COPY docker/beets-agent-s6.sh /etc/custom-services.d/01-beets-control-agent
-RUN chmod +x /etc/custom-services.d/01-beets-control-agent
+# Install S6 supervision service for the control agent in LinuxServer supported path
+COPY docker/beets-agent-s6.sh /custom-services.d/beets-control-agent
+RUN chmod +x /custom-services.d/beets-control-agent
 
 # Environment configuration
 ENV BEETS_AGENT_PORT=8338 \

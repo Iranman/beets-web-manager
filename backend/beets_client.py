@@ -94,28 +94,38 @@ class BeetsClient:
         """Fetch configuration and database existence status."""
         return self._request("GET", "/config/status", timeout=5.0)
 
-    def raw_sqlite_query(self, sql: str, params: tuple = ()) -> List[Dict[str, Any]]:
+    def raw_sqlite_query(self, sql: str, params: tuple = (), offset: int = 0, limit: int = 1000) -> List[Dict[str, Any]]:
         """Run a strictly read-only SELECT query against the Beets database via the control agent."""
-        res = self._request("POST", "/library/raw_query", {"query": sql, "params": list(params)})
+        res = self._request("POST", "/library/raw_query", {"query": sql, "params": list(params), "offset": offset, "limit": limit})
         return res.get("rows", [])
 
-    def run_command(self, command: str, args: Optional[List[str]] = None, timeout: float = 120.0, config_override: str = "") -> Dict[str, Any]:
+    def run_command(self, command: str, args: Optional[List[str]] = None, timeout: float = 120.0, config_override: str = "", source_path: str = "", target_path: str = "") -> Dict[str, Any]:
         """Execute a beet command synchronously on the Beets control agent."""
-        return self._request("POST", "/commands/execute", {
+        payload = {
             "command": command,
             "args": args or [],
             "timeout": timeout,
             "config_override": config_override,
-        }, timeout=timeout + 5.0)
+        }
+        if source_path:
+            payload["source_path"] = source_path
+        if target_path:
+            payload["target_path"] = target_path
 
-    def start_job(self, command: str, args: Optional[List[str]] = None, label: str = "", config_override: str = "") -> str:
+        return self._request("POST", "/commands/execute", payload, timeout=timeout + 5.0)
+
+    def start_job(self, command: str, args: Optional[List[str]] = None, label: str = "", config_override: str = "", source_path: str = "") -> str:
         """Start a background job inside the Beets control agent."""
-        res = self._request("POST", "/jobs/create", {
+        payload = {
             "command": command,
             "args": args or [],
             "label": label,
             "config_override": config_override,
-        })
+        }
+        if source_path:
+            payload["source_path"] = source_path
+
+        res = self._request("POST", "/jobs/create", payload)
         return res.get("job_id", "")
 
     def get_job(self, job_id: str) -> Dict[str, Any]:
@@ -184,15 +194,51 @@ class BeetsClient:
         res = self._request("GET", f"/albums?query={urllib.parse.quote(query)}&limit={limit}")
         return res.get("albums", [])
 
-    def list_all_albums(self, limit: int = 5000) -> List[Dict[str, Any]]:
-        """List all albums up to limit."""
-        res = self._request("GET", f"/albums?limit={limit}")
-        return res.get("albums", [])
+    def list_all_albums(self, page_size: int = 500, safety_ceiling: int = 20000) -> List[Dict[str, Any]]:
+        """Fetch all albums by paginating through all available pages up to safety ceiling."""
+        all_albums = []
+        offset = 0
+        while True:
+            res = self._request("GET", f"/albums?offset={offset}&limit={page_size}")
+            albums_page = res.get("albums", [])
+            all_albums.extend(albums_page)
 
-    def list_all_items(self, limit: int = 10000) -> List[Dict[str, Any]]:
-        """List all items up to limit."""
-        res = self._request("GET", f"/items?limit={limit}")
-        return res.get("items", [])
+            has_more = res.get("has_more", False)
+            if not has_more or not albums_page:
+                break
+
+            next_offset = res.get("next_offset")
+            if next_offset is None or next_offset <= offset:
+                raise BeetsError(f"Inconsistent pagination state received from server: next_offset={next_offset}, current_offset={offset}")
+
+            offset = next_offset
+            if len(all_albums) >= safety_ceiling:
+                raise BeetsError(f"Safety ceiling reached while paginating albums ({len(all_albums)} >= {safety_ceiling})")
+
+        return all_albums
+
+    def list_all_items(self, page_size: int = 1000, safety_ceiling: int = 100000) -> List[Dict[str, Any]]:
+        """Fetch all items by paginating through all available pages up to safety ceiling."""
+        all_items = []
+        offset = 0
+        while True:
+            res = self._request("GET", f"/items?offset={offset}&limit={page_size}")
+            items_page = res.get("items", [])
+            all_items.extend(items_page)
+
+            has_more = res.get("has_more", False)
+            if not has_more or not items_page:
+                break
+
+            next_offset = res.get("next_offset")
+            if next_offset is None or next_offset <= offset:
+                raise BeetsError(f"Inconsistent pagination state received from server: next_offset={next_offset}, current_offset={offset}")
+
+            offset = next_offset
+            if len(all_items) >= safety_ceiling:
+                raise BeetsError(f"Safety ceiling reached while paginating items ({len(all_items)} >= {safety_ceiling})")
+
+        return all_items
 
     def update_item_fields(self, item_id: int, fields: Dict[str, Any]) -> Dict[str, Any]:
         """Update fields on item row in SQLite under lock."""
@@ -376,33 +422,84 @@ class RemoteLibrary:
         if query is None or query == [] or query == () or query == "":
             items_data = self.client.list_all_items()
             return [RemoteItem(r) for r in items_data]
-        if isinstance(query, list) and not query:
-            items_data = self.client.list_all_items()
-            return [RemoteItem(r) for r in items_data]
-        if isinstance(query, str) and query.startswith("album_id:"):
-            aid_str = query.split(":", 1)[1].strip()
-            if aid_str.isdigit():
-                items_data = self.client.find_items_by_album_id(int(aid_str))
+
+        if isinstance(query, list):
+            if not query:
+                items_data = self.client.list_all_items()
                 return [RemoteItem(r) for r in items_data]
-        elif isinstance(query, str) and query.startswith("album:"):
-            album_name = query.split(":", 1)[1].strip()
-            items_data = self.client.find_items_by_query(album_name)
-            return [RemoteItem(r) for r in items_data]
-        elif isinstance(query, str):
-            items_data = self.client.find_items_by_query(query)
-            return [RemoteItem(r) for r in items_data]
+            res_items = []
+            for q_term in query:
+                if isinstance(q_term, str):
+                    res_items.extend(self.items(q_term))
+                else:
+                    raise BeetsError(f"Unsupported query term in list: {q_term!r}")
+            return res_items
+
+        if isinstance(query, str):
+            q_str = query.strip()
+            if q_str.startswith("album_id:"):
+                aid_str = q_str.split(":", 1)[1].strip()
+                if aid_str.isdigit():
+                    items_data = self.client.find_items_by_album_id(int(aid_str))
+                    return [RemoteItem(r) for r in items_data]
+            elif q_str.startswith("album:"):
+                items_data = self.client.find_items_by_query(q_str)
+                return [RemoteItem(r) for r in items_data]
+            elif q_str.startswith("artist:"):
+                items_data = self.client.find_items_by_query(q_str)
+                return [RemoteItem(r) for r in items_data]
+            elif q_str.startswith("title:"):
+                items_data = self.client.find_items_by_query(q_str)
+                return [RemoteItem(r) for r in items_data]
+            elif q_str.startswith("path:"):
+                path_val = q_str.split(":", 1)[1].strip()
+                items_data = self.client.find_items_by_path(path_val)
+                return [RemoteItem(r) for r in items_data]
+            elif q_str.startswith("mb_trackid:") or q_str.startswith("mbid:"):
+                mbid_val = q_str.split(":", 1)[1].strip()
+                items_data = self.client.find_items_by_mbid(mbid_val)
+                return [RemoteItem(r) for r in items_data]
+            elif q_str in {"singleton:true", "singleton:false"}:
+                items_data = self.client.find_items_by_query(q_str)
+                return [RemoteItem(r) for r in items_data]
+
         raise BeetsError(f"Unsupported RemoteLibrary items() query shape: {query!r}")
 
     def albums(self, query: Any = None) -> List[RemoteAlbum]:
         if query is None or query == [] or query == () or query == "":
             albums_data = self.client.list_all_albums()
             return [RemoteAlbum(r) for r in albums_data]
-        if isinstance(query, list) and not query:
-            albums_data = self.client.list_all_albums()
-            return [RemoteAlbum(r) for r in albums_data]
+
+        if isinstance(query, list):
+            if not query:
+                albums_data = self.client.list_all_albums()
+                return [RemoteAlbum(r) for r in albums_data]
+            res_albums = []
+            for q_term in query:
+                if isinstance(q_term, str):
+                    res_albums.extend(self.albums(q_term))
+                else:
+                    raise BeetsError(f"Unsupported query term in list: {q_term!r}")
+            return res_albums
+
         if isinstance(query, str) and query.strip():
-            albums_data = self.client.find_albums_by_query(query.strip())
-            return [RemoteAlbum(r) for r in albums_data]
+            q_str = query.strip()
+            if q_str.startswith("mb_albumid:"):
+                mb_id = q_str.split(":", 1)[1].strip()
+                res = self.client._request("GET", f"/albums?mb_albumid={urllib.parse.quote(mb_id)}")
+                return [RemoteAlbum(r) for r in res.get("albums", [])]
+            elif q_str.startswith("mb_releasegroupid:"):
+                rg_id = q_str.split(":", 1)[1].strip()
+                res = self.client._request("GET", f"/albums?mb_releasegroupid={urllib.parse.quote(rg_id)}")
+                return [RemoteAlbum(r) for r in res.get("albums", [])]
+            elif q_str.startswith("album:"):
+                search_term = q_str[6:].strip()
+                albums_data = self.client.find_albums_by_query(search_term)
+                return [RemoteAlbum(r) for r in albums_data]
+            elif ":" not in q_str:
+                albums_data = self.client.find_albums_by_query(q_str)
+                return [RemoteAlbum(r) for r in albums_data]
+
         raise BeetsError(f"Unsupported RemoteLibrary albums() query shape: {query!r}")
 
 
