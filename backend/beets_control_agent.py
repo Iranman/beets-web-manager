@@ -396,6 +396,9 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             album_id = params.get("album_id", [None])[0]
             path_val = params.get("path", [None])[0]
             mbid = params.get("mbid", [None])[0] or params.get("mb_trackid", [None])[0]
+            album_text = params.get("album", [None])[0]
+            artist_text = params.get("artist", [None])[0]
+            title_text = params.get("title", [None])[0]
             query = params.get("query", [None])[0]
             offset = max(int(params.get("offset", [0])[0]), 0)
             limit = min(max(int(params.get("limit", [500])[0]), 1), 2000)
@@ -412,19 +415,45 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
 
                 where_clause = ""
                 sql_params = []
-                if album_id:
+                if album_id is not None:
                     where_clause = "WHERE album_id = ?"
                     sql_params.append(int(album_id))
-                elif path_val:
+                elif path_val is not None:
                     where_clause = "WHERE path = ?"
                     sql_params.append(path_val)
-                elif mbid:
+                elif mbid is not None:
                     where_clause = "WHERE mb_trackid = ?"
                     sql_params.append(mbid)
+                elif "singleton" in params:
+                    s_raw = params["singleton"][0]
+                    if s_raw is None or str(s_raw).strip().lower() not in {"true", "false", "1", "0"}:
+                        self._send_json(400, {"error": f"Invalid singleton parameter value: {s_raw!r}"})
+                        con.close()
+                        return
+                    s_bool = str(s_raw).strip().lower() in {"true", "1"}
+                    if s_bool:
+                        where_clause = "WHERE (album_id IS NULL OR album_id = 0)"
+                    else:
+                        where_clause = "WHERE (album_id IS NOT NULL AND album_id != 0)"
+                elif album_text is not None:
+                    where_clause = "WHERE album LIKE ? ESCAPE '\\'"
+                    escaped = album_text.strip().replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+                    sql_params.append(f"%{escaped}%")
+                elif artist_text is not None:
+                    where_clause = "WHERE artist LIKE ? ESCAPE '\\'"
+                    escaped = artist_text.strip().replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+                    sql_params.append(f"%{escaped}%")
+                elif title_text is not None:
+                    where_clause = "WHERE title LIKE ? ESCAPE '\\'"
+                    escaped = title_text.strip().replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+                    sql_params.append(f"%{escaped}%")
                 elif query is not None:
                     q_str = str(query).strip()
                     if not q_str:
                         where_clause = "WHERE 1 = 0"
+                    elif q_str.startswith("album_id:"):
+                        where_clause = "WHERE album_id = ?"
+                        sql_params.append(int(q_str.split(":", 1)[1].strip()))
                     elif q_str.startswith("album:"):
                         where_clause = "WHERE album LIKE ? ESCAPE '\\'"
                         escaped = q_str[6:].strip().replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
@@ -443,10 +472,16 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                     elif q_str.startswith("mb_trackid:") or q_str.startswith("mbid:"):
                         where_clause = "WHERE mb_trackid = ?"
                         sql_params.append(q_str.split(":", 1)[1].strip())
-                    elif q_str == "singleton:true":
-                        where_clause = "WHERE album_id IS NULL OR album_id = 0"
-                    elif q_str == "singleton:false":
-                        where_clause = "WHERE album_id IS NOT NULL AND album_id != 0"
+                    elif q_str.lower().startswith("singleton:"):
+                        s_val = q_str.split(":", 1)[1].strip().lower()
+                        if s_val in {"true", "1"}:
+                            where_clause = "WHERE (album_id IS NULL OR album_id = 0)"
+                        elif s_val in {"false", "0"}:
+                            where_clause = "WHERE (album_id IS NOT NULL AND album_id != 0)"
+                        else:
+                            self._send_json(400, {"error": f"Invalid singleton query value: {s_val!r}"})
+                            con.close()
+                            return
                     else:
                         escaped = q_str.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
                         pattern = f"%{escaped}%"

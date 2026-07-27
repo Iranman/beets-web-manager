@@ -340,11 +340,7 @@ class TestStructuredQueryRouting(unittest.TestCase):
         with mock.patch("backend.beets_control_agent.LIB_PATH", str(self.db_path)):
             handler = ControlAgentHandler.__new__(ControlAgentHandler)
             handler.headers = {"Authorization": "Bearer test"}
-
-            def _fake_auth():
-                return True
-
-            handler._authenticate = _fake_auth
+            handler._authenticate = lambda: True
 
             client = BeetsClient(base_url="http://127.0.0.1:8338", token="test")
             rlib = RemoteLibrary(client)
@@ -362,7 +358,7 @@ class TestStructuredQueryRouting(unittest.TestCase):
                 return res_data[0][1]
 
             with mock.patch.object(client, "_request", side_effect=mock_request), \
-                 mock.patch.object(client, "find_all_items_by_bare_text") as mock_bare_text:
+                 mock.patch.object(client, "search_items_text") as mock_bare_text:
 
                 items = rlib.items("album_id:100")
                 self.assertEqual(len(items), 2)
@@ -419,7 +415,7 @@ class TestStructuredQueryRouting(unittest.TestCase):
                 return res_data[0][1]
 
             with mock.patch.object(client, "_request", side_effect=mock_request), \
-                 mock.patch.object(client, "find_all_albums_by_bare_text") as mock_bare_text:
+                 mock.patch.object(client, "search_albums_text") as mock_bare_text:
 
                 albums = rlib.albums("mb_albumid:album-mbid-aaa")
                 self.assertEqual(len(albums), 1)
@@ -467,6 +463,152 @@ class TestStructuredQueryRouting(unittest.TestCase):
 
         with self.assertRaises(BeetsError):
             rlib.albums("unknown_field:123")
+
+
+class TestSingletonQueryRouting(unittest.TestCase):
+    """Real client and control-agent handler tests for singleton:true and singleton:false filtering."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.tmp_dir.name) / "musiclibrary.blb"
+
+        con = sqlite3.connect(str(self.db_path))
+        con.execute("""
+            CREATE TABLE items (
+                id INTEGER PRIMARY KEY,
+                album_id INTEGER,
+                title TEXT,
+                artist TEXT,
+                album TEXT,
+                path TEXT
+            )
+        """)
+
+        # Item 1: album_id = NULL (singleton)
+        con.execute("INSERT INTO items VALUES (1, NULL, 'Singleton 1', 'Artist A', '', '/data/music/s1.flac')")
+        # Item 2: album_id = 0 (singleton per project evidence)
+        con.execute("INSERT INTO items VALUES (2, 0, 'Singleton 2', 'Artist B', '', '/data/music/s2.flac')")
+        # Item 3: album_id = 100 (album track)
+        con.execute("INSERT INTO items VALUES (3, 100, 'Track 1', 'Artist C', 'Album 1', '/data/music/a1/t1.flac')")
+        # Item 4: album_id = 200 (album track)
+        con.execute("INSERT INTO items VALUES (4, 200, 'Track 2', 'Artist D', 'Album 2', '/data/music/a2/t2.flac')")
+
+        con.commit()
+        con.close()
+
+    def tearDown(self):
+        self.tmp_dir.cleanup()
+
+    def _setup_handler_and_client(self):
+        handler = ControlAgentHandler.__new__(ControlAgentHandler)
+        handler.headers = {"Authorization": "Bearer test"}
+        handler._authenticate = lambda: True
+
+        client = BeetsClient(base_url="http://127.0.0.1:8338", token="test")
+        rlib = RemoteLibrary(client)
+
+        received_endpoints = []
+
+        def mock_request(method, endpoint, data=None, timeout=None):
+            received_endpoints.append(endpoint)
+            parsed = urllib.parse.urlparse(endpoint)
+            handler.path = parsed.path + "?" + parsed.query
+            res_data = []
+
+            def _send_json(code, d):
+                res_data.append((code, d))
+
+            handler._send_json = _send_json
+            handler.do_GET()
+            return res_data[0][1]
+
+        return handler, client, rlib, mock_request, received_endpoints
+
+    def test_singleton_true_returns_only_singletons(self):
+        with mock.patch("backend.beets_control_agent.LIB_PATH", str(self.db_path)):
+            _, client, rlib, mock_req, endpoints = self._setup_handler_and_client()
+            with mock.patch.object(client, "_request", side_effect=mock_req):
+                items = rlib.items("singleton:true")
+                self.assertEqual(len(items), 2)
+                self.assertEqual({i.id for i in items}, {1, 2})
+                self.assertIn("/items?singleton=true", endpoints[0])
+
+    def test_singleton_false_returns_only_album_tracks(self):
+        with mock.patch("backend.beets_control_agent.LIB_PATH", str(self.db_path)):
+            _, client, rlib, mock_req, endpoints = self._setup_handler_and_client()
+            with mock.patch.object(client, "_request", side_effect=mock_req):
+                items = rlib.items("singleton:false")
+                self.assertEqual(len(items), 2)
+                self.assertEqual({i.id for i in items}, {3, 4})
+                self.assertIn("/items?singleton=false", endpoints[0])
+
+    def test_singleton_false_does_not_return_all_items(self):
+        """Regression test ensuring singleton=false sends singleton=false and does NOT return unfiltered library."""
+        with mock.patch("backend.beets_control_agent.LIB_PATH", str(self.db_path)):
+            _, client, rlib, mock_req, endpoints = self._setup_handler_and_client()
+            with mock.patch.object(client, "_request", side_effect=mock_req):
+                items = rlib.items("singleton:false")
+                # Must return ONLY 2 items (album tracks), NOT all 4 items
+                self.assertNotEqual(len(items), 4, "singleton:false must NOT return the entire library")
+                self.assertEqual(len(items), 2)
+                self.assertEqual(set(i.id for i in items), {3, 4})
+
+    def test_singleton_case_insensitivity(self):
+        with mock.patch("backend.beets_control_agent.LIB_PATH", str(self.db_path)):
+            _, client, rlib, mock_req, _ = self._setup_handler_and_client()
+            with mock.patch.object(client, "_request", side_effect=mock_req):
+                items_true = rlib.items("singleton:TRUE")
+                self.assertEqual({i.id for i in items_true}, {1, 2})
+
+                items_false = rlib.items("singleton:False")
+                self.assertEqual({i.id for i in items_false}, {3, 4})
+
+                items_false_upper = rlib.items("singleton:FALSE")
+                self.assertEqual({i.id for i in items_false_upper}, {3, 4})
+
+    def test_singleton_invalid_values_raise(self):
+        with mock.patch("backend.beets_control_agent.LIB_PATH", str(self.db_path)):
+            _, client, rlib, mock_req, _ = self._setup_handler_and_client()
+            with mock.patch.object(client, "_request", side_effect=mock_req):
+                with self.assertRaises(BeetsError):
+                    rlib.items("singleton:maybe")
+
+                with self.assertRaises(BeetsError):
+                    rlib.items("singleton:")
+
+            # Test direct HTTP request with invalid singleton value returns 400 Bad Request
+            handler = ControlAgentHandler.__new__(ControlAgentHandler)
+            handler.headers = {"Authorization": "Bearer test"}
+            handler._authenticate = lambda: True
+            handler.path = "/items?singleton=invalid"
+            sent_responses = []
+            handler._send_json = lambda code, data: sent_responses.append((code, data))
+            handler.do_GET()
+
+            self.assertEqual(len(sent_responses), 1)
+            code, data = sent_responses[0]
+            self.assertEqual(code, 400)
+            self.assertIn("error", data)
+
+    def test_singleton_pagination_page2(self):
+        """Test that page-two singleton matches are included completely."""
+        client = BeetsClient(base_url="http://127.0.0.1:8338", token="test")
+        rlib = RemoteLibrary(client)
+
+        page1 = [{"id": i, "album_id": None} for i in range(1, 501)]
+        page2 = [{"id": 501, "album_id": None}]
+
+        def mock_request(method, endpoint, data=None, timeout=None):
+            if "offset=0" in endpoint:
+                return {"items": page1, "count": 500, "total": 501, "offset": 0, "limit": 500, "has_more": True, "next_offset": 500}
+            elif "offset=500" in endpoint:
+                return {"items": page2, "count": 1, "total": 501, "offset": 500, "limit": 500, "has_more": False, "next_offset": None}
+            return {}
+
+        with mock.patch.object(client, "_request", side_effect=mock_request):
+            items = rlib.items("singleton:true")
+            self.assertEqual(len(items), 501)
+            self.assertEqual(items[-1].id, 501)
 
 
 class TestRemoteLibraryQuerySemantics(unittest.TestCase):
@@ -697,62 +839,76 @@ class TestRemoteLibraryQuerySemantics(unittest.TestCase):
                 client.find_all_items_for_term("Voyager", safety_ceiling=500)
 
     def test_duplicate_detection_functional_regression(self):
-        """End-to-end regression test directly invoking extracted production function _resolve_album_title_duplicate_candidate."""
+        """End-to-end regression test invoking production function _resolve_album_title_duplicate_candidate with realistic query boundary and candidate verification."""
         mock_library = mock.MagicMock(spec=RemoteLibrary)
         test_logger = logging.getLogger("test_dedup")
 
-        cand1 = RemoteItem({"id": 1, "title": "WILLOW", "album": "WILLOW"})
-        cand2 = RemoteItem({"id": 2, "title": "Amber", "album": "WILLOW"})
-        cand3 = RemoteItem({"id": 3, "title": "WILLOW", "album": "From Chaos"})
+        cand1 = RemoteItem({"id": 1, "title": "Down", "album": "Voyager"})
+        cand2 = RemoteItem({"id": 2, "title": "Amber", "album": "Voyager"})
+        cand3 = RemoteItem({"id": 3, "title": "Down", "album": "From Chaos"})
         cand4 = RemoteItem({"id": 4, "title": "Amber", "album": "From Chaos"})
 
-        # Case 1: Same album ("WILLOW (2019)") + Same title ("WILLOW") -> Accepted
-        mock_library.items.return_value = [cand1]
-        item, mtype = _resolve_album_title_duplicate_candidate(mock_library, "WILLOW (2019)", "WILLOW", logger_instance=test_logger)
-        mock_library.items.assert_called_with("album:WILLOW")
+        # Realistic query-layer behavior: library.items("album:<X>") filters by album at the query boundary
+        def mock_items(query=None):
+            if query == "album:Voyager":
+                return [cand1, cand2]
+            elif query == "album:From Chaos":
+                return [cand3, cand4]
+            return []
+
+        mock_library.items.side_effect = mock_items
+
+        # Case 1: Same album ("Voyager") + Same title ("Down") -> Match
+        mock_library.items.side_effect = lambda q: [cand1] if q == "album:Voyager" else []
+        item, mtype = _resolve_album_title_duplicate_candidate(mock_library, "Voyager (2019)", "Down", logger_instance=test_logger)
         self.assertIsNotNone(item)
         self.assertEqual(item.id, 1)
         self.assertEqual(mtype, "album+title (100%)")
 
-        # Case 2: Same album ("WILLOW (2019)") + Different title ("Unrelated Title") -> Rejected
-        mock_library.items.return_value = [cand2]
-        item, mtype = _resolve_album_title_duplicate_candidate(mock_library, "WILLOW (2019)", "Unrelated Title", logger_instance=test_logger)
+        # Case 2: Same album ("Voyager") + Different title ("Amber" vs requested "Down") -> No match
+        mock_library.items.side_effect = lambda q: [cand2] if q == "album:Voyager" else []
+        item, mtype = _resolve_album_title_duplicate_candidate(mock_library, "Voyager (2019)", "Down", logger_instance=test_logger)
         self.assertIsNone(item)
         self.assertEqual(mtype, "")
 
-        # Case 3: Different album ("From Chaos") + Same title ("WILLOW") -> Query uses "album:From Chaos", cand1 not returned by lib query
-        mock_library.items.return_value = [cand4]
-        item, mtype = _resolve_album_title_duplicate_candidate(mock_library, "From Chaos", "WILLOW", logger_instance=test_logger)
-        mock_library.items.assert_called_with("album:From Chaos")
+        # Case 3: Different album ("From Chaos") + Same title ("Down") -> Query layer for "album:Voyager" returns []
+        mock_library.items.side_effect = lambda q: [cand3] if q == "album:From Chaos" else []
+        item, mtype = _resolve_album_title_duplicate_candidate(mock_library, "Voyager", "Down", logger_instance=test_logger)
         self.assertIsNone(item)
+        self.assertEqual(mtype, "")
 
-        # Case 4: Different album + Different title -> Rejected
-        cand_different = RemoteItem({"id": 4, "title": "Unrelated Song", "album": "From Chaos"})
-        mock_library.items.return_value = [cand_different]
-        item, mtype = _resolve_album_title_duplicate_candidate(mock_library, "From Chaos", "WILLOW", logger_instance=test_logger)
+        # Case 4: Different album ("From Chaos") + Different title ("Amber" vs requested "Down") -> Query layer returns []
+        mock_library.items.side_effect = lambda q: [cand4] if q == "album:From Chaos" else []
+        item, mtype = _resolve_album_title_duplicate_candidate(mock_library, "Voyager", "Down", logger_instance=test_logger)
         self.assertIsNone(item)
+        self.assertEqual(mtype, "")
 
-        # Case 5: Multiple candidates where only one matches both title & album
-        mock_library.items.return_value = [cand2, cand1]
-        item, mtype = _resolve_album_title_duplicate_candidate(mock_library, "WILLOW (2019)", "WILLOW", logger_instance=test_logger)
-        self.assertIsNotNone(item)
+        # Case 5: Multiple candidates for Voyager -> Only Voyager/Down matched when searching for title "Down"
+        mock_library.items.side_effect = lambda q: [cand2, cand1] if q == "album:Voyager" else []
+        item, mtype = _resolve_album_title_duplicate_candidate(mock_library, "Voyager", "Down", logger_instance=test_logger)
         self.assertEqual(item.id, 1)
 
-        # Case 6: BeetsError during album lookup -> Warning logged, returns (None, "")
-        mock_library.items.side_effect = BeetsError("Database lock timeout")
+        # Case 6: Candidate-level album verification protection
+        # Scenario where fake library query layer unexpectedly returns a candidate from a different album
+        mock_library.items.side_effect = None
+        mock_library.items.return_value = [RemoteItem({"id": 99, "title": "Down", "album": "From Chaos"})]
+        item, mtype = _resolve_album_title_duplicate_candidate(mock_library, "Voyager", "Down", logger_instance=test_logger)
+        self.assertIsNone(item, "Candidate-level album verification must reject items with non-matching album names")
+
+        # Case 7: Expected query failure (BeetsError) -> Warning logged, safe fallback (None, "")
+        mock_library.items.side_effect = BeetsError("Control agent timeout")
         with mock.patch.object(test_logger, "warning") as mock_warn:
-            item, mtype = _resolve_album_title_duplicate_candidate(mock_library, "WILLOW (2019)", "WILLOW", logger_instance=test_logger)
+            item, mtype = _resolve_album_title_duplicate_candidate(mock_library, "Voyager", "Down", logger_instance=test_logger)
             self.assertIsNone(item)
             self.assertEqual(mtype, "")
             mock_warn.assert_called_once()
 
-        # Case 7: Unexpected exception -> Handled explicitly and returns (None, "")
-        mock_library.items.side_effect = RuntimeError("Unexpected failure")
-        with mock.patch.object(test_logger, "warning") as mock_warn:
-            item, mtype = _resolve_album_title_duplicate_candidate(mock_library, "WILLOW (2019)", "WILLOW", logger_instance=test_logger)
-            self.assertIsNone(item)
-            self.assertEqual(mtype, "")
-            mock_warn.assert_called_once()
+        # Case 8: Unexpected programming exception (RuntimeError) -> Error logged with stack trace, re-raised
+        mock_library.items.side_effect = RuntimeError("Unexpected memory failure")
+        with mock.patch.object(test_logger, "error") as mock_err:
+            with self.assertRaises(RuntimeError):
+                _resolve_album_title_duplicate_candidate(mock_library, "Voyager", "Down", logger_instance=test_logger)
+            mock_err.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -27420,14 +27420,18 @@ def _resolve_album_title_duplicate_candidate(
         from difflib import SequenceMatcher
         candidates = list(library.items(f"album:{folder_album}"))
         for cand in candidates:
-            cand_title = (cand.title or '').lower()
+            cand_album = (getattr(cand, "album", None) or getattr(cand, "get", lambda k, d="": "")("album") or "").lower()
+            if cand_album and SequenceMatcher(None, cand_album, folder_album.lower()).ratio() < 0.8:
+                continue
+            cand_title = (getattr(cand, "title", None) or getattr(cand, "get", lambda k, d="": "")("title") or "").lower()
             score = SequenceMatcher(None, cand_title, track_title.lower()).ratio()
             if score >= threshold:
                 return cand, f"album+title ({score:.0%})"
     except BeetsError as ex:
         log.warning("Album duplicate candidate search failed for '%s': %s", folder_album, ex)
     except Exception as ex:
-        log.warning("Error during album+title duplicate candidate search: %s", ex)
+        log.error("Unexpected error during album+title duplicate candidate search for '%s': %s", folder_album, ex, exc_info=True)
+        raise
 
     return None, ""
 
