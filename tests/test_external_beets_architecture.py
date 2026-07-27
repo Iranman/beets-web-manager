@@ -17,6 +17,7 @@ from app import _resolve_album_title_duplicate_candidate
 from backend.beets_client import (
     BeetsAuthError,
     BeetsClient,
+    BeetsCommandError,
     BeetsError,
     BeetsUnavailableError,
     RemoteAlbum,
@@ -25,6 +26,7 @@ from backend.beets_client import (
     get_db_connection,
     parse_query_term,
 )
+from job_engine import Job, _beet_run, _parse_remote_beet_command
 from backend.beets_control_agent import (
     ControlAgentHandler,
     _handle_delete_album,
@@ -909,6 +911,98 @@ class TestRemoteLibraryQuerySemantics(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 _resolve_album_title_duplicate_candidate(mock_library, "Voyager", "Down", logger_instance=test_logger)
             mock_err.assert_called_once()
+
+
+class TestCommandNormalization(unittest.TestCase):
+    def test_literal_executable(self):
+        parsed = _parse_remote_beet_command(["beet", "version"])
+        self.assertEqual(parsed.subcommand, "version")
+        self.assertEqual(parsed.args, [])
+
+    def test_linuxserver_executable(self):
+        parsed = _parse_remote_beet_command(["/lsiopy/bin/beet", "version"])
+        self.assertEqual(parsed.subcommand, "version")
+        self.assertEqual(parsed.args, [])
+
+    def test_other_posix_executable(self):
+        parsed = _parse_remote_beet_command(["/usr/local/bin/beet", "ls", "artist:311"])
+        self.assertEqual(parsed.subcommand, "ls")
+        self.assertEqual(parsed.args, ["artist:311"])
+
+    def test_windows_executable(self):
+        parsed = _parse_remote_beet_command([r"C:\Python\Scripts\beet.exe", "version"])
+        self.assertEqual(parsed.subcommand, "version")
+        self.assertEqual(parsed.args, [])
+
+    def test_config_argument_stripped(self):
+        parsed = _parse_remote_beet_command(["/lsiopy/bin/beet", "-c", "/config/config.yaml", "embedart", "-y", "album_id:20"])
+        self.assertEqual(parsed.subcommand, "embedart")
+        self.assertEqual(parsed.args, ["-y", "album_id:20"])
+
+    def test_quoted_string_command(self):
+        parsed = _parse_remote_beet_command('beet ls "album:From Chaos"')
+        self.assertEqual(parsed.subcommand, "ls")
+        self.assertEqual(parsed.args, ["album:From Chaos"])
+
+        parsed_import = _parse_remote_beet_command('beet import "/data/torrents/music/Artist Name/Album Name"')
+        self.assertEqual(parsed_import.subcommand, "import")
+        self.assertEqual(parsed_import.args, ["/data/torrents/music/Artist Name/Album Name"])
+
+    def test_empty_command_raises(self):
+        with self.assertRaises(BeetsCommandError):
+            _parse_remote_beet_command([])
+        with self.assertRaises(BeetsCommandError):
+            _parse_remote_beet_command("")
+
+    def test_executable_only_command_raises(self):
+        with self.assertRaises(BeetsCommandError):
+            _parse_remote_beet_command(["/lsiopy/bin/beet"])
+
+    def test_path_like_invalid_subcommand_raises(self):
+        with self.assertRaises(BeetsCommandError):
+            _parse_remote_beet_command(["/lsiopy/bin/beet", "/bin/sh"])
+        with self.assertRaises(BeetsCommandError):
+            _parse_remote_beet_command(["beet", r"C:\script.py"])
+
+    def test_shell_chaining_attempt_raises(self):
+        with self.assertRaises(BeetsCommandError):
+            _parse_remote_beet_command(["beet", "ls", ";", "rm", "-rf"])
+        with self.assertRaises(BeetsCommandError):
+            _parse_remote_beet_command("beet ls && rm -rf /")
+
+    @mock.patch("backend.beets_client.beets_client.run_command")
+    def test_beet_run_uses_central_parser(self, mock_run):
+        mock_run.return_value = {"returncode": 0, "stdout": "ok", "stderr": ""}
+        log = []
+        res = _beet_run(["/lsiopy/bin/beet", "-c", "/config/config.yaml", "embedart", "-y", "album_id:20"], log)
+        self.assertEqual(res.returncode, 0)
+        mock_run.assert_called_once_with("embedart", args=["-y", "album_id:20"], timeout=120.0, config_override="")
+
+    @mock.patch("backend.beets_client.beets_client.start_job")
+    @mock.patch("backend.beets_client.beets_client.get_job")
+    def test_job_run_uses_central_parser(self, mock_get, mock_start):
+        mock_start.return_value = "job-123"
+        mock_get.return_value = {"status": "success", "stdout": ["done"], "stderr": []}
+        job = Job("j1", ["/lsiopy/bin/beet", "-c", "/config/config.yaml", "import", "-q", "/data/torrents/music"])
+        import time
+        time.sleep(0.1)
+        mock_start.assert_called_once_with("import", args=["-q", "/data/torrents/music"], label="/lsiopy/bin/beet -c /config/config.yaml import -q /data/torrents/music", config_override="")
+
+    def test_beet_locked_script_exists_and_uses_flock(self):
+        locked_script = ROOT / "docker" / "beet-locked"
+        self.assertTrue(locked_script.exists())
+        content = locked_script.read_text()
+        self.assertIn("flock /config/.beet_db.lock /lsiopy/bin/beet", content)
+
+    @mock.patch("backend.beets_client.beets_client.run_command")
+    def test_app_py_beet_bin_command_normalization_regression(self, mock_run):
+        from app import BEET_BIN
+        mock_run.return_value = {"returncode": 0, "stdout": "ok", "stderr": ""}
+        log = []
+        cmd = [BEET_BIN, "-c", "/config/config.yaml", "embedart", "-y", "album_id:20"]
+        res = _beet_run(cmd, log)
+        self.assertEqual(res.returncode, 0)
+        mock_run.assert_called_once_with("embedart", args=["-y", "album_id:20"], timeout=120.0, config_override="")
 
 
 if __name__ == "__main__":

@@ -8,9 +8,10 @@ RUN mkdir -p /opt/beets-web-manager-agent/beetsplug /custom-services.d
 COPY backend/beets_control_agent.py /opt/beets-web-manager-agent/beets_control_agent.py
 COPY beetsplug/ /opt/beets-web-manager-agent/beetsplug/
 
-# Install S6 supervision service for the control agent in LinuxServer supported path
+# Install S6 supervision service for the control agent and locked CLI wrapper
 COPY docker/beets-agent-s6.sh /custom-services.d/beets-control-agent
-RUN chmod +x /custom-services.d/beets-control-agent
+COPY docker/beet-locked /usr/local/bin/beet-locked
+RUN chmod +x /custom-services.d/beets-control-agent /usr/local/bin/beet-locked
 
 # Environment configuration
 ENV BEETS_AGENT_PORT=8338 \

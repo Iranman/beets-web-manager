@@ -228,17 +228,17 @@ Back up `/config/config.yaml`, `/config/musiclibrary.blb`, plugin configuration,
 
 ## Manual Beets CLI and Shared Locking
 
-All manual CLI operations run inside the `beets` container. Mutating manual commands automatically respect the shared database file lock (`/config/.beet_db.lock`):
+All manual CLI operations run inside the `beets` container. Mutating manual CLI operations should use the `beet-locked` wrapper to automatically acquire the shared database file lock (`/config/.beet_db.lock`):
 
 ```bash
-# Run manual Beets CLI query
+# Run manual read-only Beets CLI query
 docker compose exec beets /lsiopy/bin/beet ls artist:311
 
 # Verify installed core and custom plugins (including bundled discpath)
 docker compose exec beets /lsiopy/bin/beet plugins
 
-# Run manual import inside the Beets container
-docker compose exec beets /lsiopy/bin/beet import /data/torrents/music
+# Run manual mutating import inside the Beets container (locked)
+docker compose exec beets beet-locked import /data/torrents/music
 ```
 
 No second Beets database is created.

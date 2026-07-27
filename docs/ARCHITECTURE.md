@@ -32,9 +32,9 @@ Current migration status: incomplete. External engine separation is complete; th
 
 ## External Boundaries
 
-- Beets Engine & CLI: All library mutations, database queries, tag writes, and Beets commands run inside the `beets` container under control-agent supervision or manual CLI execution (`docker compose exec beets /lsiopy/bin/beet ...`).
+- Beets Engine & CLI: All library mutations, database queries, tag writes, and Beets commands run inside the `beets` container under control-agent supervision or manual CLI execution (`docker compose exec beets /lsiopy/bin/beet ...` for read-only, `docker compose exec beets beet-locked ...` for mutating commands).
 - Control Agent Supervision: LinuxServer S6 supervises `/opt/beets-web-manager-agent/beets_control_agent.py` at `/custom-services.d/beets-control-agent`. If the agent crashes, S6 restarts it automatically without terminating the container.
-- Database & Lock Ownership: The single authoritative database `/config/musiclibrary.blb` lives exclusively in the `beets` container. Mutating operations acquire the shared file lock `/config/.beet_db.lock`. Manual CLI commands and control agent jobs serialize on this lock.
+- Database & Lock Ownership: The single authoritative database `/config/musiclibrary.blb` lives exclusively in the `beets` container. Mutating operations acquire the shared file lock `/config/.beet_db.lock`. Manual CLI commands (via `beet-locked`) and control agent jobs serialize on this lock.
 - Port Exposure: Control agent port 8338 is exposed internally to the Docker bridge network only (`expose: ["8338"]`). It is never published to host interfaces. Web manager port 8337 (`WEBCONTROL_PORT`) is published to localhost (`127.0.0.1:8337`) or behind a reverse proxy.
 - MusicBrainz and AcoustID: `helpers_mb.py` performs release, release-group, recording, and AcoustID lookup work. `routes_submissions.py` also performs MusicBrainz validation and AcoustID submission orchestration.
 - AI provider: `app.py` includes OpenAI-key checks and AI suggestion calls. AI availability is already modeled in some paths, but matching still needs one shared contract.

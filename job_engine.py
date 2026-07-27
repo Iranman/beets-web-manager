@@ -29,6 +29,84 @@ def _summarize_result(value):
     return {"type": type(value).__name__, "value": str(value)[:160]}
 
 from backend.beets_client import beets_client, BeetsError, BeetsUnavailableError, BeetsAuthError, BeetsCommandError
+import os, shlex
+from typing import NamedTuple
+
+
+class ParsedRemoteBeetCommand(NamedTuple):
+    subcommand: str
+    args: List[str]
+    config_override: str = ""
+
+
+def _is_beet_executable_token(token: str) -> bool:
+    if not token:
+        return False
+    normalized = token.replace("\\", "/")
+    base = normalized.split("/")[-1].lower()
+    return base in ("beet", "beet.exe")
+
+
+def _parse_remote_beet_command(command: Any) -> ParsedRemoteBeetCommand:
+    """Parse and normalize raw Beets command tokens or string for remote execution."""
+    if command is None:
+        raise BeetsCommandError("Command cannot be None")
+
+    if isinstance(command, str):
+        raw_str = command.strip()
+        if not raw_str:
+            raise BeetsCommandError("Command string cannot be empty")
+        try:
+            tokens = shlex.split(raw_str, posix=True)
+        except ValueError as exc:
+            raise BeetsCommandError(f"Invalid shell quoting in command string: {exc}") from exc
+    elif isinstance(command, (list, tuple)):
+        tokens = [str(t) for t in command]
+    else:
+        raise BeetsCommandError(f"Unsupported command type: {type(command)}")
+
+    if not tokens:
+        raise BeetsCommandError("Command tokens list cannot be empty")
+
+    # Strip leading Beets executable token if present (e.g. beet, /lsiopy/bin/beet, C:\...\beet.exe)
+    if tokens and _is_beet_executable_token(tokens[0]):
+        tokens = tokens[1:]
+
+    # Strip -c / --config parameters (the remote engine uses its own authoritative config)
+    clean_tokens: List[str] = []
+    skip_next = False
+    for i, token in enumerate(tokens):
+        if skip_next:
+            skip_next = False
+            continue
+        if token in ("-c", "--config"):
+            if i + 1 < len(tokens):
+                skip_next = True
+            continue
+        clean_tokens.append(token)
+
+    if not clean_tokens:
+        raise BeetsCommandError("No subcommand provided after parsing executable and flags")
+
+    subcommand = clean_tokens[0]
+    args = clean_tokens[1:]
+
+    if not subcommand or subcommand.strip() == "":
+        raise BeetsCommandError("Subcommand cannot be empty")
+
+    # Reject if subcommand is another path or executable
+    sub_norm = subcommand.replace("\\", "/")
+    if "/" in sub_norm or sub_norm.endswith((".py", ".sh", ".exe", ".bin")):
+        raise BeetsCommandError(f"Invalid subcommand name: '{subcommand}'")
+
+    # Reject shell operators/chaining in subcommand and args
+    dangerous_ops = (";", "&&", "||", "|", ">", "<", "`", "$(")
+    for token_to_check in [subcommand] + args:
+        for op in dangerous_ops:
+            if op in token_to_check:
+                raise BeetsCommandError(f"Dangerous shell operator '{op}' rejected in command token: '{token_to_check}'")
+
+    return ParsedRemoteBeetCommand(subcommand=subcommand, args=args, config_override="")
 
 
 def _beet_run(cmd, log, *, timeout=120, env=None, warn_msg=None, cancel=None):
@@ -39,43 +117,17 @@ def _beet_run(cmd, log, *, timeout=120, env=None, warn_msg=None, cancel=None):
             self.stdout = out
             self.stderr = err
 
-    if isinstance(cmd, str):
-        cmd_list = cmd.split()
-    else:
-        cmd_list = list(cmd)
-
-    if cmd_list and cmd_list[0] == "beet":
-        cmd_list = cmd_list[1:]
-
-    config_override = ""
-    clean_cmd = []
-    skip_next = False
-    for i, token in enumerate(cmd_list):
-        if skip_next:
-            skip_next = False
-            continue
-        if token in ("-c", "--config"):
-            if i + 1 < len(cmd_list):
-                cfg_path = cmd_list[i + 1]
-                try:
-                    import os
-                    if os.path.exists(cfg_path):
-                        with open(cfg_path, "r", encoding="utf-8") as f:
-                            config_override = f.read()
-                except Exception:
-                    pass
-            skip_next = True
-            continue
-        clean_cmd.append(token)
-
-    if not clean_cmd:
-        return _R(1, "", "Empty command")
-
-    subcommand = clean_cmd[0]
-    args = clean_cmd[1:]
+    try:
+        parsed = _parse_remote_beet_command(cmd)
+    except BeetsCommandError as exc:
+        log.append(f"  ⚠ Invalid Beets command: {exc}")
+        return _R(1, "", str(exc))
+    except Exception as exc:
+        log.append(f"  ⚠ _beet_run parsing error: {exc}")
+        return _R(1, "", str(exc))
 
     try:
-        res = beets_client.run_command(subcommand, args=args, timeout=float(timeout), config_override=config_override)
+        res = beets_client.run_command(parsed.subcommand, args=parsed.args, timeout=float(timeout), config_override=parsed.config_override)
         rc = res.get("returncode", 0)
         stdout = res.get("stdout", "")
         stderr = res.get("stderr", "")
@@ -134,35 +186,15 @@ class Job:
         self.started_at = time.time()
         r_status = "running"
         try:
-            cmd_list = list(self.command)
-            if cmd_list and cmd_list[0] == "beet":
-                cmd_list = cmd_list[1:]
+            try:
+                parsed = _parse_remote_beet_command(self.command)
+            except Exception as exc:
+                self.log.append(f"  ⚠ Invalid command for job: {exc}")
+                self.returncode = 1
+                self.finished_at = time.time()
+                return
 
-            config_override = ""
-            clean_cmd = []
-            skip_next = False
-            for i, token in enumerate(cmd_list):
-                if skip_next:
-                    skip_next = False
-                    continue
-                if token in ("-c", "--config"):
-                    if i + 1 < len(cmd_list):
-                        cfg_path = cmd_list[i + 1]
-                        try:
-                            import os
-                            if os.path.exists(cfg_path):
-                                with open(cfg_path, "r", encoding="utf-8") as f:
-                                    config_override = f.read()
-                        except Exception:
-                            pass
-                    skip_next = True
-                    continue
-                clean_cmd.append(token)
-
-            subcommand = clean_cmd[0] if clean_cmd else "version"
-            args = clean_cmd[1:] if len(clean_cmd) > 1 else []
-
-            remote_id = beets_client.start_job(subcommand, args=args, label=self.label, config_override=config_override)
+            remote_id = beets_client.start_job(parsed.subcommand, args=parsed.args, label=self.label, config_override=parsed.config_override)
             with self._lock:
                 self._remote_job_id = remote_id
 
