@@ -1,5 +1,6 @@
 """Unit and integration tests for the external Beets control agent architecture."""
 
+import importlib.util
 import json
 import logging
 import os
@@ -1608,8 +1609,22 @@ class TestControlAgentCapabilityEnforcement(unittest.TestCase):
             self.assertIsNone(require_command_capability("mbsubmit"))
 
 
+_BEETS_AVAILABLE = importlib.util.find_spec("beets") is not None
+
+
+@unittest.skipUnless(_BEETS_AVAILABLE, "beets is not importable in this environment")
 class TestChromaPluginClassResolution(unittest.TestCase):
-    """Tests for the Beets 2.4.0 Chroma plugin class-resolution fix, patch script, and AcoustID boundaries."""
+    """Tests for the Beets 2.4.0 Chroma plugin class-resolution fix, patch script, and AcoustID boundaries.
+
+    The web manager intentionally has zero direct Beets dependency (see
+    docs/ARCHITECTURE.md), so `beets` is not installed in the CI
+    python-tests environment. These tests exercise real Beets plugin-loader
+    behavior and docker/beets/apply_patches.py (which itself does `import
+    beets`), so they can only run where beets happens to be available
+    (e.g. a developer machine with it pip-installed for this purpose, or a
+    dedicated real-runtime validation job) -- matching the existing
+    convention in tests/test_plugin_path_precedence.py.
+    """
 
     def test_apply_patch_replaces_original_block_exactly_once(self):
         """apply_patch() replaces ORIGINAL_BLOCK with PATCHED_BLOCK when original source is unpatched."""
