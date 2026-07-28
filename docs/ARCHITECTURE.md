@@ -28,7 +28,7 @@ Frontend
   -> Beets CLI, SQLite DB (/config/musiclibrary.blb), & Media Filesystem
 ```
 
-Current migration status: incomplete. External engine separation is complete; the web manager service has zero direct Beets imports or SQLite file handles, delegating all library, database, tag, and media mutations to the `beets` container via authenticated internal HTTP APIs.
+Current migration status: incomplete. Service split is complete; route/service migration is incomplete. The web manager service has zero direct Beets imports and no local SQLite file handles; `backend.beets_client.RemoteLibrary` and `RemoteSQLiteConnection` translate legacy library/SQL call shapes into authenticated internal HTTP requests. Remaining work is to replace those compatibility call shapes with explicit service/repository methods and to move residual media-file mutation call sites behind the control-agent boundary.
 
 ## External Boundaries
 
@@ -36,6 +36,7 @@ Current migration status: incomplete. External engine separation is complete; th
 - Control Agent Supervision: LinuxServer S6 supervises `/opt/beets-web-manager-agent/beets_control_agent.py` at `/custom-services.d/beets-control-agent`. If the agent crashes, S6 restarts it automatically without terminating the container.
 - Database & Lock Ownership: The single authoritative database `/config/musiclibrary.blb` lives exclusively in the `beets` container. Mutating operations acquire the shared file lock `/config/.beet_db.lock`. Manual CLI commands (via `beet-locked`) and control agent jobs serialize on this lock.
 - Port Exposure: Control agent port 8338 is exposed internally to the Docker bridge network only (`expose: ["8338"]`). It is never published to host interfaces. Web manager port 8337 (`WEBCONTROL_PORT`) is published to localhost (`127.0.0.1:8337`) or behind a reverse proxy.
+- Health and readiness: `/api/health` is web-manager liveness only. `/health/ready` and `/api/setup/status` query the authenticated remote control agent for authoritative Beets readiness, loaded-plugin state, command capabilities, and engine path health.
 - MusicBrainz and AcoustID: `helpers_mb.py` performs release, release-group, recording, and AcoustID lookup work. `routes_submissions.py` also performs MusicBrainz validation and AcoustID submission orchestration.
 - Submission command capability: the `submit` (AcoustID, via the `chroma` plugin) and `mbsubmit` (MusicBrainz) remote commands are gated by whether Beets actually finished loading the required plugin, not merely whether the plugin module is importable on disk -- a plugin can be present and importable (`beetsplug.chroma`) and still fail to initialize inside Beets (e.g. `chroma` silently failing to load even with `fpcalc`/`pyacoustid` present), so `backend/beets_control_agent.py`'s `get_loaded_beet_plugins()` parses the actual "plugins: ..." line from `beet version`'s own output rather than using `importlib.util.find_spec()`. Capability is enforced in two independent places: `routes_submissions._submission_readiness()` on the web-manager side (fails closed -- any remote connection failure, authentication failure, or malformed `/status` response reports every capability unavailable, never a local `find_spec()`/`shutil.which()` fallback), and `backend/beets_control_agent.py`'s `require_command_capability()` inside `/commands/execute` and `/jobs/create` themselves, so a caller that reaches the control agent directly (bypassing the web-manager route) is still blocked before any subprocess or job object is created.
 - AI provider: `app.py` includes OpenAI-key checks and AI suggestion calls. AI availability is already modeled in some paths, but matching still needs one shared contract.
@@ -46,7 +47,7 @@ Current migration status: incomplete. External engine separation is complete; th
 ## State Ownership
 
 - Beets is the library source of truth.
-- Beets SQLite data is accessed through Beets objects and direct SQLite reads/writes.
+- Beets SQLite data is stored and directly opened only inside the `beets` container. The control agent still uses direct `sqlite3.connect(LIB_PATH)` for several compatibility endpoints. The web manager reaches those paths through `backend.beets_client.RemoteSQLiteConnection`, not a local file handle.
 - Job state lives in `JobStore` in memory; selected workflows also persist checkpoints or last-run JSON under `/config` or metadata cache paths.
 - Transaction/audit state lives in `backend.transaction_engine.TransactionStore`, file-backed under `BEETS_TRANSACTION_DIR` or `/config/transactions`.
 - Import review state is composed from Beets library data plus JSON review files and computed evidence.
@@ -88,8 +89,9 @@ Intended direction:
 
 Existing mutation mechanisms include:
 
-- Direct Beets `modify`, `write`, `move`, and `import` command arrays in `app.py` and `routes_submissions.py`.
-- Direct filesystem moves, deletes, copies, and directory removals in `app.py`.
+- Legacy Beets `modify`, `write`, `move`, `import`, `submit`, and `mbsubmit` command arrays in `app.py`, `job_engine.py`, and `routes_submissions.py`. These arrays are normalized and executed remotely through `backend.beets_client.BeetsClient`; they must not shell out in the web-manager container.
+- Control-agent endpoints for Beets commands, tag writes, file moves/deletes, and direct SQLite-backed compatibility queries inside the `beets` container.
+- Residual direct filesystem moves, deletes, copies, and directory removals in `app.py`. Under the supported Compose files the web-manager image is not the media owner, so these call sites need ARCH-003 controlled-boundary cleanup before being treated as architecture-complete. The old local `/api/library/scan` filesystem walk and background loop are disabled unless `BEETS_ENABLE_LEGACY_LOCAL_SCAN=1`.
 - A file-backed `TransactionStore` in `backend/transaction_engine.py` with statuses, changes, metadata diffs, rollback fields, settings, and job attachment.
 - Several workflow-specific preview/dry-run routes, including import target preview, cleanup scans, folder placeholder preview, and transaction endpoints.
 
@@ -103,7 +105,7 @@ Intended direction:
 6. Verify final filesystem and application state.
 7. Record completed steps and recovery information.
 
-Current migration status: partial. The transaction engine is a foundation, but not every mutating route uses it yet.
+Current migration status: partial. The transaction engine and remote control agent are foundations, but not every mutating route uses one plan/apply/verify/recover boundary yet.
 
 ## Frontend Architecture
 
@@ -124,7 +126,7 @@ Frontend direction:
 
 - `app.py` route/domain/mutation/job coupling.
 - Duplicated matching and confidence rules across import review, playlist, replacement, cleanup, and submission flows.
-- Direct filesystem and Beets mutation calls outside a single controlled mutation boundary.
+- Residual legacy filesystem and remote Beets command call sites outside a single controlled mutation boundary.
 - Job idempotency and checkpoint consistency across all long-running workflows.
 - Consistent provider-adapter contracts for AI, MusicBrainz, AcoustID, Plex, and download providers.
 - Large frontend modules that mix rendering, polling, local state machines, and decision presentation.

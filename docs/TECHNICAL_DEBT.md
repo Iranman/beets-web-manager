@@ -4,11 +4,11 @@ Statuses: Open, In Progress, Blocked, Done.
 
 ## ARCH-001 Monolithic Route/Domain/Mutation Coupling
 
-- Affected area: Backend `app.py`.
-- Evidence: route scan found most API routes in `app.py`, including import review, library, cleanup, deduplication, playlists, Plex, configuration, transactions, and import endpoints. `app.py` also contains matching helpers, Beets subprocess calls, direct SQLite access, direct filesystem mutations, and job orchestration.
-- Current risk: Changes to one workflow can accidentally alter unrelated behavior. AI-assisted edits are prone to conflicts because many responsibilities share one file.
-- Desired state: Routes remain thin. Application services own workflows. Domain modules own matching and safety decisions. Provider adapters own external calls. Repositories own Beets/SQLite access.
-- Safe migration approach: Extract one tested service at a time. Start with pure functions already represented in tests. Keep route signatures and responses stable.
+- Affected area: Backend `app.py` and route modules.
+- Evidence: Route scan still finds most operator workflows in `app.py`, including import review, library, cleanup, deduplication, playlists, Plex, configuration, transactions, and import endpoints. The external-engine branch changed the service boundary: Beets command arrays now flow through `job_engine._beet_run()`/`BeetsClient`, and `_db()` returns `RemoteSQLiteConnection` instead of a local file handle. The monolith still mixes routing, matching, orchestration, legacy SQL-shaped calls, and residual filesystem mutation call sites.
+- Current risk: Changes to one workflow can accidentally alter unrelated behavior. Compatibility shims reduce migration blast radius, but they also hide whether a route is using a well-owned service method or a legacy remote-SQL/remote-command shape.
+- Desired state: Routes remain thin. Application services own workflows. Domain modules own matching and safety decisions. Provider adapters own external calls. Repository/client methods own Beets-engine access.
+- Safe migration approach: Extract one tested service at a time. Prefer replacing legacy SQL-shaped and command-array callers with explicit `BeetsClient` methods while preserving route signatures and responses.
 - Priority: P0.
 - Status: Open.
 
@@ -25,10 +25,10 @@ Statuses: Open, In Progress, Blocked, Done.
 ## ARCH-003 Mutations Do Not All Use One Controlled Boundary
 
 - Affected area: Beets command execution, filesystem cleanup, metadata write, artwork repair, import, playlist placement, deduplication, replacement.
-- Evidence: Direct `shutil.move`, `shutil.rmtree`, `Path.unlink`, `os.replace`, Beets `modify/write/move/import`, and direct SQLite writes appear in `app.py` and `routes_submissions.py`. `backend/transaction_engine.py` exists but is not universal.
-- Current risk: Preview/audit/rollback behavior varies by workflow. Partial failure can be hard to recover or may be reported inconsistently.
-- Desired state: Mutating workflows use shared plan/apply/verify/recover semantics with root validation, diffs, audit records, and recovery information.
-- Safe migration approach: Wrap one high-risk mutation family at a time using `TransactionStore` rather than replacing all callers. Start with deletes/moves from Import Review and cleanup paths.
+- Evidence: The `beets` control agent now owns Beets CLI execution, direct SQLite compatibility queries, tag writes, and file move/delete endpoints inside the authoritative engine container. `app.py` still contains many legacy command-array call sites and residual direct filesystem operations (`shutil.move`, `shutil.rmtree`, `Path.unlink`, `os.replace`, copies, and directory removals) that are not all planned, audited, and verified through one transaction boundary. `backend/transaction_engine.py` exists but is not universal.
+- Current risk: Preview/audit/rollback behavior varies by workflow. Partial failure can be hard to recover or may be reported inconsistently. Residual filesystem call sites also make it easy to accidentally depend on web-manager media mounts that the supported two-service Compose files intentionally do not provide.
+- Desired state: Mutating workflows use shared plan/apply/verify/recover semantics with root validation, diffs, audit records, and recovery information, and all media/Beets mutations execute in the `beets` engine boundary.
+- Safe migration approach: Wrap one high-risk mutation family at a time using `TransactionStore` and explicit control-agent/BeetsClient APIs rather than replacing all callers. Start with deletes/moves from Import Review and cleanup paths.
 - Priority: P0.
 - Status: Open.
 
@@ -62,25 +62,25 @@ Statuses: Open, In Progress, Blocked, Done.
 - Priority: P2.
 - Status: Open.
 
-## ARCH-007 Direct SQLite Access Bypasses Repository Boundary
+## ARCH-007 Raw SQL Compatibility Layer Bypasses Repository Boundary
 
-- Affected area: Beets database reads/writes across `app.py`.
-- Evidence: `_db()` exists, but direct `sqlite3.connect(LIB_PATH)` calls also appear throughout `app.py`.
-- Current risk: Lock handling, row factories, path normalization, and write safety can vary by caller.
-- Desired state: A small Beets repository layer owns common reads/writes and lock retry policy.
-- Safe migration approach: Consolidate repeated read-only queries first. Move write paths only when covered by mutation tests.
+- Affected area: Web-manager legacy `_db()`/`RemoteSQLiteConnection` callers and control-agent SQLite endpoints.
+- Evidence: The original local SQLite violation has been removed from the web-manager service boundary: `app.py`'s `_db()` yields `backend.beets_client.RemoteSQLiteConnection`, and the actual `sqlite3.connect(LIB_PATH)` calls are in `backend/beets_control_agent.py` inside the `beets` container. However many routes still express data access as raw SQL-shaped calls over the remote compatibility layer instead of using explicit repository/client methods.
+- Current risk: Lock handling, pagination, row factories, path normalization, query allowlisting, and write safety can vary by caller. The service boundary is safer than before, but the repository boundary is still weak.
+- Desired state: A small Beets repository/client layer owns common reads/writes and lock retry policy. Web-manager routes call typed methods rather than raw SQL-shaped compatibility calls.
+- Safe migration approach: Consolidate repeated read-only queries first by adding explicit `BeetsClient` methods backed by control-agent endpoints. Move write paths only when covered by mutation tests and transaction/audit records.
 - Priority: P2.
 - Status: Open.
 
 ## ARCH-008 Agent Instructions Were Too Large And Duplicated
 
-- Affected area: `AGENTS.md`, `CLAUDE.md`.
-- Evidence: Both files contained large overlapping operational guidance and product rules, making drift likely.
-- Current risk: Different agents can follow different rules or miss key safety constraints in long files.
-- Desired state: Concise agent files reference `docs/AI_ENGINEERING_RULES.md` as the shared rule source.
-- Safe migration approach: Keep agent files short, add static governance tests, and update shared docs for rule changes.
+- Affected area: `AGENTS.md`, `CLAUDE.md`, `docs/AGENT_WORKFLOW.md`, `docs/AI_ENGINEERING_RULES.md`, and governance tests.
+- Evidence: The integrated governance branch adds shared workflow documentation and static tests in `tests/test_engineering_governance_docs.py`. The instructions now distinguish review-and-fix work, push/PR/merge/deploy restrictions, migration-sensitive work, and the difference between implemented, tested, verified, ready to push, ready to merge, and ready to deploy.
+- Current risk: Low. Future drift is still possible if agent files are edited without updating the shared docs and governance tests.
+- Desired state: Concise agent files reference shared rules, and governance tests catch contradictory terminology or unsafe authority claims.
+- Safe migration approach: Keep agent files short, keep project-manager assignments allowed, and update shared docs and tests together for rule changes.
 - Priority: P1.
-- Status: In Progress.
+- Status: Done.
 
 ## ARCH-009 Release ID And Release-Group Identity Are Inconsistently Modeled
 
@@ -105,13 +105,13 @@ Statuses: Open, In Progress, Blocked, Done.
 - Priority: P2.
 - Status: Open.
 
-## ARCH-011 `/api/setup/status`'s Beets Plugin Diagnostics Shell Out To A Local `beet` Binary Instead Of Querying The Remote Control Agent
+## ARCH-011 Remote Beets Plugin Diagnostics For `/api/setup/status`
 
-- Affected area: `routes_setup.py`'s `_beet_binary()`, `_run_beet_diagnostic()`, `_beets_plugin_diagnostics()`, and every integration-status function that consumes their result (`_plugin_integration_status`, `_acoustid_integration_status`, `_replaygain_integration_status`, `_fetchart_integration_status`, and the `discpath`/`lastgenre`/`listenbrainz`/`discogs`/`musicbrainz` entries built from the same `diagnostics` dict in `setup_status()`). Found while reviewing `fix/architecture-ci-baseline`'s narrowly-scoped `_fetchart_integration_status` readiness fix (which correctly removed a *local-Beets-importability* false-negative gate but left this deeper, pre-existing issue untouched, since fixing it is a separate, much larger architectural change).
-- Evidence: `_run_beet_diagnostic()` calls `subprocess.run([beet_bin, ...])` directly, where `beet_bin` comes from `_beet_binary()` resolving `BEET_BIN`/`shutil.which("beet")` **in the web-manager process's own filesystem**. This contradicts the stated two-service architecture (`docs/ARCHITECTURE.md`: "the web manager service has zero direct Beets imports or SQLite file handles") and, unlike `routes_submissions._submission_readiness()` (which correctly calls the authenticated remote control agent's `/health` endpoint and uses its truthful `plugins: {...}` field from `get_loaded_beet_plugins()`), never calls `backend/beets_client.py`/the remote control agent at all. In the real, correctly-configured two-service deployment the web-manager container has no `beet` executable, so `_beet_binary()` always returns `available=False`, `plugin_loader_ok` is always `False`, and every integration status gated on it (fetchart, replaygain, lastgenre, listenbrainz, discogs, musicbrainz, discpath, acoustid) can never report `operational: true` in production -- the opposite failure mode from a false positive, but still a genuine functional gap, not merely a naming inconsistency.
-- Current risk: `/api/setup/status`'s readiness reporting for these integrations is either permanently pessimistic in a correctly-deployed container (if no `beet` binary is ever reachable there) or, if a `beet` binary happens to be present for some other reason, reports on a *different* Beets installation than the one actually authoritative in the `beets` engine container -- neither behavior matches what an operator reading the Setup/System page would reasonably expect "operational" to mean.
-- Desired state: `_beets_plugin_diagnostics()` (or a replacement) queries the remote control agent's `/health` endpoint the same way `routes_submissions._submission_readiness()` already does, using `get_loaded_beet_plugins()`'s truthful loaded-plugin data instead of a local subprocess probe, and fails closed identically (any connection/auth/malformed-response failure reports every gated integration as not operational, per the existing pattern in `_submission_readiness()`).
-- Safe migration approach: Do not touch this inside a CI-baseline-restoration slice. Add contract tests around `_beets_plugin_diagnostics()`'s current return shape first (so a refactor can prove behavioral parity for the fields other code already depends on: `available`, `version`, `plugin_loader_ok`, `plugin_loader_error`), then migrate `_beets_plugin_diagnostics()` to call the remote control agent, then update each consuming integration-status function one at a time, verifying each against a real disposable control-agent container (chroma-loaded and chroma-unloaded cases) before moving to the next.
-- Required tests: Remote-connection-failure fails closed; remote-authentication-failure fails closed; malformed `/health` response fails closed; a genuinely loaded plugin reports operational; a genuinely failed-to-load plugin (real container reproduction, not a mock) reports not operational; no test in the migrated suite requires `beets` to be importable in the web-manager's own Python process.
+- Affected area: `routes_setup.py`, `backend/beets_client.py`, `backend/beets_control_agent.py`, and setup-status tests.
+- Evidence: The integrated branch removes setup-status dependency on `_beet_binary()`/`_run_beet_diagnostic()` and normalizes one authenticated Beets control-agent `/status` snapshot into the existing public fields (`available`, `version`, `plugin_loader_ok`, `plugin_loader_error`, `configured_plugins`, `plugin_failures`) plus `loaded_plugins`, `installed_plugins`, `capabilities`, `commands`, and remote path/tool health. The control agent reports Beets version, loaded plugins, plugin failures, `submit` and `mbsubmit` command readiness, Chroma/fingerprinting, AcoustID lookup/submission, MusicBrainz submission, FetchArt, ReplayGain, LastGenre, Discogs, ListenBrainz, and Discpath state. Unit tests cover connection failure, authentication failure, timeout, malformed shapes, FetchArt loaded/failed, Chroma present/missing, independent submit/mbsubmit readiness, ReplayGain backend readiness, Discpath readiness, redaction, no local subprocess lookup, and one-snapshot reuse. Disposable runtime validation passed for the patched engine, Chroma disabled, invalid control-agent credentials, and unreachable control-agent cases.
+- Current risk: Low. Future risk is mostly contract drift between `backend/beets_control_agent.py`, `backend/beets_client.py`, and `routes_setup.py` if one side changes without tests.
+- Desired state: `/api/setup/status` reports authoritative remote Beets readiness, fails closed on remote errors, never falls back to a local Beets executable or local `find_spec()` as operational proof, and does not leak the internal API token or raw exceptions.
+- Safe migration approach: Keep the current compatibility response shape for frontend callers. Extend the control-agent status contract only with additive structured fields. Do not treat setup-status display as a security boundary; command endpoints must continue enforcing capability checks themselves.
+- Required tests: Covered by `tests/test_routes_setup.py`, `tests/test_external_beets_architecture.py`, image verification, and disposable Compose runtime probes.
 - Priority: P1.
-- Status: Open.
+- Status: Done.
