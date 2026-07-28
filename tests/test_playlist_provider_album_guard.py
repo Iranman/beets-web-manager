@@ -8,6 +8,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _app_ast_cache import get_app_ast  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_SOURCE = (ROOT / "app.py").read_text(encoding="utf-8")
@@ -15,7 +17,7 @@ APP_SOURCE = (ROOT / "app.py").read_text(encoding="utf-8")
 
 def load_symbols(names, namespace):
     wanted = set(names)
-    tree = ast.parse(APP_SOURCE)
+    tree = get_app_ast()
     body = []
     for node in tree.body:
         node_name = getattr(node, "name", None)

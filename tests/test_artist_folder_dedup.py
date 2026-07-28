@@ -1,5 +1,6 @@
 import ast
 import re
+import sys
 import tempfile
 import unicodedata
 import unittest
@@ -7,13 +8,15 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _app_ast_cache import get_app_ast  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_SOURCE = ROOT / "app.py"
 
 
 def _load_namespace(apply_stub=None):
-    tree = ast.parse(APP_SOURCE.read_text(encoding="utf-8"))
+    tree = get_app_ast()
     names = {
         "_UNICODE_NORM",
         "_normalize_name",
