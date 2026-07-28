@@ -1555,7 +1555,7 @@ class TestControlAgentCapabilityEnforcement(unittest.TestCase):
         handler.headers["Content-Length"] = str(len(payload))
         responses = []
         handler._send_json = lambda code, data: responses.append((code, data))
-        with mock.patch("backend.beets_control_agent.BEETS_API_TOKEN", "real-token"):
+        with mock.patch("backend.beets_control_agent.BEETS_API_TOKEN", "real-token-that-is-long-enough-1234567890"):
             handler.do_POST()
         self.assertEqual(responses[0][0], 401)
 
@@ -1568,7 +1568,7 @@ class TestControlAgentCapabilityEnforcement(unittest.TestCase):
         handler.headers["Content-Length"] = str(len(payload))
         responses = []
         handler._send_json = lambda code, data: responses.append((code, data))
-        with mock.patch("backend.beets_control_agent.BEETS_API_TOKEN", "real-token"):
+        with mock.patch("backend.beets_control_agent.BEETS_API_TOKEN", "real-token-that-is-long-enough-1234567890"):
             handler.do_POST()
         self.assertEqual(responses[0][0], 401)
 
@@ -1606,6 +1606,436 @@ class TestControlAgentCapabilityEnforcement(unittest.TestCase):
         with mock.patch("backend.beets_control_agent.subprocess.run", return_value=fake_version):
             self.assertIsNone(require_command_capability("submit"))
             self.assertIsNone(require_command_capability("mbsubmit"))
+
+
+class ComposeSecurityValidatorTests(unittest.TestCase):
+    """Real negative-path coverage for scripts/validate_compose_security.py,
+    not just a single pass/fail smoke check."""
+
+    def test_baseline_files_pass(self):
+        import scripts.validate_compose_security as vcs
+        self.assertEqual(vcs.main(), 0)
+
+    def test_locally_built_image_with_upstream_digest_suffix_fails(self):
+        import scripts.validate_compose_security as vcs
+        errors: list = []
+        vcs._check_image_digest_semantics(
+            "beets", "beets-engine:2.4.0@sha256:" + "a" * 64, has_build=True, errors=errors
+        )
+        self.assertTrue(any("must not attach a digest" in e for e in errors), errors)
+
+    def test_locally_built_image_plain_tag_passes_when_dockerfile_pinned(self):
+        import scripts.validate_compose_security as vcs
+        errors: list = []
+        vcs._check_image_digest_semantics("beets", "beets-engine:2.4.0", has_build=True, errors=errors)
+        self.assertEqual(errors, [])
+
+    def test_locally_built_image_fails_when_dockerfile_base_not_pinned(self):
+        import scripts.validate_compose_security as vcs
+        with mock.patch.object(vcs, "_dockerfile_beets_base_is_approved", return_value=False):
+            errors: list = []
+            vcs._check_image_digest_semantics("beets", "beets-engine:2.4.0", has_build=True, errors=errors)
+            self.assertTrue(any("does not pin the approved" in e for e in errors), errors)
+
+    def test_pulled_third_party_image_without_digest_fails(self):
+        import scripts.validate_compose_security as vcs
+        errors: list = []
+        vcs._check_image_digest_semantics(
+            "bgutil-provider", "brainicism/bgutil-ytdlp-pot-provider:1.3.1-deno", has_build=False, errors=errors
+        )
+        self.assertTrue(any("not digest-pinned" in e for e in errors), errors)
+
+    def test_pulled_third_party_image_with_digest_passes(self):
+        import scripts.validate_compose_security as vcs
+        errors: list = []
+        vcs._check_image_digest_semantics(
+            "bgutil-provider",
+            "brainicism/bgutil-ytdlp-pot-provider:1.3.1-deno@sha256:" + "b" * 64,
+            has_build=False,
+            errors=errors,
+        )
+        self.assertEqual(errors, [])
+
+    def test_hardcoded_lan_ip_in_outbound_allowlist_fails(self):
+        import scripts.validate_compose_security as vcs
+        errors: list = []
+        vcs._check_no_hardcoded_lan_allowlist(
+            'BEETS_OUTBOUND_ALLOWLIST: "192.168.1.5:32400"', "synthetic.yml", errors
+        )
+        self.assertTrue(errors)
+
+    def test_env_var_passthrough_outbound_allowlist_passes(self):
+        import scripts.validate_compose_security as vcs
+        errors: list = []
+        vcs._check_no_hardcoded_lan_allowlist(
+            'BEETS_OUTBOUND_ALLOWLIST: "${BEETS_OUTBOUND_ALLOWLIST:-}"', "synthetic.yml", errors
+        )
+        self.assertEqual(errors, [])
+
+    def test_empty_outbound_allowlist_passes(self):
+        import scripts.validate_compose_security as vcs
+        errors: list = []
+        vcs._check_no_hardcoded_lan_allowlist("BEETS_OUTBOUND_ALLOWLIST=", "synthetic.env", errors)
+        self.assertEqual(errors, [])
+
+    def _write_compose_variant(self, tmpdir, beets_block, web_block=""):
+        from pathlib import Path
+        content = "services:\n  beets:\n" + beets_block
+        if web_block:
+            content += "\n  beets-web-manager:\n" + web_block
+        path = Path(tmpdir) / "docker-compose.synthetic.yml"
+        path.write_text(content, encoding="utf-8")
+        return path
+
+    def test_public_8338_binding_fails(self):
+        import scripts.validate_compose_security as vcs
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = self._write_compose_variant(
+                tmpdir,
+                "    image: beets-engine:2.4.0\n    ports:\n      - \"8338:8338\"\n",
+                "    ports:\n      - \"127.0.0.1:8337:8337\"\n",
+            )
+            errors: list = []
+            with mock.patch.object(vcs, "_dockerfile_beets_base_is_approved", return_value=True):
+                vcs._check_compose_variant(path, errors, [])
+            self.assertTrue(any("internal-only or bind to loopback" in e for e in errors), errors)
+
+    def test_internal_only_8338_passes(self):
+        import scripts.validate_compose_security as vcs
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = self._write_compose_variant(
+                tmpdir,
+                "    build:\n      context: .\n      dockerfile: Dockerfile.beets\n    image: beets-engine:2.4.0\n    expose:\n      - \"8338\"\n",
+                "    ports:\n      - \"127.0.0.1:8337:8337\"\n",
+            )
+            errors: list = []
+            with mock.patch.object(vcs, "_dockerfile_beets_base_is_approved", return_value=True):
+                vcs._check_compose_variant(path, errors, [])
+            self.assertEqual(errors, [])
+
+    def test_loopback_only_8337_passes_via_web_manager_service(self):
+        import scripts.validate_compose_security as vcs
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = self._write_compose_variant(
+                tmpdir,
+                "    build:\n      context: .\n      dockerfile: Dockerfile.beets\n    image: beets-engine:2.4.0\n    expose:\n      - \"8338\"\n",
+                "    ports:\n      - \"127.0.0.1:${WEBCONTROL_PORT:-8337}:8337\"\n",
+            )
+            errors: list = []
+            with mock.patch.object(vcs, "_dockerfile_beets_base_is_approved", return_value=True):
+                vcs._check_compose_variant(path, errors, [])
+            self.assertEqual(errors, [])
+
+    def test_docker_socket_mount_fails(self):
+        import scripts.validate_compose_security as vcs
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = self._write_compose_variant(
+                tmpdir,
+                "    image: beets-engine:2.4.0\n    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock\n",
+            )
+            errors: list = []
+            with mock.patch.object(vcs, "_dockerfile_beets_base_is_approved", return_value=True):
+                vcs._check_compose_variant(path, errors, [])
+            self.assertTrue(any("Docker socket" in e for e in errors), errors)
+
+    def test_both_compose_files_are_validated(self):
+        import scripts.validate_compose_security as vcs
+        errors: list = []
+        vcs._check_compose_variant(vcs.STANDALONE_COMPOSE, errors, [])
+        vcs._check_compose_variant(vcs.ARRS_COMPOSE, errors, [])
+        self.assertEqual(errors, [])
+
+
+class SecretScannerTests(unittest.TestCase):
+    """Real negative-path coverage for scripts/security_secret_scan.py."""
+
+    def test_baseline_repo_passes(self):
+        import scripts.security_secret_scan as sss
+        with mock.patch("sys.argv", ["security_secret_scan.py"]):
+            self.assertEqual(sss.main(), 0)
+
+    def test_real_looking_secret_is_detected(self):
+        import scripts.security_secret_scan as sss
+        # Built at runtime (not a contiguous literal) so this test fixture
+        # itself is never mistaken for a real committed secret by a
+        # whole-repo scan of this very test file.
+        fake_key = "AKIA" + "ABCDEFGHIJKLMNOP"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "leaked.env"
+            path.write_text(f"AWS_SECRET={fake_key}\n", encoding="utf-8")
+            findings = sss.scan_file(path)
+            self.assertTrue(any(rule == "aws-access-key" for _, rule in findings))
+
+    def test_placeholder_accepted_only_in_env_example(self):
+        import scripts.security_secret_scan as sss
+        example_path = Path("some/dir/.env.example")
+        other_path = Path("some/dir/real.env")
+        self.assertTrue(sss.is_placeholder("changeme", example_path))
+        self.assertFalse(sss.is_placeholder("changeme", other_path))
+
+    def test_weak_placeholder_rejected_outside_example_context(self):
+        import scripts.security_secret_scan as sss
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "real_config.env"
+            path.write_text("SOME_API_KEY=changeme\n", encoding="utf-8")
+            findings = sss.scan_file(path)
+            self.assertIn((1, "config-secret-assignment"), findings)
+
+    def test_scanner_exception_does_not_hide_same_value_elsewhere(self):
+        import scripts.security_secret_scan as sss
+        with tempfile.TemporaryDirectory() as tmpdir:
+            example_path = Path(tmpdir) / ".env.example"
+            example_path.write_text("BEETS_API_TOKEN=changeme\n", encoding="utf-8")
+            real_path = Path(tmpdir) / "other_service.env"
+            real_path.write_text("BEETS_API_TOKEN=changeme\n", encoding="utf-8")
+            self.assertEqual(sss.scan_file(example_path), [])
+            self.assertEqual(sss.scan_file(real_path), [(1, "config-secret-assignment")])
+
+    def test_ci_workflow_placeholder_env_is_narrowly_scoped(self):
+        import scripts.security_secret_scan as sss
+        workflow_path = sss.ROOT / ".github" / "workflows" / "docker-build.yml"
+        non_workflow_path = sss.ROOT / "docker-compose.yml"
+        self.assertTrue(sss.is_ci_only_workflow_file(workflow_path))
+        self.assertFalse(sss.is_ci_only_workflow_file(non_workflow_path))
+
+
+class BeetsApiTokenStrengthTests(unittest.TestCase):
+    """Coverage for backend/beets_control_agent.py's BEETS_API_TOKEN
+    strength/placeholder validation, fixing the gap where a non-empty but
+    trivially weak value like 'changeme' previously granted real
+    authenticated control-agent access."""
+
+    def test_blank_token_rejected(self):
+        from backend.beets_control_agent import beets_api_token_is_usable
+        self.assertFalse(beets_api_token_is_usable(""))
+        self.assertFalse(beets_api_token_is_usable("   "))
+
+    def test_placeholder_token_rejected(self):
+        from backend.beets_control_agent import beets_api_token_is_usable
+        self.assertFalse(beets_api_token_is_usable("changeme"))
+        self.assertFalse(beets_api_token_is_usable("CHANGEME"))
+        self.assertFalse(beets_api_token_is_usable("changeme_required_strong_token"))
+
+    def test_short_weak_token_rejected(self):
+        from backend.beets_control_agent import beets_api_token_is_usable
+        self.assertFalse(beets_api_token_is_usable("short-token-16ch"))
+
+    def test_valid_generated_token_accepted(self):
+        from backend.beets_control_agent import beets_api_token_is_usable
+        self.assertTrue(beets_api_token_is_usable("a" * 32))
+        self.assertTrue(beets_api_token_is_usable("Xk9pQ2vR7mN4tL8wZ1cB5dF3gH6jK0sA"))
+
+    def test_run_agent_raises_on_weak_token(self):
+        import backend.beets_control_agent as bca
+        with mock.patch.object(bca, "BEETS_API_TOKEN", "changeme"):
+            with self.assertRaises(RuntimeError):
+                bca.run_agent()
+
+    def test_authenticate_returns_500_on_weak_configured_token(self):
+        from backend.beets_control_agent import ControlAgentHandler
+        handler = ControlAgentHandler.__new__(ControlAgentHandler)
+        handler.headers = {}
+        responses = []
+        handler._send_json = lambda code, data: responses.append((code, data))
+        with mock.patch("backend.beets_control_agent.BEETS_API_TOKEN", "changeme"):
+            result = handler._authenticate()
+        self.assertFalse(result)
+        self.assertEqual(responses[0][0], 500)
+
+
+class FetchartOperationalReadinessTests(unittest.TestCase):
+    """Coverage for the readiness fix in routes_setup.py's
+    _fetchart_integration_status(): operational must depend on the real
+    plugin-loader probe result, never on local Beets package
+    importability alone (which is unavailable by design in the web-manager
+    process and would previously force a permanent false negative in any
+    environment -- e.g. CI -- where beetsplug.fetchart happens not to be
+    locally importable even though the loader probe genuinely succeeded)."""
+
+    def _diagnostics(self, **overrides):
+        base = {
+            "configured_plugins": {"fetchart"},
+            "plugin_failures": [],
+            "plugin_loader_ok": True,
+        }
+        base.update(overrides)
+        return base
+
+    def test_configured_and_loader_ok_is_operational(self):
+        from routes_setup import _fetchart_integration_status
+        status = _fetchart_integration_status(self._diagnostics())
+        self.assertTrue(status["operational"])
+
+    def test_loader_failure_is_not_operational(self):
+        from routes_setup import _fetchart_integration_status
+        status = _fetchart_integration_status(self._diagnostics(plugin_loader_ok=False))
+        self.assertFalse(status["operational"])
+
+    def test_missing_plugin_loader_field_is_not_operational(self):
+        from routes_setup import _fetchart_integration_status
+        diagnostics = self._diagnostics()
+        del diagnostics["plugin_loader_ok"]
+        status = _fetchart_integration_status(diagnostics)
+        self.assertFalse(status["operational"])
+
+    def test_plugin_failure_pattern_is_not_operational(self):
+        from routes_setup import _fetchart_integration_status
+        status = _fetchart_integration_status(
+            self._diagnostics(plugin_failures=["** error loading plugin fetchart"])
+        )
+        self.assertFalse(status["operational"])
+
+    def test_not_configured_is_not_operational_even_if_loader_ok(self):
+        from routes_setup import _fetchart_integration_status
+        status = _fetchart_integration_status(self._diagnostics(configured_plugins=set()))
+        self.assertFalse(status["operational"])
+
+    def test_local_beets_absent_does_not_force_false_negative(self):
+        """The removed probe['installed']/probe['importable_in_process']/
+        probe['bundled_namespace_merged'] gate previously required
+        beetsplug.fetchart to be importable in-process; confirm operational
+        can now be True even when the (still-computed, still-displayed)
+        namespace probe reports everything unavailable."""
+        from routes_setup import _fetchart_integration_status
+        with mock.patch(
+            "routes_setup._fetchart_namespace_probe",
+            return_value={"importable_in_process": False, "installed": False, "bundled_namespace_merged": False},
+        ):
+            status = _fetchart_integration_status(self._diagnostics())
+        self.assertTrue(status["operational"])
+        self.assertFalse(status["importable_in_process"])
+
+
+class BeetsEngineImageVerifierTests(unittest.TestCase):
+    """Real failure-path coverage for scripts/verify_beets_engine_image.py,
+    plus safety checks (no shell interpolation of untrusted values, network
+    disabled for offline checks)."""
+
+    def test_unsafe_image_identifier_rejected(self):
+        import scripts.verify_beets_engine_image as vbi
+        with self.assertRaises(SystemExit):
+            vbi._require_safe_identifier("image; rm -rf /", "--image")
+
+    def test_unsafe_plugin_identifier_rejected(self):
+        import scripts.verify_beets_engine_image as vbi
+        with self.assertRaises(SystemExit):
+            vbi._require_safe_identifier("chroma'); import os; os.system('id", "--require-plugin")
+
+    def test_safe_identifier_accepted(self):
+        import scripts.verify_beets_engine_image as vbi
+        self.assertEqual(vbi._require_safe_identifier("beets-engine:2.4.0", "--image"), "beets-engine:2.4.0")
+
+    def test_missing_image_fails(self):
+        import scripts.verify_beets_engine_image as vbi
+        mock_inspect = mock.MagicMock(returncode=1, stdout="", stderr="No such image")
+        with mock.patch.object(vbi, "_run_docker", return_value=mock_inspect):
+            errors: list = []
+            self.assertFalse(vbi.check_image_exists("nonexistent:image", errors))
+            self.assertTrue(any("does not exist locally" in e for e in errors))
+
+    def test_wrong_version_fails(self):
+        import scripts.verify_beets_engine_image as vbi
+        mock_proc = mock.MagicMock(returncode=0, stdout="beets version 2.5.0\n", stderr="")
+        with mock.patch.object(vbi, "run_container_shell", return_value=mock_proc):
+            errors: list = []
+            vbi.check_version("beets-engine:ci", "2.4.0", errors)
+            self.assertTrue(any("Expected Beets version" in e for e in errors))
+
+    def test_missing_plugin_fails(self):
+        import scripts.verify_beets_engine_image as vbi
+        mock_proc = mock.MagicMock(returncode=1, stdout="FAILED: returned None", stderr="")
+        with mock.patch.object(vbi, "run_container_python", return_value=mock_proc):
+            errors: list = []
+            vbi.check_required_plugin("beets-engine:ci", "chroma", errors)
+            self.assertTrue(any("failed to resolve" in e for e in errors))
+
+    def test_duplicate_forbidden_plugin_fails(self):
+        import scripts.verify_beets_engine_image as vbi
+        mock_proc = mock.MagicMock(
+            returncode=0,
+            stdout="plugins: chroma, convert, musicbrainz, musicbrainz\n",
+            stderr="",
+        )
+        with mock.patch.object(vbi, "run_container_shell", return_value=mock_proc):
+            errors: list = []
+            vbi.check_forbid_duplicate_plugin("beets-engine:ci", "musicbrainz", ["chroma", "musicbrainz"], errors)
+            self.assertTrue(any("duplicated" in e for e in errors))
+
+    def test_non_duplicated_plugin_passes(self):
+        import scripts.verify_beets_engine_image as vbi
+        mock_proc = mock.MagicMock(
+            returncode=0,
+            stdout="plugins: chroma, convert, musicbrainz\n",
+            stderr="",
+        )
+        with mock.patch.object(vbi, "run_container_shell", return_value=mock_proc):
+            errors: list = []
+            vbi.check_forbid_duplicate_plugin("beets-engine:ci", "musicbrainz", ["chroma", "musicbrainz"], errors)
+            self.assertEqual(errors, [])
+
+    def test_bpsync_mismatch_fails(self):
+        import scripts.verify_beets_engine_image as vbi
+        mock_proc = mock.MagicMock(returncode=1, stdout="FAILED: <class 'beetsplug.beatport.BeatportPlugin'>", stderr="")
+        with mock.patch.object(vbi, "run_container_python", return_value=mock_proc):
+            errors: list = []
+            vbi.check_bpsync("beets-engine:ci", errors)
+            self.assertTrue(any("bpsync resolution check failed" in e for e in errors))
+
+    def test_required_command_help_failure_fails(self):
+        import scripts.verify_beets_engine_image as vbi
+        mock_proc = mock.MagicMock(returncode=1, stdout="", stderr="error: unknown command 'submit'")
+        with mock.patch.object(vbi, "run_container_shell", return_value=mock_proc):
+            errors: list = []
+            vbi.check_command_help("beets-engine:ci", "submit", ["chroma"], errors)
+            self.assertTrue(any("failed with exit code" in e for e in errors))
+
+    def test_malformed_plugin_output_fails(self):
+        import scripts.verify_beets_engine_image as vbi
+        mock_proc = mock.MagicMock(returncode=0, stdout="unexpected garbage, no OK prefix", stderr="")
+        with mock.patch.object(vbi, "run_container_python", return_value=mock_proc):
+            errors: list = []
+            vbi.check_required_plugin("beets-engine:ci", "chroma", errors)
+            self.assertTrue(any("failed to resolve" in e for e in errors))
+
+    def test_containers_run_with_network_none(self):
+        import scripts.verify_beets_engine_image as vbi
+        with mock.patch.object(vbi, "_run_docker", return_value=mock.MagicMock(returncode=0, stdout="", stderr="")) as mock_run:
+            vbi.run_container_shell("beets-engine:ci", "echo hi")
+            args = mock_run.call_args[0][0]
+            self.assertIn("--network", args)
+            self.assertIn("none", args)
+
+    def test_docker_binary_missing_reports_clear_error(self):
+        import scripts.verify_beets_engine_image as vbi
+        with mock.patch("subprocess.run", side_effect=FileNotFoundError("no docker")):
+            with self.assertRaises(vbi.DockerCommandError):
+                vbi._run_docker(["version"])
+
+    def test_end_to_end_argument_parsing_success(self):
+        import scripts.verify_beets_engine_image as vbi
+        mock_inspect = mock.MagicMock(returncode=0, stdout="", stderr="")
+        mock_version = mock.MagicMock(returncode=0, stdout="beets version 2.4.0\n", stderr="")
+        mock_agent_files = mock.MagicMock(returncode=0, stdout="", stderr="")
+        mock_help = mock.MagicMock(returncode=0, stdout="", stderr="")
+
+        def fake_run_docker(args, input_text=None):
+            if args[:2] == ["image", "inspect"]:
+                return mock_inspect
+            joined = " ".join(args)
+            if "beet version" in joined:
+                return mock_version
+            if "test -f" in joined:
+                return mock_agent_files
+            return mock_help
+
+        with mock.patch.object(vbi, "_run_docker", side_effect=fake_run_docker):
+            with mock.patch("sys.argv", [
+                "verify_beets_engine_image.py",
+                "--image", "test-image:latest",
+                "--require-version", "2.4.0",
+                "--require-command-help", "mbsubmit",
+            ]):
+                self.assertEqual(vbi.main(), 0)
 
 
 if __name__ == "__main__":

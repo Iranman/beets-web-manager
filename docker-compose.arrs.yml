@@ -265,6 +265,10 @@ services:
       BEETS_API_URL: http://beets:8338
       BEETS_API_TOKEN: "${BEETS_API_TOKEN:?set in .env}"
       BEETS_WEB_AUTH_TOKEN: "${BEETS_WEB_AUTH_TOKEN:?set a strong owner token}"
+      # Enforced by backend/security.py's install_secure_urllib() SSRF policy,
+      # which runs only in this (web-manager) process -- not in the beets
+      # engine container. Empty by default; set per-deployment in .env.
+      BEETS_OUTBOUND_ALLOWLIST: "${BEETS_OUTBOUND_ALLOWLIST:-}"
       WEBCONTROL_PORT: "8337"
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
       OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
