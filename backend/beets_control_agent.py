@@ -646,9 +646,18 @@ def _handle_delete_album(album_id: int, delete_files: bool = True) -> tuple:
         release_os_lock(lock)
 
 
+def _json_default(obj):
+    if isinstance(obj, bytes):
+        try:
+            return obj.decode("utf-8", errors="replace")
+        except Exception:
+            return str(obj)
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
 class ControlAgentHandler(BaseHTTPRequestHandler):
     def _send_json(self, code: int, data: dict):
-        body = json.dumps(data, indent=2).encode("utf-8")
+        body = json.dumps(data, indent=2, default=_json_default).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
