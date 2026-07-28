@@ -12,6 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 REQUIRED_ENV = [
+    "BEETS_API_TOKEN",
     "BEETS_WEB_AUTH_TOKEN",
     "PLEX_TOKEN",
     "LIDARR_API_KEY",
@@ -111,7 +112,7 @@ def main(argv: list[str] | None = None) -> int:
             value = os.environ.get(name, "")
             if not value:
                 unset.append(name)
-            elif _is_placeholder(value, min_length=32 if name == "BEETS_WEB_AUTH_TOKEN" else 16):
+            elif _is_placeholder(value, min_length=32 if name in {"BEETS_API_TOKEN", "BEETS_WEB_AUTH_TOKEN"} else 16):
                 weak.append(name)
         present_optional = [name for name in OPTIONAL_ROTATION_ENV if os.environ.get(name)]
         result["unset_required_env"] = unset

@@ -34,6 +34,7 @@ from flask import jsonify, request
 # Imported after app.py has already defined app (circular-but-OK pattern,
 # matches routes_jobs.py / routes_lidarr.py).
 from app import app  # noqa: E402
+from backend.beets_client import BeetsAuthError, BeetsError, BeetsUnavailableError, beets_client  # noqa: E402
 # The auth-bootstrap helpers below are imported lazily, inside the functions
 # that use them, rather than here at module scope: tests/test_routes_setup.py
 # exercises this module against a minimal stub `app` module (just a bare
@@ -459,27 +460,6 @@ def _check_path(path_value: str, *, require_writable: bool) -> Dict[str, Any]:
 
 
 
-_BEETS_DIAGNOSTIC_COMMAND_FAILED = "Beets diagnostic command failed."
-
-_BEETS_PLUGIN_FAILURE_PATTERNS = (
-    "error loading plugin",
-    "modulenotfounderror",
-    "no module named",
-    "initialization failed",
-    "replaygain initialization failed",
-)
-
-# Supported Beets 2.12.0 loader probe: `beet plugins` does not exist in
-# Beets 2.12.0 and previously made every configured plugin look healthy
-# whenever the (unsupported) command merely failed to run. `-vv version`
-# is a real, supported, noninteractive, read-only command that still loads
-# the exact configured plugin list and pluginpath before printing the
-# version -- Beets initializes plugins during UI startup regardless of
-# which subcommand is requested, so a plugin import/initialization failure
-# surfaces here exactly as it does for `beet -c ... -vv version` in the
-# Docker smoke test (tests/test_beets_fresh_install_plugins.py).
-_BEET_LOADER_PROBE_ARGS = ["-vv", "version"]
-
 _REDACTED = "[redacted]"
 
 # Named key/value secrets: matches any identifier ending in one of the
@@ -491,7 +471,7 @@ _REDACTED = "[redacted]"
 #
 # The negative lookahead after the separator keeps this idempotent:
 # `_redact_diagnostic_text()` is applied repeatedly to the same text today
-# (subprocess stdout/stderr boundary, failure-line extraction, and
+# (remote status normalization, failure-line extraction, and
 # integration payload serialization each call it), so a value that is
 # already exactly the `[redacted]` placeholder (optionally quoted, any
 # case) must be left alone rather than re-matched -- otherwise the bare
@@ -547,14 +527,11 @@ def _redact_diagnostic_text(text: str) -> str:
     header value through end-of-line, not just the first cookie pair),
     query-string credentials, and credentials embedded in a URL's userinfo.
 
-    This function is genuinely called more than once on the same text in
-    production -- `_run_beet_diagnostic()` redacts stdout/stderr at the
-    subprocess boundary, `_diagnostic_failure_lines()` and the loader-error
-    detail line then redact lines extracted from that already-redacted
-    text, and `_integration_status()` redacts note/detail again at
-    serialization -- so it must be idempotent: calling it again on its own
-    output must return that output unchanged, with no accumulation of
-    stray `]` characters and no corruption of an existing placeholder."""
+    This function may be called more than once on the same text as remote
+    diagnostics are normalized and then serialized through integration
+    payloads, so it must be idempotent: calling it again on its own output
+    must return that output unchanged, with no accumulation of stray `]`
+    characters and no corruption of an existing placeholder."""
     redacted = str(text or "")
     try:
         # Reuse app.py's generic secret-assignment/control-char sanitizer
@@ -577,247 +554,166 @@ def _redact_diagnostic_text(text: str) -> str:
     return redacted
 
 
-def _simple_yaml_scalar(value: str) -> str:
-    return str(value or "").strip().strip('"\'')
-
-
-def _parse_beets_config_summary(config_path: Path) -> Dict[str, Any]:
-    summary: Dict[str, Any] = {
-        "plugins": [],
+def _remote_beets_diagnostics_failure(
+    error: str,
+    *,
+    timed_out: bool = False,
+    diagnostic_error: str = "",
+    remote_error: str = "unavailable",
+) -> Dict[str, Any]:
+    safe_error = _redact_diagnostic_text(error or "Beets control-agent status is unavailable.")
+    return {
+        "available": False,
+        "path": os.environ.get("BEETS_API_URL", "http://beets:8338"),
+        "version": "",
+        "diagnostic_error": _redact_diagnostic_text(diagnostic_error),
+        "plugins_returncode": None,
+        "plugin_loader_returncode": None,
+        "plugin_loader_ok": False,
+        "plugin_loader_timed_out": bool(timed_out),
+        "plugin_loader_error": safe_error,
+        "configured_plugins": [],
+        "loaded_plugins": [],
+        "installed_plugins": {},
         "pluginpath": [],
+        "plugin_failures": [],
         "replaygain_backend": "",
         "replaygain_command": "",
-        "discogs_token_configured": False,
-        "listenbrainz_token_configured": False,
+        "discogs_token_configured": bool(os.environ.get("DISCOGS_TOKEN") or os.environ.get("DISCOGS_USER_TOKEN")),
+        "listenbrainz_token_configured": bool(os.environ.get("LISTENBRAINZ_TOKEN")),
+        "fpcalc_available": False,
+        "fpcalc_path": "",
+        "ffmpeg_available": False,
+        "ffmpeg_path": "",
+        "pyacoustid_available": False,
+        "capabilities": {},
+        "commands": {},
+        "remote_reachable": False,
+        "remote_error": remote_error,
+        "paths": {},
     }
-    try:
-        lines = config_path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except Exception:
-        return summary
-    section = ""
-    list_key = ""
-    for raw in lines:
-        stripped = raw.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        indent = len(raw) - len(raw.lstrip(" "))
-        if indent == 0:
-            list_key = ""
-            if stripped.startswith("plugins:"):
-                value = stripped.split(":", 1)[1].strip()
-                if value:
-                    summary["plugins"].extend(p for p in value.split() if p)
-                else:
-                    list_key = "plugins"
-                section = "plugins"
-                continue
-            if stripped.startswith("pluginpath:"):
-                value = stripped.split(":", 1)[1].strip()
-                if value:
-                    summary["pluginpath"].append(_simple_yaml_scalar(value))
-                else:
-                    list_key = "pluginpath"
-                section = "pluginpath"
-                continue
-            section = stripped[:-1].strip() if stripped.endswith(":") else ""
-            continue
-        if list_key and stripped.startswith("-"):
-            value = _simple_yaml_scalar(stripped[1:].strip())
-            if value:
-                if list_key == "plugins":
-                    summary["plugins"].extend(p for p in value.split() if p)
-                else:
-                    summary["pluginpath"].append(value)
-            continue
-        if section == "replaygain" and stripped.startswith("backend:"):
-            summary["replaygain_backend"] = _simple_yaml_scalar(stripped.split(":", 1)[1])
-        elif section == "replaygain" and stripped.startswith("command:"):
-            summary["replaygain_command"] = _simple_yaml_scalar(stripped.split(":", 1)[1])
-        elif section == "discogs" and stripped.startswith("user_token:"):
-            summary["discogs_token_configured"] = bool(_simple_yaml_scalar(stripped.split(":", 1)[1]))
-        elif section == "listenbrainz" and stripped.startswith("token:"):
-            summary["listenbrainz_token_configured"] = bool(_simple_yaml_scalar(stripped.split(":", 1)[1]))
-    summary["plugins"] = list(dict.fromkeys(summary["plugins"]))
-    summary["pluginpath"] = list(dict.fromkeys(summary["pluginpath"]))
-    return summary
-
-
-def _beet_binary() -> Tuple[bool, str]:
-    configured = os.environ.get("BEET_BIN", "beet").strip() or "beet"
-    if os.path.isabs(configured) and Path(configured).exists():
-        return True, configured
-    resolved = shutil.which(configured)
-    return bool(resolved), resolved or configured
-
-
-def _run_beet_diagnostic(args: List[str], config_path: Path | None = None, timeout: int = 8) -> Dict[str, Any]:
-    available, beet_bin = _beet_binary()
-    if not available:
-        return {
-            "available": False, "path": beet_bin, "returncode": None, "timed_out": False,
-            "stdout": "", "stderr": "beet executable not found",
-        }
-    cmd = [beet_bin]
-    if config_path and config_path.exists():
-        cmd.extend(["-c", str(config_path)])
-    cmd.extend(args)
-    env = {**os.environ}
-    if config_path:
-        env["BEETSDIR"] = str(config_path.parent)
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
-        return {
-            "available": True,
-            "path": beet_bin,
-            "returncode": proc.returncode,
-            "timed_out": False,
-            "stdout": _redact_diagnostic_text(proc.stdout or ""),
-            "stderr": _redact_diagnostic_text(proc.stderr or ""),
-        }
-    except subprocess.TimeoutExpired as ex:
-        # Preserve whatever partial output the process produced before the
-        # timeout fired -- sanitized -- rather than discarding it, but never
-        # serialize the raw TimeoutExpired object (its repr includes the
-        # full argv/cmd, which is not something we want to hand back to the
-        # browser). The endpoint must stay responsive; this returns a
-        # structured, bounded result instead of propagating the exception.
-        partial_stdout = ex.stdout if isinstance(ex.stdout, str) else (ex.stdout or b"").decode("utf-8", "replace")
-        partial_stderr = ex.stderr if isinstance(ex.stderr, str) else (ex.stderr or b"").decode("utf-8", "replace")
-        app.logger.warning("Beets diagnostic command timed out after %ss", timeout)
-        return {
-            "available": True,
-            "path": beet_bin,
-            "returncode": None,
-            "timed_out": True,
-            "stdout": _redact_diagnostic_text(partial_stdout),
-            "stderr": _redact_diagnostic_text(partial_stderr) or "Beets diagnostic timed out.",
-        }
-    except Exception as ex:
-        app.logger.error("Beets diagnostic command failed: %s", type(ex).__name__)
-        return {
-            "available": True, "path": beet_bin, "returncode": None, "timed_out": False,
-            "stdout": "", "stderr": _redact_diagnostic_text(_BEETS_DIAGNOSTIC_COMMAND_FAILED),
-        }
-
-
-def _diagnostic_failure_lines(text: str) -> List[str]:
-    failures: List[str] = []
-    for line in str(text or "").splitlines():
-        lower = line.lower()
-        if any(pattern in lower for pattern in _BEETS_PLUGIN_FAILURE_PATTERNS):
-            failures.append(_redact_diagnostic_text(line.strip()))
-    return failures[:12]
 
 
 def _beets_plugin_diagnostics(config_path: Path) -> Dict[str, Any]:
-    """Run the supported Beets plugin-loader probe and report a truthful,
-    fail-closed summary. `beet plugins` does not exist in Beets 2.12.0, so
-    this uses `beet -c <config> -vv version`: a supported, noninteractive,
-    read-only, bounded-timeout command that still loads the exact
-    configured plugin list and pluginpath (Beets initializes plugins during
-    UI startup for every subcommand, so import/initialization failures
-    surface here the same way they do for `beet ... version` in the Docker
-    smoke test). A loader result only counts as successful when the beet
-    executable was found, the config file exists, the process exited 0,
-    it did not time out, and no recognized plugin-failure pattern appears
-    in its output -- callers must not infer plugin health from config.yaml
-    parsing alone when this is not true.
+    """Return Beets plugin diagnostics from the authoritative remote control
+    agent, never from a local `beet` executable in the web-manager process.
+
+    The returned shape preserves the public setup-status fields used by the
+    frontend while making the source of truth the authenticated control-agent
+    `/status` response. Any connection, authentication, timeout, or malformed
+    response fails closed: plugin_loader_ok is false and no configured/loaded
+    plugin is trusted.
     """
-    config_summary = _parse_beets_config_summary(config_path)
-    config_exists = config_path.exists()
-    if config_exists:
-        loader_probe = _run_beet_diagnostic(_BEET_LOADER_PROBE_ARGS, config_path=config_path, timeout=12)
-    else:
-        available, beet_path = _beet_binary()
-        loader_probe = {
-            "available": available,
-            "path": beet_path,
-            "returncode": None,
-            "timed_out": False,
-            "stdout": "",
-            "stderr": "Beets config file not found.",
-        }
+    try:
+        remote_status = beets_client.get_status()
+    except BeetsAuthError:
+        return _remote_beets_diagnostics_failure(
+            "Beets control-agent authentication failed.",
+            diagnostic_error="Beets control-agent authentication failed.",
+            remote_error="authentication_failed",
+        )
+    except BeetsUnavailableError as ex:
+        text = str(ex).lower()
+        timed_out = "timed out" in text or "timeout" in text
+        return _remote_beets_diagnostics_failure(
+            "Beets control-agent status request timed out." if timed_out else "Beets control agent is unavailable.",
+            timed_out=timed_out,
+            diagnostic_error="Beets control agent is unavailable.",
+            remote_error="timeout" if timed_out else "unavailable",
+        )
+    except TimeoutError:
+        return _remote_beets_diagnostics_failure(
+            "Beets control-agent status request timed out.",
+            timed_out=True,
+            diagnostic_error="Beets control-agent status request timed out.",
+            remote_error="timeout",
+        )
+    except BeetsError:
+        return _remote_beets_diagnostics_failure(
+            "Beets control-agent status request failed.",
+            diagnostic_error="Beets control-agent status request failed.",
+            remote_error="request_failed",
+        )
+    except Exception:
+        app.logger.error("Remote Beets diagnostics failed: %s", "unexpected_error")
+        return _remote_beets_diagnostics_failure(
+            "Beets control-agent status request failed.",
+            diagnostic_error="Beets control-agent status request failed.",
+            remote_error="request_failed",
+        )
 
-    combined = "\n".join([loader_probe.get("stdout", ""), loader_probe.get("stderr", "")])
-    failures = _diagnostic_failure_lines(combined)
+    if not isinstance(remote_status, dict) or remote_status.get("status") != "ok":
+        return _remote_beets_diagnostics_failure(
+            "Malformed Beets control-agent status response.",
+            diagnostic_error="Malformed Beets control-agent status response.",
+            remote_error="malformed_response",
+        )
 
-    version_lines = (loader_probe.get("stdout") or loader_probe.get("stderr") or "").strip().splitlines()
-    version = ""
-    for line in version_lines:
-        if line.lower().startswith("beets version"):
-            version = line.strip()
-            break
-    if not version and version_lines:
-        version = version_lines[0].strip()
+    configured_plugins = remote_status.get("configured_plugins")
+    loaded_plugins = remote_status.get("loaded_plugins")
+    plugin_failures = remote_status.get("plugin_failures")
+    commands = remote_status.get("commands")
+    capabilities = remote_status.get("capabilities")
+    if not isinstance(configured_plugins, list) or not isinstance(loaded_plugins, list):
+        return _remote_beets_diagnostics_failure(
+            "Malformed Beets control-agent status response.",
+            diagnostic_error="Malformed Beets control-agent status response.",
+            remote_error="malformed_response",
+        )
+    if plugin_failures is not None and not isinstance(plugin_failures, list):
+        return _remote_beets_diagnostics_failure(
+            "Malformed Beets control-agent status response.",
+            diagnostic_error="Malformed Beets control-agent status response.",
+            remote_error="malformed_response",
+        )
+    if commands is not None and not isinstance(commands, dict):
+        return _remote_beets_diagnostics_failure(
+            "Malformed Beets control-agent status response.",
+            diagnostic_error="Malformed Beets control-agent status response.",
+            remote_error="malformed_response",
+        )
+    if capabilities is not None and not isinstance(capabilities, dict):
+        return _remote_beets_diagnostics_failure(
+            "Malformed Beets control-agent status response.",
+            diagnostic_error="Malformed Beets control-agent status response.",
+            remote_error="malformed_response",
+        )
 
-    loader_timed_out = bool(loader_probe.get("timed_out"))
-    loader_available = bool(loader_probe.get("available"))
-    loader_returncode = loader_probe.get("returncode")
-    loader_ok = (
-        config_exists
-        and loader_available
-        and loader_returncode == 0
-        and not loader_timed_out
-        and not failures
-    )
-
-    loader_error = ""
-    if not loader_ok:
-        if not loader_available:
-            loader_error = "Beets executable not found."
-        elif not config_exists:
-            loader_error = "Beets config file not found."
-        elif loader_timed_out:
-            loader_error = "Beets plugin loader timed out."
-        elif failures:
-            loader_error = failures[0]
-        elif loader_probe.get("stderr") == _BEETS_DIAGNOSTIC_COMMAND_FAILED:
-            loader_error = _BEETS_DIAGNOSTIC_COMMAND_FAILED
-        elif loader_returncode != 0:
-            detail_source = (loader_probe.get("stderr") or loader_probe.get("stdout") or "").strip()
-            detail_line = detail_source.splitlines()[0] if detail_source else "Beets plugin loader failed."
-            loader_error = _redact_diagnostic_text(detail_line)[:240]
-        else:
-            loader_error = "Beets plugin loader failed."
-
-    # Preserved for backward compatibility with the earlier version+plugins
-    # dual-probe shape (tests/test_routes_setup.py asserts this exact value
-    # when the diagnostic subprocess call itself raises).
-    diagnostic_error = _BEETS_DIAGNOSTIC_COMMAND_FAILED if loader_probe.get("stderr") == _BEETS_DIAGNOSTIC_COMMAND_FAILED else ""
+    loader_ok = bool(remote_status.get("plugin_loader_ok"))
+    loader_error = str(remote_status.get("plugin_loader_error") or "")
+    if not loader_ok and not loader_error:
+        loader_error = "Beets plugin loader did not complete successfully."
 
     return {
-        "available": loader_available,
-        "path": loader_probe.get("path", ""),
-        "version": version,
-        "diagnostic_error": diagnostic_error,
-        # `plugins_returncode` is kept for existing frontend consumers; it
-        # now reflects the supported plugin-loader probe (`-vv version`)
-        # rather than the unsupported `beet plugins` command it replaced.
-        "plugins_returncode": loader_returncode,
-        "plugin_loader_returncode": loader_returncode,
+        "available": bool(remote_status.get("beet_available", True)),
+        "path": str(remote_status.get("beetsdir") or os.environ.get("BEETS_API_URL", "http://beets:8338")),
+        "version": str(remote_status.get("beets_version") or ""),
+        "diagnostic_error": "",
+        "plugins_returncode": remote_status.get("plugin_loader_returncode"),
+        "plugin_loader_returncode": remote_status.get("plugin_loader_returncode"),
         "plugin_loader_ok": loader_ok,
-        "plugin_loader_timed_out": loader_timed_out,
-        "plugin_loader_error": loader_error,
-        # Only trust config.yaml's plugin/pluginpath listing as descriptive
-        # of runtime state when the loader actually loaded that config
-        # successfully -- otherwise report them empty so callers can't
-        # mistake "listed in config.yaml" for "actually loaded".
-        "configured_plugins": config_summary["plugins"] if loader_ok else [],
-        "pluginpath": config_summary["pluginpath"] if loader_ok else [],
-        "plugin_failures": failures,
-        "replaygain_backend": config_summary.get("replaygain_backend") or "" if loader_ok else "",
-        "replaygain_command": config_summary.get("replaygain_command") or "" if loader_ok else "",
-        "discogs_token_configured": bool(
-            os.environ.get("DISCOGS_TOKEN")
-            or os.environ.get("DISCOGS_USER_TOKEN")
-            or (loader_ok and config_summary.get("discogs_token_configured"))
-        ),
-        "listenbrainz_token_configured": bool(
-            os.environ.get("LISTENBRAINZ_TOKEN")
-            or (loader_ok and config_summary.get("listenbrainz_token_configured"))
-        ),
+        "plugin_loader_timed_out": bool(remote_status.get("plugin_loader_timed_out")),
+        "plugin_loader_error": _redact_diagnostic_text(loader_error),
+        "configured_plugins": list(dict.fromkeys(str(p) for p in configured_plugins if str(p).strip())),
+        "loaded_plugins": list(dict.fromkeys(str(p) for p in loaded_plugins if str(p).strip())),
+        "installed_plugins": remote_status.get("installed_plugins") if isinstance(remote_status.get("installed_plugins"), dict) else {},
+        "pluginpath": remote_status.get("pluginpath") if isinstance(remote_status.get("pluginpath"), list) else [],
+        "plugin_failures": [_redact_diagnostic_text(str(line)) for line in (plugin_failures or [])][:12],
+        "replaygain_backend": str(remote_status.get("replaygain_backend") or ""),
+        "replaygain_command": str(remote_status.get("replaygain_command") or ""),
+        "discogs_token_configured": bool(remote_status.get("discogs_token_configured")),
+        "listenbrainz_token_configured": bool(remote_status.get("listenbrainz_token_configured")),
+        "fpcalc_available": bool(remote_status.get("fpcalc_available")),
+        "fpcalc_path": str(remote_status.get("fpcalc_path") or ""),
+        "ffmpeg_available": bool(remote_status.get("ffmpeg_available")),
+        "ffmpeg_path": str(remote_status.get("ffmpeg_path") or ""),
+        "pyacoustid_available": bool(remote_status.get("pyacoustid_available")),
+        "capabilities": capabilities or {},
+        "commands": commands or {},
+        "remote_reachable": True,
+        "remote_error": "",
+        "paths": remote_status.get("paths") if isinstance(remote_status.get("paths"), dict) else {},
     }
-
 
 def _plugin_failure_for(failures: List[str], plugin: str) -> str:
     plugin_l = plugin.lower()
@@ -862,7 +758,8 @@ def _plugin_integration_status(
     token_configured: bool | None = None,
     note: str = "",
 ) -> Dict[str, Any]:
-    plugins = set(diagnostics.get("configured_plugins") or [])
+    configured_plugins = set(diagnostics.get("configured_plugins") or [])
+    loaded_plugins = set(diagnostics.get("loaded_plugins") or [])
     failures = list(diagnostics.get("plugin_failures") or [])
     failure = _plugin_failure_for(failures, name)
     if failure:
@@ -887,12 +784,19 @@ def _plugin_integration_status(
             detail=str(diagnostics.get("plugin_loader_error") or ""),
             note="Beets plugin loader did not complete successfully; plugin state cannot be confirmed.",
         )
-    if name not in plugins:
+    if name not in configured_plugins:
         return _integration_status(
             configured=False,
             required=required,
             state="installed_but_disabled",
             note="Plugin is installed but not enabled in config.yaml.",
+        )
+    if name not in loaded_plugins:
+        return _integration_status(
+            configured=False,
+            required=required,
+            state="dependency_plugin_missing",
+            note="Plugin is enabled in config.yaml but was not loaded by the Beets engine.",
         )
     if token_configured is not None:
         return _integration_status(
@@ -941,16 +845,29 @@ def _acoustid_integration_status(diagnostics: Dict[str, Any], fpcalc_path: str |
             note="fpcalc is missing.",
         )
     configured_plugins = set(diagnostics.get("configured_plugins") or [])
+    loaded_plugins = set(diagnostics.get("loaded_plugins") or [])
     if "chroma" not in configured_plugins:
         return _integration_status(
             configured=False,
             state="installed_but_disabled",
             note="Chroma plugin is installed but not enabled in config.yaml.",
         )
+    if "chroma" not in loaded_plugins:
+        return _integration_status(
+            configured=False,
+            state="dependency_plugin_missing",
+            note="Chroma is enabled but was not loaded by the Beets engine.",
+        )
+    if not diagnostics.get("pyacoustid_available"):
+        return _integration_status(
+            configured=False,
+            state="dependency_plugin_missing",
+            note="pyacoustid is missing in the Beets engine.",
+        )
     return _integration_status(
         configured=True,
         state="configured",
-        note="Fingerprinting available; AcoustID key is optional but improves rate limits.",
+        note="Fingerprinting and AcoustID lookup support are available; submission also requires a user key.",
     )
 
 
@@ -967,6 +884,7 @@ def _replaygain_integration_status(diagnostics: Dict[str, Any], ffmpeg_path: str
     if not diagnostics.get("plugin_loader_ok"):
         return _loader_failed_status(diagnostics)
     configured_plugins = set(diagnostics.get("configured_plugins") or [])
+    loaded_plugins = set(diagnostics.get("loaded_plugins") or [])
     replaygain_backend = diagnostics.get("replaygain_backend") or ""
     replaygain_command = diagnostics.get("replaygain_command") or ""
     if "replaygain" not in configured_plugins:
@@ -974,6 +892,12 @@ def _replaygain_integration_status(diagnostics: Dict[str, Any], ffmpeg_path: str
             configured=False,
             state="installed_but_disabled",
             note="ReplayGain must use an installed backend.",
+        )
+    if "replaygain" not in loaded_plugins:
+        return _integration_status(
+            configured=False,
+            state="dependency_plugin_missing",
+            note="ReplayGain is enabled but was not loaded by the Beets engine.",
         )
     if replaygain_backend == "ffmpeg" and ffmpeg_path and not replaygain_command:
         return _integration_status(
@@ -1043,20 +967,19 @@ def _fetchart_integration_status(diagnostics: Dict[str, Any]) -> Dict[str, Any]:
     loadable-by-the-real-loader/namespace-merged/operational -- never
     reports operational merely because "fetchart" appears in config.yaml,
     find_spec() resolves something, or the dependency package is installed.
-    Operational requires the real `beet -vv version` loader probe to have
-    actually loaded it, with no recognized plugin-failure pattern, in
-    addition to every other signal.
+    Operational requires the authoritative Beets control-agent status to have
+    loaded it, with no recognized plugin-failure pattern, in addition to
+    every other signal.
     """
     plugin_failures = list(diagnostics.get("plugin_failures") or [])
     fetchart_failure = _plugin_failure_for(plugin_failures, "fetchart")
     configured_plugins = set(diagnostics.get("configured_plugins") or [])
+    loaded_plugins = set(diagnostics.get("loaded_plugins") or [])
     configured = "fetchart" in configured_plugins
+    loaded = "fetchart" in loaded_plugins
     probe = _fetchart_namespace_probe()
-    loadable_by_beet_cli = bool(diagnostics.get("plugin_loader_ok")) and not fetchart_failure
-    operational = bool(
-        configured
-        and loadable_by_beet_cli
-    )
+    loadable_by_beet_cli = bool(diagnostics.get("plugin_loader_ok")) and loaded and not fetchart_failure
+    operational = bool(configured and loadable_by_beet_cli)
 
     if fetchart_failure:
         base = _integration_status(
@@ -1069,6 +992,11 @@ def _fetchart_integration_status(diagnostics: Dict[str, Any]) -> Dict[str, Any]:
         base = _integration_status(
             configured=False, required=True, state="installed_but_disabled",
             note="FetchArt is installed but not enabled in config.yaml.",
+        )
+    elif not loaded:
+        base = _integration_status(
+            configured=False, required=True, state="dependency_plugin_missing",
+            note="FetchArt is enabled but was not loaded by the Beets engine.",
         )
     else:
         base = _integration_status(
@@ -1090,17 +1018,42 @@ def _fetchart_integration_status(diagnostics: Dict[str, Any]) -> Dict[str, Any]:
 def setup_status():
     """Readiness snapshot: paths, beets config, fpcalc, and each optional
     integration's configured/not-configured state (does not make live network
-    calls — use the /api/setup/test/* endpoints for that)."""
+    calls to external providers; it does query the internal Beets control agent)."""
     settings = _load_settings()
 
-    config_check = _check_path(os.environ.get("BEETSDIR", "/config"), require_writable=True)
-    music_check = _check_path("/data/media/music", require_writable=False)
-    downloads_check = _check_path("/data/torrents", require_writable=True)
     beets_config_path = Path(os.environ.get("BEETS_CONFIG", "/config/config.yaml"))
-
-    fpcalc_path = shutil.which("fpcalc")
-    ffmpeg_path = shutil.which("ffmpeg")
     diagnostics = _beets_plugin_diagnostics(beets_config_path)
+    remote_paths = diagnostics.get("paths") if isinstance(diagnostics.get("paths"), dict) else {}
+
+    def _remote_path(name: str, default_path: str, *, require_writable: bool = False) -> Dict[str, Any]:
+        data = remote_paths.get(name)
+        if isinstance(data, dict):
+            return {
+                "path": str(data.get("path") or default_path),
+                "exists": bool(data.get("exists")),
+                "is_dir": bool(data.get("is_dir")),
+                "readable": bool(data.get("readable")),
+                "writable": bool(data.get("writable")),
+                "ok": bool(data.get("ok")),
+            }
+        return {
+            "path": default_path,
+            "exists": False,
+            "is_dir": False,
+            "readable": False,
+            "writable": False,
+            "ok": False,
+        }
+
+    config_check = _remote_path("config", "/config", require_writable=True)
+    music_check = _remote_path("music_library", "/data/media/music")
+    downloads_check = _remote_path("downloads", "/data/torrents", require_writable=True)
+    remote_config_file = remote_paths.get("beets_config") if isinstance(remote_paths.get("beets_config"), dict) else {}
+    beets_config_exists = bool(remote_config_file.get("exists"))
+    beets_config_report_path = str(remote_config_file.get("path") or beets_config_path)
+
+    fpcalc_path = diagnostics.get("fpcalc_path") if diagnostics.get("fpcalc_available") else ""
+    ffmpeg_path = diagnostics.get("ffmpeg_path") if diagnostics.get("ffmpeg_available") else ""
 
     integrations = {
         "ai": _integration_status(
@@ -1143,7 +1096,7 @@ def setup_status():
         "discpath": _plugin_integration_status(
             "discpath",
             diagnostics,
-            note="User plugins load from /config/beetsplug before bundled plugins in /app/beetsplug.",
+            note="User plugins load from /config/beetsplug before bundled plugins in /opt/beets-web-manager-agent/beetsplug.",
         ),
         "fetchart": _fetchart_integration_status(diagnostics),
         "replaygain": _replaygain_integration_status(diagnostics, ffmpeg_path),
@@ -1166,15 +1119,15 @@ def setup_status():
         blocking.append(f"Music library path {music_check['path']} is not accessible")
     if not downloads_check["writable"]:
         blocking.append(f"Cannot write to downloads/staging path {downloads_check['path']}")
-    if not beets_config_path.exists():
+    if not beets_config_exists:
         blocking.append(
-            f"Beets config not found at {beets_config_path} — copy config.yaml.example to config.yaml"
+            f"Beets config not found at {beets_config_report_path} - copy config.yaml.example to config.yaml"
         )
     if not fpcalc_path:
         blocking.append("fpcalc (chromaprint) not found on PATH — AcoustID fingerprinting will not work")
-    if beets_config_path.exists() and not diagnostics.get("plugin_loader_ok"):
-        # Config exists but the supported plugin-loader probe did not
-        # succeed (nonzero exit, timeout, or a recognized plugin failure) --
+    if beets_config_exists and not diagnostics.get("plugin_loader_ok"):
+        # Config exists but the remote plugin-loader status did not
+        # succeed (nonzero result, timeout, or a recognized plugin failure) --
         # surface this as at least a warning rather than silently reporting
         # every configured plugin as healthy. (When the config itself is
         # missing, the message above already covers it -- avoid a duplicate.)
@@ -1211,7 +1164,7 @@ def setup_status():
             "config": config_check,
             "music_library": music_check,
             "downloads": downloads_check,
-            "beets_config": {"path": str(beets_config_path), "exists": beets_config_path.exists()},
+            "beets_config": {"path": beets_config_report_path, "exists": beets_config_exists},
         },
         "fpcalc": {"available": bool(fpcalc_path), "path": fpcalc_path or ""},
         "beets": diagnostics,
@@ -1470,23 +1423,40 @@ def health_live():
 
 @app.get("/health/ready")
 def health_ready():
-    """Readiness probe: same underlying checks as /api/setup/status, boiled
-    down to a single status a load balancer/orchestrator can act on."""
-    config_check = _check_path(os.environ.get("BEETSDIR", "/config"), require_writable=True)
-    downloads_check = _check_path("/data/torrents", require_writable=True)
-    beets_config_path = Path(os.environ.get("BEETS_CONFIG", "/config/config.yaml"))
+    """Readiness probe backed by the authoritative Beets control agent."""
+    diagnostics = _beets_plugin_diagnostics(Path(os.environ.get("BEETS_CONFIG", "/config/config.yaml")))
+    remote_paths = diagnostics.get("paths") if isinstance(diagnostics.get("paths"), dict) else {}
+
+    def _remote_path_ok(name: str, *, writable: bool = False) -> bool:
+        data = remote_paths.get(name)
+        if not isinstance(data, dict):
+            return False
+        return bool(data.get("writable") if writable else data.get("ok"))
+
     blocking = []
-    if not config_check["writable"]:
+    if not diagnostics.get("remote_reachable"):
+        blocking.append("beets control agent unavailable")
+    if not _remote_path_ok("config", writable=True):
         blocking.append("config path not writable")
-    if not downloads_check["writable"]:
+    if not _remote_path_ok("downloads", writable=True):
         blocking.append("downloads path not writable")
-    if not beets_config_path.exists():
+    beets_config = remote_paths.get("beets_config") if isinstance(remote_paths.get("beets_config"), dict) else {}
+    if not beets_config.get("exists"):
         blocking.append("beets config missing")
+    if beets_config.get("exists") and not diagnostics.get("plugin_loader_ok"):
+        blocking.append("beets plugin loader failed")
+
     status = "ready" if not blocking else "warning"
     return jsonify({
         "status": status,
         "version": _APP_VERSION,
         "blocking_reasons": blocking,
+        "beets": {
+            "available": bool(diagnostics.get("available")),
+            "remote_reachable": bool(diagnostics.get("remote_reachable")),
+            "version": diagnostics.get("version") or "",
+            "plugin_loader_ok": bool(diagnostics.get("plugin_loader_ok")),
+        },
     }), (200 if not blocking else 503)
 
 

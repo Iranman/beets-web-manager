@@ -136,6 +136,31 @@ class TestBeetsControlAgentSecurity(unittest.TestCase):
         if compose_path.exists():
             self.assertNotIn("/etc/custom-services.d", compose_path.read_text(encoding="utf-8"))
 
+    def test_engine_image_disables_inherited_beet_web_service(self):
+        """The engine image must run the control agent, not the LSIO beet web service."""
+        content = (ROOT / "Dockerfile.beets").read_text(encoding="utf-8")
+
+        self.assertIn("/etc/s6-overlay/s6-rc.d/user/contents.d/svc-beets", content)
+        self.assertIn("rm -f /etc/s6-overlay/s6-rc.d/user/contents.d/svc-beets", content)
+        self.assertNotIn("beet web", content)
+
+    def test_public_api_health_is_liveness_only(self):
+        import app as app_module
+
+        with mock.patch.object(app_module, "_health_checks", side_effect=AssertionError("dependency probe used")):
+            response = app_module.app.test_client().get("/api/health")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), {"ok": True})
+
+    def test_legacy_local_scan_loop_is_opt_in(self):
+        content = (ROOT / "app.py").read_text(encoding="utf-8")
+
+        self.assertIn("BEETS_ENABLE_LEGACY_LOCAL_SCAN", content)
+        self.assertIn("/web-manager-data/last_scan.txt", content)
+        self.assertIn("if _legacy_local_scan_enabled():", content)
+        self.assertIn("Legacy local library scan is disabled", content)
+
 
 class TestBeetsClientRemoteOnly(unittest.TestCase):
     def test_get_db_connection_never_uses_local_sqlite(self):
@@ -166,6 +191,17 @@ class TestBeetsClientRemoteOnly(unittest.TestCase):
             mock_urlopen.side_effect = urllib.error.URLError("Connection refused")
             with self.assertRaises(BeetsUnavailableError):
                 client.version()
+
+    def test_beets_client_malformed_json_raises_sanitized_unavailable_error(self):
+        client = BeetsClient(base_url="http://127.0.0.1:9999", token="test")
+        with mock.patch("urllib.request.urlopen") as mock_urlopen:
+            mock_response = mock.MagicMock()
+            mock_response.read.return_value = b"{not-valid-json token=secret}"
+            mock_urlopen.return_value.__enter__.return_value = mock_response
+            with self.assertRaises(BeetsUnavailableError) as cm:
+                client.get_status()
+        self.assertIn("malformed JSON", str(cm.exception))
+        self.assertNotIn("secret", str(cm.exception))
 
     def test_web_manager_source_code_contains_no_beets_imports(self):
         """Assert that web-manager production code contains zero beets imports."""
@@ -1427,12 +1463,13 @@ class TestAcoustIDChromaCapability(unittest.TestCase):
 
     def _run_status_with_beet_version_stdout(self, stdout: str) -> dict:
         handler = ControlAgentHandler.__new__(ControlAgentHandler)
-        handler.headers = {}
+        handler.headers = {"Authorization": "Bearer test-token"}
+        handler._authenticate = lambda: True
         handler.path = "/status"
         responses = []
         handler._send_json = lambda code, data: responses.append((code, data))
 
-        fake_result = mock.MagicMock(stdout=stdout, returncode=0)
+        fake_result = mock.MagicMock(stdout=stdout, stderr="", returncode=0)
         with mock.patch("backend.beets_control_agent.subprocess.run", return_value=fake_result):
             handler.do_GET()
 
@@ -1452,6 +1489,8 @@ class TestAcoustIDChromaCapability(unittest.TestCase):
         )
         data = self._run_status_with_beet_version_stdout(stdout)
         self.assertFalse(data["plugins"]["chroma"], "chroma is not in the loaded-plugins line and must report unavailable")
+        self.assertFalse(data["capabilities"]["fingerprinting"]["available"])
+        self.assertFalse(data["capabilities"]["fingerprinting"]["chroma_loaded"])
         self.assertTrue(data["plugins"]["mbsubmit"])
         self.assertTrue(data["plugins"]["musicbrainz"])
 
@@ -2225,6 +2264,7 @@ class FetchartOperationalReadinessTests(unittest.TestCase):
     def _diagnostics(self, **overrides):
         base = {
             "configured_plugins": {"fetchart"},
+            "loaded_plugins": {"fetchart"},
             "plugin_failures": [],
             "plugin_loader_ok": True,
         }

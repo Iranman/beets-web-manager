@@ -2767,34 +2767,34 @@ def ytdlp_test_youtube():
     )
     return jsonify({"ok": True, "job_id": job.job_id, "status": "queued"})
 def _health_checks() -> Dict[str, bool]:
-    return {
-        "library_path": Path(LIB_PATH).exists(),
-        "beet_bin":     Path(BEET_BIN).exists() if BEET_BIN else False,
-        "music_root":   MUSIC_ROOT.is_dir(),
-        "lidarr_key":   bool(LIDARR_KEY),
+    checks = {
+        "app": True,
+        "beets_control_agent": False,
+        "lidarr_key": bool(LIDARR_KEY),
         "discogs_token": bool(DISCOGS_TOKEN),
-        "slskd_key":    bool(SLSKD_API_KEY),
-        "openai_key":   bool(os.environ.get("OPENAI_API_KEY")),
+        "slskd_key": bool(SLSKD_API_KEY),
+        "openai_key": bool(os.environ.get("OPENAI_API_KEY")),
     }
+    try:
+        agent_health = beets_client.health()
+        checks["beets_control_agent"] = agent_health.get("status") == "ok"
+    except Exception:
+        checks["beets_control_agent"] = False
+    return checks
 
 
 @app.get("/api/health")
 def health():
-    # Public/unauthenticated (Docker/k8s-style probes never send credentials)
-    # — keep this minimal. An unauthenticated caller should not be able to
-    # fingerprint which integrations are configured or which host paths
-    # exist; that detail lives at /api/health/detail, which requires auth.
-    checks = _health_checks()
-    ok = checks["library_path"] and checks["beet_bin"]
-    return jsonify({"ok": ok})
+    # Public/unauthenticated liveness. Dependency/readiness detail belongs on
+    # /health/ready and authenticated /api/health/detail.
+    return jsonify({"ok": True})
 
 
 @app.get("/api/health/detail")
 def health_detail():
-    """Same integration/path diagnostics /api/health used to expose
-    unauthenticated. Requires auth (no entry in _AUTH_PUBLIC_ENDPOINTS)."""
+    """Authenticated dependency diagnostics for the web manager."""
     checks = _health_checks()
-    ok = checks["library_path"] and checks["beet_bin"]
+    ok = checks["app"] and checks["beets_control_agent"]
     return jsonify({"ok": ok, "checks": checks})
 
 @app.post("/api/restart")
@@ -25324,11 +25324,17 @@ def start_ai_batch_import():
 
 # ── Library scan ──────────────────────────────────────────────────────────────
 
-_SCAN_STATE_FILE     = Path("/config/last_scan.txt")
+_SCAN_STATE_FILE     = Path(os.environ.get("BEETS_SCAN_STATE_FILE", "/web-manager-data/last_scan.txt"))
 _FULL_SCAN_INTERVAL  = 1800   # 30 min — full DB reconciliation + cleanup
 _QUICK_SCAN_INTERVAL = 120    # 2 min  — invalidate lib cache so next /api/library is fresh
 _AUTO_SCAN_INTERVAL  = _FULL_SCAN_INTERVAL   # kept for API compat
 _last_scan_job_id: Optional[str] = None
+
+
+def _legacy_local_scan_enabled() -> bool:
+    return os.environ.get("BEETS_ENABLE_LEGACY_LOCAL_SCAN", "0").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
 
 def _get_last_scan() -> float:
     """Return Unix timestamp of the last successful scan, or 0."""
@@ -25463,6 +25469,11 @@ def _do_scan_job() -> str:
 
 @app.post("/api/library/scan")
 def library_scan():
+    if not _legacy_local_scan_enabled():
+        return jsonify({
+            "ok": False,
+            "error": "Legacy local library scan is disabled for the external Beets engine architecture.",
+        }), 409
     jid = _do_scan_job()
     return jsonify({"ok": True, "job_id": jid, "last_scan": _get_last_scan()})
 
@@ -27046,7 +27057,8 @@ def _auto_scan_loop():
             _lg.getLogger(__name__).warning("_auto_scan_loop error: %s", _e)
         time.sleep(20)   # heartbeat every 20s
 
-threading.Thread(target=_auto_scan_loop, daemon=True).start()
+if _legacy_local_scan_enabled():
+    threading.Thread(target=_auto_scan_loop, daemon=True).start()
 
 # ── Import ────────────────────────────────────────────────────────────────────
 
