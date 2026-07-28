@@ -8,7 +8,8 @@
     "build": "tsc -b && next build && node scripts/sync-next-export.mjs",
     "preview": "next dev",
     "typecheck": "tsc -b --pretty",
-    "lint": "eslint src"
+    "lint": "eslint src",
+    "test": "vitest run"
   },
   "dependencies": {
     "@emotion/react": "11.14.0",
@@ -18,23 +19,26 @@
     "@tailwindcss/postcss": "4.3.2",
     "@tanstack/react-query": "5.101.2",
     "next": "16.2.11",
-    "postcss": "8.5.15",
+    "postcss": "8.5.24",
     "react": "19.2.7",
     "react-dom": "19.2.7",
-    "react-router-dom": "7.18.1",
+    "react-router": "8.3.0",
     "tailwindcss": "4.3.0"
   },
   "overrides": {
-    "postcss": "8.5.15",
+    "postcss": "8.5.24",
     "sharp": "0.35.3"
   },
   "devDependencies": {
+    "@testing-library/react": "16.3.2",
     "@types/node": "26.1.1",
     "@types/react": "19.2.17",
     "@types/react-dom": "19.2.3",
     "eslint": "^10.7.0",
     "eslint-plugin-react-hooks": "^7.1.1",
+    "jsdom": "25.0.1",
     "typescript": "6.0.3",
-    "typescript-eslint": "^8.64.0"
+    "typescript-eslint": "^8.64.0",
+    "vitest": "4.1.10"
   }
 }

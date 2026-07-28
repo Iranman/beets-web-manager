@@ -12,7 +12,7 @@ Use `docs/ARCHITECTURE.md` for the current system shape and intended dependency 
 
 - Backend: Python/Flask, with many routes still in `app.py`; selected routes are split into `routes_jobs.py`, `routes_lidarr.py`, `routes_setup.py`, and `routes_submissions.py`.
 - Domain/helper modules: `backend/`, `helpers_mb.py`, and `job_engine.py` hold extracted matching, safety, provider, transaction, and job utilities.
-- Frontend: React, Next.js static export, TypeScript, Tailwind, MUI, Headless UI, and TanStack Query under `frontend/src/`.
+- Frontend: React, Next.js static export, TypeScript, Tailwind, MUI, Headless UI, TanStack Query, and React Router v8 (`react-router`; the `react-router-dom` package was removed in v8 -- all declarative routing imports come from `react-router` itself) under `frontend/src/`.
 - Beets is the library backend and source of library mutations. Do not replace it with a parallel library implementation.
 
 ## Non-Negotiable Rules
@@ -52,6 +52,7 @@ cd frontend
 npm.cmd run typecheck
 npm.cmd run build
 npm.cmd run lint
+npm.cmd run test
 npm.cmd audit --audit-level=high
 ```
 

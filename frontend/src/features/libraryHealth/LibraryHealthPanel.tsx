@@ -3,7 +3,7 @@ import Button from '@mui/material/Button';
 import Chip from '@mui/material/Chip';
 import LinearProgress from '@mui/material/LinearProgress';
 import { useCallback, useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router';
 import {
   apiJson, getMbidStatus, getJobResult, startMbidStickingRepair, startTemplateTokenCleanup,
   getRgidGroupDetail, mergeRgidGroup, keepRgidGroupSeparate, undoRgidGroupResolution,

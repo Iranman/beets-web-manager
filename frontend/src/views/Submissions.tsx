@@ -6,7 +6,7 @@ import Menu from '@mui/material/Menu';
 import MenuItem from '@mui/material/MenuItem';
 import TextField from '@mui/material/TextField';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router';
 import ArtistResolutionCard from '../components/ArtistResolutionCard';
 import SubmissionReadinessCard, { ACTION_LABEL, readinessSummary } from '../components/SubmissionReadinessCard';
 import {

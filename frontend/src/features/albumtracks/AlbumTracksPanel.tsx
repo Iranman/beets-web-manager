@@ -5,7 +5,7 @@ import Chip from '@mui/material/Chip';
 import LinearProgress from '@mui/material/LinearProgress';
 import TextField from '@mui/material/TextField';
 import { useEffect, useState } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router';
 import { getJobResult, removeAlbumTracks, removeAlbumTracksBatch, scanAlbumTracks } from '../../api/client';
 import type { AlbumTrackProblem, AlbumTrackScanResult } from '../../api/types';
 import { CleanActionBar, CleanEmptyState, CleanMetricGrid, CleanPanelHeader } from '../../components/CleanPanel';

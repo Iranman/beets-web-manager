@@ -79,6 +79,39 @@ class ImportPageNavigationTests(unittest.TestCase):
         self.assertNotIn("ImportReviewPage", self.jobs_source)
 
 
+class RouterDependencyPolicyTests(unittest.TestCase):
+    """Governance-only: encodes the deliberate package-structure decision
+    (react-router v8, no react-router-dom, no npm alias) as a policy
+    assertion. This class intentionally does NOT claim to verify routing
+    behavior -- real route matching, redirects, query-param propagation,
+    and NavLink destinations are covered by
+    frontend/tests/router.test.tsx (Vitest + @testing-library/react,
+    exercising the actual AppRoutes component under MemoryRouter), which a
+    source-text assertion cannot meaningfully substitute for."""
+
+    @classmethod
+    def setUpClass(cls):
+        import json
+        cls.pkg = json.loads((ROOT / "frontend" / "package.json").read_text(encoding="utf-8"))
+        cls.lockfile_text = (ROOT / "frontend" / "package-lock.json").read_text(encoding="utf-8")
+
+    def test_react_router_dom_is_not_a_direct_dependency(self):
+        self.assertNotIn("react-router-dom", self.pkg.get("dependencies", {}))
+        self.assertNotIn("react-router-dom", self.pkg.get("devDependencies", {}))
+
+    def test_no_npm_alias_for_react_router_dom_remains(self):
+        # The unsupported migration shortcut this policy rejects: aliasing
+        # react-router-dom to the react-router package instead of removing
+        # it and updating imports.
+        self.assertNotIn('"react-router-dom": "npm:react-router', self.lockfile_text)
+
+    def test_react_router_is_pinned_to_the_patched_v8_release(self):
+        self.assertEqual(self.pkg["dependencies"]["react-router"], "8.3.0")
+
+    def test_postcss_patched_version_and_override_are_present(self):
+        self.assertEqual(self.pkg["dependencies"]["postcss"], "8.5.24")
+        self.assertEqual(self.pkg["overrides"]["postcss"], "8.5.24")
+
 
 if __name__ == "__main__":
     unittest.main()
