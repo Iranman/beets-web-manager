@@ -68,3 +68,27 @@ jobs:
             echo "::error::Container never became healthy within the timeout"
             exit 1
           fi
+
+  beets-engine-verification:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Build Beets engine image
+        run: docker build --pull=false -f Dockerfile.beets -t beets-engine:ci .
+      - name: Verify Beets engine image
+        run: |
+          set -e
+          args=(--image beets-engine:ci --require-version 2.4.0 --require-command-help mbsubmit)
+          # Chroma plugin-resolution assertions activate automatically once
+          # this file marker (the build-time patch script) is present on the
+          # checked-out tree -- e.g. after fix/chroma-acoustid-plugin merges
+          # into this branch's base. No follow-up change to that branch's
+          # own workflow is required.
+          if [ -f docker/beets/apply_patches.py ]; then
+            echo "Chroma plugin-resolution patch detected; activating Chroma-specific verification."
+            args+=(--require-plugin chroma --forbid-duplicate-plugin musicbrainz --require-command-help submit --check-bpsync)
+          fi
+          python scripts/verify_beets_engine_image.py "${args[@]}"

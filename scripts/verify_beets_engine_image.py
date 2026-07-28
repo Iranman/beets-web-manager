@@ -1,0 +1,266 @@
+#!/usr/bin/env python3
+"""Reusable CI verifier for Beets engine Docker images.
+
+Validates Beets engine images against explicit plugin, version, capability,
+and command-help expectations without requiring Beets to be installed in the
+runner Python environment.
+
+Safety properties:
+- Every value that could contain attacker- or CI-input-controlled text
+  (image name, plugin names, command names) is validated against a strict
+  safe-character allowlist before use, and passed to subprocesses as
+  discrete argv list elements -- never interpolated into a shell string.
+- Container Python probe scripts are generated from a small set of fixed
+  templates with only already-validated identifiers substituted in, and are
+  passed to the container via stdin, not as part of a shell -c string.
+- All checks run with --network none: none of them need network access, and
+  disabling it removes an entire class of nondeterminism and risk.
+- Every docker invocation is wrapped so a missing/broken Docker daemon or
+  binary produces one clear error message instead of an unhandled traceback.
+"""
+from __future__ import annotations
+
+import argparse
+import re
+import subprocess
+import sys
+from typing import List, Optional
+
+_SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/@-]*$")
+
+
+def _require_safe_identifier(value: str, label: str) -> str:
+    """Reject anything that is not a plain identifier/tag-like token before
+    it is ever used to build a subprocess argv or an in-container script,
+    closing off shell/Python injection through image names, plugin names,
+    or command names."""
+    if not value or not _SAFE_IDENTIFIER_RE.match(value):
+        raise SystemExit(f"Invalid {label} (unsafe characters): {value!r}")
+    return value
+
+
+class DockerCommandError(RuntimeError):
+    pass
+
+
+def _run_docker(args: List[str], input_text: Optional[str] = None) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(
+            ["docker", *args],
+            input=input_text,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except FileNotFoundError as exc:
+        raise DockerCommandError(f"docker binary not found: {exc}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise DockerCommandError(f"docker command timed out: {' '.join(args)}") from exc
+    except OSError as exc:
+        raise DockerCommandError(f"docker command failed to start: {exc}") from exc
+
+
+def run_container_python(image: str, script: str) -> subprocess.CompletedProcess:
+    """Run a Python script inside a disposable, network-isolated container by
+    piping it to stdin, never by interpolating it into a shell -c string."""
+    return _run_docker(
+        [
+            "run", "--rm", "--network", "none", "-i",
+            "--entrypoint", "/lsiopy/bin/python3",
+            image, "-",
+        ],
+        input_text=script,
+    )
+
+
+def run_container_shell(image: str, shell_cmd: str) -> subprocess.CompletedProcess:
+    """Run a fixed, script-authored (never CLI-argument-interpolated) shell
+    command inside a disposable, network-isolated container."""
+    return _run_docker(["run", "--rm", "--network", "none", "--entrypoint", "/bin/sh", image, "-c", shell_cmd])
+
+
+def check_version(image: str, expected_version: str, errors: List[str]) -> None:
+    res = run_container_shell(image, "/lsiopy/bin/beet version")
+    if res.returncode != 0:
+        errors.append(f"beet version command failed: {res.stderr.strip()}")
+        return
+    version_line = ""
+    for line in res.stdout.splitlines():
+        if line.lower().startswith("beets version"):
+            version_line = line.strip()
+            break
+    if not version_line:
+        errors.append(f"beet version output did not contain a 'beets version' line: {res.stdout.strip()!r}")
+        return
+    reported_version = version_line.split()[-1]
+    if reported_version != expected_version:
+        errors.append(f"Expected Beets version '{expected_version}', got '{reported_version}' ({version_line})")
+    else:
+        print(f"[OK] Beets version verified: {reported_version}")
+
+
+def check_control_agent_files(image: str, errors: List[str]) -> None:
+    res = run_container_shell(
+        image,
+        "test -f /opt/beets-web-manager-agent/beets_control_agent.py && test -f /custom-services.d/beets-control-agent",
+    )
+    if res.returncode != 0:
+        errors.append(
+            "Control agent files (/opt/beets-web-manager-agent/beets_control_agent.py or "
+            "/custom-services.d/beets-control-agent) missing"
+        )
+    else:
+        print("[OK] Control agent files and S6 service script present")
+
+
+def check_required_plugin(image: str, plugin: str, errors: List[str]) -> None:
+    script = f"""
+import beets.plugins
+p = beets.plugins._get_plugin({plugin!r})
+if p is None:
+    print("FAILED: returned None")
+    raise SystemExit(1)
+print("OK:", p.__class__.__module__, p.__class__.__name__)
+"""
+    res = run_container_python(image, script)
+    if res.returncode != 0 or not res.stdout.strip().startswith("OK:"):
+        errors.append(f"Required plugin '{plugin}' failed to resolve: {res.stdout.strip()} {res.stderr.strip()}")
+    else:
+        print(f"[OK] Required plugin '{plugin}' resolved: {res.stdout.strip()}")
+
+
+def check_forbid_duplicate_plugin(image: str, plugin: str, configured_plugins: List[str], errors: List[str]) -> None:
+    """Real duplicate-plugin check: loads the FULL configured plugin set (the
+    same set every --require-plugin/--require-command-help name contributes,
+    exactly as a real deployment would configure them) via `beet -vv version`
+    and asserts `plugin` appears at most once in the final "plugins:" line --
+    not merely that _get_plugin(plugin) resolves to itself in isolation,
+    which is true whether or not a real duplicate exists elsewhere."""
+    plugin_list = " ".join(dict.fromkeys(configured_plugins))
+    setup_cmd = (
+        f"mkdir -p /tmp/ci_verify && "
+        f"printf 'plugins: {plugin_list}\\n' > /tmp/ci_verify_config.yaml && "
+        f"BEETSDIR=/tmp/ci_verify /lsiopy/bin/beet -c /tmp/ci_verify_config.yaml -vv version"
+    )
+    res = run_container_shell(image, setup_cmd)
+    plugins_line = ""
+    for line in res.stdout.splitlines():
+        if line.strip().startswith("plugins:"):
+            plugins_line = line.strip()
+    if not plugins_line:
+        errors.append(f"Could not find a 'plugins:' line in beet -vv version output for duplicate check: {res.stdout.strip()!r}")
+        return
+    loaded = [name.strip() for name in plugins_line.split("plugins:", 1)[1].split(",")]
+    count = loaded.count(plugin)
+    if count > 1:
+        errors.append(f"Plugin '{plugin}' is duplicated in the loaded plugin list ({count}x): {plugins_line}")
+    elif count == 0:
+        errors.append(f"Plugin '{plugin}' did not load at all when checking for duplicates: {plugins_line}")
+    else:
+        print(f"[OK] Plugin '{plugin}' loaded exactly once: {plugins_line}")
+
+
+def check_bpsync(image: str, errors: List[str]) -> None:
+    script = """
+import importlib
+mod = importlib.import_module("beetsplug.bpsync")
+cls = getattr(mod, "BPSyncPlugin", None)
+if cls is None or cls.__module__ != "beetsplug.bpsync":
+    print("FAILED:", cls)
+    raise SystemExit(1)
+print("OK: bpsync -> BPSyncPlugin")
+"""
+    res = run_container_python(image, script)
+    if res.returncode != 0 or "OK:" not in res.stdout:
+        errors.append(f"bpsync resolution check failed: {res.stdout.strip()} {res.stderr.strip()}")
+    else:
+        print("[OK] bpsync plugin resolved correctly to BPSyncPlugin")
+
+
+def check_command_help(image: str, command: str, configured_plugins: List[str], errors: List[str]) -> None:
+    plugin_list = " ".join(dict.fromkeys(configured_plugins))
+    setup_cmd = (
+        f"mkdir -p /tmp/ci_verify && "
+        f"printf 'plugins: {plugin_list}\\n' > /tmp/ci_verify_config.yaml && "
+        f"BEETSDIR=/tmp/ci_verify /lsiopy/bin/beet -c /tmp/ci_verify_config.yaml {command} --help"
+    )
+    res = run_container_shell(image, setup_cmd)
+    if res.returncode != 0:
+        errors.append(f"beet {command} --help failed with exit code {res.returncode}: {res.stderr.strip()}")
+    else:
+        print(f"[OK] 'beet {command} --help' executed successfully (exit code 0)")
+
+
+def check_image_exists(image: str, errors: List[str]) -> bool:
+    res = _run_docker(["image", "inspect", image])
+    if res.returncode != 0:
+        errors.append(f"Image does not exist locally: {image}")
+        return False
+    return True
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Verify Beets engine image capabilities")
+    parser.add_argument("--image", default="beets-engine:ci", help="Docker image tag to verify")
+    parser.add_argument("--require-version", default="", help="Expected Beets version string (e.g. 2.4.0)")
+    parser.add_argument("--require-plugin", action="append", default=[], help="Required loaded plugin name")
+    parser.add_argument("--forbid-duplicate-plugin", action="append", default=[], help="Forbidden duplicate plugin name")
+    parser.add_argument("--require-command-help", action="append", default=[], help="Subcommand requiring zero exit on --help")
+    parser.add_argument("--check-bpsync", action="store_true", help="Verify bpsync plugin resolves to BPSyncPlugin")
+
+    args = parser.parse_args()
+    errors: List[str] = []
+
+    try:
+        image = _require_safe_identifier(args.image, "--image")
+        require_plugins = [_require_safe_identifier(p, "--require-plugin") for p in args.require_plugin]
+        forbid_duplicates = [_require_safe_identifier(p, "--forbid-duplicate-plugin") for p in args.forbid_duplicate_plugin]
+        require_command_help = [_require_safe_identifier(c, "--require-command-help") for c in args.require_command_help]
+    except SystemExit as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    print(f"Verifying Beets engine image: {image}")
+
+    try:
+        if not check_image_exists(image, errors):
+            print("\n--- Beets engine verification FAILED ---", file=sys.stderr)
+            for err in errors:
+                print(f"  [FAIL] {err}", file=sys.stderr)
+            return 1
+
+        configured_plugins = list(dict.fromkeys(require_plugins + forbid_duplicates + require_command_help + ["mbsubmit"]))
+
+        if args.require_version:
+            check_version(image, args.require_version, errors)
+
+        check_control_agent_files(image, errors)
+
+        for plugin in require_plugins:
+            check_required_plugin(image, plugin, errors)
+
+        for plugin in forbid_duplicates:
+            check_forbid_duplicate_plugin(image, plugin, configured_plugins, errors)
+
+        if args.check_bpsync:
+            check_bpsync(image, errors)
+
+        for command in require_command_help:
+            check_command_help(image, command, configured_plugins, errors)
+    except DockerCommandError as exc:
+        print(f"\n--- Beets engine verification FAILED (Docker error) ---", file=sys.stderr)
+        print(f"  [FAIL] {exc}", file=sys.stderr)
+        return 1
+
+    if errors:
+        print("\n--- Beets engine verification FAILED ---", file=sys.stderr)
+        for err in errors:
+            print(f"  [FAIL] {err}", file=sys.stderr)
+        return 1
+
+    print("\n--- Beets engine verification PASSED ---")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

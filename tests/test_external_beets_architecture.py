@@ -1906,5 +1906,137 @@ class FetchartOperationalReadinessTests(unittest.TestCase):
         self.assertFalse(status["importable_in_process"])
 
 
+class BeetsEngineImageVerifierTests(unittest.TestCase):
+    """Real failure-path coverage for scripts/verify_beets_engine_image.py,
+    plus safety checks (no shell interpolation of untrusted values, network
+    disabled for offline checks)."""
+
+    def test_unsafe_image_identifier_rejected(self):
+        import scripts.verify_beets_engine_image as vbi
+        with self.assertRaises(SystemExit):
+            vbi._require_safe_identifier("image; rm -rf /", "--image")
+
+    def test_unsafe_plugin_identifier_rejected(self):
+        import scripts.verify_beets_engine_image as vbi
+        with self.assertRaises(SystemExit):
+            vbi._require_safe_identifier("chroma'); import os; os.system('id", "--require-plugin")
+
+    def test_safe_identifier_accepted(self):
+        import scripts.verify_beets_engine_image as vbi
+        self.assertEqual(vbi._require_safe_identifier("beets-engine:2.4.0", "--image"), "beets-engine:2.4.0")
+
+    def test_missing_image_fails(self):
+        import scripts.verify_beets_engine_image as vbi
+        mock_inspect = mock.MagicMock(returncode=1, stdout="", stderr="No such image")
+        with mock.patch.object(vbi, "_run_docker", return_value=mock_inspect):
+            errors: list = []
+            self.assertFalse(vbi.check_image_exists("nonexistent:image", errors))
+            self.assertTrue(any("does not exist locally" in e for e in errors))
+
+    def test_wrong_version_fails(self):
+        import scripts.verify_beets_engine_image as vbi
+        mock_proc = mock.MagicMock(returncode=0, stdout="beets version 2.5.0\n", stderr="")
+        with mock.patch.object(vbi, "run_container_shell", return_value=mock_proc):
+            errors: list = []
+            vbi.check_version("beets-engine:ci", "2.4.0", errors)
+            self.assertTrue(any("Expected Beets version" in e for e in errors))
+
+    def test_missing_plugin_fails(self):
+        import scripts.verify_beets_engine_image as vbi
+        mock_proc = mock.MagicMock(returncode=1, stdout="FAILED: returned None", stderr="")
+        with mock.patch.object(vbi, "run_container_python", return_value=mock_proc):
+            errors: list = []
+            vbi.check_required_plugin("beets-engine:ci", "chroma", errors)
+            self.assertTrue(any("failed to resolve" in e for e in errors))
+
+    def test_duplicate_forbidden_plugin_fails(self):
+        import scripts.verify_beets_engine_image as vbi
+        mock_proc = mock.MagicMock(
+            returncode=0,
+            stdout="plugins: chroma, convert, musicbrainz, musicbrainz\n",
+            stderr="",
+        )
+        with mock.patch.object(vbi, "run_container_shell", return_value=mock_proc):
+            errors: list = []
+            vbi.check_forbid_duplicate_plugin("beets-engine:ci", "musicbrainz", ["chroma", "musicbrainz"], errors)
+            self.assertTrue(any("duplicated" in e for e in errors))
+
+    def test_non_duplicated_plugin_passes(self):
+        import scripts.verify_beets_engine_image as vbi
+        mock_proc = mock.MagicMock(
+            returncode=0,
+            stdout="plugins: chroma, convert, musicbrainz\n",
+            stderr="",
+        )
+        with mock.patch.object(vbi, "run_container_shell", return_value=mock_proc):
+            errors: list = []
+            vbi.check_forbid_duplicate_plugin("beets-engine:ci", "musicbrainz", ["chroma", "musicbrainz"], errors)
+            self.assertEqual(errors, [])
+
+    def test_bpsync_mismatch_fails(self):
+        import scripts.verify_beets_engine_image as vbi
+        mock_proc = mock.MagicMock(returncode=1, stdout="FAILED: <class 'beetsplug.beatport.BeatportPlugin'>", stderr="")
+        with mock.patch.object(vbi, "run_container_python", return_value=mock_proc):
+            errors: list = []
+            vbi.check_bpsync("beets-engine:ci", errors)
+            self.assertTrue(any("bpsync resolution check failed" in e for e in errors))
+
+    def test_required_command_help_failure_fails(self):
+        import scripts.verify_beets_engine_image as vbi
+        mock_proc = mock.MagicMock(returncode=1, stdout="", stderr="error: unknown command 'submit'")
+        with mock.patch.object(vbi, "run_container_shell", return_value=mock_proc):
+            errors: list = []
+            vbi.check_command_help("beets-engine:ci", "submit", ["chroma"], errors)
+            self.assertTrue(any("failed with exit code" in e for e in errors))
+
+    def test_malformed_plugin_output_fails(self):
+        import scripts.verify_beets_engine_image as vbi
+        mock_proc = mock.MagicMock(returncode=0, stdout="unexpected garbage, no OK prefix", stderr="")
+        with mock.patch.object(vbi, "run_container_python", return_value=mock_proc):
+            errors: list = []
+            vbi.check_required_plugin("beets-engine:ci", "chroma", errors)
+            self.assertTrue(any("failed to resolve" in e for e in errors))
+
+    def test_containers_run_with_network_none(self):
+        import scripts.verify_beets_engine_image as vbi
+        with mock.patch.object(vbi, "_run_docker", return_value=mock.MagicMock(returncode=0, stdout="", stderr="")) as mock_run:
+            vbi.run_container_shell("beets-engine:ci", "echo hi")
+            args = mock_run.call_args[0][0]
+            self.assertIn("--network", args)
+            self.assertIn("none", args)
+
+    def test_docker_binary_missing_reports_clear_error(self):
+        import scripts.verify_beets_engine_image as vbi
+        with mock.patch("subprocess.run", side_effect=FileNotFoundError("no docker")):
+            with self.assertRaises(vbi.DockerCommandError):
+                vbi._run_docker(["version"])
+
+    def test_end_to_end_argument_parsing_success(self):
+        import scripts.verify_beets_engine_image as vbi
+        mock_inspect = mock.MagicMock(returncode=0, stdout="", stderr="")
+        mock_version = mock.MagicMock(returncode=0, stdout="beets version 2.4.0\n", stderr="")
+        mock_agent_files = mock.MagicMock(returncode=0, stdout="", stderr="")
+        mock_help = mock.MagicMock(returncode=0, stdout="", stderr="")
+
+        def fake_run_docker(args, input_text=None):
+            if args[:2] == ["image", "inspect"]:
+                return mock_inspect
+            joined = " ".join(args)
+            if "beet version" in joined:
+                return mock_version
+            if "test -f" in joined:
+                return mock_agent_files
+            return mock_help
+
+        with mock.patch.object(vbi, "_run_docker", side_effect=fake_run_docker):
+            with mock.patch("sys.argv", [
+                "verify_beets_engine_image.py",
+                "--image", "test-image:latest",
+                "--require-version", "2.4.0",
+                "--require-command-help", "mbsubmit",
+            ]):
+                self.assertEqual(vbi.main(), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
