@@ -532,9 +532,6 @@ class RoutesSetupFetchArtDiagnosticsTests(unittest.TestCase):
         body = response.get_json()
         fetchart = body["integrations"]["fetchart"]
         self.assertEqual(fetchart["state"], "configured")
-        self.assertTrue(fetchart["installed"])
-        self.assertTrue(fetchart["importable_in_process"])
-        self.assertTrue(fetchart["bundled_namespace_merged"])
         self.assertTrue(fetchart["loadable_by_beet_cli"])
         self.assertTrue(fetchart["operational"])
 

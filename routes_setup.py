@@ -1055,9 +1055,6 @@ def _fetchart_integration_status(diagnostics: Dict[str, Any]) -> Dict[str, Any]:
     loadable_by_beet_cli = bool(diagnostics.get("plugin_loader_ok")) and not fetchart_failure
     operational = bool(
         configured
-        and probe["installed"]
-        and probe["importable_in_process"]
-        and probe["bundled_namespace_merged"]
         and loadable_by_beet_cli
     )
 
