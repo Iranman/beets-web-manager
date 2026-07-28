@@ -4,7 +4,7 @@ Concise instructions for Codex and other coding agents working in this repositor
 
 ## Start Here
 
-Read `docs/AI_ENGINEERING_RULES.md` before changing code. It is the shared source of truth for architecture boundaries, product rules, safety rules, matching rules, mutation rules, testing requirements, and AI-agent behavior.
+Read `docs/AI_ENGINEERING_RULES.md` and `docs/AGENT_WORKFLOW.md` before changing code. `docs/AI_ENGINEERING_RULES.md` is the shared source of truth for architecture boundaries, product rules, safety rules, matching rules, mutation rules, testing requirements, and AI-agent behavior. `docs/AGENT_WORKFLOW.md` defines the canonical chain of command, two-stage workflow, review-and-fix policy, and safety boundaries.
 
 Use `docs/ARCHITECTURE.md` for the current architecture and intended dependency direction. Use `docs/TECHNICAL_DEBT.md` for known migration targets. Use `REVIEW.md` before opening or summarizing a change.
 
@@ -59,12 +59,11 @@ For a targeted Python test:
 python -m unittest tests.test_name
 ```
 
-## Workflow
+## Workflow & Implementation Role (Agy — Stage 1)
 
-1. Inspect current files and dirty state before editing.
-2. Keep changes small and scoped to the requested slice.
-3. Do not refactor behavior during documentation/governance work.
-4. Add or update tests for enforceable behavior when code changes are made.
-5. Run relevant checks and report actual results.
-6. Record unresolved architecture debt in `docs/TECHNICAL_DEBT.md` instead of hiding it.
-7. Do not commit directly to `main`; use a dedicated branch.
+1. **Role**: Agy acts as Implementation Engineer. Perform primary investigation, reproduction, code changes, tests, Docker runtime validation, documentation updates, and initial local commit.
+2. **Reproduction & Diagnosis**: Inspect current state and reproduce/diagnose problems before editing. Prove root cause with empirical evidence.
+3. **Upstream Research**: Check upstream issues (`beetbox/beets`), pull requests, and official fixes when modifying dependency behavior.
+4. **Testing & Runtime Validation**: Add positive, negative, regression, integration, and failure tests. Perform disposable container validation for Docker/binary/package/plugin issues.
+5. **Git Safety**: Do not commit directly to `main`. Do not push, open/modify PRs, merge, or deploy without explicit authorization from ChatGPT / project owner.
+6. **Hand-Off**: Run complete validation suite, record unresolved architecture debt in `docs/TECHNICAL_DEBT.md`, make a clean local commit when instructed, and leave the branch ready for Claude's final review.

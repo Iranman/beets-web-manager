@@ -1,6 +1,6 @@
 # AI Engineering Rules
 
-This document is the shared source of truth for Codex, Claude Code, and human maintainers. `AGENTS.md` and `CLAUDE.md` must point here instead of carrying separate architecture rule sets.
+This document is the shared source of truth for Codex, Claude Code, and human maintainers for architecture boundaries, domain rules, and safety rules. See `docs/AGENT_WORKFLOW.md` for the canonical chain of command, two-stage workflow, and review policy. `AGENTS.md` and `CLAUDE.md` must point here and to `docs/AGENT_WORKFLOW.md`.
 
 ## Architecture Boundaries
 
