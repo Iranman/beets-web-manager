@@ -28,6 +28,16 @@ from urllib.parse import parse_qs, urlparse
 # Configuration
 PORT = int(os.environ.get("BEETS_AGENT_PORT", "8338"))
 BEETS_API_TOKEN = os.environ.get("BEETS_API_TOKEN", "")
+BEETS_API_TOKEN_MIN_LENGTH = 32
+# Known human-instructional placeholder words -- an obviously-weak value like
+# "changeme" is non-empty and would otherwise silently authenticate every
+# control-agent request if only an emptiness check were enforced.
+_PLACEHOLDER_API_TOKENS = {
+    "changeme", "change-me", "change_me", "changeit", "example",
+    "placeholder", "password", "secret", "token", "test", "default",
+    "changeme_required_strong_token", "replace_with_a_generated_strong_token",
+    "your-token-here", "your_token_here",
+}
 BEETSDIR = os.environ.get("BEETSDIR", "/config")
 MUSIC_LIBRARY_PATH = os.environ.get("MUSIC_LIBRARY_PATH", "/data/media/music")
 DOWNLOAD_PATH = os.environ.get("DOWNLOAD_PATH", "/data/torrents")
@@ -366,8 +376,8 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _authenticate(self) -> bool:
-        if not BEETS_API_TOKEN:
-            self._send_json(500, {"error": "Control Agent misconfigured: BEETS_API_TOKEN is missing"})
+        if not beets_api_token_is_usable(BEETS_API_TOKEN):
+            self._send_json(500, {"error": "Control Agent misconfigured: BEETS_API_TOKEN is missing or too weak"})
             return False
 
         header_token = self.headers.get("X-Beets-API-Token", "")
@@ -1278,9 +1288,25 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
         self._send_json(404, {"error": f"Endpoint not found: {path}"})
 
 
+def beets_api_token_is_usable(value: str) -> bool:
+    """Fail-closed strength check for BEETS_API_TOKEN: rejects empty,
+    too-short, and known-placeholder values so a weak/example credential
+    (e.g. "changeme") cannot silently grant real authenticated control-agent
+    access -- an emptiness check alone does not catch this."""
+    token = (value or "").strip()
+    if len(token) < BEETS_API_TOKEN_MIN_LENGTH:
+        return False
+    if token.lower() in _PLACEHOLDER_API_TOKENS:
+        return False
+    return True
+
+
 def run_agent():
-    if not BEETS_API_TOKEN:
-        raise RuntimeError("BEETS_API_TOKEN environment variable is required and cannot be empty")
+    if not beets_api_token_is_usable(BEETS_API_TOKEN):
+        raise RuntimeError(
+            "BEETS_API_TOKEN environment variable is required and must be a strong, "
+            f"non-placeholder value of at least {BEETS_API_TOKEN_MIN_LENGTH} characters"
+        )
     server_address = ("0.0.0.0", PORT)
     httpd = HTTPServer(server_address, ControlAgentHandler)
     print(f"[BeetsControlAgent] Listening on 0.0.0.0:{PORT} (LOCK={LOCK_PATH})")

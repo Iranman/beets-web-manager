@@ -2,7 +2,7 @@ import { Tab, TabGroup, TabList, TabPanel, TabPanels } from '@headlessui/react';
 import Chip from '@mui/material/Chip';
 import LinearProgress from '@mui/material/LinearProgress';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useSearchParams } from 'react-router';
 import { apiJson, getAcquisitionQueue, getReviewQueue } from '../api/client';
 import type { AcquisitionQueueResponse, ReviewQueueResponse } from '../api/types';
 import { AcquisitionPanel, type SourceFilter } from '../features/acquisition/AcquisitionPanel';
