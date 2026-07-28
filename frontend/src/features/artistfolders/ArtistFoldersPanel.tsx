@@ -4,7 +4,7 @@ import Chip from '@mui/material/Chip';
 import LinearProgress from '@mui/material/LinearProgress';
 import TextField from '@mui/material/TextField';
 import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router';
 import { getJobResult, mergeArtistFolders, scanArtistFolders, stampMbidFolders } from '../../api/client';
 import type { ArtistFolderGroup, ArtistFolderScanResponse } from '../../api/types';
 import { CleanActionBar, CleanEmptyState, CleanMetricGrid, CleanPanelHeader, CleanSection } from '../../components/CleanPanel';

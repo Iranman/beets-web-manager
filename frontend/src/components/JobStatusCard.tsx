@@ -1,5 +1,5 @@
 import LinearProgress from '@mui/material/LinearProgress';
-import { NavLink } from 'react-router-dom';
+import { NavLink } from 'react-router';
 import type { Job } from '../types/api';
 
 interface Props {
