@@ -1,5 +1,6 @@
 """Unit and integration tests for the external Beets control agent architecture."""
 
+import importlib.util
 import json
 import logging
 import os
@@ -1606,6 +1607,375 @@ class TestControlAgentCapabilityEnforcement(unittest.TestCase):
         with mock.patch("backend.beets_control_agent.subprocess.run", return_value=fake_version):
             self.assertIsNone(require_command_capability("submit"))
             self.assertIsNone(require_command_capability("mbsubmit"))
+
+
+_BEETS_AVAILABLE = importlib.util.find_spec("beets") is not None
+
+
+@unittest.skipUnless(_BEETS_AVAILABLE, "beets is not importable in this environment")
+class TestChromaPluginClassResolution(unittest.TestCase):
+    """Tests for the Beets 2.4.0 Chroma plugin class-resolution fix, patch script, and AcoustID boundaries.
+
+    The web manager intentionally has zero direct Beets dependency (see
+    docs/ARCHITECTURE.md), so `beets` is not installed in the CI
+    python-tests environment. These tests exercise real Beets plugin-loader
+    behavior and docker/beets/apply_patches.py (which itself does `import
+    beets`), so they can only run where beets happens to be available
+    (e.g. a developer machine with it pip-installed for this purpose, or a
+    dedicated real-runtime validation job) -- matching the existing
+    convention in tests/test_plugin_path_precedence.py.
+    """
+
+    def test_apply_patch_replaces_original_block_exactly_once(self):
+        """apply_patch() replaces ORIGINAL_BLOCK with PATCHED_BLOCK when original source is unpatched."""
+        from docker.beets.apply_patches import apply_patch, ORIGINAL_BLOCK, PATCHED_BLOCK
+        mock_file = mock.mock_open(read_data=ORIGINAL_BLOCK)
+        with mock.patch("beets.__version__", "2.4.0"), \
+             mock.patch("builtins.open", mock_file), \
+             mock.patch("importlib.reload"), \
+             mock.patch("beets.plugins._get_plugin") as mock_get_plugin:
+            mock_plugin = mock.MagicMock()
+            mock_plugin.__class__.__module__ = "beetsplug.chroma"
+            mock_plugin.__class__.__name__ = "AcoustidPlugin"
+            # bpsync is not installed in this synthetic environment; return
+            # None for it so the (correctly non-swallowing) bpsync sanity
+            # check takes its "not importable, skip" path instead of being
+            # compared against the chroma mock.
+            mock_get_plugin.side_effect = lambda name: mock_plugin if name == "chroma" else None
+
+            with mock.patch.dict("sys.modules", {"beetsplug.chroma": mock.MagicMock(AcoustidPlugin=mock_plugin.__class__)}):
+                apply_patch()
+
+        # Verify file write was called with PATCHED_BLOCK
+        written_data = "".join(call.args[0] for call in mock_file().write.call_args_list)
+        self.assertEqual(written_data, PATCHED_BLOCK)
+
+    def test_apply_patch_correct_upstream_predicate_inserted(self):
+        """PATCHED_BLOCK in apply_patches contains the upstream-equivalent startswith predicate."""
+        from docker.beets.apply_patches import PATCHED_BLOCK
+        self.assertIn("obj.__module__.startswith(f\"{mod.__name__}.\")", PATCHED_BLOCK)
+
+    def test_apply_patch_accepts_already_patched_source(self):
+        """apply_patch() accepts source already containing PATCHED_BLOCK without rewriting file."""
+        from docker.beets.apply_patches import apply_patch, PATCHED_BLOCK
+        mock_file = mock.mock_open(read_data=PATCHED_BLOCK)
+        with mock.patch("beets.__version__", "2.4.0"), \
+             mock.patch("builtins.open", mock_file), \
+             mock.patch("importlib.reload"), \
+             mock.patch("beets.plugins._get_plugin") as mock_get_plugin:
+            mock_plugin = mock.MagicMock()
+            mock_plugin.__class__.__module__ = "beetsplug.chroma"
+            mock_plugin.__class__.__name__ = "AcoustidPlugin"
+            # bpsync is not installed in this synthetic environment; return
+            # None for it so the (correctly non-swallowing) bpsync sanity
+            # check takes its "not importable, skip" path instead of being
+            # compared against the chroma mock.
+            mock_get_plugin.side_effect = lambda name: mock_plugin if name == "chroma" else None
+
+            with mock.patch.dict("sys.modules", {"beetsplug.chroma": mock.MagicMock(AcoustidPlugin=mock_plugin.__class__)}):
+                apply_patch()
+
+        # File write should not have been called
+        mock_file().write.assert_not_called()
+
+    def test_apply_patch_already_patched_source_runs_sanity_checks(self):
+        """apply_patch() on already-patched source still executes runtime sanity check and fails if check fails."""
+        from docker.beets.apply_patches import apply_patch, PATCHED_BLOCK
+        mock_file = mock.mock_open(read_data=PATCHED_BLOCK)
+        with mock.patch("beets.__version__", "2.4.0"), \
+             mock.patch("builtins.open", mock_file), \
+             mock.patch("importlib.reload"), \
+             mock.patch("beets.plugins._get_plugin", return_value=None):
+            with mock.patch.dict("sys.modules", {"beetsplug.chroma": mock.MagicMock()}):
+                with self.assertRaises(RuntimeError) as ctx:
+                    apply_patch()
+                self.assertIn("Sanity check failed for chroma", str(ctx.exception))
+
+    def test_apply_patch_rejects_partial_patch(self):
+        """apply_patch() raises RuntimeError when source contains a partial or unknown patch state."""
+        from docker.beets.apply_patches import apply_patch
+        partial_content = "def _get_plugin(): if obj.__module__ == mod.__name__: pass"
+        mock_file = mock.mock_open(read_data=partial_content)
+        with mock.patch("beets.__version__", "2.4.0"), \
+             mock.patch("builtins.open", mock_file):
+            with self.assertRaises(RuntimeError) as ctx:
+                apply_patch()
+            self.assertIn("Invalid source state", str(ctx.exception))
+
+    def test_apply_patch_rejects_both_blocks_present(self):
+        """apply_patch() raises RuntimeError when both ORIGINAL_BLOCK and PATCHED_BLOCK exist."""
+        from docker.beets.apply_patches import apply_patch, ORIGINAL_BLOCK, PATCHED_BLOCK
+        both_content = f"{ORIGINAL_BLOCK}\n{PATCHED_BLOCK}"
+        mock_file = mock.mock_open(read_data=both_content)
+        with mock.patch("beets.__version__", "2.4.0"), \
+             mock.patch("builtins.open", mock_file):
+            with self.assertRaises(RuntimeError) as ctx:
+                apply_patch()
+            self.assertIn("Invalid source state", str(ctx.exception))
+
+    def test_apply_patch_rejects_neither_block_present(self):
+        """apply_patch() raises RuntimeError when neither ORIGINAL_BLOCK nor PATCHED_BLOCK is present."""
+        from docker.beets.apply_patches import apply_patch
+        mock_file = mock.mock_open(read_data="def _get_plugin(): pass")
+        with mock.patch("beets.__version__", "2.4.0"), \
+             mock.patch("builtins.open", mock_file):
+            with self.assertRaises(RuntimeError) as ctx:
+                apply_patch()
+            self.assertIn("Invalid source state", str(ctx.exception))
+
+    def test_apply_patch_rejects_multiple_original_blocks(self):
+        """apply_patch() raises RuntimeError when ORIGINAL_BLOCK occurs more than once."""
+        from docker.beets.apply_patches import apply_patch, ORIGINAL_BLOCK
+        multi_content = f"{ORIGINAL_BLOCK}\n{ORIGINAL_BLOCK}"
+        mock_file = mock.mock_open(read_data=multi_content)
+        with mock.patch("beets.__version__", "2.4.0"), \
+             mock.patch("builtins.open", mock_file):
+            with self.assertRaises(RuntimeError) as ctx:
+                apply_patch()
+            self.assertIn("Invalid source state", str(ctx.exception))
+
+    def test_apply_patch_rejects_multiple_patched_blocks(self):
+        """apply_patch() raises RuntimeError when PATCHED_BLOCK occurs more than once."""
+        from docker.beets.apply_patches import apply_patch, PATCHED_BLOCK
+        multi_content = f"{PATCHED_BLOCK}\n{PATCHED_BLOCK}"
+        mock_file = mock.mock_open(read_data=multi_content)
+        with mock.patch("beets.__version__", "2.4.0"), \
+             mock.patch("builtins.open", mock_file):
+            with self.assertRaises(RuntimeError) as ctx:
+                apply_patch()
+            self.assertIn("Invalid source state", str(ctx.exception))
+
+    def test_apply_patch_rejects_version_mismatch(self):
+        """apply_patch() raises RuntimeError when installed Beets version is not 2.4.0."""
+        from docker.beets.apply_patches import apply_patch
+        with mock.patch("beets.__version__", "2.5.0"):
+            with self.assertRaises(RuntimeError) as ctx:
+                apply_patch()
+            self.assertIn("expected Beets 2.4.0", str(ctx.exception))
+
+    @staticmethod
+    def _exec_block(block_src, mod):
+        """Execute a literal ORIGINAL_BLOCK/PATCHED_BLOCK string from
+        docker/beets/apply_patches.py as real code against a synthetic
+        module, so tests exercise the actual production constant byte for
+        byte instead of re-deriving its selection logic independently.
+
+        ``block_src`` is written to sit at the same indentation and use the
+        same free variables (``namespace``, ``name``, ``inspect``,
+        ``GenericAlias``, ``BeetsPlugin``) as the real body of
+        beets.plugins._get_plugin, so it is wrapped in a matching function
+        signature here rather than altered in any way.
+        """
+        import inspect
+        import types
+        from types import GenericAlias
+        import beets.plugins as beets_plugins_module
+
+        # block_src's own leading whitespace becomes the function body's
+        # indentation verbatim, so the literal production string is used
+        # completely unmodified (no re-indentation arithmetic that could
+        # itself drift from the real constant).
+        first_line = block_src.splitlines()[0]
+        indent = first_line[: len(first_line) - len(first_line.lstrip())]
+        func_src = "def _select(namespace, name):\n" + block_src + "\n" + indent + "return None\n"
+        exec_globals = {
+            "inspect": inspect,
+            "GenericAlias": GenericAlias,
+            "BeetsPlugin": beets_plugins_module.BeetsPlugin,
+        }
+        exec(compile(func_src, "<production_block>", "exec"), exec_globals)
+        namespace = types.SimpleNamespace(**{mod.__name__.rsplit(".", 1)[-1]: mod})
+        return exec_globals["_select"](namespace, mod.__name__.rsplit(".", 1)[-1])
+
+    def test_unpatched_original_block_selects_musicbrainz_plugin_first(self):
+        """The real, unpatched ORIGINAL_BLOCK reproduces the upstream defect: it
+        selects the imported MusicBrainzPlugin instead of chroma's own
+        AcoustidPlugin, because it has no module-origin check at all."""
+        from docker.beets.apply_patches import ORIGINAL_BLOCK
+        import beets.plugins
+
+        class FakeMusicBrainzPlugin(beets.plugins.BeetsPlugin):
+            __module__ = "beetsplug.musicbrainz"
+
+        class FakeAcoustidPlugin(beets.plugins.BeetsPlugin):
+            __module__ = "beetsplug.chroma"
+
+        class FakeChromaModule:
+            __name__ = "beetsplug.chroma"
+
+        mod = FakeChromaModule()
+        mod.__dict__["MusicBrainzPlugin"] = FakeMusicBrainzPlugin
+        mod.__dict__["AcoustidPlugin"] = FakeAcoustidPlugin
+
+        selected = self._exec_block(ORIGINAL_BLOCK, mod)
+        self.assertIsInstance(selected, FakeMusicBrainzPlugin)
+        self.assertNotIsInstance(selected, FakeAcoustidPlugin)
+
+    def test_patched_block_selects_chroma_acoustid_plugin(self):
+        """The real PATCHED_BLOCK selects AcoustidPlugin over the imported
+        MusicBrainzPlugin for the chroma module."""
+        from docker.beets.apply_patches import PATCHED_BLOCK
+        import beets.plugins
+
+        class FakeMusicBrainzPlugin(beets.plugins.BeetsPlugin):
+            __module__ = "beetsplug.musicbrainz"
+
+        class FakeAcoustidPlugin(beets.plugins.BeetsPlugin):
+            __module__ = "beetsplug.chroma"
+
+        class FakeChromaModule:
+            __name__ = "beetsplug.chroma"
+
+        mod = FakeChromaModule()
+        mod.__dict__["MusicBrainzPlugin"] = FakeMusicBrainzPlugin
+        mod.__dict__["AcoustidPlugin"] = FakeAcoustidPlugin
+
+        selected = self._exec_block(PATCHED_BLOCK, mod)
+        self.assertIsInstance(selected, FakeAcoustidPlugin)
+        self.assertNotIsInstance(selected, FakeMusicBrainzPlugin)
+
+    def test_patched_block_accepts_package_submodule_plugin(self):
+        """The real PATCHED_BLOCK accepts a plugin class defined in a package
+        submodule (e.g. beetsplug.bandcamp.search) of the requested module."""
+        from docker.beets.apply_patches import PATCHED_BLOCK
+        import beets.plugins
+
+        class FakeSubmodulePlugin(beets.plugins.BeetsPlugin):
+            __module__ = "beetsplug.bandcamp.search"
+
+        class FakeBandcampModule:
+            __name__ = "beetsplug.bandcamp"
+
+        mod = FakeBandcampModule()
+        mod.__dict__["SubmodulePlugin"] = FakeSubmodulePlugin
+
+        selected = self._exec_block(PATCHED_BLOCK, mod)
+        self.assertIsInstance(selected, FakeSubmodulePlugin)
+
+    def test_patched_block_rejects_foreign_plugin_outside_namespace(self):
+        """The real PATCHED_BLOCK rejects a foreign plugin class whose module
+        is neither the requested module nor one of its submodules."""
+        from docker.beets.apply_patches import PATCHED_BLOCK
+        import beets.plugins
+
+        class FakeForeignPlugin(beets.plugins.BeetsPlugin):
+            __module__ = "beetsplug.other"
+
+        class FakeChromaModule:
+            __name__ = "beetsplug.chroma"
+
+        mod = FakeChromaModule()
+        mod.__dict__["ForeignPlugin"] = FakeForeignPlugin
+
+        selected = self._exec_block(PATCHED_BLOCK, mod)
+        self.assertIsNone(selected)
+
+    def test_patched_block_resolves_bpsync_correctly(self):
+        """The real PATCHED_BLOCK selects BPSyncPlugin over the imported
+        BeatportPlugin for the bpsync module."""
+        from docker.beets.apply_patches import PATCHED_BLOCK
+        import beets.plugins
+
+        class FakeBeatportPlugin(beets.plugins.BeetsPlugin):
+            __module__ = "beetsplug.beatport"
+
+        class FakeBPSyncPlugin(beets.plugins.BeetsPlugin):
+            __module__ = "beetsplug.bpsync"
+
+        class FakeBPSyncModule:
+            __name__ = "beetsplug.bpsync"
+
+        mod = FakeBPSyncModule()
+        mod.__dict__["BeatportPlugin"] = FakeBeatportPlugin
+        mod.__dict__["BPSyncPlugin"] = FakeBPSyncPlugin
+
+        selected = self._exec_block(PATCHED_BLOCK, mod)
+        self.assertIsInstance(selected, FakeBPSyncPlugin)
+        self.assertNotIsInstance(selected, FakeBeatportPlugin)
+
+    def test_missing_acoustid_key_blocks_submission_routes(self):
+        """album_acoustid_submit and item_acoustid_submit block submission when AcoustID key is missing."""
+        from app import app
+        with mock.patch("routes_submissions._submission_readiness") as mock_readiness:
+            mock_readiness.return_value = {
+                "plugins": {"chroma": True},
+                "fpcalc_available": True,
+                "pyacoustid_available": True,
+                "acoustid_key_configured": False,
+                "remote_reachable": True,
+            }
+            with app.test_request_context():
+                from routes_submissions import album_acoustid_submit, item_acoustid_submit
+                with mock.patch("routes_submissions.lib.get_album") as mock_album:
+                    mock_album.return_value = mock.MagicMock(items=lambda: [])
+                    res, code = album_acoustid_submit(1)
+                    self.assertEqual(code, 400)
+                    self.assertIn("AcoustID API key is not configured", res.json["error"])
+
+                with mock.patch("routes_submissions.lib.get_item") as mock_item:
+                    mock_item.return_value = mock.MagicMock(album_id=None)
+                    res, code = item_acoustid_submit(1)
+                    self.assertEqual(code, 400)
+                    self.assertIn("AcoustID API key is not configured", res.json["error"])
+
+    def test_acoustid_submission_boundary_interception(self):
+        """Verify that submit_items reaches PyAcoustID boundary with expected
+        parameters without external calls.
+
+        Two independent safety barriers are used so that no real AcoustID
+        request can occur even if one of them is somehow bypassed:
+        (1) sys.modules["acoustid"] is replaced with a mock before the first
+        import of beetsplug.chroma, so the real PyAcoustID networking code is
+        never reached; (2) socket.socket construction is additionally
+        blocked for the duration of the real submit_items() call, so even a
+        hypothetical direct socket-level fallback would raise instead of
+        reaching the network.
+        """
+        import socket
+        import sys
+        mock_acoustid = mock.MagicMock()
+        submitted_calls = []
+
+        def mock_submit(apikey, userkey, data, timeout=None):
+            submitted_calls.append({
+                "apikey": apikey,
+                "userkey": userkey,
+                "data": list(data),
+                "timeout": timeout,
+            })
+            return {"status": "ok", "submissions": [{"id": 100, "status": "pending"}]}
+
+        mock_acoustid.submit = mock_submit
+        mock_acoustid.API_KEY = "1vOwZtEn"
+
+        def _blocked_socket(*args, **kwargs):
+            raise AssertionError(
+                "Real socket construction attempted during a test that must "
+                "make zero external AcoustID/network calls."
+            )
+
+        with mock.patch.dict(sys.modules, {"acoustid": mock_acoustid}):
+            import beetsplug.chroma
+            import beets.library
+
+            mock_item = mock.MagicMock(spec=beets.library.Item)
+            mock_item.length = 180
+            mock_item.mb_trackid = "99999999-9999-9999-9999-999999999999"
+            mock_item.path = b"/fake/path.mp3"
+
+            with mock.patch("beetsplug.chroma.fingerprint_item", return_value="AQAA_FAKE_FINGERPRINT"), \
+                 mock.patch("socket.socket", side_effect=_blocked_socket):
+                log = mock.MagicMock()
+                beetsplug.chroma.submit_items(log, "user_key_777", [mock_item])
+
+        self.assertEqual(len(submitted_calls), 1)
+        call = submitted_calls[0]
+        self.assertEqual(call["apikey"], beetsplug.chroma.API_KEY)
+        self.assertEqual(call["userkey"], "user_key_777")
+        self.assertEqual(len(call["data"]), 1)
+        self.assertEqual(call["data"][0]["fingerprint"], "AQAA_FAKE_FINGERPRINT")
+        self.assertEqual(call["data"][0]["mbid"], "99999999-9999-9999-9999-999999999999")
+        self.assertEqual(call["data"][0]["duration"], 180)
 
 
 class ComposeSecurityValidatorTests(unittest.TestCase):

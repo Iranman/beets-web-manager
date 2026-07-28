@@ -1,6 +1,10 @@
 # syntax=docker/dockerfile:1
 FROM lscr.io/linuxserver/beets:2.4.0@sha256:4cce2967154e849ca5466469d934a4bb9d8d83c3acf2a5279da47bccd16518f1
 
+# Apply pinned Beets 2.4.0 plugin resolution fix
+COPY docker/beets/ /opt/beets-patches/
+RUN /lsiopy/bin/python3 /opt/beets-patches/apply_patches.py
+
 # Create agent application, plugin, and LinuxServer custom service directories
 RUN mkdir -p /opt/beets-web-manager-agent/beetsplug /custom-services.d
 
