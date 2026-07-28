@@ -10,18 +10,28 @@ RUN mkdir -p /opt/beets-web-manager-agent/beetsplug /custom-services.d
 
 # Copy agent application code and bundled custom plugins
 COPY backend/beets_control_agent.py /opt/beets-web-manager-agent/beets_control_agent.py
+COPY backend/beets_startup_guard.py /opt/beets-web-manager-agent/beets_startup_guard.py
 COPY beetsplug/ /opt/beets-web-manager-agent/beetsplug/
 
-# Install S6 supervision service for the control agent and locked CLI wrapper
+# Install S6 supervision service for the control agent and locked CLI wrapper.
+# beets-agent-s6.sh runs the startup guard before exec'ing the control agent
+# itself -- see docker/beets-agent-s6.sh for why this, not
+# custom-cont-init.d, is the enforcement point.
 COPY docker/beets-agent-s6.sh /custom-services.d/beets-control-agent
 COPY docker/beet-locked /usr/local/bin/beet-locked
 RUN rm -f /etc/s6-overlay/s6-rc.d/user/contents.d/svc-beets \
     && chmod +x /custom-services.d/beets-control-agent /usr/local/bin/beet-locked
 
-# Environment configuration
+# Environment configuration. BEETS_EXPECT_EXISTING_LIBRARY=1 by default: a
+# rebuilt/redeployed engine image must refuse to silently accept a missing
+# or empty database rather than treat it as a fresh install -- this is the
+# exact failure mode of the 2026-07-28 production incident. A genuine new
+# install must override this explicitly (BEETS_EXPECT_EXISTING_LIBRARY=0),
+# not rely on it defaulting the other way.
 ENV BEETS_AGENT_PORT=8338 \
     BEETSDIR=/config \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    BEETS_EXPECT_EXISTING_LIBRARY=1
 
 EXPOSE 8338
 
