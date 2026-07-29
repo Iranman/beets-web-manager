@@ -73,6 +73,18 @@ class LibraryStatsForArtistsTests(unittest.TestCase):
         cls.ns = _load_namespace()
         cls.stats = staticmethod(cls.ns["_library_stats_for_artists"])
 
+    # A real album's disk folder can contain extra files never imported into
+    # Beets alongside the genuine album tracks (track_count counts every
+    # file in the folder; not_imported counts the extras). Only the
+    # imported+missing portion is a real Beets item row.
+    def test_real_album_with_unimported_extra_files_excludes_them_from_tracks(self):
+        artists = [
+            _artist("Artist A", [_album(album_id=1, track_count=12, not_imported=2)]),
+        ]
+        result = self.stats(artists)
+        self.assertEqual(result["albums"], 1)
+        self.assertEqual(result["tracks"], 10)
+
     # 1. Raw track total equals unique remote item count (real albums only, no singletons here).
     def test_normal_albums_count_tracks_and_albums_correctly(self):
         artists = [

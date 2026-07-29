@@ -12865,7 +12865,14 @@ def _library_stats_for_artists(artists: List[Dict[str, Any]]) -> Dict[str, int]:
 
             if album_id > 0:
                 album_ids_seen.add(album_id)
-                tracks_total += track_count
+                # track_count is the card's total file count -- imported +
+                # not-yet-imported extras + missing-on-disk (see
+                # _build_library_payload: "track_count": len(tracks), where
+                # `tracks` includes not-imported files sitting alongside a
+                # real album). Only the imported+missing portion represents
+                # actual Beets item rows; extra not-imported files on disk
+                # must not inflate the track total for a real album.
+                tracks_total += track_count - not_imported
             elif not_imported > 0:
                 disk_only_albums += 1
                 disk_only_tracks += track_count
