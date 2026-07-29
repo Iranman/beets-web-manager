@@ -37,10 +37,15 @@ class DedupAcoustidFingerprintTests(unittest.TestCase):
 
     def test_acoustid_cache_skips_missing_files(self):
         idx = self.app_source.index("def _acoustid_lookup_cached(")
-        body = self.app_source[idx: idx + 1000]
+        body = self.app_source[idx: idx + 1600]
         self.assertIn("_audio_cache_file_identity(file_path)", body)
         self.assertIn("return []", body)
-        self.assertIn("_acoustid_lookup(str(path))", body)
+        # Uses the status-preserving lookup so transient failures
+        # (unavailable/timeout/provider_error/analysis_error) can be excluded
+        # from the permanent disk cache -- only a terminal, file-determined
+        # outcome (matched/no_match/invalid_media) gets persisted.
+        self.assertIn("_acoustid_lookup_status(str(path))", body)
+        self.assertIn("_ACOUSTID_TERMINAL_STATUSES", body)
     def test_scan_falls_back_to_fingerprint_when_unmatched(self):
         self.assertIn("_acoustid_fingerprint_ids(str(src))", self.dedup_source)
         self.assertIn("AcoustID fingerprint", self.dedup_source)

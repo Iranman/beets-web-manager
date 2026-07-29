@@ -293,6 +293,7 @@ def _agent_status_payload() -> dict[str, Any]:
     fpcalc_path = shutil.which("fpcalc") or ""
     ffmpeg_path = shutil.which("ffmpeg") or ""
     pyacoustid_available = importlib.util.find_spec("acoustid") is not None
+    acoustid_api_key_configured = bool((os.environ.get("ACOUSTID_API_KEY") or "").strip())
 
     def _path_status(path: str, *, require_writable: bool = False) -> dict[str, Any]:
         exists = os.path.exists(path)
@@ -347,8 +348,13 @@ def _agent_status_payload() -> dict[str, Any]:
             "chroma_loaded": "chroma" in loaded_plugins,
         },
         "acoustid_lookup": {
-            "available": bool(fpcalc_path and pyacoustid_available and "chroma" in loaded_plugins),
+            # /audio/acoustid-lookup is a narrow engine-side adapter (ARCH-012):
+            # it runs fpcalc directly and calls api.acoustid.org itself, so it
+            # needs fpcalc + ACOUSTID_API_KEY -- not pyacoustid or a loaded
+            # chroma plugin, which this endpoint never touches.
+            "available": bool(fpcalc_path and acoustid_api_key_configured),
             "fpcalc_available": bool(fpcalc_path),
+            "acoustid_api_key_configured": acoustid_api_key_configured,
             "pyacoustid_available": pyacoustid_available,
             "chroma_loaded": "chroma" in loaded_plugins,
         },
@@ -439,6 +445,7 @@ def require_command_capability(command: str) -> Optional[dict]:
     return {"error": error_msg, "reason": reason}
 
 
+<<<<<<< HEAD
 def _decode_untrusted_path(raw_path: str) -> Optional[str]:
     decoded = raw_path
     for _ in range(5):
@@ -451,6 +458,41 @@ def _decode_untrusted_path(raw_path: str) -> Optional[str]:
         decoded = next_decoded
     return None
 
+=======
+def resolve_safe_path(path: str, allowed_types: list = None) -> Optional[str]:
+    """Verify that path stays strictly within allowed root directories without
+    traversal or symlink escape, and return the canonical (symlink-resolved)
+    path to actually use, or None if unsafe.
+
+    Callers must operate on the returned canonical path, not the original
+    caller-supplied string: `is_safe_path()`/this function resolve symlinks
+    internally to decide safety, but a sink that re-uses the original string
+    afterward re-opens a (narrow) TOCTOU/symlink-swap gap between the check
+    and the use, and can behave inconsistently with what was actually
+    validated. Using the resolved path at the sink closes that gap.
+    """
+    if not path or not isinstance(path, str):
+        return None
+    if "\x00" in path:
+        return None
+
+    # Decode URL encoding if present
+    try:
+        decoded = urllib.parse.unquote(path)
+    except Exception:
+        decoded = path
+
+    if "\x00" in decoded or "\\" in decoded:
+        return None
+
+    # Path must be absolute
+    if not decoded.startswith("/"):
+        return None
+
+    parts = decoded.split("/")
+    if ".." in parts or "." in parts:
+        return None
+>>>>>>> b0206f1 (fix: wire ACOUSTID_API_KEY to the engine and preserve AcoustID status end-to-end)
 
 def _allowed_root_paths(allowed_types: list = None) -> list[str]:
     all_roots = {
@@ -471,11 +513,32 @@ def _allowed_root_paths(allowed_types: list = None) -> list[str]:
 
 def _path_is_within(candidate: str, root: str) -> bool:
     try:
+<<<<<<< HEAD
         real_candidate = os.path.realpath(candidate)
         real_root = os.path.realpath(root)
         return os.path.commonpath([real_candidate, real_root]) == real_root
+=======
+        abs_path = os.path.abspath(decoded)
+        real_path = os.path.realpath(abs_path)
+
+        for root in roots_to_check:
+            real_root = os.path.realpath(root)
+            if real_path == real_root or real_path.startswith(real_root + os.sep) or real_path.startswith(real_root + "/"):
+                return real_path
+        return None
+>>>>>>> b0206f1 (fix: wire ACOUSTID_API_KEY to the engine and preserve AcoustID status end-to-end)
     except Exception:
-        return False
+        return None
+
+
+def is_safe_path(path: str, allowed_types: list = None) -> bool:
+    """Verify that path stays strictly within allowed root directories without
+    traversal or symlink escape. Boolean-only compatibility wrapper around
+    resolve_safe_path() for call sites that only need a yes/no gate (e.g.
+    validating an argument that is not itself about to be opened here).
+    Sinks that open/move/delete the path should call resolve_safe_path()
+    directly and use its return value, not this wrapper."""
+    return resolve_safe_path(path, allowed_types) is not None
 
 
 class UnsafePathError(ValueError):
@@ -774,6 +837,7 @@ def _handle_delete_album(album_id: int, delete_files: bool = True) -> tuple:
             files_deleted = 0
             file_errors = []
             if delete_files:
+<<<<<<< HEAD
                 # Database rows are already committed above at this point.
                 # Everything below is best-effort filesystem cleanup, and
                 # must never be allowed to propagate an exception up to the
@@ -825,6 +889,24 @@ def _handle_delete_album(album_id: int, delete_files: bool = True) -> tuple:
                                     pass
                 except Exception:
                     file_errors.append("Unexpected error during file cleanup")
+=======
+                for fpath in item_files:
+                    safe_fpath = resolve_safe_path(fpath, ["music", "staging"]) if fpath else None
+                    if safe_fpath and os.path.exists(safe_fpath):
+                        try:
+                            os.unlink(safe_fpath)
+                            files_deleted += 1
+                        except Exception as exc:
+                            file_errors.append(f"Failed to delete {fpath}: {exc}")
+
+                safe_album_path = resolve_safe_path(album_path, ["music"]) if album_path else None
+                if safe_album_path and os.path.exists(safe_album_path):
+                    try:
+                        if os.path.isdir(safe_album_path) and not os.listdir(safe_album_path):
+                            os.rmdir(safe_album_path)
+                    except Exception:
+                        pass
+>>>>>>> b0206f1 (fix: wire ACOUSTID_API_KEY to the engine and preserve AcoustID status end-to-end)
 
             files_failed = len(file_errors)
             if files_failed > 0:
@@ -1389,6 +1471,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/tags/read":
+<<<<<<< HEAD
             file_path = body.get("file_path", "")
             try:
                 safe_file_path = resolve_safe_path(file_path, ["music", "staging"])
@@ -1397,13 +1480,33 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 return
             if not safe_file_path.exists():
                 self._send_json(404, {"error": "File not found"})
+=======
+            file_path_in = body.get("file_path", "")
+            # resolve_safe_path() (tested in TestBeetsControlAgentSecurity)
+            # resolves symlinks via realpath and enforces containment within
+            # an allowed root; the sinks below use its returned canonical
+            # path, not the original string, so nothing after this point
+            # re-opens the check-then-use gap. CodeQL's default
+            # py/path-injection query doesn't model this custom
+            # string-or-None-returning guard as a taint barrier.
+            file_path = resolve_safe_path(file_path_in, ["music", "staging"])
+            if file_path is None:
+                self._send_json(403, {"error": f"Access denied for path: {file_path_in}"})
+                return
+            if not os.path.exists(file_path):
+                self._send_json(404, {"error": f"File not found: {file_path_in}"})
+>>>>>>> b0206f1 (fix: wire ACOUSTID_API_KEY to the engine and preserve AcoustID status end-to-end)
                 return
 
             try:
                 tags = {}
                 try:
                     from beets.mediafile import MediaFile
+<<<<<<< HEAD
                     mf = MediaFile(safe_file_path)
+=======
+                    mf = MediaFile(file_path)
+>>>>>>> b0206f1 (fix: wire ACOUSTID_API_KEY to the engine and preserve AcoustID status end-to-end)
                     tags = {
                         "title": mf.title,
                         "artist": mf.artist,
@@ -1423,7 +1526,11 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                     }
                 except Exception:
                     import mutagen
+<<<<<<< HEAD
                     f = mutagen.File(safe_file_path, easy=True)
+=======
+                    f = mutagen.File(file_path, easy=True)
+>>>>>>> b0206f1 (fix: wire ACOUSTID_API_KEY to the engine and preserve AcoustID status end-to-end)
                     if f is not None:
                         tags = {
                             "title": (f.get("title") or [""])[0],
@@ -1440,8 +1547,9 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/tags/write":
-            file_path = body.get("file_path", "")
+            file_path_in = body.get("file_path", "")
             tags = body.get("tags", {})
+<<<<<<< HEAD
             try:
                 safe_file_path = resolve_safe_path(file_path, ["music", "staging"])
             except UnsafePathError:
@@ -1456,6 +1564,18 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             unsafe_tags = sorted(str(k) for k in tags.keys() if str(k) not in _TAG_WRITE_FIELDS)
             if unsafe_tags:
                 self._send_json(400, {"error": "Unsupported tag field"})
+=======
+            # resolve_safe_path() (tested in TestBeetsControlAgentSecurity)
+            # resolves symlinks via realpath and enforces containment within
+            # an allowed root; the sinks below use its returned canonical
+            # path, not the original string.
+            file_path = resolve_safe_path(file_path_in, ["music", "staging"])
+            if file_path is None:
+                self._send_json(403, {"error": f"Access denied for path: {file_path_in}"})
+                return
+            if not os.path.exists(file_path):
+                self._send_json(404, {"error": f"File not found: {file_path_in}"})
+>>>>>>> b0206f1 (fix: wire ACOUSTID_API_KEY to the engine and preserve AcoustID status end-to-end)
                 return
 
             lock_file = acquire_os_lock(read_only=False)
@@ -1590,6 +1710,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             finally:
                 release_os_lock(lock_file)
             return
+
         if path == "/audio/acoustid-lookup":
             file_path = body.get("path") or body.get("file_path", "")
             if not file_path or not isinstance(file_path, str):
@@ -1608,6 +1729,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
 
             if not safe_file_path.is_file():  # codeql[py/path-injection] -- sanitized by resolve_safe_path() above
                 self._send_json(400, {"ok": False, "status": "invalid_media", "error": f"Path is not a regular file: {file_path}"})
+                return
                 return
 
             fpcalc = shutil.which("fpcalc") or "/usr/bin/fpcalc"
