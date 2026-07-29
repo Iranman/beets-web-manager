@@ -1292,10 +1292,15 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
 
         if path == "/tags/read":
             file_path = body.get("file_path", "")
+            # is_safe_path() (tested in TestBeetsControlAgentSecurity) resolves
+            # symlinks via realpath and enforces containment within an allowed
+            # root before any of the filesystem operations below run; CodeQL's
+            # default py/path-injection query doesn't model this custom
+            # boolean-returning guard as a taint barrier.
             if not is_safe_path(file_path, ["music", "staging"]):
                 self._send_json(403, {"error": f"Access denied for path: {file_path}"})
                 return
-            if not os.path.exists(file_path):
+            if not os.path.exists(file_path):  # codeql[py/path-injection] -- sanitized by is_safe_path() above
                 self._send_json(404, {"error": f"File not found: {file_path}"})
                 return
 
@@ -1303,7 +1308,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 tags = {}
                 try:
                     from beets.mediafile import MediaFile
-                    mf = MediaFile(file_path)
+                    mf = MediaFile(file_path)  # codeql[py/path-injection] -- sanitized by is_safe_path() above
                     tags = {
                         "title": mf.title,
                         "artist": mf.artist,
@@ -1323,7 +1328,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                     }
                 except Exception:
                     import mutagen
-                    f = mutagen.File(file_path, easy=True)
+                    f = mutagen.File(file_path, easy=True)  # codeql[py/path-injection] -- sanitized by is_safe_path() above
                     if f is not None:
                         tags = {
                             "title": (f.get("title") or [""])[0],
@@ -1342,10 +1347,13 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
         if path == "/tags/write":
             file_path = body.get("file_path", "")
             tags = body.get("tags", {})
+            # is_safe_path() (tested in TestBeetsControlAgentSecurity) resolves
+            # symlinks via realpath and enforces containment within an allowed
+            # root before any of the filesystem operations below run.
             if not is_safe_path(file_path, ["music", "staging"]):
                 self._send_json(403, {"error": f"Access denied for path: {file_path}"})
                 return
-            if not os.path.exists(file_path):
+            if not os.path.exists(file_path):  # codeql[py/path-injection] -- sanitized by is_safe_path() above
                 self._send_json(404, {"error": f"File not found: {file_path}"})
                 return
 
@@ -1354,7 +1362,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 written = False
                 try:
                     from beets.mediafile import MediaFile
-                    mf = MediaFile(file_path)
+                    mf = MediaFile(file_path)  # codeql[py/path-injection] -- sanitized by is_safe_path() above
                     for k, v in tags.items():
                         if hasattr(mf, k):
                             setattr(mf, k, v)
@@ -1362,7 +1370,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                     written = True
                 except Exception:
                     import mutagen
-                    f = mutagen.File(file_path, easy=True)
+                    f = mutagen.File(file_path, easy=True)  # codeql[py/path-injection] -- sanitized by is_safe_path() above
                     if f is not None:
                         for k, v in tags.items():
                             f[k] = v
@@ -1381,17 +1389,20 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
         if path == "/files/move":
             src = body.get("source_path", "")
             dst = body.get("target_path", "")
+            # is_safe_path() (tested in TestBeetsControlAgentSecurity) resolves
+            # symlinks via realpath and enforces containment within an allowed
+            # root before any of the filesystem operations below run.
             if not is_safe_path(src, ["music", "staging"]) or not is_safe_path(dst, ["music", "staging"]):
                 self._send_json(403, {"error": "Access denied for path outside allowed roots"})
                 return
-            if not os.path.exists(src):
+            if not os.path.exists(src):  # codeql[py/path-injection] -- sanitized by is_safe_path() above
                 self._send_json(404, {"error": f"Source path not found: {src}"})
                 return
 
             lock_file = acquire_os_lock(read_only=False)
             try:
-                os.makedirs(os.path.dirname(dst), exist_ok=True)
-                shutil.move(src, dst)
+                os.makedirs(os.path.dirname(dst), exist_ok=True)  # codeql[py/path-injection] -- sanitized by is_safe_path() above
+                shutil.move(src, dst)  # codeql[py/path-injection] -- sanitized by is_safe_path() above
                 self._send_json(200, {"ok": True, "source_path": src, "target_path": dst})
             except Exception as exc:
                 self._send_json(500, {"error": f"Failed to move file: {exc}"})
@@ -1401,19 +1412,22 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
 
         if path == "/files/delete":
             target = body.get("path", "")
+            # is_safe_path() (tested in TestBeetsControlAgentSecurity) resolves
+            # symlinks via realpath and enforces containment within an allowed
+            # root before any of the filesystem operations below run.
             if not is_safe_path(target, ["music", "staging"]):
                 self._send_json(403, {"error": f"Access denied for path: {target}"})
                 return
-            if not os.path.exists(target):
+            if not os.path.exists(target):  # codeql[py/path-injection] -- sanitized by is_safe_path() above
                 self._send_json(200, {"ok": True, "path": target, "existed": False})
                 return
 
             lock_file = acquire_os_lock(read_only=False)
             try:
-                if os.path.isdir(target):
-                    shutil.rmtree(target)
+                if os.path.isdir(target):  # codeql[py/path-injection] -- sanitized by is_safe_path() above
+                    shutil.rmtree(target)  # codeql[py/path-injection] -- sanitized by is_safe_path() above
                 else:
-                    os.unlink(target)
+                    os.unlink(target)  # codeql[py/path-injection] -- sanitized by is_safe_path() above
                 self._send_json(200, {"ok": True, "path": target, "existed": True})
             except Exception as exc:
                 self._send_json(500, {"error": f"Failed to delete path: {exc}"})
@@ -1423,13 +1437,16 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
 
         if path == "/files/mkdir":
             target = body.get("path", "")
+            # is_safe_path() (tested in TestBeetsControlAgentSecurity) resolves
+            # symlinks via realpath and enforces containment within an allowed
+            # root before the filesystem operation below runs.
             if not is_safe_path(target, ["music", "staging"]):
                 self._send_json(403, {"error": f"Access denied for path: {target}"})
                 return
 
             lock_file = acquire_os_lock(read_only=False)
             try:
-                os.makedirs(target, exist_ok=True)
+                os.makedirs(target, exist_ok=True)  # codeql[py/path-injection] -- sanitized by is_safe_path() above
                 self._send_json(200, {"ok": True, "path": target})
             except Exception as exc:
                 self._send_json(500, {"error": f"Failed to create directory: {exc}"})
