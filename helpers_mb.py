@@ -631,100 +631,20 @@ def _clean_for_mb(title: str, artist: str):
 
 
 def _acoustid_lookup(file_path: str) -> List[Dict[str, Any]]:
-    """Run fpcalc + AcoustID lookup. Returns list of MB recording candidate dicts."""
-    fpcalc = shutil.which("fpcalc") or "/usr/bin/fpcalc"
-    if not Path(fpcalc).exists():
+    """Run AcoustID lookup via remote engine control agent (port 8338).
+    Returns list of MB recording candidate dicts.
+    """
+    if not file_path:
         return []
     try:
-        r = subprocess.run([fpcalc, "-json", file_path], capture_output=True, text=True, timeout=30)
-        if r.returncode != 0 or not r.stdout.strip():
-            return []
-        fp_data = json.loads(r.stdout)
-        duration = int(fp_data.get("duration") or 0)
-        fingerprint = (fp_data.get("fingerprint") or "").strip()
-        if not fingerprint or duration < 5:
-            return []
-    except Exception:
+        from backend.beets_client import beets_client
+        res = beets_client.acoustid_lookup(file_path)
+        if isinstance(res, dict):
+            return res.get("candidates", [])
         return []
-    aid_key = os.environ.get("ACOUSTID_API_KEY") or "8XaBELgH"  # env var or test fallback
-    params = _up.urlencode({
-        "client":      aid_key,
-        "meta":        "recordings releases releasegroups",
-        "duration":    duration,
-        "fingerprint": fingerprint,
-        "format":      "json",
-    })
-    data = {}
-    req = _ur.Request(
-        f"https://api.acoustid.org/v2/lookup?{params}",
-        headers={"User-Agent": "BeetsWebControl/1.0"}
-    )
-    for attempt in range(2):
-        try:
-            global _ACOUSTID_NEXT_LOOKUP_AT
-            with _ACOUSTID_LOOKUP_LOCK:
-                now = time.monotonic()
-                if _ACOUSTID_NEXT_LOOKUP_AT > now:
-                    time.sleep(_ACOUSTID_NEXT_LOOKUP_AT - now)
-                _ACOUSTID_NEXT_LOOKUP_AT = time.monotonic() + _ACOUSTID_MIN_INTERVAL_SECONDS
-            with _ur.urlopen(req, timeout=15) as r2:
-                data = json.loads(r2.read())
-            break
-        except Exception:
-            if attempt >= 1:
-                return []
-            time.sleep(1.0)
-    if data.get("status") != "ok":
+    except Exception as exc:
+        logging.warning(f"AcoustID lookup via control agent failed for {file_path}: {exc}")
         return []
-    out = []
-    seen_mbids: set = set()
-    for result in (data.get("results") or [])[:5]:
-        confidence = int(round((result.get("score") or 0) * 100))
-        acoustid_id = str(result.get("id") or "")
-        for rec in (result.get("recordings") or [])[:3]:
-            mb_id = rec.get("id", "")
-            if not mb_id or mb_id in seen_mbids:
-                continue
-            seen_mbids.add(mb_id)
-            t_title  = rec.get("title", "")
-            artists  = " / ".join(a.get("name", "") for a in (rec.get("artists") or []))
-            releases = rec.get("releases") or []
-            rel = releases[0] if releases else {}
-            rel_title = rel.get("title", "")
-            rel_year  = (rel.get("date", {}).get("year") if isinstance(rel.get("date"), dict) else "")
-            mb_albumids = [r.get("id", "") for r in releases if r.get("id")]
-            releasegroups = rec.get("releasegroups") or rec.get("release-groups") or []
-            rg = releasegroups[0] if releasegroups else {}
-            rg_id = rg.get("id", "") if isinstance(rg, dict) else ""
-            rg_title = rg.get("title", "") if isinstance(rg, dict) else ""
-            if not rg_id:
-                for rel_item in releases:
-                    rel_rg = (
-                        rel_item.get("releasegroup")
-                        or rel_item.get("release-group")
-                        or rel_item.get("release_group")
-                        or {}
-                    )
-                    if isinstance(rel_rg, dict) and rel_rg.get("id"):
-                        rg_id = rel_rg.get("id", "")
-                        rg_title = rel_rg.get("title", "") or rg_title
-                        break
-            out.append({
-                "score":       confidence,
-                "acoustid_id": acoustid_id,
-                "mb_trackid":  mb_id,
-                "mb_url":      f"https://musicbrainz.org/recording/{mb_id}",
-                "title":       t_title,
-                "artist":      artists,
-                "album":       rel_title or rg_title,
-                "year":        str(rel_year) if rel_year else "",
-                "duration":    "",
-                "source":      "acoustid",
-                "mb_albumids": mb_albumids,
-                "mb_releasegroupid": rg_id,
-                "release_group": rg_title,
-            })
-    return out
 
 
 def _resolve_release_group_to_release(rg_mbid: str, log: list,
