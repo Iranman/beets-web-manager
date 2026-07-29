@@ -10,6 +10,14 @@ Use this checklist for every change that touches application behavior, jobs, mat
 - Jobs orchestrate services and checkpoints rather than duplicating domain decisions.
 - Frontend code displays backend evidence and state; it does not make authoritative identity or mutation decisions.
 
+## Plugin-First Ownership and Container Boundaries
+
+- Beets core and installed plugins were evaluated before writing custom media/metadata code in the web manager.
+- Web manager contains zero local `beet`, `fpcalc`, or `ffprobe` executions and zero direct SQLite file handles.
+- All Beets commands, tag writes, and file moves/deletes run through the authenticated control agent on port 8338 inside the `beets` container.
+- FFmpeg in the web manager is restricted to approved `yt-dlp` download postprocessing.
+- No hidden local subprocess fallback when the control agent returns an error.
+
 ## Business Rules
 
 - MusicBrainz and AcoustID remain primary identity evidence.

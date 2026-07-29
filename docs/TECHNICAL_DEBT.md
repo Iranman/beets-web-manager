@@ -136,3 +136,16 @@ Statuses: Open, In Progress, Blocked, Done.
 - Existing mitigations: `PLEX_TOKEN` is sent via a request header, never a URL query parameter (query-string tokens are far more likely to end up in access logs/proxies). A stable, persisted, installation-specific Plex client identifier (`X-Plex-Client-Identifier`/`X-Plex-Product`/`X-Plex-Device-Name`) is now sent on every request, so any future rotation is cleanly attributable instead of facing the ambiguity that blocked attribution this time (the token has visibility into 35 authorized devices with no way to isolate which one originally produced it). Token values are never logged, printed, or included in reports.
 - Future recommended action: rotate `PLEX_TOKEN` when convenient, using Plex Web -> Settings -> Account -> Authorized Devices to remove the specific session, then generate a replacement.
 - Status: Owner accepted. Not a release blocker.
+
+## ARCH-013 AcoustID Fingerprinting and Lookup Capability Gap
+
+- Affected area: AcoustID fingerprinting, candidate matching, AI evidence generation, `helpers_mb.py`, `backend/beets_client.py`, `backend/beets_control_agent.py`.
+- Evidence: Beets `chroma` plugin does not expose a supported public API or CLI command to fingerprint an arbitrary pre-import audio file and return structured MusicBrainz recording candidate dictionaries without executing a full Beets import pipeline.
+- Current temporary adapter: Narrow engine-side `POST /audio/acoustid-lookup` adapter running on `backend/beets_control_agent.py` inside the Beets engine container.
+- Authoritative owner: Beets engine container (owns `fpcalc`, `pyacoustid`, and `ACOUSTID_API_KEY`).
+- Web-manager responsibilities: Web-manager issues remote HTTP requests via `BeetsClient.acoustid_lookup()`, presents candidates in UI/AI evidence, and handles unavailable states.
+- Engine responsibilities: Engine executes `fpcalc` via `subprocess.run(..., shell=False)`, extracts duration/fingerprint, queries `api.acoustid.org` using `ACOUSTID_API_KEY`, computes confidence scores, and formats candidate dicts.
+- Future preferred integration: Upstream Beets Chroma plugin API enhancement or custom engine plugin exposing structured pre-import fingerprinting.
+- Acceptance criteria: Web manager contains zero local `fpcalc` invocations and zero direct `api.acoustid.org` HTTP calls; all AcoustID operations flow over the authenticated control agent boundary.
+- Priority: P1.
+- Status: In Progress.
