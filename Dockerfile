@@ -22,7 +22,7 @@ LABEL org.opencontainers.image.revision="${VCS_REF}" \
       org.opencontainers.image.source="https://github.com/Iranman/beets-web-manager"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git \
+    ffmpeg \
     tini \
     && rm -rf /var/lib/apt/lists/*
 
