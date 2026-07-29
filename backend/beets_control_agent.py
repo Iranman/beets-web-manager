@@ -22,6 +22,7 @@ import time
 import urllib.parse
 import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import parse_qs, urlparse
 
@@ -477,41 +478,72 @@ def _path_is_within(candidate: str, root: str) -> bool:
         return False
 
 
-def resolve_safe_path(path: str, allowed_types: list = None) -> Optional[str]:
-    """Return a canonical path under an approved root, or None.
+class UnsafePathError(ValueError):
+    """Raised by resolve_safe_path() when the input cannot be trusted."""
 
-    Callers must use this returned value for filesystem operations. Returning a
-    bool and then operating on the original request value leaves a gap for mixed
-    encodings, symlink components, and prefix-collision paths.
+
+def resolve_safe_path(
+    path: object,
+    allowed_types: list = None,
+    *,
+    require_exists: bool = False,
+    expected_type: str = None,
+) -> Path:
+    """Validate untrusted path input and return the one trusted, canonical
+    Path callers may use for filesystem operations.
+
+    Raises UnsafePathError for every unsafe condition instead of returning a
+    bool/None -- a caller that checked a boolean and then still operated on
+    the original tainted string left a gap (and a static-analysis blind
+    spot) for mixed encodings, symlink components, and prefix-collision
+    paths. There is no code path that produces a Path from untrusted input
+    without it having passed every check below.
     """
     if not path or not isinstance(path, str):
-        return None
+        raise UnsafePathError("path must be a non-empty string")
     if "\x00" in path or "\\" in path:
-        return None
+        raise UnsafePathError("path contains a null byte or backslash")
 
     decoded = _decode_untrusted_path(path)
     if decoded is None:
-        return None
+        raise UnsafePathError("path failed to decode")
     if "\x00" in decoded or "\\" in decoded:
-        return None
+        raise UnsafePathError("decoded path contains a null byte or backslash")
     if not decoded.startswith("/"):
-        return None
+        raise UnsafePathError("path must be absolute")
 
     parts = decoded.split("/")
     if ".." in parts or "." in parts:
-        return None
+        raise UnsafePathError("path contains a traversal segment")
 
     abs_path = os.path.abspath(decoded)
     real_path = os.path.realpath(abs_path)
+    trusted: Optional[Path] = None
     for root in _allowed_root_paths(allowed_types):
         if _path_is_within(real_path, root):
-            return real_path
-    return None
+            trusted = Path(real_path)
+            break
+    if trusted is None:
+        raise UnsafePathError("path is outside every allowed root")
+
+    if require_exists and not trusted.exists():
+        raise UnsafePathError("path does not exist")
+    if expected_type == "file" and trusted.exists() and not trusted.is_file():
+        raise UnsafePathError("path is not a regular file")
+    if expected_type == "dir" and trusted.exists() and not trusted.is_dir():
+        raise UnsafePathError("path is not a directory")
+
+    return trusted
 
 
-def is_safe_path(path: str, allowed_types: list = None) -> bool:
-    """Verify that path stays strictly within allowed roots."""
-    return resolve_safe_path(path, allowed_types) is not None
+def is_safe_path(path: object, allowed_types: list = None) -> bool:
+    """Boolean convenience wrapper for call sites that only need a check
+    (e.g. validating job args), not the resolved Path itself."""
+    try:
+        resolve_safe_path(path, allowed_types)
+        return True
+    except UnsafePathError:
+        return False
 
 
 def acquire_os_lock(read_only: bool = False):
@@ -1096,8 +1128,9 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 return
 
             artpath = body.get("artpath", "")
-            safe_artpath = resolve_safe_path(artpath, ["music"])
-            if safe_artpath is None:
+            try:
+                safe_artpath = resolve_safe_path(artpath, ["music"])
+            except UnsafePathError:
                 self._send_json(403, {"error": "Access denied for artpath outside allowed roots"})
                 return
 
@@ -1110,14 +1143,15 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 if not cur.fetchone():
                     self._send_json(404, {"error": f"Album {album_id} not found"})
                     return
-                safe_artpath = resolve_safe_path(artpath, ["music"])
-                if safe_artpath is None:
+                try:
+                    safe_artpath = resolve_safe_path(artpath, ["music"])
+                except UnsafePathError:
                     self._send_json(403, {"error": "Access denied for artpath outside allowed roots"})
                     return
-                cur.execute("UPDATE albums SET artpath = ? WHERE id = ?", (safe_artpath, album_id))
+                cur.execute("UPDATE albums SET artpath = ? WHERE id = ?", (str(safe_artpath), album_id))
                 con.commit()
                 con.close()
-                self._send_json(200, {"ok": True, "album_id": album_id, "artpath": safe_artpath})
+                self._send_json(200, {"ok": True, "album_id": album_id, "artpath": str(safe_artpath)})
             except Exception:
                 self._send_json(500, {"error": "Failed to set artpath"})
             finally:
@@ -1268,11 +1302,12 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
 
         if path == "/tags/read":
             file_path = body.get("file_path", "")
-            safe_file_path = resolve_safe_path(file_path, ["music", "staging"])
-            if safe_file_path is None:
+            try:
+                safe_file_path = resolve_safe_path(file_path, ["music", "staging"])
+            except UnsafePathError:
                 self._send_json(403, {"error": "Access denied for path outside allowed roots"})
                 return
-            if not os.path.exists(safe_file_path):
+            if not safe_file_path.exists():
                 self._send_json(404, {"error": "File not found"})
                 return
 
@@ -1319,11 +1354,12 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
         if path == "/tags/write":
             file_path = body.get("file_path", "")
             tags = body.get("tags", {})
-            safe_file_path = resolve_safe_path(file_path, ["music", "staging"])
-            if safe_file_path is None:
+            try:
+                safe_file_path = resolve_safe_path(file_path, ["music", "staging"])
+            except UnsafePathError:
                 self._send_json(403, {"error": "Access denied for path outside allowed roots"})
                 return
-            if not os.path.exists(safe_file_path):
+            if not safe_file_path.exists():
                 self._send_json(404, {"error": "File not found"})
                 return
             if not isinstance(tags, dict):
@@ -1336,8 +1372,15 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
 
             lock_file = acquire_os_lock(read_only=False)
             try:
-                safe_file_path = resolve_safe_path(file_path, ["music", "staging"])
-                if safe_file_path is None or not os.path.exists(safe_file_path):
+                # Re-resolve inside the lock: the caller's path is re-validated
+                # (not just re-checked-for-existence) to close the TOCTOU gap
+                # between the pre-lock check above and lock acquisition.
+                try:
+                    safe_file_path = resolve_safe_path(file_path, ["music", "staging"])
+                except UnsafePathError:
+                    self._send_json(403, {"error": "Access denied for path outside allowed roots"})
+                    return
+                if not safe_file_path.exists():
                     self._send_json(403, {"error": "Access denied for path outside allowed roots"})
                     return
                 written = False
@@ -1358,7 +1401,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                         f.save()
                         written = True
                 if written:
-                    self._send_json(200, {"ok": True, "file_path": safe_file_path})
+                    self._send_json(200, {"ok": True, "file_path": str(safe_file_path)})
                 else:
                     self._send_json(500, {"error": "Failed to write tags to file"})
             except Exception:
@@ -1369,29 +1412,32 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
         if path == "/files/move":
             src = body.get("source_path", "")
             dst = body.get("target_path", "")
-            safe_src = resolve_safe_path(src, ["music", "staging"])
-            safe_dst = resolve_safe_path(dst, ["music", "staging"])
-            if safe_src is None or safe_dst is None:
+            try:
+                safe_src = resolve_safe_path(src, ["music", "staging"])
+                safe_dst = resolve_safe_path(dst, ["music", "staging"])
+            except UnsafePathError:
                 self._send_json(403, {"error": "Access denied for path outside allowed roots"})
                 return
-            if not os.path.exists(safe_src):
+            if not safe_src.exists():
                 self._send_json(404, {"error": "Source path not found"})
                 return
 
             lock_file = acquire_os_lock(read_only=False)
             try:
-                safe_src = resolve_safe_path(src, ["music", "staging"])
-                safe_dst = resolve_safe_path(dst, ["music", "staging"])
-                if safe_src is None or safe_dst is None or not os.path.exists(safe_src):
+                # Re-resolve inside the lock to close the TOCTOU gap between
+                # the pre-lock check above and lock acquisition.
+                try:
+                    safe_src = resolve_safe_path(src, ["music", "staging"])
+                    safe_dst = resolve_safe_path(dst, ["music", "staging"])
+                except UnsafePathError:
                     self._send_json(403, {"error": "Access denied for path outside allowed roots"})
                     return
-                os.makedirs(os.path.dirname(safe_dst), exist_ok=True)
-                safe_dst = resolve_safe_path(dst, ["music", "staging"])
-                if safe_dst is None:
+                if not safe_src.exists():
                     self._send_json(403, {"error": "Access denied for path outside allowed roots"})
                     return
-                shutil.move(safe_src, safe_dst)
-                self._send_json(200, {"ok": True, "source_path": safe_src, "target_path": safe_dst})
+                safe_dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(safe_src), str(safe_dst))
+                self._send_json(200, {"ok": True, "source_path": str(safe_src), "target_path": str(safe_dst)})
             except Exception:
                 self._send_json(500, {"error": "Failed to move file"})
             finally:
@@ -1400,25 +1446,32 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
 
         if path == "/files/delete":
             target = body.get("path", "")
-            safe_target = resolve_safe_path(target, ["music", "staging"])
-            if safe_target is None:
+            try:
+                safe_target = resolve_safe_path(target, ["music", "staging"])
+            except UnsafePathError:
                 self._send_json(403, {"error": "Access denied for path outside allowed roots"})
                 return
-            if not os.path.exists(safe_target):
-                self._send_json(200, {"ok": True, "path": safe_target, "existed": False})
+            if any(str(safe_target) == os.path.realpath(root) for root in _allowed_root_paths(["music", "staging"])):
+                self._send_json(403, {"error": "Refusing to delete an allowed-root directory itself"})
+                return
+            if not safe_target.exists():
+                self._send_json(200, {"ok": True, "path": str(safe_target), "existed": False})
                 return
 
             lock_file = acquire_os_lock(read_only=False)
             try:
-                safe_target = resolve_safe_path(target, ["music", "staging"])
-                if safe_target is None:
+                # Re-resolve inside the lock to close the TOCTOU gap between
+                # the pre-lock check above and lock acquisition.
+                try:
+                    safe_target = resolve_safe_path(target, ["music", "staging"])
+                except UnsafePathError:
                     self._send_json(403, {"error": "Access denied for path outside allowed roots"})
                     return
-                if os.path.isdir(safe_target):
+                if safe_target.is_dir():
                     shutil.rmtree(safe_target)
                 else:
-                    os.unlink(safe_target)
-                self._send_json(200, {"ok": True, "path": safe_target, "existed": True})
+                    safe_target.unlink()
+                self._send_json(200, {"ok": True, "path": str(safe_target), "existed": True})
             except Exception:
                 self._send_json(500, {"error": "Failed to delete path"})
             finally:
@@ -1427,23 +1480,23 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
 
         if path == "/files/mkdir":
             target = body.get("path", "")
-            safe_target = resolve_safe_path(target, ["music", "staging"])
-            if safe_target is None:
+            try:
+                safe_target = resolve_safe_path(target, ["music", "staging"])
+            except UnsafePathError:
                 self._send_json(403, {"error": "Access denied for path outside allowed roots"})
                 return
 
             lock_file = acquire_os_lock(read_only=False)
             try:
-                safe_target = resolve_safe_path(target, ["music", "staging"])
-                if safe_target is None:
+                # Re-resolve inside the lock to close the TOCTOU gap between
+                # the pre-lock check above and lock acquisition.
+                try:
+                    safe_target = resolve_safe_path(target, ["music", "staging"])
+                except UnsafePathError:
                     self._send_json(403, {"error": "Access denied for path outside allowed roots"})
                     return
-                os.makedirs(safe_target, exist_ok=True)
-                safe_target = resolve_safe_path(target, ["music", "staging"])
-                if safe_target is None:
-                    self._send_json(403, {"error": "Access denied for path outside allowed roots"})
-                    return
-                self._send_json(200, {"ok": True, "path": safe_target})
+                safe_target.mkdir(parents=True, exist_ok=True)
+                self._send_json(200, {"ok": True, "path": str(safe_target)})
             except Exception:
                 self._send_json(500, {"error": "Failed to create directory"})
             finally:

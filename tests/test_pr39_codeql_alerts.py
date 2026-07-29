@@ -14,7 +14,7 @@ import routes_submissions
 import scripts.validate_compose_security as compose_security
 from backend import beets_control_agent as bca
 from backend.beets_client import BeetsClient, BeetsError
-from backend.beets_control_agent import ControlAgentHandler, resolve_safe_path
+from backend.beets_control_agent import ControlAgentHandler, UnsafePathError, resolve_safe_path
 
 
 def _post_agent(path: str, payload: dict):
@@ -71,7 +71,9 @@ class ControlAgentPathBoundaryTests(unittest.TestCase):
         good = f"{self.music}/Artist/Track.flac"
         Path(good).parent.mkdir(parents=True, exist_ok=True)
         Path(good).write_text("audio", encoding="utf-8")
-        self.assertEqual(resolve_safe_path(good, ["music"]), str(Path(good).resolve()))
+        resolved = resolve_safe_path(good, ["music"])
+        self.assertIsInstance(resolved, Path)
+        self.assertEqual(resolved, Path(good).resolve())
 
         bad_paths = [
             f"{self.music}/../outside/secret.flac",
@@ -85,7 +87,8 @@ class ControlAgentPathBoundaryTests(unittest.TestCase):
         ]
         for candidate in bad_paths:
             with self.subTest(candidate=candidate):
-                self.assertIsNone(resolve_safe_path(candidate, ["music"]))
+                with self.assertRaises(UnsafePathError):
+                    resolve_safe_path(candidate, ["music"])
 
     def test_symlink_escape_is_rejected_where_supported(self):
         outside_secret = f"{self.outside}/secret.flac"
@@ -95,7 +98,66 @@ class ControlAgentPathBoundaryTests(unittest.TestCase):
             Path(link_path).symlink_to(Path(outside_secret))
         except (OSError, NotImplementedError):
             self.skipTest("Symlink creation is unavailable")
-        self.assertIsNone(resolve_safe_path(link_path, ["music"]))
+        with self.assertRaises(UnsafePathError):
+            resolve_safe_path(link_path, ["music"])
+
+    def test_resolve_safe_path_rejects_empty_and_non_string_input(self):
+        for bad in (None, "", 42, ["/tmp/x"], {"path": "/tmp/x"}):
+            with self.subTest(bad=bad):
+                with self.assertRaises(UnsafePathError):
+                    resolve_safe_path(bad, ["music"])
+
+    def test_resolve_safe_path_rejects_relative_path(self):
+        with self.assertRaises(UnsafePathError):
+            resolve_safe_path("Artist/Track.flac", ["music"])
+
+    def test_resolve_safe_path_require_exists(self):
+        missing = f"{self.music}/Artist/DoesNotExist.flac"
+        # Not required: resolves fine even though nothing is on disk yet.
+        resolved = resolve_safe_path(missing, ["music"])
+        self.assertEqual(resolved, Path(missing).resolve())
+        with self.assertRaises(UnsafePathError):
+            resolve_safe_path(missing, ["music"], require_exists=True)
+
+    def test_resolve_safe_path_expected_type_file_vs_directory(self):
+        file_path = f"{self.music}/Artist/Track.flac"
+        Path(file_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(file_path).write_text("audio", encoding="utf-8")
+        dir_path = f"{self.music}/Artist"
+
+        # Correct expectations pass.
+        resolve_safe_path(file_path, ["music"], expected_type="file")
+        resolve_safe_path(dir_path, ["music"], expected_type="dir")
+
+        # Wrong expectations are rejected.
+        with self.assertRaises(UnsafePathError):
+            resolve_safe_path(file_path, ["music"], expected_type="dir")
+        with self.assertRaises(UnsafePathError):
+            resolve_safe_path(dir_path, ["music"], expected_type="file")
+
+    def test_resolve_safe_path_supports_multiple_allowed_roots(self):
+        music_file = f"{self.music}/Artist/Track.flac"
+        staging_file = f"{self.staging}/incoming/Track.flac"
+        Path(music_file).parent.mkdir(parents=True, exist_ok=True)
+        Path(staging_file).parent.mkdir(parents=True, exist_ok=True)
+        Path(music_file).write_text("a", encoding="utf-8")
+        Path(staging_file).write_text("a", encoding="utf-8")
+        resolve_safe_path(music_file, ["music", "staging"])
+        resolve_safe_path(staging_file, ["music", "staging"])
+        with self.assertRaises(UnsafePathError):
+            resolve_safe_path(f"{self.outside}/Track.flac", ["music", "staging"])
+
+    def test_resolve_safe_path_accepts_unicode_and_spaces(self):
+        fancy = f"{self.music}/Café Artist/Track (Live).flac"
+        Path(fancy).parent.mkdir(parents=True, exist_ok=True)
+        Path(fancy).write_text("audio", encoding="utf-8")
+        resolved = resolve_safe_path(fancy, ["music"])
+        self.assertEqual(resolved, Path(fancy).resolve())
+
+    def test_delete_refuses_to_remove_allowed_root_itself(self):
+        code, data = _post_agent("/files/delete", {"path": self.music})
+        self.assertEqual(code, 403, data)
+        self.assertTrue(Path(self.music).is_dir())
 
     def test_delete_endpoint_rejects_encoded_escape_before_mutation(self):
         outside_secret = f"{self.outside}/secret.flac"
@@ -109,6 +171,39 @@ class ControlAgentPathBoundaryTests(unittest.TestCase):
         code, _ = _post_agent("/files/mkdir", {"path": f"{self.base}/music-other/new"})
         self.assertEqual(code, 403)
         self.assertFalse(Path(f"{self.base}/music-other/new").exists())
+
+    def test_move_endpoint_rejects_source_escape(self):
+        outside_secret = f"{self.outside}/secret.flac"
+        Path(outside_secret).write_text("secret", encoding="utf-8")
+        code, data = _post_agent("/files/move", {
+            "source_path": f"{self.music}/%252e%252e/outside/secret.flac",
+            "target_path": f"{self.staging}/stolen.flac",
+        })
+        self.assertEqual(code, 403, data)
+        self.assertTrue(Path(outside_secret).exists())
+        self.assertFalse(Path(f"{self.staging}/stolen.flac").exists())
+
+    def test_move_endpoint_rejects_destination_escape(self):
+        source = f"{self.music}/Artist/Track.flac"
+        Path(source).parent.mkdir(parents=True, exist_ok=True)
+        Path(source).write_text("audio", encoding="utf-8")
+        code, data = _post_agent("/files/move", {
+            "source_path": source,
+            "target_path": f"{self.music}/%252e%252e/outside/stolen.flac",
+        })
+        self.assertEqual(code, 403, data)
+        self.assertTrue(Path(source).exists())
+
+    def test_move_endpoint_accepts_valid_paths_and_uses_canonical_destination(self):
+        source = f"{self.music}/Artist/Track.flac"
+        Path(source).parent.mkdir(parents=True, exist_ok=True)
+        Path(source).write_text("audio", encoding="utf-8")
+        dest = f"{self.staging}/moved/Track.flac"
+        code, data = _post_agent("/files/move", {"source_path": source, "target_path": dest})
+        self.assertEqual(code, 200, data)
+        self.assertEqual(data["target_path"], str(Path(dest).resolve()))
+        self.assertTrue(Path(dest).exists())
+        self.assertFalse(Path(source).exists())
 
 
 class ControlAgentSqlBoundaryTests(unittest.TestCase):
