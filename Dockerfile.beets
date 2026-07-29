@@ -1,6 +1,15 @@
 # syntax=docker/dockerfile:1
 FROM lscr.io/linuxserver/beets:2.4.0@sha256:4cce2967154e849ca5466469d934a4bb9d8d83c3acf2a5279da47bccd16518f1
 
+# Immutable image provenance. Required, not optional: a blank/missing
+# VCS_REF fails the build rather than silently producing an unlabeled
+# image, and a later rebuild with new fixes must never be able to keep
+# an earlier commit's label by omission.
+ARG VCS_REF
+RUN test -n "${VCS_REF}" || (echo "ERROR: VCS_REF build-arg is required and must not be blank" >&2 && exit 1)
+LABEL org.opencontainers.image.revision="${VCS_REF}" \
+      org.opencontainers.image.source="https://github.com/Iranman/beets-web-manager"
+
 # Apply pinned Beets 2.4.0 plugin resolution fix
 COPY docker/beets/ /opt/beets-patches/
 RUN /lsiopy/bin/python3 /opt/beets-patches/apply_patches.py
