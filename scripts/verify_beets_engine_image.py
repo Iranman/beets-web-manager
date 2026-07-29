@@ -284,6 +284,16 @@ def check_s6_supervision(image: str, errors: List[str]) -> None:
         run_res = _run_docker([
             "run", "-d", "--name", container,
             "-e", f"BEETS_API_TOKEN={token}",
+            # This test verifies S6 process supervision (svc-beets stays
+            # down, the control agent stays up and restarts after a crash),
+            # not the startup guard's fail-closed behavior -- that's
+            # covered by its own dedicated tests. A fresh container here
+            # has no pre-existing library, and the guard's production
+            # default (BEETS_EXPECT_EXISTING_LIBRARY=1 in the Dockerfile)
+            # correctly refuses to start against a missing database, which
+            # would otherwise block this test before it can even observe
+            # S6 behavior.
+            "-e", "BEETS_EXPECT_EXISTING_LIBRARY=0",
             image,
         ])
         if run_res.returncode != 0:
