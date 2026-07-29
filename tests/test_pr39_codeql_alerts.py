@@ -137,6 +137,59 @@ class ControlAgentPathBoundaryTests(unittest.TestCase):
         self.assertEqual(code, 403)
         self.assertFalse(Path(f"{self.base}/music-other/new").exists())
 
+    def test_resolve_safe_path_preserves_literal_percent_filename(self):
+        """Regression test: resolve_safe_path must canonicalize from the
+        original raw path, not its decoded form. Decoding is used only to
+        detect a hidden traversal/separator/null-byte attack; a legitimate
+        literal filename that happens to contain a percent-sign byte
+        sequence (e.g. "50%20off.flac") must resolve to itself and not be
+        silently rewritten to a different string ("50 off.flac") before it
+        reaches the filesystem sink -- this API's contract is a raw
+        filesystem path (values arrive in a JSON body, never URL-encoded by
+        any real caller), so decoding must never change what gets operated on."""
+        literal = f"{self.music}/convention%20album.flac"
+        Path(literal).write_text("audio", encoding="utf-8")
+        decoded_sibling = f"{self.music}/convention album.flac"
+        self.assertFalse(Path(decoded_sibling).exists())
+
+        result = resolve_safe_path(literal, ["music"])
+        self.assertEqual(result, str(Path(literal).resolve()))
+        self.assertNotEqual(result, str(Path(decoded_sibling).resolve()))
+
+        with mock.patch.object(bca.os, "unlink") as unlink_mock:
+            code, data = _post_agent("/files/delete", {"path": literal})
+        self.assertEqual(code, 200, data)
+        unlink_mock.assert_called_once_with(str(Path(literal).resolve()))
+
+    def test_command_args_allow_beets_range_query_syntax(self):
+        """Regression test: a blanket '".." in arg' substring check rejected
+        legitimate Beets range-query syntax (e.g. `year:2020..2023`,
+        `added:2020-01-01..2020-02-01`), which is never filesystem-joined --
+        only an actual relative path segment ("..", "../x", "x/..") is a
+        real traversal-relevant shape and must still be rejected."""
+        source = Path(self.staging) / "import-source"
+        source.mkdir()
+        fake_result = mock.MagicMock(returncode=0, stdout="", stderr="")
+
+        legitimate_args = ["year:2020..2023", "added:2020-01-01..2020-02-01", "artist:Weird Al..."]
+        with mock.patch.object(bca.subprocess, "run", return_value=fake_result) as run_mock:
+            code, data = _post_agent("/commands/execute", {
+                "command": "ls",
+                "args": legitimate_args,
+            })
+        self.assertEqual(code, 200, data)
+        full_cmd = run_mock.call_args.args[0]
+        self.assertEqual(full_cmd[-len(legitimate_args):], legitimate_args)
+
+        for traversal_arg in ["..", "../etc/passwd", "foo/../bar", "./relative"]:
+            with self.subTest(arg=traversal_arg):
+                with mock.patch.object(bca.subprocess, "run") as run_mock:
+                    code, data = _post_agent("/commands/execute", {
+                        "command": "ls",
+                        "args": [traversal_arg],
+                    })
+                self.assertEqual(code, 403, data)
+                run_mock.assert_not_called()
 
     def test_resolve_safe_path_rejects_extended_malicious_inputs(self):
         bad_paths = [

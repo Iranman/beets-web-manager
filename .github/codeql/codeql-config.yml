@@ -1,0 +1,13 @@
+# CodeQL advanced-setup configuration, used only by
+# .github/workflows/codeql-advanced.yml (currently workflow_dispatch-only,
+# not auto-triggered -- see that file's header comment for why).
+#
+# This does not change or replace the default query suite: it only adds the
+# repository-local path-injection barrier model pack
+# (.github/codeql/extensions/pr39-path-sanitizers/) alongside it, so
+# resolve_safe_path()'s return value is recognized as a path-injection
+# barrier without disabling or narrowing any default security query.
+name: "PR39 path-sanitizer model config"
+packs:
+  python:
+    - iranman/beets-web-manager-pr39-path-sanitizers

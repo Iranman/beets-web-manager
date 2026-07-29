@@ -1,0 +1,76 @@
+# NOT YET ACTIVE. Manual (workflow_dispatch) trigger only.
+#
+# Why this file exists: `gh api repos/Iranman/beets-web-manager/code-scanning/default-setup`
+# confirms this repository currently relies on GitHub's *default* CodeQL
+# setup (state: configured, query_suite: default). Default setup has no
+# mechanism to load a repository-local CodeQL pack -- it cannot discover
+# .github/codeql/extensions/pr39-path-sanitizers/, no matter how correctly
+# that pack is authored. Confirmed independently: `code-scanning/analyses`
+# shows zero CodeQL analyses have ever run for this branch or any PR whose
+# base is not `main` (only refs/pull/39/head and refs/heads/main have any).
+#
+# This workflow is what *advanced* setup would look like if the project
+# owner chooses to adopt it: it runs the same languages as default setup
+# and does not narrow, exclude, or disable any default security query --
+# it only additionally loads the local path-injection barrier model pack
+# via .github/codeql/codeql-config.yml, so resolve_safe_path()'s return
+# value is recognized as a barrier without weakening anything else.
+#
+# GitHub does not allow default setup and a custom analysis workflow to run
+# at the same time. Enabling this file for real requires the repository
+# owner to first disable default setup in Settings -> Code security ->
+# Code scanning, then change the trigger below from workflow_dispatch to
+# the commented-out pull_request/push/schedule block. That repository-wide
+# setting change is outside this PR's authorized scope, so the trigger is
+# left manual-only here to avoid creating a live conflict on push.
+#
+# The CodeQL CLI was not available to test this configuration locally, so
+# pack resolution here is unverified -- treat it as a documented starting
+# point for the project owner's decision, not a proven-working pipeline.
+
+name: CodeQL (advanced, local path-sanitizer pack)
+
+on:
+  workflow_dispatch: {}
+  # pull_request:
+  # push:
+  #   branches: [main]
+  # schedule:
+  #   - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+  security-events: write
+  packages: read
+  actions: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: python
+            build-mode: none
+          - language: javascript-typescript
+            build-mode: none
+          - language: actions
+            build-mode: none
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          config-file: ./.github/codeql/codeql-config.yml
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:${{ matrix.language }}"

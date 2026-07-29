@@ -74,6 +74,7 @@ _TAG_WRITE_FIELDS = {
 _PATH_DECODE_LIMIT = 5
 _ENCODED_SEPARATOR_RE = re.compile(r"%(?:2f|5c|00)", re.IGNORECASE)
 _ENCODED_BYTE_RE = re.compile(r"%[0-9a-f]{2}", re.IGNORECASE)
+_DOTDOT_SEGMENT_RE = re.compile(r"(^|/)\.\.(/|$)")
 _ALLOWED_ROOT_ERROR = {
     "error": "Refusing to operate on an allowed root",
     "code": "allowed_root_operation_denied",
@@ -525,7 +526,19 @@ def resolve_safe_path(path: str, allowed_types: list = None) -> Optional[str]:
     if ".." in parts or "." in parts:
         return None
 
-    abs_path = os.path.abspath(decoded)
+    # Canonicalize from the ORIGINAL raw path, not the decoded form above:
+    # decoding is used only to detect a hidden traversal/separator/null-byte
+    # attack encoded into the request. The API contract for this endpoint
+    # family is a raw filesystem path (values arrive in a JSON POST body,
+    # never URL-encoded by any real caller) -- a legitimate literal filename
+    # that merely contains a percent-sign byte sequence (e.g.
+    # "50%20off.flac") must resolve to itself, not be silently rewritten to
+    # a different string ("50 off.flac") before it reaches the filesystem
+    # sink. Since any %2f/%5c/%00 sequence was already rejected before this
+    # point, decoding cannot have introduced a new "/" that isn't already at
+    # the same position in the raw string, so re-deriving parts/leading-slash
+    # from `decoded` above and the canonical value from `path` here is safe.
+    abs_path = os.path.abspath(path)
     real_path = os.path.realpath(abs_path)
     for root in _allowed_root_paths(allowed_types):
         if _path_is_within(real_path, root):
@@ -573,7 +586,20 @@ def _sanitize_command_path_args(args: Any, error_context: str) -> tuple[Optional
         s_arg = str(arg)
         if s_arg in ("-c", "--config") or s_arg.startswith(("-c=", "--config=")):
             return None, {"error": f"Unsupported config override in {error_context} args"}
-        if s_arg.startswith(".") or ".." in s_arg or "\\" in s_arg or "\x00" in s_arg:
+        # Reject ".." only as an actual path segment (bounded by "/" or the
+        # whole string), not as a bare substring: Beets' own query syntax
+        # uses ".." for range queries (e.g. `year:2020..2023`,
+        # `added:2020-01-01..2020-02-01`), which a blanket substring check
+        # would incorrectly reject even though these args are never
+        # filesystem-joined. A relative arg is still only relevant to
+        # traversal for a command like `import` that can accept a second
+        # positional path, so a genuine "../"-shaped segment must still be
+        # blocked.
+        if (
+            s_arg == "." or s_arg.startswith("./")
+            or _DOTDOT_SEGMENT_RE.search(s_arg)
+            or "\\" in s_arg or "\x00" in s_arg
+        ):
             return None, {"error": f"Invalid path parameter in {error_context} args"}
         if s_arg.startswith("/"):
             safe_arg = resolve_safe_path(s_arg, ["music", "staging", "config", "tmp"])
