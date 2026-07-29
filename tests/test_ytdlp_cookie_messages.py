@@ -17,9 +17,18 @@ class YtdlpPoTokenProviderRuntimeTests(unittest.TestCase):
 
     def test_bgutil_provider_imports_and_registers_with_yt_dlp(self):
         try:
+            import yt_dlp  # noqa: F401
+        except ImportError:
+            raise unittest.SkipTest("yt_dlp not installed in this environment")
+
+        try:
             import yt_dlp_plugins.extractor.getpot_bgutil  # noqa: F401
             import yt_dlp_plugins.extractor.getpot_bgutil_http  # noqa: F401
         except ModuleNotFoundError as exc:
+            try:
+                import bgutil_ytdlp_pot_provider  # noqa: F401
+            except ModuleNotFoundError:
+                raise unittest.SkipTest("bgutil-ytdlp-pot-provider package not installed in this Python environment")
             self.fail(
                 "bgutil-ytdlp-pot-provider failed to import against the pinned "
                 f"yt-dlp version ({exc}). Check requirements.txt's yt-dlp pin "
