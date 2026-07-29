@@ -253,7 +253,12 @@ def _submission_readiness() -> Dict[str, Any]:
     try:
         remote_status = beets_client.get_status()
     except Exception as exc:
-        remote_error = str(exc)
+        # Logged in full server-side only -- the raw exception text (which
+        # can include connection details, hostnames, or other internals)
+        # must not flow into the client-facing "reason" field below
+        # (CodeQL py/stack-trace-exposure).
+        app.logger.error("Beets control agent status check failed: %s", exc)
+        remote_error = "Beets control agent status check failed"
 
     if not isinstance(remote_status, dict) or remote_status.get("status") != "ok":
         return {

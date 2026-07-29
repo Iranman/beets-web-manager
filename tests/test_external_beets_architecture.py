@@ -1402,7 +1402,7 @@ class TestAcoustIDChromaCapability(unittest.TestCase):
     def test_submission_readiness_fails_closed_on_connection_failure(self, mock_status):
         """A remote connection failure must report every capability unavailable,
         never fall back to a local find_spec()/shutil.which() guess."""
-        mock_status.side_effect = BeetsUnavailableError("Beets Control Agent is unavailable")
+        mock_status.side_effect = BeetsUnavailableError("Beets Control Agent is unavailable at 10.0.0.5:8338")
 
         from routes_submissions import _submission_readiness
         readiness = _submission_readiness()
@@ -1411,7 +1411,12 @@ class TestAcoustIDChromaCapability(unittest.TestCase):
         self.assertFalse(readiness["plugins"]["mbsubmit"])
         self.assertFalse(readiness["fpcalc_available"])
         self.assertFalse(readiness["pyacoustid_available"])
-        self.assertIn("Beets Control Agent is unavailable", readiness["reason"])
+        # The raw exception text (which can include internal hosts/ports)
+        # must never reach the client-facing reason field (CodeQL
+        # py/stack-trace-exposure) -- only a generic message does.
+        self.assertNotIn("10.0.0.5", readiness["reason"])
+        self.assertNotIn("Beets Control Agent is unavailable at", readiness["reason"])
+        self.assertTrue(readiness["reason"])
 
     @mock.patch("backend.beets_client.beets_client.get_status")
     def test_submission_readiness_fails_closed_on_authentication_failure(self, mock_status):
