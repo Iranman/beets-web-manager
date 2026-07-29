@@ -2123,6 +2123,38 @@ class ComposeSecurityValidatorTests(unittest.TestCase):
         )
         self.assertEqual(errors, [])
 
+    def test_locally_built_image_with_no_tag_fails(self):
+        """CodeQL py/polynomial-redos (#356): the old ^[^:@/]+(?:/[^:@]+)*$
+        regex was ambiguous (both groups accept the same non-colon,
+        non-at characters) and worst-case polynomial on crafted input.
+        Replaced with a plain substring check; this proves it still
+        detects the untagged case it was written for."""
+        import scripts.validate_compose_security as vcs
+        errors: list = []
+        vcs._check_image_digest_semantics("beets", "beets-engine", has_build=True, errors=errors)
+        self.assertTrue(any("has no tag" in e for e in errors), errors)
+
+    def test_pulled_third_party_image_with_no_tag_or_digest_fails(self):
+        import scripts.validate_compose_security as vcs
+        errors: list = []
+        vcs._check_image_digest_semantics(
+            "bgutil-provider", "brainicism/bgutil-ytdlp-pot-provider", has_build=False, errors=errors
+        )
+        self.assertTrue(any("has no tag or digest" in e for e in errors), errors)
+
+    def test_image_digest_check_has_no_regex_backtracking_on_adversarial_input(self):
+        """Regression guard for the class of bug: an input engineered to
+        exploit the old ambiguous regex's backtracking must resolve
+        near-instantly now that it's a plain substring check."""
+        import time
+
+        import scripts.validate_compose_security as vcs
+        adversarial = "a" * 50_000 + "!"
+        errors: list = []
+        start = time.monotonic()
+        vcs._check_image_digest_semantics("beets", adversarial, has_build=True, errors=errors)
+        self.assertLess(time.monotonic() - start, 1.0)
+
     def test_hardcoded_lan_ip_in_outbound_allowlist_fails(self):
         import scripts.validate_compose_security as vcs
         errors: list = []

@@ -121,7 +121,7 @@ def _check_image_digest_semantics(label: str, image: str, has_build: bool, error
                 f"{label} image must not attach a digest to a locally built image tag "
                 f"(docker compose build fails with 'build tag cannot contain a digest'): {image}"
             )
-        elif re.match(r"^[^:@/]+(?:/[^:@]+)*$", image):
+        elif ":" not in image and "@" not in image:
             errors.append(f"{label} image has no tag: {image}")
         if not _dockerfile_beets_base_is_approved():
             errors.append(
@@ -131,7 +131,7 @@ def _check_image_digest_semantics(label: str, image: str, has_build: bool, error
     else:
         if "@sha256:" not in image:
             errors.append(f"{label} image is not digest-pinned: {image}")
-        if re.match(r"^[^:@/]+(?:/[^:@]+)*$", image):
+        if ":" not in image and "@" not in image:
             errors.append(f"{label} image has no tag or digest: {image}")
 
 
