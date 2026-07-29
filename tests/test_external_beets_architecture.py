@@ -2604,5 +2604,54 @@ class BeetsEngineImageVerifierTests(unittest.TestCase):
                 self.assertEqual(vbi.main(), 0)
 
 
+class TestPluginFirstArchitectureGuardrails(unittest.TestCase):
+    def test_agents_md_has_plugin_first_section(self):
+        content = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertIn("## Plugin-First Beets Architecture", content)
+        self.assertIn("Check Beets core and installed plugins before implementing", content)
+        self.assertIn("built-in Beets web plugin (`beet web`) is the sole intentional replacement", content)
+        self.assertIn("No local `beet`, `fpcalc`, `ffprobe`", content)
+
+    def test_claude_md_points_to_agents_md_and_plugin_requirements(self):
+        content = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+        self.assertIn("Read `AGENTS.md`", content)
+        self.assertIn("Existing Beets/plugin capability reviewed:", content)
+
+    def test_agent_workflow_has_plugin_evaluation_directive(self):
+        content = (ROOT / "docs" / "AGENT_WORKFLOW.md").read_text(encoding="utf-8")
+        self.assertIn("Evaluate Beets core and installed plugins before implementing", content)
+
+    def test_review_md_has_plugin_first_checklist(self):
+        content = (ROOT / "REVIEW.md").read_text(encoding="utf-8")
+        self.assertIn("## Plugin-First Ownership and Container Boundaries", content)
+        self.assertIn("No hidden local subprocess fallback", content)
+
+    def test_web_manager_runtime_has_no_local_fpcalc_execution(self):
+        files_to_check = [ROOT / "helpers_mb.py", ROOT / "app.py"]
+        for fpath in files_to_check:
+            content = fpath.read_text(encoding="utf-8")
+            self.assertNotIn('shutil.which("fpcalc")', content, f"Found local fpcalc probe in {fpath.name}")
+            self.assertNotIn('subprocess.run([fpcalc', content, f"Found local fpcalc subprocess call in {fpath.name}")
+
+    def test_requirements_txt_excludes_plugin_only_packages(self):
+        req = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+        for pkg in ("pylast", "pylistenbrainz", "Pillow", "beautifulsoup4"):
+            self.assertNotIn(f"{pkg}==", req, f"{pkg} should be removed from web manager requirements.txt")
+
+    def test_dockerfile_uses_ffmpeg_and_excludes_git(self):
+        df = (ROOT / "Dockerfile").read_text(encoding="utf-8").replace("\r\n", "\n")
+        self.assertIn("ffmpeg", df)
+        self.assertNotIn("apt-get install -y --no-install-recommends \\\n    git", df)
+
+    def test_acoustid_lookup_client_and_control_agent(self):
+        from backend.beets_client import BeetsClient, beets_client
+        self.assertTrue(hasattr(beets_client, "acoustid_lookup"))
+        with mock.patch.object(beets_client, "_request", return_value={"ok": True, "status": "matched", "candidates": [{"score": 90, "title": "Test"}]}):
+            res = beets_client.acoustid_lookup("/data/torrents/music/test.flac")
+            self.assertTrue(res.get("ok"))
+            self.assertEqual(res.get("status"), "matched")
+            self.assertEqual(len(res.get("candidates")), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
