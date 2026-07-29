@@ -82,7 +82,7 @@ jobs:
       - name: Verify Beets engine image
         run: |
           set -e
-          args=(--image beets-engine:ci --require-version 2.4.0 --require-command-help mbsubmit)
+          args=(--image beets-engine:ci --require-version 2.4.0 --require-command-help mbsubmit --check-s6-supervision)
           # Chroma plugin-resolution assertions activate automatically once
           # this file marker (the build-time patch script) is present on the
           # checked-out tree -- e.g. after fix/chroma-acoustid-plugin merges

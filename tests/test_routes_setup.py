@@ -32,10 +32,21 @@ def _load_routes_setup_against_stub_app():
 
 
 def tearDownModule():
-    sys.modules.pop("routes_setup", None)
-    app_module = sys.modules.get("app")
-    if getattr(app_module, "__routes_setup_test_stub__", False):
-        sys.modules.pop("app", None)
+    """Undo the stub-`app` swap from _load_routes_setup_against_stub_app().
+
+    Popping only "app" (leaving "routes_setup"/"routes_submissions"/
+    "routes_jobs"/"routes_lidarr" cached from whatever app instance they were
+    originally bound to) would let a later test file's fresh `from app import
+    app` re-execute app.py's module body into a brand-new Flask instance
+    while those already-cached route modules keep their `@app.route(...)`
+    registrations on the *old* instance -- the new one silently ends up
+    missing routes (observed as spurious 405s in tests/
+    test_external_beets_architecture.py when it runs after this module).
+    Clearing all of them together forces the next `import app` anywhere to
+    do one complete, internally-consistent rebuild instead of a partial one.
+    """
+    for name in ("app", "routes_setup", "routes_submissions", "routes_jobs", "routes_lidarr"):
+        sys.modules.pop(name, None)
 class RoutesSetupHealthTests(unittest.TestCase):
     def setUp(self):
         self.flask_app, self.module = _load_routes_setup_against_stub_app()

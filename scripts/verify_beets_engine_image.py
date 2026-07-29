@@ -21,9 +21,11 @@ Safety properties:
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
+import time
 from typing import List, Optional
 
 _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/@-]*$")
@@ -191,6 +193,93 @@ def check_command_help(image: str, command: str, configured_plugins: List[str], 
         print(f"[OK] 'beet {command} --help' executed successfully (exit code 0)")
 
 
+def check_s6_supervision(image: str, errors: List[str]) -> None:
+    """Real-runtime proof (not source inspection) that the inherited
+    LinuxServer `svc-beets` web service never runs under S6, that the Beets
+    control agent does run under S6 and is restarted after a crash, and that
+    the container shuts down cleanly -- starts the image with its actual
+    entrypoint (unlike the other checks here, which override --entrypoint
+    for speed), so this genuinely exercises S6 bring-up rather than just
+    grepping the Dockerfile for the removal instruction."""
+    container = f"beets-s6-verify-{os.getpid()}"
+    token = "ci-s6-verify-" + "x" * 40
+    try:
+        run_res = _run_docker([
+            "run", "-d", "--name", container,
+            "-e", f"BEETS_API_TOKEN={token}",
+            image,
+        ])
+        if run_res.returncode != 0:
+            errors.append(f"S6 check: failed to start container: {run_res.stderr.strip()}")
+            return
+
+        healthy = False
+        for _ in range(30):
+            inspect = _run_docker(["inspect", "--format", "{{.State.Health.Status}}", container])
+            if inspect.stdout.strip() == "healthy":
+                healthy = True
+                break
+            time.sleep(2)
+        if not healthy:
+            logs = _run_docker(["logs", "--tail", "60", container])
+            errors.append(f"S6 check: container never became healthy: {logs.stdout[-2000:]}")
+            return
+
+        svc_status = _run_docker(["exec", container, "s6-svstat", "/run/service/svc-beets"])
+        if "down" not in svc_status.stdout:
+            errors.append(f"S6 check: inherited svc-beets is not down: {svc_status.stdout.strip()!r}")
+        else:
+            print("[OK] Inherited svc-beets web service is down (never brought up by S6)")
+
+        agent_status = _run_docker(["exec", container, "s6-svstat", "/run/service/custom-svc-beets-control-agent"])
+        if "up" not in agent_status.stdout:
+            errors.append(f"S6 check: control agent is not up: {agent_status.stdout.strip()!r}")
+            return
+        print("[OK] Beets control agent is up under S6 supervision")
+
+        pid_res = _run_docker(["exec", container, "pgrep", "-f", "beets_control_agent.py"])
+        old_pid = pid_res.stdout.strip()
+        if not old_pid:
+            errors.append("S6 check: could not determine control agent PID")
+            return
+
+        kill_res = _run_docker(["exec", container, "kill", "-9", old_pid])
+        if kill_res.returncode != 0:
+            errors.append(f"S6 check: failed to kill control agent PID {old_pid}: {kill_res.stderr.strip()}")
+            return
+
+        restarted = False
+        new_pid = ""
+        for _ in range(15):
+            time.sleep(1)
+            pid_res = _run_docker(["exec", container, "pgrep", "-f", "beets_control_agent.py"])
+            new_pid = pid_res.stdout.strip()
+            if new_pid and new_pid != old_pid:
+                restarted = True
+                break
+        if not restarted:
+            errors.append("S6 check: control agent was not restarted by S6 after being killed")
+            return
+        print(f"[OK] Control agent restarted under S6 after crash (pid {old_pid} -> {new_pid})")
+
+        state = _run_docker(["inspect", "--format", "{{.State.Status}}", container])
+        if state.stdout.strip() != "running":
+            errors.append(f"S6 check: container is not running after restart: {state.stdout.strip()!r}")
+            return
+
+        stop_res = _run_docker(["stop", "-t", "15", container])
+        if stop_res.returncode != 0:
+            errors.append(f"S6 check: container did not stop cleanly: {stop_res.stderr.strip()}")
+            return
+        exit_code = _run_docker(["inspect", "--format", "{{.State.ExitCode}}", container])
+        if exit_code.stdout.strip() != "0":
+            errors.append(f"S6 check: container exited with nonzero code {exit_code.stdout.strip()!r} on stop")
+        else:
+            print("[OK] Container shuts down cleanly (exit code 0)")
+    finally:
+        _run_docker(["rm", "-f", container])
+
+
 def check_image_exists(image: str, errors: List[str]) -> bool:
     res = _run_docker(["image", "inspect", image])
     if res.returncode != 0:
@@ -207,6 +296,10 @@ def main() -> int:
     parser.add_argument("--forbid-duplicate-plugin", action="append", default=[], help="Forbidden duplicate plugin name")
     parser.add_argument("--require-command-help", action="append", default=[], help="Subcommand requiring zero exit on --help")
     parser.add_argument("--check-bpsync", action="store_true", help="Verify bpsync plugin resolves to BPSyncPlugin")
+    parser.add_argument(
+        "--check-s6-supervision", action="store_true",
+        help="Start the image for real and verify svc-beets stays down, the control agent runs and restarts under S6, and shutdown is clean",
+    )
 
     args = parser.parse_args()
     errors: List[str] = []
@@ -247,6 +340,9 @@ def main() -> int:
 
         for command in require_command_help:
             check_command_help(image, command, configured_plugins, errors)
+
+        if args.check_s6_supervision:
+            check_s6_supervision(image, errors)
     except DockerCommandError as exc:
         print(f"\n--- Beets engine verification FAILED (Docker error) ---", file=sys.stderr)
         print(f"  [FAIL] {exc}", file=sys.stderr)

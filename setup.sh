@@ -18,7 +18,7 @@ if ! docker info >/dev/null 2>&1; then
 fi
 
 echo "==> Creating local directories..."
-mkdir -p config data/music data/downloads backups
+mkdir -p config data/music data/downloads backups web-manager-data
 
 if [ -f .env ]; then
   echo "==> .env already exists, leaving it untouched."
@@ -26,9 +26,15 @@ else
   echo "==> Creating .env from .env.example..."
   cp .env.example .env
   TOKEN="$(openssl rand -hex 32 2>/dev/null || head -c32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  API_TOKEN="$(openssl rand -hex 32 2>/dev/null || head -c32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
   # Portable in-place edit (works on GNU and BSD/macOS sed).
   sed -i.bak "s/^BEETS_WEB_AUTH_TOKEN=.*/BEETS_WEB_AUTH_TOKEN=${TOKEN}/" .env && rm -f .env.bak
-  echo "    Generated a random BEETS_WEB_AUTH_TOKEN in .env (not printed here)."
+  # BEETS_API_TOKEN ships as the placeholder "changeme" in .env.example, which
+  # the Beets control agent's beets_api_token_is_usable() rejects at startup --
+  # leaving it unset here means the beets engine container fails to start on
+  # first run.
+  sed -i.bak "s/^BEETS_API_TOKEN=.*/BEETS_API_TOKEN=${API_TOKEN}/" .env && rm -f .env.bak
+  echo "    Generated random BEETS_WEB_AUTH_TOKEN and BEETS_API_TOKEN values in .env (not printed here)."
   echo "    Edit .env now to add AI/Plex/AcoustID/Lidarr credentials, or configure them later in the app."
 fi
 
