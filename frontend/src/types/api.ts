@@ -270,7 +270,20 @@ export interface LibraryArtist {
 export interface LibraryResponse {
   ok: boolean;
   artists: LibraryArtist[];
-  stats: { artists: number; albums: number; tracks: number };
+  stats: {
+    artists: number;
+    /** Count of unique Beets album_ids -- not disk-folder cards. A real album
+     * split across multiple disk folders is counted once, not once per folder. */
+    albums: number;
+    /** Imported tracks only: album tracks plus singletons. Excludes disk-only content. */
+    tracks: number;
+    /** Imported tracks with no Beets album row (singletons). Already included in `tracks`. */
+    singleton_tracks?: number;
+    /** Disk folders with no Beets album row and at least one never-imported file. */
+    disk_only_albums?: number;
+    /** Never-imported track files inside disk_only_albums. Not included in `tracks`. */
+    disk_only_tracks?: number;
+  };
   library_version: number;
   tracks_included?: boolean;
 }
