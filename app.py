@@ -40332,6 +40332,54 @@ def _plex_timeout_error(exc: BaseException) -> bool:
     return "timed out" in text or "timeout" in text
 
 
+_plex_client_identifier_cache: str = ""
+
+
+def _plex_client_identifier_file() -> Path:
+    return Path(os.environ.get("PLEX_CLIENT_IDENTIFIER_FILE", "/web-manager-data/.plex_client_identifier"))
+
+
+def _plex_client_identifier() -> str:
+    """Stable, installation-specific Plex client identifier.
+
+    Not a secret -- an opaque, per-installation UUID Plex uses to tell
+    this integration's authorized-device entry apart from every other
+    client on the account. Generated once and persisted so it survives
+    container recreation; a fresh value would otherwise register a new
+    "device" on every restart and never let a future rotation be
+    isolated the way this one couldn't be.
+    """
+    global _plex_client_identifier_cache
+    if _plex_client_identifier_cache:
+        return _plex_client_identifier_cache
+    id_file = _plex_client_identifier_file()
+    try:
+        existing = id_file.read_text(encoding="utf-8").strip()
+        if existing:
+            _plex_client_identifier_cache = existing
+            return existing
+    except Exception:
+        pass
+    generated = uuid.uuid4().hex
+    try:
+        id_file.parent.mkdir(parents=True, exist_ok=True)
+        id_file.write_text(generated, encoding="utf-8")
+    except Exception:
+        pass  # Best-effort persistence; an in-memory-only id for this process is still correct.
+    _plex_client_identifier_cache = generated
+    return generated
+
+
+def _plex_client_headers() -> Dict[str, str]:
+    return {
+        "X-Plex-Client-Identifier": _plex_client_identifier(),
+        "X-Plex-Product": "Beets Web Manager",
+        "X-Plex-Device-Name": "beets-web-manager",
+        "X-Plex-Version": "0.1.0",
+        "X-Plex-Platform": "Docker",
+    }
+
+
 def _plex_request(path: str, params: Optional[Dict[str, Any]] = None,
                   *, method: str = "GET", timeout: Optional[int] = None,
                   attempts: int = 2) -> Dict[str, Any]:
@@ -40341,9 +40389,12 @@ def _plex_request(path: str, params: Optional[Dict[str, Any]] = None,
     if not settings["token"]:
         raise RuntimeError("Plex token is not configured")
     query = dict(params or {})
-    query["X-Plex-Token"] = settings["token"]
-    url = f"{settings['url']}{path}?{urllib.parse.urlencode(query)}"
-    req = urllib.request.Request(url, headers={"Accept": "application/json"}, method=method)
+    url = f"{settings['url']}{path}"
+    if query:
+        url = f"{url}?{urllib.parse.urlencode(query)}"
+    headers = {"Accept": "application/json", "X-Plex-Token": settings["token"]}
+    headers.update(_plex_client_headers())
+    req = urllib.request.Request(url, headers=headers, method=method)
     timeout = int(timeout or PLEX_API_TIMEOUT)
     last_exc: Optional[BaseException] = None
     for attempt in range(max(1, int(attempts or 1))):

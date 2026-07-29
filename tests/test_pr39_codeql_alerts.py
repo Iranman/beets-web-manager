@@ -1,6 +1,7 @@
 """Regression tests for PR #39 CodeQL alert families."""
 
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -337,6 +338,111 @@ class PublicExceptionResponseTests(unittest.TestCase):
                 album_dir.rmdir()
             except OSError:
                 pass
+
+
+class PlexClientIdentifierFileDefaultTests(unittest.TestCase):
+    def test_defaults_to_persistent_data_dir(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("PLEX_CLIENT_IDENTIFIER_FILE", None)
+            self.assertEqual(
+                app_module._plex_client_identifier_file(),
+                Path("/web-manager-data/.plex_client_identifier"),
+            )
+
+    def test_honors_override_env_var(self):
+        with mock.patch.dict(os.environ, {"PLEX_CLIENT_IDENTIFIER_FILE": "/tmp/custom-id-file"}):
+            self.assertEqual(app_module._plex_client_identifier_file(), Path("/tmp/custom-id-file"))
+
+
+class PlexClientIdentityTests(unittest.TestCase):
+    """Track B follow-up: the app previously reused a bare account token
+    with no distinct device registration, making a future rotation
+    impossible to isolate. These cover the fix: a stable, persisted,
+    per-installation client identifier, and token delivery via header
+    (not a URL query string, which is far more likely to end up in an
+    access log)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(dir="/tmp")
+        self.id_file = Path(self.tmp.name) / ".plex_client_identifier"
+        self.patches = [
+            mock.patch.object(app_module, "_plex_client_identifier_file", lambda: self.id_file),
+            mock.patch.object(app_module, "_plex_client_identifier_cache", ""),
+        ]
+        for patch in self.patches:
+            patch.start()
+
+    def tearDown(self):
+        for patch in reversed(self.patches):
+            patch.stop()
+        self.tmp.cleanup()
+
+    def test_identifier_is_generated_and_persisted(self):
+        self.assertFalse(self.id_file.exists())
+        first = app_module._plex_client_identifier()
+        self.assertTrue(self.id_file.exists())
+        self.assertEqual(self.id_file.read_text(encoding="utf-8").strip(), first)
+
+    def test_identifier_is_stable_across_calls_and_process_restart(self):
+        first = app_module._plex_client_identifier()
+        second = app_module._plex_client_identifier()
+        self.assertEqual(first, second)
+
+        # Simulate a fresh process (cold in-memory cache) reading the same
+        # persisted file -- must recover the same identifier, not mint a
+        # new one, or every container recreation would register as a new
+        # Plex "device".
+        app_module._plex_client_identifier_cache = ""
+        third = app_module._plex_client_identifier()
+        self.assertEqual(first, third)
+
+    def test_two_installations_get_different_identifiers(self):
+        first = app_module._plex_client_identifier()
+        other_dir = tempfile.TemporaryDirectory(dir="/tmp")
+        try:
+            other_file = Path(other_dir.name) / ".id"
+            with mock.patch.object(app_module, "_plex_client_identifier_file", lambda: other_file), \
+                 mock.patch.object(app_module, "_plex_client_identifier_cache", ""):
+                second = app_module._plex_client_identifier()
+        finally:
+            other_dir.cleanup()
+        self.assertNotEqual(first, second)
+
+    def test_client_headers_include_stable_identifier_and_no_secrets(self):
+        headers = app_module._plex_client_headers()
+        self.assertEqual(headers["X-Plex-Client-Identifier"], app_module._plex_client_identifier())
+        self.assertIn("X-Plex-Product", headers)
+        self.assertIn("X-Plex-Device-Name", headers)
+        self.assertNotIn("X-Plex-Token", headers)
+
+    def test_plex_request_sends_token_as_header_not_in_url(self):
+        captured = {}
+
+        class _FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return b"{}"
+
+        def _fake_urlopen(req, timeout=None):
+            captured["url"] = req.full_url
+            captured["headers"] = {k: v for k, v in req.header_items()}
+            return _FakeResponse()
+
+        with mock.patch.object(app_module, "_plex_settings", return_value={
+                "url": "http://plex.example.test:32400", "token": "test-secret-token-value",
+                "section": "", "plex_music_roots": "", "beets_music_root": "/data/media/music",
+                "plex_scan_timeout": "10", "plex_index_timeout": "10"}), \
+             mock.patch.object(app_module.urllib.request, "urlopen", side_effect=_fake_urlopen):
+            app_module._plex_request("/library/sections")
+
+        self.assertNotIn("test-secret-token-value", captured["url"])
+        self.assertNotIn("token", captured["url"].lower())
+        self.assertEqual(captured["headers"].get("X-plex-token"), "test-secret-token-value")
 
 
 if __name__ == "__main__":
