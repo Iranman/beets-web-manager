@@ -399,7 +399,19 @@ class TestBeetsClientRemoteOnly(unittest.TestCase):
                 self.assertTrue(len(res["file_errors"]) > 0)
 
     def test_docker_web_manager_image_has_no_beets_binary(self):
-        """Test web-manager container image has no beet executable (skipped if Docker daemon unavailable)."""
+        """Test web-manager container image has no beet executable (skipped if
+        Docker or the image is unavailable on this host).
+
+        Known gap: .github/workflows/unit-tests.yml (the job this test runs
+        in during CI) never builds any web-manager image -- only
+        docker-build.yml does, tagged `beets-web-manager:ci`, in a separate
+        job that does not run this Python test suite. So in CI this check
+        currently always skips; it only runs for real on a host (local dev,
+        or a future combined workflow) where one of these tags was already
+        built. Checking both tags at least makes it capable of running for
+        real wherever either image happens to be present, rather than being
+        permanently tied to a tag CI never produces.
+        """
         try:
             res = subprocess.run(["docker", "info"], capture_output=True, text=True, timeout=5)
             if res.returncode != 0:
@@ -407,12 +419,18 @@ class TestBeetsClientRemoteOnly(unittest.TestCase):
         except Exception:
             raise unittest.SkipTest("Docker CLI unavailable on this host")
 
-        img_inspect = subprocess.run(["docker", "image", "inspect", "beets-web-manager:0.1.0"], capture_output=True, text=True, timeout=5)
-        if img_inspect.returncode != 0:
-            raise unittest.SkipTest("beets-web-manager:0.1.0 image not built locally on this host")
+        candidate_tags = ["beets-web-manager:0.1.0", "beets-web-manager:ci"]
+        image_tag = None
+        for tag in candidate_tags:
+            img_inspect = subprocess.run(["docker", "image", "inspect", tag], capture_output=True, text=True, timeout=5)
+            if img_inspect.returncode == 0:
+                image_tag = tag
+                break
+        if image_tag is None:
+            raise unittest.SkipTest(f"None of {candidate_tags} built locally on this host")
 
         res = subprocess.run(
-            ["docker", "run", "--rm", "beets-web-manager:0.1.0", "command", "-v", "beet"],
+            ["docker", "run", "--rm", image_tag, "command", "-v", "beet"],
             capture_output=True,
             text=True,
             timeout=10,
