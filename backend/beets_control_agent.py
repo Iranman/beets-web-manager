@@ -72,6 +72,28 @@ def _invalid_field_names(fields: dict, allowed: set) -> list:
     """Return caller-supplied field names not present in the allowlist."""
     return [k for k in fields.keys() if k not in allowed]
 
+
+def _strip_sql_comments(text: str) -> str:
+    """Remove /* ... */ and -- ...end-of-line SQL comments via a single
+    linear scan -- no regex, so there is no backtracking-shaped pattern
+    (CodeQL py/polynomial-redos) regardless of input content."""
+    out = []
+    i = 0
+    n = len(text)
+    while i < n:
+        two = text[i:i + 2]
+        if two == "/*":
+            end = text.find("*/", i + 2)
+            i = n if end == -1 else end + 2
+            continue
+        if two == "--":
+            end = text.find("\n", i + 2)
+            i = n if end == -1 else end
+            continue
+        out.append(text[i])
+        i += 1
+    return "".join(out)
+
 JOBS = {}
 JOBS_LOCK = threading.Lock()
 
@@ -1033,18 +1055,17 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 self._send_json(400, {"error": "Query string is required"})
                 return
 
-            # Cap length before any regex processing: the comment-stripping
-            # patterns below are worst-case polynomial in input size on
-            # pathological input (CodeQL py/polynomial-redos), so bounding
-            # the input size bounds the worst-case cost to a fixed constant
-            # regardless of pattern shape. No legitimate SELECT needs 10k+
-            # characters.
+            # No legitimate SELECT needs 10k+ characters; bounding input size
+            # bounds the cost of everything below to a fixed constant.
             if len(query) > 10_000:
                 self._send_json(400, {"error": "Query string is too long"})
                 return
 
-            clean_q = re.sub(r'/\*.*?\*/', '', query, flags=re.DOTALL)
-            clean_q = re.sub(r'--.*$', '', clean_q, flags=re.MULTILINE).strip()
+            # Comments are stripped with a manual single-pass scan, not
+            # regex, so there is no backtracking-shaped pattern for CodeQL's
+            # py/polynomial-redos query to flag in the first place (this
+            # replaced r'/\*.*?\*/' and r'--.*$', alerts #353/#354).
+            clean_q = _strip_sql_comments(query).strip()
 
             if ";" in clean_q.rstrip(";"):
                 self._send_json(400, {"error": "Multiple SQL statements are not permitted"})
@@ -1500,10 +1521,14 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                     self._send_json(404, {"error": f"Item {item_id} not found"})
                     return
 
-                # Column names are validated against ITEM_EDITABLE_FIELDS above;
-                # only values are parameterized (identifiers can't be bound).
-                set_clause = ", ".join(f"{k} = ?" for k in fields.keys())
-                params = list(fields.values()) + [item_id]
+                # Column names come from iterating the fixed ITEM_EDITABLE_FIELDS
+                # constant (checked for membership in the caller-supplied
+                # `fields` dict), never from `fields.keys()` directly -- the
+                # SQL text is built entirely from a hardcoded set of column
+                # names, so no caller-controlled string ever reaches it.
+                update_cols = [col for col in ITEM_EDITABLE_FIELDS if col in fields]
+                set_clause = ", ".join(f"{col} = ?" for col in update_cols)
+                params = [fields[col] for col in update_cols] + [item_id]
                 cur.execute(f"UPDATE items SET {set_clause} WHERE id = ?", params)
                 con.commit()
                 cur.execute("SELECT * FROM items WHERE id = ?", (item_id,))
@@ -1542,10 +1567,14 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                     self._send_json(404, {"error": f"Album {album_id} not found"})
                     return
 
-                # Column names are validated against ALBUM_EDITABLE_FIELDS above;
-                # only values are parameterized (identifiers can't be bound).
-                set_clause = ", ".join(f"{k} = ?" for k in fields.keys())
-                params = list(fields.values()) + [album_id]
+                # Column names come from iterating the fixed ALBUM_EDITABLE_FIELDS
+                # constant (checked for membership in the caller-supplied
+                # `fields` dict), never from `fields.keys()` directly -- the
+                # SQL text is built entirely from a hardcoded set of column
+                # names, so no caller-controlled string ever reaches it.
+                update_cols = [col for col in ALBUM_EDITABLE_FIELDS if col in fields]
+                set_clause = ", ".join(f"{col} = ?" for col in update_cols)
+                params = [fields[col] for col in update_cols] + [album_id]
                 cur.execute(f"UPDATE albums SET {set_clause} WHERE id = ?", params)
                 con.commit()
                 cur.execute("SELECT * FROM albums WHERE id = ?", (album_id,))
