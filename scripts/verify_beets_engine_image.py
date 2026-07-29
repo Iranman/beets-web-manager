@@ -162,21 +162,98 @@ def check_forbid_duplicate_plugin(image: str, plugin: str, configured_plugins: L
         print(f"[OK] Plugin '{plugin}' loaded exactly once: {plugins_line}")
 
 
-def check_bpsync(image: str, errors: List[str]) -> None:
-    script = """
+_BPSYNC_KNOWN_INCOMPATIBILITY_SIGNATURE = "BeatportPlugin.setup() missing"
+
+
+def check_bpsync(image: str, errors: List[str], require_operational: bool = False) -> None:
+    """Verify BPSync through Beets' real plugin loader, not import+class-identity.
+
+    Importing beetsplug.bpsync and checking the class name (the previous
+    version of this check) is a false positive: BPSyncPlugin.__init__
+    unconditionally calls self.beatport_plugin.setup() with no arguments,
+    but the installed BeatportPlugin.setup(self, session) requires one --
+    every real instantiation attempt (which is exactly what Beets' own
+    loader does: _get_plugin() calls obj() with zero arguments) fails with
+    a TypeError before BPSyncPlugin is ever usable. That failure is a
+    genuine upstream signature mismatch between the bundled bpsync.py and
+    beatport.py, unrelated to credentials -- it happens with no Beatport
+    account configured at all.
+
+    This check runs the plugin through Beets' actual loader (a disposable
+    config with `plugins: bpsync`, `beet -vv version`) and distinguishes:
+      - resolved:    the module imports and the class exists with the
+                     right identity (always true here; not sufficient
+                     evidence of anything working).
+      - loaded:      _get_plugin() successfully constructed an instance
+                     and it appears in the loaded "plugins:" line.
+      - incompatible: the known setup()-signature TypeError occurred.
+                     Non-fatal unless require_operational is set, since
+                     bpsync is not enabled in production and this does
+                     not affect Chroma, submit, or mbsubmit.
+      - broken (unexpected): anything else -- always fatal, since it
+                     would mean a new, undiagnosed regression rather than
+                     the one known, already-investigated issue.
+    """
+    resolve_script = """
 import importlib
 mod = importlib.import_module("beetsplug.bpsync")
 cls = getattr(mod, "BPSyncPlugin", None)
 if cls is None or cls.__module__ != "beetsplug.bpsync":
     print("FAILED:", cls)
     raise SystemExit(1)
-print("OK: bpsync -> BPSyncPlugin")
+print("RESOLVED:", cls.__module__, cls.__name__)
 """
-    res = run_container_python(image, script)
-    if res.returncode != 0 or "OK:" not in res.stdout:
-        errors.append(f"bpsync resolution check failed: {res.stdout.strip()} {res.stderr.strip()}")
-    else:
-        print("[OK] bpsync plugin resolved correctly to BPSyncPlugin")
+    resolved = run_container_python(image, resolve_script)
+    if resolved.returncode != 0 or "RESOLVED:" not in resolved.stdout:
+        errors.append(
+            f"bpsync module/class resolution failed (this is a regression beyond the known "
+            f"setup() incompatibility): {resolved.stdout.strip()} {resolved.stderr.strip()}"
+        )
+        return
+
+    setup_cmd = (
+        "mkdir -p /tmp/ci_verify_bpsync && "
+        "printf 'plugins: bpsync\\n' > /tmp/ci_verify_bpsync/config.yaml && "
+        "BEETSDIR=/tmp/ci_verify_bpsync /lsiopy/bin/beet -c /tmp/ci_verify_bpsync/config.yaml -vv version; "
+        "rm -rf /tmp/ci_verify_bpsync"
+    )
+    res = run_container_shell(image, setup_cmd)
+    combined_output = res.stdout + res.stderr
+
+    plugins_line = ""
+    for line in res.stdout.splitlines():
+        if line.strip().startswith("plugins:"):
+            plugins_line = line.strip()
+    loaded_names = (
+        [name.strip() for name in plugins_line.split("plugins:", 1)[1].split(",")]
+        if plugins_line
+        else []
+    )
+
+    if "bpsync" in loaded_names:
+        print("[OK] bpsync resolved, loaded, and operational (appears in loaded plugins list)")
+        return
+
+    if _BPSYNC_KNOWN_INCOMPATIBILITY_SIGNATURE in combined_output:
+        message = (
+            "bpsync resolved (class importable, correct identity) but failed to load: "
+            "known upstream incompatibility -- BeatportPlugin.setup() requires a session "
+            "argument that bpsync.py's __init__ does not provide, independent of credentials. "
+            "Not enabled in production; does not affect Chroma, submit, or mbsubmit."
+        )
+        if require_operational:
+            errors.append(f"bpsync is required to be operational but is not: {message}")
+        else:
+            print(f"[INCOMPATIBLE, non-fatal] {message}")
+        return
+
+    # Anything else is an unexpected, previously-undiagnosed failure mode --
+    # always fatal, since a false negative here would hide a real regression
+    # behind the known-issue label.
+    errors.append(
+        "bpsync failed to load with an error that does not match the known "
+        f"setup()-signature incompatibility -- treating as a new regression: {combined_output.strip()[-2000:]}"
+    )
 
 
 def check_command_help(image: str, command: str, configured_plugins: List[str], errors: List[str]) -> None:
@@ -295,7 +372,17 @@ def main() -> int:
     parser.add_argument("--require-plugin", action="append", default=[], help="Required loaded plugin name")
     parser.add_argument("--forbid-duplicate-plugin", action="append", default=[], help="Forbidden duplicate plugin name")
     parser.add_argument("--require-command-help", action="append", default=[], help="Subcommand requiring zero exit on --help")
-    parser.add_argument("--check-bpsync", action="store_true", help="Verify bpsync plugin resolves to BPSyncPlugin")
+    parser.add_argument(
+        "--check-bpsync", action="store_true",
+        help="Verify bpsync through Beets' real plugin loader. Reports resolved/loaded/incompatible "
+             "status; a known upstream setup()-signature incompatibility is reported but not fatal "
+             "unless --require-bpsync-operational is also set.",
+    )
+    parser.add_argument(
+        "--require-bpsync-operational", action="store_true",
+        help="Fail the build if bpsync does not fully load (including the known incompatibility). "
+             "Only pass this if a deployment actually requires bpsync to work.",
+    )
     parser.add_argument(
         "--check-s6-supervision", action="store_true",
         help="Start the image for real and verify svc-beets stays down, the control agent runs and restarts under S6, and shutdown is clean",
@@ -336,7 +423,7 @@ def main() -> int:
             check_forbid_duplicate_plugin(image, plugin, configured_plugins, errors)
 
         if args.check_bpsync:
-            check_bpsync(image, errors)
+            check_bpsync(image, errors, require_operational=args.require_bpsync_operational)
 
         for command in require_command_help:
             check_command_help(image, command, configured_plugins, errors)

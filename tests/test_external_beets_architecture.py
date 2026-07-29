@@ -2383,13 +2383,85 @@ class BeetsEngineImageVerifierTests(unittest.TestCase):
             vbi.check_forbid_duplicate_plugin("beets-engine:ci", "musicbrainz", ["chroma", "musicbrainz"], errors)
             self.assertEqual(errors, [])
 
-    def test_bpsync_mismatch_fails(self):
+    def test_bpsync_class_resolution_failure_always_fails(self):
+        # Even the module/class import step failing is a fatal regression --
+        # worse than the known incompatibility, since that step is expected
+        # to always succeed.
         import scripts.verify_beets_engine_image as vbi
         mock_proc = mock.MagicMock(returncode=1, stdout="FAILED: <class 'beetsplug.beatport.BeatportPlugin'>", stderr="")
         with mock.patch.object(vbi, "run_container_python", return_value=mock_proc):
             errors: list = []
             vbi.check_bpsync("beets-engine:ci", errors)
-            self.assertTrue(any("bpsync resolution check failed" in e for e in errors))
+            self.assertTrue(any("bpsync module/class resolution failed" in e for e in errors))
+
+    def test_bpsync_operational_when_loaded_via_real_beets_loader(self):
+        # Not just importable -- actually appears in the real loader's
+        # "plugins:" line, meaning construction and setup succeeded.
+        import scripts.verify_beets_engine_image as vbi
+        resolve_ok = mock.MagicMock(returncode=0, stdout="RESOLVED: beetsplug.bpsync BPSyncPlugin", stderr="")
+        loader_ok = mock.MagicMock(returncode=0, stdout="plugins: bpsync\n", stderr="")
+        with mock.patch.object(vbi, "run_container_python", return_value=resolve_ok), \
+             mock.patch.object(vbi, "run_container_shell", return_value=loader_ok):
+            errors: list = []
+            vbi.check_bpsync("beets-engine:ci", errors)
+            self.assertEqual(errors, [])
+
+    def test_bpsync_known_incompatibility_is_non_fatal_by_default(self):
+        # Reproduces the real, live-verified failure: BPSyncPlugin resolves
+        # (importable, correct class) but Beets' real loader fails to
+        # construct it because BeatportPlugin.setup() requires a session
+        # argument bpsync.py's __init__ never provides. Not enabled in
+        # production, so this must not fail the build unless explicitly
+        # required.
+        import scripts.verify_beets_engine_image as vbi
+        resolve_ok = mock.MagicMock(returncode=0, stdout="RESOLVED: beetsplug.bpsync BPSyncPlugin", stderr="")
+        loader_incompatible = mock.MagicMock(
+            returncode=0,
+            stdout="plugins: \n",
+            stderr=(
+                "** error loading plugin bpsync\n"
+                "TypeError: BeatportPlugin.setup() missing 1 required positional argument: 'session'\n"
+            ),
+        )
+        with mock.patch.object(vbi, "run_container_python", return_value=resolve_ok), \
+             mock.patch.object(vbi, "run_container_shell", return_value=loader_incompatible):
+            errors: list = []
+            vbi.check_bpsync("beets-engine:ci", errors, require_operational=False)
+            self.assertEqual(errors, [])
+
+    def test_bpsync_known_incompatibility_fails_when_required_operational(self):
+        import scripts.verify_beets_engine_image as vbi
+        resolve_ok = mock.MagicMock(returncode=0, stdout="RESOLVED: beetsplug.bpsync BPSyncPlugin", stderr="")
+        loader_incompatible = mock.MagicMock(
+            returncode=0,
+            stdout="plugins: \n",
+            stderr=(
+                "** error loading plugin bpsync\n"
+                "TypeError: BeatportPlugin.setup() missing 1 required positional argument: 'session'\n"
+            ),
+        )
+        with mock.patch.object(vbi, "run_container_python", return_value=resolve_ok), \
+             mock.patch.object(vbi, "run_container_shell", return_value=loader_incompatible):
+            errors: list = []
+            vbi.check_bpsync("beets-engine:ci", errors, require_operational=True)
+            self.assertTrue(any("required to be operational but is not" in e for e in errors))
+
+    def test_bpsync_unexpected_failure_is_always_fatal(self):
+        # A failure that does NOT match the known setup()-signature error
+        # must never be silently absorbed into the "known incompatibility,
+        # non-fatal" bucket -- that would hide a real, new regression.
+        import scripts.verify_beets_engine_image as vbi
+        resolve_ok = mock.MagicMock(returncode=0, stdout="RESOLVED: beetsplug.bpsync BPSyncPlugin", stderr="")
+        loader_broken = mock.MagicMock(
+            returncode=1,
+            stdout="",
+            stderr="ImportError: some completely different, undiagnosed failure\n",
+        )
+        with mock.patch.object(vbi, "run_container_python", return_value=resolve_ok), \
+             mock.patch.object(vbi, "run_container_shell", return_value=loader_broken):
+            errors: list = []
+            vbi.check_bpsync("beets-engine:ci", errors, require_operational=False)
+            self.assertTrue(any("new regression" in e for e in errors))
 
     def test_required_command_help_failure_fails(self):
         import scripts.verify_beets_engine_image as vbi

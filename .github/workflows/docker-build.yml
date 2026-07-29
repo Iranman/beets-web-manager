@@ -90,6 +90,17 @@ jobs:
           # own workflow is required.
           if [ -f docker/beets/apply_patches.py ]; then
             echo "Chroma plugin-resolution patch detected; activating Chroma-specific verification."
-            args+=(--require-plugin chroma --forbid-duplicate-plugin musicbrainz --require-command-help submit --check-bpsync)
+            args+=(--require-plugin chroma --forbid-duplicate-plugin musicbrainz --require-command-help submit)
           fi
+          # bpsync is verified separately from Chroma: they are unrelated
+          # plugins that happened to be bundled under the same "same defect
+          # class" description in an earlier PR draft. bpsync has its own,
+          # different, credential-independent upstream incompatibility
+          # (BeatportPlugin.setup() requires a session argument bpsync.py's
+          # __init__ never provides) -- verified through Beets' real plugin
+          # loader, not just import+class-identity. Reported, not fatal,
+          # since bpsync is not enabled in production and does not affect
+          # Chroma, submit, or mbsubmit. Add --require-bpsync-operational
+          # only if a deployment actually starts depending on bpsync.
+          args+=(--check-bpsync)
           python scripts/verify_beets_engine_image.py "${args[@]}"
