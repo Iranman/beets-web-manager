@@ -29,7 +29,7 @@ jobs:
       - run: python scripts/validate_compose_security.py
       - run: docker compose -f docker-compose.arrs.yml config
       - run: docker compose config
-      - run: docker build --pull=false -t beets-web-manager:ci .
+      - run: docker build --pull=false --build-arg VCS_REF="${{ github.sha }}" -t beets-web-manager:ci .
       - name: Installation smoke test
         run: |
           set -e
@@ -78,7 +78,7 @@ jobs:
         with:
           python-version: "3.13"
       - name: Build Beets engine image
-        run: docker build --pull=false -f Dockerfile.beets -t beets-engine:ci .
+        run: docker build --pull=false --build-arg VCS_REF="${{ github.sha }}" -f Dockerfile.beets -t beets-engine:ci .
       - name: Verify Beets engine image
         run: |
           set -e
