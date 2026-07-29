@@ -395,6 +395,15 @@ class BeetsClient:
         """Perform transactional single-writer album deletion under lock."""
         return self._request("DELETE", f"/albums/{album_id}", {"delete_files": delete_files})
 
+    def acoustid_lookup(self, file_path: str) -> Dict[str, Any]:
+        """Perform AcoustID fingerprinting and lookup via remote engine control agent."""
+        if not file_path or not str(file_path).strip():
+            return {"ok": False, "status": "invalid_media", "candidates": []}
+        res = self._request("POST", "/audio/acoustid-lookup", {"file_path": str(file_path).strip()})
+        if isinstance(res, dict):
+            return res
+        return {"ok": False, "status": "analysis_error", "candidates": []}
+
 
 class RemoteSQLiteCursor:
     def __init__(self, client: BeetsClient):
