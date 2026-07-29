@@ -51,25 +51,20 @@ ALLOWED_COMMANDS = {
     "version", "config", "check", "remove", "rm", "submit", "mbsubmit"
 }
 
-_ITEM_UPDATE_COLUMN_NAMES = (
-    "album_id", "title", "artist", "artist_sort", "artist_credit", "album",
-    "albumartist", "albumartist_sort", "albumartist_credit", "genre", "year",
-    "month", "day", "original_year", "original_month", "original_day",
-    "track", "tracktotal", "disc", "disctotal", "lyrics", "comments",
-    "composer", "composer_sort", "grouping", "label", "catalognum",
-    "country", "media", "albumdisambig", "disctitle", "mb_trackid",
-    "mb_albumid", "mb_artistid", "mb_albumartistid", "mb_releasegroupid",
-    "asin", "isrc", "bpm", "comp", "path",
-)
-_ALBUM_UPDATE_COLUMN_NAMES = (
-    "album", "albumartist", "albumartist_sort", "albumartist_credit",
-    "genre", "year", "month", "day", "original_year", "original_month",
-    "original_day", "tracktotal", "disctotal", "label", "catalognum",
-    "country", "albumdisambig", "mb_albumid", "mb_albumartistid",
-    "mb_releasegroupid", "asin", "artpath", "comp", "path",
-)
-_ITEM_UPDATE_STATEMENTS = {name: f"UPDATE items SET {name} = ? WHERE id = ?" for name in _ITEM_UPDATE_COLUMN_NAMES}
-_ALBUM_UPDATE_STATEMENTS = {name: f"UPDATE albums SET {name} = ? WHERE id = ?" for name in _ALBUM_UPDATE_COLUMN_NAMES}
+# PATCH /items/<id> and /albums/<id> build SQL from caller-supplied field
+# keys. SQL parameters can only bind values, never column names, so every
+# accepted key must come from these fixed allowlists.
+ITEM_EDITABLE_FIELDS = {
+    "title", "artist", "album", "albumartist", "year", "genre", "track",
+    "tracktotal", "disc", "disctotal", "label", "comments",
+    "mb_trackid", "mb_albumid", "mb_artistid", "mb_releasegroupid",
+}
+ALBUM_EDITABLE_FIELDS = {
+    "album", "albumartist", "year", "genre", "label", "comments",
+    "mb_albumid", "mb_albumartistid", "mb_releasegroupid",
+}
+_ITEM_UPDATE_STATEMENTS = {name: f"UPDATE items SET {name} = ? WHERE id = ?" for name in ITEM_EDITABLE_FIELDS}
+_ALBUM_UPDATE_STATEMENTS = {name: f"UPDATE albums SET {name} = ? WHERE id = ?" for name in ALBUM_EDITABLE_FIELDS}
 _TAG_WRITE_FIELDS = {
     "title", "artist", "album", "albumartist", "year", "month", "day",
     "track", "tracktotal", "disc", "disctotal", "genre", "comments",
@@ -77,6 +72,44 @@ _TAG_WRITE_FIELDS = {
     "mb_albumartistid", "mb_releasegroupid",
 }
 
+
+def _invalid_field_names(fields: dict, allowed: set) -> list:
+    """Return caller-supplied field names not present in the allowlist."""
+    return [k for k in fields.keys() if k not in allowed]
+
+
+def _validated_update_assignments(fields: Any, allowed_statements: dict[str, str]) -> tuple[list[tuple[str, Any]], list[str]]:
+    if not isinstance(fields, dict):
+        return [], ["fields"]
+    assignments: list[tuple[str, Any]] = []
+    invalid: list[str] = []
+    for key, value in fields.items():
+        statement = allowed_statements.get(str(key))
+        if statement is None:
+            invalid.append(str(key))
+            continue
+        assignments.append((statement, value))
+    return assignments, invalid
+
+
+def _strip_sql_comments(text: str) -> str:
+    """Remove SQL comments with a linear scan."""
+    out = []
+    i = 0
+    n = len(text)
+    while i < n:
+        two = text[i:i + 2]
+        if two == "/*":
+            end = text.find("*/", i + 2)
+            i = n if end == -1 else end + 2
+            continue
+        if two == "--":
+            end = text.find("\n", i + 2)
+            i = n if end == -1 else end
+            continue
+        out.append(text[i])
+        i += 1
+    return "".join(out)
 JOBS = {}
 JOBS_LOCK = threading.Lock()
 
@@ -481,19 +514,6 @@ def is_safe_path(path: str, allowed_types: list = None) -> bool:
     return resolve_safe_path(path, allowed_types) is not None
 
 
-def _validated_update_assignments(fields: Any, allowed_statements: dict[str, str]) -> tuple[list[tuple[str, Any]], list[str]]:
-    if not isinstance(fields, dict):
-        return [], ["fields"]
-    assignments: list[tuple[str, Any]] = []
-    invalid: list[str] = []
-    for key, value in fields.items():
-        statement = allowed_statements.get(str(key))
-        if statement is None:
-            invalid.append(str(key))
-            continue
-        assignments.append((statement, value))
-    return assignments, invalid
-
 def acquire_os_lock(read_only: bool = False):
     """Acquire an OS file lock on LOCK_PATH for Beets concurrency protection."""
     os.makedirs(os.path.dirname(LOCK_PATH), exist_ok=True)
@@ -708,9 +728,18 @@ def _handle_delete_album(album_id: int, delete_files: bool = True) -> tuple:
         release_os_lock(lock)
 
 
+def _json_default(obj):
+    if isinstance(obj, bytes):
+        try:
+            return obj.decode("utf-8", errors="replace")
+        except Exception:
+            return str(obj)
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
 class ControlAgentHandler(BaseHTTPRequestHandler):
     def _send_json(self, code: int, data: dict):
-        body = json.dumps(data, indent=2).encode("utf-8")
+        body = json.dumps(data, indent=2, default=_json_default).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -1455,6 +1484,11 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 self._send_json(400, {"error": "Unsupported item field"})
                 return
 
+            invalid_fields = _invalid_field_names(fields, ITEM_EDITABLE_FIELDS)
+            if invalid_fields:
+                self._send_json(403, {"error": f"Field(s) not editable: {', '.join(invalid_fields)}"})
+                return
+
             lock_file = acquire_os_lock(read_only=False)
             try:
                 con = sqlite3.connect(LIB_PATH, timeout=10)
@@ -1491,6 +1525,11 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             assignments, invalid_fields = _validated_update_assignments(fields, _ALBUM_UPDATE_STATEMENTS)
             if invalid_fields:
                 self._send_json(400, {"error": "Unsupported album field"})
+                return
+
+            invalid_fields = _invalid_field_names(fields, ALBUM_EDITABLE_FIELDS)
+            if invalid_fields:
+                self._send_json(403, {"error": f"Field(s) not editable: {', '.join(invalid_fields)}"})
                 return
 
             lock_file = acquire_os_lock(read_only=False)

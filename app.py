@@ -10615,7 +10615,6 @@ def album_delete_art(aid):
     except Exception as ex:
         app.logger.warning("Could not clear album artpath for album %s: %s", aid, type(ex).__name__)
         return jsonify({"ok": False, "error": "Could not clear artpath."}), 500
-
     _invalidate_lib_cache()
     return jsonify({
         "ok": True,
@@ -12821,17 +12820,72 @@ def _library_payload_for_response(payload: Dict[str, Any], include_tracks: bool 
 
 
 def _library_stats_for_artists(artists: List[Dict[str, Any]]) -> Dict[str, int]:
+    """Summary counts for the artists/albums tree produced by
+    _build_library_payload(). Each entry in an artist's "albums" list is a
+    disk-folder-derived CARD, not necessarily a real Beets album:
+
+    - A card with album_id > 0 is a real Beets album. The same album_id can
+      legitimately appear on more than one card (its tracks split across
+      more than one disk folder, e.g. a reissue alongside the original) --
+      count it once, not once per card.
+    - A card with album_id == 0 and not_imported == 0 has no Beets album
+      row, but every track on it IS imported -- a genuine singleton (or a
+      synthetic "(Singles)" bucket of singletons). This is not a fake
+      extra album; its tracks count toward the track total, not the album
+      total.
+    - A card with album_id == 0 and not_imported > 0 is genuinely disk-only
+      (no Beets album row, at least one file never imported). Reported
+      separately, never folded into "albums" or "tracks".
+
+    Prior behavior counted every non-virtual card as "1 album" and summed
+    every card's track_count into "tracks" -- so singleton pseudo-albums
+    inflated the album count (roughly 1 per singleton), the same album
+    split across multiple disk folders was counted multiple times, and
+    disk-only content leaked into "tracks" whenever it reached this
+    function unfiltered. Fixed by keying album identity on album_id and
+    routing singleton/disk-only cards to their own counts instead.
+    """
+    album_ids_seen: set = set()
+    tracks_total = 0
+    singleton_tracks = 0
+    disk_only_albums = 0
+    disk_only_tracks = 0
+
+    for artist in artists:
+        for album in artist.get("albums", []):
+            if album.get("virtual_appearance"):
+                continue
+            try:
+                album_id = int(album.get("album_id") or 0)
+            except Exception:
+                album_id = 0
+            track_count = int(album.get("track_count") or len(album.get("tracks") or []))
+            not_imported = int(album.get("not_imported") or 0)
+
+            if album_id > 0:
+                album_ids_seen.add(album_id)
+                # track_count is the card's total file count -- imported +
+                # not-yet-imported extras + missing-on-disk (see
+                # _build_library_payload: "track_count": len(tracks), where
+                # `tracks` includes not-imported files sitting alongside a
+                # real album). Only the imported+missing portion represents
+                # actual Beets item rows; extra not-imported files on disk
+                # must not inflate the track total for a real album.
+                tracks_total += track_count - not_imported
+            elif not_imported > 0:
+                disk_only_albums += 1
+                disk_only_tracks += track_count
+            else:
+                singleton_tracks += track_count
+                tracks_total += track_count
+
     return {
         "artists": len(artists),
-        "albums": sum(
-            1 for artist in artists for album in artist.get("albums", [])
-            if not album.get("virtual_appearance")
-        ),
-        "tracks": sum(
-            int(album.get("track_count") or len(album.get("tracks", [])))
-            for artist in artists for album in artist.get("albums", [])
-            if not album.get("virtual_appearance")
-        ),
+        "albums": len(album_ids_seen),
+        "tracks": tracks_total,
+        "singleton_tracks": singleton_tracks,
+        "disk_only_albums": disk_only_albums,
+        "disk_only_tracks": disk_only_tracks,
     }
 
 
@@ -49418,80 +49472,3 @@ if __name__ == "__main__":
         port=PORT,
         threads=_env_int("WEBCONTROL_THREADS", 8, minimum=1, maximum=64),
     )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

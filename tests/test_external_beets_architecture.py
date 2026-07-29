@@ -122,6 +122,55 @@ class TestBeetsControlAgentSecurity(unittest.TestCase):
             self.assertEqual(code, 403, f"Query '{q}' should have been rejected with 403, got {code}")
             self.assertEqual(data.get("error"), "Raw SQL queries are not permitted")
 
+    def test_raw_query_rejects_oversized_query_before_processing(self):
+        """Raw SQL is retired, so oversized SQL is denied before parsing."""
+        handler = ControlAgentHandler.__new__(ControlAgentHandler)
+        handler.headers = {"X-Beets-API-Token": "testtoken"}
+
+        sent_responses = []
+        def _send_json(code, data):
+            sent_responses.append((code, data))
+
+        handler._send_json = _send_json
+        handler._authenticate = lambda: True
+
+        oversized_query = "SELECT * FROM items WHERE id IN (" + ",".join(str(n) for n in range(5000)) + ")"
+        self.assertGreater(len(oversized_query), 10_000)
+
+        handler.path = "/library/raw_query"
+        body = json.dumps({"query": oversized_query}).encode("utf-8")
+        handler.rfile = BytesIO(body)
+        handler.headers["Content-Length"] = str(len(body))
+        handler.do_POST()
+
+        self.assertEqual(len(sent_responses), 1)
+        code, data = sent_responses[0]
+        self.assertEqual(code, 403)
+        self.assertEqual(data["error"], "Raw SQL queries are not permitted")
+
+    def test_raw_query_within_length_limit_is_rejected_fail_closed(self):
+        handler = ControlAgentHandler.__new__(ControlAgentHandler)
+        handler.headers = {"X-Beets-API-Token": "testtoken"}
+
+        sent_responses = []
+        def _send_json(code, data):
+            sent_responses.append((code, data))
+
+        handler._send_json = _send_json
+        handler._authenticate = lambda: True
+
+        handler.path = "/library/raw_query"
+        body = json.dumps({"query": "SELECT * FROM items"}).encode("utf-8")
+        handler.rfile = BytesIO(body)
+        handler.headers["Content-Length"] = str(len(body))
+        with mock.patch("backend.beets_control_agent.os.path.exists", return_value=False):
+            handler.do_POST()
+
+        code, data = sent_responses[0]
+        self.assertEqual(code, 403)
+        self.assertEqual(data["error"], "Raw SQL queries are not permitted")
+        self.assertNotIn("too long", data.get("error", ""))
+
     def test_s6_service_discovery_path_in_dockerfile(self):
         """Assert Dockerfile.beets uses LinuxServer supported /custom-services.d path."""
         dockerfile_path = ROOT / "Dockerfile.beets"
@@ -1350,7 +1399,7 @@ class TestAcoustIDChromaCapability(unittest.TestCase):
     def test_submission_readiness_fails_closed_on_connection_failure(self, mock_status):
         """A remote connection failure must report every capability unavailable,
         never fall back to a local find_spec()/shutil.which() guess."""
-        mock_status.side_effect = BeetsUnavailableError("Beets Control Agent is unavailable")
+        mock_status.side_effect = BeetsUnavailableError("Beets Control Agent is unavailable at 10.0.0.5:8338")
 
         from routes_submissions import _submission_readiness
         readiness = _submission_readiness()
@@ -1360,8 +1409,9 @@ class TestAcoustIDChromaCapability(unittest.TestCase):
         self.assertFalse(readiness["fpcalc_available"])
         self.assertFalse(readiness["pyacoustid_available"])
         self.assertEqual(readiness["reason"], "Beets control agent status is unavailable")
+        self.assertNotIn("10.0.0.5", readiness["reason"])
+        self.assertNotIn("Beets Control Agent is unavailable at", readiness["reason"])
         self.assertNotIn("Beets Control Agent is unavailable", readiness["reason"])
-
     @mock.patch("backend.beets_client.beets_client.get_status")
     def test_submission_readiness_fails_closed_on_authentication_failure(self, mock_status):
         """A remote authentication failure must also fail closed, not silently
@@ -2067,6 +2117,38 @@ class ComposeSecurityValidatorTests(unittest.TestCase):
         )
         self.assertEqual(errors, [])
 
+    def test_locally_built_image_with_no_tag_fails(self):
+        """CodeQL py/polynomial-redos (#356): the old ^[^:@/]+(?:/[^:@]+)*$
+        regex was ambiguous (both groups accept the same non-colon,
+        non-at characters) and worst-case polynomial on crafted input.
+        Replaced with a plain substring check; this proves it still
+        detects the untagged case it was written for."""
+        import scripts.validate_compose_security as vcs
+        errors: list = []
+        vcs._check_image_digest_semantics("beets", "beets-engine", has_build=True, errors=errors)
+        self.assertTrue(any("has no tag" in e for e in errors), errors)
+
+    def test_pulled_third_party_image_with_no_tag_or_digest_fails(self):
+        import scripts.validate_compose_security as vcs
+        errors: list = []
+        vcs._check_image_digest_semantics(
+            "bgutil-provider", "brainicism/bgutil-ytdlp-pot-provider", has_build=False, errors=errors
+        )
+        self.assertTrue(any("has no tag or digest" in e for e in errors), errors)
+
+    def test_image_digest_check_has_no_regex_backtracking_on_adversarial_input(self):
+        """Regression guard for the class of bug: an input engineered to
+        exploit the old ambiguous regex's backtracking must resolve
+        near-instantly now that it's a plain substring check."""
+        import time
+
+        import scripts.validate_compose_security as vcs
+        adversarial = "a" * 50_000 + "!"
+        errors: list = []
+        start = time.monotonic()
+        vcs._check_image_digest_semantics("beets", adversarial, has_build=True, errors=errors)
+        self.assertLess(time.monotonic() - start, 1.0)
+
     def test_hardcoded_lan_ip_in_outbound_allowlist_fails(self):
         import scripts.validate_compose_security as vcs
         errors: list = []
@@ -2385,13 +2467,85 @@ class BeetsEngineImageVerifierTests(unittest.TestCase):
             vbi.check_forbid_duplicate_plugin("beets-engine:ci", "musicbrainz", ["chroma", "musicbrainz"], errors)
             self.assertEqual(errors, [])
 
-    def test_bpsync_mismatch_fails(self):
+    def test_bpsync_class_resolution_failure_always_fails(self):
+        # Even the module/class import step failing is a fatal regression --
+        # worse than the known incompatibility, since that step is expected
+        # to always succeed.
         import scripts.verify_beets_engine_image as vbi
         mock_proc = mock.MagicMock(returncode=1, stdout="FAILED: <class 'beetsplug.beatport.BeatportPlugin'>", stderr="")
         with mock.patch.object(vbi, "run_container_python", return_value=mock_proc):
             errors: list = []
             vbi.check_bpsync("beets-engine:ci", errors)
-            self.assertTrue(any("bpsync resolution check failed" in e for e in errors))
+            self.assertTrue(any("bpsync module/class resolution failed" in e for e in errors))
+
+    def test_bpsync_operational_when_loaded_via_real_beets_loader(self):
+        # Not just importable -- actually appears in the real loader's
+        # "plugins:" line, meaning construction and setup succeeded.
+        import scripts.verify_beets_engine_image as vbi
+        resolve_ok = mock.MagicMock(returncode=0, stdout="RESOLVED: beetsplug.bpsync BPSyncPlugin", stderr="")
+        loader_ok = mock.MagicMock(returncode=0, stdout="plugins: bpsync\n", stderr="")
+        with mock.patch.object(vbi, "run_container_python", return_value=resolve_ok), \
+             mock.patch.object(vbi, "run_container_shell", return_value=loader_ok):
+            errors: list = []
+            vbi.check_bpsync("beets-engine:ci", errors)
+            self.assertEqual(errors, [])
+
+    def test_bpsync_known_incompatibility_is_non_fatal_by_default(self):
+        # Reproduces the real, live-verified failure: BPSyncPlugin resolves
+        # (importable, correct class) but Beets' real loader fails to
+        # construct it because BeatportPlugin.setup() requires a session
+        # argument bpsync.py's __init__ never provides. Not enabled in
+        # production, so this must not fail the build unless explicitly
+        # required.
+        import scripts.verify_beets_engine_image as vbi
+        resolve_ok = mock.MagicMock(returncode=0, stdout="RESOLVED: beetsplug.bpsync BPSyncPlugin", stderr="")
+        loader_incompatible = mock.MagicMock(
+            returncode=0,
+            stdout="plugins: \n",
+            stderr=(
+                "** error loading plugin bpsync\n"
+                "TypeError: BeatportPlugin.setup() missing 1 required positional argument: 'session'\n"
+            ),
+        )
+        with mock.patch.object(vbi, "run_container_python", return_value=resolve_ok), \
+             mock.patch.object(vbi, "run_container_shell", return_value=loader_incompatible):
+            errors: list = []
+            vbi.check_bpsync("beets-engine:ci", errors, require_operational=False)
+            self.assertEqual(errors, [])
+
+    def test_bpsync_known_incompatibility_fails_when_required_operational(self):
+        import scripts.verify_beets_engine_image as vbi
+        resolve_ok = mock.MagicMock(returncode=0, stdout="RESOLVED: beetsplug.bpsync BPSyncPlugin", stderr="")
+        loader_incompatible = mock.MagicMock(
+            returncode=0,
+            stdout="plugins: \n",
+            stderr=(
+                "** error loading plugin bpsync\n"
+                "TypeError: BeatportPlugin.setup() missing 1 required positional argument: 'session'\n"
+            ),
+        )
+        with mock.patch.object(vbi, "run_container_python", return_value=resolve_ok), \
+             mock.patch.object(vbi, "run_container_shell", return_value=loader_incompatible):
+            errors: list = []
+            vbi.check_bpsync("beets-engine:ci", errors, require_operational=True)
+            self.assertTrue(any("required to be operational but is not" in e for e in errors))
+
+    def test_bpsync_unexpected_failure_is_always_fatal(self):
+        # A failure that does NOT match the known setup()-signature error
+        # must never be silently absorbed into the "known incompatibility,
+        # non-fatal" bucket -- that would hide a real, new regression.
+        import scripts.verify_beets_engine_image as vbi
+        resolve_ok = mock.MagicMock(returncode=0, stdout="RESOLVED: beetsplug.bpsync BPSyncPlugin", stderr="")
+        loader_broken = mock.MagicMock(
+            returncode=1,
+            stdout="",
+            stderr="ImportError: some completely different, undiagnosed failure\n",
+        )
+        with mock.patch.object(vbi, "run_container_python", return_value=resolve_ok), \
+             mock.patch.object(vbi, "run_container_shell", return_value=loader_broken):
+            errors: list = []
+            vbi.check_bpsync("beets-engine:ci", errors, require_operational=False)
+            self.assertTrue(any("new regression" in e for e in errors))
 
     def test_required_command_help_failure_fails(self):
         import scripts.verify_beets_engine_image as vbi

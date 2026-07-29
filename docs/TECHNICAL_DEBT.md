@@ -115,3 +115,14 @@ Statuses: Open, In Progress, Blocked, Done.
 - Required tests: Covered by `tests/test_routes_setup.py`, `tests/test_external_beets_architecture.py`, image verification, and disposable Compose runtime probes.
 - Priority: P1.
 - Status: Done.
+
+## ARCH-012 Library Disk-Walk Loses Real Albums Whose Folder Is Entirely Missing
+
+- Affected area: `app.py` `_build_library_payload()`, specifically the leftover-`missing_by_bucket` injection pass that runs after the per-artist-folder walk (the "Any remaining missing items belong to artists not on disk at all" block).
+- Evidence: Live verification against the real production database (3,144 items / 413 albums, confirmed by direct query) found `/api/library` reporting only 368 unique `album_id`s after the `_library_stats_for_artists()` aggregation fix (see the library-summary-aggregation fix on `integration/external-beets-engine-release-v2`) -- 45 real albums are not represented by any disk-walk card at all. Their items are all "missing" (file gone from disk), and the leftover-injection code's artist/album name-based lookup (`beets_album_lk.get((mart.lower(), malb.lower()), {})`) fails to match them back to their real `album_id`, so `ba_info2` stays `{}` and the card is built with `album_id=0` -- landing in the singleton bucket instead of being counted as a real album.
+- Current risk: Medium. Read-only display accuracy only (no data mutation risk -- the underlying Beets database is unaffected), but `/api/library`'s `albums`/`tracks` totals undercount by roughly this margin whenever an entire album folder has been removed from disk while the Beets rows remain.
+- Desired state: The leftover-missing-item injection should reliably resolve every fully-missing album back to its real `album_id`, most likely by keying off each missing item's own `album_id` (already present on the item row) instead of, or in addition to, the artist/album name-string lookup, which is fragile to normalization differences between the stored `albumartist`/`album` fields and the on-disk folder-derived name.
+- Safe migration approach: This is disk-walk traversal logic -- CLAUDE.md's "`/api/library` is high risk, needs side-by-side parity checks before any traversal-logic change" applies. Do not modify `_build_library_payload()` without first building a side-by-side parity harness (old output vs. new output over a real or realistically-shaped fixture) so a fix here can't silently regress a different part of the walk.
+- Required tests: A new parity/regression test modeling a real album whose entire folder is missing from disk, asserting it is still counted in `albums`/`tracks`, not `singleton_tracks`.
+- Priority: P1.
+- Status: Open.

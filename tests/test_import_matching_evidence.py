@@ -1,15 +1,18 @@
 import ast
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from typing import Any, Dict, List
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _app_ast_cache import get_app_ast  # noqa: E402
 
 APP_SOURCE = Path(__file__).resolve().parents[1] / "app.py"
 
 
 def _load_evidence_namespace():
-    tree = ast.parse(APP_SOURCE.read_text(encoding="utf-8"))
+    tree = get_app_ast()
     names = {
         "_AI_EVIDENCE_ROOT_DIRS",
         "_AI_EVIDENCE_FMT_SEG_RE",

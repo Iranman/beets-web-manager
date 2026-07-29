@@ -11,6 +11,16 @@ RUN npm run build
 # ---- Runtime stage ----------------------------------------------------------
 FROM python:3.12-slim-bookworm AS runtime
 
+# Immutable image provenance. Required, not optional: a blank/missing
+# VCS_REF fails the build rather than silently producing an unlabeled
+# image (the beets-web-manager:0.1.0 image running in production as of
+# 2026-07-28 has no OCI labels at all -- its source commit cannot be
+# verified -- which this exists to prevent from happening again).
+ARG VCS_REF
+RUN test -n "${VCS_REF}" || (echo "ERROR: VCS_REF build-arg is required and must not be blank" >&2 && exit 1)
+LABEL org.opencontainers.image.revision="${VCS_REF}" \
+      org.opencontainers.image.source="https://github.com/Iranman/beets-web-manager"
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     tini \

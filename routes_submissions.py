@@ -255,7 +255,6 @@ def _submission_readiness() -> Dict[str, Any]:
     except Exception as exc:
         app.logger.warning("Submission readiness status check failed: %s", type(exc).__name__)
         remote_error = "Beets control agent status is unavailable"
-
     if not isinstance(remote_status, dict) or remote_status.get("status") != "ok":
         return {
             "plugins": {"mbsubmit": False, "musicbrainz": False, "chroma": False, "mbsync": False},
@@ -1521,4 +1520,3 @@ def attach_album_mbids(aid: int):
 
     job = jobs.start_python(_do, label=f"Attach MusicBrainz IDs: album {aid}", metadata={"type": "musicbrainz-match", "album_id": aid, "transaction_operation": "MusicBrainz Match"})
     return jsonify({"ok": True, "job_id": job.job_id})
-
