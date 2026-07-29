@@ -191,3 +191,16 @@ Statuses: Open, In Progress, Blocked, Done.
 - Next recommended wave: `app.py` `py/path-injection` (184 alerts, the largest remaining single group by far) -- given this wave's finding that CodeQL does not recognize this codebase's established containment helpers (`_path_is_under`, `_folder_cleanup_path`-style resolve-then-validate) as sanitizers, expect a similar high proportion of already-safe-but-unrecognized findings requiring per-alert trace verification rather than code changes, with a smaller number of genuine unguarded-path-helper fixes like `_abs_resolved` in wave 2. `py/polynomial-redos` (18) is a good second target -- narrow, mechanical, and independent of the path-injection triage. Frontend (`index.html`/`Playlists.tsx`, 17 alerts) needs a separate frontend-focused wave.
 - Priority: P1 (unchanged).
 - Status: Open. PR #52 (critical + 7 newest), wave 2 (25 non-app-backend alerts), and wave 3 (62 app.py stack-trace-exposure alerts) are closed; 220 alerts remain (184 path-injection, 18 ReDoS, 4 accepted-by-design stack-trace, 17 frontend, and small remainders), requiring further dedicated waves before this item can be marked Done.
+
+## ARCH-013 AcoustID Fingerprinting and Lookup Capability Gap
+
+- Affected area: AcoustID fingerprinting, candidate matching, AI evidence generation, `helpers_mb.py`, `backend/beets_client.py`, `backend/beets_control_agent.py`.
+- Evidence: Beets `chroma` plugin does not expose a supported public API or CLI command to fingerprint an arbitrary pre-import audio file and return structured MusicBrainz recording candidate dictionaries without executing a full Beets import pipeline.
+- Current temporary adapter: Narrow engine-side `POST /audio/acoustid-lookup` adapter running on `backend/beets_control_agent.py` inside the Beets engine container.
+- Authoritative owner: Beets engine container (owns `fpcalc`, `pyacoustid`, and `ACOUSTID_API_KEY`).
+- Web-manager responsibilities: Web-manager issues remote HTTP requests via `BeetsClient.acoustid_lookup()`, presents candidates in UI/AI evidence, and handles unavailable states.
+- Engine responsibilities: Engine executes `fpcalc` via `subprocess.run(..., shell=False)`, extracts duration/fingerprint, queries `api.acoustid.org` using `ACOUSTID_API_KEY`, computes confidence scores, and formats candidate dicts.
+- Future preferred integration: Upstream Beets Chroma plugin API enhancement or custom engine plugin exposing structured pre-import fingerprinting.
+- Acceptance criteria: Web manager contains zero local `fpcalc` invocations and zero direct `api.acoustid.org` HTTP calls; all AcoustID operations flow over the authenticated control agent boundary.
+- Priority: P1.
+- Status: In Progress.
