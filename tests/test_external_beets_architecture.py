@@ -407,6 +407,10 @@ class TestBeetsClientRemoteOnly(unittest.TestCase):
         except Exception:
             raise unittest.SkipTest("Docker CLI unavailable on this host")
 
+        img_inspect = subprocess.run(["docker", "image", "inspect", "beets-web-manager:0.1.0"], capture_output=True, text=True, timeout=5)
+        if img_inspect.returncode != 0:
+            raise unittest.SkipTest("beets-web-manager:0.1.0 image not built locally on this host")
+
         res = subprocess.run(
             ["docker", "run", "--rm", "beets-web-manager:0.1.0", "command", "-v", "beet"],
             capture_output=True,
