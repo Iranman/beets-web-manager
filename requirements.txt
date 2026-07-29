@@ -9,7 +9,13 @@ deezer-python==2.1.0
 requests==2.32.5
 
 # yt-dlp download pipeline
-yt-dlp[default,curl-cffi]==2024.11.4
+# yt-dlp==2024.11.4 predates the yt_dlp.extractor.youtube.pot package that
+# bgutil-ytdlp-pot-provider imports at plugin-discovery time (ModuleNotFoundError
+# on every yt-dlp invocation, silently swallowed by yt-dlp's plugin loader --
+# the PO-token provider never actually registered). 2025.6.9 is the earliest
+# version verified here to both import and register the provider
+# (BgUtilHTTP appears in yt_dlp.extractor.youtube.pot._registry._pot_providers).
+yt-dlp[default,curl-cffi]==2025.6.9
 bgutil-ytdlp-pot-provider==1.3.1
 
 # Tag reading & demo-mode metadata helper
