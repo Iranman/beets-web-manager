@@ -51,6 +51,27 @@ ALLOWED_COMMANDS = {
     "version", "config", "check", "remove", "rm", "submit", "mbsubmit"
 }
 
+# PATCH /items/<id> and /albums/<id> build a SQL SET clause from the caller's
+# `fields` keys. SQL parameters can only bind values, never column names, so
+# the keys themselves must be checked against a fixed allowlist before being
+# interpolated -- this endpoint is authenticated but network-reachable
+# independently of the web-manager's own field allowlist (app.py's
+# EDITABLE_FIELDS), and must not rely solely on the caller's honesty.
+ITEM_EDITABLE_FIELDS = {
+    "title", "artist", "album", "albumartist", "year", "genre", "track",
+    "tracktotal", "disc", "disctotal", "label", "comments",
+    "mb_trackid", "mb_albumid", "mb_artistid", "mb_releasegroupid",
+}
+ALBUM_EDITABLE_FIELDS = {
+    "album", "albumartist", "year", "genre", "label", "comments",
+    "mb_albumid", "mb_albumartistid", "mb_releasegroupid",
+}
+
+
+def _invalid_field_names(fields: dict, allowed: set) -> list:
+    """Return caller-supplied field names not present in the allowlist."""
+    return [k for k in fields.keys() if k not in allowed]
+
 JOBS = {}
 JOBS_LOCK = threading.Lock()
 
@@ -1424,6 +1445,11 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 self._send_json(400, {"error": "No fields provided"})
                 return
 
+            invalid_fields = _invalid_field_names(fields, ITEM_EDITABLE_FIELDS)
+            if invalid_fields:
+                self._send_json(403, {"error": f"Field(s) not editable: {', '.join(invalid_fields)}"})
+                return
+
             lock_file = acquire_os_lock(read_only=False)
             try:
                 con = sqlite3.connect(LIB_PATH, timeout=10)
@@ -1434,6 +1460,8 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                     self._send_json(404, {"error": f"Item {item_id} not found"})
                     return
 
+                # Column names are validated against ITEM_EDITABLE_FIELDS above;
+                # only values are parameterized (identifiers can't be bound).
                 set_clause = ", ".join(f"{k} = ?" for k in fields.keys())
                 params = list(fields.values()) + [item_id]
                 cur.execute(f"UPDATE items SET {set_clause} WHERE id = ?", params)
@@ -1459,6 +1487,11 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 self._send_json(400, {"error": "No fields provided"})
                 return
 
+            invalid_fields = _invalid_field_names(fields, ALBUM_EDITABLE_FIELDS)
+            if invalid_fields:
+                self._send_json(403, {"error": f"Field(s) not editable: {', '.join(invalid_fields)}"})
+                return
+
             lock_file = acquire_os_lock(read_only=False)
             try:
                 con = sqlite3.connect(LIB_PATH, timeout=10)
@@ -1469,6 +1502,8 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                     self._send_json(404, {"error": f"Album {album_id} not found"})
                     return
 
+                # Column names are validated against ALBUM_EDITABLE_FIELDS above;
+                # only values are parameterized (identifiers can't be bound).
                 set_clause = ", ".join(f"{k} = ?" for k in fields.keys())
                 params = list(fields.values()) + [album_id]
                 cur.execute(f"UPDATE albums SET {set_clause} WHERE id = ?", params)
