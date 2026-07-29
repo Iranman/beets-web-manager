@@ -253,7 +253,8 @@ def _submission_readiness() -> Dict[str, Any]:
     try:
         remote_status = beets_client.get_status()
     except Exception as exc:
-        remote_error = str(exc)
+        app.logger.warning("Submission readiness status check failed: %s", type(exc).__name__)
+        remote_error = "Beets control agent status is unavailable"
 
     if not isinstance(remote_status, dict) or remote_status.get("status") != "ok":
         return {

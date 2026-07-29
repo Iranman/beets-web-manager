@@ -167,9 +167,8 @@ class BeetsClient:
         return self._request("GET", "/config/status", timeout=5.0)
 
     def raw_sqlite_query(self, sql: str, params: tuple = (), offset: int = 0, limit: int = 1000) -> List[Dict[str, Any]]:
-        """Run a strictly read-only SELECT query against the Beets database via the control agent."""
-        res = self._request("POST", "/library/raw_query", {"query": sql, "params": list(params), "offset": offset, "limit": limit})
-        return res.get("rows", [])
+        """Raw SQL is intentionally unavailable; use structured query helpers."""
+        raise BeetsError("Raw SQLite queries are not permitted; use structured library query helpers")
 
     def run_command(self, command: str, args: Optional[List[str]] = None, timeout: float = 120.0, config_override: str = "", source_path: str = "", target_path: str = "") -> Dict[str, Any]:
         """Execute a beet command synchronously on the Beets control agent."""

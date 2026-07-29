@@ -10613,7 +10613,8 @@ def album_delete_art(aid):
     try:
         beets_client.clear_album_artpath(aid)
     except Exception as ex:
-        return jsonify({"ok": False, "error": f"Could not clear artpath: {ex}"}), 500
+        app.logger.warning("Could not clear album artpath for album %s: %s", aid, type(ex).__name__)
+        return jsonify({"ok": False, "error": "Could not clear artpath."}), 500
 
     _invalidate_lib_cache()
     return jsonify({

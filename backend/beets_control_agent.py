@@ -51,6 +51,32 @@ ALLOWED_COMMANDS = {
     "version", "config", "check", "remove", "rm", "submit", "mbsubmit"
 }
 
+_ITEM_UPDATE_COLUMN_NAMES = (
+    "album_id", "title", "artist", "artist_sort", "artist_credit", "album",
+    "albumartist", "albumartist_sort", "albumartist_credit", "genre", "year",
+    "month", "day", "original_year", "original_month", "original_day",
+    "track", "tracktotal", "disc", "disctotal", "lyrics", "comments",
+    "composer", "composer_sort", "grouping", "label", "catalognum",
+    "country", "media", "albumdisambig", "disctitle", "mb_trackid",
+    "mb_albumid", "mb_artistid", "mb_albumartistid", "mb_releasegroupid",
+    "asin", "isrc", "bpm", "comp", "path",
+)
+_ALBUM_UPDATE_COLUMN_NAMES = (
+    "album", "albumartist", "albumartist_sort", "albumartist_credit",
+    "genre", "year", "month", "day", "original_year", "original_month",
+    "original_day", "tracktotal", "disctotal", "label", "catalognum",
+    "country", "albumdisambig", "mb_albumid", "mb_albumartistid",
+    "mb_releasegroupid", "asin", "artpath", "comp", "path",
+)
+_ITEM_UPDATE_STATEMENTS = {name: f"UPDATE items SET {name} = ? WHERE id = ?" for name in _ITEM_UPDATE_COLUMN_NAMES}
+_ALBUM_UPDATE_STATEMENTS = {name: f"UPDATE albums SET {name} = ? WHERE id = ?" for name in _ALBUM_UPDATE_COLUMN_NAMES}
+_TAG_WRITE_FIELDS = {
+    "title", "artist", "album", "albumartist", "year", "month", "day",
+    "track", "tracktotal", "disc", "disctotal", "genre", "comments",
+    "lyrics", "composer", "mb_trackid", "mb_albumid", "mb_artistid",
+    "mb_albumartistid", "mb_releasegroupid",
+}
+
 JOBS = {}
 JOBS_LOCK = threading.Lock()
 
@@ -379,58 +405,94 @@ def require_command_capability(command: str) -> Optional[dict]:
     return {"error": error_msg, "reason": reason}
 
 
-def is_safe_path(path: str, allowed_types: list = None) -> bool:
-    """Verify that path stays strictly within allowed root directories without traversal or symlink escape."""
-    if not path or not isinstance(path, str):
-        return False
-    if "\x00" in path:
-        return False
+def _decode_untrusted_path(raw_path: str) -> Optional[str]:
+    decoded = raw_path
+    for _ in range(5):
+        try:
+            next_decoded = urllib.parse.unquote(decoded)
+        except Exception:
+            return None
+        if next_decoded == decoded:
+            return decoded
+        decoded = next_decoded
+    return None
 
-    # Decode URL encoding if present
-    try:
-        decoded = urllib.parse.unquote(path)
-    except Exception:
-        decoded = path
 
-    if "\x00" in decoded or "\\" in decoded:
-        return False
-
-    # Path must be absolute
-    if not decoded.startswith("/"):
-        return False
-
-    parts = decoded.split("/")
-    if ".." in parts or "." in parts:
-        return False
-
+def _allowed_root_paths(allowed_types: list = None) -> list[str]:
     all_roots = {
         "config": [os.path.abspath(BEETSDIR), "/config"],
         "music": [os.path.abspath(MUSIC_LIBRARY_PATH), "/data/media/music"],
         "staging": [os.path.abspath(DOWNLOAD_PATH), "/data/torrents"],
         "tmp": ["/tmp", tempfile.gettempdir()],
     }
-
-    roots_to_check = []
+    roots_to_check: list[str] = []
     if allowed_types:
-        for t in allowed_types:
-            if t in all_roots:
-                roots_to_check.extend(all_roots[t])
+        for root_type in allowed_types:
+            roots_to_check.extend(all_roots.get(root_type, []))
     else:
-        for r_list in all_roots.values():
-            roots_to_check.extend(r_list)
+        for root_list in all_roots.values():
+            roots_to_check.extend(root_list)
+    return roots_to_check
 
+
+def _path_is_within(candidate: str, root: str) -> bool:
     try:
-        abs_path = os.path.abspath(decoded)
-        real_path = os.path.realpath(abs_path)
-
-        for root in roots_to_check:
-            real_root = os.path.realpath(root)
-            if real_path == real_root or real_path.startswith(real_root + os.sep) or real_path.startswith(real_root + "/"):
-                return True
-        return False
+        real_candidate = os.path.realpath(candidate)
+        real_root = os.path.realpath(root)
+        return os.path.commonpath([real_candidate, real_root]) == real_root
     except Exception:
         return False
 
+
+def resolve_safe_path(path: str, allowed_types: list = None) -> Optional[str]:
+    """Return a canonical path under an approved root, or None.
+
+    Callers must use this returned value for filesystem operations. Returning a
+    bool and then operating on the original request value leaves a gap for mixed
+    encodings, symlink components, and prefix-collision paths.
+    """
+    if not path or not isinstance(path, str):
+        return None
+    if "\x00" in path or "\\" in path:
+        return None
+
+    decoded = _decode_untrusted_path(path)
+    if decoded is None:
+        return None
+    if "\x00" in decoded or "\\" in decoded:
+        return None
+    if not decoded.startswith("/"):
+        return None
+
+    parts = decoded.split("/")
+    if ".." in parts or "." in parts:
+        return None
+
+    abs_path = os.path.abspath(decoded)
+    real_path = os.path.realpath(abs_path)
+    for root in _allowed_root_paths(allowed_types):
+        if _path_is_within(real_path, root):
+            return real_path
+    return None
+
+
+def is_safe_path(path: str, allowed_types: list = None) -> bool:
+    """Verify that path stays strictly within allowed roots."""
+    return resolve_safe_path(path, allowed_types) is not None
+
+
+def _validated_update_assignments(fields: Any, allowed_statements: dict[str, str]) -> tuple[list[tuple[str, Any]], list[str]]:
+    if not isinstance(fields, dict):
+        return [], ["fields"]
+    assignments: list[tuple[str, Any]] = []
+    invalid: list[str] = []
+    for key, value in fields.items():
+        statement = allowed_statements.get(str(key))
+        if statement is None:
+            invalid.append(str(key))
+            continue
+        assignments.append((statement, value))
+    return assignments, invalid
 
 def acquire_os_lock(read_only: bool = False):
     """Acquire an OS file lock on LOCK_PATH for Beets concurrency protection."""
@@ -704,7 +766,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 "allowed_commands": list(ALLOWED_COMMANDS),
                 "os_locking": True,
                 "strict_path_validation": True,
-                "read_only_raw_query": True,
+                "read_only_raw_query": False,
             })
             return
 
@@ -994,75 +1056,8 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/library/raw_query":
-            query = body.get("query", body.get("sql", "")).strip()
-            params_list = body.get("params", [])
-            offset = max(int(body.get("offset", 0)), 0)
-            limit = min(max(int(body.get("limit", 1000)), 1), 5000)
-
-            if not query:
-                self._send_json(400, {"error": "Query string is required"})
-                return
-
-            clean_q = re.sub(r'/\*.*?\*/', '', query, flags=re.DOTALL)
-            clean_q = re.sub(r'--.*$', '', clean_q, flags=re.MULTILINE).strip()
-
-            if ";" in clean_q.rstrip(";"):
-                self._send_json(400, {"error": "Multiple SQL statements are not permitted"})
-                return
-            clean_q = clean_q.rstrip(";")
-
-            forbidden = [
-                r"\bUPDATE\b", r"\bDELETE\b", r"\bINSERT\b", r"\bDROP\b",
-                r"\bCREATE\b", r"\bALTER\b", r"\bREPLACE\b", r"\bATTACH\b",
-                r"\bDETACH\b", r"\bVACUUM\b", r"\bPRAGMA\b", r"\bEXEC\b", r"\bEXECUTE\b"
-            ]
-            for pattern in forbidden:
-                if re.search(pattern, clean_q, re.IGNORECASE):
-                    self._send_json(400, {"error": f"Forbidden statement type: raw_query endpoint is strictly read-only SELECT queries"})
-                    return
-
-            if not re.match(r"^\s*(WITH\b|SELECT\b)", clean_q, re.IGNORECASE):
-                self._send_json(400, {"error": "Raw query must begin with SELECT or WITH ... SELECT"})
-                return
-
-            if not os.path.exists(LIB_PATH):
-                self._send_json(404, {"error": "Database file musiclibrary.blb not found"})
-                return
-
-            lock_file = acquire_os_lock(read_only=True)
-            try:
-                con = sqlite3.connect(LIB_PATH, timeout=10)
-                con.row_factory = sqlite3.Row
-                cur = con.cursor()
-
-                count_sql = f"SELECT COUNT(*) FROM ({clean_q}) AS _total_subquery"
-                cur.execute(count_sql, params_list)
-                total_count = cur.fetchone()[0]
-
-                page_sql = f"SELECT * FROM ({clean_q}) AS _page_subquery LIMIT ? OFFSET ?"
-                cur.execute(page_sql, list(params_list) + [limit, offset])
-                rows = [dict(r) for r in cur.fetchall()]
-                con.close()
-
-                has_more = (offset + len(rows)) < total_count
-                next_offset = (offset + len(rows)) if has_more else None
-
-                self._send_json(200, {
-                    "rows": rows,
-                    "count": len(rows),
-                    "total": total_count,
-                    "offset": offset,
-                    "limit": limit,
-                    "has_more": has_more,
-                    "next_offset": next_offset,
-                    "truncated": has_more
-                })
-            except Exception as exc:
-                self._send_json(500, {"error": f"SQLite error: {exc}"})
-            finally:
-                release_os_lock(lock_file)
+            self._send_json(403, {"error": "Raw SQL queries are not permitted"})
             return
-
         if path.startswith("/albums/") and path.endswith("/artpath"):
             parts = path.split("/")
             try:
@@ -1072,8 +1067,9 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 return
 
             artpath = body.get("artpath", "")
-            if not artpath or not is_safe_path(artpath, ["music"]):
-                self._send_json(403, {"error": f"Access denied for artpath: {artpath}"})
+            safe_artpath = resolve_safe_path(artpath, ["music"])
+            if safe_artpath is None:
+                self._send_json(403, {"error": "Access denied for artpath outside allowed roots"})
                 return
 
             lock_file = acquire_os_lock(read_only=False)
@@ -1085,12 +1081,16 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 if not cur.fetchone():
                     self._send_json(404, {"error": f"Album {album_id} not found"})
                     return
-                cur.execute("UPDATE albums SET artpath = ? WHERE id = ?", (artpath, album_id))
+                safe_artpath = resolve_safe_path(artpath, ["music"])
+                if safe_artpath is None:
+                    self._send_json(403, {"error": "Access denied for artpath outside allowed roots"})
+                    return
+                cur.execute("UPDATE albums SET artpath = ? WHERE id = ?", (safe_artpath, album_id))
                 con.commit()
                 con.close()
-                self._send_json(200, {"ok": True, "album_id": album_id, "artpath": artpath})
-            except Exception as exc:
-                self._send_json(500, {"error": f"Failed to set artpath: {exc}"})
+                self._send_json(200, {"ok": True, "album_id": album_id, "artpath": safe_artpath})
+            except Exception:
+                self._send_json(500, {"error": "Failed to set artpath"})
             finally:
                 release_os_lock(lock_file)
             return
@@ -1239,18 +1239,19 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
 
         if path == "/tags/read":
             file_path = body.get("file_path", "")
-            if not is_safe_path(file_path, ["music", "staging"]):
-                self._send_json(403, {"error": f"Access denied for path: {file_path}"})
+            safe_file_path = resolve_safe_path(file_path, ["music", "staging"])
+            if safe_file_path is None:
+                self._send_json(403, {"error": "Access denied for path outside allowed roots"})
                 return
-            if not os.path.exists(file_path):
-                self._send_json(404, {"error": f"File not found: {file_path}"})
+            if not os.path.exists(safe_file_path):
+                self._send_json(404, {"error": "File not found"})
                 return
 
             try:
                 tags = {}
                 try:
                     from beets.mediafile import MediaFile
-                    mf = MediaFile(file_path)
+                    mf = MediaFile(safe_file_path)
                     tags = {
                         "title": mf.title,
                         "artist": mf.artist,
@@ -1270,7 +1271,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                     }
                 except Exception:
                     import mutagen
-                    f = mutagen.File(file_path, easy=True)
+                    f = mutagen.File(safe_file_path, easy=True)
                     if f is not None:
                         tags = {
                             "title": (f.get("title") or [""])[0],
@@ -1282,26 +1283,38 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                             "genre": (f.get("genre") or [""])[0],
                         }
                 self._send_json(200, {"tags": tags})
-            except Exception as exc:
-                self._send_json(500, {"error": f"Failed to read tags: {exc}"})
+            except Exception:
+                self._send_json(500, {"error": "Failed to read tags"})
             return
 
         if path == "/tags/write":
             file_path = body.get("file_path", "")
             tags = body.get("tags", {})
-            if not is_safe_path(file_path, ["music", "staging"]):
-                self._send_json(403, {"error": f"Access denied for path: {file_path}"})
+            safe_file_path = resolve_safe_path(file_path, ["music", "staging"])
+            if safe_file_path is None:
+                self._send_json(403, {"error": "Access denied for path outside allowed roots"})
                 return
-            if not os.path.exists(file_path):
-                self._send_json(404, {"error": f"File not found: {file_path}"})
+            if not os.path.exists(safe_file_path):
+                self._send_json(404, {"error": "File not found"})
+                return
+            if not isinstance(tags, dict):
+                self._send_json(400, {"error": "tags must be an object"})
+                return
+            unsafe_tags = sorted(str(k) for k in tags.keys() if str(k) not in _TAG_WRITE_FIELDS)
+            if unsafe_tags:
+                self._send_json(400, {"error": "Unsupported tag field"})
                 return
 
             lock_file = acquire_os_lock(read_only=False)
             try:
+                safe_file_path = resolve_safe_path(file_path, ["music", "staging"])
+                if safe_file_path is None or not os.path.exists(safe_file_path):
+                    self._send_json(403, {"error": "Access denied for path outside allowed roots"})
+                    return
                 written = False
                 try:
                     from beets.mediafile import MediaFile
-                    mf = MediaFile(file_path)
+                    mf = MediaFile(safe_file_path)
                     for k, v in tags.items():
                         if hasattr(mf, k):
                             setattr(mf, k, v)
@@ -1309,81 +1322,104 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                     written = True
                 except Exception:
                     import mutagen
-                    f = mutagen.File(file_path, easy=True)
+                    f = mutagen.File(safe_file_path, easy=True)
                     if f is not None:
                         for k, v in tags.items():
                             f[k] = v
                         f.save()
                         written = True
                 if written:
-                    self._send_json(200, {"ok": True, "file_path": file_path})
+                    self._send_json(200, {"ok": True, "file_path": safe_file_path})
                 else:
                     self._send_json(500, {"error": "Failed to write tags to file"})
-            except Exception as exc:
-                self._send_json(500, {"error": f"Failed to write tags: {exc}"})
+            except Exception:
+                self._send_json(500, {"error": "Failed to write tags"})
             finally:
                 release_os_lock(lock_file)
             return
-
         if path == "/files/move":
             src = body.get("source_path", "")
             dst = body.get("target_path", "")
-            if not is_safe_path(src, ["music", "staging"]) or not is_safe_path(dst, ["music", "staging"]):
+            safe_src = resolve_safe_path(src, ["music", "staging"])
+            safe_dst = resolve_safe_path(dst, ["music", "staging"])
+            if safe_src is None or safe_dst is None:
                 self._send_json(403, {"error": "Access denied for path outside allowed roots"})
                 return
-            if not os.path.exists(src):
-                self._send_json(404, {"error": f"Source path not found: {src}"})
+            if not os.path.exists(safe_src):
+                self._send_json(404, {"error": "Source path not found"})
                 return
 
             lock_file = acquire_os_lock(read_only=False)
             try:
-                os.makedirs(os.path.dirname(dst), exist_ok=True)
-                shutil.move(src, dst)
-                self._send_json(200, {"ok": True, "source_path": src, "target_path": dst})
-            except Exception as exc:
-                self._send_json(500, {"error": f"Failed to move file: {exc}"})
+                safe_src = resolve_safe_path(src, ["music", "staging"])
+                safe_dst = resolve_safe_path(dst, ["music", "staging"])
+                if safe_src is None or safe_dst is None or not os.path.exists(safe_src):
+                    self._send_json(403, {"error": "Access denied for path outside allowed roots"})
+                    return
+                os.makedirs(os.path.dirname(safe_dst), exist_ok=True)
+                safe_dst = resolve_safe_path(dst, ["music", "staging"])
+                if safe_dst is None:
+                    self._send_json(403, {"error": "Access denied for path outside allowed roots"})
+                    return
+                shutil.move(safe_src, safe_dst)
+                self._send_json(200, {"ok": True, "source_path": safe_src, "target_path": safe_dst})
+            except Exception:
+                self._send_json(500, {"error": "Failed to move file"})
             finally:
                 release_os_lock(lock_file)
             return
 
         if path == "/files/delete":
             target = body.get("path", "")
-            if not is_safe_path(target, ["music", "staging"]):
-                self._send_json(403, {"error": f"Access denied for path: {target}"})
+            safe_target = resolve_safe_path(target, ["music", "staging"])
+            if safe_target is None:
+                self._send_json(403, {"error": "Access denied for path outside allowed roots"})
                 return
-            if not os.path.exists(target):
-                self._send_json(200, {"ok": True, "path": target, "existed": False})
+            if not os.path.exists(safe_target):
+                self._send_json(200, {"ok": True, "path": safe_target, "existed": False})
                 return
 
             lock_file = acquire_os_lock(read_only=False)
             try:
-                if os.path.isdir(target):
-                    shutil.rmtree(target)
+                safe_target = resolve_safe_path(target, ["music", "staging"])
+                if safe_target is None:
+                    self._send_json(403, {"error": "Access denied for path outside allowed roots"})
+                    return
+                if os.path.isdir(safe_target):
+                    shutil.rmtree(safe_target)
                 else:
-                    os.unlink(target)
-                self._send_json(200, {"ok": True, "path": target, "existed": True})
-            except Exception as exc:
-                self._send_json(500, {"error": f"Failed to delete path: {exc}"})
+                    os.unlink(safe_target)
+                self._send_json(200, {"ok": True, "path": safe_target, "existed": True})
+            except Exception:
+                self._send_json(500, {"error": "Failed to delete path"})
             finally:
                 release_os_lock(lock_file)
             return
 
         if path == "/files/mkdir":
             target = body.get("path", "")
-            if not is_safe_path(target, ["music", "staging"]):
-                self._send_json(403, {"error": f"Access denied for path: {target}"})
+            safe_target = resolve_safe_path(target, ["music", "staging"])
+            if safe_target is None:
+                self._send_json(403, {"error": "Access denied for path outside allowed roots"})
                 return
 
             lock_file = acquire_os_lock(read_only=False)
             try:
-                os.makedirs(target, exist_ok=True)
-                self._send_json(200, {"ok": True, "path": target})
-            except Exception as exc:
-                self._send_json(500, {"error": f"Failed to create directory: {exc}"})
+                safe_target = resolve_safe_path(target, ["music", "staging"])
+                if safe_target is None:
+                    self._send_json(403, {"error": "Access denied for path outside allowed roots"})
+                    return
+                os.makedirs(safe_target, exist_ok=True)
+                safe_target = resolve_safe_path(target, ["music", "staging"])
+                if safe_target is None:
+                    self._send_json(403, {"error": "Access denied for path outside allowed roots"})
+                    return
+                self._send_json(200, {"ok": True, "path": safe_target})
+            except Exception:
+                self._send_json(500, {"error": "Failed to create directory"})
             finally:
                 release_os_lock(lock_file)
             return
-
         self._send_json(404, {"error": f"Endpoint not found: {path}"})
 
     def do_PATCH(self):
@@ -1414,6 +1450,10 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             if not fields:
                 self._send_json(400, {"error": "No fields provided"})
                 return
+            assignments, invalid_fields = _validated_update_assignments(fields, _ITEM_UPDATE_STATEMENTS)
+            if invalid_fields:
+                self._send_json(400, {"error": "Unsupported item field"})
+                return
 
             lock_file = acquire_os_lock(read_only=False)
             try:
@@ -1425,9 +1465,8 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                     self._send_json(404, {"error": f"Item {item_id} not found"})
                     return
 
-                set_clause = ", ".join(f"{k} = ?" for k in fields.keys())
-                params = list(fields.values()) + [item_id]
-                cur.execute(f"UPDATE items SET {set_clause} WHERE id = ?", params)
+                for statement, value in assignments:
+                    cur.execute(statement, (value, item_id))
                 con.commit()
                 cur.execute("SELECT * FROM items WHERE id = ?", (item_id,))
                 updated = dict(cur.fetchone())
@@ -1449,6 +1488,10 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             if not fields:
                 self._send_json(400, {"error": "No fields provided"})
                 return
+            assignments, invalid_fields = _validated_update_assignments(fields, _ALBUM_UPDATE_STATEMENTS)
+            if invalid_fields:
+                self._send_json(400, {"error": "Unsupported album field"})
+                return
 
             lock_file = acquire_os_lock(read_only=False)
             try:
@@ -1460,9 +1503,8 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                     self._send_json(404, {"error": f"Album {album_id} not found"})
                     return
 
-                set_clause = ", ".join(f"{k} = ?" for k in fields.keys())
-                params = list(fields.values()) + [album_id]
-                cur.execute(f"UPDATE albums SET {set_clause} WHERE id = ?", params)
+                for statement, value in assignments:
+                    cur.execute(statement, (value, album_id))
                 con.commit()
                 cur.execute("SELECT * FROM albums WHERE id = ?", (album_id,))
                 updated = dict(cur.fetchone())

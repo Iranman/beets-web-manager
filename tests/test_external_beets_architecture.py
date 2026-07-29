@@ -87,7 +87,7 @@ class TestBeetsControlAgentSecurity(unittest.TestCase):
             self.assertFalse(result)
 
     def test_raw_query_security_handler_execution(self):
-        """Test raw SQL handler execution rejecting mutations and multi-statements."""
+        """Test raw SQL handler execution is disabled fail-closed."""
         handler = ControlAgentHandler.__new__(ControlAgentHandler)
         handler.headers = {"X-Beets-API-Token": "testtoken"}
 
@@ -99,6 +99,7 @@ class TestBeetsControlAgentSecurity(unittest.TestCase):
         handler._authenticate = lambda: True
 
         forbidden_queries = [
+            "SELECT * FROM items",
             "UPDATE items SET title='hacked'",
             "DELETE FROM items",
             "INSERT INTO items DEFAULT VALUES",
@@ -118,8 +119,8 @@ class TestBeetsControlAgentSecurity(unittest.TestCase):
             handler.do_POST()
             self.assertTrue(len(sent_responses) > 0, f"No response sent for query: {q}")
             code, data = sent_responses[0]
-            self.assertEqual(code, 400, f"Query '{q}' should have been rejected with 400, got {code}")
-            self.assertIn("error", data)
+            self.assertEqual(code, 403, f"Query '{q}' should have been rejected with 403, got {code}")
+            self.assertEqual(data.get("error"), "Raw SQL queries are not permitted")
 
     def test_s6_service_discovery_path_in_dockerfile(self):
         """Assert Dockerfile.beets uses LinuxServer supported /custom-services.d path."""
@@ -1358,7 +1359,8 @@ class TestAcoustIDChromaCapability(unittest.TestCase):
         self.assertFalse(readiness["plugins"]["mbsubmit"])
         self.assertFalse(readiness["fpcalc_available"])
         self.assertFalse(readiness["pyacoustid_available"])
-        self.assertIn("Beets Control Agent is unavailable", readiness["reason"])
+        self.assertEqual(readiness["reason"], "Beets control agent status is unavailable")
+        self.assertNotIn("Beets Control Agent is unavailable", readiness["reason"])
 
     @mock.patch("backend.beets_client.beets_client.get_status")
     def test_submission_readiness_fails_closed_on_authentication_failure(self, mock_status):
