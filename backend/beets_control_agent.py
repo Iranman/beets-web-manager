@@ -71,6 +71,13 @@ _TAG_WRITE_FIELDS = {
     "lyrics", "composer", "mb_trackid", "mb_albumid", "mb_artistid",
     "mb_albumartistid", "mb_releasegroupid",
 }
+_PATH_DECODE_LIMIT = 5
+_ENCODED_SEPARATOR_RE = re.compile(r"%(?:2f|5c|00)", re.IGNORECASE)
+_ENCODED_BYTE_RE = re.compile(r"%[0-9a-f]{2}", re.IGNORECASE)
+_ALLOWED_ROOT_ERROR = {
+    "error": "Refusing to operate on an allowed root",
+    "code": "allowed_root_operation_denied",
+}
 
 
 def _invalid_field_names(fields: dict, allowed: set) -> list:
@@ -440,15 +447,29 @@ def require_command_capability(command: str) -> Optional[dict]:
 
 def _decode_untrusted_path(raw_path: str) -> Optional[str]:
     decoded = raw_path
-    for _ in range(5):
+    for _ in range(_PATH_DECODE_LIMIT):
+        if _ENCODED_SEPARATOR_RE.search(decoded):
+            return None
         try:
-            next_decoded = urllib.parse.unquote(decoded)
-        except Exception:
+            next_decoded = urllib.parse.unquote(decoded, errors="strict")
+        except (UnicodeDecodeError, ValueError):
             return None
         if next_decoded == decoded:
+            if _ENCODED_BYTE_RE.search(decoded):
+                return None
             return decoded
         decoded = next_decoded
-    return None
+        if "\x00" in decoded or "\\" in decoded:
+            return None
+
+    try:
+        if urllib.parse.unquote(decoded, errors="strict") != decoded:
+            return None
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if _ENCODED_BYTE_RE.search(decoded):
+        return None
+    return decoded
 
 
 def _allowed_root_paths(allowed_types: list = None) -> list[str]:
@@ -482,9 +503,12 @@ def resolve_safe_path(path: str, allowed_types: list = None) -> Optional[str]:
 
     Callers must use this returned value for filesystem operations. Returning a
     bool and then operating on the original request value leaves a gap for mixed
-    encodings, symlink components, and prefix-collision paths.
+    encodings, symlink components, and prefix-collision paths. This is the
+    control agent's path security boundary; its ReturnValue is modeled as a
+    CodeQL path-injection barrier, so changes require adversarial tests and
+    CodeQL reanalysis.
     """
-    if not path or not isinstance(path, str):
+    if not isinstance(path, str) or not path.strip():
         return None
     if "\x00" in path or "\\" in path:
         return None
@@ -494,7 +518,7 @@ def resolve_safe_path(path: str, allowed_types: list = None) -> Optional[str]:
         return None
     if "\x00" in decoded or "\\" in decoded:
         return None
-    if not decoded.startswith("/"):
+    if not decoded.startswith("/") or decoded.startswith("//"):
         return None
 
     parts = decoded.split("/")
@@ -512,6 +536,53 @@ def resolve_safe_path(path: str, allowed_types: list = None) -> Optional[str]:
 def is_safe_path(path: str, allowed_types: list = None) -> bool:
     """Verify that path stays strictly within allowed roots."""
     return resolve_safe_path(path, allowed_types) is not None
+
+
+def _is_allowed_root_path(safe_path: str, allowed_types: list = None) -> bool:
+    try:
+        real_candidate = os.path.realpath(safe_path)
+        return any(real_candidate == os.path.realpath(root) for root in _allowed_root_paths(allowed_types))
+    except Exception:
+        return False
+
+
+def _creation_parent_is_safe(safe_path: str, allowed_types: list = None) -> bool:
+    parent = os.path.dirname(safe_path)
+    if not parent or parent == safe_path:
+        return False
+
+    existing_parent = parent
+    while existing_parent and not os.path.exists(existing_parent):
+        next_parent = os.path.dirname(existing_parent)
+        if next_parent == existing_parent:
+            return False
+        existing_parent = next_parent
+
+    real_existing_parent = os.path.realpath(existing_parent)
+    if not os.path.isdir(real_existing_parent):
+        return False
+    return any(_path_is_within(real_existing_parent, root) for root in _allowed_root_paths(allowed_types))
+
+
+def _sanitize_command_path_args(args: Any, error_context: str) -> tuple[Optional[list[str]], Optional[dict[str, str]]]:
+    if not isinstance(args, list):
+        return None, {"error": f"{error_context} args must be a list"}
+
+    sanitized: list[str] = []
+    for arg in args:
+        s_arg = str(arg)
+        if s_arg in ("-c", "--config") or s_arg.startswith(("-c=", "--config=")):
+            return None, {"error": f"Unsupported config override in {error_context} args"}
+        if s_arg.startswith(".") or ".." in s_arg or "\\" in s_arg or "\x00" in s_arg:
+            return None, {"error": f"Invalid path parameter in {error_context} args"}
+        if s_arg.startswith("/"):
+            safe_arg = resolve_safe_path(s_arg, ["music", "staging", "config", "tmp"])
+            if safe_arg is None:
+                return None, {"error": f"Access denied for path in {error_context} args"}
+            sanitized.append(safe_arg)
+        else:
+            sanitized.append(s_arg)
+    return sanitized, None
 
 
 def acquire_os_lock(read_only: bool = False):
@@ -686,17 +757,25 @@ def _handle_delete_album(album_id: int, delete_files: bool = True) -> tuple:
             file_errors = []
             if delete_files:
                 for fpath in item_files:
-                    if fpath and is_safe_path(fpath, ["music", "staging"]) and os.path.exists(fpath):
+                    safe_fpath = resolve_safe_path(fpath, ["music", "staging"])
+                    if safe_fpath is None:
+                        file_errors.append("Skipped unsafe album item path")
+                        continue
+                    if _is_allowed_root_path(safe_fpath, ["music", "staging"]):
+                        file_errors.append("Skipped allowed root path")
+                        continue
+                    if os.path.exists(safe_fpath):
                         try:
-                            os.unlink(fpath)
+                            os.unlink(safe_fpath)
                             files_deleted += 1
-                        except Exception as exc:
-                            file_errors.append(f"Failed to delete {fpath}: {exc}")
+                        except Exception:
+                            file_errors.append("Failed to delete album item file")
 
-                if album_path and is_safe_path(album_path, ["music"]) and os.path.exists(album_path):
+                safe_album_path = resolve_safe_path(album_path, ["music"]) if album_path else None
+                if safe_album_path and not _is_allowed_root_path(safe_album_path, ["music"]) and os.path.exists(safe_album_path):
                     try:
-                        if os.path.isdir(album_path) and not os.listdir(album_path):
-                            os.rmdir(album_path)
+                        if os.path.isdir(safe_album_path) and not os.listdir(safe_album_path):
+                            os.rmdir(safe_album_path)
                     except Exception:
                         pass
 
@@ -1141,30 +1220,28 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 self._send_json(409, capability_error)
                 return
 
+            safe_source_path = None
             if source_path:
                 allowed_roots = ["staging"] if command == "import" else ["music", "staging"]
-                if not is_safe_path(source_path, allowed_roots):
-                    self._send_json(403, {"error": f"Access denied for source_path: {source_path}"})
+                safe_source_path = resolve_safe_path(source_path, allowed_roots)
+                if safe_source_path is None:
+                    self._send_json(403, {"error": "Access denied for source_path outside allowed roots"})
                     return
 
             if target_path:
-                if not is_safe_path(target_path, ["music", "staging"]):
-                    self._send_json(403, {"error": f"Access denied for target_path: {target_path}"})
+                if resolve_safe_path(target_path, ["music", "staging"]) is None:
+                    self._send_json(403, {"error": "Access denied for target_path outside allowed roots"})
                     return
 
-            for arg in args:
-                s_arg = str(arg)
-                if s_arg.startswith(".") or ".." in s_arg or "\\" in s_arg or "\x00" in s_arg:
-                    self._send_json(403, {"error": f"Invalid path parameter in command args: {arg}"})
-                    return
-                if s_arg.startswith("/") and not is_safe_path(s_arg, ["music", "staging", "config", "tmp"]):
-                    self._send_json(403, {"error": f"Access denied for path in command args: {arg}"})
-                    return
+            sanitized_args, arg_error = _sanitize_command_path_args(args, "command")
+            if arg_error is not None:
+                self._send_json(403, arg_error)
+                return
 
             cmd_list = [command]
-            if source_path:
-                cmd_list.append(source_path)
-            cmd_list.extend([str(a) for a in args])
+            if safe_source_path:
+                cmd_list.append(safe_source_path)
+            cmd_list.extend(sanitized_args or [])
 
             mutating = command in {
                 "import", "update", "write", "move", "modify", "mbsync",
@@ -1200,7 +1277,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             except subprocess.TimeoutExpired:
                 self._send_json(408, {"error": f"Command '{command}' timed out after {timeout}s", "returncode": 124})
             except Exception as exc:
-                self._send_json(500, {"error": f"Command execution error: {exc}"})
+                self._send_json(500, {"error": "Command execution error"})
             finally:
                 if tmp_cfg_path and os.path.exists(tmp_cfg_path):
                     try:
@@ -1226,26 +1303,24 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 self._send_json(409, capability_error)
                 return
 
+            safe_source_path = None
             if source_path:
                 allowed_roots = ["staging"] if command == "import" else ["music", "staging"]
-                if not is_safe_path(source_path, allowed_roots):
-                    self._send_json(403, {"error": f"Access denied for source_path: {source_path}"})
+                safe_source_path = resolve_safe_path(source_path, allowed_roots)
+                if safe_source_path is None:
+                    self._send_json(403, {"error": "Access denied for source_path outside allowed roots"})
                     return
 
-            for arg in args:
-                s_arg = str(arg)
-                if s_arg.startswith(".") or ".." in s_arg or "\\" in s_arg or "\x00" in s_arg:
-                    self._send_json(403, {"error": f"Invalid path parameter in job args: {arg}"})
-                    return
-                if s_arg.startswith("/") and not is_safe_path(s_arg, ["music", "staging", "config", "tmp"]):
-                    self._send_json(403, {"error": f"Access denied for path in job args: {arg}"})
-                    return
+            sanitized_args, arg_error = _sanitize_command_path_args(args, "job")
+            if arg_error is not None:
+                self._send_json(403, arg_error)
+                return
 
             job_id = uuid.uuid4().hex
             cmd_list = [command]
-            if source_path:
-                cmd_list.append(source_path)
-            cmd_list.extend([str(a) for a in args])
+            if safe_source_path:
+                cmd_list.append(safe_source_path)
+            cmd_list.extend(sanitized_args or [])
 
             job = AgentJob(job_id, cmd_list, label=label, config_override=config_override)
             with JOBS_LOCK:
@@ -1374,6 +1449,12 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             if safe_src is None or safe_dst is None:
                 self._send_json(403, {"error": "Access denied for path outside allowed roots"})
                 return
+            if _is_allowed_root_path(safe_src, ["music", "staging"]) or _is_allowed_root_path(safe_dst, ["music", "staging"]):
+                self._send_json(403, _ALLOWED_ROOT_ERROR)
+                return
+            if not _creation_parent_is_safe(safe_dst, ["music", "staging"]):
+                self._send_json(403, {"error": "Access denied for destination parent outside allowed roots"})
+                return
             if not os.path.exists(safe_src):
                 self._send_json(404, {"error": "Source path not found"})
                 return
@@ -1385,9 +1466,16 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 if safe_src is None or safe_dst is None or not os.path.exists(safe_src):
                     self._send_json(403, {"error": "Access denied for path outside allowed roots"})
                     return
-                os.makedirs(os.path.dirname(safe_dst), exist_ok=True)
+                if _is_allowed_root_path(safe_src, ["music", "staging"]) or _is_allowed_root_path(safe_dst, ["music", "staging"]):
+                    self._send_json(403, _ALLOWED_ROOT_ERROR)
+                    return
+                if not _creation_parent_is_safe(safe_dst, ["music", "staging"]):
+                    self._send_json(403, {"error": "Access denied for destination parent outside allowed roots"})
+                    return
+                safe_dst_parent = os.path.dirname(safe_dst)
+                os.makedirs(safe_dst_parent, exist_ok=True)
                 safe_dst = resolve_safe_path(dst, ["music", "staging"])
-                if safe_dst is None:
+                if safe_dst is None or _is_allowed_root_path(safe_dst, ["music", "staging"]):
                     self._send_json(403, {"error": "Access denied for path outside allowed roots"})
                     return
                 shutil.move(safe_src, safe_dst)
@@ -1404,6 +1492,9 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             if safe_target is None:
                 self._send_json(403, {"error": "Access denied for path outside allowed roots"})
                 return
+            if _is_allowed_root_path(safe_target, ["music", "staging"]):
+                self._send_json(403, _ALLOWED_ROOT_ERROR)
+                return
             if not os.path.exists(safe_target):
                 self._send_json(200, {"ok": True, "path": safe_target, "existed": False})
                 return
@@ -1413,6 +1504,12 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 safe_target = resolve_safe_path(target, ["music", "staging"])
                 if safe_target is None:
                     self._send_json(403, {"error": "Access denied for path outside allowed roots"})
+                    return
+                if _is_allowed_root_path(safe_target, ["music", "staging"]):
+                    self._send_json(403, _ALLOWED_ROOT_ERROR)
+                    return
+                if not os.path.exists(safe_target):
+                    self._send_json(200, {"ok": True, "path": safe_target, "existed": False})
                     return
                 if os.path.isdir(safe_target):
                     shutil.rmtree(safe_target)
@@ -1431,12 +1528,24 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             if safe_target is None:
                 self._send_json(403, {"error": "Access denied for path outside allowed roots"})
                 return
+            if _is_allowed_root_path(safe_target, ["music", "staging"]):
+                self._send_json(403, _ALLOWED_ROOT_ERROR)
+                return
+            if not _creation_parent_is_safe(safe_target, ["music", "staging"]):
+                self._send_json(403, {"error": "Access denied for parent outside allowed roots"})
+                return
 
             lock_file = acquire_os_lock(read_only=False)
             try:
                 safe_target = resolve_safe_path(target, ["music", "staging"])
                 if safe_target is None:
                     self._send_json(403, {"error": "Access denied for path outside allowed roots"})
+                    return
+                if _is_allowed_root_path(safe_target, ["music", "staging"]):
+                    self._send_json(403, _ALLOWED_ROOT_ERROR)
+                    return
+                if not _creation_parent_is_safe(safe_target, ["music", "staging"]):
+                    self._send_json(403, {"error": "Access denied for parent outside allowed roots"})
                     return
                 os.makedirs(safe_target, exist_ok=True)
                 safe_target = resolve_safe_path(target, ["music", "staging"])

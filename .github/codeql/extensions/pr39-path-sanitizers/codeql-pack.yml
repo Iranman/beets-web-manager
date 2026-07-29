@@ -1,0 +1,7 @@
+name: iranman/beets-web-manager-pr39-path-sanitizers
+version: 0.0.0
+library: true
+extensionTargets:
+  codeql/python-all: "*"
+dataExtensions:
+  - models/**/*.yml

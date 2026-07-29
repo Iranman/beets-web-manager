@@ -1,0 +1,6 @@
+extensions:
+  - addsTo:
+      pack: codeql/python-all
+      extensible: barrierModel
+    data:
+      - ["backend.beets_control_agent", "Member[resolve_safe_path].ReturnValue", "path-injection"]

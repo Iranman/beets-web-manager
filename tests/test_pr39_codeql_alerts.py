@@ -1,8 +1,11 @@
 """Regression tests for PR #39 CodeQL alert families."""
 
 import json
+import shutil
 import sqlite3
+import sys
 import tempfile
+import types
 import unittest
 import uuid
 from io import BytesIO
@@ -41,6 +44,30 @@ def _patch_agent(path: str, payload: dict):
     handler._send_json = lambda code, data: responses.append((code, data))
     handler.do_PATCH()
     return responses[0]
+
+
+def _delete_agent(path: str, payload: dict):
+    handler = ControlAgentHandler.__new__(ControlAgentHandler)
+    body = json.dumps(payload).encode("utf-8")
+    handler.path = path
+    handler.headers = {"Content-Length": str(len(body))}
+    handler.rfile = BytesIO(body)
+    handler._authenticate = lambda: True
+    responses = []
+    handler._send_json = lambda code, data: responses.append((code, data))
+    handler.do_DELETE()
+    return responses[0]
+
+
+def _encoded_dotdot(layers: int) -> str:
+    dot = "%2e"
+    for _ in range(layers - 1):
+        dot = dot.replace("%", "%25")
+    return f"{dot}{dot}"
+
+
+def _api_path(path: Path) -> str:
+    return str(path).replace("\\", "/")
 
 
 class ControlAgentPathBoundaryTests(unittest.TestCase):
@@ -110,6 +137,289 @@ class ControlAgentPathBoundaryTests(unittest.TestCase):
         self.assertEqual(code, 403)
         self.assertFalse(Path(f"{self.base}/music-other/new").exists())
 
+
+    def test_resolve_safe_path_rejects_extended_malicious_inputs(self):
+        bad_paths = [
+            "",
+            "   ",
+            None,
+            f"{self.music}/Artist/./Track.flac",
+            f"{self.music}/{_encoded_dotdot(1)}/outside/secret.flac",
+            f"{self.music}/{_encoded_dotdot(2)}/outside/secret.flac",
+            f"{self.music}/{_encoded_dotdot(5)}/outside/secret.flac",
+            f"{self.music}/{_encoded_dotdot(6)}/outside/secret.flac",
+            f"{self.music}/Artist%2fTrack.flac",
+            f"{self.outside}/secret.flac",
+            f"{self.music}/Track.flac\x00.jpg",
+            f"{self.music}\\Artist\\Track.flac",
+            "C:/data/media/music/track.flac",
+            "\\\\server\\share\\track.flac",
+            "//server/share/track.flac",
+        ]
+        for candidate in bad_paths:
+            with self.subTest(candidate=candidate):
+                self.assertIsNone(resolve_safe_path(candidate, ["music"]))
+
+    def test_symlink_directory_escape_is_rejected_where_supported(self):
+        link_dir = f"{self.music}/escape-dir"
+        try:
+            Path(link_dir).symlink_to(Path(self.outside), target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("Symlink creation is unavailable")
+        self.assertIsNone(resolve_safe_path(f"{link_dir}/secret.flac", ["music"]))
+
+    def test_delete_endpoint_uses_canonical_path_and_refuses_root(self):
+        code, data = _post_agent("/files/delete", {"path": self.music})
+        self.assertEqual(code, 403, data)
+        self.assertEqual(data["code"], "allowed_root_operation_denied")
+
+        safe_missing = f"{self.music}/Artist/missing.flac"
+        code, data = _post_agent("/files/delete", {"path": safe_missing})
+        self.assertEqual(code, 200, data)
+        self.assertFalse(data["existed"])
+        self.assertEqual(data["path"], str(Path(safe_missing).resolve()))
+
+        existing = f"{self.music}/Artist/Track.flac"
+        Path(existing).parent.mkdir(parents=True, exist_ok=True)
+        Path(existing).write_text("audio", encoding="utf-8")
+        with mock.patch.object(bca.os, "unlink") as unlink_mock:
+            code, data = _post_agent("/files/delete", {"path": existing})
+        self.assertEqual(code, 200, data)
+        self.assertTrue(data["existed"])
+        unlink_mock.assert_called_once_with(str(Path(existing).resolve()))
+
+    def test_delete_endpoint_rejects_symlink_escape_before_unlink(self):
+        outside_secret = Path(self.outside) / "secret.flac"
+        outside_secret.write_text("secret", encoding="utf-8")
+        link_path = Path(self.music) / "escape.flac"
+        try:
+            link_path.symlink_to(outside_secret)
+        except (OSError, NotImplementedError):
+            self.skipTest("Symlink creation is unavailable")
+        with mock.patch.object(bca.os, "unlink") as unlink_mock:
+            code, data = _post_agent("/files/delete", {"path": _api_path(link_path)})
+        self.assertEqual(code, 403, data)
+        unlink_mock.assert_not_called()
+        self.assertTrue(outside_secret.exists())
+
+    def test_mkdir_endpoint_validates_parent_and_revalidates_after_creation(self):
+        target = f"{self.music}/Artist/New Album"
+        code, data = _post_agent("/files/mkdir", {"path": target})
+        self.assertEqual(code, 200, data)
+        self.assertEqual(data["path"], str(Path(target).resolve()))
+        self.assertTrue(Path(target).is_dir())
+
+        code, data = _post_agent("/files/mkdir", {"path": self.music})
+        self.assertEqual(code, 403, data)
+        self.assertEqual(data["code"], "allowed_root_operation_denied")
+
+    def test_mkdir_rejects_symlink_parent_escape_where_supported(self):
+        link_dir = Path(self.music) / "linked-parent"
+        try:
+            link_dir.symlink_to(Path(self.outside), target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("Symlink creation is unavailable")
+        target = link_dir / "child"
+        code, data = _post_agent("/files/mkdir", {"path": _api_path(target)})
+        self.assertEqual(code, 403, data)
+        self.assertFalse((Path(self.outside) / "child").exists())
+
+    def test_mkdir_rejects_parent_symlink_replacement_race(self):
+        race_parent = Path(self.music) / "race-parent"
+        race_parent.mkdir()
+        target = race_parent / "child"
+
+        def replace_parent_with_symlink(path, exist_ok=False):
+            shutil.rmtree(race_parent)
+            race_parent.symlink_to(Path(self.outside), target_is_directory=True)
+
+        with mock.patch.object(bca, "acquire_os_lock", return_value=None), \
+             mock.patch.object(bca, "release_os_lock"), \
+             mock.patch.object(bca.os, "makedirs", side_effect=replace_parent_with_symlink):
+            code, data = _post_agent("/files/mkdir", {"path": _api_path(target)})
+        self.assertEqual(code, 403, data)
+        self.assertFalse((Path(self.outside) / "child").exists())
+
+    def test_move_endpoint_uses_canonical_paths_and_rejects_symlink_parent(self):
+        src = Path(self.staging) / "download.flac"
+        src.write_text("audio", encoding="utf-8")
+        dst = Path(self.music) / "Artist" / "Album" / "download.flac"
+        with mock.patch.object(bca.shutil, "move") as move_mock:
+            code, data = _post_agent("/files/move", {"source_path": _api_path(src), "target_path": _api_path(dst)})
+        self.assertEqual(code, 200, data)
+        move_mock.assert_called_once_with(str(src.resolve()), str(dst.resolve()))
+        self.assertEqual(data["source_path"], str(src.resolve()))
+        self.assertEqual(data["target_path"], str(dst.resolve()))
+
+        link_dir = Path(self.music) / "escape-destination"
+        try:
+            link_dir.symlink_to(Path(self.outside), target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("Symlink creation is unavailable")
+        with mock.patch.object(bca.shutil, "move") as move_mock:
+            code, data = _post_agent("/files/move", {"source_path": _api_path(src), "target_path": _api_path(link_dir / "file.flac")})
+        self.assertEqual(code, 403, data)
+        move_mock.assert_not_called()
+
+    def test_move_revalidates_parent_after_symlink_race(self):
+        src = Path(self.staging) / "download.flac"
+        src.write_text("audio", encoding="utf-8")
+        race_parent = Path(self.music) / "race-move"
+        race_parent.mkdir()
+        dst = race_parent / "download.flac"
+
+        def replace_parent_with_symlink(path, exist_ok=False):
+            shutil.rmtree(race_parent)
+            race_parent.symlink_to(Path(self.outside), target_is_directory=True)
+
+        with mock.patch.object(bca, "acquire_os_lock", return_value=None), \
+             mock.patch.object(bca, "release_os_lock"), \
+             mock.patch.object(bca.os, "makedirs", side_effect=replace_parent_with_symlink), \
+             mock.patch.object(bca.shutil, "move") as move_mock:
+            code, data = _post_agent("/files/move", {"source_path": _api_path(src), "target_path": _api_path(dst)})
+        self.assertEqual(code, 403, data)
+        move_mock.assert_not_called()
+        self.assertTrue(src.exists())
+
+    def test_commands_execute_and_jobs_create_use_canonical_paths(self):
+        source = Path(self.staging) / "import-source"
+        source.mkdir()
+        arg_file = Path(self.music) / "Artist" / "Track.flac"
+        arg_file.parent.mkdir(parents=True, exist_ok=True)
+        arg_file.write_text("audio", encoding="utf-8")
+
+        fake_result = mock.MagicMock(returncode=0, stdout="", stderr="")
+        with mock.patch.object(bca.subprocess, "run", return_value=fake_result) as run_mock:
+            code, data = _post_agent("/commands/execute", {
+                "command": "import",
+                "source_path": _api_path(source),
+                "args": ["--quiet", _api_path(arg_file)],
+            })
+        self.assertEqual(code, 200, data)
+        full_cmd = run_mock.call_args.args[0]
+        self.assertEqual(full_cmd[-4:], ["import", str(source.resolve()), "--quiet", str(arg_file.resolve())])
+
+        created = {}
+
+        class FakeJob:
+            def __init__(self, job_id, command, label="", config_override=""):
+                self.command = command
+                created["job_id"] = job_id
+                created["command"] = command
+
+        with mock.patch.object(bca, "AgentJob", FakeJob):
+            code, data = _post_agent("/jobs/create", {
+                "command": "import",
+                "source_path": _api_path(source),
+                "args": ["--quiet", _api_path(arg_file)],
+            })
+        try:
+            self.assertEqual(code, 200, data)
+            self.assertEqual(created["command"], ["import", str(source.resolve()), "--quiet", str(arg_file.resolve())])
+        finally:
+            bca.JOBS.pop(created.get("job_id"), None)
+
+    def test_command_path_rejections_do_not_echo_unsafe_values(self):
+        unsafe = f"{self.staging}/{_encoded_dotdot(2)}/outside"
+        with mock.patch.object(bca.subprocess, "run") as run_mock:
+            code, data = _post_agent("/commands/execute", {"command": "import", "source_path": unsafe, "args": []})
+        self.assertEqual(code, 403, data)
+        run_mock.assert_not_called()
+        self.assertNotIn(_encoded_dotdot(2), json.dumps(data))
+
+        with mock.patch.object(bca.subprocess, "run") as run_mock:
+            code, data = _post_agent("/commands/execute", {
+                "command": "import",
+                "source_path": self.staging,
+                "args": ["--config=/etc/passwd"],
+            })
+        self.assertEqual(code, 403, data)
+        run_mock.assert_not_called()
+        self.assertNotIn("/etc/passwd", json.dumps(data))
+
+        before_jobs = set(bca.JOBS)
+        code, data = _post_agent("/jobs/create", {"command": "import", "source_path": unsafe, "args": []})
+        self.assertEqual(code, 403, data)
+        self.assertEqual(set(bca.JOBS), before_jobs)
+        self.assertNotIn(_encoded_dotdot(2), json.dumps(data))
+
+        code, data = _post_agent("/jobs/create", {
+            "command": "import",
+            "source_path": self.staging,
+            "args": ["-c", "/etc/passwd"],
+        })
+        self.assertEqual(code, 403, data)
+        self.assertEqual(set(bca.JOBS), before_jobs)
+        self.assertNotIn("/etc/passwd", json.dumps(data))
+
+    def test_tag_read_and_write_use_canonical_mediafile_path(self):
+        track = Path(self.music) / "Artist" / "Track.flac"
+        track.parent.mkdir(parents=True, exist_ok=True)
+        track.write_text("audio", encoding="utf-8")
+        seen_paths = []
+        saved_paths = []
+
+        class FakeMediaFile:
+            def __init__(self, path):
+                seen_paths.append(path)
+                self.title = "Title"
+                self.artist = "Artist"
+                self.album = "Album"
+                self.albumartist = "Artist"
+                self.year = 2026
+                self.track = 1
+                self.tracktotal = 1
+                self.disc = 1
+                self.disctotal = 1
+                self.genre = "Genre"
+                self.mb_trackid = "recording-id"
+                self.mb_albumid = "release-id"
+                self.mb_artistid = "artist-id"
+                self.mb_albumartistid = "albumartist-id"
+                self.mb_releasegroupid = "release-group-id"
+
+            def save(self):
+                saved_paths.append(seen_paths[-1])
+
+        beets_module = types.ModuleType("beets")
+        mediafile_module = types.ModuleType("beets.mediafile")
+        mediafile_module.MediaFile = FakeMediaFile
+        with mock.patch.dict(sys.modules, {"beets": beets_module, "beets.mediafile": mediafile_module}):
+            code, data = _post_agent("/tags/read", {"file_path": _api_path(track)})
+            self.assertEqual(code, 200, data)
+            self.assertEqual(data["tags"]["title"], "Title")
+            code, data = _post_agent("/tags/write", {"file_path": _api_path(track), "tags": {"title": "New"}})
+            self.assertEqual(code, 200, data)
+        self.assertEqual(seen_paths, [str(track.resolve()), str(track.resolve())])
+        self.assertEqual(saved_paths, [str(track.resolve())])
+
+    def test_album_delete_uses_canonical_database_paths_and_sanitized_errors(self):
+        db_path = Path(self.base) / "musiclibrary.blb"
+        track = Path(self.music) / "Artist" / "Album" / "Track.flac"
+        track.parent.mkdir(parents=True, exist_ok=True)
+        track.write_text("audio", encoding="utf-8")
+        outside_track = Path(self.outside) / "secret.flac"
+        outside_track.write_text("secret", encoding="utf-8")
+        con = sqlite3.connect(db_path)
+        con.execute("CREATE TABLE albums (id INTEGER PRIMARY KEY, album TEXT, path TEXT)")
+        con.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, album_id INTEGER, path TEXT)")
+        con.execute("INSERT INTO albums (id, album, path) VALUES (1, 'Album', ?)", (self.music,))
+        con.execute("INSERT INTO items (id, album_id, path) VALUES (10, 1, ?)", (_api_path(track),))
+        con.execute("INSERT INTO items (id, album_id, path) VALUES (11, 1, ?)", (_api_path(outside_track),))
+        con.commit()
+        con.close()
+
+        with mock.patch.object(bca, "LIB_PATH", str(db_path)), \
+             mock.patch.object(bca.os, "unlink") as unlink_mock, \
+             mock.patch.object(bca.os, "rmdir") as rmdir_mock:
+            code, data = bca._handle_delete_album(1, delete_files=True)
+        self.assertEqual(code, 200, data)
+        unlink_mock.assert_any_call(str(track.resolve()))
+        self.assertNotIn(mock.call(str(outside_track.resolve())), unlink_mock.mock_calls)
+        rmdir_mock.assert_not_called()
+        self.assertEqual(data["files_failed"], 1)
+        self.assertNotIn(str(outside_track), json.dumps(data))
+        self.assertNotIn("secret.flac", json.dumps(data))
 
 class ControlAgentSqlBoundaryTests(unittest.TestCase):
     def setUp(self):
@@ -244,5 +554,45 @@ class PublicExceptionResponseTests(unittest.TestCase):
                 pass
 
 
+
+class CodeQLPathModelIntegrityTests(unittest.TestCase):
+    def test_path_barrier_model_is_narrow(self):
+        model = Path(".github/codeql/extensions/pr39-path-sanitizers/models/beets-control-agent-path.yml")
+        self.assertTrue(model.exists())
+        text = model.read_text(encoding="utf-8")
+        self.assertIn("extensible: barrierModel", text)
+        self.assertIn("codeql/python-all", text)
+        self.assertIn('"backend.beets_control_agent"', text)
+        self.assertIn('"Member[resolve_safe_path].ReturnValue"', text)
+        self.assertIn('"path-injection"', text)
+        self.assertNotIn("Argument[", text)
+        self.assertNotIn("sourceModel", text)
+        self.assertNotIn("sinkModel", text)
+        self.assertNotIn("barrierGuardModel", text)
+        self.assertEqual(text.count("path-injection"), 1)
+
+    def test_model_pack_does_not_weaken_codeql_policy(self):
+        pack = Path(".github/codeql/extensions/pr39-path-sanitizers/codeql-pack.yml")
+        self.assertTrue(pack.exists())
+        pack_text = pack.read_text(encoding="utf-8")
+        self.assertIn("extensionTargets:", pack_text)
+        self.assertIn("codeql/python-all", pack_text)
+        self.assertIn("dataExtensions:", pack_text)
+
+        github_text = "\n".join(
+            p.read_text(encoding="utf-8")
+            for p in Path(".github").rglob("*.yml")
+        )
+        forbidden = [
+            "continue-on-error",
+            "paths-ignore",
+            "paths:",
+            "exclude:",
+            "security-severity",
+            "disable-default-queries",
+        ]
+        for token in forbidden:
+            with self.subTest(token=token):
+                self.assertNotIn(token, github_text)
 if __name__ == "__main__":
     unittest.main()
