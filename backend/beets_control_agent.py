@@ -51,12 +51,9 @@ ALLOWED_COMMANDS = {
     "version", "config", "check", "remove", "rm", "submit", "mbsubmit"
 }
 
-# PATCH /items/<id> and /albums/<id> build a SQL SET clause from the caller's
-# `fields` keys. SQL parameters can only bind values, never column names, so
-# the keys themselves must be checked against a fixed allowlist before being
-# interpolated -- this endpoint is authenticated but network-reachable
-# independently of the web-manager's own field allowlist (app.py's
-# EDITABLE_FIELDS), and must not rely solely on the caller's honesty.
+# PATCH /items/<id> and /albums/<id> build SQL from caller-supplied field
+# keys. SQL parameters can only bind values, never column names, so every
+# accepted key must come from these fixed allowlists.
 ITEM_EDITABLE_FIELDS = {
     "title", "artist", "album", "albumartist", "year", "genre", "track",
     "tracktotal", "disc", "disctotal", "label", "comments",
@@ -66,6 +63,14 @@ ALBUM_EDITABLE_FIELDS = {
     "album", "albumartist", "year", "genre", "label", "comments",
     "mb_albumid", "mb_albumartistid", "mb_releasegroupid",
 }
+_ITEM_UPDATE_STATEMENTS = {name: f"UPDATE items SET {name} = ? WHERE id = ?" for name in ITEM_EDITABLE_FIELDS}
+_ALBUM_UPDATE_STATEMENTS = {name: f"UPDATE albums SET {name} = ? WHERE id = ?" for name in ALBUM_EDITABLE_FIELDS}
+_TAG_WRITE_FIELDS = {
+    "title", "artist", "album", "albumartist", "year", "month", "day",
+    "track", "tracktotal", "disc", "disctotal", "genre", "comments",
+    "lyrics", "composer", "mb_trackid", "mb_albumid", "mb_artistid",
+    "mb_albumartistid", "mb_releasegroupid",
+}
 
 
 def _invalid_field_names(fields: dict, allowed: set) -> list:
@@ -73,10 +78,22 @@ def _invalid_field_names(fields: dict, allowed: set) -> list:
     return [k for k in fields.keys() if k not in allowed]
 
 
+def _validated_update_assignments(fields: Any, allowed_statements: dict[str, str]) -> tuple[list[tuple[str, Any]], list[str]]:
+    if not isinstance(fields, dict):
+        return [], ["fields"]
+    assignments: list[tuple[str, Any]] = []
+    invalid: list[str] = []
+    for key, value in fields.items():
+        statement = allowed_statements.get(str(key))
+        if statement is None:
+            invalid.append(str(key))
+            continue
+        assignments.append((statement, value))
+    return assignments, invalid
+
+
 def _strip_sql_comments(text: str) -> str:
-    """Remove /* ... */ and -- ...end-of-line SQL comments via a single
-    linear scan -- no regex, so there is no backtracking-shaped pattern
-    (CodeQL py/polynomial-redos) regardless of input content."""
+    """Remove SQL comments with a linear scan."""
     out = []
     i = 0
     n = len(text)
@@ -93,7 +110,6 @@ def _strip_sql_comments(text: str) -> str:
         out.append(text[i])
         i += 1
     return "".join(out)
-
 JOBS = {}
 JOBS_LOCK = threading.Lock()
 
@@ -422,57 +438,80 @@ def require_command_capability(command: str) -> Optional[dict]:
     return {"error": error_msg, "reason": reason}
 
 
-def is_safe_path(path: str, allowed_types: list = None) -> bool:
-    """Verify that path stays strictly within allowed root directories without traversal or symlink escape."""
-    if not path or not isinstance(path, str):
-        return False
-    if "\x00" in path:
-        return False
+def _decode_untrusted_path(raw_path: str) -> Optional[str]:
+    decoded = raw_path
+    for _ in range(5):
+        try:
+            next_decoded = urllib.parse.unquote(decoded)
+        except Exception:
+            return None
+        if next_decoded == decoded:
+            return decoded
+        decoded = next_decoded
+    return None
 
-    # Decode URL encoding if present
-    try:
-        decoded = urllib.parse.unquote(path)
-    except Exception:
-        decoded = path
 
-    if "\x00" in decoded or "\\" in decoded:
-        return False
-
-    # Path must be absolute
-    if not decoded.startswith("/"):
-        return False
-
-    parts = decoded.split("/")
-    if ".." in parts or "." in parts:
-        return False
-
+def _allowed_root_paths(allowed_types: list = None) -> list[str]:
     all_roots = {
         "config": [os.path.abspath(BEETSDIR), "/config"],
         "music": [os.path.abspath(MUSIC_LIBRARY_PATH), "/data/media/music"],
         "staging": [os.path.abspath(DOWNLOAD_PATH), "/data/torrents"],
         "tmp": ["/tmp", tempfile.gettempdir()],
     }
-
-    roots_to_check = []
+    roots_to_check: list[str] = []
     if allowed_types:
-        for t in allowed_types:
-            if t in all_roots:
-                roots_to_check.extend(all_roots[t])
+        for root_type in allowed_types:
+            roots_to_check.extend(all_roots.get(root_type, []))
     else:
-        for r_list in all_roots.values():
-            roots_to_check.extend(r_list)
+        for root_list in all_roots.values():
+            roots_to_check.extend(root_list)
+    return roots_to_check
 
+
+def _path_is_within(candidate: str, root: str) -> bool:
     try:
-        abs_path = os.path.abspath(decoded)
-        real_path = os.path.realpath(abs_path)
-
-        for root in roots_to_check:
-            real_root = os.path.realpath(root)
-            if real_path == real_root or real_path.startswith(real_root + os.sep) or real_path.startswith(real_root + "/"):
-                return True
-        return False
+        real_candidate = os.path.realpath(candidate)
+        real_root = os.path.realpath(root)
+        return os.path.commonpath([real_candidate, real_root]) == real_root
     except Exception:
         return False
+
+
+def resolve_safe_path(path: str, allowed_types: list = None) -> Optional[str]:
+    """Return a canonical path under an approved root, or None.
+
+    Callers must use this returned value for filesystem operations. Returning a
+    bool and then operating on the original request value leaves a gap for mixed
+    encodings, symlink components, and prefix-collision paths.
+    """
+    if not path or not isinstance(path, str):
+        return None
+    if "\x00" in path or "\\" in path:
+        return None
+
+    decoded = _decode_untrusted_path(path)
+    if decoded is None:
+        return None
+    if "\x00" in decoded or "\\" in decoded:
+        return None
+    if not decoded.startswith("/"):
+        return None
+
+    parts = decoded.split("/")
+    if ".." in parts or "." in parts:
+        return None
+
+    abs_path = os.path.abspath(decoded)
+    real_path = os.path.realpath(abs_path)
+    for root in _allowed_root_paths(allowed_types):
+        if _path_is_within(real_path, root):
+            return real_path
+    return None
+
+
+def is_safe_path(path: str, allowed_types: list = None) -> bool:
+    """Verify that path stays strictly within allowed roots."""
+    return resolve_safe_path(path, allowed_types) is not None
 
 
 def acquire_os_lock(read_only: bool = False):
@@ -756,7 +795,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 "allowed_commands": list(ALLOWED_COMMANDS),
                 "os_locking": True,
                 "strict_path_validation": True,
-                "read_only_raw_query": True,
+                "read_only_raw_query": False,
             })
             return
 
@@ -1046,97 +1085,8 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/library/raw_query":
-            query = body.get("query", body.get("sql", "")).strip()
-            params_list = body.get("params", [])
-            offset = max(int(body.get("offset", 0)), 0)
-            limit = min(max(int(body.get("limit", 1000)), 1), 5000)
-
-            if not query:
-                self._send_json(400, {"error": "Query string is required"})
-                return
-
-            # No legitimate SELECT needs 10k+ characters; bounding input size
-            # bounds the cost of everything below to a fixed constant.
-            if len(query) > 10_000:
-                self._send_json(400, {"error": "Query string is too long"})
-                return
-
-            # Comments are stripped with a manual single-pass scan, not
-            # regex, so there is no backtracking-shaped pattern for CodeQL's
-            # py/polynomial-redos query to flag in the first place (this
-            # replaced r'/\*.*?\*/' and r'--.*$', alerts #353/#354).
-            clean_q = _strip_sql_comments(query).strip()
-
-            if ";" in clean_q.rstrip(";"):
-                self._send_json(400, {"error": "Multiple SQL statements are not permitted"})
-                return
-            clean_q = clean_q.rstrip(";")
-
-            forbidden = [
-                r"\bUPDATE\b", r"\bDELETE\b", r"\bINSERT\b", r"\bDROP\b",
-                r"\bCREATE\b", r"\bALTER\b", r"\bREPLACE\b", r"\bATTACH\b",
-                r"\bDETACH\b", r"\bVACUUM\b", r"\bPRAGMA\b", r"\bEXEC\b", r"\bEXECUTE\b"
-            ]
-            for pattern in forbidden:
-                if re.search(pattern, clean_q, re.IGNORECASE):
-                    self._send_json(400, {"error": f"Forbidden statement type: raw_query endpoint is strictly read-only SELECT queries"})
-                    return
-
-            if not re.match(r"^\s*(WITH\b|SELECT\b)", clean_q, re.IGNORECASE):
-                self._send_json(400, {"error": "Raw query must begin with SELECT or WITH ... SELECT"})
-                return
-
-            if not os.path.exists(LIB_PATH):
-                self._send_json(404, {"error": "Database file musiclibrary.blb not found"})
-                return
-
-            lock_file = acquire_os_lock(read_only=True)
-            try:
-                # This endpoint's entire purpose is to run a caller-supplied
-                # read-only SELECT (an admin/power-user query tool), so the
-                # query text is deliberately interpolated into the SQL, not
-                # parameterized -- CodeQL correctly flags this pattern
-                # (py/sql-injection, alerts #348/#349) since it can't verify
-                # the layered defenses actually applied above and below:
-                # comment-stripped, single-statement only (";" rejected),
-                # denylisted against every mutating/administrative keyword,
-                # must start with SELECT/WITH, length-capped, and -- the
-                # backstop below -- the connection itself is opened
-                # read-only at the SQLite engine level via URI mode, so even
-                # a successful bypass of every check above cannot mutate
-                # the database.
-                con = sqlite3.connect(f"file:{LIB_PATH}?mode=ro", uri=True, timeout=10)
-                con.row_factory = sqlite3.Row
-                cur = con.cursor()
-
-                count_sql = f"SELECT COUNT(*) FROM ({clean_q}) AS _total_subquery"
-                cur.execute(count_sql, params_list)  # codeql[py/sql-injection] -- see comment above: read-only connection, denylisted, single-statement, length-capped by design
-                total_count = cur.fetchone()[0]
-
-                page_sql = f"SELECT * FROM ({clean_q}) AS _page_subquery LIMIT ? OFFSET ?"
-                cur.execute(page_sql, list(params_list) + [limit, offset])  # codeql[py/sql-injection] -- see comment above: read-only connection, denylisted, single-statement, length-capped by design
-                rows = [dict(r) for r in cur.fetchall()]
-                con.close()
-
-                has_more = (offset + len(rows)) < total_count
-                next_offset = (offset + len(rows)) if has_more else None
-
-                self._send_json(200, {
-                    "rows": rows,
-                    "count": len(rows),
-                    "total": total_count,
-                    "offset": offset,
-                    "limit": limit,
-                    "has_more": has_more,
-                    "next_offset": next_offset,
-                    "truncated": has_more
-                })
-            except Exception as exc:
-                self._send_json(500, {"error": f"SQLite error: {exc}"})
-            finally:
-                release_os_lock(lock_file)
+            self._send_json(403, {"error": "Raw SQL queries are not permitted"})
             return
-
         if path.startswith("/albums/") and path.endswith("/artpath"):
             parts = path.split("/")
             try:
@@ -1146,8 +1096,9 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 return
 
             artpath = body.get("artpath", "")
-            if not artpath or not is_safe_path(artpath, ["music"]):
-                self._send_json(403, {"error": f"Access denied for artpath: {artpath}"})
+            safe_artpath = resolve_safe_path(artpath, ["music"])
+            if safe_artpath is None:
+                self._send_json(403, {"error": "Access denied for artpath outside allowed roots"})
                 return
 
             lock_file = acquire_os_lock(read_only=False)
@@ -1159,12 +1110,16 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 if not cur.fetchone():
                     self._send_json(404, {"error": f"Album {album_id} not found"})
                     return
-                cur.execute("UPDATE albums SET artpath = ? WHERE id = ?", (artpath, album_id))
+                safe_artpath = resolve_safe_path(artpath, ["music"])
+                if safe_artpath is None:
+                    self._send_json(403, {"error": "Access denied for artpath outside allowed roots"})
+                    return
+                cur.execute("UPDATE albums SET artpath = ? WHERE id = ?", (safe_artpath, album_id))
                 con.commit()
                 con.close()
-                self._send_json(200, {"ok": True, "album_id": album_id, "artpath": artpath})
-            except Exception as exc:
-                self._send_json(500, {"error": f"Failed to set artpath: {exc}"})
+                self._send_json(200, {"ok": True, "album_id": album_id, "artpath": safe_artpath})
+            except Exception:
+                self._send_json(500, {"error": "Failed to set artpath"})
             finally:
                 release_os_lock(lock_file)
             return
@@ -1313,23 +1268,19 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
 
         if path == "/tags/read":
             file_path = body.get("file_path", "")
-            # is_safe_path() (tested in TestBeetsControlAgentSecurity) resolves
-            # symlinks via realpath and enforces containment within an allowed
-            # root before any of the filesystem operations below run; CodeQL's
-            # default py/path-injection query doesn't model this custom
-            # boolean-returning guard as a taint barrier.
-            if not is_safe_path(file_path, ["music", "staging"]):
-                self._send_json(403, {"error": f"Access denied for path: {file_path}"})
+            safe_file_path = resolve_safe_path(file_path, ["music", "staging"])
+            if safe_file_path is None:
+                self._send_json(403, {"error": "Access denied for path outside allowed roots"})
                 return
-            if not os.path.exists(file_path):  # codeql[py/path-injection] -- sanitized by is_safe_path() above
-                self._send_json(404, {"error": f"File not found: {file_path}"})
+            if not os.path.exists(safe_file_path):
+                self._send_json(404, {"error": "File not found"})
                 return
 
             try:
                 tags = {}
                 try:
                     from beets.mediafile import MediaFile
-                    mf = MediaFile(file_path)  # codeql[py/path-injection] -- sanitized by is_safe_path() above
+                    mf = MediaFile(safe_file_path)
                     tags = {
                         "title": mf.title,
                         "artist": mf.artist,
@@ -1349,7 +1300,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                     }
                 except Exception:
                     import mutagen
-                    f = mutagen.File(file_path, easy=True)  # codeql[py/path-injection] -- sanitized by is_safe_path() above
+                    f = mutagen.File(safe_file_path, easy=True)
                     if f is not None:
                         tags = {
                             "title": (f.get("title") or [""])[0],
@@ -1361,29 +1312,38 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                             "genre": (f.get("genre") or [""])[0],
                         }
                 self._send_json(200, {"tags": tags})
-            except Exception as exc:
-                self._send_json(500, {"error": f"Failed to read tags: {exc}"})
+            except Exception:
+                self._send_json(500, {"error": "Failed to read tags"})
             return
 
         if path == "/tags/write":
             file_path = body.get("file_path", "")
             tags = body.get("tags", {})
-            # is_safe_path() (tested in TestBeetsControlAgentSecurity) resolves
-            # symlinks via realpath and enforces containment within an allowed
-            # root before any of the filesystem operations below run.
-            if not is_safe_path(file_path, ["music", "staging"]):
-                self._send_json(403, {"error": f"Access denied for path: {file_path}"})
+            safe_file_path = resolve_safe_path(file_path, ["music", "staging"])
+            if safe_file_path is None:
+                self._send_json(403, {"error": "Access denied for path outside allowed roots"})
                 return
-            if not os.path.exists(file_path):  # codeql[py/path-injection] -- sanitized by is_safe_path() above
-                self._send_json(404, {"error": f"File not found: {file_path}"})
+            if not os.path.exists(safe_file_path):
+                self._send_json(404, {"error": "File not found"})
+                return
+            if not isinstance(tags, dict):
+                self._send_json(400, {"error": "tags must be an object"})
+                return
+            unsafe_tags = sorted(str(k) for k in tags.keys() if str(k) not in _TAG_WRITE_FIELDS)
+            if unsafe_tags:
+                self._send_json(400, {"error": "Unsupported tag field"})
                 return
 
             lock_file = acquire_os_lock(read_only=False)
             try:
+                safe_file_path = resolve_safe_path(file_path, ["music", "staging"])
+                if safe_file_path is None or not os.path.exists(safe_file_path):
+                    self._send_json(403, {"error": "Access denied for path outside allowed roots"})
+                    return
                 written = False
                 try:
                     from beets.mediafile import MediaFile
-                    mf = MediaFile(file_path)  # codeql[py/path-injection] -- sanitized by is_safe_path() above
+                    mf = MediaFile(safe_file_path)
                     for k, v in tags.items():
                         if hasattr(mf, k):
                             setattr(mf, k, v)
@@ -1391,90 +1351,104 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                     written = True
                 except Exception:
                     import mutagen
-                    f = mutagen.File(file_path, easy=True)  # codeql[py/path-injection] -- sanitized by is_safe_path() above
+                    f = mutagen.File(safe_file_path, easy=True)
                     if f is not None:
                         for k, v in tags.items():
                             f[k] = v
                         f.save()
                         written = True
                 if written:
-                    self._send_json(200, {"ok": True, "file_path": file_path})
+                    self._send_json(200, {"ok": True, "file_path": safe_file_path})
                 else:
                     self._send_json(500, {"error": "Failed to write tags to file"})
-            except Exception as exc:
-                self._send_json(500, {"error": f"Failed to write tags: {exc}"})
+            except Exception:
+                self._send_json(500, {"error": "Failed to write tags"})
             finally:
                 release_os_lock(lock_file)
             return
-
         if path == "/files/move":
             src = body.get("source_path", "")
             dst = body.get("target_path", "")
-            # is_safe_path() (tested in TestBeetsControlAgentSecurity) resolves
-            # symlinks via realpath and enforces containment within an allowed
-            # root before any of the filesystem operations below run.
-            if not is_safe_path(src, ["music", "staging"]) or not is_safe_path(dst, ["music", "staging"]):
+            safe_src = resolve_safe_path(src, ["music", "staging"])
+            safe_dst = resolve_safe_path(dst, ["music", "staging"])
+            if safe_src is None or safe_dst is None:
                 self._send_json(403, {"error": "Access denied for path outside allowed roots"})
                 return
-            if not os.path.exists(src):  # codeql[py/path-injection] -- sanitized by is_safe_path() above
-                self._send_json(404, {"error": f"Source path not found: {src}"})
+            if not os.path.exists(safe_src):
+                self._send_json(404, {"error": "Source path not found"})
                 return
 
             lock_file = acquire_os_lock(read_only=False)
             try:
-                os.makedirs(os.path.dirname(dst), exist_ok=True)  # codeql[py/path-injection] -- sanitized by is_safe_path() above
-                shutil.move(src, dst)  # codeql[py/path-injection] -- sanitized by is_safe_path() above
-                self._send_json(200, {"ok": True, "source_path": src, "target_path": dst})
-            except Exception as exc:
-                self._send_json(500, {"error": f"Failed to move file: {exc}"})
+                safe_src = resolve_safe_path(src, ["music", "staging"])
+                safe_dst = resolve_safe_path(dst, ["music", "staging"])
+                if safe_src is None or safe_dst is None or not os.path.exists(safe_src):
+                    self._send_json(403, {"error": "Access denied for path outside allowed roots"})
+                    return
+                os.makedirs(os.path.dirname(safe_dst), exist_ok=True)
+                safe_dst = resolve_safe_path(dst, ["music", "staging"])
+                if safe_dst is None:
+                    self._send_json(403, {"error": "Access denied for path outside allowed roots"})
+                    return
+                shutil.move(safe_src, safe_dst)
+                self._send_json(200, {"ok": True, "source_path": safe_src, "target_path": safe_dst})
+            except Exception:
+                self._send_json(500, {"error": "Failed to move file"})
             finally:
                 release_os_lock(lock_file)
             return
 
         if path == "/files/delete":
             target = body.get("path", "")
-            # is_safe_path() (tested in TestBeetsControlAgentSecurity) resolves
-            # symlinks via realpath and enforces containment within an allowed
-            # root before any of the filesystem operations below run.
-            if not is_safe_path(target, ["music", "staging"]):
-                self._send_json(403, {"error": f"Access denied for path: {target}"})
+            safe_target = resolve_safe_path(target, ["music", "staging"])
+            if safe_target is None:
+                self._send_json(403, {"error": "Access denied for path outside allowed roots"})
                 return
-            if not os.path.exists(target):  # codeql[py/path-injection] -- sanitized by is_safe_path() above
-                self._send_json(200, {"ok": True, "path": target, "existed": False})
+            if not os.path.exists(safe_target):
+                self._send_json(200, {"ok": True, "path": safe_target, "existed": False})
                 return
 
             lock_file = acquire_os_lock(read_only=False)
             try:
-                if os.path.isdir(target):  # codeql[py/path-injection] -- sanitized by is_safe_path() above
-                    shutil.rmtree(target)  # codeql[py/path-injection] -- sanitized by is_safe_path() above
+                safe_target = resolve_safe_path(target, ["music", "staging"])
+                if safe_target is None:
+                    self._send_json(403, {"error": "Access denied for path outside allowed roots"})
+                    return
+                if os.path.isdir(safe_target):
+                    shutil.rmtree(safe_target)
                 else:
-                    os.unlink(target)  # codeql[py/path-injection] -- sanitized by is_safe_path() above
-                self._send_json(200, {"ok": True, "path": target, "existed": True})
-            except Exception as exc:
-                self._send_json(500, {"error": f"Failed to delete path: {exc}"})
+                    os.unlink(safe_target)
+                self._send_json(200, {"ok": True, "path": safe_target, "existed": True})
+            except Exception:
+                self._send_json(500, {"error": "Failed to delete path"})
             finally:
                 release_os_lock(lock_file)
             return
 
         if path == "/files/mkdir":
             target = body.get("path", "")
-            # is_safe_path() (tested in TestBeetsControlAgentSecurity) resolves
-            # symlinks via realpath and enforces containment within an allowed
-            # root before the filesystem operation below runs.
-            if not is_safe_path(target, ["music", "staging"]):
-                self._send_json(403, {"error": f"Access denied for path: {target}"})
+            safe_target = resolve_safe_path(target, ["music", "staging"])
+            if safe_target is None:
+                self._send_json(403, {"error": "Access denied for path outside allowed roots"})
                 return
 
             lock_file = acquire_os_lock(read_only=False)
             try:
-                os.makedirs(target, exist_ok=True)  # codeql[py/path-injection] -- sanitized by is_safe_path() above
-                self._send_json(200, {"ok": True, "path": target})
-            except Exception as exc:
-                self._send_json(500, {"error": f"Failed to create directory: {exc}"})
+                safe_target = resolve_safe_path(target, ["music", "staging"])
+                if safe_target is None:
+                    self._send_json(403, {"error": "Access denied for path outside allowed roots"})
+                    return
+                os.makedirs(safe_target, exist_ok=True)
+                safe_target = resolve_safe_path(target, ["music", "staging"])
+                if safe_target is None:
+                    self._send_json(403, {"error": "Access denied for path outside allowed roots"})
+                    return
+                self._send_json(200, {"ok": True, "path": safe_target})
+            except Exception:
+                self._send_json(500, {"error": "Failed to create directory"})
             finally:
                 release_os_lock(lock_file)
             return
-
         self._send_json(404, {"error": f"Endpoint not found: {path}"})
 
     def do_PATCH(self):
@@ -1505,6 +1479,10 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             if not fields:
                 self._send_json(400, {"error": "No fields provided"})
                 return
+            assignments, invalid_fields = _validated_update_assignments(fields, _ITEM_UPDATE_STATEMENTS)
+            if invalid_fields:
+                self._send_json(400, {"error": "Unsupported item field"})
+                return
 
             invalid_fields = _invalid_field_names(fields, ITEM_EDITABLE_FIELDS)
             if invalid_fields:
@@ -1521,15 +1499,8 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                     self._send_json(404, {"error": f"Item {item_id} not found"})
                     return
 
-                # Column names come from iterating the fixed ITEM_EDITABLE_FIELDS
-                # constant (checked for membership in the caller-supplied
-                # `fields` dict), never from `fields.keys()` directly -- the
-                # SQL text is built entirely from a hardcoded set of column
-                # names, so no caller-controlled string ever reaches it.
-                update_cols = [col for col in ITEM_EDITABLE_FIELDS if col in fields]
-                set_clause = ", ".join(f"{col} = ?" for col in update_cols)
-                params = [fields[col] for col in update_cols] + [item_id]
-                cur.execute(f"UPDATE items SET {set_clause} WHERE id = ?", params)
+                for statement, value in assignments:
+                    cur.execute(statement, (value, item_id))
                 con.commit()
                 cur.execute("SELECT * FROM items WHERE id = ?", (item_id,))
                 updated = dict(cur.fetchone())
@@ -1551,6 +1522,10 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             if not fields:
                 self._send_json(400, {"error": "No fields provided"})
                 return
+            assignments, invalid_fields = _validated_update_assignments(fields, _ALBUM_UPDATE_STATEMENTS)
+            if invalid_fields:
+                self._send_json(400, {"error": "Unsupported album field"})
+                return
 
             invalid_fields = _invalid_field_names(fields, ALBUM_EDITABLE_FIELDS)
             if invalid_fields:
@@ -1567,15 +1542,8 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                     self._send_json(404, {"error": f"Album {album_id} not found"})
                     return
 
-                # Column names come from iterating the fixed ALBUM_EDITABLE_FIELDS
-                # constant (checked for membership in the caller-supplied
-                # `fields` dict), never from `fields.keys()` directly -- the
-                # SQL text is built entirely from a hardcoded set of column
-                # names, so no caller-controlled string ever reaches it.
-                update_cols = [col for col in ALBUM_EDITABLE_FIELDS if col in fields]
-                set_clause = ", ".join(f"{col} = ?" for col in update_cols)
-                params = [fields[col] for col in update_cols] + [album_id]
-                cur.execute(f"UPDATE albums SET {set_clause} WHERE id = ?", params)
+                for statement, value in assignments:
+                    cur.execute(statement, (value, album_id))
                 con.commit()
                 cur.execute("SELECT * FROM albums WHERE id = ?", (album_id,))
                 updated = dict(cur.fetchone())

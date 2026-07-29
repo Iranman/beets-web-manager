@@ -87,7 +87,7 @@ class TestBeetsControlAgentSecurity(unittest.TestCase):
             self.assertFalse(result)
 
     def test_raw_query_security_handler_execution(self):
-        """Test raw SQL handler execution rejecting mutations and multi-statements."""
+        """Test raw SQL handler execution is disabled fail-closed."""
         handler = ControlAgentHandler.__new__(ControlAgentHandler)
         handler.headers = {"X-Beets-API-Token": "testtoken"}
 
@@ -99,6 +99,7 @@ class TestBeetsControlAgentSecurity(unittest.TestCase):
         handler._authenticate = lambda: True
 
         forbidden_queries = [
+            "SELECT * FROM items",
             "UPDATE items SET title='hacked'",
             "DELETE FROM items",
             "INSERT INTO items DEFAULT VALUES",
@@ -118,14 +119,11 @@ class TestBeetsControlAgentSecurity(unittest.TestCase):
             handler.do_POST()
             self.assertTrue(len(sent_responses) > 0, f"No response sent for query: {q}")
             code, data = sent_responses[0]
-            self.assertEqual(code, 400, f"Query '{q}' should have been rejected with 400, got {code}")
-            self.assertIn("error", data)
+            self.assertEqual(code, 403, f"Query '{q}' should have been rejected with 403, got {code}")
+            self.assertEqual(data.get("error"), "Raw SQL queries are not permitted")
 
-    def test_raw_query_rejects_oversized_query_before_regex_processing(self):
-        """CodeQL py/polynomial-redos (alerts #353/#354): the comment-stripping
-        regexes applied to the raw_query string are worst-case polynomial in
-        input size on pathological input. Capping the input length bounds
-        the worst case to a fixed constant regardless of pattern shape."""
+    def test_raw_query_rejects_oversized_query_before_processing(self):
+        """Raw SQL is retired, so oversized SQL is denied before parsing."""
         handler = ControlAgentHandler.__new__(ControlAgentHandler)
         handler.headers = {"X-Beets-API-Token": "testtoken"}
 
@@ -147,10 +145,10 @@ class TestBeetsControlAgentSecurity(unittest.TestCase):
 
         self.assertEqual(len(sent_responses), 1)
         code, data = sent_responses[0]
-        self.assertEqual(code, 400)
-        self.assertIn("too long", data["error"])
+        self.assertEqual(code, 403)
+        self.assertEqual(data["error"], "Raw SQL queries are not permitted")
 
-    def test_raw_query_within_length_limit_is_not_rejected_for_length(self):
+    def test_raw_query_within_length_limit_is_rejected_fail_closed(self):
         handler = ControlAgentHandler.__new__(ControlAgentHandler)
         handler.headers = {"X-Beets-API-Token": "testtoken"}
 
@@ -169,9 +167,8 @@ class TestBeetsControlAgentSecurity(unittest.TestCase):
             handler.do_POST()
 
         code, data = sent_responses[0]
-        # Rejected for a different reason (missing DB file in this unit
-        # test), never for length -- proves the cap doesn't false-positive
-        # on an ordinary short query.
+        self.assertEqual(code, 403)
+        self.assertEqual(data["error"], "Raw SQL queries are not permitted")
         self.assertNotIn("too long", data.get("error", ""))
 
     def test_s6_service_discovery_path_in_dockerfile(self):
@@ -1411,13 +1408,10 @@ class TestAcoustIDChromaCapability(unittest.TestCase):
         self.assertFalse(readiness["plugins"]["mbsubmit"])
         self.assertFalse(readiness["fpcalc_available"])
         self.assertFalse(readiness["pyacoustid_available"])
-        # The raw exception text (which can include internal hosts/ports)
-        # must never reach the client-facing reason field (CodeQL
-        # py/stack-trace-exposure) -- only a generic message does.
+        self.assertEqual(readiness["reason"], "Beets control agent status is unavailable")
         self.assertNotIn("10.0.0.5", readiness["reason"])
         self.assertNotIn("Beets Control Agent is unavailable at", readiness["reason"])
-        self.assertTrue(readiness["reason"])
-
+        self.assertNotIn("Beets Control Agent is unavailable", readiness["reason"])
     @mock.patch("backend.beets_client.beets_client.get_status")
     def test_submission_readiness_fails_closed_on_authentication_failure(self, mock_status):
         """A remote authentication failure must also fail closed, not silently

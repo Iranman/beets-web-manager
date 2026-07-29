@@ -253,13 +253,8 @@ def _submission_readiness() -> Dict[str, Any]:
     try:
         remote_status = beets_client.get_status()
     except Exception as exc:
-        # Logged in full server-side only -- the raw exception text (which
-        # can include connection details, hostnames, or other internals)
-        # must not flow into the client-facing "reason" field below
-        # (CodeQL py/stack-trace-exposure).
-        app.logger.error("Beets control agent status check failed: %s", exc)
-        remote_error = "Beets control agent status check failed"
-
+        app.logger.warning("Submission readiness status check failed: %s", type(exc).__name__)
+        remote_error = "Beets control agent status is unavailable"
     if not isinstance(remote_status, dict) or remote_status.get("status") != "ok":
         return {
             "plugins": {"mbsubmit": False, "musicbrainz": False, "chroma": False, "mbsync": False},
@@ -1525,4 +1520,3 @@ def attach_album_mbids(aid: int):
 
     job = jobs.start_python(_do, label=f"Attach MusicBrainz IDs: album {aid}", metadata={"type": "musicbrainz-match", "album_id": aid, "transaction_operation": "MusicBrainz Match"})
     return jsonify({"ok": True, "job_id": job.job_id})
-
