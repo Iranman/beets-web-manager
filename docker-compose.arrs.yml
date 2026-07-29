@@ -267,8 +267,8 @@ services:
       BEETS_WEB_AUTH_TOKEN: "${BEETS_WEB_AUTH_TOKEN:?set a strong owner token}"
       # Enforced by backend/security.py's install_secure_urllib() SSRF policy,
       # which runs only in this (web-manager) process -- not in the beets
-      # engine container. Empty by default; set per-deployment in .env.
-      BEETS_OUTBOUND_ALLOWLIST: "${BEETS_OUTBOUND_ALLOWLIST:-}"
+      # engine container. Defaults to the internal Beets control agent; set additional per-deployment entries in .env.
+      BEETS_OUTBOUND_ALLOWLIST: "${BEETS_OUTBOUND_ALLOWLIST:-beets:8338}"
       WEBCONTROL_PORT: "8337"
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
       OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
@@ -280,9 +280,9 @@ services:
       DISCOGS_TOKEN: "${DISCOGS_TOKEN:-}"
       DISCOGS_USER_TOKEN: "${DISCOGS_USER_TOKEN:-}"
       LISTENBRAINZ_TOKEN: "${LISTENBRAINZ_TOKEN:-}"
-      PLEX_URL: http://192.168.0.250:32400
+      PLEX_URL: "${PLEX_URL:-}"
       PLEX_TOKEN: "${PLEX_TOKEN:?set in .env}"
-      LIDARR_URL: http://192.168.0.250:8686
+      LIDARR_URL: "${LIDARR_URL:-}"
       LIDARR_API_KEY: "${LIDARR_API_KEY:?set in .env}"
       SLSKD_URL: http://slskd:5030
       SLSKD_API_KEY: "${SLSKD_API_KEY:-}"
@@ -371,7 +371,7 @@ services:
       DIGARR_INITIAL_USERNAME: admin
       DIGARR_INITIAL_PASSWORD: "${DIGARR_INITIAL_PASSWORD:?set in .env}"
       DIGARR_DISABLE_REGISTRATION: "true"
-      ALLOWED_ORIGIN: "http://192.168.0.250:3000"
+      ALLOWED_ORIGIN: "${DIGARR_ALLOWED_ORIGIN:-http://localhost:3000}"
       LIDARR_URL: http://lidarr:8686
       LIDARR_API_KEY: "${LIDARR_API_KEY:?set in .env}"
       AI_PROVIDER: openai

@@ -139,8 +139,12 @@ class BeetsClient:
             raise BeetsError(f"Beets API request error: {msg}") from exc
         except urllib.error.URLError as exc:
             raise BeetsUnavailableError(f"Beets Control Agent is unavailable at {self.base_url}: {exc.reason}") from exc
+        except json.JSONDecodeError as exc:
+            raise BeetsUnavailableError("Beets Control Agent returned malformed JSON") from exc
+        except TimeoutError as exc:
+            raise BeetsUnavailableError("Timed out communicating with Beets Control Agent") from exc
         except Exception as exc:
-            raise BeetsUnavailableError(f"Failed to communicate with Beets Control Agent: {exc}") from exc
+            raise BeetsUnavailableError("Failed to communicate with Beets Control Agent") from exc
 
     def health(self) -> Dict[str, Any]:
         """Check Beets agent health status."""
@@ -148,7 +152,7 @@ class BeetsClient:
 
     def get_status(self) -> Dict[str, Any]:
         """Fetch status and plugin details from the Beets control agent."""
-        return self._request("GET", "/health", timeout=5.0)
+        return self._request("GET", "/status", timeout=5.0)
 
     def version(self) -> Dict[str, Any]:
         """Fetch Beets version and agent version."""

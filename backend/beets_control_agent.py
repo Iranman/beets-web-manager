@@ -22,7 +22,7 @@ import time
 import urllib.parse
 import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import parse_qs, urlparse
 
 # Configuration
@@ -63,6 +63,154 @@ _COMMAND_CAPABILITY_REQUIREMENTS = {
 }
 
 
+_BEETS_PLUGIN_FAILURE_PATTERNS = (
+    "error loading plugin",
+    "failed loading plugin",
+    "failed to load plugin",
+    "no module named",
+    "modulenotfounderror",
+    "importerror",
+    "traceback",
+)
+
+
+def _redact_agent_status_text(text: str) -> str:
+    """Small defense-in-depth redactor for diagnostic text returned over the
+    internal status API. The web manager redacts again before browser output,
+    but the agent should not deliberately serialize obvious secrets either.
+    """
+    redacted = str(text or "")
+    redacted = re.sub(r"(?i)(authorization\s*:\s*(?:bearer|basic)\s+)\S+", r"\1[redacted]", redacted)
+    redacted = re.sub(r"(?i)(cookie\s*:\s*).*$", r"\1[redacted]", redacted, flags=re.MULTILINE)
+    redacted = re.sub(
+        r"(?i)(api[_-]?key|token|password|secret|user[_-]?token)(\s*[:=]\s*)([^\s,'\"&]+)",
+        r"\1\2[redacted]",
+        redacted,
+    )
+    redacted = re.sub(r"https?://([^:/\s]+):([^@/\s]+)@", r"https://\1:[redacted]@", redacted)
+    return redacted
+
+
+def _diagnostic_failure_lines(text: str) -> list[str]:
+    failures: list[str] = []
+    for line in str(text or "").splitlines():
+        lower = line.lower()
+        if any(pattern in lower for pattern in _BEETS_PLUGIN_FAILURE_PATTERNS):
+            failures.append(_redact_agent_status_text(line.strip()))
+    return failures[:12]
+
+
+def _simple_yaml_scalar(raw: str) -> str:
+    value = str(raw or "").strip()
+    if "#" in value:
+        value = value.split("#", 1)[0].strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        value = value[1:-1]
+    return value.strip()
+
+
+def _parse_beets_config_summary() -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "plugins": [],
+        "pluginpath": [],
+        "replaygain_backend": "",
+        "replaygain_command": "",
+        "discogs_token_configured": False,
+        "listenbrainz_token_configured": False,
+    }
+    config_path = os.path.join(BEETSDIR, "config.yaml")
+    try:
+        lines = open(config_path, "r", encoding="utf-8").read().splitlines()
+    except Exception:
+        return summary
+
+    section = ""
+    list_key = ""
+    for raw in lines:
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        indent = len(raw) - len(raw.lstrip(" "))
+        stripped = raw.strip()
+        if indent == 0 and ":" in stripped:
+            key, rest = stripped.split(":", 1)
+            section = key.strip()
+            list_key = ""
+            value = _simple_yaml_scalar(rest)
+            if section == "plugins" and value:
+                summary["plugins"].extend(value.replace(",", " ").split())
+            elif section == "pluginpath" and value:
+                summary["pluginpath"].append(value)
+            continue
+        if stripped.startswith("-"):
+            value = _simple_yaml_scalar(stripped[1:])
+            if section == "plugins" and value:
+                summary["plugins"].extend(value.replace(",", " ").split())
+            elif section == "pluginpath" and value:
+                summary["pluginpath"].append(value)
+            continue
+        if section == "replaygain" and stripped.startswith("backend:"):
+            summary["replaygain_backend"] = _simple_yaml_scalar(stripped.split(":", 1)[1])
+        elif section == "replaygain" and stripped.startswith("command:"):
+            summary["replaygain_command"] = _simple_yaml_scalar(stripped.split(":", 1)[1])
+        elif section == "discogs" and stripped.startswith("user_token:"):
+            summary["discogs_token_configured"] = bool(_simple_yaml_scalar(stripped.split(":", 1)[1]))
+        elif section == "listenbrainz" and stripped.startswith("token:"):
+            summary["listenbrainz_token_configured"] = bool(_simple_yaml_scalar(stripped.split(":", 1)[1]))
+
+    summary["plugins"] = list(dict.fromkeys(summary["plugins"]))
+    summary["pluginpath"] = list(dict.fromkeys(summary["pluginpath"]))
+    return summary
+
+
+def _beet_version_snapshot(timeout: int = 5) -> dict[str, Any]:
+    snapshot: dict[str, Any] = {
+        "available": False,
+        "version": "",
+        "loaded_plugins": [],
+        "plugin_failures": [],
+        "returncode": None,
+        "timed_out": False,
+        "error": "",
+    }
+    try:
+        res = subprocess.run([BEET_BIN, "version"], capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        snapshot["available"] = True
+        snapshot["timed_out"] = True
+        snapshot["error"] = "Beets version probe timed out."
+        return snapshot
+    except Exception:
+        snapshot["error"] = "Beets version probe failed."
+        return snapshot
+
+    snapshot["available"] = True
+    snapshot["returncode"] = res.returncode
+    stdout = res.stdout if isinstance(res.stdout, str) else ""
+    stderr = res.stderr if isinstance(res.stderr, str) else ""
+    combined = "\n".join([stdout, stderr])
+    snapshot["plugin_failures"] = _diagnostic_failure_lines(combined)
+
+    version_lines = combined.strip().splitlines()
+    for line in version_lines:
+        if line.lower().startswith("beets version"):
+            snapshot["version"] = line.strip()
+            break
+    if not snapshot["version"] and version_lines:
+        snapshot["version"] = version_lines[0].strip()
+
+    for line in stdout.splitlines():
+        if line.startswith("plugins:"):
+            loaded = [name.strip() for name in line[len("plugins:"):].split(",") if name.strip()]
+            snapshot["loaded_plugins"] = list(dict.fromkeys(loaded))
+            break
+
+    if snapshot["plugin_failures"]:
+        snapshot["error"] = snapshot["plugin_failures"][0]
+    elif res.returncode != 0:
+        snapshot["error"] = "Beets version probe failed."
+    return snapshot
+
+
 def get_loaded_beet_plugins() -> set:
     """Return the set of plugins Beets actually finished loading, parsed from
     `beet version`'s own "plugins: a, b, c" line.
@@ -72,14 +220,146 @@ def get_loaded_beet_plugins() -> set:
     importable on disk but silently fails to initialize (as beetsplug.chroma
     can, even with fpcalc/pyacoustid present) is correctly excluded.
     """
-    try:
-        res = subprocess.run([BEET_BIN, "version"], capture_output=True, text=True, timeout=5)
-    except Exception:
-        return set()
-    for line in (res.stdout.splitlines() if res.stdout else []):
-        if line.startswith("plugins:"):
-            return {name.strip() for name in line[len("plugins:"):].split(",") if name.strip()}
-    return set()
+    return set(_beet_version_snapshot().get("loaded_plugins") or [])
+
+
+def _agent_status_payload() -> dict[str, Any]:
+    snapshot = _beet_version_snapshot()
+    config_summary = _parse_beets_config_summary()
+    loaded_plugins = set(snapshot.get("loaded_plugins") or [])
+    configured_plugins = set(config_summary.get("plugins") or [])
+
+    import importlib.util
+    fpcalc_path = shutil.which("fpcalc") or ""
+    ffmpeg_path = shutil.which("ffmpeg") or ""
+    pyacoustid_available = importlib.util.find_spec("acoustid") is not None
+
+    def _path_status(path: str, *, require_writable: bool = False) -> dict[str, Any]:
+        exists = os.path.exists(path)
+        is_dir = os.path.isdir(path)
+        readable = bool(exists and os.access(path, os.R_OK))
+        writable = bool(exists and os.access(path, os.W_OK))
+        return {
+            "path": path,
+            "exists": exists,
+            "is_dir": is_dir,
+            "readable": readable,
+            "writable": writable,
+            "ok": bool(exists and readable and (writable if require_writable else True)),
+        }
+
+    config_path = os.path.join(BEETSDIR, "config.yaml")
+    remote_paths = {
+        "config": _path_status(BEETSDIR, require_writable=True),
+        "music_library": _path_status(MUSIC_LIBRARY_PATH),
+        "downloads": _path_status(DOWNLOAD_PATH, require_writable=True),
+        "beets_config": {"path": config_path, "exists": os.path.exists(config_path)},
+    }
+
+    discpath_installed = (
+        os.path.exists("/opt/beets-web-manager-agent/beetsplug/discpath.py")
+        or os.path.exists(os.path.join(BEETSDIR, "beetsplug", "discpath.py"))
+    )
+
+    plugin_names = {
+        "chroma", "discogs", "discpath", "fetchart", "lastgenre", "listenbrainz",
+        "mbsubmit", "mbsync", "musicbrainz", "replaygain",
+    }
+    plugin_flags = {name: name in loaded_plugins for name in sorted(plugin_names)}
+
+    commands = {
+        "submit": {
+            "available": "chroma" in loaded_plugins,
+            "registered": "chroma" in loaded_plugins,
+            "required_plugin": "chroma",
+        },
+        "mbsubmit": {
+            "available": "mbsubmit" in loaded_plugins,
+            "registered": "mbsubmit" in loaded_plugins,
+            "required_plugin": "mbsubmit",
+        },
+    }
+
+    capabilities = {
+        "fingerprinting": {
+            "available": bool(fpcalc_path and "chroma" in loaded_plugins),
+            "fpcalc_available": bool(fpcalc_path),
+            "chroma_loaded": "chroma" in loaded_plugins,
+        },
+        "acoustid_lookup": {
+            "available": bool(fpcalc_path and pyacoustid_available and "chroma" in loaded_plugins),
+            "fpcalc_available": bool(fpcalc_path),
+            "pyacoustid_available": pyacoustid_available,
+            "chroma_loaded": "chroma" in loaded_plugins,
+        },
+        "acoustid_submission": {
+            "available": bool(commands["submit"]["available"]),
+            "command": "submit",
+            "chroma_loaded": "chroma" in loaded_plugins,
+        },
+        "musicbrainz_submission": {
+            "available": bool(commands["mbsubmit"]["available"]),
+            "command": "mbsubmit",
+            "mbsubmit_loaded": "mbsubmit" in loaded_plugins,
+        },
+        "fetchart": {
+            "configured": "fetchart" in configured_plugins,
+            "loaded": "fetchart" in loaded_plugins,
+            "available": "fetchart" in loaded_plugins,
+        },
+        "replaygain": {
+            "configured": "replaygain" in configured_plugins,
+            "loaded": "replaygain" in loaded_plugins,
+            "available": bool("replaygain" in loaded_plugins and (config_summary.get("replaygain_backend") != "ffmpeg" or ffmpeg_path)),
+            "backend": config_summary.get("replaygain_backend") or "",
+            "command": config_summary.get("replaygain_command") or "",
+            "ffmpeg_available": bool(ffmpeg_path),
+        },
+        "lastgenre": {"configured": "lastgenre" in configured_plugins, "loaded": "lastgenre" in loaded_plugins},
+        "discogs": {"configured": "discogs" in configured_plugins, "loaded": "discogs" in loaded_plugins},
+        "listenbrainz": {"configured": "listenbrainz" in configured_plugins, "loaded": "listenbrainz" in loaded_plugins},
+        "discpath": {"configured": "discpath" in configured_plugins, "loaded": "discpath" in loaded_plugins, "installed": discpath_installed},
+    }
+
+    plugin_loader_ok = bool(
+        snapshot.get("available")
+        and snapshot.get("returncode") == 0
+        and not snapshot.get("timed_out")
+        and not snapshot.get("plugin_failures")
+    )
+
+    return {
+        "status": "ok",
+        "service": "beets-control-agent",
+        "agent_version": "1.0.0",
+        "beets_version": snapshot.get("version") or "",
+        "beet_available": bool(snapshot.get("available")),
+        "db_healthy": os.path.exists(LIB_PATH) and os.access(LIB_PATH, os.R_OK),
+        "config_healthy": os.path.exists(os.path.join(BEETSDIR, "config.yaml")),
+        "fpcalc_available": bool(fpcalc_path),
+        "fpcalc_path": fpcalc_path,
+        "ffmpeg_available": bool(ffmpeg_path),
+        "ffmpeg_path": ffmpeg_path,
+        "pyacoustid_available": pyacoustid_available,
+        "plugins": plugin_flags,
+        "configured_plugins": list(config_summary.get("plugins") or []),
+        "loaded_plugins": list(snapshot.get("loaded_plugins") or []),
+        "installed_plugins": {"discpath": discpath_installed},
+        "pluginpath": list(config_summary.get("pluginpath") or []),
+        "plugin_failures": list(snapshot.get("plugin_failures") or []),
+        "plugin_loader_ok": plugin_loader_ok,
+        "plugin_loader_returncode": snapshot.get("returncode"),
+        "plugin_loader_timed_out": bool(snapshot.get("timed_out")),
+        "plugin_loader_error": _redact_agent_status_text(str(snapshot.get("error") or "")),
+        "capabilities": capabilities,
+        "commands": commands,
+        "paths": remote_paths,
+        "replaygain_backend": config_summary.get("replaygain_backend") or "",
+        "replaygain_command": config_summary.get("replaygain_command") or "",
+        "discogs_token_configured": bool(os.environ.get("DISCOGS_TOKEN") or os.environ.get("DISCOGS_USER_TOKEN") or config_summary.get("discogs_token_configured")),
+        "listenbrainz_token_configured": bool(os.environ.get("LISTENBRAINZ_TOKEN") or config_summary.get("listenbrainz_token_configured")),
+        "beetsdir": BEETSDIR,
+    }
 
 
 def require_command_capability(command: str) -> Optional[dict]:
@@ -399,58 +679,24 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
         path = parsed.path.rstrip("/")
         params = parse_qs(parsed.query)
 
-        if path in ("/health", "/status"):
-            beets_ver = "unknown"
-            try:
-                res = subprocess.run([BEET_BIN, "version"], capture_output=True, text=True, timeout=5)
-                beets_ver = res.stdout.splitlines()[0] if res.stdout else "available"
-            except Exception:
-                pass
-            # See get_loaded_beet_plugins() for why this is not a Python import check.
-            loaded_plugins = get_loaded_beet_plugins()
-
-            db_healthy = os.path.exists(LIB_PATH) and os.access(LIB_PATH, os.R_OK)
-            config_healthy = os.path.exists(os.path.join(BEETSDIR, "config.yaml"))
-            discpath_found = os.path.exists("/opt/beets-web-manager-agent/beetsplug/discpath.py") or os.path.exists(os.path.join(BEETSDIR, "beetsplug", "discpath.py"))
-
-            import shutil, importlib.util
-            fpcalc_p = shutil.which("fpcalc") or ""
-            pyacoustid_avail = importlib.util.find_spec("acoustid") is not None
-            chroma_avail = "chroma" in loaded_plugins
-            mbsubmit_avail = "mbsubmit" in loaded_plugins
-            musicbrainz_avail = "musicbrainz" in loaded_plugins
-
+        if path == "/health":
             self._send_json(200, {
                 "status": "ok",
                 "service": "beets-control-agent",
                 "agent_version": "1.0.0",
-                "beets_version": beets_ver,
-                "db_healthy": db_healthy,
-                "config_healthy": config_healthy,
-                "fpcalc_available": bool(fpcalc_p),
-                "fpcalc_path": fpcalc_p,
-                "pyacoustid_available": pyacoustid_avail,
-                "plugins": {
-                    "discpath": discpath_found,
-                    "chroma": chroma_avail,
-                    "mbsubmit": mbsubmit_avail,
-                    "musicbrainz": musicbrainz_avail,
-                },
-                "beetsdir": BEETSDIR,
             })
             return
 
         if not self._authenticate():
             return
 
+        if path == "/status":
+            self._send_json(200, _agent_status_payload())
+            return
+
         if path == "/version":
-            beets_ver = "unknown"
-            try:
-                res = subprocess.run([BEET_BIN, "version"], capture_output=True, text=True, timeout=5)
-                beets_ver = res.stdout.splitlines()[0] if res.stdout else "available"
-            except Exception:
-                pass
-            self._send_json(200, {"agent_version": "1.0.0", "beets_version": beets_ver})
+            status = _agent_status_payload()
+            self._send_json(200, {"agent_version": "1.0.0", "beets_version": status.get("beets_version") or ""})
             return
 
         if path == "/capabilities":

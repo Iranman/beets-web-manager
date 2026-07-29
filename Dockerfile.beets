@@ -15,7 +15,8 @@ COPY beetsplug/ /opt/beets-web-manager-agent/beetsplug/
 # Install S6 supervision service for the control agent and locked CLI wrapper
 COPY docker/beets-agent-s6.sh /custom-services.d/beets-control-agent
 COPY docker/beet-locked /usr/local/bin/beet-locked
-RUN chmod +x /custom-services.d/beets-control-agent /usr/local/bin/beet-locked
+RUN rm -f /etc/s6-overlay/s6-rc.d/user/contents.d/svc-beets \
+    && chmod +x /custom-services.d/beets-control-agent /usr/local/bin/beet-locked
 
 # Environment configuration
 ENV BEETS_AGENT_PORT=8338 \

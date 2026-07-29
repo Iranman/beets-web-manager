@@ -133,7 +133,7 @@ For comprehensive architecture guidelines, refer to `docs/ARCHITECTURE.md` and `
 1. **Engine Separation**: The authoritative Beets engine runs separately from the web manager in a dedicated container.
 2. **Single Source of Truth**: Exactly one authoritative Beets installation, one `/config/config.yaml`, and one `/config/musiclibrary.blb`.
 3. **Engine Mutation Domain**: Beets database, audio tag writes, media renaming, staging imports, and library mutations belong exclusively to the Beets engine.
-4. **Web Manager Scope**: The web manager handles UI, orchestration, background jobs, and integrations. It contains no Beets executable, no Beets Python modules, no direct SQLite database access, and no direct tag/file mutations.
+4. **Web Manager Scope**: The web manager handles UI, orchestration, background jobs, and integrations. It must not contain a Beets executable, Beets Python modules, or local SQLite database access. Residual legacy tag/file mutation call sites are architecture debt tracked in `docs/TECHNICAL_DEBT.md` and must move behind the Beets control-agent boundary before being treated as complete.
 5. **Control Agent Communication**: Web manager communicates with the Beets engine exclusively through the authenticated internal control agent on port `8338` (internal-only).
 6. **Concurrency & Locking**: Mutating operations must acquire and honor the shared OS lock (`.beet_db.lock`).
 7. **Fail-Closed Capabilities**: Plugin capability checks must fail closed. `mbsubmit` and `submit` are independent capabilities. AcoustID fingerprinting, lookup, and submission readiness are distinct capabilities.

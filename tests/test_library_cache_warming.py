@@ -94,7 +94,7 @@ class LibraryPayloadExtractionTests(unittest.TestCase):
 
 class AutoScanLoopRebuildsInsteadOfJustInvalidatingTests(unittest.TestCase):
     def setUp(self):
-        self.fn = _function_source(APP_SOURCE, "def _auto_scan_loop():", "\n\nthreading.Thread(target=_auto_scan_loop")
+        self.fn = _function_source(APP_SOURCE, "def _auto_scan_loop():", "\n\nif _legacy_local_scan_enabled()")
 
     def test_quick_tick_calls_refresh_not_bare_invalidate(self):
         self.assertIn("_refresh_library_cache()", self.fn)
@@ -106,10 +106,11 @@ class AutoScanLoopRebuildsInsteadOfJustInvalidatingTests(unittest.TestCase):
         tick_block = self.fn[tick_start:tick_start + 1000]
         self.assertIn("_refresh_library_cache()", tick_block)
 
-    def test_loop_still_runs_as_a_background_daemon_thread(self):
-        self.assertIn(
-            "threading.Thread(target=_auto_scan_loop, daemon=True).start()", APP_SOURCE
-        )
+    def test_loop_is_opt_in_before_starting_background_daemon_thread(self):
+        startup = _function_source(APP_SOURCE, "if _legacy_local_scan_enabled():", "\n\n# ── Import")
+        self.assertIn("threading.Thread(target=_auto_scan_loop, daemon=True).start()", startup)
+        self.assertNotIn("threading.Thread(target=_auto_scan_loop, daemon=True).start()", self.fn)
+
 
 
 class RecordScanRebuildsTests(unittest.TestCase):
