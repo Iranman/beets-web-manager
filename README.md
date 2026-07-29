@@ -83,7 +83,7 @@ Important variables include:
 - `OPENAI_API_KEY` or compatible provider key: **optional** AI metadata features — see [How AI Matching Works](#how-ai-matching-works).
 - `PLEX_URL` and `PLEX_TOKEN`: Plex sync and refresh integration (optional).
 - `LIDARR_URL` and `LIDARR_API_KEY`: wanted-music and Arr integration (optional).
-- `ACOUSTID_API_KEY` / `ACOUSTID_KEY`: optional — AcoustID lookups work without a key via a shared, rate-limited test key.
+- `ACOUSTID_API_KEY`: set on the Beets engine service — required for `/audio/acoustid-lookup` fingerprint lookups; without it the engine reports AcoustID as `unavailable` rather than falling back to a shared key. `ACOUSTID_KEY` on the web-manager service is used only when submitting fingerprints via `beet submit` (see ARCH-012 in `docs/TECHNICAL_DEBT.md`).
 - `SLSKD_SLSK_USERNAME` and `SLSKD_SLSK_PASSWORD`: Soulseek client credentials (optional, required only for SLSKD-based acquisition).
 - `BEETS_OUTBOUND_ALLOWLIST`: exact host:port or CIDR:port entries for local services the backend may call; defaults to the internal Beets control agent (`beets:8338`).
 - `BEETS_TRUSTED_PROXIES`: direct proxy CIDRs whose forwarded client IP headers may be trusted.

@@ -396,13 +396,52 @@ class BeetsClient:
         return self._request("DELETE", f"/albums/{album_id}", {"delete_files": delete_files})
 
     def acoustid_lookup(self, file_path: str) -> Dict[str, Any]:
-        """Perform AcoustID fingerprinting and lookup via remote engine control agent."""
+        """Perform AcoustID fingerprinting and lookup via remote engine control agent.
+
+        Unlike _request(), this does not raise on a non-2xx response: the
+        engine's /audio/acoustid-lookup endpoint always returns a structured
+        {"ok", "status", ...} body even for expected failure states (missing
+        ACOUSTID_API_KEY -> 503 "unavailable", provider errors -> 502, a
+        timed-out lookup -> 504, a bad path -> 400/403/404). _request()
+        collapses every >=500 response into a generic BeetsUnavailableError
+        with only a string message, which would silently destroy that
+        distinction (an "unavailable" capability and a "timeout" would both
+        become indistinguishable exceptions) -- callers need the real status.
+        A true transport failure (connection refused, malformed non-JSON
+        body) still reports "unavailable" via BeetsUnavailableError below,
+        since there is no structured body to read in that case.
+        """
         if not file_path or not str(file_path).strip():
             return {"ok": False, "status": "invalid_media", "candidates": []}
-        res = self._request("POST", "/audio/acoustid-lookup", {"file_path": str(file_path).strip()})
-        if isinstance(res, dict):
-            return res
-        return {"ok": False, "status": "analysis_error", "candidates": []}
+
+        url = f"{self.base_url}/audio/acoustid-lookup"
+        headers = {"Content-Type": "application/json", "User-Agent": "beets-web-manager/1.0"}
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        body = json.dumps({"file_path": str(file_path).strip()}).encode("utf-8")
+        req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if exc.code == 401:
+                raise BeetsAuthError("Authentication with Beets Control Agent failed: 401 Unauthorized") from exc
+            try:
+                parsed = json.loads(exc.read().decode("utf-8"))
+                if isinstance(parsed, dict) and parsed.get("status"):
+                    return parsed
+            except Exception:
+                pass
+            raise BeetsUnavailableError(f"Beets Control Agent error: HTTP {exc.code}") from exc
+        except urllib.error.URLError as exc:
+            raise BeetsUnavailableError(f"Beets Control Agent is unavailable at {self.base_url}: {exc.reason}") from exc
+        except json.JSONDecodeError as exc:
+            raise BeetsUnavailableError("Beets Control Agent returned malformed JSON") from exc
+        except TimeoutError as exc:
+            raise BeetsUnavailableError("Timed out communicating with Beets Control Agent") from exc
+        except Exception as exc:
+            raise BeetsUnavailableError("Failed to communicate with Beets Control Agent") from exc
 
 
 class RemoteSQLiteCursor:

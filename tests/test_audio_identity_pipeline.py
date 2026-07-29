@@ -12,6 +12,7 @@ from _app_ast_cache import get_app_ast  # noqa: E402
 ROOT = Path(__file__).resolve().parents[1]
 APP_SOURCE = (ROOT / "app.py").read_text(encoding="utf-8")
 HELPERS_SOURCE = (ROOT / "helpers_mb.py").read_text(encoding="utf-8")
+CONTROL_AGENT_SOURCE = (ROOT / "backend" / "beets_control_agent.py").read_text(encoding="utf-8")
 
 
 def load_symbols(names, namespace):
@@ -219,11 +220,16 @@ class AudioIdentityPipelineStaticTests(unittest.TestCase):
         self.assertIn('"fingerprint"', body)
         self.assertIn('"acoustid_id"', body)
 
-    def test_acoustid_lookup_has_retry_rate_limit_and_release_group_fields(self):
-        self.assertIn("_ACOUSTID_LOOKUP_LOCK", HELPERS_SOURCE)
-        self.assertIn("for attempt in range(2)", HELPERS_SOURCE)
-        self.assertIn('"acoustid_id"', HELPERS_SOURCE)
-        self.assertIn('"mb_releasegroupid"', HELPERS_SOURCE)
+    def test_acoustid_lookup_has_retry_and_release_group_fields(self):
+        # ARCH-012: fingerprinting and the AcoustID HTTP call moved into the
+        # engine-side /audio/acoustid-lookup adapter (backend/beets_control_agent.py);
+        # helpers_mb.py is now a thin remote-call wrapper with no retry/rate-limit
+        # logic of its own.
+        self.assertIn("for attempt in range(2)", CONTROL_AGENT_SOURCE)
+        self.assertIn('"acoustid_id"', CONTROL_AGENT_SOURCE)
+        self.assertIn('"mb_releasegroupid"', CONTROL_AGENT_SOURCE)
+        self.assertNotIn("_ACOUSTID_LOOKUP_LOCK", HELPERS_SOURCE)
+        self.assertIn("beets_client.acoustid_lookup(file_path)", HELPERS_SOURCE)
 
 
 if __name__ == "__main__":

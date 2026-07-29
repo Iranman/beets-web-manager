@@ -13,6 +13,9 @@ services:
       - BEETSDIR=/config
       - BEETS_API_TOKEN=${BEETS_API_TOKEN:?set a required strong token}
       - BEETS_AGENT_PORT=8338
+      # Owned by the engine: /audio/acoustid-lookup runs fpcalc and queries
+      # api.acoustid.org from inside this container, not the web manager.
+      - ACOUSTID_API_KEY=${ACOUSTID_API_KEY:-}
     volumes:
       - ./config:/config
       - ${MUSIC_LIBRARY_PATH:-./data/music}:/data/media/music
