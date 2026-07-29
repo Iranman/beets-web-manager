@@ -1033,6 +1033,16 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 self._send_json(400, {"error": "Query string is required"})
                 return
 
+            # Cap length before any regex processing: the comment-stripping
+            # patterns below are worst-case polynomial in input size on
+            # pathological input (CodeQL py/polynomial-redos), so bounding
+            # the input size bounds the worst-case cost to a fixed constant
+            # regardless of pattern shape. No legitimate SELECT needs 10k+
+            # characters.
+            if len(query) > 10_000:
+                self._send_json(400, {"error": "Query string is too long"})
+                return
+
             clean_q = re.sub(r'/\*.*?\*/', '', query, flags=re.DOTALL)
             clean_q = re.sub(r'--.*$', '', clean_q, flags=re.MULTILINE).strip()
 
@@ -1061,16 +1071,29 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
 
             lock_file = acquire_os_lock(read_only=True)
             try:
-                con = sqlite3.connect(LIB_PATH, timeout=10)
+                # This endpoint's entire purpose is to run a caller-supplied
+                # read-only SELECT (an admin/power-user query tool), so the
+                # query text is deliberately interpolated into the SQL, not
+                # parameterized -- CodeQL correctly flags this pattern
+                # (py/sql-injection, alerts #348/#349) since it can't verify
+                # the layered defenses actually applied above and below:
+                # comment-stripped, single-statement only (";" rejected),
+                # denylisted against every mutating/administrative keyword,
+                # must start with SELECT/WITH, length-capped, and -- the
+                # backstop below -- the connection itself is opened
+                # read-only at the SQLite engine level via URI mode, so even
+                # a successful bypass of every check above cannot mutate
+                # the database.
+                con = sqlite3.connect(f"file:{LIB_PATH}?mode=ro", uri=True, timeout=10)
                 con.row_factory = sqlite3.Row
                 cur = con.cursor()
 
                 count_sql = f"SELECT COUNT(*) FROM ({clean_q}) AS _total_subquery"
-                cur.execute(count_sql, params_list)
+                cur.execute(count_sql, params_list)  # codeql[py/sql-injection] -- see comment above: read-only connection, denylisted, single-statement, length-capped by design
                 total_count = cur.fetchone()[0]
 
                 page_sql = f"SELECT * FROM ({clean_q}) AS _page_subquery LIMIT ? OFFSET ?"
-                cur.execute(page_sql, list(params_list) + [limit, offset])
+                cur.execute(page_sql, list(params_list) + [limit, offset])  # codeql[py/sql-injection] -- see comment above: read-only connection, denylisted, single-statement, length-capped by design
                 rows = [dict(r) for r in cur.fetchall()]
                 con.close()
 

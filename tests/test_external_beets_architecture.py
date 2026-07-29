@@ -121,6 +121,59 @@ class TestBeetsControlAgentSecurity(unittest.TestCase):
             self.assertEqual(code, 400, f"Query '{q}' should have been rejected with 400, got {code}")
             self.assertIn("error", data)
 
+    def test_raw_query_rejects_oversized_query_before_regex_processing(self):
+        """CodeQL py/polynomial-redos (alerts #353/#354): the comment-stripping
+        regexes applied to the raw_query string are worst-case polynomial in
+        input size on pathological input. Capping the input length bounds
+        the worst case to a fixed constant regardless of pattern shape."""
+        handler = ControlAgentHandler.__new__(ControlAgentHandler)
+        handler.headers = {"X-Beets-API-Token": "testtoken"}
+
+        sent_responses = []
+        def _send_json(code, data):
+            sent_responses.append((code, data))
+
+        handler._send_json = _send_json
+        handler._authenticate = lambda: True
+
+        oversized_query = "SELECT * FROM items WHERE id IN (" + ",".join(str(n) for n in range(5000)) + ")"
+        self.assertGreater(len(oversized_query), 10_000)
+
+        handler.path = "/library/raw_query"
+        body = json.dumps({"query": oversized_query}).encode("utf-8")
+        handler.rfile = BytesIO(body)
+        handler.headers["Content-Length"] = str(len(body))
+        handler.do_POST()
+
+        self.assertEqual(len(sent_responses), 1)
+        code, data = sent_responses[0]
+        self.assertEqual(code, 400)
+        self.assertIn("too long", data["error"])
+
+    def test_raw_query_within_length_limit_is_not_rejected_for_length(self):
+        handler = ControlAgentHandler.__new__(ControlAgentHandler)
+        handler.headers = {"X-Beets-API-Token": "testtoken"}
+
+        sent_responses = []
+        def _send_json(code, data):
+            sent_responses.append((code, data))
+
+        handler._send_json = _send_json
+        handler._authenticate = lambda: True
+
+        handler.path = "/library/raw_query"
+        body = json.dumps({"query": "SELECT * FROM items"}).encode("utf-8")
+        handler.rfile = BytesIO(body)
+        handler.headers["Content-Length"] = str(len(body))
+        with mock.patch("backend.beets_control_agent.os.path.exists", return_value=False):
+            handler.do_POST()
+
+        code, data = sent_responses[0]
+        # Rejected for a different reason (missing DB file in this unit
+        # test), never for length -- proves the cap doesn't false-positive
+        # on an ordinary short query.
+        self.assertNotIn("too long", data.get("error", ""))
+
     def test_s6_service_discovery_path_in_dockerfile(self):
         """Assert Dockerfile.beets uses LinuxServer supported /custom-services.d path."""
         dockerfile_path = ROOT / "Dockerfile.beets"
