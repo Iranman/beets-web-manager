@@ -481,18 +481,6 @@ def _path_is_within(candidate: str, root: str) -> bool:
         return os.path.commonpath([real_candidate, real_root]) == real_root
     except Exception:
         return False
-    except Exception:
-        return None
-
-
-def is_safe_path(path: str, allowed_types: list = None) -> bool:
-    """Verify that path stays strictly within allowed root directories without
-    traversal or symlink escape. Boolean-only compatibility wrapper around
-    resolve_safe_path() for call sites that only need a yes/no gate (e.g.
-    validating an argument that is not itself about to be opened here).
-    Sinks that open/move/delete the path should call resolve_safe_path()
-    directly and use its return value, not this wrapper."""
-    return resolve_safe_path(path, allowed_types) is not None
 
 
 class UnsafePathError(ValueError):
@@ -1461,7 +1449,6 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             if unsafe_tags:
                 self._send_json(400, {"error": "Unsupported tag field"})
                 return
-                return
 
             lock_file = acquire_os_lock(read_only=False)
             try:
@@ -1605,16 +1592,21 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             try:
                 safe_file_path = resolve_safe_path(file_path, ["music", "staging"])
             except UnsafePathError:
-                self._send_json(403, {"ok": False, "status": "analysis_error", "error": f"Access denied for path outside allowed roots: {file_path}"})
+                self._send_json(403, {"ok": False, "status": "analysis_error", "error": "Access denied for path outside allowed roots"})
                 return
 
-            if not safe_file_path.exists():  # codeql[py/path-injection] -- sanitized by resolve_safe_path() above
-                self._send_json(404, {"ok": False, "status": "invalid_media", "error": f"File not found: {file_path}"})
+            # safe_file_path is the canonical Path returned by resolve_safe_path()
+            # above, not the raw request string -- see docs/TECHNICAL_DEBT.md
+            # for the known CodeQL false-positive gap on this pattern (the
+            # default query pack does not model resolve_safe_path() as a
+            # sanitizer; a source comment cannot suppress this, only an
+            # advanced-setup model pack or an owner-reviewed alert dismissal can).
+            if not safe_file_path.exists():
+                self._send_json(404, {"ok": False, "status": "invalid_media", "error": "File not found"})
                 return
 
-            if not safe_file_path.is_file():  # codeql[py/path-injection] -- sanitized by resolve_safe_path() above
-                self._send_json(400, {"ok": False, "status": "invalid_media", "error": f"Path is not a regular file: {file_path}"})
-                return
+            if not safe_file_path.is_file():
+                self._send_json(400, {"ok": False, "status": "invalid_media", "error": "Path is not a regular file"})
                 return
 
             fpcalc = shutil.which("fpcalc") or "/usr/bin/fpcalc"
@@ -1628,7 +1620,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 return
 
             try:
-                res = subprocess.run([fpcalc, "-json", str(safe_file_path)], capture_output=True, text=True, timeout=30, shell=False)  # codeql[py/path-injection] -- sanitized by resolve_safe_path() above
+                res = subprocess.run([fpcalc, "-json", str(safe_file_path)], capture_output=True, text=True, timeout=30, shell=False)
                 if res.returncode != 0 or not res.stdout.strip():
                     self._send_json(500, {"ok": False, "status": "analysis_error", "error": f"fpcalc failed with exit code {res.returncode}"})
                     return
@@ -1641,8 +1633,8 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             except subprocess.TimeoutExpired:
                 self._send_json(504, {"ok": False, "status": "timeout", "error": "fpcalc fingerprinting timed out after 30s"})
                 return
-            except Exception as exc:
-                self._send_json(500, {"ok": False, "status": "analysis_error", "error": f"fpcalc execution error: {exc}"})
+            except Exception:
+                self._send_json(500, {"ok": False, "status": "analysis_error", "error": "fpcalc execution error"})
                 return
 
             params = urllib.parse.urlencode({
