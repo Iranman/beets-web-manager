@@ -47,6 +47,7 @@ from app import (  # noqa: E402
     jobs,
     lib,
 )
+from backend.beets_client import beets_client
 from backend.security import OutboundPolicyError, validate_outbound_url
 
 _SUBMISSION_ALLOWED_ROOTS = (MUSIC_ROOT, DOWNLOADS_ROOT)
@@ -238,20 +239,52 @@ def _config_has_acoustid_key(config_path: str = "/config/config.yaml") -> bool:
 
 
 def _submission_readiness() -> Dict[str, Any]:
-    configured = set(_read_beets_plugin_list())
-    fpcalc_path = shutil.which("fpcalc") or ""
+    """Report AcoustID/MusicBrainz submission capability strictly from the remote
+    Beets control agent's own /status response.
+
+    Fails closed: any connection failure, authentication failure, or malformed
+    response is reported as every capability being unavailable rather than
+    falling back to local `find_spec()`/`shutil.which()`/local Beets config
+    checks -- the web manager has no local Beets installation to inspect, so a
+    local fallback could only ever be a guess, not a fact.
+    """
+    remote_status = None
+    remote_error = ""
+    try:
+        remote_status = beets_client.get_status()
+    except Exception as exc:
+        app.logger.warning("Submission readiness status check failed: %s", type(exc).__name__)
+        remote_error = "Beets control agent status is unavailable"
+    if not isinstance(remote_status, dict) or remote_status.get("status") != "ok":
+        return {
+            "plugins": {"mbsubmit": False, "musicbrainz": False, "chroma": False, "mbsync": False},
+            "fpcalc_available": False,
+            "fpcalc_path": "",
+            "pyacoustid_available": False,
+            "acoustid_key_configured": bool(_acoustid_key() or _config_has_acoustid_key()),
+            "beet_available": False,
+            "remote_reachable": False,
+            "reason": remote_error or "Beets control agent status is unavailable or malformed",
+        }
+
+    remote_plugins = remote_status.get("plugins")
+    if not isinstance(remote_plugins, dict):
+        remote_plugins = {}
+
     return {
         "plugins": {
-            "mbsubmit": "mbsubmit" in configured,
-            "musicbrainz": "musicbrainz" in configured,
-            "chroma": "chroma" in configured,
-            "mbsync": "mbsync" in configured,
+            "mbsubmit": bool(remote_plugins.get("mbsubmit", False)),
+            "musicbrainz": bool(remote_plugins.get("musicbrainz", False)),
+            "chroma": bool(remote_plugins.get("chroma", False)),
+            "mbsync": bool(remote_plugins.get("mbsync", False)),
         },
-        "fpcalc_available": bool(fpcalc_path),
-        "fpcalc_path": fpcalc_path,
-        "pyacoustid_available": importlib.util.find_spec("acoustid") is not None,
+        "fpcalc_available": bool(remote_status.get("fpcalc_available", False)),
+        "fpcalc_path": remote_status.get("fpcalc_path") or "",
+        "pyacoustid_available": bool(remote_status.get("pyacoustid_available", False)),
         "acoustid_key_configured": bool(_acoustid_key() or _config_has_acoustid_key()),
-        "beet_available": bool(BEET_BIN and Path(BEET_BIN).exists()),
+        "beet_available": True,
+        "remote_reachable": True,
+        "reason": "",
     }
 
 
@@ -420,17 +453,16 @@ def _media_tag_track_payload(file_path: Path, index: int) -> Dict[str, Any]:
     mb_trackid = ""
     if exists:
         try:
-            from beets.mediafile import MediaFile
-            mf = MediaFile(str(file_path))
-            title = _s(mf.title or "").strip()
-            artist = _s(mf.artist or "").strip()
-            album = _s(mf.album or "").strip()
-            albumartist = _s(getattr(mf, "albumartist", "") or artist).strip()
-            track = int(mf.track or 0)
-            disc = int(mf.disc or 0)
-            year = int(getattr(mf, "year", 0) or getattr(mf, "original_year", 0) or 0)
-            duration = float(mf.length or 0)
-            mb_trackid = _s(getattr(mf, "mb_trackid", "") or "").strip().lower()
+            from backend.beets_client import beets_client
+            tags = beets_client.read_tags(str(file_path))
+            title = _s(tags.get("title", "") or "").strip()
+            artist = _s(tags.get("artist", "") or "").strip()
+            album = _s(tags.get("album", "") or "").strip()
+            albumartist = _s(tags.get("albumartist", "") or artist).strip()
+            track = int(tags.get("track", 0) or 0)
+            disc = int(tags.get("disc", 0) or 0)
+            year = int(tags.get("year", 0) or 0)
+            mb_trackid = _s(tags.get("mb_trackid", "") or "").strip().lower()
             fmt = file_path.suffix.lstrip(".").upper()
         except Exception:
             pass
@@ -1488,4 +1520,3 @@ def attach_album_mbids(aid: int):
 
     job = jobs.start_python(_do, label=f"Attach MusicBrainz IDs: album {aid}", metadata={"type": "musicbrainz-match", "album_id": aid, "transaction_operation": "MusicBrainz Match"})
     return jsonify({"ok": True, "job_id": job.job_id})
-

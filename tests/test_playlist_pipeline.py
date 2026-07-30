@@ -2,6 +2,7 @@ import ast
 import hashlib
 import json
 import re
+import sys
 import tempfile
 import threading
 import time
@@ -10,6 +11,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _app_ast_cache import get_app_ast  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_SOURCE = (ROOT / "app.py").read_text(encoding="utf-8")
@@ -19,7 +22,7 @@ TYPES_SOURCE = (ROOT / "frontend" / "src" / "api" / "types.ts").read_text(encodi
 
 
 def load_function(name, namespace):
-    tree = ast.parse(APP_SOURCE)
+    tree = get_app_ast()
     node = next(item for item in tree.body if isinstance(item, ast.FunctionDef) and item.name == name)
     module = ast.Module(body=[node], type_ignores=[])
     ast.fix_missing_locations(module)

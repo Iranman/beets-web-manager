@@ -11,6 +11,7 @@ jobs:
   compose-verification:
     runs-on: ubuntu-latest
     env:
+      BEETS_API_TOKEN: changeme
       BEETS_WEB_AUTH_TOKEN: changeme
       OPENAI_API_KEY: changeme
       PLEX_TOKEN: changeme
@@ -28,7 +29,7 @@ jobs:
       - run: python scripts/validate_compose_security.py
       - run: docker compose -f docker-compose.arrs.yml config
       - run: docker compose config
-      - run: docker build --pull=false -t beets-web-manager:ci .
+      - run: docker build --pull=false --build-arg VCS_REF="${{ github.sha }}" -t beets-web-manager:ci .
       - name: Installation smoke test
         run: |
           set -e
@@ -68,3 +69,38 @@ jobs:
             echo "::error::Container never became healthy within the timeout"
             exit 1
           fi
+
+  beets-engine-verification:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Build Beets engine image
+        run: docker build --pull=false --build-arg VCS_REF="${{ github.sha }}" -f Dockerfile.beets -t beets-engine:ci .
+      - name: Verify Beets engine image
+        run: |
+          set -e
+          args=(--image beets-engine:ci --require-version 2.4.0 --require-command-help mbsubmit --check-s6-supervision)
+          # Chroma plugin-resolution assertions activate automatically once
+          # this file marker (the build-time patch script) is present on the
+          # checked-out tree -- e.g. after fix/chroma-acoustid-plugin merges
+          # into this branch's base. No follow-up change to that branch's
+          # own workflow is required.
+          if [ -f docker/beets/apply_patches.py ]; then
+            echo "Chroma plugin-resolution patch detected; activating Chroma-specific verification."
+            args+=(--require-plugin chroma --forbid-duplicate-plugin musicbrainz --require-command-help submit)
+          fi
+          # bpsync is verified separately from Chroma: they are unrelated
+          # plugins that happened to be bundled under the same "same defect
+          # class" description in an earlier PR draft. bpsync has its own,
+          # different, credential-independent upstream incompatibility
+          # (BeatportPlugin.setup() requires a session argument bpsync.py's
+          # __init__ never provides) -- verified through Beets' real plugin
+          # loader, not just import+class-identity. Reported, not fatal,
+          # since bpsync is not enabled in production and does not affect
+          # Chroma, submit, or mbsubmit. Add --require-bpsync-operational
+          # only if a deployment actually starts depending on bpsync.
+          args+=(--check-bpsync)
+          python scripts/verify_beets_engine_image.py "${args[@]}"

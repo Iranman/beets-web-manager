@@ -1,15 +1,18 @@
 import ast
 import re
+import sys
 import unittest
 from pathlib import Path
 from typing import Any, Dict, List
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _app_ast_cache import get_app_ast  # noqa: E402
 
 APP_SOURCE = Path(__file__).resolve().parents[1] / "app.py"
 
 
 def _load_matcher_namespace():
-    tree = ast.parse(APP_SOURCE.read_text(encoding="utf-8"))
+    tree = get_app_ast()
     names = {
         "_ALBUM_TRACK_PREFIX_RE",
         "_ALBUM_TRACK_ANNOT_RE",

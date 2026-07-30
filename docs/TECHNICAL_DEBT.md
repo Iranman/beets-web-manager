@@ -4,11 +4,11 @@ Statuses: Open, In Progress, Blocked, Done.
 
 ## ARCH-001 Monolithic Route/Domain/Mutation Coupling
 
-- Affected area: Backend `app.py`.
-- Evidence: route scan found most API routes in `app.py`, including import review, library, cleanup, deduplication, playlists, Plex, configuration, transactions, and import endpoints. `app.py` also contains matching helpers, Beets subprocess calls, direct SQLite access, direct filesystem mutations, and job orchestration.
-- Current risk: Changes to one workflow can accidentally alter unrelated behavior. AI-assisted edits are prone to conflicts because many responsibilities share one file.
-- Desired state: Routes remain thin. Application services own workflows. Domain modules own matching and safety decisions. Provider adapters own external calls. Repositories own Beets/SQLite access.
-- Safe migration approach: Extract one tested service at a time. Start with pure functions already represented in tests. Keep route signatures and responses stable.
+- Affected area: Backend `app.py` and route modules.
+- Evidence: Route scan still finds most operator workflows in `app.py`, including import review, library, cleanup, deduplication, playlists, Plex, configuration, transactions, and import endpoints. The external-engine branch changed the service boundary: Beets command arrays now flow through `job_engine._beet_run()`/`BeetsClient`, and `_db()` returns `RemoteSQLiteConnection` instead of a local file handle. The monolith still mixes routing, matching, orchestration, legacy SQL-shaped calls, and residual filesystem mutation call sites.
+- Current risk: Changes to one workflow can accidentally alter unrelated behavior. Compatibility shims reduce migration blast radius, but they also hide whether a route is using a well-owned service method or a legacy remote-SQL/remote-command shape.
+- Desired state: Routes remain thin. Application services own workflows. Domain modules own matching and safety decisions. Provider adapters own external calls. Repository/client methods own Beets-engine access.
+- Safe migration approach: Extract one tested service at a time. Prefer replacing legacy SQL-shaped and command-array callers with explicit `BeetsClient` methods while preserving route signatures and responses.
 - Priority: P0.
 - Status: Open.
 
@@ -25,10 +25,10 @@ Statuses: Open, In Progress, Blocked, Done.
 ## ARCH-003 Mutations Do Not All Use One Controlled Boundary
 
 - Affected area: Beets command execution, filesystem cleanup, metadata write, artwork repair, import, playlist placement, deduplication, replacement.
-- Evidence: Direct `shutil.move`, `shutil.rmtree`, `Path.unlink`, `os.replace`, Beets `modify/write/move/import`, and direct SQLite writes appear in `app.py` and `routes_submissions.py`. `backend/transaction_engine.py` exists but is not universal.
-- Current risk: Preview/audit/rollback behavior varies by workflow. Partial failure can be hard to recover or may be reported inconsistently.
-- Desired state: Mutating workflows use shared plan/apply/verify/recover semantics with root validation, diffs, audit records, and recovery information.
-- Safe migration approach: Wrap one high-risk mutation family at a time using `TransactionStore` rather than replacing all callers. Start with deletes/moves from Import Review and cleanup paths.
+- Evidence: The `beets` control agent now owns Beets CLI execution, direct SQLite compatibility queries, tag writes, and file move/delete endpoints inside the authoritative engine container. `app.py` still contains many legacy command-array call sites and residual direct filesystem operations (`shutil.move`, `shutil.rmtree`, `Path.unlink`, `os.replace`, copies, and directory removals) that are not all planned, audited, and verified through one transaction boundary. `backend/transaction_engine.py` exists but is not universal.
+- Current risk: Preview/audit/rollback behavior varies by workflow. Partial failure can be hard to recover or may be reported inconsistently. Residual filesystem call sites also make it easy to accidentally depend on web-manager media mounts that the supported two-service Compose files intentionally do not provide.
+- Desired state: Mutating workflows use shared plan/apply/verify/recover semantics with root validation, diffs, audit records, and recovery information, and all media/Beets mutations execute in the `beets` engine boundary.
+- Safe migration approach: Wrap one high-risk mutation family at a time using `TransactionStore` and explicit control-agent/BeetsClient APIs rather than replacing all callers. Start with deletes/moves from Import Review and cleanup paths.
 - Priority: P0.
 - Status: Open.
 
@@ -62,25 +62,25 @@ Statuses: Open, In Progress, Blocked, Done.
 - Priority: P2.
 - Status: Open.
 
-## ARCH-007 Direct SQLite Access Bypasses Repository Boundary
+## ARCH-007 Raw SQL Compatibility Layer Bypasses Repository Boundary
 
-- Affected area: Beets database reads/writes across `app.py`.
-- Evidence: `_db()` exists, but direct `sqlite3.connect(LIB_PATH)` calls also appear throughout `app.py`.
-- Current risk: Lock handling, row factories, path normalization, and write safety can vary by caller.
-- Desired state: A small Beets repository layer owns common reads/writes and lock retry policy.
-- Safe migration approach: Consolidate repeated read-only queries first. Move write paths only when covered by mutation tests.
+- Affected area: Web-manager legacy `_db()`/`RemoteSQLiteConnection` callers and control-agent SQLite endpoints.
+- Evidence: The original local SQLite violation has been removed from the web-manager service boundary: `app.py`'s `_db()` yields `backend.beets_client.RemoteSQLiteConnection`, and the actual `sqlite3.connect(LIB_PATH)` calls are in `backend/beets_control_agent.py` inside the `beets` container. However many routes still express data access as raw SQL-shaped calls over the remote compatibility layer instead of using explicit repository/client methods.
+- Current risk: Lock handling, pagination, row factories, path normalization, query allowlisting, and write safety can vary by caller. The service boundary is safer than before, but the repository boundary is still weak.
+- Desired state: A small Beets repository/client layer owns common reads/writes and lock retry policy. Web-manager routes call typed methods rather than raw SQL-shaped compatibility calls.
+- Safe migration approach: Consolidate repeated read-only queries first by adding explicit `BeetsClient` methods backed by control-agent endpoints. Move write paths only when covered by mutation tests and transaction/audit records.
 - Priority: P2.
 - Status: Open.
 
 ## ARCH-008 Agent Instructions Were Too Large And Duplicated
 
-- Affected area: `AGENTS.md`, `CLAUDE.md`.
-- Evidence: Both files contained large overlapping operational guidance and product rules, making drift likely.
-- Current risk: Different agents can follow different rules or miss key safety constraints in long files.
-- Desired state: Concise agent files reference `docs/AI_ENGINEERING_RULES.md` as the shared rule source.
-- Safe migration approach: Keep agent files short, add static governance tests, and update shared docs for rule changes.
+- Affected area: `AGENTS.md`, `CLAUDE.md`, `docs/AGENT_WORKFLOW.md`, `docs/AI_ENGINEERING_RULES.md`, and governance tests.
+- Evidence: The integrated governance branch adds shared workflow documentation and static tests in `tests/test_engineering_governance_docs.py`. The instructions now distinguish review-and-fix work, push/PR/merge/deploy restrictions, migration-sensitive work, and the difference between implemented, tested, verified, ready to push, ready to merge, and ready to deploy.
+- Current risk: Low. Future drift is still possible if agent files are edited without updating the shared docs and governance tests.
+- Desired state: Concise agent files reference shared rules, and governance tests catch contradictory terminology or unsafe authority claims.
+- Safe migration approach: Keep agent files short, keep project-manager assignments allowed, and update shared docs and tests together for rule changes.
 - Priority: P1.
-- Status: In Progress.
+- Status: Done.
 
 ## ARCH-009 Release ID And Release-Group Identity Are Inconsistently Modeled
 
@@ -104,3 +104,35 @@ Statuses: Open, In Progress, Blocked, Done.
 - Note on runtime model: this app's supported deployment is one Waitress process with a thread pool, not multiple worker processes (see `_ai_batch_active_workers`' comment in `app.py`). A version/CAS field is still worth adding for correctness and clarity even in a single-process model, and becomes necessary (not just nice-to-have) if the deployment model ever changes to multiple processes or containers sharing one state directory. The active-worker registry is explicitly process-local only -- it provides no guarantee across multiple Python processes, multiple containers, or multiple hosts sharing the JSON state directory; durable/file-based locking would be required for that, tracked here as future work, not implemented in PR #12.
 - Priority: P2.
 - Status: Open.
+
+## ARCH-011 Remote Beets Plugin Diagnostics For `/api/setup/status`
+
+- Affected area: `routes_setup.py`, `backend/beets_client.py`, `backend/beets_control_agent.py`, and setup-status tests.
+- Evidence: The integrated branch removes setup-status dependency on `_beet_binary()`/`_run_beet_diagnostic()` and normalizes one authenticated Beets control-agent `/status` snapshot into the existing public fields (`available`, `version`, `plugin_loader_ok`, `plugin_loader_error`, `configured_plugins`, `plugin_failures`) plus `loaded_plugins`, `installed_plugins`, `capabilities`, `commands`, and remote path/tool health. The control agent reports Beets version, loaded plugins, plugin failures, `submit` and `mbsubmit` command readiness, Chroma/fingerprinting, AcoustID lookup/submission, MusicBrainz submission, FetchArt, ReplayGain, LastGenre, Discogs, ListenBrainz, and Discpath state. Unit tests cover connection failure, authentication failure, timeout, malformed shapes, FetchArt loaded/failed, Chroma present/missing, independent submit/mbsubmit readiness, ReplayGain backend readiness, Discpath readiness, redaction, no local subprocess lookup, and one-snapshot reuse. Disposable runtime validation passed for the patched engine, Chroma disabled, invalid control-agent credentials, and unreachable control-agent cases.
+- Current risk: Low. Future risk is mostly contract drift between `backend/beets_control_agent.py`, `backend/beets_client.py`, and `routes_setup.py` if one side changes without tests.
+- Desired state: `/api/setup/status` reports authoritative remote Beets readiness, fails closed on remote errors, never falls back to a local Beets executable or local `find_spec()` as operational proof, and does not leak the internal API token or raw exceptions.
+- Safe migration approach: Keep the current compatibility response shape for frontend callers. Extend the control-agent status contract only with additive structured fields. Do not treat setup-status display as a security boundary; command endpoints must continue enforcing capability checks themselves.
+- Required tests: Covered by `tests/test_routes_setup.py`, `tests/test_external_beets_architecture.py`, image verification, and disposable Compose runtime probes.
+- Priority: P1.
+- Status: Done.
+
+## ARCH-012 Library Disk-Walk Loses Real Albums Whose Folder Is Entirely Missing
+
+- Affected area: `app.py` `_build_library_payload()`, specifically the leftover-`missing_by_bucket` injection pass that runs after the per-artist-folder walk (the "Any remaining missing items belong to artists not on disk at all" block).
+- Evidence: Live verification against the real production database (3,144 items / 413 albums, confirmed by direct query) found `/api/library` reporting only 368 unique `album_id`s after the `_library_stats_for_artists()` aggregation fix (see the library-summary-aggregation fix on `integration/external-beets-engine-release-v2`) -- 45 real albums are not represented by any disk-walk card at all. Their items are all "missing" (file gone from disk), and the leftover-injection code's artist/album name-based lookup (`beets_album_lk.get((mart.lower(), malb.lower()), {})`) fails to match them back to their real `album_id`, so `ba_info2` stays `{}` and the card is built with `album_id=0` -- landing in the singleton bucket instead of being counted as a real album.
+- Current risk: Medium. Read-only display accuracy only (no data mutation risk -- the underlying Beets database is unaffected), but `/api/library`'s `albums`/`tracks` totals undercount by roughly this margin whenever an entire album folder has been removed from disk while the Beets rows remain.
+- Desired state: The leftover-missing-item injection should reliably resolve every fully-missing album back to its real `album_id`, most likely by keying off each missing item's own `album_id` (already present on the item row) instead of, or in addition to, the artist/album name-string lookup, which is fragile to normalization differences between the stored `albumartist`/`album` fields and the on-disk folder-derived name.
+- Safe migration approach: This is disk-walk traversal logic -- CLAUDE.md's "`/api/library` is high risk, needs side-by-side parity checks before any traversal-logic change" applies. Do not modify `_build_library_payload()` without first building a side-by-side parity harness (old output vs. new output over a real or realistically-shaped fixture) so a fix here can't silently regress a different part of the walk.
+- Required tests: A new parity/regression test modeling a real album whose entire folder is missing from disk, asserting it is still counted in `albums`/`tracks`, not `singleton_tracks`.
+- Priority: P1.
+- Status: Open.
+
+## SEC-001 Retained Plex Credential After Diagnostic Exposure
+
+- Date: 2026-07-29.
+- Scope: `PLEX_TOKEN`, used only by `beets-web-manager`.
+- Risk: the token appeared in private diagnostic session output during earlier work on this branch and must be treated as potentially exposed.
+- Decision: owner reviewed the exposure and explicitly chose to retain the current token rather than revoke/replace it, accepting the associated risk.
+- Existing mitigations: `PLEX_TOKEN` is sent via a request header, never a URL query parameter (query-string tokens are far more likely to end up in access logs/proxies). A stable, persisted, installation-specific Plex client identifier (`X-Plex-Client-Identifier`/`X-Plex-Product`/`X-Plex-Device-Name`) is now sent on every request, so any future rotation is cleanly attributable instead of facing the ambiguity that blocked attribution this time (the token has visibility into 35 authorized devices with no way to isolate which one originally produced it). Token values are never logged, printed, or included in reports.
+- Future recommended action: rotate `PLEX_TOKEN` when convenient, using Plex Web -> Settings -> Account -> Authorized Devices to remove the specific session, then generate a replacement.
+- Status: Owner accepted. Not a release blocker.

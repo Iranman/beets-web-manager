@@ -11,7 +11,7 @@ import LinearProgress from '@mui/material/LinearProgress';
 import MenuItem from '@mui/material/MenuItem';
 import TextField from '@mui/material/TextField';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router';
 import { getAlbumTracks, getArtistImageUrl, getLibraryArtRepairReport } from '../api/client';
 import type { ArtRepairItem, ArtRepairReportResponse } from '../api/types';
 import { artistNeedsAttention, getAlbumHealth } from '../lib/libraryHealth';

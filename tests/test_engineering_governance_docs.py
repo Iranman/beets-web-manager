@@ -16,6 +16,7 @@ class EngineeringGovernanceDocsTest(unittest.TestCase):
             "CLAUDE.md",
             "REVIEW.md",
             "docs/AI_ENGINEERING_RULES.md",
+            "docs/AGENT_WORKFLOW.md",
             "docs/ARCHITECTURE.md",
             "docs/TECHNICAL_DEBT.md",
             "docs/operations/DEVELOPMENT_AND_DEPLOYMENT.md",
@@ -29,6 +30,7 @@ class EngineeringGovernanceDocsTest(unittest.TestCase):
     def test_agent_files_point_to_shared_source_of_truth(self) -> None:
         required_references = [
             "docs/AI_ENGINEERING_RULES.md",
+            "docs/AGENT_WORKFLOW.md",
             "docs/ARCHITECTURE.md",
             "docs/TECHNICAL_DEBT.md",
             "REVIEW.md",
@@ -141,8 +143,50 @@ class EngineeringGovernanceDocsTest(unittest.TestCase):
         self.assertIn("AGENTS.md.bak-*", gitignore)
         self.assertIn("CLAUDE.md.bak-*", gitignore)
         self.assertIn("!docs/AI_ENGINEERING_RULES.md", gitignore)
+        self.assertIn("!docs/AGENT_WORKFLOW.md", gitignore)
         self.assertIn("!docs/operations/*.md", gitignore)
         self.assertIn("!docs/incidents/*.md", gitignore)
+
+    def test_agent_workflow_defines_chain_of_command(self) -> None:
+        content = read_repo_file("docs/AGENT_WORKFLOW.md")
+        expected_roles = [
+            "Project Owner — Iran",
+            "Project Manager — ChatGPT",
+            "Technical Lead and Final Reviewer — Claude",
+            "Implementation Engineer — Agy",
+        ]
+        for role in expected_roles:
+            with self.subTest(role=role):
+                self.assertIn(role, content)
+
+    def test_agent_workflow_gives_claude_fix_authority_not_review_only(self) -> None:
+        content = read_repo_file("docs/AGENT_WORKFLOW.md")
+        self.assertIn(
+            "Do not only report findings. Fix every issue you identify directly, "
+            "add or correct tests, rerun all required validation, and leave the "
+            "branch in a clean final state.",
+            content,
+        )
+        self.assertIn("Fix issues directly in code rather than producing a findings-only report", content)
+
+    def test_agent_workflow_restricts_push_pr_merge_deploy_authority(self) -> None:
+        content = read_repo_file("docs/AGENT_WORKFLOW.md")
+        restricted_actions = [
+            "`git push` or `git push --force`",
+            "Open a pull request or modify an existing pull request",
+            "Mark a draft PR as ready for review",
+            "`git merge` or merge PRs on GitHub",
+            "Deploy to TrueNAS or production environments",
+        ]
+        for action in restricted_actions:
+            with self.subTest(action=action):
+                self.assertIn(action, content)
+
+    def test_agent_workflow_is_not_a_conversation_transcript(self) -> None:
+        content = read_repo_file("docs/AGENT_WORKFLOW.md")
+        for banned_phrase in ("as we discussed", "in this session", "in this conversation", "as requested above"):
+            with self.subTest(phrase=banned_phrase):
+                self.assertNotIn(banned_phrase, content.lower())
 
 
 if __name__ == "__main__":

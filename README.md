@@ -7,7 +7,7 @@ I made this because the beets web plugin just wasn't cutting it. Not only does t
 
 ## Features
 
-- Flask backend that reads and updates a Beets library directly.
+- Flask web manager that orchestrates Beets through an authenticated internal control agent.
 - React and Next.js static frontend served by the backend.
 - Import review queue with evidence-driven accept, reject, and cleanup actions.
 - Playlist ingestion from files, URLs, pasted tracks, and saved playlist manifests.
@@ -36,14 +36,14 @@ cp .env.example .env
 
 ## Docker Installation
 
-The provided Compose file is intended for a broader Arr/media stack. The Beets app service is hardened to run non-root, bind to loopback by default, and mount only the Beets config, music library, and music staging roots.
+The provided Compose files run two Beets-related services: `beets`, the authoritative Beets engine, and `beets-web-manager`, the Flask/React operator UI. The engine owns `/config/config.yaml`, `/config/musiclibrary.blb`, Beets CLI execution, tag writes, and media mutations. The web manager image intentionally contains no Beets executable, no Beets Python package, and no direct Beets SQLite access.
 
 ```bash
 docker compose -f docker-compose.arrs.yml config
-docker compose -f docker-compose.arrs.yml up -d bgutil-provider beets
+docker compose -f docker-compose.arrs.yml up -d bgutil-provider beets beets-web-manager
 ```
 
-By default the web app binds to `127.0.0.1:8337`. Put it behind a reverse proxy only after configuring authentication, allowed outbound internal services, TLS, and trusted proxy settings.
+By default the web app binds to `127.0.0.1:8337`, while the Beets control-agent port `8338` is exposed only on the internal Compose network. Put the web port behind a reverse proxy only after configuring authentication, allowed outbound internal services, TLS, and trusted proxy settings.
 
 ## Development Installation
 
@@ -68,7 +68,7 @@ npm run build
 
 Most runtime configuration comes from environment variables and `/config/config.yaml` inside the container. Secrets must be provided through `.env`, Docker secrets, or mounted secret files. Do not commit real credentials.
 
-Beets and the default plugin dependencies are installed during the image build. A clean image includes the bundled discpath plugin at /app/beetsplug, user plugins may be mounted at /config/beetsplug, and pluginpath searches /config/beetsplug before /app/beetsplug. Do not install Python packages manually inside the running container; it is intentionally non-root and read-only.
+Beets and Beets plugins are installed only in the `beets` engine image built from `Dockerfile.beets`. The web-manager image built from `Dockerfile` does not include Beets and must communicate with the engine through `BEETS_API_URL` plus `BEETS_API_TOKEN`. The engine image includes the bundled `discpath` plugin under `/opt/beets-web-manager-agent/beetsplug`; user plugins may be mounted at `/config/beetsplug`, and `pluginpath` searches `/config/beetsplug` before the bundled path. Do not install Python packages manually inside running containers; rebuild images from source.
 
 See `.env.example` for the required and optional variables.
 
@@ -76,14 +76,16 @@ See `.env.example` for the required and optional variables.
 
 Important variables include:
 
-- `BEETS_WEB_AUTH_TOKEN`: bearer token for API/script clients. **Required**, but not something you have to invent yourself — see [Authentication](#authentication) below.
+- `BEETS_API_TOKEN`: strong shared secret between `beets-web-manager` and the internal Beets control agent. **Required**; blank, weak, and placeholder values are rejected by the engine.
+- `BEETS_API_URL`: internal URL for the Beets control agent, normally `http://beets:8338`.
+- `BEETS_WEB_AUTH_TOKEN`: bearer token for API/script clients. **Required**, but not something you have to invent yourself - see [Authentication](#authentication) below.
 - `BEETS_WEB_PASSWORD` / `BEETS_WEB_USERNAME`: Basic Auth credentials for browser access. See [Authentication](#authentication) for the password requirements.
 - `OPENAI_API_KEY` or compatible provider key: **optional** AI metadata features — see [How AI Matching Works](#how-ai-matching-works).
 - `PLEX_URL` and `PLEX_TOKEN`: Plex sync and refresh integration (optional).
 - `LIDARR_URL` and `LIDARR_API_KEY`: wanted-music and Arr integration (optional).
 - `ACOUSTID_API_KEY` / `ACOUSTID_KEY`: optional — AcoustID lookups work without a key via a shared, rate-limited test key.
 - `SLSKD_SLSK_USERNAME` and `SLSKD_SLSK_PASSWORD`: Soulseek client credentials (optional, required only for SLSKD-based acquisition).
-- `BEETS_OUTBOUND_ALLOWLIST`: exact host:port or CIDR:port entries for local services the backend may call.
+- `BEETS_OUTBOUND_ALLOWLIST`: exact host:port or CIDR:port entries for local services the backend may call; defaults to the internal Beets control agent (`beets:8338`).
 - `BEETS_TRUSTED_PROXIES`: direct proxy CIDRs whose forwarded client IP headers may be trusted.
 
 MusicBrainz needs no key or account — it is a public API used for every release/recording lookup regardless of what else is configured.
@@ -161,7 +163,7 @@ Long-running operations are represented as jobs with status, logs, cancellation,
 ## Technology Stack
 
 - Python and Flask backend
-- Beets library APIs and CLI
+- Beets CLI, SQLite library, and media mutation isolated in the `beets` engine container
 - React, Next.js static export, TypeScript
 - Tailwind CSS, MUI, Headless UI, TanStack Query
 - Docker Compose deployment
@@ -183,9 +185,9 @@ For the simplest possible start:
 ./setup.sh          # or .\setup.ps1 on Windows
 ```
 
-This creates `.env`/`config.yaml` from the example templates, generates a random `BEETS_WEB_AUTH_TOKEN`, builds the image, and starts the stack via `docker-compose.yml` (a minimal single-container Compose file — see `docker-compose.arrs.yml` for the broader Arr-stack variant used above). Readiness and per-integration connectivity checks are available at `GET /api/setup/status` and `POST /api/setup/test/{ai,musicbrainz,acoustid,plex}`, and standard health probes at `/health`, `/health/live`, `/health/ready`.
+This creates `.env`/`config.yaml` from the example templates, generates a random `BEETS_WEB_AUTH_TOKEN`, and starts the two-service stack via `docker-compose.yml`. You must set a strong `BEETS_API_TOKEN` before the Beets engine will accept internal control-agent requests. Readiness and per-integration connectivity checks are available at `GET /api/setup/status` and `POST /api/setup/test/{ai,musicbrainz,acoustid,plex}`, and standard health probes at `/health`, `/health/live`, `/health/ready`.
 
-Packaging status: the baseline branch has passing GitHub CI for lint, typecheck, frontend build, Python tests, security, and Docker image build. The unreleased setup/demo packaging path still needs a final Docker/startup check after `routes_lidarr.py` is restored.
+Packaging status: passing tests on a local or CI branch do not authorize production deployment. Rebuild and validate both services in disposable storage before migrating an existing library.
 
 ## Troubleshooting
 
@@ -199,7 +201,7 @@ This means neither `BEETS_WEB_AUTH_TOKEN` nor `BEETS_WEB_PASSWORD` resolved to a
 Passwords must be at least 32 characters (the same floor `_MIN_AUTH_SECRET_LENGTH`/`BEETS_WEB_AUTH_MIN_LENGTH` uses to decide whether a secret is usable at all) and include an uppercase letter, a lowercase letter, a number, and a special character. The System page's password field shows a live strength meter and a checklist of which requirements are still unmet.
 
 **Where do I check whether MusicBrainz, AcoustID, AI, and Plex are actually reachable right now?**
-`GET /api/setup/status` reports each integration's configured/not-configured state without making network calls. For a live connectivity check, use `POST /api/setup/test/{ai,musicbrainz,acoustid,plex}` — each integration is tested and reported independently, so one being down or misconfigured never hides or blocks the results of the others. The System page's Integrations panel has a "Test connections" button that runs all four and shows a ✓ Connected / ⚠ Warning / ✗ Not Configured badge per integration.
+`GET /api/setup/status` queries the internal Beets control agent for the authoritative Beets version, loaded plugins, plugin failures, command readiness, and path health. It does not contact external providers. For live external connectivity checks, use `POST /api/setup/test/{ai,musicbrainz,acoustid,plex}` - each integration is tested and reported independently, so one being down or misconfigured never hides or blocks the results of the others. The System page's Integrations panel has a "Test connections" button that runs all four and shows a Connected / Warning / Not Configured badge per integration.
 
 ## Documentation
 
@@ -224,17 +226,52 @@ Generates a few short, self-synthesized sine-wave WAV files (not copies of any r
 ./scripts/restore.sh <file.tar.gz>
 ```
 
-Backs up the beets database and configuration/state JSON files under `/config` — **not** your music library, which you should back up separately with your own storage/snapshot tooling.
+Back up `/config/config.yaml`, `/config/musiclibrary.blb`, plugin configuration, and web-manager state files under `/config` before upgrades or migrations — **not** your music library, which should be backed up separately with storage/snapshot tooling.
 
-## Updates
+## Manual Beets CLI and Shared Locking
+
+All manual CLI operations run inside the `beets` container. Mutating manual CLI operations should use the `beet-locked` wrapper to automatically acquire the shared database file lock (`/config/.beet_db.lock`):
 
 ```bash
-docker compose build --no-cache beets
-docker compose up -d --force-recreate beets
-docker compose exec beets beet version
+# Run manual read-only Beets CLI query
+docker compose exec beets /lsiopy/bin/beet ls artist:311
+
+# Verify the Beets version and loaded plugin line
+docker compose exec beets /lsiopy/bin/beet version
+
+# Run manual mutating import inside the Beets container (locked)
+docker compose exec beets beet-locked import /data/torrents/music
 ```
 
-Run `./scripts/backup.sh` first. There is no separate database-migration step — the beets library schema is managed by beets itself on next library open.
+No second Beets database is created. The temporary Beets 2.4.0 Chroma compatibility patch in `Dockerfile.beets` is only for the pinned affected release and should be removed after upgrading to a fixed upstream Beets release.
+
+## Architecture Migration & Upgrades
+
+```bash
+# 1. Back up config and library
+./scripts/backup.sh
+
+# 2. Rebuild both services with clean layers
+docker compose build --no-cache beets beets-web-manager
+
+# 3. Re-create and restart the stack
+docker compose up -d --force-recreate beets beets-web-manager
+
+# 4. Verify agent health, web health, and remote Beets diagnostics
+docker compose exec beets /lsiopy/bin/beet version
+curl -s http://127.0.0.1:8337/api/health
+curl -s http://127.0.0.1:8337/health/ready
+curl -s http://127.0.0.1:8337/api/setup/status
+```
+
+### Rollback
+
+If a rollback is required, restore the prior image tags and `/config` backup:
+
+```bash
+./scripts/restore.sh ./backups/beets-backup-<timestamp>.tar.gz
+docker compose up -d --force-recreate
+```
 
 ## Support Beets Web Manager
 

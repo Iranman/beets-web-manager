@@ -17,7 +17,7 @@ try { docker info | Out-Null } catch {
 }
 
 Write-Host "==> Creating local directories..."
-New-Item -ItemType Directory -Force -Path "config", "data\music", "data\downloads", "backups" | Out-Null
+New-Item -ItemType Directory -Force -Path "config", "data\music", "data\downloads", "backups", "web-manager-data" | Out-Null
 
 if (Test-Path ".env") {
     Write-Host "==> .env already exists, leaving it untouched."
@@ -27,8 +27,16 @@ if (Test-Path ".env") {
     $bytes = New-Object byte[] 32
     [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
     $token = -join ($bytes | ForEach-Object { $_.ToString("x2") })
+    $apiBytes = New-Object byte[] 32
+    [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($apiBytes)
+    $apiToken = -join ($apiBytes | ForEach-Object { $_.ToString("x2") })
     (Get-Content ".env") -replace '^BEETS_WEB_AUTH_TOKEN=.*', "BEETS_WEB_AUTH_TOKEN=$token" | Set-Content ".env"
-    Write-Host "    Generated a random BEETS_WEB_AUTH_TOKEN in .env (not printed here)."
+    # BEETS_API_TOKEN ships as the placeholder "changeme" in .env.example, which
+    # the Beets control agent's beets_api_token_is_usable() rejects at startup --
+    # leaving it unset here means the beets engine container fails to start on
+    # first run.
+    (Get-Content ".env") -replace '^BEETS_API_TOKEN=.*', "BEETS_API_TOKEN=$apiToken" | Set-Content ".env"
+    Write-Host "    Generated random BEETS_WEB_AUTH_TOKEN and BEETS_API_TOKEN values in .env (not printed here)."
     Write-Host "    Edit .env now to add AI/Plex/AcoustID/Lidarr credentials, or configure them later in the app."
 }
 

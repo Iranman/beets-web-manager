@@ -28,54 +28,135 @@ def _summarize_result(value):
         return {"type": "list", "count": len(value)}
     return {"type": type(value).__name__, "value": str(value)[:160]}
 
+from backend.beets_client import beets_client, BeetsError, BeetsUnavailableError, BeetsAuthError, BeetsCommandError
+import os, shlex
+from typing import NamedTuple
+
+
+class ParsedRemoteBeetCommand(NamedTuple):
+    subcommand: str
+    args: List[str]
+    config_override: str = ""
+
+
+# How long Job._run() will keep polling for a *confirmed* remote terminal status
+# after cancellation is requested, before giving up and reporting cancel_failed
+# rather than waiting forever. Overridable per-Job for tests.
+REMOTE_CANCEL_CONFIRM_TIMEOUT = float(os.environ.get("BEETS_CANCEL_CONFIRM_TIMEOUT", "30.0"))
+
+
+def _is_beet_executable_token(token: str) -> bool:
+    if not token:
+        return False
+    normalized = token.replace("\\", "/")
+    base = normalized.split("/")[-1].lower()
+    return base in ("beet", "beet.exe")
+
+
+def _parse_remote_beet_command(command: Any) -> ParsedRemoteBeetCommand:
+    """Parse and normalize raw Beets command tokens or string for remote execution."""
+    if command is None:
+        raise BeetsCommandError("Command cannot be None")
+
+    if isinstance(command, str):
+        raw_str = command.strip()
+        if not raw_str:
+            raise BeetsCommandError("Command string cannot be empty")
+        try:
+            tokens = shlex.split(raw_str, posix=True)
+        except ValueError as exc:
+            raise BeetsCommandError(f"Invalid shell quoting in command string: {exc}") from exc
+    elif isinstance(command, (list, tuple)):
+        tokens = [str(t) for t in command]
+    else:
+        raise BeetsCommandError(f"Unsupported command type: {type(command)}")
+
+    if not tokens:
+        raise BeetsCommandError("Command tokens list cannot be empty")
+
+    # Strip leading Beets executable token if present (e.g. beet, /lsiopy/bin/beet, C:\...\beet.exe)
+    if tokens and _is_beet_executable_token(tokens[0]):
+        tokens = tokens[1:]
+
+    # Strip -c / --config parameters (the remote engine uses its own authoritative config)
+    clean_tokens: List[str] = []
+    skip_next = False
+    for i, token in enumerate(tokens):
+        if skip_next:
+            skip_next = False
+            continue
+        if token in ("-c", "--config"):
+            if i + 1 < len(tokens):
+                skip_next = True
+            continue
+        clean_tokens.append(token)
+
+    if not clean_tokens:
+        raise BeetsCommandError("No subcommand provided after parsing executable and flags")
+
+    subcommand = clean_tokens[0]
+    args = clean_tokens[1:]
+
+    if not subcommand or subcommand.strip() == "":
+        raise BeetsCommandError("Subcommand cannot be empty")
+
+    # Reject if subcommand is another path or executable
+    sub_norm = subcommand.replace("\\", "/")
+    if "/" in sub_norm or sub_norm.endswith((".py", ".sh", ".exe", ".bin")):
+        raise BeetsCommandError(f"Invalid subcommand name: '{subcommand}'")
+
+    # Reject shell operators/chaining in subcommand and args
+    dangerous_ops = (";", "&&", "||", "|", ">", "<", "`", "$(")
+    for token_to_check in [subcommand] + args:
+        for op in dangerous_ops:
+            if op in token_to_check:
+                raise BeetsCommandError(f"Dangerous shell operator '{op}' rejected in command token: '{token_to_check}'")
+
+    return ParsedRemoteBeetCommand(subcommand=subcommand, args=args, config_override="")
+
+
 def _beet_run(cmd, log, *, timeout=120, env=None, warn_msg=None, cancel=None):
-    """Run a beet subprocess.
-    Polls every 250 ms so a cancel request kills the process immediately.
-    On TimeoutExpired logs a warning and returns rc=124 so callers can treat
-    it as a soft timeout rather than success or hard error."""
-    _POLL = 0.25
-    class _Killed:
-        returncode = -9; stdout = ""; stderr = ""
-    class _TimedOut:
-        returncode = 124; stdout = ""; stderr = ""
+    """Run a beet command via the external Beets Control Agent API."""
+    class _R:
+        def __init__(self, rc=0, out="", err=""):
+            self.returncode = rc
+            self.stdout = out
+            self.stderr = err
+
     try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                text=True, env=env)
-        deadline = time.time() + timeout
-        while True:
-            try:
-                stdout, stderr = proc.communicate(timeout=_POLL)
-                class _R:
-                    pass
-                r = _R()
-                r.returncode = proc.returncode
-                r.stdout = stdout or ""
-                r.stderr = stderr or ""
-                return r
-            except subprocess.TimeoutExpired:
-                pass
-            if cancel is not None and cancel.is_set():
-                proc.kill()
-                proc.communicate()
-                log.append("  [killed by user]")
-                return _Killed()
-            if time.time() > deadline:
-                proc.kill()
-                proc.communicate()
-                step = ' '.join(cmd[3:5]) if len(cmd) > 4 else ' '.join(cmd)
-                log.append(warn_msg or
-                           f"  ⚠ '{step}' timed out after {timeout}s —"
-                           " files likely already in place, verify in library")
-                return _TimedOut()
+        parsed = _parse_remote_beet_command(cmd)
+    except BeetsCommandError as exc:
+        log.append(f"  ⚠ Invalid Beets command: {exc}")
+        return _R(1, "", str(exc))
+    except Exception as exc:
+        log.append(f"  ⚠ _beet_run parsing error: {exc}")
+        return _R(1, "", str(exc))
+
+    try:
+        res = beets_client.run_command(parsed.subcommand, args=parsed.args, timeout=float(timeout), config_override=parsed.config_override)
+        rc = res.get("returncode", 0)
+        stdout = res.get("stdout", "")
+        stderr = res.get("stderr", "")
+        if stdout:
+            for line in stdout.splitlines():
+                log.append(line)
+        if stderr:
+            for line in stderr.splitlines():
+                log.append(f"  ⚠ {line}")
+        return _R(rc, stdout, stderr)
+    except BeetsUnavailableError as exc:
+        log.append(f"  ⚠ Beets service unavailable: {exc}")
+        return _R(1, "", str(exc))
+    except BeetsAuthError as exc:
+        log.append(f"  ⚠ Beets authentication failed: {exc}")
+        return _R(1, "", str(exc))
     except Exception as exc:
         log.append(f"  ⚠ _beet_run error: {exc}")
-        class _R:
-            returncode = 1; stdout = ""; stderr = ""
-        return _R()
+        return _R(1, "", str(exc))
 
 
 class Job:
-    def __init__(self, job_id: str, command: List[str], label: str = ""):
+    def __init__(self, job_id: str, command: List[str], label: str = "", cancel_confirm_timeout: Optional[float] = None):
         self.job_id      = job_id
         self.command     = command
         self.label       = label or " ".join(command)
@@ -84,40 +165,202 @@ class Job:
         self.finished_at: Optional[float] = None
         self.returncode: Optional[int]    = None
         self.log: List[str]               = []
-        self._proc: Optional[subprocess.Popen] = None
+        self._remote_job_id: Optional[str] = None
+        self._cancel_requested = False
+        self._cancel_failed = False
+        self._state = "created"
+        self._cancel_confirm_timeout = (
+            REMOTE_CANCEL_CONFIRM_TIMEOUT if cancel_confirm_timeout is None else cancel_confirm_timeout
+        )
         self._lock = threading.Lock()
         threading.Thread(target=self._run, daemon=True).start()
 
     @property
-    def status(self):
-        if self.finished_at is not None:
-            return "success" if self.returncode == 0 else "failed"
-        return "running"
+    def status(self) -> str:
+        with self._lock:
+            return self._state
 
     def kill(self):
+        remote_id_to_cancel = None
         with self._lock:
-            if self._proc and self._proc.poll() is None:
-                self._proc.kill()
+            if self.finished_at is not None or self._state in ("cancelled", "success", "failed", "cancel_failed", "timeout"):
+                return
+            self._cancel_requested = True
+            if "[killed]" not in self.log:
                 self.log.append("[killed]")
+            if self._state in ("running", "dispatching"):
+                self._state = "cancelling"
+            remote_id_to_cancel = self._remote_job_id
+
+        if remote_id_to_cancel:
+            try:
+                beets_client.cancel_job(remote_id_to_cancel)
+            except Exception as exc:
+                with self._lock:
+                    self._cancel_failed = True
+                    err_msg = f"  ⚠ Remote cancellation request error: {exc}"
+                    if err_msg not in self.log:
+                        self.log.append(err_msg)
 
     def _run(self):
-        self.started_at = time.time()
+        with self._lock:
+            self.started_at = time.time()
+            if self._cancel_requested:
+                self._state = "cancelled"
+                self.returncode = 130
+                self.finished_at = time.time()
+                return
+            self._state = "dispatching"
+
+        # 1. Parse command
         try:
-            with self._lock:
-                self._proc = subprocess.Popen(
-                    self.command, stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT, text=True, bufsize=1,
-                )
-            for line in self._proc.stdout:
-                self.log.append(line.rstrip("\n"))
-                if len(self.log) > 5000:
-                    self.log = self.log[-5000:]
-            self.returncode = self._proc.wait()
+            parsed = _parse_remote_beet_command(self.command)
         except Exception as exc:
-            self.log.append(f"ERROR: {exc}")
-            self.returncode = 1
-        finally:
-            self.finished_at = time.time()
+            with self._lock:
+                self.log.append(f"  ⚠ Invalid command for job: {exc}")
+                self._state = "failed"
+                self.returncode = 1
+                self.finished_at = time.time()
+            return
+
+        # 2. Check cancel before dispatch
+        with self._lock:
+            if self._cancel_requested:
+                self._state = "cancelled"
+                self.returncode = 130
+                self.finished_at = time.time()
+                return
+
+        # 3. Dispatch start_job
+        try:
+            remote_id = beets_client.start_job(
+                parsed.subcommand,
+                args=parsed.args,
+                label=self.label,
+                config_override=parsed.config_override
+            )
+        except Exception as exc:
+            with self._lock:
+                if self._cancel_requested:
+                    self._state = "cancelled"
+                    self.returncode = 130
+                else:
+                    self.log.append(f"ERROR: {exc}")
+                    self._state = "failed"
+                    self.returncode = 1
+                self.finished_at = time.time()
+            return
+
+        if not remote_id:
+            with self._lock:
+                if self._cancel_requested:
+                    self._state = "cancelled"
+                    self.returncode = 130
+                else:
+                    self.log.append("ERROR: Failed to start remote job on Beets agent")
+                    self._state = "failed"
+                    self.returncode = 1
+                self.finished_at = time.time()
+            return
+
+        # 4. Store remote_id
+        with self._lock:
+            self._remote_job_id = remote_id
+            if self._cancel_requested:
+                self._state = "cancelling"
+            else:
+                self._state = "running"
+
+        # 5. Polling loop and cancellation confirmation
+        seen_stdout = 0
+        seen_stderr = 0
+        cancel_deadline: Optional[float] = None
+
+        while True:
+            with self._lock:
+                cancel_req = self._cancel_requested
+                cancel_err = self._cancel_failed
+
+            if cancel_req:
+                if cancel_deadline is None:
+                    # Deadline starts the moment we first notice cancellation was
+                    # requested while a real remote job exists, using monotonic time
+                    # so wall-clock adjustments can't extend or shorten the wait.
+                    cancel_deadline = time.monotonic() + self._cancel_confirm_timeout
+                try:
+                    beets_client.cancel_job(remote_id)
+                except Exception as exc:
+                    with self._lock:
+                        self._cancel_failed = True
+                        err_msg = f"  ⚠ Remote cancellation request error: {exc}"
+                        if err_msg not in self.log:
+                            self.log.append(err_msg)
+
+            try:
+                job_data = beets_client.get_job(remote_id)
+                r_status = job_data.get("status", "running")
+                r_stdout = job_data.get("stdout", [])
+                r_stderr = job_data.get("stderr", [])
+
+                with self._lock:
+                    if len(r_stdout) > seen_stdout:
+                        for line in r_stdout[seen_stdout:]:
+                            self.log.append(line)
+                        seen_stdout = len(r_stdout)
+
+                    if len(r_stderr) > seen_stderr:
+                        for line in r_stderr[seen_stderr:]:
+                            self.log.append(f"ERR: {line}")
+                        seen_stderr = len(r_stderr)
+
+                if r_status in ("success", "failed", "cancelled", "timeout"):
+                    with self._lock:
+                        if r_status == "cancelled":
+                            self._state = "cancelled"
+                            self.returncode = 130
+                        elif r_status == "success":
+                            if cancel_req:
+                                self.log.append("  ⚠ Cancellation arrived after the remote job had already completed.")
+                            self._state = "success"
+                            self.returncode = job_data.get("returncode", 0)
+                        elif r_status == "failed":
+                            self._state = "failed"
+                            self.returncode = job_data.get("returncode", 1)
+                        else:
+                            self._state = r_status
+                            self.returncode = job_data.get("returncode", 1)
+                        self.finished_at = time.time()
+                    break
+
+            except Exception as exc:
+                with self._lock:
+                    if cancel_req or cancel_err:
+                        self.log.append(f"  ⚠ Remote state unconfirmed during cancellation: {exc}")
+                        self._state = "cancel_failed"
+                        self.returncode = 1
+                        self.finished_at = time.time()
+                        break
+                    else:
+                        self.log.append(f"ERROR: {exc}")
+                        self._state = "failed"
+                        self.returncode = 1
+                        self.finished_at = time.time()
+                        break
+
+            if cancel_deadline is not None and time.monotonic() >= cancel_deadline:
+                with self._lock:
+                    err_msg = (
+                        f"  ⚠ Remote cancellation was not confirmed within "
+                        f"{self._cancel_confirm_timeout:.0f}s; giving up waiting."
+                    )
+                    if err_msg not in self.log:
+                        self.log.append(err_msg)
+                    self._state = "cancel_failed"
+                    self.returncode = 1
+                    self.finished_at = time.time()
+                break
+
+            time.sleep(0.2)
 
     def to_dict(self, include_log=False, include_result=True):
         d = {

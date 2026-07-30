@@ -2,7 +2,7 @@ import { Tab, TabGroup, TabList, TabPanel, TabPanels } from '@headlessui/react';
 import Button from '@mui/material/Button';
 import Chip from '@mui/material/Chip';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
+import { useLocation, useNavigate, useSearchParams } from 'react-router';
 import { CleanMetricGrid, CleanPanelHeader } from '../components/CleanPanel';
 import { AlbumTracksPanel } from '../features/albumtracks/AlbumTracksPanel';
 import { ArtistAliasPanel } from '../features/artistAlias/ArtistAliasPanel';

@@ -204,13 +204,12 @@ services:
   beets:
     <<: *common-keys
     container_name: beets
-    # Updated from lscr.io/linuxserver/beets:latest on 2026-07-16.
-    # linux/amd64 manifest digest verified with: docker manifest inspect --verbose lscr.io/linuxserver/beets:2.4.0
     platform: linux/amd64
-    image: lscr.io/linuxserver/beets:2.4.0@sha256:4cce2967154e849ca5466469d934a4bb9d8d83c3acf2a5279da47bccd16518f1
+    build:
+      context: .
+      dockerfile: Dockerfile.beets
+    image: beets-engine:2.4.0
     user: "${BEETS_UID:-1000}:${BEETS_GID:-1000}"
-    entrypoint: ["/lsiopy/bin/python3"]
-    command: ["/config/app.py"]
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -230,6 +229,47 @@ services:
       BEETSDIR: /config
       HOME: /config
       XDG_CONFIG_HOME: /config/.config
+      BEETS_API_TOKEN: "${BEETS_API_TOKEN:?set in .env}"
+      BEETS_AGENT_PORT: "8338"
+    expose:
+      - "8338"
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /mnt/PLEX/Apps/Arrs/beets:/config:rw
+      - /mnt/PLEX/data/media/music:/data/media/music:rw
+      - /mnt/PLEX/data/torrents/music:/data/torrents/music:rw
+    healthcheck:
+      test: ["CMD", "/lsiopy/bin/python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8338/health', timeout=5).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  beets-web-manager:
+    <<: *common-keys
+    container_name: beets-web-manager
+    build: .
+    image: beets-web-manager:0.1.0
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=512m
+      - /run:rw,nosuid,nodev,size=64m
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      TZ: America/Los_Angeles
+      BEETS_API_URL: http://beets:8338
+      BEETS_API_TOKEN: "${BEETS_API_TOKEN:?set in .env}"
+      BEETS_WEB_AUTH_TOKEN: "${BEETS_WEB_AUTH_TOKEN:?set a strong owner token}"
+      # Enforced by backend/security.py's install_secure_urllib() SSRF policy,
+      # which runs only in this (web-manager) process -- not in the beets
+      # engine container. Defaults to the internal Beets control agent; set additional per-deployment entries in .env.
+      BEETS_OUTBOUND_ALLOWLIST: "${BEETS_OUTBOUND_ALLOWLIST:-beets:8338}"
+      WEBCONTROL_PORT: "8337"
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
       OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
       AI_API_KEY: "${AI_API_KEY:-}"
@@ -240,38 +280,27 @@ services:
       DISCOGS_TOKEN: "${DISCOGS_TOKEN:-}"
       DISCOGS_USER_TOKEN: "${DISCOGS_USER_TOKEN:-}"
       LISTENBRAINZ_TOKEN: "${LISTENBRAINZ_TOKEN:-}"
-      PLEX_URL: http://192.168.0.250:32400
+      PLEX_URL: "${PLEX_URL:-}"
       PLEX_TOKEN: "${PLEX_TOKEN:?set in .env}"
-      LIDARR_URL: http://192.168.0.250:8686
+      LIDARR_URL: "${LIDARR_URL:-}"
       LIDARR_API_KEY: "${LIDARR_API_KEY:?set in .env}"
-      SPOTIFY_CLIENT_ID: ""
-      SPOTIFY_CLIENT_SECRET: ""
+      SLSKD_URL: http://slskd:5030
+      SLSKD_API_KEY: "${SLSKD_API_KEY:-}"
       YTDLP_PO_PROVIDER_URL: http://bgutil-provider:4416
-      YTDLP_BGUTIL_PIP_PACKAGE: bgutil-ytdlp-pot-provider==1.3.1
-      YTDLP_INSTALL_DENO: "0"
-      YTDLP_INSTALL_SYSTEM_JS_RUNTIME: "0"
-      SPOTIFLAC_AUTO_INSTALL: "0"
-      BEETS_OUTBOUND_ALLOWLIST: "192.168.0.250:32400,192.168.0.250:8686,bgutil-provider:4416,slskd:5030"
-      BEETS_TRUSTED_PROXIES: ""
-      BEETS_WEB_AUTH_TOKEN: "${BEETS_WEB_AUTH_TOKEN:?set a strong owner token}"
     ports:
       - "127.0.0.1:8337:8337"
     volumes:
       - /etc/localtime:/etc/localtime:ro
-      # Writable: app config, Beets DB/config, cache, job state, and explicit operator-managed backups.
-      - /mnt/PLEX/Apps/Arrs/beets:/config:rw
-      # Writable: Beets imports/moves/retags and controlled cleanup operate only inside the music library root.
-      - /mnt/PLEX/data/media/music:/data/media/music:rw
-      # Writable: playlist/download/intake staging. Do not replace this with /mnt/PLEX/data:/data.
-      - /mnt/PLEX/data/torrents/music:/data/torrents/music:rw
+      - /mnt/PLEX/Apps/Arrs/beets-web-manager:/web-manager-data:rw
     healthcheck:
-      test: ["CMD", "/lsiopy/bin/python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8337/api/health', timeout=5).read()"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8337/api/health', timeout=5).read()"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 45s
+      start_period: 20s
     depends_on:
-      - bgutil-provider
+      beets:
+        condition: service_healthy
   ###############################################
   # PROFILARR - Quality Profile & Custom Format Sync
   ###############################################
@@ -342,7 +371,7 @@ services:
       DIGARR_INITIAL_USERNAME: admin
       DIGARR_INITIAL_PASSWORD: "${DIGARR_INITIAL_PASSWORD:?set in .env}"
       DIGARR_DISABLE_REGISTRATION: "true"
-      ALLOWED_ORIGIN: "http://192.168.0.250:3000"
+      ALLOWED_ORIGIN: "${DIGARR_ALLOWED_ORIGIN:-http://localhost:3000}"
       LIDARR_URL: http://lidarr:8686
       LIDARR_API_KEY: "${LIDARR_API_KEY:?set in .env}"
       AI_PROVIDER: openai

@@ -8,6 +8,9 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _app_ast_cache import get_app_ast  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[1]
 APP_SOURCE = (ROOT / "app.py").read_text(encoding="utf-8")
 JOBS_SOURCE = (ROOT / "frontend" / "src" / "views" / "Jobs.tsx").read_text(encoding="utf-8")
@@ -50,6 +53,9 @@ def _load_album_cleanup_helpers() -> Dict[str, Any]:
         "_album_cleanup_trash_path",
         "_album_cleanup_remove_empty_dirs",
         "_album_cleanup_remove_empty_tree",
+        "_read_file_media_tags",
+        "AUDIO_EXT",
+        "_ART_EXTS",
     }
     namespace: Dict[str, Any] = {
         "Any": Any,
@@ -83,7 +89,7 @@ def _load_album_cleanup_helpers() -> Dict[str, Any]:
         "_folder_cleanup_db_items": lambda folder: [],
         "_album_cleanup_update_db_path": lambda old, new, log: 0,
     }
-    tree = ast.parse(APP_SOURCE)
+    tree = get_app_ast()
     for node in tree.body:
         target_names = set()
         if isinstance(node, ast.Assign):

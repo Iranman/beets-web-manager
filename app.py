@@ -25,6 +25,10 @@ else:
 _ur = urllib.request
 _up = urllib.parse
 
+def _s(v: Any) -> str:
+    return str(v or "") if v is not None else ""
+
+
 os.environ.setdefault("BEETSDIR", "/config")
 
 # ── yt-dlp: probe preinstalled tools; runtime package/binary installs are disabled
@@ -317,7 +321,52 @@ from helpers_mb import (
     _resolve_mb_release_id, _JUNK_TITLE_RE, _fetch_mb_release_candidate,
     _mb_release_group_candidates,
 )
-from beets.library import Library
+from backend.beets_client import beets_client, get_db_connection, lib, BeetsError, BeetsUnavailableError, BeetsAuthError
+
+
+def _read_file_media_tags(path: Any) -> Dict[str, Any]:
+    """Read media tags from an audio file via BeetsClient API, unit test mocks, or mutagen fallback."""
+    p_str = str(path)
+    try:
+        tags = beets_client.read_tags(p_str)
+        if tags and isinstance(tags, dict) and any(tags.values()):
+            return tags
+    except Exception:
+        pass
+    sys_mods = sys.modules if "sys" in globals() else __import__("sys").modules
+    if "beets.mediafile" in sys_mods and hasattr(sys_mods["beets.mediafile"], "MediaFile"):
+        try:
+            mf = sys_mods["beets.mediafile"].MediaFile(p_str)
+            return {
+                "title": getattr(mf, "title", "") or "",
+                "artist": getattr(mf, "artist", "") or "",
+                "album": getattr(mf, "album", "") or "",
+                "albumartist": getattr(mf, "albumartist", "") or "",
+                "year": str(getattr(mf, "year", "") or ""),
+                "track": getattr(mf, "track", "") or "",
+                "mb_trackid": getattr(mf, "mb_trackid", "") or "",
+                "mb_albumid": getattr(mf, "mb_albumid", "") or "",
+                "mb_releasegroupid": getattr(mf, "mb_releasegroupid", "") or "",
+                "genre": getattr(mf, "genre", "") or "",
+            }
+        except Exception:
+            pass
+    try:
+        import mutagen
+        f = mutagen.File(p_str, easy=True)
+        if f is not None:
+            return {
+                "title": (f.get("title") or [""])[0],
+                "artist": (f.get("artist") or [""])[0],
+                "album": (f.get("album") or [""])[0],
+                "albumartist": (f.get("albumartist") or [""])[0],
+                "year": (f.get("date") or [""])[0],
+                "track": (f.get("tracknumber") or [""])[0],
+                "genre": (f.get("genre") or [""])[0],
+            }
+    except Exception:
+        pass
+    return {}
 
 def _beets_config_discogs_token() -> str:
     cfg_path = Path(os.environ.get("BEETS_CONFIG", "/config/config.yaml"))
@@ -1513,29 +1562,8 @@ def _sqlite_write_retry(label: str, fn, *, log=None, attempts: int = 5):
 
 @contextmanager
 def _db(path=None, *, text_factory=None, row_factory=None):
-    """Context manager: yield a SQLite connection that is always closed."""
-    timeout = _sqlite_timeout_seconds()
-    db_path = path or LIB_PATH
-    con = sqlite3.connect(db_path, timeout=timeout)
-    try:
-        con.execute(f"PRAGMA busy_timeout = {int(timeout * 1000)}")
-    except Exception:
-        pass
-    try:
-        resolved_db_path = str(Path(db_path).resolve(strict=False))
-    except Exception:
-        resolved_db_path = _s(db_path)
-    if resolved_db_path:
-        with _SQLITE_WAL_LOCK:
-            if resolved_db_path not in _SQLITE_WAL_CONFIGURED:
-                try:
-                    con.execute("PRAGMA journal_mode=WAL")
-                    con.execute("PRAGMA synchronous=NORMAL")
-                    _SQLITE_WAL_CONFIGURED.add(resolved_db_path)
-                except Exception:
-                    pass
-    if text_factory is not None:
-        con.text_factory = text_factory
+    """Context manager: yield a RemoteSQLiteConnection to the Beets control agent."""
+    con = get_db_connection(path)
     if row_factory is not None:
         con.row_factory = row_factory
     try:
@@ -1658,8 +1686,6 @@ def _repair_album_mbid_sticking_once(album_id: int, mb_albumid: str,
             log.append(f"  [mbid] WARN beet write failed for album_id {aid} (rc={proc.returncode})")
     return summary
 
-
-lib = Library(LIB_PATH)
 
 EDITABLE_FIELDS = [
     ("title",       "Title"),
@@ -2741,34 +2767,34 @@ def ytdlp_test_youtube():
     )
     return jsonify({"ok": True, "job_id": job.job_id, "status": "queued"})
 def _health_checks() -> Dict[str, bool]:
-    return {
-        "library_path": Path(LIB_PATH).exists(),
-        "beet_bin":     Path(BEET_BIN).exists() if BEET_BIN else False,
-        "music_root":   MUSIC_ROOT.is_dir(),
-        "lidarr_key":   bool(LIDARR_KEY),
+    checks = {
+        "app": True,
+        "beets_control_agent": False,
+        "lidarr_key": bool(LIDARR_KEY),
         "discogs_token": bool(DISCOGS_TOKEN),
-        "slskd_key":    bool(SLSKD_API_KEY),
-        "openai_key":   bool(os.environ.get("OPENAI_API_KEY")),
+        "slskd_key": bool(SLSKD_API_KEY),
+        "openai_key": bool(os.environ.get("OPENAI_API_KEY")),
     }
+    try:
+        agent_health = beets_client.health()
+        checks["beets_control_agent"] = agent_health.get("status") == "ok"
+    except Exception:
+        checks["beets_control_agent"] = False
+    return checks
 
 
 @app.get("/api/health")
 def health():
-    # Public/unauthenticated (Docker/k8s-style probes never send credentials)
-    # — keep this minimal. An unauthenticated caller should not be able to
-    # fingerprint which integrations are configured or which host paths
-    # exist; that detail lives at /api/health/detail, which requires auth.
-    checks = _health_checks()
-    ok = checks["library_path"] and checks["beet_bin"]
-    return jsonify({"ok": ok})
+    # Public/unauthenticated liveness. Dependency/readiness detail belongs on
+    # /health/ready and authenticated /api/health/detail.
+    return jsonify({"ok": True})
 
 
 @app.get("/api/health/detail")
 def health_detail():
-    """Same integration/path diagnostics /api/health used to expose
-    unauthenticated. Requires auth (no entry in _AUTH_PUBLIC_ENDPOINTS)."""
+    """Authenticated dependency diagnostics for the web manager."""
     checks = _health_checks()
-    ok = checks["library_path"] and checks["beet_bin"]
+    ok = checks["app"] and checks["beets_control_agent"]
     return jsonify({"ok": ok, "checks": checks})
 
 @app.post("/api/restart")
@@ -10133,32 +10159,14 @@ def _art_repair_attach_last_run(report: Dict[str, Any],
 
 def _album_art_clear_pointer(aid: int, album, log: List[str]) -> None:
     try:
-        album["artpath"] = b""
-        album.store()
-        return
-    except Exception:
-        pass
-    try:
-        with _db() as con:
-            con.execute("UPDATE albums SET artpath='' WHERE id=?", (aid,))
-            con.commit()
+        beets_client.clear_album_artpath(aid)
     except Exception as ex:
         log.append(f"  artpath clear warning: {ex}")
 
 
 def _album_art_set_pointer(aid: int, path: str, log: List[str]) -> None:
     try:
-        album = lib.get_album(aid)
-        if album:
-            album["artpath"] = _s(path).encode()
-            album.store()
-            return
-    except Exception:
-        pass
-    try:
-        with _db() as con:
-            con.execute("UPDATE albums SET artpath=? WHERE id=?", (_s(path), aid))
-            con.commit()
+        beets_client.set_album_artpath(aid, _s(path))
     except Exception as ex:
         log.append(f"  artpath restore warning: {ex}")
 
@@ -10305,10 +10313,7 @@ def _repair_album_art(aid: int, log: List[str], cancel_event=None,
         }
 
     try:
-        album_obj = lib.get_album(aid)
-        if album_obj:
-            album_obj["artpath"] = saved_path.encode()
-            album_obj.store()
+        beets_client.set_album_artpath(aid, saved_path)
         r = _beet_run(
             [BEET_BIN, "-c", "/config/config.yaml", "embedart", "-y", f"album_id:{aid}"],
             log,
@@ -10476,8 +10481,7 @@ def album_replace_art_from_url(aid):
         if not saved:
             raise RuntimeError("Image download failed or was not a supported image")
         try:
-            album_obj["artpath"] = saved.encode()
-            album_obj.store()
+            beets_client.set_album_artpath(aid, saved)
         except Exception as ex:
             raise RuntimeError(f"Could not update beets artpath: {ex}")
         log.append(f"Saved cover art: {Path(saved).name}")
@@ -10543,8 +10547,7 @@ def album_upload_art(aid):
         except Exception as ex:
             raise RuntimeError(f"Could not save uploaded cover art: {ex}")
         try:
-            album_obj["artpath"] = str(dest).encode()
-            album_obj.store()
+            beets_client.set_album_artpath(aid, str(dest))
         except Exception as ex:
             raise RuntimeError(f"Could not update beets artpath: {ex}")
         log.append(f"Uploaded cover art: {dest.name} ({dest.stat().st_size // 1024} KB)")
@@ -10608,16 +10611,10 @@ def album_delete_art(aid):
                 return jsonify({"ok": False, "error": f"Could not delete {p.name}: {ex}"}), 500
 
     try:
-        album["artpath"] = b""
-        album.store()
-    except Exception:
-        try:
-            with _db() as con:
-                con.execute("UPDATE albums SET artpath='' WHERE id=?", (aid,))
-                con.commit()
-        except Exception as ex:
-            return jsonify({"ok": False, "error": f"Could not clear artpath: {ex}"}), 500
-
+        beets_client.clear_album_artpath(aid)
+    except Exception as ex:
+        app.logger.warning("Could not clear album artpath for album %s: %s", aid, type(ex).__name__)
+        return jsonify({"ok": False, "error": "Could not clear artpath."}), 500
     _invalidate_lib_cache()
     return jsonify({
         "ok": True,
@@ -10628,67 +10625,48 @@ def album_delete_art(aid):
 
 @app.post("/api/albums/<int:aid>/remove")
 def album_remove(aid):
-    """Remove an album from the beets library (optionally delete files from disk).
-    Uses the beets Python API directly to avoid CLI flag compatibility issues."""
+    """Remove an album from the beets library and storage via control agent endpoint."""
     delete_files = bool((request.json or {}).get("delete_files", False))
 
-    # Validate album exists before queuing job
-    album = lib.get_album(aid)
+    album = beets_client.get_album(aid)
     if not album:
         return jsonify({"ok": False, "error": f"Album {aid} not found in library"}), 404
 
     def _do(log, cancel_event=None):
-        try:
-            album_obj = lib.get_album(aid)
-            if not album_obj:
-                raise RuntimeError(f"Album {aid} not found")
+        log.append(f"Removing album '{_s(album.get('album'))}' (id={aid}) via Beets Control Agent…")
+        res = beets_client.delete_album(aid, delete_files=delete_files)
 
-            items = list(album_obj.items())
-            log.append(f"Removing {len(items)} track(s) from album '{_s(getattr(album_obj,'album',''))}' (id={aid})…")
+        status = res.get("status")
+        db_deleted = res.get("database_deleted", False)
+        items_del = res.get("items_deleted", 0)
+        files_del = res.get("files_deleted", 0)
+        files_failed = res.get("files_failed", 0)
+        file_errs = res.get("file_errors", [])
 
-            _mroot_del = "/data/media/music"
-            removed_paths = []
-            for item in items:
-                p = _s(item.path)
-                # Resolve relative beets path to absolute for file operations
-                if p and not p.startswith("/"):
-                    p = _mroot_del + "/" + p
-                removed_paths.append(p)
-                if delete_files:
-                    try:
-                        Path(p).unlink(missing_ok=True)
-                        log.append(f"  Deleted: {Path(p).name}")
-                    except Exception as ex:
-                        log.append(f"  WARNING: could not delete {Path(p).name}: {ex}")
+        if status == "failed" or not db_deleted:
+            err = res.get("error", "Album removal failed")
+            log.append(f"❌ Error: {err}")
+            log.append(f"[AUDIT] Album ID {aid} removal FAILED: {err}")
+            raise RuntimeError(err)
 
-            # Remove from DB via direct SQLite (lib.remove() not available in this version)
-            with _db() as con_rm:
-                con_rm.execute("DELETE FROM items WHERE album_id = ?", (aid,))
-                con_rm.execute("DELETE FROM albums WHERE id = ?", (aid,))
-                con_rm.commit()
+        if status == "partial_failure" or file_errs:
+            log.append(f"⚠️ Partial Failure: Album database record deleted ({items_del} DB tracks removed), but {files_failed} file(s) failed to delete from disk.")
+            for fe in file_errs:
+                log.append(f"  FAILED: {fe}")
+            log.append(f"[AUDIT] Album ID {aid} removal PARTIAL FAILURE: db_deleted=True, files_deleted={files_del}, files_failed={files_failed}")
+        else:
+            log.append(f"✓ Removed album from library ({items_del} DB tracks deleted)." +
+                       (f" {files_del} files deleted from disk." if delete_files else " Files kept on disk."))
+            log.append(f"[AUDIT] Album ID {aid} removal SUCCESS: db_deleted=True, files_deleted={files_del}")
 
-            # Clean up empty album folder
-            if delete_files and removed_paths:
-                try:
-                    aldir = Path(removed_paths[0]).parent
-                    remaining = [f for f in aldir.iterdir()
-                                 if f.suffix.lower() in {'.flac','.mp3','.m4a','.ogg','.opus','.wav'}]
-                    if not remaining:
-                        aldir.rmdir()
-                        log.append(f"  Removed empty folder: {aldir.name}")
-                except Exception:
-                    pass
+        _invalidate_lib_cache()
 
-            log.append(f"✓ Removed album from library." +
-                       (" Files deleted from disk." if delete_files else " Files kept on disk."))
-            _invalidate_lib_cache()
-
-        except Exception as ex:
-            raise RuntimeError(f"Remove failed: {ex}")
-
-    label = f"Remove album {aid}" + (" + delete files" if delete_files else "")
-    job = jobs.start_python(_do, label=label)
-    return jsonify({"ok": True, "job_id": job.job_id})
+    job_id = jobs.create(
+        f"Remove Album: {_s(album.get('album') or f'id={aid}')}",
+        _do,
+        meta={"album_id": aid, "type": "album_remove", "delete_files": delete_files}
+    )
+    return jsonify({"ok": True, "job_id": job_id})
 
 
 @app.post("/api/albums/<int:aid>/rename")
@@ -12842,17 +12820,72 @@ def _library_payload_for_response(payload: Dict[str, Any], include_tracks: bool 
 
 
 def _library_stats_for_artists(artists: List[Dict[str, Any]]) -> Dict[str, int]:
+    """Summary counts for the artists/albums tree produced by
+    _build_library_payload(). Each entry in an artist's "albums" list is a
+    disk-folder-derived CARD, not necessarily a real Beets album:
+
+    - A card with album_id > 0 is a real Beets album. The same album_id can
+      legitimately appear on more than one card (its tracks split across
+      more than one disk folder, e.g. a reissue alongside the original) --
+      count it once, not once per card.
+    - A card with album_id == 0 and not_imported == 0 has no Beets album
+      row, but every track on it IS imported -- a genuine singleton (or a
+      synthetic "(Singles)" bucket of singletons). This is not a fake
+      extra album; its tracks count toward the track total, not the album
+      total.
+    - A card with album_id == 0 and not_imported > 0 is genuinely disk-only
+      (no Beets album row, at least one file never imported). Reported
+      separately, never folded into "albums" or "tracks".
+
+    Prior behavior counted every non-virtual card as "1 album" and summed
+    every card's track_count into "tracks" -- so singleton pseudo-albums
+    inflated the album count (roughly 1 per singleton), the same album
+    split across multiple disk folders was counted multiple times, and
+    disk-only content leaked into "tracks" whenever it reached this
+    function unfiltered. Fixed by keying album identity on album_id and
+    routing singleton/disk-only cards to their own counts instead.
+    """
+    album_ids_seen: set = set()
+    tracks_total = 0
+    singleton_tracks = 0
+    disk_only_albums = 0
+    disk_only_tracks = 0
+
+    for artist in artists:
+        for album in artist.get("albums", []):
+            if album.get("virtual_appearance"):
+                continue
+            try:
+                album_id = int(album.get("album_id") or 0)
+            except Exception:
+                album_id = 0
+            track_count = int(album.get("track_count") or len(album.get("tracks") or []))
+            not_imported = int(album.get("not_imported") or 0)
+
+            if album_id > 0:
+                album_ids_seen.add(album_id)
+                # track_count is the card's total file count -- imported +
+                # not-yet-imported extras + missing-on-disk (see
+                # _build_library_payload: "track_count": len(tracks), where
+                # `tracks` includes not-imported files sitting alongside a
+                # real album). Only the imported+missing portion represents
+                # actual Beets item rows; extra not-imported files on disk
+                # must not inflate the track total for a real album.
+                tracks_total += track_count - not_imported
+            elif not_imported > 0:
+                disk_only_albums += 1
+                disk_only_tracks += track_count
+            else:
+                singleton_tracks += track_count
+                tracks_total += track_count
+
     return {
         "artists": len(artists),
-        "albums": sum(
-            1 for artist in artists for album in artist.get("albums", [])
-            if not album.get("virtual_appearance")
-        ),
-        "tracks": sum(
-            int(album.get("track_count") or len(album.get("tracks", [])))
-            for artist in artists for album in artist.get("albums", [])
-            if not album.get("virtual_appearance")
-        ),
+        "albums": len(album_ids_seen),
+        "tracks": tracks_total,
+        "singleton_tracks": singleton_tracks,
+        "disk_only_albums": disk_only_albums,
+        "disk_only_tracks": disk_only_tracks,
     }
 
 
@@ -16135,14 +16168,13 @@ def _build_folder_evidence(folder_path: str) -> Dict[str, Any]:
 
     for f in audio_files[:20]:
         try:
-            from beets.mediafile import MediaFile
-            mf = MediaFile(str(f))
-            t = mf.track or ""
-            title = _strip_stamps((mf.title or "").strip())
+            tags = _read_file_media_tags(f)
+            t = tags.get("track", "") or ""
+            title = _strip_stamps((tags.get("title", "") or "").strip())
             if title:
                 track_titles.append(title)
                 track_lines.append(
-                    f"  {t}. {title} — {mf.artist or ''} [{mf.album or ''}] ({mf.year or ''})"
+                    f"  {t}. {title} — {tags.get('artist', '') or ''} [{tags.get('album', '') or ''}] ({tags.get('year', '') or ''})"
                 )
             else:
                 _stem = _strip_stamps(f.stem)
@@ -16918,9 +16950,8 @@ def _acoustid_multi_file(
             if p in seen:
                 continue
             try:
-                from beets.mediafile import MediaFile
-                mf = MediaFile(p)
-                if not (mf.title or "").strip() or not (mf.artist or "").strip():
+                tags = _read_file_media_tags(p)
+                if not (tags.get("title", "") or "").strip() or not (tags.get("artist", "") or "").strip():
                     _add(p)
                     if len(candidates_set) >= max_files:
                         break
@@ -25348,11 +25379,17 @@ def start_ai_batch_import():
 
 # ── Library scan ──────────────────────────────────────────────────────────────
 
-_SCAN_STATE_FILE     = Path("/config/last_scan.txt")
+_SCAN_STATE_FILE     = Path(os.environ.get("BEETS_SCAN_STATE_FILE", "/web-manager-data/last_scan.txt"))
 _FULL_SCAN_INTERVAL  = 1800   # 30 min — full DB reconciliation + cleanup
 _QUICK_SCAN_INTERVAL = 120    # 2 min  — invalidate lib cache so next /api/library is fresh
 _AUTO_SCAN_INTERVAL  = _FULL_SCAN_INTERVAL   # kept for API compat
 _last_scan_job_id: Optional[str] = None
+
+
+def _legacy_local_scan_enabled() -> bool:
+    return os.environ.get("BEETS_ENABLE_LEGACY_LOCAL_SCAN", "0").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
 
 def _get_last_scan() -> float:
     """Return Unix timestamp of the last successful scan, or 0."""
@@ -25487,6 +25524,11 @@ def _do_scan_job() -> str:
 
 @app.post("/api/library/scan")
 def library_scan():
+    if not _legacy_local_scan_enabled():
+        return jsonify({
+            "ok": False,
+            "error": "Legacy local library scan is disabled for the external Beets engine architecture.",
+        }), 409
     jid = _do_scan_job()
     return jsonify({"ok": True, "job_id": jid, "last_scan": _get_last_scan()})
 
@@ -27070,7 +27112,8 @@ def _auto_scan_loop():
             _lg.getLogger(__name__).warning("_auto_scan_loop error: %s", _e)
         time.sleep(20)   # heartbeat every 20s
 
-threading.Thread(target=_auto_scan_loop, daemon=True).start()
+if _legacy_local_scan_enabled():
+    threading.Thread(target=_auto_scan_loop, daemon=True).start()
 
 # ── Import ────────────────────────────────────────────────────────────────────
 
@@ -27417,6 +27460,49 @@ def _dedup_job_result(kind: str, state: Dict[str, Any]) -> Dict[str, Any]:
         result["final_summary"] = state.get("final_summary")
     return result
 
+
+def _resolve_album_title_duplicate_candidate(
+    library: Any,
+    folder_raw: str,
+    track_title: str,
+    threshold: float = _MB_TRACK_PREFLIGHT_MATCH_THRESHOLD,
+    logger_instance: Optional[Any] = None,
+) -> Tuple[Optional[Any], str]:
+    """Find duplicate library track candidate by extracting folder album name and comparing track title.
+
+    Used by dedup_scan to match files where the source folder represents the album name.
+    Returns (candidate_item, match_type_str). Returns (None, "") on no match or query failure.
+    """
+    log = logger_instance or logger
+    if not track_title or not folder_raw:
+        return None, ""
+
+    folder_album = re.sub(r'\s*[\(\[]\d{4}[\)\]]\s*$', '', folder_raw).strip()
+    folder_album = re.sub(r'^\d{4}\s*[-–—]\s*', '', folder_album).strip()
+    folder_album = _restore_time_colon_title(folder_album)
+    if not folder_album:
+        return None, ""
+
+    try:
+        from difflib import SequenceMatcher
+        candidates = list(library.items(f"album:{folder_album}"))
+        for cand in candidates:
+            cand_album = (getattr(cand, "album", None) or getattr(cand, "get", lambda k, d="": "")("album") or "").lower()
+            if cand_album and SequenceMatcher(None, cand_album, folder_album.lower()).ratio() < 0.8:
+                continue
+            cand_title = (getattr(cand, "title", None) or getattr(cand, "get", lambda k, d="": "")("title") or "").lower()
+            score = SequenceMatcher(None, cand_title, track_title.lower()).ratio()
+            if score >= threshold:
+                return cand, f"album+title ({score:.0%})"
+    except BeetsError as ex:
+        log.warning("Album duplicate candidate search failed for '%s': %s", folder_album, ex)
+    except Exception as ex:
+        log.error("Unexpected error during album+title duplicate candidate search for '%s': %s", folder_album, ex, exc_info=True)
+        raise
+
+    return None, ""
+
+
 @app.post("/api/dedup/scan")
 def dedup_scan():
     """Start a background dedup scan; returns job_id immediately."""
@@ -27487,7 +27573,6 @@ def dedup_scan():
             return _s(path_value).casefold()
 
     def _run(log, cancel, update_state=None):
-        from beets.mediafile import MediaFile
         state["log"] = log
         if update_state:
             update_state(_dedup_structured_state(
@@ -27573,10 +27658,10 @@ def dedup_scan():
                 return {"ok": False, "error": str(exc)}
             mb_trackid = artist = title = ""
             try:
-                mf = MediaFile(str(src))
-                mb_trackid = (getattr(mf, "mb_trackid", "") or "").strip()
-                artist     = (getattr(mf, "artist",     "") or "").strip()
-                title      = (getattr(mf, "title",      "") or "").strip()
+                tags = _read_file_media_tags(src)
+                mb_trackid = (tags.get("mb_trackid", "") or "").strip()
+                artist     = (tags.get("artist",     "") or "").strip()
+                title      = (tags.get("title",      "") or "").strip()
             except Exception:
                 pass
             if not title:
@@ -27660,23 +27745,12 @@ def dedup_scan():
                     # 4. Album-folder + title match — catches beets-renamed files where
                     #    the source folder is "WILLOW (2019)" or "1999 - Californication"
                     if not lib_item and title:
-                        folder_raw   = src.parent.name          # e.g. "WILLOW (2019)" or "1999 - Californication"
-                        folder_album = re.sub(r'\s*[\(\[]\d{4}[\)\]]\s*$', '', folder_raw).strip()  # "WILLOW (2019)" → "WILLOW"
-                        folder_album = re.sub(r'^\d{4}\s*[-–—]\s*', '', folder_album).strip()        # "1999 - Californication" → "Californication"
-                        folder_album = _restore_time_colon_title(folder_album)
-                        if folder_album:
-                            try:
-                                from difflib import SequenceMatcher
-                                candidates = list(lib.items([f"album:{folder_album}"]))
-                                for cand in candidates:
-                                    cand_title = (cand.title or '').lower()
-                                    score = SequenceMatcher(None, cand_title, title.lower()).ratio()
-                                    if score >= _MB_TRACK_PREFLIGHT_MATCH_THRESHOLD:
-                                        lib_item   = cand
-                                        match_type = f"album+title ({score:.0%})"
-                                        break
-                            except Exception:
-                                pass
+                        cand_item, cand_match_type = _resolve_album_title_duplicate_candidate(
+                            lib, src.parent.name, title, logger_instance=logger
+                        )
+                        if cand_item:
+                            lib_item = cand_item
+                            match_type = cand_match_type
 
                     # 5. AcoustID fingerprint fallback — when tags/size/text heuristics
                     #    found nothing, fingerprint the source file and look for a
@@ -27881,7 +27955,6 @@ def dedup_ai_review():
     }
 
     def _run(log, cancel, update_state=None):
-        from beets.mediafile import MediaFile
         from difflib import SequenceMatcher as _SM
 
         state["log"] = log
@@ -27989,13 +28062,10 @@ def dedup_ai_review():
             for f in batch:
                 fm: Dict = {"path": str(f), "filename": f.name,
                             "artist": "", "title": "", "album": ""}
-                try:
-                    mf = MediaFile(str(f))
-                    fm["artist"] = (_s(getattr(mf, "artist", "") or "")).strip()
-                    fm["title"]  = (_s(getattr(mf, "title",  "") or "")).strip()
-                    fm["album"]  = (_s(getattr(mf, "album",  "") or "")).strip()
-                except Exception:
-                    pass
+                tags = _read_file_media_tags(str(f))
+                fm["artist"] = (_s(tags.get("artist") or "")).strip()
+                fm["title"]  = (_s(tags.get("title") or "")).strip()
+                fm["album"]  = (_s(tags.get("album") or "")).strip()
                 # Fallback: parse artist from filename  "Artist - Title.mp3"
                 if not fm["artist"]:
                     stem = re.sub(r'^\d+\s*[-\.]\s*', '', f.stem)
@@ -36510,12 +36580,12 @@ def _album_cleanup_file_inventory(folder: Path) -> Dict[str, Dict[str, Any]]:
     return files
 
 
-def _album_cleanup_embedded_musicbrainz_tags(folder: Path, inventory: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
-    try:
-        from beets.mediafile import MediaFile
-    except Exception:
-        return {"mb_releasegroupids": [], "mb_albumids": [], "albums": [], "years": [], "inspected": 0}
+def _album_cleanup_valid_rgid(value: Any) -> str:
+    text = _s(value).strip().lower()
+    return text if _MB_UUID_RE.match(text) else ""
 
+
+def _album_cleanup_embedded_musicbrainz_tags(folder: Path, inventory: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     rgids: List[str] = []
     release_ids: List[str] = []
     albums: List[str] = []
@@ -36531,20 +36601,22 @@ def _album_cleanup_embedded_musicbrainz_tags(folder: Path, inventory: Dict[str, 
         if not raw_path:
             continue
         try:
-            mf = MediaFile(raw_path)
+            tags = _read_file_media_tags(raw_path)
+            if not tags:
+                continue
         except Exception:
             continue
         inspected += 1
-        rgid = _album_cleanup_valid_rgid(getattr(mf, "mb_releasegroupid", ""))
+        rgid = _album_cleanup_valid_rgid(tags.get("mb_releasegroupid", ""))
         if rgid:
             rgids.append(rgid)
-        release_id = _album_cleanup_valid_rgid(getattr(mf, "mb_albumid", ""))
+        release_id = _album_cleanup_valid_rgid(tags.get("mb_albumid", ""))
         if release_id:
             release_ids.append(release_id)
-        album = _s(getattr(mf, "album", "")).strip()
+        album = _s(tags.get("album", "")).strip()
         if album:
             albums.append(album)
-        year = _s(getattr(mf, "year", "")).strip()[:4]
+        year = _s(tags.get("year", "")).strip()[:4]
         if year and year.isdigit():
             years.append(year)
 
@@ -40260,6 +40332,54 @@ def _plex_timeout_error(exc: BaseException) -> bool:
     return "timed out" in text or "timeout" in text
 
 
+_plex_client_identifier_cache: str = ""
+
+
+def _plex_client_identifier_file() -> Path:
+    return Path(os.environ.get("PLEX_CLIENT_IDENTIFIER_FILE", "/web-manager-data/.plex_client_identifier"))
+
+
+def _plex_client_identifier() -> str:
+    """Stable, installation-specific Plex client identifier.
+
+    Not a secret -- an opaque, per-installation UUID Plex uses to tell
+    this integration's authorized-device entry apart from every other
+    client on the account. Generated once and persisted so it survives
+    container recreation; a fresh value would otherwise register a new
+    "device" on every restart and never let a future rotation be
+    isolated the way this one couldn't be.
+    """
+    global _plex_client_identifier_cache
+    if _plex_client_identifier_cache:
+        return _plex_client_identifier_cache
+    id_file = _plex_client_identifier_file()
+    try:
+        existing = id_file.read_text(encoding="utf-8").strip()
+        if existing:
+            _plex_client_identifier_cache = existing
+            return existing
+    except Exception:
+        pass
+    generated = uuid.uuid4().hex
+    try:
+        id_file.parent.mkdir(parents=True, exist_ok=True)
+        id_file.write_text(generated, encoding="utf-8")
+    except Exception:
+        pass  # Best-effort persistence; an in-memory-only id for this process is still correct.
+    _plex_client_identifier_cache = generated
+    return generated
+
+
+def _plex_client_headers() -> Dict[str, str]:
+    return {
+        "X-Plex-Client-Identifier": _plex_client_identifier(),
+        "X-Plex-Product": "Beets Web Manager",
+        "X-Plex-Device-Name": "beets-web-manager",
+        "X-Plex-Version": "0.1.0",
+        "X-Plex-Platform": "Docker",
+    }
+
+
 def _plex_request(path: str, params: Optional[Dict[str, Any]] = None,
                   *, method: str = "GET", timeout: Optional[int] = None,
                   attempts: int = 2) -> Dict[str, Any]:
@@ -40269,9 +40389,12 @@ def _plex_request(path: str, params: Optional[Dict[str, Any]] = None,
     if not settings["token"]:
         raise RuntimeError("Plex token is not configured")
     query = dict(params or {})
-    query["X-Plex-Token"] = settings["token"]
-    url = f"{settings['url']}{path}?{urllib.parse.urlencode(query)}"
-    req = urllib.request.Request(url, headers={"Accept": "application/json"}, method=method)
+    url = f"{settings['url']}{path}"
+    if query:
+        url = f"{url}?{urllib.parse.urlencode(query)}"
+    headers = {"Accept": "application/json", "X-Plex-Token": settings["token"]}
+    headers.update(_plex_client_headers())
+    req = urllib.request.Request(url, headers=headers, method=method)
     timeout = int(timeout or PLEX_API_TIMEOUT)
     last_exc: Optional[BaseException] = None
     for attempt in range(max(1, int(attempts or 1))):
@@ -42991,11 +43114,10 @@ def _playlist_download_text_candidates(path_value: str) -> Dict[str, List[str]]:
             _add(artist_candidates, right)
 
     try:
-        from beets.mediafile import MediaFile
-        mf = MediaFile(str(path))
-        _add(title_candidates, getattr(mf, "title", ""))
-        _add(artist_candidates, getattr(mf, "artist", ""))
-        _add(artist_candidates, getattr(mf, "albumartist", ""))
+        tags = _read_file_media_tags(path)
+        _add(title_candidates, tags.get("title", ""))
+        _add(artist_candidates, tags.get("artist", ""))
+        _add(artist_candidates, tags.get("albumartist", ""))
     except Exception:
         pass
 
@@ -43135,13 +43257,11 @@ def _playlist_download_match(path_value: str, artist: str, title: str,
 
 def _playlist_stamp_download_tags(path_value: str, artist: str, title: str, log) -> None:
     try:
-        from beets.mediafile import MediaFile
-        mf = MediaFile(str(path_value))
-        mf.title = title
+        tags = {"title": title}
         if artist:
-            mf.artist = artist
-            mf.albumartist = artist
-        mf.save()
+            tags["artist"] = artist
+            tags["albumartist"] = artist
+        beets_client.write_tags(str(path_value), tags)
     except Exception as ex:
         log(f"  warning: could not stamp playlist tags on {Path(path_value).name}: {ex}")
 
@@ -47760,38 +47880,32 @@ def _playlist_staged_entries(name: str) -> List[Tuple[Dict[str, Any], Path]]:
 
 
 def _enrich_playlist_file_tags(path: Path, track: Dict[str, Any], log: List[str]) -> None:
-    """Write safe playlist singleton tags before beet import."""
+    """Write safe playlist singleton tags before beet import via control agent API."""
     try:
-        import mediafile as _mf  # beets internal, always available
-        mf = _mf.MediaFile(str(path))
-        changed = False
+        cur_tags = _read_file_media_tags(str(path))
         artist = _s(track.get("artist") or "")
         title = _s(track.get("title") or "")
+        tags_to_write = {}
 
         if artist:
-            if not (mf.artist or "").strip():
-                mf.artist = artist
-                changed = True
-            if not (mf.albumartist or "").strip():
-                mf.albumartist = artist
-                changed = True
+            if not (cur_tags.get("artist") or "").strip():
+                tags_to_write["artist"] = artist
+            if not (cur_tags.get("albumartist") or "").strip():
+                tags_to_write["albumartist"] = artist
 
-        if title and not (mf.title or "").strip():
-            mf.title = title
-            changed = True
+        if title and not (cur_tags.get("title") or "").strip():
+            tags_to_write["title"] = title
 
-        current_album = (mf.album or "").strip()
+        current_album = (cur_tags.get("album") or "").strip()
         year_only_album = bool(re.match(r'^\d{4}$', current_album))
         bad_album = _playlist_album_value_is_bad_fallback(current_album)
         if not current_album or year_only_album or bad_album:
-            mf.album = title or path.stem
-            if artist and not (mf.albumartist or "").strip():
-                mf.albumartist = artist
-            changed = True
+            tags_to_write["album"] = title or path.stem
+            if artist and not (cur_tags.get("albumartist") or "").strip():
+                tags_to_write["albumartist"] = artist
             try:
-                if getattr(mf, "year", 0):
-                    mf.year = 0
-                    changed = True
+                if int(cur_tags.get("year", 0) or 0) > 0:
+                    tags_to_write["year"] = 0
             except Exception:
                 pass
             if bad_album:
@@ -47799,9 +47913,10 @@ def _enrich_playlist_file_tags(path: Path, track: Dict[str, Any], log: List[str]
                     f"  [tag] Rejected metadata: provider name was incorrectly used as album ({current_album})"
                 )
 
-        if changed:
-            mf.save()
+        if tags_to_write:
+            beets_client.write_tags(str(path), tags_to_write)
     except Exception as exc:
+        log.append(f"  [tag] Error enriching playlist file tags: {exc}")
         log.append(f"  [tag] Warning: could not enrich tags on {path.name}: {exc}")
 
 
@@ -48530,15 +48645,14 @@ def _music_format_read_embedded_identity(row: Dict[str, Any]) -> Dict[str, Any]:
     if not path.is_file():
         return {}
     try:
-        from beets.mediafile import MediaFile
-        mf = MediaFile(str(path))
+        tags = _read_file_media_tags(path)
         return {
-            "artist": _s(getattr(mf, "artist", "") or ""),
-            "albumartist": _s(getattr(mf, "albumartist", "") or ""),
-            "title": _s(getattr(mf, "title", "") or ""),
-            "album": _s(getattr(mf, "album", "") or ""),
-            "mb_trackid": _s(getattr(mf, "mb_trackid", "") or ""),
-            "mb_albumid": _s(getattr(mf, "mb_albumid", "") or ""),
+            "artist": _s(tags.get("artist", "") or ""),
+            "albumartist": _s(tags.get("albumartist", "") or ""),
+            "title": _s(tags.get("title", "") or ""),
+            "album": _s(tags.get("album", "") or ""),
+            "mb_trackid": _s(tags.get("mb_trackid", "") or ""),
+            "mb_albumid": _s(tags.get("mb_albumid", "") or ""),
         }
     except Exception:
         return {}
@@ -49409,80 +49523,3 @@ if __name__ == "__main__":
         port=PORT,
         threads=_env_int("WEBCONTROL_THREADS", 8, minimum=1, maximum=64),
     )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

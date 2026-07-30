@@ -1,7 +1,7 @@
 plugins: fetchart embedart convert scrub replaygain lastgenre chroma lyrics mbsync musicbrainz deezer listenbrainz ftintitle fromfilename duplicates missing smartplaylist mbsubmit unimported discpath
 pluginpath:
+  - /opt/beets-web-manager-agent/beetsplug
   - /config/beetsplug
-  - /app/beetsplug
 directory: /data/media/music
 library: /config/musiclibrary.blb
 art_filename: albumart

@@ -98,6 +98,7 @@ config.yaml
 # Unreviewed local docs drafts
 docs/*
 !docs/AI_ENGINEERING_RULES.md
+!docs/AGENT_WORKFLOW.md
 !docs/ARCHITECTURE.md
 !docs/TECHNICAL_DEBT.md
 !docs/adr/

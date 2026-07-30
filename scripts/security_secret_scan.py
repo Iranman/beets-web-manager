@@ -26,9 +26,21 @@ SKIP_DIRS = {
     ".pytest_cache", "__pycache__", "dist", "node_modules", "out",
 }
 LOCAL_ARTIFACT_DIRS = {"_codex_backups", ".codex-live-backups", ".local-archive", "output"}
-ALLOWLIST_VALUES = {
-    "", "false", "true", "none", "null", "changeme", "change-me", "example",
-    "placeholder", "configured", "redacted", "***redacted***", "<redacted>",
+
+# Safe in ANY scanned file: generic non-secret-shaped values a real credential
+# could never plausibly be. These do not depend on the file being a template.
+UNIVERSAL_ALLOWLIST_VALUES = {
+    "", "false", "true", "none", "null", "configured", "redacted",
+    "***redacted***", "<redacted>",
+}
+
+# Only safe when the containing file is itself clearly a template/example
+# file (see is_example_file below). A real, non-example config with
+# PASSWORD=changeme is a genuine committed weak credential and must still be
+# flagged -- these are human-instructional placeholder words that someone
+# could plausibly paste into a real, non-example file by mistake.
+EXAMPLE_FILE_ONLY_ALLOWLIST_VALUES = {
+    "changeme", "change-me", "example", "placeholder",
 }
 HIGH_CONFIDENCE_RULES = [
     ("private-key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
@@ -63,9 +75,32 @@ def clean_value(value: str) -> str:
     return value.rstrip(",")
 
 
-def is_placeholder(value: str) -> bool:
+def is_example_file(path: Path) -> bool:
+    """Only files that are unambiguously templates/examples, never a file a
+    user would deploy as-is. Matches this repo's own convention (.env.example,
+    config.yaml.example) plus the generic *.example suffix."""
+    name = path.name.lower()
+    return name == ".env.example" or name.endswith(".example")
+
+
+def is_ci_only_workflow_file(path: Path) -> bool:
+    """GitHub Actions workflow files under .github/workflows/ are never
+    deployed or run outside a throwaway CI runner; their `env:` blocks may
+    legitimately need placeholder values so `docker compose config` can
+    interpolate required variables. This is still narrowly scoped to that
+    one directory, not a blanket exception for all YAML."""
+    try:
+        rel = path.relative_to(ROOT)
+    except ValueError:
+        return False
+    return rel.parts[:2] == (".github", "workflows")
+
+
+def is_placeholder(value: str, path: Path) -> bool:
     lowered = clean_value(value).lower()
-    if lowered in ALLOWLIST_VALUES:
+    if lowered in UNIVERSAL_ALLOWLIST_VALUES:
+        return True
+    if (is_example_file(path) or is_ci_only_workflow_file(path)) and lowered in EXAMPLE_FILE_ONLY_ALLOWLIST_VALUES:
         return True
     if lowered.startswith("${") or lowered.startswith("$env:"):
         return True
@@ -88,7 +123,7 @@ def scan_file(path: Path) -> list[tuple[int, str]]:
                 findings.append((line_no, rule_name))
         if path.suffix.lower() in CONFIG_SUFFIXES or path.name.lower().startswith(".env"):
             match = CONFIG_ASSIGNMENT.match(line)
-            if match and not is_placeholder(match.group(2)):
+            if match and not is_placeholder(match.group(2), path):
                 findings.append((line_no, "config-secret-assignment"))
     return findings
 

@@ -1,0 +1,3 @@
+#!/bin/sh
+set -eu
+exec flock /config/.beet_db.lock /lsiopy/bin/beet "$@"
