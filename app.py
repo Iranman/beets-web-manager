@@ -1504,7 +1504,11 @@ _JOB_PATHS_CONFIG_BLOCK = (
 
 
 def _write_job_beets_config(temp_path: str, extra: str = "") -> str:
-    """Write a temp beets config for jobs that should not load slow/fragile plugins."""
+    """Write a temp beets config for jobs that should not load slow/fragile plugins.
+
+    extra may embed a plugin API key (e.g. AcoustID), so the file is
+    written with owner-only permissions rather than the process default.
+    """
     try:
         plugins = _beet_plugins()
         extra_block = extra or ""
@@ -1519,6 +1523,7 @@ def _write_job_beets_config(temp_path: str, extra: str = "") -> str:
             + "lyrics:\n  auto: no\n"
             "replaygain:\n  auto: no\n"
         )
+        os.chmod(temp_path, 0o600)
         return temp_path
     except Exception:
         return "/config/config.yaml"
@@ -7698,6 +7703,8 @@ def _folder_import_track_count(source_folder: str, existing_album_id: int = 0) -
             pass
     try:
         source = Path(source_folder)
+        if not (_path_is_under(source, MUSIC_ROOT) or _path_is_under(source, DOWNLOADS_ROOT)):
+            return 0
         if source.is_dir():
             return sum(
                 1 for p in source.rglob("*")
@@ -10608,7 +10615,8 @@ def album_delete_art(aid):
                 p.unlink()
                 removed.append(str(p))
             except Exception as ex:
-                return jsonify({"ok": False, "error": f"Could not delete {p.name}: {ex}"}), 500
+                app.logger.warning("Could not delete art file %s for album %s: %s", p.name, aid, type(ex).__name__)
+                return jsonify({"ok": False, "error": f"Could not delete {p.name}."}), 500
 
     try:
         beets_client.clear_album_artpath(aid)
