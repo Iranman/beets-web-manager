@@ -126,3 +126,13 @@ Statuses: Open, In Progress, Blocked, Done.
 - Required tests: A new parity/regression test modeling a real album whose entire folder is missing from disk, asserting it is still counted in `albums`/`tracks`, not `singleton_tracks`.
 - Priority: P1.
 - Status: Open.
+
+## SEC-001 Retained Plex Credential After Diagnostic Exposure
+
+- Date: 2026-07-29.
+- Scope: `PLEX_TOKEN`, used only by `beets-web-manager`.
+- Risk: the token appeared in private diagnostic session output during earlier work on this branch and must be treated as potentially exposed.
+- Decision: owner reviewed the exposure and explicitly chose to retain the current token rather than revoke/replace it, accepting the associated risk.
+- Existing mitigations: `PLEX_TOKEN` is sent via a request header, never a URL query parameter (query-string tokens are far more likely to end up in access logs/proxies). A stable, persisted, installation-specific Plex client identifier (`X-Plex-Client-Identifier`/`X-Plex-Product`/`X-Plex-Device-Name`) is now sent on every request, so any future rotation is cleanly attributable instead of facing the ambiguity that blocked attribution this time (the token has visibility into 35 authorized devices with no way to isolate which one originally produced it). Token values are never logged, printed, or included in reports.
+- Future recommended action: rotate `PLEX_TOKEN` when convenient, using Plex Web -> Settings -> Account -> Authorized Devices to remove the specific session, then generate a replacement.
+- Status: Owner accepted. Not a release blocker.
