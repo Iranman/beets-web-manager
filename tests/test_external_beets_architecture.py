@@ -352,8 +352,8 @@ class TestBeetsClientRemoteOnly(unittest.TestCase):
             con.close()
 
             with mock.patch("backend.beets_control_agent.LIB_PATH", str(db_path)), \
-                 mock.patch("backend.beets_control_agent.is_safe_path", return_value=True), \
-                 mock.patch("os.unlink", side_effect=PermissionError("Permission denied")):
+                 mock.patch("backend.beets_control_agent.MUSIC_LIBRARY_PATH", str(music_path)), \
+                 mock.patch.object(Path, "unlink", side_effect=PermissionError("Permission denied")):
                 code, res = _handle_delete_album(1, delete_files=True)
                 self.assertEqual(code, 200)
                 self.assertFalse(res["success"])
