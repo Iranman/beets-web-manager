@@ -49,7 +49,6 @@ jobs:
             done
             echo "OK: web-manager container image boundary verified"
           '
-          python -m unittest tests.test_external_beets_architecture.TestBeetsClientRemoteOnly.test_docker_web_manager_image_has_no_beets_binary
       - name: Installation smoke test
         run: |
           set -e
