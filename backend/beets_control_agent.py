@@ -516,7 +516,17 @@ def resolve_safe_path(
     if ".." in parts or "." in parts:
         raise UnsafePathError("path contains a traversal segment")
 
-    abs_path = os.path.abspath(decoded)
+    # Canonicalize from the ORIGINAL raw path, not the decoded form above:
+    # decoding is used only to detect a hidden traversal/separator/null-byte
+    # attack encoded into the request. Every path endpoint here receives
+    # values in a JSON body, never URL-encoded by any real caller, so a
+    # legitimate literal filename that merely contains a percent-sign byte
+    # sequence (e.g. "50%20off.flac") must resolve to itself -- it must not
+    # be silently rewritten to a different string ("50 off.flac") before it
+    # reaches the filesystem sink. The traversal/separator/null checks above
+    # already ran against the fully-decoded form, so nothing unsafe can slip
+    # through by canonicalizing the original string here instead.
+    abs_path = os.path.abspath(path)
     real_path = os.path.realpath(abs_path)
     trusted: Optional[Path] = None
     for root in _allowed_root_paths(allowed_types):
@@ -544,6 +554,44 @@ def is_safe_path(path: object, allowed_types: list = None) -> bool:
         return True
     except UnsafePathError:
         return False
+
+
+_DOTDOT_SEGMENT_RE = re.compile(r"(^|/)\.\.(/|$)")
+
+
+def _sanitize_command_path_args(args: Any, allowed_types: list) -> list:
+    """Validate a command/job argument list, replacing any absolute-path
+    argument with its canonical resolved value (never the original
+    request string). Raises UnsafePathError for any unsafe argument.
+
+    Rejects ".." only as an actual path segment (bounded by "/" or the
+    whole string), not as a bare substring: Beets' own supported query
+    syntax uses ".." for range queries (e.g. `year:2020..2023`,
+    `added:2020-01-01..2020-02-01`), which a blanket substring check would
+    incorrectly reject even though these args are never filesystem-joined.
+    A relative arg is still only relevant to traversal for a command like
+    `import` that can accept a second positional path, so a genuine
+    "../"-shaped segment must still be blocked.
+    """
+    if not isinstance(args, list):
+        raise UnsafePathError("args must be a list")
+
+    sanitized: list = []
+    for arg in args:
+        s_arg = str(arg)
+        if s_arg in ("-c", "--config") or s_arg.startswith(("-c=", "--config=")):
+            raise UnsafePathError("unsupported config override in args")
+        if (
+            s_arg == "." or s_arg.startswith("./")
+            or _DOTDOT_SEGMENT_RE.search(s_arg)
+            or "\\" in s_arg or "\x00" in s_arg
+        ):
+            raise UnsafePathError("invalid path parameter in args")
+        if s_arg.startswith("/"):
+            sanitized.append(str(resolve_safe_path(s_arg, allowed_types)))
+        else:
+            sanitized.append(s_arg)
+    return sanitized
 
 
 def acquire_os_lock(read_only: bool = False):
@@ -717,20 +765,46 @@ def _handle_delete_album(album_id: int, delete_files: bool = True) -> tuple:
             files_deleted = 0
             file_errors = []
             if delete_files:
+                # Stored item/album paths come from the database, not the
+                # current request, but they are still untrusted: a corrupt
+                # or maliciously-written row must not be able to direct a
+                # delete outside the approved roots. Resolve each one through
+                # resolve_safe_path() and operate only on the returned Path
+                # (never the raw stored string), and refuse an approved root
+                # itself the same way /files/delete does.
                 for fpath in item_files:
-                    if fpath and is_safe_path(fpath, ["music", "staging"]) and os.path.exists(fpath):
-                        try:
-                            os.unlink(fpath)
-                            files_deleted += 1
-                        except Exception as exc:
-                            file_errors.append(f"Failed to delete {fpath}: {exc}")
-
-                if album_path and is_safe_path(album_path, ["music"]) and os.path.exists(album_path):
+                    if not fpath:
+                        continue
                     try:
-                        if os.path.isdir(album_path) and not os.listdir(album_path):
-                            os.rmdir(album_path)
-                    except Exception:
-                        pass
+                        safe_fpath = resolve_safe_path(fpath, ["music", "staging"])
+                    except UnsafePathError:
+                        file_errors.append("Skipped unsafe album item path")
+                        continue
+                    if any(str(safe_fpath) == os.path.realpath(root) for root in _allowed_root_paths(["music", "staging"])):
+                        file_errors.append("Skipped allowed root path")
+                        continue
+                    if safe_fpath.exists():
+                        try:
+                            safe_fpath.unlink()
+                            files_deleted += 1
+                        except Exception:
+                            file_errors.append("Failed to delete album item file")
+
+                if album_path:
+                    try:
+                        safe_album_path = resolve_safe_path(album_path, ["music"])
+                    except UnsafePathError:
+                        safe_album_path = None
+                    if (
+                        safe_album_path is not None
+                        and not any(str(safe_album_path) == os.path.realpath(root) for root in _allowed_root_paths(["music"]))
+                        and safe_album_path.is_dir()
+                        and not os.listdir(safe_album_path)
+                    ):
+                        try:
+                            safe_album_path.rmdir()
+                        except Exception:
+                            pass
 
             files_failed = len(file_errors)
             if files_failed > 0:
@@ -1175,30 +1249,32 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 self._send_json(409, capability_error)
                 return
 
+            safe_source_path = None
             if source_path:
                 allowed_roots = ["staging"] if command == "import" else ["music", "staging"]
-                if not is_safe_path(source_path, allowed_roots):
-                    self._send_json(403, {"error": f"Access denied for source_path: {source_path}"})
+                try:
+                    safe_source_path = resolve_safe_path(source_path, allowed_roots)
+                except UnsafePathError:
+                    self._send_json(403, {"error": "Access denied for source_path outside allowed roots"})
                     return
 
             if target_path:
-                if not is_safe_path(target_path, ["music", "staging"]):
-                    self._send_json(403, {"error": f"Access denied for target_path: {target_path}"})
+                try:
+                    resolve_safe_path(target_path, ["music", "staging"])
+                except UnsafePathError:
+                    self._send_json(403, {"error": "Access denied for target_path outside allowed roots"})
                     return
 
-            for arg in args:
-                s_arg = str(arg)
-                if s_arg.startswith(".") or ".." in s_arg or "\\" in s_arg or "\x00" in s_arg:
-                    self._send_json(403, {"error": f"Invalid path parameter in command args: {arg}"})
-                    return
-                if s_arg.startswith("/") and not is_safe_path(s_arg, ["music", "staging", "config", "tmp"]):
-                    self._send_json(403, {"error": f"Access denied for path in command args: {arg}"})
-                    return
+            try:
+                sanitized_args = _sanitize_command_path_args(args, ["music", "staging", "config", "tmp"])
+            except UnsafePathError:
+                self._send_json(403, {"error": "Invalid path parameter in command args"})
+                return
 
             cmd_list = [command]
-            if source_path:
-                cmd_list.append(source_path)
-            cmd_list.extend([str(a) for a in args])
+            if safe_source_path is not None:
+                cmd_list.append(str(safe_source_path))
+            cmd_list.extend(sanitized_args)
 
             mutating = command in {
                 "import", "update", "write", "move", "modify", "mbsync",
@@ -1233,8 +1309,8 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 })
             except subprocess.TimeoutExpired:
                 self._send_json(408, {"error": f"Command '{command}' timed out after {timeout}s", "returncode": 124})
-            except Exception as exc:
-                self._send_json(500, {"error": f"Command execution error: {exc}"})
+            except Exception:
+                self._send_json(500, {"error": "Command execution error"})
             finally:
                 if tmp_cfg_path and os.path.exists(tmp_cfg_path):
                     try:
@@ -1260,26 +1336,26 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 self._send_json(409, capability_error)
                 return
 
+            safe_source_path = None
             if source_path:
                 allowed_roots = ["staging"] if command == "import" else ["music", "staging"]
-                if not is_safe_path(source_path, allowed_roots):
-                    self._send_json(403, {"error": f"Access denied for source_path: {source_path}"})
+                try:
+                    safe_source_path = resolve_safe_path(source_path, allowed_roots)
+                except UnsafePathError:
+                    self._send_json(403, {"error": "Access denied for source_path outside allowed roots"})
                     return
 
-            for arg in args:
-                s_arg = str(arg)
-                if s_arg.startswith(".") or ".." in s_arg or "\\" in s_arg or "\x00" in s_arg:
-                    self._send_json(403, {"error": f"Invalid path parameter in job args: {arg}"})
-                    return
-                if s_arg.startswith("/") and not is_safe_path(s_arg, ["music", "staging", "config", "tmp"]):
-                    self._send_json(403, {"error": f"Access denied for path in job args: {arg}"})
-                    return
+            try:
+                sanitized_args = _sanitize_command_path_args(args, ["music", "staging", "config", "tmp"])
+            except UnsafePathError:
+                self._send_json(403, {"error": "Invalid path parameter in job args"})
+                return
 
             job_id = uuid.uuid4().hex
             cmd_list = [command]
-            if source_path:
-                cmd_list.append(source_path)
-            cmd_list.extend([str(a) for a in args])
+            if safe_source_path is not None:
+                cmd_list.append(str(safe_source_path))
+            cmd_list.extend(sanitized_args)
 
             job = AgentJob(job_id, cmd_list, label=label, config_override=config_override)
             with JOBS_LOCK:

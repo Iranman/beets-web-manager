@@ -206,6 +206,241 @@ class ControlAgentPathBoundaryTests(unittest.TestCase):
         self.assertTrue(Path(dest).exists())
         self.assertFalse(Path(source).exists())
 
+    def test_resolve_safe_path_preserves_literal_percent_filenames(self):
+        """Regression test: resolve_safe_path() must canonicalize from the
+        original raw path, not its decoded form. Decoding is used only to
+        detect a hidden traversal/separator/null-byte attack; a legitimate
+        literal filename that happens to contain a percent-sign byte
+        sequence must resolve to itself, not be silently rewritten to a
+        different string before it reaches the filesystem sink. Every path
+        endpoint here receives values in a JSON body, never URL-encoded by
+        any real caller, so decoding must never change what gets operated
+        on."""
+        literal_names = [
+            "convention%20album.flac",
+            "100%25 legit.flac",
+            "literal%2520name.flac",
+        ]
+        for name in literal_names:
+            with self.subTest(name=name):
+                literal_path = f"{self.music}/{name}"
+                Path(literal_path).write_text("audio", encoding="utf-8")
+                resolved = resolve_safe_path(literal_path, ["music"])
+                self.assertEqual(resolved, Path(literal_path).resolve())
+
+        # Encoded traversal, separators, nulls, and nested encoding must
+        # still be rejected -- the fix must not weaken detection.
+        attack_paths = [
+            f"{self.music}/../outside/secret.flac",
+            f"{self.music}/%2e%2e/outside/secret.flac",
+            f"{self.music}/%252e%252e/outside/secret.flac",
+            f"{self.music}/foo%00.flac",
+            f"{self.music}/..%2f..%2fetc/passwd",
+        ]
+        for candidate in attack_paths:
+            with self.subTest(candidate=candidate):
+                with self.assertRaises(UnsafePathError):
+                    resolve_safe_path(candidate, ["music"])
+
+        # Nested encoding of a genuine "../" must be rejected at every
+        # depth, including beyond the resolver's decode budget.
+        import urllib.parse as _up
+        s = "../"
+        for depth in range(1, 7):
+            s = _up.quote(s, safe="")
+            raw = f"{self.music}/{s}etc/passwd"
+            with self.subTest(depth=depth):
+                with self.assertRaises(UnsafePathError):
+                    resolve_safe_path(raw, ["music"])
+
+    def test_literal_percent_filename_survives_delete_endpoint(self):
+        literal_path = f"{self.music}/convention%20album.flac"
+        Path(literal_path).write_text("audio", encoding="utf-8")
+        decoded_sibling = f"{self.music}/convention album.flac"
+        self.assertFalse(Path(decoded_sibling).exists())
+
+        code, data = _post_agent("/files/delete", {"path": literal_path})
+        self.assertEqual(code, 200, data)
+        self.assertEqual(data["path"], str(Path(literal_path).resolve()))
+        self.assertFalse(Path(literal_path).exists())
+        self.assertFalse(Path(decoded_sibling).exists())
+
+    def test_command_args_allow_beets_range_query_syntax(self):
+        """Regression test: a blanket '".." in arg' substring check rejected
+        legitimate Beets range-query syntax (e.g. `year:2020..2023`), which
+        is never filesystem-joined -- only an actual relative path segment
+        is a real traversal-relevant shape and must still be rejected."""
+        legitimate_args = ["year:2020..2023", "added:2020-01-01..2020-02-01", "title:Mr...Wonderful"]
+        fake_result = mock.MagicMock(returncode=0, stdout="", stderr="")
+        with mock.patch.object(bca.subprocess, "run", return_value=fake_result) as run_mock:
+            code, data = _post_agent("/commands/execute", {"command": "ls", "args": legitimate_args})
+        self.assertEqual(code, 200, data)
+        full_cmd = run_mock.call_args.args[0]
+        self.assertEqual(full_cmd[-len(legitimate_args):], legitimate_args)
+
+        for traversal_arg in ["..", "../etc/passwd", "foo/../bar", "./relative"]:
+            with self.subTest(arg=traversal_arg):
+                with mock.patch.object(bca.subprocess, "run") as run_mock:
+                    code, data = _post_agent("/commands/execute", {"command": "ls", "args": [traversal_arg]})
+                self.assertEqual(code, 403, data)
+                run_mock.assert_not_called()
+
+    def test_commands_execute_and_jobs_create_use_canonical_source_path(self):
+        """source_path and absolute args must be replaced by their canonical
+        resolved values in the actual subprocess/job command array -- never
+        the original request string."""
+        source = f"{self.staging}/import-source"
+        Path(source).mkdir()
+        arg_file = f"{self.music}/Artist/Track.flac"
+        Path(arg_file).parent.mkdir(parents=True, exist_ok=True)
+        Path(arg_file).write_text("audio", encoding="utf-8")
+
+        fake_result = mock.MagicMock(returncode=0, stdout="", stderr="")
+        with mock.patch.object(bca.subprocess, "run", return_value=fake_result) as run_mock:
+            code, data = _post_agent("/commands/execute", {
+                "command": "import",
+                "source_path": source,
+                "args": ["--quiet", arg_file],
+            })
+        self.assertEqual(code, 200, data)
+        full_cmd = run_mock.call_args.args[0]
+        self.assertEqual(
+            full_cmd[-4:],
+            ["import", str(Path(source).resolve()), "--quiet", str(Path(arg_file).resolve())],
+        )
+
+        created = {}
+
+        class FakeJob:
+            def __init__(self, job_id, command, label="", config_override=""):
+                created["job_id"] = job_id
+                created["command"] = command
+
+        with mock.patch.object(bca, "AgentJob", FakeJob):
+            code, data = _post_agent("/jobs/create", {
+                "command": "import",
+                "source_path": source,
+                "args": ["--quiet", arg_file],
+            })
+        try:
+            self.assertEqual(code, 200, data)
+            self.assertEqual(
+                created["command"],
+                ["import", str(Path(source).resolve()), "--quiet", str(Path(arg_file).resolve())],
+            )
+        finally:
+            bca.JOBS.pop(created.get("job_id"), None)
+
+    def test_command_and_job_reject_traversal_and_option_injection(self):
+        with mock.patch.object(bca.subprocess, "run") as run_mock:
+            code, data = _post_agent("/commands/execute", {
+                "command": "import",
+                "source_path": self.staging,
+                "args": ["--config=/etc/passwd"],
+            })
+        self.assertEqual(code, 403, data)
+        run_mock.assert_not_called()
+        self.assertNotIn("/etc/passwd", json.dumps(data))
+
+        before_jobs = set(bca.JOBS)
+        code, data = _post_agent("/jobs/create", {
+            "command": "import",
+            "source_path": f"{self.staging}/%252e%252e/outside",
+            "args": [],
+        })
+        self.assertEqual(code, 403, data)
+        self.assertEqual(set(bca.JOBS), before_jobs)
+        self.assertNotIn("%252e%252e", json.dumps(data))
+
+
+class AlbumDeleteCanonicalPathTests(unittest.TestCase):
+    """Regression tests for _handle_delete_album() treating database-stored
+    paths as untrusted, matching the same canonical-path/root-refusal
+    contract as the /files/delete endpoint."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(dir="/tmp")
+        base_name = Path(self.tmp.name).name
+        self.base = f"/tmp/{base_name}"
+        self.music = f"{self.base}/music"
+        self.staging = f"{self.base}/staging"
+        self.outside = f"{self.base}/outside"
+        Path(self.music).mkdir(parents=True, exist_ok=True)
+        Path(self.staging).mkdir(parents=True, exist_ok=True)
+        Path(self.outside).mkdir(parents=True, exist_ok=True)
+        self.db_path = Path(self.base) / "musiclibrary.blb"
+        self.patches = [
+            mock.patch.object(bca, "MUSIC_LIBRARY_PATH", self.music),
+            mock.patch.object(bca, "DOWNLOAD_PATH", self.staging),
+            mock.patch.object(bca, "LOCK_PATH", f"{self.base}/agent.lock"),
+            mock.patch.object(bca, "LIB_PATH", str(self.db_path)),
+        ]
+        for patch in self.patches:
+            patch.start()
+
+    def tearDown(self):
+        for patch in reversed(self.patches):
+            patch.stop()
+        self.tmp.cleanup()
+
+    def _seed_album(self, album_path: str, item_paths: list[str]):
+        con = sqlite3.connect(self.db_path)
+        con.execute("CREATE TABLE albums (id INTEGER PRIMARY KEY, album TEXT, path TEXT)")
+        con.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, album_id INTEGER, path TEXT)")
+        con.execute("INSERT INTO albums (id, album, path) VALUES (1, 'Album', ?)", (album_path,))
+        for idx, p in enumerate(item_paths, start=10):
+            con.execute("INSERT INTO items (id, album_id, path) VALUES (?, 1, ?)", (idx, p))
+        con.commit()
+        con.close()
+
+    def test_hostile_stored_paths_do_not_escape_approved_roots(self):
+        real_item = f"{self.music}/Artist/Album/Track.flac"
+        Path(real_item).parent.mkdir(parents=True, exist_ok=True)
+        Path(real_item).write_text("audio", encoding="utf-8")
+
+        outside_item = f"{self.outside}/secret.flac"
+        Path(outside_item).write_text("secret", encoding="utf-8")
+
+        percent_item = f"{self.music}/Artist/Album/convention%20album.flac"
+        Path(percent_item).write_text("audio", encoding="utf-8")
+        decoded_sibling = f"{self.music}/Artist/Album/convention album.flac"
+
+        traversal_item = f"{self.music}/Artist/Album/%2e%2e/%2e%2e/outside/escape.flac"
+
+        self._seed_album(
+            self.music,  # hostile: album path itself is the approved root
+            [real_item, outside_item, percent_item, traversal_item],
+        )
+
+        code, data = bca._handle_delete_album(1, delete_files=True)
+        self.assertEqual(code, 200, data)
+
+        # The real, legitimate item is gone.
+        self.assertFalse(Path(real_item).exists())
+        # The literal-percent file was deleted exactly, not a decoded sibling.
+        self.assertFalse(Path(percent_item).exists())
+        self.assertFalse(Path(decoded_sibling).exists())
+        # The outside-root item was never touched.
+        self.assertTrue(Path(outside_item).exists())
+        # The approved root itself (used as the "album path") was not removed.
+        self.assertTrue(Path(self.music).is_dir())
+
+        self.assertEqual(data["files_deleted"], 2)
+        self.assertGreaterEqual(data["files_failed"], 1)
+        self.assertNotIn(self.outside, json.dumps(data))
+        self.assertNotIn("secret.flac", json.dumps(data))
+
+    def test_database_row_deletion_is_unconditional_even_with_hostile_paths(self):
+        """A malicious stored path must not prevent safe database cleanup:
+        the album/item rows are removed regardless of whether any stored
+        file path is safe to delete."""
+        self._seed_album(f"{self.outside}/evil-album", [f"{self.outside}/evil.flac"])
+        code, data = bca._handle_delete_album(1, delete_files=True)
+        self.assertEqual(code, 200, data)
+        self.assertTrue(data["database_deleted"])
+        self.assertEqual(data["items_deleted"], 1)
+        self.assertEqual(data["albums_deleted"], 1)
+
 
 class ControlAgentSqlBoundaryTests(unittest.TestCase):
     def setUp(self):
