@@ -34,6 +34,7 @@ from backend.beets_control_agent import (
     ALLOWED_COMMANDS,
     JOBS,
     ControlAgentHandler,
+    UnsafePathError,
     _handle_delete_album,
     is_safe_path,
     resolve_safe_path,
