@@ -242,8 +242,14 @@ class LidarrErrorSanitizationTests(unittest.TestCase):
         self.assertEqual(message, "Lidarr returned HTTP 500")
 
     def test_wanted_lidarr_sanitizes_non_config_errors(self):
+        # Configuration is checked via this file's own type-safe
+        # _lidarr_config_error(), not by pattern-matching
+        # _acq_fetch_lidarr_wanted()'s error text (which could, in a
+        # coincidental case, contain "not configured" itself despite
+        # coming from its own unrelated broad except in app.py).
         leak = "LEAK_MARKER /internal/path token=abc123"
         with app_module.app.test_request_context("/api/wanted/lidarr"), \
+             mock.patch.object(routes_lidarr, "_lidarr_config_error", return_value=""), \
              mock.patch.object(routes_lidarr, "_acq_fetch_lidarr_wanted", return_value=([], leak)):
             response = routes_lidarr.wanted_lidarr()
         data = response[0].get_json()
@@ -253,11 +259,26 @@ class LidarrErrorSanitizationTests(unittest.TestCase):
 
     def test_wanted_lidarr_preserves_not_configured_message(self):
         with app_module.app.test_request_context("/api/wanted/lidarr"), \
-             mock.patch.object(routes_lidarr, "_acq_fetch_lidarr_wanted", return_value=([], "LIDARR_API_KEY not configured")):
+             mock.patch.object(routes_lidarr, "_lidarr_config_error", return_value="LIDARR_API_KEY not configured"):
             response = routes_lidarr.wanted_lidarr()
         data = response[0].get_json()
         self.assertEqual(response[1], 503)
         self.assertIn("not configured", data["error"])
+
+    def test_wanted_lidarr_never_echoes_error_text_even_if_it_says_not_configured(self):
+        # Regression for the substring-matching gap CodeQL alert #407
+        # flagged: an _acq_fetch_lidarr_wanted() failure that happens to
+        # mention "not configured" for an unrelated reason must still be
+        # sanitized, since only _lidarr_config_error() -- not this
+        # string's content -- is trusted to mean "safe to echo".
+        leak = "Name or service not configured LEAK_MARKER"
+        with app_module.app.test_request_context("/api/wanted/lidarr"), \
+             mock.patch.object(routes_lidarr, "_lidarr_config_error", return_value=""), \
+             mock.patch.object(routes_lidarr, "_acq_fetch_lidarr_wanted", return_value=([], leak)):
+            response = routes_lidarr.wanted_lidarr()
+        data = response[0].get_json()
+        self.assertEqual(response[1], 502)
+        self.assertNotIn("LEAK_MARKER", json.dumps(data))
 
 
 if __name__ == "__main__":

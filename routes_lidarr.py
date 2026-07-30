@@ -128,13 +128,17 @@ def _find_artist(artists: List[Dict[str, Any]], name: str) -> Dict[str, Any] | N
 
 @app.get("/api/wanted/lidarr")
 def wanted_lidarr():
+    # Check configuration ourselves, via this file's own type-safe
+    # _lidarr_config_error(), rather than pattern-matching the text of
+    # whatever _acq_fetch_lidarr_wanted() (app.py) returns -- that
+    # function's error string is either this same fixed message or an
+    # unbounded str(exc) from its own broad except clause, and no
+    # substring match on exception text can safely tell them apart.
+    config_error = _lidarr_config_error()
+    if config_error:
+        return jsonify({"ok": False, "error": config_error, "missing": [], "total": 0}), 503
     rows, error = _acq_fetch_lidarr_wanted()
     if error:
-        # _acq_fetch_lidarr_wanted() returns either a fixed, safe
-        # "not configured" message or an unbounded str(exc) from its own
-        # broad except clause (app.py); only the former is safe to echo.
-        if "not configured" in error.lower():
-            return jsonify({"ok": False, "error": error, "missing": [], "total": 0}), 503
         app.logger.warning("Lidarr wanted-list fetch failed: %s", error)
         return jsonify({"ok": False, "error": "Could not reach Lidarr", "missing": [], "total": 0}), 502
     return jsonify({"ok": True, "missing": rows, "total": len(rows)})
