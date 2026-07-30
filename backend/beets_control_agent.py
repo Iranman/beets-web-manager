@@ -503,6 +503,15 @@ def resolve_safe_path(
         raise UnsafePathError("path must be a non-empty string")
     if "\x00" in path or "\\" in path:
         raise UnsafePathError("path contains a null byte or backslash")
+    # The absolute-path requirement must hold for the RAW string, not just its
+    # decoded form: canonicalization below deliberately uses `path` (the raw
+    # string), so a value whose raw form is relative but whose fully-decoded
+    # form happens to be absolute (e.g. "%2Fdata%2Fmusic%2Ffile.flac") must
+    # not be allowed to slip past on the strength of its decoded copy alone --
+    # os.path.abspath() would silently anchor a relative raw string to the
+    # process's cwd instead of raising here.
+    if not path.startswith("/"):
+        raise UnsafePathError("path must be absolute")
 
     decoded = _decode_untrusted_path(path)
     if decoded is None:
@@ -765,46 +774,57 @@ def _handle_delete_album(album_id: int, delete_files: bool = True) -> tuple:
             files_deleted = 0
             file_errors = []
             if delete_files:
-                # Stored item/album paths come from the database, not the
-                # current request, but they are still untrusted: a corrupt
-                # or maliciously-written row must not be able to direct a
-                # delete outside the approved roots. Resolve each one through
-                # resolve_safe_path() and operate only on the returned Path
-                # (never the raw stored string), and refuse an approved root
-                # itself the same way /files/delete does.
-                for fpath in item_files:
-                    if not fpath:
-                        continue
-                    try:
-                        safe_fpath = resolve_safe_path(fpath, ["music", "staging"])
-                    except UnsafePathError:
-                        file_errors.append("Skipped unsafe album item path")
-                        continue
-                    if any(str(safe_fpath) == os.path.realpath(root) for root in _allowed_root_paths(["music", "staging"])):
-                        file_errors.append("Skipped allowed root path")
-                        continue
-                    if safe_fpath.exists():
+                # Database rows are already committed above at this point.
+                # Everything below is best-effort filesystem cleanup, and
+                # must never be allowed to propagate an exception up to the
+                # outer handler -- doing so would incorrectly report
+                # database_deleted: False for a delete that already
+                # succeeded. Stored item/album paths come from the
+                # database, not the current request, but are still
+                # untrusted: a corrupt or maliciously-written row must not
+                # be able to direct a delete outside the approved roots.
+                # Resolve each one through resolve_safe_path() and operate
+                # only on the returned Path (never the raw stored string),
+                # and refuse an approved root itself the same way
+                # /files/delete does.
+                try:
+                    for fpath in item_files:
+                        if not fpath:
+                            continue
                         try:
-                            safe_fpath.unlink()
-                            files_deleted += 1
-                        except Exception:
-                            file_errors.append("Failed to delete album item file")
+                            safe_fpath = resolve_safe_path(fpath, ["music", "staging"])
+                        except UnsafePathError:
+                            file_errors.append("Skipped unsafe album item path")
+                            continue
+                        if any(str(safe_fpath) == os.path.realpath(root) for root in _allowed_root_paths(["music", "staging"])):
+                            file_errors.append("Skipped allowed root path")
+                            continue
+                        if safe_fpath.exists():
+                            try:
+                                safe_fpath.unlink()
+                                files_deleted += 1
+                            except Exception:
+                                file_errors.append("Failed to delete album item file")
 
-                if album_path:
-                    try:
-                        safe_album_path = resolve_safe_path(album_path, ["music"])
-                    except UnsafePathError:
-                        safe_album_path = None
-                    if (
-                        safe_album_path is not None
-                        and not any(str(safe_album_path) == os.path.realpath(root) for root in _allowed_root_paths(["music"]))
-                        and safe_album_path.is_dir()
-                        and not os.listdir(safe_album_path)
-                    ):
+                    if album_path:
                         try:
-                            safe_album_path.rmdir()
-                        except Exception:
-                            pass
+                            safe_album_path = resolve_safe_path(album_path, ["music"])
+                        except UnsafePathError:
+                            safe_album_path = None
+                        if safe_album_path is not None and not any(
+                            str(safe_album_path) == os.path.realpath(root) for root in _allowed_root_paths(["music"])
+                        ):
+                            try:
+                                album_dir_is_empty = safe_album_path.is_dir() and not os.listdir(safe_album_path)
+                            except Exception:
+                                album_dir_is_empty = False
+                            if album_dir_is_empty:
+                                try:
+                                    safe_album_path.rmdir()
+                                except Exception:
+                                    pass
+                except Exception:
+                    file_errors.append("Unexpected error during file cleanup")
 
             files_failed = len(file_errors)
             if files_failed > 0:
@@ -1238,7 +1258,6 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             timeout = body.get("timeout", 120)
             config_override = body.get("config_override", "")
             source_path = body.get("source_path", "")
-            target_path = body.get("target_path", "")
 
             if not command or command not in ALLOWED_COMMANDS:
                 self._send_json(400, {"error": f"Command '{command}' is not in the allowlist"})
@@ -1256,13 +1275,6 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                     safe_source_path = resolve_safe_path(source_path, allowed_roots)
                 except UnsafePathError:
                     self._send_json(403, {"error": "Access denied for source_path outside allowed roots"})
-                    return
-
-            if target_path:
-                try:
-                    resolve_safe_path(target_path, ["music", "staging"])
-                except UnsafePathError:
-                    self._send_json(403, {"error": "Access denied for target_path outside allowed roots"})
                     return
 
             try:

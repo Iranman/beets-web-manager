@@ -253,6 +253,24 @@ class ControlAgentPathBoundaryTests(unittest.TestCase):
                 with self.assertRaises(UnsafePathError):
                     resolve_safe_path(raw, ["music"])
 
+    def test_resolve_safe_path_requires_raw_absolute_not_just_decoded(self):
+        """Regression test: resolve_safe_path() canonicalizes from the raw
+        input string, so the absolute-path requirement must be enforced on
+        that same raw string -- not only on its decoded copy. A value whose
+        raw form is relative but whose fully-decoded form happens to be
+        absolute (e.g. a fully percent-encoded leading separator) must be
+        rejected outright rather than falling through to os.path.abspath(),
+        which would silently anchor it to the process's cwd instead."""
+        candidates = [
+            "%2Fdata%2Fmedia%2Fmusic%2Ffile.flac",
+            "%252Fdata%252Fmedia%252Fmusic%252Ffile.flac",
+            "relative%2Fencoded",
+        ]
+        for candidate in candidates:
+            with self.subTest(candidate=candidate):
+                with self.assertRaises(UnsafePathError):
+                    resolve_safe_path(candidate, ["music"])
+
     def test_literal_percent_filename_survives_delete_endpoint(self):
         literal_path = f"{self.music}/convention%20album.flac"
         Path(literal_path).write_text("audio", encoding="utf-8")
@@ -352,6 +370,24 @@ class ControlAgentPathBoundaryTests(unittest.TestCase):
         self.assertEqual(set(bca.JOBS), before_jobs)
         self.assertNotIn("%252e%252e", json.dumps(data))
 
+    def test_commands_execute_ignores_unused_target_path(self):
+        """target_path is not part of /commands/execute's actual command
+        contract -- it is never appended to the constructed command array by
+        any allowed subcommand, and no current caller sends it. It must be
+        accepted (as inert, unvalidated JSON) rather than silently
+        influencing command construction or being treated as a path sink."""
+        fake_result = mock.MagicMock(returncode=0, stdout="", stderr="")
+        with mock.patch.object(bca.subprocess, "run", return_value=fake_result) as run_mock:
+            code, data = _post_agent("/commands/execute", {
+                "command": "ls",
+                "args": ["title:x"],
+                "target_path": f"{self.outside}/anywhere-outside-every-root",
+            })
+        self.assertEqual(code, 200, data)
+        full_cmd = run_mock.call_args.args[0]
+        self.assertNotIn(f"{self.outside}/anywhere-outside-every-root", full_cmd)
+        self.assertEqual(full_cmd[-1:], ["title:x"])
+
 
 class AlbumDeleteCanonicalPathTests(unittest.TestCase):
     """Regression tests for _handle_delete_album() treating database-stored
@@ -440,6 +476,32 @@ class AlbumDeleteCanonicalPathTests(unittest.TestCase):
         self.assertTrue(data["database_deleted"])
         self.assertEqual(data["items_deleted"], 1)
         self.assertEqual(data["albums_deleted"], 1)
+
+    def test_filesystem_exception_after_commit_does_not_misreport_database_deleted(self):
+        """Regression test: the album/item DB rows are committed before any
+        filesystem cleanup runs. An unexpected filesystem exception during
+        that best-effort cleanup (e.g. os.listdir() raising on the album
+        directory) must not be allowed to propagate to the outer handler and
+        misreport an already-successful database deletion as a total
+        failure."""
+        real_item = f"{self.music}/Artist/Album/Track.flac"
+        Path(real_item).parent.mkdir(parents=True, exist_ok=True)
+        Path(real_item).write_text("audio", encoding="utf-8")
+        album_dir = f"{self.music}/Artist/Album"
+
+        self._seed_album(album_dir, [real_item])
+
+        with mock.patch.object(bca.os, "listdir", side_effect=PermissionError("denied")):
+            code, data = bca._handle_delete_album(1, delete_files=True)
+
+        self.assertEqual(code, 200, data)
+        self.assertTrue(data["database_deleted"])
+        self.assertEqual(data["items_deleted"], 1)
+        self.assertEqual(data["albums_deleted"], 1)
+        self.assertNotEqual(data["status"], "failed")
+        # The item file itself must still have been deleted -- only the
+        # album-directory listdir() call was made to fail.
+        self.assertFalse(Path(real_item).exists())
 
 
 class ControlAgentSqlBoundaryTests(unittest.TestCase):
