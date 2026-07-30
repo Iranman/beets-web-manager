@@ -81,7 +81,8 @@ class TestBeetsControlAgentSecurity(unittest.TestCase):
 
             with mock.patch("backend.beets_control_agent.MUSIC_LIBRARY_PATH", str(music_fake)):
                 self.assertFalse(is_safe_path(str(symlink), ["music"]))
-                self.assertIsNone(resolve_safe_path(str(symlink), ["music"]))
+                with self.assertRaises(UnsafePathError):
+                    resolve_safe_path(str(symlink), ["music"])
 
     def test_resolve_safe_path_returns_canonical_symlink_target(self):
         """Filesystem sinks must operate on the resolved (symlink-followed)
