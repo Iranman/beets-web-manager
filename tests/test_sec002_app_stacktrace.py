@@ -73,9 +73,19 @@ class FolderCleanRootFalsePositiveTests(unittest.TestCase):
         self.assertEqual(str(ctx.exception), "Path not found.")
 
     def test_outside_allowed_roots_raises_fixed_message(self):
+        # FOLDER_CLEAN_ROOTS includes /tmp by design, so a bare
+        # tempfile.TemporaryDirectory() is not reliably outside it (and
+        # on Windows /tmp itself isn't meaningful) -- pin the allowed
+        # roots to a disjoint sibling directory instead, so this test is
+        # deterministic on every platform/CI environment.
         with tempfile.TemporaryDirectory() as tmp:
-            with self.assertRaises(RuntimeError) as ctx:
-                app_module._folder_clean_root(tmp)
+            allowed_root = Path(tmp) / "allowed"
+            outside_dir = Path(tmp) / "outside"
+            allowed_root.mkdir()
+            outside_dir.mkdir()
+            with mock.patch.object(app_module, "FOLDER_CLEAN_ROOTS", [allowed_root]):
+                with self.assertRaises(RuntimeError) as ctx:
+                    app_module._folder_clean_root(str(outside_dir))
         self.assertIn("must be under", str(ctx.exception))
 
 
