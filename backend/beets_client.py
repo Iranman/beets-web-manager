@@ -170,7 +170,7 @@ class BeetsClient:
         """Raw SQL is intentionally unavailable; use structured query helpers."""
         raise BeetsError("Raw SQLite queries are not permitted; use structured library query helpers")
 
-    def run_command(self, command: str, args: Optional[List[str]] = None, timeout: float = 120.0, config_override: str = "", source_path: str = "", target_path: str = "") -> Dict[str, Any]:
+    def run_command(self, command: str, args: Optional[List[str]] = None, timeout: float = 120.0, config_override: str = "", source_path: str = "") -> Dict[str, Any]:
         """Execute a beet command synchronously on the Beets control agent."""
         payload = {
             "command": command,
@@ -180,8 +180,6 @@ class BeetsClient:
         }
         if source_path:
             payload["source_path"] = source_path
-        if target_path:
-            payload["target_path"] = target_path
 
         return self._request("POST", "/commands/execute", payload, timeout=timeout + 5.0)
 
