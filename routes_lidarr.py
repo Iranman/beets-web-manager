@@ -130,8 +130,13 @@ def _find_artist(artists: List[Dict[str, Any]], name: str) -> Dict[str, Any] | N
 def wanted_lidarr():
     rows, error = _acq_fetch_lidarr_wanted()
     if error:
-        status = 503 if "not configured" in error.lower() else 502
-        return jsonify({"ok": False, "error": error, "missing": [], "total": 0}), status
+        # _acq_fetch_lidarr_wanted() returns either a fixed, safe
+        # "not configured" message or an unbounded str(exc) from its own
+        # broad except clause (app.py); only the former is safe to echo.
+        if "not configured" in error.lower():
+            return jsonify({"ok": False, "error": error, "missing": [], "total": 0}), 503
+        app.logger.warning("Lidarr wanted-list fetch failed: %s", error)
+        return jsonify({"ok": False, "error": "Could not reach Lidarr", "missing": [], "total": 0}), 502
     return jsonify({"ok": True, "missing": rows, "total": len(rows)})
 
 

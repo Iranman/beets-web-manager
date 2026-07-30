@@ -455,7 +455,8 @@ def _check_path(path_value: str, *, require_writable: bool) -> Dict[str, Any]:
         else:
             result["writable"] = os.access(str(p), os.W_OK)
     except Exception as ex:
-        result["error"] = str(ex)
+        app.logger.warning("Path check failed for %r: %s", path_value, type(ex).__name__)
+        result["error"] = "Could not verify this path."
     return result
 
 
@@ -1215,7 +1216,8 @@ def setup_save_env():
     except ValueError as ex:
         return jsonify({"ok": False, "error": str(ex)}), 400
     except Exception as ex:
-        return jsonify({"ok": False, "error": f"Could not save environment file: {ex}"}), 500
+        app.logger.warning("Could not save environment file: %s", type(ex).__name__)
+        return jsonify({"ok": False, "error": "Could not save environment file."}), 500
     return jsonify(_setup_env_payload({
         "saved": sorted(set(updates) | set(clear)),
         "backup_path": backup_path,
@@ -1233,9 +1235,11 @@ def setup_test_ai():
     if not api_key:
         return jsonify({"ok": False, "status": "not_configured",
                          "error": "No AI API key configured. Set OPENAI_API_KEY (or your provider's key) and retry."}), 200
+    base_host = (urllib.parse.urlsplit(base_url).hostname or "").lower()
+    is_openai_host = base_host == "api.openai.com" or base_host.endswith(".api.openai.com")
     try:
         req = urllib.request.Request(
-            f"{base_url.rstrip('/')}/models/{model}" if "openai.com" in base_url else f"{base_url.rstrip('/')}/models",
+            f"{base_url.rstrip('/')}/models/{model}" if is_openai_host else f"{base_url.rstrip('/')}/models",
             headers={"Authorization": f"Bearer {api_key}"},
         )
         with urllib.request.urlopen(req, timeout=10) as r:
@@ -1250,8 +1254,9 @@ def setup_test_ai():
             error = f"AI provider returned HTTP {exc.code}."
         return jsonify({"ok": False, "status": "failed", "error": error}), 200
     except Exception as ex:
+        app.logger.warning("AI provider connectivity test failed: %s", type(ex).__name__)
         return jsonify({"ok": False, "status": "failed",
-                         "error": f"Could not reach the AI provider: {ex}"}), 200
+                         "error": "Could not reach the AI provider."}), 200
 
 
 @app.post("/api/setup/test/musicbrainz")
@@ -1273,7 +1278,8 @@ def setup_test_musicbrainz():
             error = f"MusicBrainz returned HTTP {exc.code}."
         return jsonify({"ok": False, "status": "failed", "error": error}), 200
     except Exception as ex:
-        return jsonify({"ok": False, "status": "failed", "error": f"Could not reach MusicBrainz: {ex}"}), 200
+        app.logger.warning("MusicBrainz connectivity test failed: %s", type(ex).__name__)
+        return jsonify({"ok": False, "status": "failed", "error": "Could not reach MusicBrainz."}), 200
 
 
 @app.post("/api/setup/test/acoustid")
@@ -1292,7 +1298,8 @@ def setup_test_acoustid():
         proc = subprocess.run([fpcalc_path, "-version"], capture_output=True, text=True, timeout=5)
         result["fpcalc_version"] = (proc.stdout or proc.stderr or "").strip()
     except Exception as ex:
-        result.update({"ok": False, "status": "failed", "error": f"fpcalc failed to run: {ex}"})
+        app.logger.warning("fpcalc failed to run: %s", type(ex).__name__)
+        result.update({"ok": False, "status": "failed", "error": "fpcalc failed to run."})
         return jsonify(result), 200
     if not api_key:
         result.update({"ok": False, "status": "not_configured",
@@ -1312,7 +1319,8 @@ def setup_test_acoustid():
         else:
             result.update({"ok": True, "status": "ready"})
     except Exception as ex:
-        result.update({"ok": False, "status": "failed", "error": f"Could not reach AcoustID: {ex}"})
+        app.logger.warning("AcoustID connectivity test failed: %s", type(ex).__name__)
+        result.update({"ok": False, "status": "failed", "error": "Could not reach AcoustID."})
     return jsonify(result), 200
 
 
@@ -1340,8 +1348,9 @@ def setup_test_plex():
         error = "Plex token is invalid or expired." if exc.code in (401, 403) else f"Plex returned HTTP {exc.code}."
         return jsonify({"ok": False, "status": "failed", "error": error}), 200
     except Exception as ex:
+        app.logger.warning("Plex connectivity test failed: %s", type(ex).__name__)
         return jsonify({"ok": False, "status": "failed",
-                         "error": f"Could not reach Plex at {plex_url}: {ex}"}), 200
+                         "error": "Could not reach Plex."}), 200
 
 
 @app.get("/api/setup/settings")
@@ -1391,7 +1400,8 @@ def setup_regenerate_auth_token():
     except ValueError as ex:
         return jsonify({"ok": False, "error": str(ex)}), 400
     except Exception as ex:
-        return jsonify({"ok": False, "error": f"Could not save environment file: {ex}"}), 500
+        app.logger.warning("Could not save environment file: %s", type(ex).__name__)
+        return jsonify({"ok": False, "error": "Could not save environment file."}), 500
     try:
         token_file.parent.mkdir(parents=True, exist_ok=True)
         token_file.write_text(token, encoding="utf-8")

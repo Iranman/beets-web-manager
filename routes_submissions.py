@@ -415,7 +415,10 @@ def _summary_for_item(item, tracks: List[Dict[str, Any]]) -> Dict[str, Any]:
 # -- Folder resolution (unimported/loose-track review items) --------------------
 
 def _abs_resolved(path_str: str) -> Path:
-    return Path(path_str).expanduser().resolve(strict=False)
+    resolved = Path(path_str).expanduser().resolve(strict=False)
+    if not any(_path_is_under(resolved, root) for root in _SUBMISSION_ALLOWED_ROOTS):
+        raise ValueError("This path is outside the allowed music/downloads roots.")
+    return resolved
 
 
 def _find_beets_album_for_folder(folder: Path):
@@ -908,6 +911,7 @@ def _resolve_submission_target(album_id: int = 0, item_id: int = 0, path: str = 
 
 @app.get("/api/submissions/target")
 def submission_target():
+    path = ""
     try:
         album_id = int(request.args.get("album_id") or 0)
         item_id = int(request.args.get("item_id") or 0)
@@ -916,8 +920,11 @@ def submission_target():
         target_type, target_id, summary, tracks = _resolve_submission_target(album_id=album_id, item_id=item_id, path=path, singleton=singleton)
     except KeyError as ex:
         return jsonify({"ok": False, "error": str(ex)}), 404
-    except Exception as ex:
+    except ValueError as ex:
         return jsonify({"ok": False, "error": str(ex)}), 400
+    except Exception as ex:
+        app.logger.warning("submission_target failed for path=%r: %s", path, type(ex).__name__)
+        return jsonify({"ok": False, "error": "Could not resolve this submission target."}), 400
     readiness = _submission_readiness()
     draft = _submission_draft(target_type, target_id)
     artist_dismissed = bool(draft.get("artist_dismissed"))
@@ -1357,9 +1364,13 @@ def submission_reference_url():
     except TimeoutError as ex:
         entry["status"] = "error"
         entry["error"] = str(ex) or "Metadata extraction timed out."
-    except Exception as ex:  # noqa: BLE001 - surfaced to the caller as a plain message
+    except (ValueError, OutboundPolicyError) as ex:
         entry["status"] = "error"
         entry["error"] = str(ex)
+    except Exception as ex:  # noqa: BLE001 - surfaced to the caller as a plain message
+        app.logger.warning("reference-url metadata extraction failed for source=%s: %s", source, type(ex).__name__)
+        entry["status"] = "error"
+        entry["error"] = "Could not extract metadata from this URL."
 
     draft = _submission_draft(target_type, target_ref)
     references = [r for r in (draft.get("reference_urls") or []) if isinstance(r, dict)]
@@ -1436,8 +1447,11 @@ def validate_musicbrainz_release():
         if local_tracks and len(local_tracks) != len(mb.get("tracks") or []):
             mismatches.append({"status": "mismatch", "issues": [f"MusicBrainz release contains {len(mb.get('tracks') or [])} tracks, but the local target contains {len(local_tracks)}."]})
         return jsonify({"ok": True, "entity_type": "release", "release": {"mb_albumid": mbid, "title": mb.get("release_title", ""), "albumartist": mb.get("release_artist", ""), "mb_albumartistid": mb.get("release_artist_id", ""), "mb_albumartistids": mb.get("release_artistids", ""), "mb_releasegroupid": mb.get("release_group", ""), "date": mb.get("date", ""), "country": mb.get("country", ""), "track_count": len(mb.get("tracks") or [])}, "local": summary, "mapping": mapping, "mismatches": mismatches, "needs_confirmation": bool(mismatches)})
-    except Exception as ex:
+    except (KeyError, ValueError) as ex:
         return jsonify({"ok": False, "error": str(ex)}), 400
+    except Exception as ex:
+        app.logger.warning("validate_musicbrainz_release failed: %s", type(ex).__name__)
+        return jsonify({"ok": False, "error": "Could not validate this MusicBrainz release."}), 400
 
 
 @app.post("/api/submissions/albums/<int:aid>/attach-mbids")
