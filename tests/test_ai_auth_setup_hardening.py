@@ -53,9 +53,14 @@ class ClassifyOpenAiErrorBehaviorTests(unittest.TestCase):
         fn_src = _function_source(
             APP_SOURCE, "def _classify_openai_error(exc: Exception) -> str:", "\n\n\ndef _ai_suggest_album_internal("
         )
+        import logging
         import urllib.error as _urllib_error
         import urllib as _urllib
-        namespace = {"urllib": _urllib}
+
+        class _StubApp:
+            logger = logging.getLogger("test_classify_openai_error")
+
+        namespace = {"urllib": _urllib, "app": _StubApp()}
         namespace["urllib"].error = _urllib_error
         exec(compile(fn_src, "<classify_openai_error>", "exec"), namespace)
         cls._classify = staticmethod(namespace["_classify_openai_error"])
@@ -88,9 +93,15 @@ class ClassifyOpenAiErrorBehaviorTests(unittest.TestCase):
     def test_url_error_is_classified_as_unreachable(self):
         self.assertIn("unreachable", self._classify(self._URLError("connection refused")))
 
-    def test_unknown_exception_still_returns_readable_string(self):
-        result = self._classify(ValueError("weird provider response"))
-        self.assertIn("weird provider response", result)
+    def test_unknown_exception_returns_a_safe_readable_string_without_raw_text(self):
+        # CodeQL py/stack-trace-exposure: the fallback branch must not echo
+        # the raw exception message (which could carry provider response
+        # bodies, headers, or other unbounded text) -- only the exception's
+        # type name, which is always safe.
+        result = self._classify(ValueError("weird provider response: token=secret-abc123"))
+        self.assertIn("ValueError", result)
+        self.assertNotIn("weird provider response", result)
+        self.assertNotIn("secret-abc123", result)
 
 
 class FolderAiSuggestFallbackSourceTests(unittest.TestCase):

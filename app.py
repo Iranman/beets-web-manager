@@ -75,11 +75,12 @@ def _probe_js_runtime(binary: str) -> Dict[str, Any]:
             "error": "" if r.returncode == 0 else output[:240],
         }
     except Exception as ex:
+        app.logger.warning("JS runtime probe failed for %r: %s", binary, type(ex).__name__)
         return {
             "ok": False,
             "returncode": None,
             "version": "",
-            "error": str(ex)[:240],
+            "error": f"Could not run {binary}.",
         }
 
 
@@ -1004,7 +1005,7 @@ def _ytdlp_auth_smoke_check(auth: Dict[str, Any], *, force: bool = False) -> Dic
                         if _yt_auth_source_failed_message(smoke_err):
                             raise
                 if smoke_err:
-                    result["smoke_warning"] = smoke_err[:500]
+                    result["smoke_warning"] = _redact_security_text(smoke_err)[:500]
         result.update({
             "ok": True,
             "cookie_count": cookie_count,
@@ -1142,7 +1143,8 @@ def _binary_status(name: str) -> Dict[str, Any]:
             "returncode": r.returncode,
         })
     except Exception as ex:
-        result["error"] = str(ex)[:240]
+        app.logger.warning("Binary version check failed for %r: %s", path, type(ex).__name__)
+        result["error"] = f"Could not run {path}."
     return result
 
 
@@ -1207,9 +1209,10 @@ def _ytdlp_po_provider_status() -> Dict[str, Any]:
         with _ur.urlopen(req, timeout=3) as resp:
             result.update({"reachable": True, "status": getattr(resp, "status", None)})
     except urllib.error.HTTPError as ex:
-        result.update({"reachable": ex.code < 500, "status": ex.code, "error": str(ex)[:240]})
+        result.update({"reachable": ex.code < 500, "status": ex.code, "error": f"HTTP {ex.code}"})
     except Exception as ex:
-        result["error"] = str(ex)[:240]
+        app.logger.warning("PO provider reachability check failed: %s", type(ex).__name__)
+        result["error"] = "Could not reach the PO token provider."
     return result
 
 
@@ -4453,7 +4456,8 @@ def ai_suggest(iid):
                         "acoustid_candidates": acoustid_cands,
                         "discogs_candidates": discogs_cands})
     except Exception as exc:
-        return jsonify({"ok": False, "error": str(exc)})
+        app.logger.warning("AI track suggestion failed: %s", type(exc).__name__)
+        return jsonify({"ok": False, "error": "Could not generate suggestions."})
 
 
 def _discogs_track_search(title: str, artist: str, limit: int = 5) -> List[Dict[str, Any]]:
@@ -5409,7 +5413,8 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
                 key=lambda p: str(p).lower(),
             )
     except Exception as ex:
-        result["error"] = f"Could not scan source folder: {ex}"
+        app.logger.warning("Could not scan source folder: %s", type(ex).__name__)
+        result["error"] = "Could not scan source folder."
         return result
     result["audio_count"] = len(audio_files)
 
@@ -11925,7 +11930,8 @@ def import_folder_stats():
             else:
                 other_count += 1
     except Exception as ex:
-        return jsonify({"ok": False, "error": str(ex)})
+        app.logger.warning("import_folder_stats failed for %r: %s", raw_path, type(ex).__name__)
+        return jsonify({"ok": False, "error": "Could not scan this folder."})
     return jsonify({
         "ok": True, "path": raw_path, "exists": True,
         "audio_count": audio_count, "art_count": art_count, "other_count": other_count,
@@ -11957,7 +11963,8 @@ def delete_import_review_folder():
     except ValueError as ex:
         return jsonify({"ok": False, "error": str(ex), "log": log}), 400
     except Exception as ex:
-        return jsonify({"ok": False, "error": f"Could not delete source folder: {ex}", "log": log}), 500
+        app.logger.warning("delete_import_review_folder failed for %r: %s", src_path, type(ex).__name__)
+        return jsonify({"ok": False, "error": "Could not delete source folder.", "log": log}), 500
 
 
 
@@ -13677,7 +13684,8 @@ def _acq_fetch_lidarr_wanted() -> Tuple[List[Dict[str, Any]], str]:
             page += 1
         return results, ""
     except Exception as exc:
-        return [], str(exc)
+        app.logger.warning("Lidarr wanted-list fetch failed: %s", type(exc).__name__)
+        return [], "Could not reach Lidarr"
 
 
 def _acq_item_mbid(item: Dict[str, Any]) -> str:
@@ -14168,7 +14176,8 @@ def _classify_openai_error(exc: Exception) -> str:
         return "the AI provider request timed out"
     if isinstance(exc, urllib.error.URLError):
         return "the AI provider is unreachable"
-    return f"AI provider error ({exc})"
+    app.logger.warning("Unclassified AI provider error: %s", type(exc).__name__)
+    return f"the AI provider request failed unexpectedly ({type(exc).__name__})"
 
 
 def _ai_suggest_album_internal(
@@ -14489,7 +14498,8 @@ def _ai_suggest_album_internal(
             "evidence": evidence,
         }
     except Exception as exc:
-        return {"ok": False, "error": str(exc)}
+        app.logger.warning("AI album suggestion failed: %s", type(exc).__name__)
+        return {"ok": False, "error": "Could not generate suggestions."}
 
 
 @app.post("/api/albums/<int:aid>/ai-suggest")
@@ -15346,7 +15356,8 @@ def library_mbid_status():
             if album_template_tokens:
                 albums_with_template_tokens += 1
     except Exception as exc:
-        return jsonify({"ok": False, "error": str(exc)})
+        app.logger.warning("Library health scan failed: %s", type(exc).__name__)
+        return jsonify({"ok": False, "error": "Could not scan library health."})
     return jsonify({
         "ok": True,
         "root": str(MUSIC_ROOT),
@@ -15966,7 +15977,8 @@ def import_cleanup_stale():
             if removed_folder_gone or removed_resolved:
                 _AI_PENDING_FILE.write_text(json.dumps(kept, indent=2))
     except Exception as ex:
-        return jsonify({"ok": False, "error": str(ex)}), 500
+        app.logger.warning("Pending-review cleanup-stale failed: %s", type(ex).__name__)
+        return jsonify({"ok": False, "error": "Could not clean up pending review."}), 500
     for decision, path, item, note in audit:
         try:
             _record_ai_review_decision(
@@ -16544,6 +16556,7 @@ def _run_ai_release_preflight(folder_path: str, mb_albumid: str,
             log=None,
         )
     except Exception as ex:
+        app.logger.warning("Preflight failed to run: %s", type(ex).__name__)
         return {
             "ok": False,
             "matches": 0,
@@ -16564,7 +16577,7 @@ def _run_ai_release_preflight(folder_path: str, mb_albumid: str,
             "release_title": "",
             "release_artist": "",
             "release_group": "",
-            "error": f"Preflight failed to run: {ex}",
+            "error": "Preflight failed to run.",
             "examples": [],
         }
 
@@ -17445,7 +17458,8 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
             "evidence": evidence,
         }
     except Exception as exc:
-        return {"ok": False, "error": str(exc)}
+        app.logger.warning("AI folder suggestion failed: %s", type(exc).__name__)
+        return {"ok": False, "error": "Could not generate suggestions."}
 
 
 def _candidate_track_local_candidates(folder: str) -> List[Dict[str, Any]]:
@@ -19108,8 +19122,9 @@ def _run_import_review_auto_enqueue_ready_batch(limit: int = 5,
                         log.append(f"Handled format-policy rejection for {Path(path).name or path}: {outcome.get('note')}")
                     continue
                 failed += 1
+                app.logger.warning("Auto-enqueue failed for %r: %s", path, type(ex).__name__)
                 _mark_pending_review_status(path, "auto_enqueue_failed", reason)
-                results.append({"path": path, "queued": False, "error": reason})
+                results.append({"path": path, "queued": False, "error": "Could not queue this item."})
                 if log is not None:
                     log.append(f"Failed {Path(path).name or path}: {ex}")
     summary = {
@@ -19185,6 +19200,7 @@ def import_review_auto_enqueue():
                 "note": outcome.get("note"),
                 "eligibility": handled_eligibility,
             })
+        app.logger.warning("import_review_auto_enqueue failed: %s", type(ex).__name__)
         _import_review_auto_update(key, status="failed", error=reason)
         _mark_pending_review_status(
             _s(payload.get("path")).strip(),
@@ -19192,7 +19208,7 @@ def import_review_auto_enqueue():
             reason,
             idempotency_key=key,
         )
-        return jsonify({"ok": False, "error": reason, "eligibility": eligibility}), 500
+        return jsonify({"ok": False, "error": "Could not queue this import.", "eligibility": eligibility}), 500
 
 
 @app.post("/api/import-review/auto-enqueue/reconcile")
@@ -25849,7 +25865,8 @@ def create_unmatched_draft():
     try:
         draft_path.mkdir(parents=True, exist_ok=True)
     except Exception as exc:
-        return jsonify({"ok": False, "error": f"Could not create folder: {exc}"}), 500
+        app.logger.warning("Could not create draft folder: %s", type(exc).__name__)
+        return jsonify({"ok": False, "error": "Could not create folder."}), 500
 
     tracklist_lines = "\n".join(
         f"  {i+1}. {_s(t.get('title') or '')}"
@@ -25878,7 +25895,8 @@ def create_unmatched_draft():
             encoding="utf-8",
         )
     except Exception as exc:
-        return jsonify({"ok": False, "error": f"Could not write draft files: {exc}"}), 500
+        app.logger.warning("Could not write draft files: %s", type(exc).__name__)
+        return jsonify({"ok": False, "error": "Could not write draft files."}), 500
 
     return jsonify({
         "ok": True,
@@ -27220,7 +27238,8 @@ def import_preflight():
                     "audio_files": audio_here,
                 })
     except Exception as ex:
-        return jsonify({"ok": False, "error": f"Could not scan path: {ex}"})
+        app.logger.warning("Could not scan path: %s", type(ex).__name__)
+        return jsonify({"ok": False, "error": "Could not scan path."})
 
     tracked_dirs: set = set()
     try:
@@ -28452,10 +28471,12 @@ def dedup_cleanup():
                         rec["db_rows_removed"] = max(0, int(cur.rowcount or 0))
                         con.commit()
                 except Exception as db_exc:
-                    rec["db_warning"] = str(db_exc)
+                    app.logger.warning("DB row cleanup failed for %r: %s", str(p_res), type(db_exc).__name__)
+                    rec["db_warning"] = "Could not remove database rows for this file."
                 parent_checks.append((p_res.parent, rec))
             except Exception as exc:
-                rec["error"] = str(exc)
+                app.logger.warning("File delete failed for %r: %s", str(p_res), type(exc).__name__)
+                rec["error"] = "Could not delete this file."
         results.append(rec)
 
     def _folder_empty(folder: Path) -> bool:
@@ -28534,7 +28555,7 @@ def _resolved_path(path: Path) -> Path:
 def _folder_clean_root(raw_root: str) -> Path:
     root = Path((raw_root or str(MUSIC_ROOT)).strip())
     if not root.exists() or not root.is_dir():
-        raise RuntimeError(f"Path not found: {root}")
+        raise RuntimeError("Path not found.")
     root_res = _resolved_path(root)
     allowed = [_resolved_path(p) for p in FOLDER_CLEAN_ROOTS]
     if not any(_path_under(root_res, ar) or root_res == ar for ar in allowed):
@@ -28721,7 +28742,8 @@ def _delete_no_audio_folders(root: str, paths: List[str], *, dry_run: bool,
             results[-1]["removed"] = True
             log.append(f"  Deleted folder tree: {folder}")
         except Exception as ex:
-            results[-1]["error"] = str(ex)
+            app.logger.warning("Could not delete folder tree %r: %s", str(folder), type(ex).__name__)
+            results[-1]["error"] = "Could not delete this folder."
             log.append(f"  WARN deleting {folder}: {ex}")
 
     summary = {
@@ -29212,7 +29234,8 @@ def clean_library_health():
     try:
         return jsonify(_library_health_payload())
     except Exception as ex:
-        return jsonify({"ok": False, "error": f"Could not scan library database health: {ex}"}), 500
+        app.logger.warning("Library health scan (route) failed: %s", type(ex).__name__)
+        return jsonify({"ok": False, "error": "Could not scan library database health."}), 500
 
 
 @app.post("/api/clean/library-health/scan")
@@ -31296,7 +31319,8 @@ def album_duplicate_resolver(aid):
     try:
         return jsonify(_album_duplicate_resolver_plan(aid, mbid))
     except Exception as ex:
-        return jsonify({"ok": False, "error": str(ex)}), 400
+        app.logger.warning("album_duplicate_resolver failed for album %s: %s", aid, type(ex).__name__)
+        return jsonify({"ok": False, "error": "Could not build duplicate-resolver plan."}), 400
 
 
 @app.post("/api/albums/<int:aid>/duplicate-resolver/apply")
@@ -31496,7 +31520,8 @@ def album_mb_completeness(aid):
         data = _album_mb_completeness(aid, mbid)
         return jsonify(data)
     except Exception as ex:
-        return jsonify({"ok": False, "error": str(ex)}), 400
+        app.logger.warning("album_mb_completeness failed for album %s: %s", aid, type(ex).__name__)
+        return jsonify({"ok": False, "error": "Could not check MusicBrainz completeness."}), 400
 
 
 @app.post("/api/albums/<int:aid>/repair-mb-tracks")
@@ -32145,7 +32170,8 @@ def clean_album_tracks_scan():
                     (limit,),
                 ).fetchall()
     except Exception as ex:
-        return jsonify({"ok": False, "error": f"Could not read albums: {ex}"}), 500
+        app.logger.warning("Could not read MusicBrainz-tagged albums: %s", type(ex).__name__)
+        return jsonify({"ok": False, "error": "Could not read albums."}), 500
     if album_id and not rows:
         return jsonify({"ok": False, "error": f"Album {album_id} not found"}), 404
     if not rows:
@@ -33114,7 +33140,7 @@ def _qbit_hardlink_missing_impl(*, dry_run: bool, category: str,
             except Exception as ex:
                 summary["errors"] += 1
                 action["status"] = "error"
-                action["error"] = str(ex)
+                action["error"] = "Could not create this hardlink."
                 add_action(action)
                 log.append(f"  ERROR linking {target}: {ex}")
         if limit and summary["checked"] >= limit:
@@ -33188,7 +33214,8 @@ def qbit_hardlink_missing():
                 cancel_event=None,
             )
         except Exception as ex:
-            return jsonify({"ok": False, "error": str(ex), "log": log}), 500
+            app.logger.warning("qBittorrent hardlink-missing dry-run failed: %s", type(ex).__name__)
+            return jsonify({"ok": False, "error": "Could not run hardlink-missing scan.", "log": log}), 500
         return jsonify({
             "ok": True,
             "dry_run": True,
@@ -35290,7 +35317,8 @@ def maintenance_runner_report():
         exists = MAINTENANCE_RUNNER_LAST_FILE.exists()
         report = _maintenance_load_last_report() if exists else {}
     except Exception as exc:
-        return jsonify({"ok": False, "error": f"Could not read maintenance report: {exc}"}), 500
+        app.logger.warning("Could not read maintenance report: %s", type(exc).__name__)
+        return jsonify({"ok": False, "error": "Could not read maintenance report."}), 500
     last_run = report.get("last_run") if isinstance(report.get("last_run"), dict) else None
     if last_run is not None and _s(last_run.get("status")).strip().lower() == "running" and not _maintenance_running_job():
         # jobs.JobStore is in-memory only, so a "running" checkpoint left
@@ -35790,7 +35818,8 @@ def _folder_cleanup_path(raw: Any) -> Tuple[Optional[Path], Optional[str]]:
             path = MUSIC_ROOT / path
         resolved = path.resolve(strict=False)
     except Exception as exc:
-        return None, f"Invalid path: {exc}"
+        app.logger.warning("Invalid folder-cleanup path %r: %s", text, type(exc).__name__)
+        return None, "Invalid path."
     if not _path_under(resolved, MUSIC_ROOT):
         return None, "Path is outside the configured music library"
     return resolved, None
@@ -36178,7 +36207,8 @@ def apply_folder_placeholder_action_api():
         try:
             source.rmdir()
         except Exception as exc:
-            return jsonify({"ok": False, "error": f"Failed to remove empty folder: {exc}"}), 500
+            app.logger.warning("Could not remove empty folder %r: %s", str(source), type(exc).__name__)
+            return jsonify({"ok": False, "error": "Failed to remove empty folder."}), 500
         return jsonify({"ok": True, "action": "remove_empty_source", "removed": str(source), "changed_count": 1})
 
     if action in {"safe_rename", "rename_folder"}:
@@ -36200,7 +36230,8 @@ def apply_folder_placeholder_action_api():
         try:
             source.rename(target)
         except OSError as exc:
-            return jsonify({"ok": False, "error": f"Rename failed: {exc}"}), 500
+            app.logger.warning("Rename failed (%r -> %r): %s", str(source), str(target), type(exc).__name__)
+            return jsonify({"ok": False, "error": "Rename failed."}), 500
         return jsonify({"ok": True, "action": "safe_rename", "renamed_from": str(source), "renamed_to": str(target), "changed_count": 1})
 
     if action in {"merge_source_files", "merge"}:
@@ -36241,7 +36272,8 @@ def apply_folder_placeholder_action_api():
                 source.rmdir()
                 removed_folders.append(str(source))
         except Exception as exc:
-            return jsonify({"ok": False, "error": f"Failed to apply merge: {exc}", "moved": moved}), 500
+            app.logger.warning("Failed to apply folder merge: %s", type(exc).__name__)
+            return jsonify({"ok": False, "error": "Failed to apply merge.", "moved": moved}), 500
         return jsonify(
             {
                 "ok": True,
@@ -37936,7 +37968,8 @@ def clean_album_folders_report():
                 report = loaded
                 exists = True
     except Exception as exc:
-        return jsonify({"ok": False, "error": f"Could not read album-folder cleanup report: {exc}"}), 500
+        app.logger.warning("Could not read album-folder cleanup report: %s", type(exc).__name__)
+        return jsonify({"ok": False, "error": "Could not read album-folder cleanup report."}), 500
     return jsonify({"ok": True, "exists": exists, "report": report})
 
 
@@ -38050,7 +38083,8 @@ def clean_root_folders_report():
                 report = loaded
                 exists = True
     except Exception as exc:
-        return jsonify({"ok": False, "error": f"Could not read root-folder repair report: {exc}"}), 500
+        app.logger.warning("Could not read root-folder repair report: %s", type(exc).__name__)
+        return jsonify({"ok": False, "error": "Could not read root-folder repair report."}), 500
     return jsonify({"ok": True, "exists": exists, "report": report})
 
 
@@ -42519,8 +42553,11 @@ def _plex_status_payload(force: bool = False) -> Dict[str, Any]:
         })
         if not section_key:
             payload["error"] = "No Plex music library section found"
+    except urllib.error.HTTPError as ex:
+        payload["error"] = "Plex token is invalid or expired." if ex.code in (401, 403) else f"Plex returned HTTP {ex.code}."
     except Exception as ex:
-        payload["error"] = str(ex)
+        app.logger.warning("Plex status check failed: %s", type(ex).__name__)
+        payload["error"] = "Could not reach Plex."
     return payload
 
 
@@ -42566,7 +42603,8 @@ def _fetch_spotify_playlist_tracks(pid: str, cid: str, cs: str) -> List[Dict[str
             token = json.loads(r.read())["access_token"]
     except (urllib.error.URLError, socket.timeout, TimeoutError,
             json.JSONDecodeError, KeyError) as ex:
-        raise _SpotifyFetchError(f"Spotify auth failed: {ex}") from ex
+        app.logger.warning("Spotify auth failed: %s", type(ex).__name__)
+        raise _SpotifyFetchError("Spotify authentication failed.") from ex
 
     tracks: List[Dict[str, str]] = []
     offset = 0
@@ -42579,7 +42617,8 @@ def _fetch_spotify_playlist_tracks(pid: str, cid: str, cs: str) -> List[Dict[str
                 data = json.loads(r.read())
         except (urllib.error.URLError, socket.timeout, TimeoutError,
                 json.JSONDecodeError) as ex:
-            raise _SpotifyFetchError(f"Spotify playlist fetch failed: {ex}") from ex
+            app.logger.warning("Spotify playlist fetch failed: %s", type(ex).__name__)
+            raise _SpotifyFetchError("Spotify playlist fetch failed.") from ex
         for item in data.get("items", []):
             trk = item.get("track") or {}
             if not trk.get("name"):
@@ -42683,7 +42722,8 @@ def playlist_parse():
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(content, download=False)
             except Exception as exc:
-                return jsonify({"ok": False, "error": f"yt-dlp error: {exc}"})
+                app.logger.warning("yt-dlp playlist import failed: %s", type(exc).__name__)
+                return jsonify({"ok": False, "error": "Could not read this playlist URL."})
 
             if not info:
                 return jsonify({"ok": False, "error": "yt-dlp returned no data for that URL"})
@@ -42774,7 +42814,8 @@ def playlist_create():
         else:
             raise RuntimeError("No playlist tracks were provided")
     except Exception as exc:
-        return jsonify({"ok": False, "error": str(exc)})
+        app.logger.warning("Playlist M3U generation failed: %s", type(exc).__name__)
+        return jsonify({"ok": False, "error": "Could not generate playlist file."})
     return jsonify({"ok": True, **result})
 
 # ── Playlist download (direct sources → beet singleton import) ────────────────
@@ -46727,7 +46768,8 @@ def _playlist_manifest_name_from_file(path: Path, diagnostics: List[str]) -> Tup
             return _clean_playlist_name(fallback), {}
         manifest = _playlist_sanitize_manifest(data)
     except Exception as ex:
-        diagnostics.append(f"manifest parse failed: {path.name}: {ex}")
+        app.logger.warning("Playlist manifest parse failed for %r: %s", path.name, type(ex).__name__)
+        diagnostics.append(f"manifest parse failed: {path.name}")
         return _clean_playlist_name(fallback), {}
     clean_name = _clean_playlist_name(
         _s(manifest.get("name") or manifest.get("playlist") or manifest.get("title") or fallback)
@@ -46898,12 +46940,16 @@ def playlist_delete(name):
             manifest.unlink()
             deleted_manifest = True
     except Exception as ex:
-        return jsonify({"ok": False, "error": f"Could not delete playlist file: {ex}"}), 500
+        app.logger.warning("Could not delete playlist file %r: %s", clean_name, type(ex).__name__)
+        return jsonify({"ok": False, "error": "Could not delete playlist file."}), 500
     if delete_plex and _plex_settings().get("token"):
         try:
             plex_deleted = _plex_delete_playlist_by_title(clean_name)
+        except urllib.error.HTTPError as ex:
+            plex_error = "Plex token is invalid or expired." if ex.code in (401, 403) else f"Plex returned HTTP {ex.code}."
         except Exception as ex:
-            plex_error = str(ex)
+            app.logger.warning("Plex playlist delete failed: %s", type(ex).__name__)
+            plex_error = "Could not delete this playlist from Plex."
     return jsonify({
         "ok": True,
         "name": clean_name,
@@ -47084,7 +47130,8 @@ def playlist_track_action(name):
             requested_path=_s(payload.get("path") or ""),
         )
     except Exception as ex:
-        return jsonify({"ok": False, "error": str(ex)}), 400
+        app.logger.warning("Playlist track action failed: %s", type(ex).__name__)
+        return jsonify({"ok": False, "error": "Could not apply this track action."}), 400
     normalized_action = _s(payload.get("action") or "").strip().lower().replace("-", "_")
     try:
         if normalized_action in {"retry", "retry_download"}:
@@ -47093,7 +47140,8 @@ def playlist_track_action(name):
         elif normalized_action == "retry_import":
             result["job"] = _playlist_start_direct_action(clean_name, "import_downloaded")
     except Exception as ex:
-        result["retry_error"] = str(ex)
+        app.logger.warning("Playlist track retry failed: %s", type(ex).__name__)
+        result["retry_error"] = "Could not retry this track."
     return jsonify(result)
 
 
@@ -48375,7 +48423,8 @@ def playlist_pipeline_action(name, action):
                 _pl_dl_jobs.pop(checkpoint_id, None)
             return jsonify({"ok": True, "action": normalized})
     except Exception as ex:
-        return jsonify({"ok": False, "error": str(ex)}), 400
+        app.logger.warning("Playlist pipeline action %r failed: %s", normalized, type(ex).__name__)
+        return jsonify({"ok": False, "error": "Could not apply this pipeline action."}), 400
     return jsonify({"ok": False, "error": f"Unsupported pipeline action: {normalized}"}), 400
 
 
@@ -48451,7 +48500,8 @@ def save_music_format_preferences_route():
     try:
         prefs = _save_music_format_preferences(payload.get("preferences") or payload)
     except Exception as ex:
-        return jsonify({"ok": False, "error": str(ex)}), 400
+        app.logger.warning("Could not save music format preferences: %s", type(ex).__name__)
+        return jsonify({"ok": False, "error": "Could not save preferences."}), 400
     return jsonify({"ok": True, "preferences": prefs})
 
 
@@ -49149,7 +49199,8 @@ def get_config():
     try:
         text = _CONFIG_PATH.read_text(encoding="utf-8")
     except Exception as ex:
-        return jsonify({"ok": False, "error": str(ex)}), 500
+        app.logger.warning("Could not read config.yaml: %s", type(ex).__name__)
+        return jsonify({"ok": False, "error": "Could not read config."}), 500
     has_bak = _CONFIG_BAK.exists()
     bak_ts  = _CONFIG_BAK.stat().st_mtime if has_bak else None
     return jsonify({"ok": True, "content": _redact_config_content(text), "redacted": True, "has_backup": has_bak, "backup_ts": bak_ts})
@@ -49167,7 +49218,8 @@ def save_config():
             shutil.copy2(str(_CONFIG_PATH), str(_CONFIG_BAK))
         _CONFIG_PATH.write_text(content, encoding="utf-8")
     except Exception as ex:
-        return jsonify({"ok": False, "error": str(ex)}), 500
+        app.logger.warning("Could not save config.yaml: %s", type(ex).__name__)
+        return jsonify({"ok": False, "error": "Could not save config."}), 500
     return jsonify({"ok": True, "backed_up": _CONFIG_BAK.exists()})
 
 @app.post("/api/config/revert")
@@ -49177,7 +49229,8 @@ def revert_config():
     try:
         shutil.copy2(str(_CONFIG_BAK), str(_CONFIG_PATH))
     except Exception as ex:
-        return jsonify({"ok": False, "error": str(ex)}), 500
+        app.logger.warning("Could not revert config.yaml: %s", type(ex).__name__)
+        return jsonify({"ok": False, "error": "Could not revert config."}), 500
     return jsonify({"ok": True})
 
 # ── Data helpers ──────────────────────────────────────────────────────────────
@@ -49287,7 +49340,8 @@ def api_transaction_settings_save():
     try:
         settings = transactions.save_settings(payload)
     except Exception as ex:
-        return jsonify({"ok": False, "error": str(ex)}), 400
+        app.logger.warning("Could not save transaction settings: %s", type(ex).__name__)
+        return jsonify({"ok": False, "error": "Could not save transaction settings."}), 400
     return jsonify({"ok": True, "settings": settings})
 
 
