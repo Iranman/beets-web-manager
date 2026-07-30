@@ -64,6 +64,8 @@ class TestBeetsControlAgentSecurity(unittest.TestCase):
 
     def test_is_safe_path_symlink_escape(self):
         """Test that symlinks resolving outside allowed root are rejected."""
+        if os.name != "posix":
+            self.skipTest("Path-root semantics require a POSIX filesystem")
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
             target = tmp_path / "secret.txt"

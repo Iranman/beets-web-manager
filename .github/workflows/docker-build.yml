@@ -30,6 +30,26 @@ jobs:
       - run: docker compose -f docker-compose.arrs.yml config
       - run: docker compose config
       - run: docker build --pull=false --build-arg VCS_REF="${{ github.sha }}" -t beets-web-manager:ci .
+      - name: Verify web-manager container image boundary
+        run: |
+          set -e
+          echo "Verifying web-manager container image boundary..."
+          docker run --rm beets-web-manager:ci sh -lc '
+            for cmd in beet fpcalc git node npm gcc g++ make; do
+              if command -v "$cmd" >/dev/null 2>&1; then
+                echo "FAIL: Forbidden command found in web-manager image: $cmd"
+                exit 1
+              fi
+            done
+            for cmd in ffmpeg ffprobe python tini; do
+              if ! command -v "$cmd" >/dev/null 2>&1; then
+                echo "FAIL: Required command missing in web-manager image: $cmd"
+                exit 1
+              fi
+            done
+            echo "OK: web-manager container image boundary verified"
+          '
+          python -m unittest tests.test_external_beets_architecture.TestBeetsClientRemoteOnly.test_docker_web_manager_image_has_no_beets_binary
       - name: Installation smoke test
         run: |
           set -e
