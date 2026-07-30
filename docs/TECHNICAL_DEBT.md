@@ -71,6 +71,7 @@ Statuses: Open, In Progress, Blocked, Done.
 - Desired state: A small Beets repository/client layer owns common reads/writes and lock retry policy. Web-manager routes call typed methods rather than raw SQL-shaped compatibility calls. Until that migration lands, `raw_sqlite_query()`'s callers must not be left executing dead code paths.
 - Safe migration approach: Consolidate repeated read-only queries first by adding explicit `BeetsClient` methods backed by control-agent endpoints. Move write paths only when covered by mutation tests and transaction/audit records.
 - Priority: P0 (escalated from P2 — confirmed non-functional call sites, not just an architecture-boundary weakness).
+- Tracking issue: https://github.com/Iranman/beets-web-manager/issues/51 (separate from PR #46, which does not touch any affected call site).
 - Status: Open.
 
 ## ARCH-008 Agent Instructions Were Too Large And Duplicated
