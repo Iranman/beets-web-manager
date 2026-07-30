@@ -101,6 +101,55 @@ class OutboundSecurityTests(unittest.TestCase):
                 with self.assertRaises(OutboundPolicyError):
                     parse_outbound_allowlist(value)
 
+    def test_install_secure_urllib_patches_module_level_urlopen(self):
+        # CodeQL alert #18 (py/full-ssrf) flags urllib.request.urlopen() calls
+        # as depending on a user-provided URL. This proves the module-level
+        # symbol every such call site resolves is the hardened wrapper, not
+        # the stdlib original, for the lifetime of the process.
+        from backend.security import secure_urlopen
+        self.assertIs(urllib.request.urlopen, secure_urlopen)
+
+    def test_fetch_open_graph_metadata_blocks_ssrf_before_any_socket_use(self):
+        # Direct regression test for the exact sink CodeQL alert #18 flags
+        # (routes_submissions._fetch_open_graph_metadata's urlopen call).
+        from routes_submissions import _fetch_open_graph_metadata
+
+        with mock.patch("backend.security.socket.getaddrinfo", fake_getaddrinfo("127.0.0.1")):
+            with mock.patch("urllib.request.OpenerDirector.open") as mock_open:
+                with self.assertRaises(OutboundPolicyError):
+                    _fetch_open_graph_metadata("http://127.0.0.1:8080/admin")
+                mock_open.assert_not_called()
+
+    def test_fetch_open_graph_metadata_uses_the_secured_opener_for_redirects(self):
+        # Even if the explicit pre-flight validate_outbound_url() call in
+        # _fetch_open_graph_metadata were ever removed, the sink must still
+        # go through an opener built with SafeRedirectHandler so a redirect
+        # hop landing on a prohibited address is stopped (proven directly
+        # against SafeRedirectHandler in test_redirect_targets_are_revalidated).
+        from routes_submissions import _fetch_open_graph_metadata
+
+        captured_openers = []
+        real_build_opener = urllib.request.build_opener
+
+        def capturing_build_opener(*handlers):
+            opener = real_build_opener(*handlers)
+            captured_openers.append(handlers)
+            return opener
+
+        with mock.patch("backend.security.socket.getaddrinfo", fake_getaddrinfo("93.184.216.34")):
+            with mock.patch("urllib.request.build_opener", side_effect=capturing_build_opener):
+                fake_response = mock.MagicMock()
+                fake_response.read.return_value = b"<html></html>"
+                fake_response.__enter__.return_value = fake_response
+                with mock.patch("urllib.request.OpenerDirector.open", return_value=fake_response):
+                    _fetch_open_graph_metadata("https://public.example.test/start")
+
+        self.assertTrue(captured_openers, "urlopen() did not go through secure_urlopen's build_opener()")
+        self.assertTrue(
+            any(isinstance(h, SafeRedirectHandler) for handlers in captured_openers for h in handlers),
+            "secured opener was not built with SafeRedirectHandler",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
