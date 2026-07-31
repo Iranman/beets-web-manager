@@ -221,7 +221,7 @@ class AudioIdentityPipelineStaticTests(unittest.TestCase):
         self.assertIn('"acoustid_id"', body)
 
     def test_acoustid_lookup_has_retry_and_release_group_fields(self):
-        # ARCH-012: fingerprinting and the AcoustID HTTP call moved into the
+        # ARCH-013: fingerprinting and the AcoustID HTTP call moved into the
         # engine-side /audio/acoustid-lookup adapter (backend/beets_control_agent.py);
         # helpers_mb.py is now a thin remote-call wrapper with no retry/rate-limit
         # logic of its own.

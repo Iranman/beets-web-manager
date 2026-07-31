@@ -22,7 +22,7 @@ Configuration is split between environment variables for the web-manager and con
 | Variable | Purpose |
 |---|---|
 | `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `AI_API_KEY`, `AI_BASE_URL`, `AI_MODEL` | Optional AI-assisted candidate ranking. Matching still uses MusicBrainz and AcoustID evidence without AI. |
-| `ACOUSTID_API_KEY` | Set on the Beets engine service. Required for the engine's `/audio/acoustid-lookup` adapter (runs `fpcalc` and queries `api.acoustid.org` directly -- not a Chroma plugin API call; see ARCH-012). Without it, fingerprint lookups report `unavailable`, not a false no-match. |
+| `ACOUSTID_API_KEY` | Set on the Beets engine service. Required for the engine's `/audio/acoustid-lookup` adapter (runs `fpcalc` and queries `api.acoustid.org` directly -- not a Chroma plugin API call; see ARCH-013). Without it, fingerprint lookups report `unavailable`, not a false no-match. |
 | `ACOUSTID_KEY` | Set on the web-manager service. Used only for `beet submit` fingerprint-submission config, not for lookups. |
 | `DISCOGS_TOKEN`, `DISCOGS_USER_TOKEN` | Optional Discogs metadata. |
 | `LISTENBRAINZ_TOKEN` | Optional ListenBrainz integration. |
