@@ -35825,6 +35825,18 @@ def _folder_cleanup_path(raw: Any) -> Tuple[Optional[Path], Optional[str]]:
     return resolved, None
 
 
+def _folder_cleanup_is_approved_root(path: Path) -> bool:
+    """True when path IS the approved music library root itself (not merely
+    contained within it). _path_under()/relative_to() treat a path and its
+    root as "under" each other (relative_to returns '.'), so every
+    destructive folder-cleanup operation (remove, rename, merge-then-remove)
+    must check this separately and refuse to touch the root itself."""
+    try:
+        return path.resolve(strict=False) == MUSIC_ROOT.resolve(strict=False)
+    except Exception:
+        return False
+
+
 def _folder_cleanup_file_inventory(root: Path) -> Dict[str, Dict[str, Any]]:
     files: Dict[str, Dict[str, Any]] = {}
     if not root.exists() or not root.is_dir():
@@ -36192,6 +36204,8 @@ def apply_folder_placeholder_action_api():
     source, source_error = _folder_cleanup_path(payload.get("source_path"))
     if source_error or source is None:
         return jsonify({"ok": False, "error": source_error or "Invalid source path"}), 400
+    if action != "mark_reviewed" and action != "skip" and _folder_cleanup_is_approved_root(source):
+        return jsonify({"ok": False, "error": "Refusing to modify the music library root itself"}), 400
 
     if action in {"remove_empty_source", "remove_empty"}:
         preview_token = _s(payload.get("preview_token")).strip()
@@ -36305,6 +36319,9 @@ def apply_safe_folder_placeholder_renames_job():
                 if err or src is None:
                     log.append(f"  SKIP (invalid path): {src_str}")
                     continue
+                if _folder_cleanup_is_approved_root(src):
+                    log.append(f"  SKIP (refusing to rename the music library root): {src_str}")
+                    continue
                 name = src.name
                 clean_name = _LITERAL_PLACEHOLDER_RE.sub("", name)
                 clean_name = _UNRESOLVED_TEMPLATE_TOKEN_RE.sub("", clean_name)
@@ -36340,6 +36357,14 @@ def apply_safe_folder_placeholder_renames_job():
             src = Path(row["folder"])
             dst = Path(row["proposed_folder"])
 
+            if not _path_under(src, MUSIC_ROOT) or not _path_under(dst, MUSIC_ROOT):
+                log.append(f"  [{i + 1}/{total}] SKIP (path outside music library): {src.name}")
+                skipped += 1
+                continue
+            if _folder_cleanup_is_approved_root(src):
+                log.append(f"  [{i + 1}/{total}] SKIP (refusing to rename the music library root): {src.name}")
+                skipped += 1
+                continue
             if not src.exists() or not src.is_dir():
                 log.append(f"  [{i + 1}/{total}] SKIP (source gone): {src.name}")
                 skipped += 1
