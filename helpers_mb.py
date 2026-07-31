@@ -1,5 +1,5 @@
 """MusicBrainz / AcoustID API helpers — no app.py dependencies."""
-import json, logging, os, re, shutil, subprocess, time
+import hashlib, json, logging, os, re, shutil, subprocess, time
 import urllib.error, urllib.parse, urllib.request
 from backend.security import install_secure_urllib
 install_secure_urllib()
@@ -645,8 +645,12 @@ def _acoustid_lookup_status(file_path: str) -> Dict[str, Any]:
             return res
         return {"ok": False, "status": "analysis_error", "candidates": []}
     except Exception as exc:
-        logging.warning(f"AcoustID lookup via control agent failed for {file_path}: {exc}")
-        return {"ok": False, "status": "analysis_error", "candidates": [], "error": str(exc)}
+        path_hash = hashlib.sha256(str(file_path).encode("utf-8", errors="replace")).hexdigest()[:12]
+        logging.warning(
+            "AcoustID lookup via control agent failed (path_hash=%s): %s",
+            path_hash, type(exc).__name__,
+        )
+        return {"ok": False, "status": "analysis_error", "candidates": []}
 
 
 def _acoustid_capability_available() -> bool:

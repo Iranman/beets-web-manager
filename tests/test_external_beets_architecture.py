@@ -2796,6 +2796,33 @@ class TestPluginFirstArchitectureGuardrails(unittest.TestCase):
             self.assertEqual(result.get("status"), "analysis_error")
             self.assertEqual(helpers_mb._acoustid_lookup("/data/torrents/music/test.flac"), [])
 
+    def test_acoustid_lookup_status_exception_log_omits_full_path_and_raw_text(self):
+        """The failure-path log line (and the returned dict) must not
+        contain the complete media path or the raw exception text -- both
+        can embed provider response bodies, URLs, or filesystem structure.
+        A useful, non-sensitive diagnostic (exception class name, a stable
+        path hash for correlating repeat failures) must remain."""
+        import helpers_mb
+        from backend.beets_client import beets_client
+
+        distinctive_path = "/data/torrents/music/Very Secret Artist - Embarrassing Title.flac"
+        sensitive_exc_text = "connection to https://internal-secret-host.example/api?token=abc123 failed"
+
+        with mock.patch.object(beets_client, "acoustid_lookup", side_effect=RuntimeError(sensitive_exc_text)), \
+             self.assertLogs(level="WARNING") as captured:
+            result = helpers_mb._acoustid_lookup_status(distinctive_path)
+
+        self.assertEqual(result.get("status"), "analysis_error")
+        self.assertNotIn("error", result)
+
+        full_log_text = "\n".join(captured.output)
+        self.assertNotIn(distinctive_path, full_log_text)
+        self.assertNotIn("Very Secret Artist", full_log_text)
+        self.assertNotIn(sensitive_exc_text, full_log_text)
+        self.assertNotIn("internal-secret-host", full_log_text)
+        self.assertNotIn("token=abc123", full_log_text)
+        self.assertIn("RuntimeError", full_log_text)
+
     def test_acoustid_cache_does_not_persist_transient_failures(self):
         """A transient engine outage (unavailable/timeout/provider_error) must
         not be written to the never-expiring disk cache, or a temporary
