@@ -3,8 +3,12 @@
 import json
 import os
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
+import urllib.error
+import urllib.request
 import uuid
 from io import BytesIO
 from pathlib import Path
@@ -387,6 +391,164 @@ class ControlAgentPathBoundaryTests(unittest.TestCase):
         full_cmd = run_mock.call_args.args[0]
         self.assertNotIn(f"{self.outside}/anywhere-outside-every-root", full_cmd)
         self.assertEqual(full_cmd[-1:], ["title:x"])
+
+
+class AcoustidLookupProviderRouteTests(unittest.TestCase):
+    """Regression tests for POST /audio/acoustid-lookup's configured-provider
+    path. This exercises the real handler far enough to reach
+    urllib.request.Request/urlopen and urllib.error.HTTPError/URLError --
+    the exact code path that crashed with
+    'AttributeError: module 'urllib' has no attribute 'request'' when only
+    `import urllib.parse` was present. Mocking only the external HTTP
+    boundary (urllib.request.urlopen) proves the fix reaches real provider
+    request construction, not just that the import line exists."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(dir="/tmp")
+        base_name = Path(self.tmp.name).name
+        self.base = f"/tmp/{base_name}"
+        self.music = f"{self.base}/music"
+        Path(self.music).mkdir(parents=True, exist_ok=True)
+        self.valid_file = f"{self.music}/track.flac"
+        Path(self.valid_file).write_bytes(b"not-real-audio-bytes")
+        self.patches = [
+            mock.patch.object(bca, "MUSIC_LIBRARY_PATH", self.music),
+            mock.patch.object(bca, "DOWNLOAD_PATH", f"{self.base}/staging"),
+            mock.patch.object(bca, "LOCK_PATH", f"{self.base}/agent.lock"),
+            mock.patch.dict(os.environ, {"ACOUSTID_API_KEY": "synthetic-test-key-not-real"}),
+            mock.patch.object(bca.shutil, "which", return_value="/fake/fpcalc"),
+            mock.patch.object(bca.os.path, "exists", return_value=True),
+        ]
+        for patch in self.patches:
+            patch.start()
+        self._fake_fpcalc = mock.patch.object(
+            bca.subprocess, "run",
+            return_value=mock.MagicMock(
+                returncode=0,
+                stdout=json.dumps({"duration": 180.5, "fingerprint": "AQAB-fake-fingerprint"}),
+            ),
+        )
+        self._fake_fpcalc.start()
+
+    def tearDown(self):
+        self._fake_fpcalc.stop()
+        for patch in reversed(self.patches):
+            patch.stop()
+        self.tmp.cleanup()
+
+    def _fake_response(self, payload: dict):
+        resp = mock.MagicMock()
+        resp.read.return_value = json.dumps(payload).encode("utf-8")
+        resp.__enter__.return_value = resp
+        resp.__exit__.return_value = False
+        return resp
+
+    def test_matched_response_reaches_real_provider_request(self):
+        provider_payload = {
+            "status": "ok",
+            "results": [{
+                "id": "acoustid-id-1",
+                "score": 0.95,
+                "recordings": [{
+                    "id": "mb-recording-id-1",
+                    "title": "Test Track",
+                    "artists": [{"name": "Test Artist"}],
+                    "releases": [{"id": "mb-release-1", "title": "Test Album", "date": {"year": 2020}}],
+                }],
+            }],
+        }
+        with mock.patch.object(bca.urllib.request, "urlopen", return_value=self._fake_response(provider_payload)) as urlopen_mock:
+            code, data = _post_agent("/audio/acoustid-lookup", {"path": self.valid_file})
+        self.assertEqual(code, 200, data)
+        self.assertEqual(data["status"], "matched")
+        self.assertTrue(data["candidates"])
+        self.assertEqual(data["candidates"][0]["mb_trackid"], "mb-recording-id-1")
+        urlopen_mock.assert_called_once()
+        request_obj = urlopen_mock.call_args.args[0]
+        self.assertIn("client=synthetic-test-key-not-real", request_obj.full_url)
+        self.assertNotIn("synthetic-test-key-not-real", json.dumps(data))
+        self.assertNotIn(self.valid_file, json.dumps(data))
+
+    def test_no_match_response(self):
+        with mock.patch.object(bca.urllib.request, "urlopen", return_value=self._fake_response({"status": "ok", "results": []})):
+            code, data = _post_agent("/audio/acoustid-lookup", {"path": self.valid_file})
+        self.assertEqual(code, 200, data)
+        self.assertEqual(data["status"], "no_match")
+        self.assertEqual(data["candidates"], [])
+
+    def test_http_error_maps_to_provider_error(self):
+        def raise_http_error(*a, **k):
+            raise urllib.error.HTTPError(url="https://api.acoustid.org/v2/lookup", code=503, msg="Service Unavailable", hdrs=None, fp=None)
+        with mock.patch.object(bca.urllib.request, "urlopen", side_effect=raise_http_error):
+            code, data = _post_agent("/audio/acoustid-lookup", {"path": self.valid_file})
+        self.assertEqual(code, 502, data)
+        self.assertEqual(data["status"], "provider_error")
+        self.assertNotIn("503", json.dumps(data))
+
+    def test_url_error_maps_to_provider_error(self):
+        with mock.patch.object(bca.urllib.request, "urlopen", side_effect=urllib.error.URLError("connection refused")):
+            code, data = _post_agent("/audio/acoustid-lookup", {"path": self.valid_file})
+        self.assertEqual(code, 502, data)
+        self.assertEqual(data["status"], "provider_error")
+        self.assertNotIn("connection refused", json.dumps(data))
+
+    def test_timeout_after_retry(self):
+        with mock.patch.object(bca.urllib.request, "urlopen", side_effect=TimeoutError("timed out")), \
+             mock.patch.object(bca.time, "sleep"):
+            code, data = _post_agent("/audio/acoustid-lookup", {"path": self.valid_file})
+        self.assertEqual(code, 504, data)
+        self.assertEqual(data["status"], "timeout")
+
+    def test_malformed_provider_payload(self):
+        resp = mock.MagicMock()
+        resp.read.return_value = b"not valid json{{{"
+        resp.__enter__.return_value = resp
+        resp.__exit__.return_value = False
+        with mock.patch.object(bca.urllib.request, "urlopen", return_value=resp):
+            code, data = _post_agent("/audio/acoustid-lookup", {"path": self.valid_file})
+        self.assertEqual(code, 500, data)
+        self.assertEqual(data["status"], "analysis_error")
+        self.assertNotIn("not valid json", json.dumps(data))
+
+    def test_urllib_request_and_error_are_importable_from_the_module(self):
+        """A future removal of either import must fail this test."""
+        self.assertTrue(hasattr(bca.urllib, "request"))
+        self.assertTrue(hasattr(bca.urllib, "error"))
+        self.assertTrue(hasattr(bca.urllib.request, "Request"))
+        self.assertTrue(hasattr(bca.urllib.request, "urlopen"))
+        self.assertTrue(hasattr(bca.urllib.error, "HTTPError"))
+        self.assertTrue(hasattr(bca.urllib.error, "URLError"))
+
+
+class AcoustidLookupIsolatedImportTests(unittest.TestCase):
+    """No mocking of any kind here (deliberately -- mock.patch.object on
+    bca.subprocess.run patches the process-wide subprocess module, which
+    would otherwise intercept this test's own attempt to spawn a real
+    isolated interpreter). Regression test for the exact bug Codex
+    reported: importing only `urllib.parse` does NOT make
+    `urllib.request`/`urllib.error` accessible as attributes of the shared
+    `urllib` package object -- that only appeared to work when other test
+    modules in the same process had already imported urllib.request first.
+    A genuinely fresh subprocess that imports ONLY
+    backend.beets_control_agent has no such contamination, so this is the
+    check that would actually have failed with 'AttributeError: module
+    'urllib' has no attribute 'request'' against the previously reviewed
+    f1b44ea1... head."""
+
+    def test_urllib_submodules_load_in_a_fresh_isolated_process(self):
+        script = (
+            "import backend.beets_control_agent as bca\n"
+            "bca.urllib.request.Request('https://example.com')\n"
+            "assert bca.urllib.error.HTTPError\n"
+            "assert bca.urllib.error.URLError\n"
+            "print('URLLIB_OK')\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True, text=True, cwd=str(Path(__file__).resolve().parent.parent),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("URLLIB_OK", result.stdout)
 
 
 class AlbumDeleteCanonicalPathTests(unittest.TestCase):

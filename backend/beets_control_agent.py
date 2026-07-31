@@ -19,7 +19,9 @@ import subprocess
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.parse
+import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -348,7 +350,7 @@ def _agent_status_payload() -> dict[str, Any]:
             "chroma_loaded": "chroma" in loaded_plugins,
         },
         "acoustid_lookup": {
-            # /audio/acoustid-lookup is a narrow engine-side adapter (ARCH-012):
+            # /audio/acoustid-lookup is a narrow engine-side adapter (ARCH-013):
             # it runs fpcalc directly and calls api.acoustid.org itself, so it
             # needs fpcalc + ACOUSTID_API_KEY -- not pyacoustid or a loaded
             # chroma plugin, which this endpoint never touches.
@@ -1654,14 +1656,20 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                     with urllib.request.urlopen(req, timeout=15) as r2:
                         data = json.loads(r2.read().decode("utf-8"))
                     break
-                except urllib.error.HTTPError as he:
-                    self._send_json(502, {"ok": False, "status": "provider_error", "error": f"AcoustID API HTTP error {he.code}"})
+                except urllib.error.HTTPError:
+                    self._send_json(502, {"ok": False, "status": "provider_error", "error": "AcoustID API rejected the request"})
                     return
-                except Exception:
+                except urllib.error.URLError:
+                    self._send_json(502, {"ok": False, "status": "provider_error", "error": "AcoustID API connection error"})
+                    return
+                except TimeoutError:
                     if attempt >= 1:
-                        self._send_json(504, {"ok": False, "status": "timeout", "error": "AcoustID API lookup timed out or failed to connect"})
+                        self._send_json(504, {"ok": False, "status": "timeout", "error": "AcoustID API lookup timed out"})
                         return
                     time.sleep(1.0)
+                except Exception:
+                    self._send_json(500, {"ok": False, "status": "analysis_error", "error": "AcoustID API lookup failed"})
+                    return
 
             if data.get("status") != "ok":
                 self._send_json(502, {"ok": False, "status": "provider_error", "error": f"AcoustID API returned status: {data.get('status')}"})
