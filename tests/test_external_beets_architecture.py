@@ -34,8 +34,10 @@ from backend.beets_control_agent import (
     ALLOWED_COMMANDS,
     JOBS,
     ControlAgentHandler,
+    UnsafePathError,
     _handle_delete_album,
     is_safe_path,
+    resolve_safe_path,
     require_command_capability,
 )
 from job_engine import Job, JobStore, _beet_run, _parse_remote_beet_command
@@ -63,6 +65,8 @@ class TestBeetsControlAgentSecurity(unittest.TestCase):
 
     def test_is_safe_path_symlink_escape(self):
         """Test that symlinks resolving outside allowed root are rejected."""
+        if os.name != "posix":
+            self.skipTest("Path-root semantics require a POSIX filesystem")
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
             target = tmp_path / "secret.txt"
@@ -78,6 +82,41 @@ class TestBeetsControlAgentSecurity(unittest.TestCase):
 
             with mock.patch("backend.beets_control_agent.MUSIC_LIBRARY_PATH", str(music_fake)):
                 self.assertFalse(is_safe_path(str(symlink), ["music"]))
+                with self.assertRaises(UnsafePathError):
+                    resolve_safe_path(str(symlink), ["music"])
+
+    def test_resolve_safe_path_returns_canonical_symlink_target(self):
+        """Filesystem sinks must operate on the resolved (symlink-followed)
+        path resolve_safe_path() returns, not the original caller-supplied
+        string, or a check-then-use gap re-opens between validation and use.
+        A within-root symlink must resolve to its real, allowed target."""
+        if os.name != "posix":
+            # resolve_safe_path()/is_safe_path() require a POSIX-style
+            # absolute path (matching the real Linux container runtime this
+            # code actually ships in); a Windows temp-dir path never starts
+            # with "/", so this can't be meaningfully exercised here.
+            self.skipTest("Path-root semantics require a POSIX filesystem")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            music_root = tmp_path / "music_real"
+            music_root.mkdir()
+            real_file = music_root / "track.flac"
+            real_file.write_bytes(b"audio")
+
+            alias_dir = music_root / "alias"
+            try:
+                os.symlink(music_root, alias_dir)
+            except (OSError, NotImplementedError):
+                self.skipTest("Symlink creation not supported on this platform/user")
+
+            with mock.patch("backend.beets_control_agent.MUSIC_LIBRARY_PATH", str(music_root)):
+                resolved = resolve_safe_path(str(alias_dir / "track.flac"), ["music"])
+                self.assertIsNotNone(resolved)
+                self.assertEqual(Path(resolved), real_file.resolve())
+                # is_safe_path() must agree with resolve_safe_path() on the
+                # same input (boolean wrapper stays consistent with the
+                # canonical-path-returning implementation it wraps).
+                self.assertTrue(is_safe_path(str(alias_dir / "track.flac"), ["music"]))
 
     def test_auth_token_fail_closed(self):
         with mock.patch("backend.beets_control_agent.BEETS_API_TOKEN", ""):
@@ -352,7 +391,7 @@ class TestBeetsClientRemoteOnly(unittest.TestCase):
             con.close()
 
             with mock.patch("backend.beets_control_agent.LIB_PATH", str(db_path)), \
-                 mock.patch("backend.beets_control_agent.MUSIC_LIBRARY_PATH", str(music_path)), \
+                 mock.patch("backend.beets_control_agent.resolve_safe_path", side_effect=lambda p, *a, **kw: Path(p) if isinstance(p, str) else p), \
                  mock.patch.object(Path, "unlink", side_effect=PermissionError("Permission denied")):
                 code, res = _handle_delete_album(1, delete_files=True)
                 self.assertEqual(code, 200)
@@ -364,7 +403,19 @@ class TestBeetsClientRemoteOnly(unittest.TestCase):
                 self.assertTrue(len(res["file_errors"]) > 0)
 
     def test_docker_web_manager_image_has_no_beets_binary(self):
-        """Test web-manager container image has no beet executable (skipped if Docker daemon unavailable)."""
+        """Test web-manager container image has no beet executable (skipped if
+        Docker or the image is unavailable on this host).
+
+        Known gap: .github/workflows/unit-tests.yml (the job this test runs
+        in during CI) never builds any web-manager image -- only
+        docker-build.yml does, tagged `beets-web-manager:ci`, in a separate
+        job that does not run this Python test suite. So in CI this check
+        currently always skips; it only runs for real on a host (local dev,
+        or a future combined workflow) where one of these tags was already
+        built. Checking both tags at least makes it capable of running for
+        real wherever either image happens to be present, rather than being
+        permanently tied to a tag CI never produces.
+        """
         try:
             res = subprocess.run(["docker", "info"], capture_output=True, text=True, timeout=5)
             if res.returncode != 0:
@@ -372,8 +423,18 @@ class TestBeetsClientRemoteOnly(unittest.TestCase):
         except Exception:
             raise unittest.SkipTest("Docker CLI unavailable on this host")
 
+        candidate_tags = ["beets-web-manager:0.1.0", "beets-web-manager:ci"]
+        image_tag = None
+        for tag in candidate_tags:
+            img_inspect = subprocess.run(["docker", "image", "inspect", tag], capture_output=True, text=True, timeout=5)
+            if img_inspect.returncode == 0:
+                image_tag = tag
+                break
+        if image_tag is None:
+            raise unittest.SkipTest(f"None of {candidate_tags} built locally on this host")
+
         res = subprocess.run(
-            ["docker", "run", "--rm", "beets-web-manager:0.1.0", "command", "-v", "beet"],
+            ["docker", "run", "--rm", image_tag, "command", "-v", "beet"],
             capture_output=True,
             text=True,
             timeout=10,
@@ -2602,6 +2663,204 @@ class BeetsEngineImageVerifierTests(unittest.TestCase):
                 "--require-command-help", "mbsubmit",
             ]):
                 self.assertEqual(vbi.main(), 0)
+
+
+class TestPluginFirstArchitectureGuardrails(unittest.TestCase):
+    def test_agents_md_has_plugin_first_section(self):
+        content = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertIn("## Plugin-First Beets Architecture", content)
+        self.assertIn("Check Beets core and installed plugins before implementing", content)
+        self.assertIn("built-in Beets web plugin (`beet web`) is the sole intentional replacement", content)
+        self.assertIn("No local `beet`, `fpcalc`, `ffprobe`", content)
+
+    def test_claude_md_points_to_agents_md_and_plugin_requirements(self):
+        content = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+        self.assertIn("Read `AGENTS.md`", content)
+        self.assertIn("Existing Beets/plugin capability reviewed:", content)
+
+    def test_agent_workflow_has_plugin_evaluation_directive(self):
+        content = (ROOT / "docs" / "AGENT_WORKFLOW.md").read_text(encoding="utf-8")
+        self.assertIn("Evaluate Beets core and installed plugins before implementing", content)
+
+    def test_review_md_has_plugin_first_checklist(self):
+        content = (ROOT / "REVIEW.md").read_text(encoding="utf-8")
+        self.assertIn("## Plugin-First Ownership and Container Boundaries", content)
+        self.assertIn("No hidden local subprocess fallback", content)
+
+    def test_web_manager_runtime_has_no_local_fpcalc_execution(self):
+        files_to_check = [ROOT / "helpers_mb.py", ROOT / "app.py"]
+        for fpath in files_to_check:
+            content = fpath.read_text(encoding="utf-8")
+            self.assertNotIn('shutil.which("fpcalc")', content, f"Found local fpcalc probe in {fpath.name}")
+            self.assertNotIn('subprocess.run([fpcalc', content, f"Found local fpcalc subprocess call in {fpath.name}")
+
+    def test_requirements_txt_excludes_plugin_only_packages(self):
+        req = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+        for pkg in ("pylast", "pylistenbrainz", "Pillow", "beautifulsoup4"):
+            self.assertNotIn(f"{pkg}==", req, f"{pkg} should be removed from web manager requirements.txt")
+
+    def test_dockerfile_uses_ffmpeg_and_excludes_git(self):
+        df = (ROOT / "Dockerfile").read_text(encoding="utf-8").replace("\r\n", "\n")
+        self.assertIn("ffmpeg", df)
+        self.assertNotIn("apt-get install -y --no-install-recommends \\\n    git", df)
+
+    def test_acoustid_lookup_client_and_control_agent(self):
+        from backend.beets_client import BeetsClient, beets_client
+        self.assertTrue(hasattr(beets_client, "acoustid_lookup"))
+
+        success_body = json.dumps(
+            {"ok": True, "status": "matched", "candidates": [{"score": 90, "title": "Test"}]}
+        ).encode("utf-8")
+        mock_resp = mock.MagicMock()
+        mock_resp.read.return_value = success_body
+        mock_resp.__enter__.return_value = mock_resp
+        with mock.patch("backend.beets_client.urllib.request.urlopen", return_value=mock_resp):
+            res = beets_client.acoustid_lookup("/data/torrents/music/test.flac")
+            self.assertTrue(res.get("ok"))
+            self.assertEqual(res.get("status"), "matched")
+            self.assertEqual(len(res.get("candidates")), 1)
+
+    def test_acoustid_lookup_client_preserves_structured_error_status(self):
+        """acoustid_lookup() must not collapse a structured non-2xx response
+        (e.g. 503 'unavailable' for a missing ACOUSTID_API_KEY) into a bare
+        exception the way the shared _request() helper does for every other
+        endpoint -- regression test for a real bug only found via live
+        two-container testing: _request() treats any >=500 status as a
+        generic BeetsUnavailableError, discarding the engine's actual
+        {"status": "unavailable"} body."""
+        from backend.beets_client import BeetsClient, beets_client, BeetsAuthError, BeetsUnavailableError
+
+        error_body = json.dumps(
+            {"ok": False, "status": "unavailable", "fingerprint_available": False,
+             "error": "ACOUSTID_API_KEY environment variable not configured"}
+        ).encode("utf-8")
+
+        def raise_503(*args, **kwargs):
+            resp = mock.MagicMock()
+            resp.read.return_value = error_body
+            raise urllib.error.HTTPError("http://beets:8338/audio/acoustid-lookup", 503, "Service Unavailable", {}, resp)
+
+        with mock.patch("backend.beets_client.urllib.request.urlopen", side_effect=raise_503):
+            res = beets_client.acoustid_lookup("/data/torrents/music/test.flac")
+            self.assertFalse(res.get("ok"))
+            self.assertEqual(res.get("status"), "unavailable")
+
+        # A genuine 401 must still raise BeetsAuthError, not be swallowed.
+        def raise_401(*args, **kwargs):
+            resp = mock.MagicMock()
+            resp.read.return_value = b"{}"
+            raise urllib.error.HTTPError("http://beets:8338/audio/acoustid-lookup", 401, "Unauthorized", {}, resp)
+
+        with mock.patch("backend.beets_client.urllib.request.urlopen", side_effect=raise_401):
+            with self.assertRaises(BeetsAuthError):
+                beets_client.acoustid_lookup("/data/torrents/music/test.flac")
+
+        # A transport-level failure with no parseable body still reports
+        # unavailable via an exception (no structured body to preserve).
+        def raise_connection_error(*args, **kwargs):
+            raise urllib.error.URLError("connection refused")
+
+        with mock.patch("backend.beets_client.urllib.request.urlopen", side_effect=raise_connection_error):
+            with self.assertRaises(BeetsUnavailableError):
+                beets_client.acoustid_lookup("/data/torrents/music/test.flac")
+
+    def test_acoustid_lookup_status_preserves_distinct_statuses(self):
+        """helpers_mb._acoustid_lookup_status must not collapse unavailable,
+        timeout, provider_error, and no_match into the same bare []."""
+        import helpers_mb
+        from backend.beets_client import beets_client
+
+        cases = [
+            {"ok": False, "status": "unavailable", "candidates": []},
+            {"ok": False, "status": "timeout", "candidates": []},
+            {"ok": False, "status": "provider_error", "candidates": []},
+            {"ok": True, "status": "no_match", "candidates": []},
+            {"ok": True, "status": "matched", "candidates": [{"score": 95, "mb_trackid": "abc"}]},
+        ]
+        for case in cases:
+            with mock.patch.object(beets_client, "acoustid_lookup", return_value=case):
+                result = helpers_mb._acoustid_lookup_status("/data/torrents/music/test.flac")
+                self.assertEqual(result.get("status"), case["status"])
+                self.assertEqual(result.get("candidates"), case["candidates"])
+
+    def test_acoustid_lookup_status_survives_control_agent_exception(self):
+        """A control-agent/network exception must return a status dict, not
+        raise -- regression test for a NameError (missing `logging` import)
+        that previously escaped this exact except-block uncaught."""
+        import helpers_mb
+        from backend.beets_client import beets_client
+
+        with mock.patch.object(beets_client, "acoustid_lookup", side_effect=RuntimeError("boom")):
+            result = helpers_mb._acoustid_lookup_status("/data/torrents/music/test.flac")
+            self.assertFalse(result.get("ok"))
+            self.assertEqual(result.get("status"), "analysis_error")
+            self.assertEqual(helpers_mb._acoustid_lookup("/data/torrents/music/test.flac"), [])
+
+    def test_acoustid_lookup_status_exception_log_omits_full_path_and_raw_text(self):
+        """The failure-path log line (and the returned dict) must not
+        contain the complete media path or the raw exception text -- both
+        can embed provider response bodies, URLs, or filesystem structure.
+        A useful, non-sensitive diagnostic (exception class name, a stable
+        path hash for correlating repeat failures) must remain."""
+        import helpers_mb
+        from backend.beets_client import beets_client
+
+        distinctive_path = "/data/torrents/music/Very Secret Artist - Embarrassing Title.flac"
+        sensitive_exc_text = "connection to https://internal-secret-host.example/api?token=abc123 failed"
+
+        with mock.patch.object(beets_client, "acoustid_lookup", side_effect=RuntimeError(sensitive_exc_text)), \
+             self.assertLogs(level="WARNING") as captured:
+            result = helpers_mb._acoustid_lookup_status(distinctive_path)
+
+        self.assertEqual(result.get("status"), "analysis_error")
+        self.assertNotIn("error", result)
+
+        full_log_text = "\n".join(captured.output)
+        self.assertNotIn(distinctive_path, full_log_text)
+        self.assertNotIn("Very Secret Artist", full_log_text)
+        self.assertNotIn(sensitive_exc_text, full_log_text)
+        self.assertNotIn("internal-secret-host", full_log_text)
+        self.assertNotIn("token=abc123", full_log_text)
+        self.assertIn("RuntimeError", full_log_text)
+
+    def test_acoustid_cache_does_not_persist_transient_failures(self):
+        """A transient engine outage (unavailable/timeout/provider_error) must
+        not be written to the never-expiring disk cache, or a temporary
+        outage would become a permanent false no-match for that file."""
+        import app as app_module
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            audio_path = Path(tmp_dir) / "track.flac"
+            audio_path.write_bytes(b"fake audio bytes")
+
+            with mock.patch.object(app_module, "_ACOUSTID_FILE_CACHE_DIR", Path(tmp_dir) / "cache"), \
+                 mock.patch.object(app_module, "_acoustid_lookup_status",
+                                    return_value={"ok": False, "status": "unavailable", "candidates": []}) as mock_status:
+                result = app_module._acoustid_lookup_cached(str(audio_path))
+                self.assertEqual(result, [])
+                cache_files = list((Path(tmp_dir) / "cache").rglob("*.json")) if (Path(tmp_dir) / "cache").exists() else []
+                self.assertEqual(cache_files, [], "transient failure must not be written to the permanent disk cache")
+
+                # A subsequent call must retry the engine rather than serve a
+                # stale cached negative result.
+                app_module._acoustid_lookup_cached(str(audio_path))
+                self.assertEqual(mock_status.call_count, 2)
+
+    def test_acoustid_cache_persists_terminal_outcomes(self):
+        """A genuine matched/no_match/invalid_media result IS cached, since
+        it is determined by the file's own content, not engine availability."""
+        import app as app_module
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            audio_path = Path(tmp_dir) / "track.flac"
+            audio_path.write_bytes(b"fake audio bytes")
+
+            with mock.patch.object(app_module, "_ACOUSTID_FILE_CACHE_DIR", Path(tmp_dir) / "cache"), \
+                 mock.patch.object(app_module, "_acoustid_lookup_status",
+                                    return_value={"ok": True, "status": "no_match", "candidates": []}) as mock_status:
+                app_module._acoustid_lookup_cached(str(audio_path))
+                app_module._acoustid_lookup_cached(str(audio_path))
+                self.assertEqual(mock_status.call_count, 1, "a terminal outcome should be served from cache on the second call")
 
 
 if __name__ == "__main__":

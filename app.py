@@ -318,9 +318,9 @@ from backend.transaction_engine import TransactionStore, metadata_diff
 from backend.title_normalize import restore_time_colon_title as _restore_time_colon_title
 from helpers_mb import (
     _fetch_mb_recording_details, _mb_recording_search, _mb_release_search,
-    _clean_for_mb, _acoustid_lookup, _resolve_release_group_to_release,
-    _resolve_mb_release_id, _JUNK_TITLE_RE, _fetch_mb_release_candidate,
-    _mb_release_group_candidates,
+    _clean_for_mb, _acoustid_lookup, _acoustid_lookup_status, _ACOUSTID_TERMINAL_STATUSES,
+    _acoustid_capability_available, _resolve_release_group_to_release, _resolve_mb_release_id,
+    _JUNK_TITLE_RE, _fetch_mb_release_candidate, _mb_release_group_candidates,
 )
 from backend.beets_client import beets_client, get_db_connection, lib, BeetsError, BeetsUnavailableError, BeetsAuthError
 
@@ -4093,7 +4093,11 @@ def _track_ai_evidence_packet(iid: int, *, filename: str,
         },
         "validation": {
             "returned_track_in_candidates": bool(selected_candidate) if mb_trackid else False,
-            "acoustid_available": bool(acoustid_candidates),
+            # Whether the engine's AcoustID capability is configured at all,
+            # not whether this specific lookup found a match -- an empty
+            # acoustid_candidates list must not be reported as "unavailable"
+            # when fingerprinting genuinely ran and just found no match.
+            "acoustid_available": _acoustid_capability_available(),
             "fingerprint_status": fingerprint_status,
             "trusted_for_apply": bool(selected_candidate),
         },
@@ -16657,8 +16661,13 @@ def _audio_cache_file_identity(file_path: str) -> Tuple[Optional[Path], Optional
 def _acoustid_lookup_cached(file_path: str) -> List[Dict[str, Any]]:
     """AcoustID lookup with file-level disk cache keyed by resolved path + size + mtime_ns.
 
-    Cache entries never expire — a changed file produces a new cache key.
-    Returns the same format as _acoustid_lookup (list of recording candidate dicts).
+    Only a terminal, file-content-determined outcome (matched/no_match/invalid_media)
+    is persisted to the never-expiring disk cache. A transient failure
+    (unavailable/timeout/provider_error/analysis_error) is never written to
+    disk, so a temporary engine outage cannot freeze in as a permanent
+    negative cache entry for this file. Returns the same format as
+    _acoustid_lookup (list of recording candidate dicts); use
+    _acoustid_lookup_status() directly when the distinction matters.
     """
     path, cache_key = _audio_cache_file_identity(file_path)
     if not path or not cache_key:
@@ -16671,13 +16680,15 @@ def _acoustid_lookup_cached(file_path: str) -> List[Dict[str, Any]]:
         except Exception:
             pass
 
-    result = _acoustid_lookup(str(path))
-    try:
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_text(json.dumps(result), encoding="utf-8")
-    except Exception:
-        pass
-    return result
+    status_result = _acoustid_lookup_status(str(path))
+    candidates = status_result.get("candidates", []) or []
+    if status_result.get("status") in _ACOUSTID_TERMINAL_STATUSES:
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(json.dumps(candidates), encoding="utf-8")
+        except Exception:
+            pass
+    return candidates
 
 
 def _audio_identity_score(candidate: Dict[str, Any]) -> float:

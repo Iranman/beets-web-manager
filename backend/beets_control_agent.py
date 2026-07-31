@@ -19,7 +19,9 @@ import subprocess
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.parse
+import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -293,6 +295,7 @@ def _agent_status_payload() -> dict[str, Any]:
     fpcalc_path = shutil.which("fpcalc") or ""
     ffmpeg_path = shutil.which("ffmpeg") or ""
     pyacoustid_available = importlib.util.find_spec("acoustid") is not None
+    acoustid_api_key_configured = bool((os.environ.get("ACOUSTID_API_KEY") or "").strip())
 
     def _path_status(path: str, *, require_writable: bool = False) -> dict[str, Any]:
         exists = os.path.exists(path)
@@ -347,8 +350,13 @@ def _agent_status_payload() -> dict[str, Any]:
             "chroma_loaded": "chroma" in loaded_plugins,
         },
         "acoustid_lookup": {
-            "available": bool(fpcalc_path and pyacoustid_available and "chroma" in loaded_plugins),
+            # /audio/acoustid-lookup is a narrow engine-side adapter (ARCH-013):
+            # it runs fpcalc directly and calls api.acoustid.org itself, so it
+            # needs fpcalc + ACOUSTID_API_KEY -- not pyacoustid or a loaded
+            # chroma plugin, which this endpoint never touches.
+            "available": bool(fpcalc_path and acoustid_api_key_configured),
             "fpcalc_available": bool(fpcalc_path),
+            "acoustid_api_key_configured": acoustid_api_key_configured,
             "pyacoustid_available": pyacoustid_available,
             "chroma_loaded": "chroma" in loaded_plugins,
         },
@@ -450,7 +458,6 @@ def _decode_untrusted_path(raw_path: str) -> Optional[str]:
             return decoded
         decoded = next_decoded
     return None
-
 
 def _allowed_root_paths(allowed_types: list = None) -> list[str]:
     all_roots = {
@@ -774,19 +781,6 @@ def _handle_delete_album(album_id: int, delete_files: bool = True) -> tuple:
             files_deleted = 0
             file_errors = []
             if delete_files:
-                # Database rows are already committed above at this point.
-                # Everything below is best-effort filesystem cleanup, and
-                # must never be allowed to propagate an exception up to the
-                # outer handler -- doing so would incorrectly report
-                # database_deleted: False for a delete that already
-                # succeeded. Stored item/album paths come from the
-                # database, not the current request, but are still
-                # untrusted: a corrupt or maliciously-written row must not
-                # be able to direct a delete outside the approved roots.
-                # Resolve each one through resolve_safe_path() and operate
-                # only on the returned Path (never the raw stored string),
-                # and refuse an approved root itself the same way
-                # /files/delete does.
                 try:
                     for fpath in item_files:
                         if not fpath:
@@ -1589,6 +1583,155 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 self._send_json(500, {"error": "Failed to create directory"})
             finally:
                 release_os_lock(lock_file)
+            return
+
+        if path == "/audio/acoustid-lookup":
+            file_path = body.get("path") or body.get("file_path", "")
+            if not file_path or not isinstance(file_path, str):
+                self._send_json(400, {"ok": False, "status": "invalid_media", "error": "Missing or invalid file path parameter"})
+                return
+
+            try:
+                safe_file_path = resolve_safe_path(file_path, ["music", "staging"])
+            except UnsafePathError:
+                self._send_json(403, {"ok": False, "status": "analysis_error", "error": "Access denied for path outside allowed roots"})
+                return
+
+            # safe_file_path is the canonical Path returned by resolve_safe_path()
+            # above, not the raw request string -- see docs/TECHNICAL_DEBT.md
+            # for the known CodeQL false-positive gap on this pattern (the
+            # default query pack does not model resolve_safe_path() as a
+            # sanitizer; a source comment cannot suppress this, only an
+            # advanced-setup model pack or an owner-reviewed alert dismissal can).
+            if not safe_file_path.exists():
+                self._send_json(404, {"ok": False, "status": "invalid_media", "error": "File not found"})
+                return
+
+            if not safe_file_path.is_file():
+                self._send_json(400, {"ok": False, "status": "invalid_media", "error": "Path is not a regular file"})
+                return
+
+            fpcalc = shutil.which("fpcalc") or "/usr/bin/fpcalc"
+            if not os.path.exists(fpcalc):
+                self._send_json(503, {"ok": False, "status": "unavailable", "fingerprint_available": False, "error": "fpcalc executable not available in engine"})
+                return
+
+            aid_key = (os.environ.get("ACOUSTID_API_KEY") or "").strip()
+            if not aid_key:
+                self._send_json(503, {"ok": False, "status": "unavailable", "fingerprint_available": False, "error": "ACOUSTID_API_KEY environment variable not configured"})
+                return
+
+            try:
+                res = subprocess.run([fpcalc, "-json", str(safe_file_path)], capture_output=True, text=True, timeout=30, shell=False)
+                if res.returncode != 0 or not res.stdout.strip():
+                    self._send_json(500, {"ok": False, "status": "analysis_error", "error": f"fpcalc failed with exit code {res.returncode}"})
+                    return
+                fp_data = json.loads(res.stdout)
+                duration = float(fp_data.get("duration") or 0)
+                fingerprint = (fp_data.get("fingerprint") or "").strip()
+                if not fingerprint or duration < 5:
+                    self._send_json(400, {"ok": False, "status": "invalid_media", "error": "Invalid fingerprint or audio duration too short (<5s)"})
+                    return
+            except subprocess.TimeoutExpired:
+                self._send_json(504, {"ok": False, "status": "timeout", "error": "fpcalc fingerprinting timed out after 30s"})
+                return
+            except Exception:
+                self._send_json(500, {"ok": False, "status": "analysis_error", "error": "fpcalc execution error"})
+                return
+
+            params = urllib.parse.urlencode({
+                "client": aid_key,
+                "meta": "recordings releases releasegroups",
+                "duration": int(duration),
+                "fingerprint": fingerprint,
+                "format": "json",
+            })
+            req = urllib.request.Request(
+                f"https://api.acoustid.org/v2/lookup?{params}",
+                headers={"User-Agent": "BeetsWebControl/1.0"}
+            )
+            data = {}
+            for attempt in range(2):
+                try:
+                    with urllib.request.urlopen(req, timeout=15) as r2:
+                        data = json.loads(r2.read().decode("utf-8"))
+                    break
+                except urllib.error.HTTPError:
+                    self._send_json(502, {"ok": False, "status": "provider_error", "error": "AcoustID API rejected the request"})
+                    return
+                except urllib.error.URLError:
+                    self._send_json(502, {"ok": False, "status": "provider_error", "error": "AcoustID API connection error"})
+                    return
+                except TimeoutError:
+                    if attempt >= 1:
+                        self._send_json(504, {"ok": False, "status": "timeout", "error": "AcoustID API lookup timed out"})
+                        return
+                    time.sleep(1.0)
+                except Exception:
+                    self._send_json(500, {"ok": False, "status": "analysis_error", "error": "AcoustID API lookup failed"})
+                    return
+
+            if data.get("status") != "ok":
+                self._send_json(502, {"ok": False, "status": "provider_error", "error": f"AcoustID API returned status: {data.get('status')}"})
+                return
+
+            out = []
+            seen_mbids = set()
+            for result in (data.get("results") or [])[:5]:
+                confidence = int(round((result.get("score") or 0) * 100))
+                acoustid_id = str(result.get("id") or "")
+                for rec in (result.get("recordings") or [])[:3]:
+                    mb_id = rec.get("id", "")
+                    if not mb_id or mb_id in seen_mbids:
+                        continue
+                    seen_mbids.add(mb_id)
+                    t_title = rec.get("title", "")
+                    artists = " / ".join(a.get("name", "") for a in (rec.get("artists") or []))
+                    releases = rec.get("releases") or []
+                    rel = releases[0] if releases else {}
+                    rel_title = rel.get("title", "")
+                    rel_year = (rel.get("date", {}).get("year") if isinstance(rel.get("date"), dict) else "")
+                    mb_albumids = [r.get("id", "") for r in releases if r.get("id")]
+                    releasegroups = rec.get("releasegroups") or rec.get("release-groups") or []
+                    rg = releasegroups[0] if releasegroups else {}
+                    rg_id = rg.get("id", "") if isinstance(rg, dict) else ""
+                    rg_title = rg.get("title", "") if isinstance(rg, dict) else ""
+                    if not rg_id:
+                        for rel_item in releases:
+                            rel_rg = (
+                                rel_item.get("releasegroup")
+                                or rel_item.get("release-group")
+                                or rel_item.get("release_group")
+                                or {}
+                            )
+                            if isinstance(rel_rg, dict) and rel_rg.get("id"):
+                                rg_id = rel_rg.get("id", "")
+                                rg_title = rel_rg.get("title", "") or rg_title
+                                break
+                    out.append({
+                        "score": confidence,
+                        "acoustid_id": acoustid_id,
+                        "mb_trackid": mb_id,
+                        "mb_url": f"https://musicbrainz.org/recording/{mb_id}",
+                        "title": t_title,
+                        "artist": artists,
+                        "album": rel_title or rg_title,
+                        "year": str(rel_year) if rel_year else "",
+                        "duration": "",
+                        "source": "acoustid",
+                        "mb_albumids": mb_albumids,
+                        "mb_releasegroupid": rg_id,
+                        "release_group": rg_title,
+                    })
+
+            status_str = "matched" if out else "no_match"
+            self._send_json(200, {
+                "ok": True,
+                "status": status_str,
+                "fingerprint_available": True,
+                "duration": duration,
+                "candidates": out
+            })
             return
         self._send_json(404, {"error": f"Endpoint not found: {path}"})
 

@@ -3,6 +3,46 @@ import unittest
 from pathlib import Path
 
 
+class YtdlpPoTokenProviderRuntimeTests(unittest.TestCase):
+    """Real import/registration check (not a source-text assertion): fails
+    the way the runtime actually fails if the pinned yt-dlp/bgutil-ytdlp-pot-
+    provider version pair is incompatible.
+
+    yt-dlp==2024.11.4 predated the yt_dlp.extractor.youtube.pot package that
+    bgutil-ytdlp-pot-provider imports at plugin-discovery time; yt-dlp's
+    plugin loader swallows that ModuleNotFoundError and continues, so the
+    breakage was silent -- the provider never actually registered, only a
+    console warning was ever printed. This test fails loudly instead.
+    """
+
+    def test_bgutil_provider_imports_and_registers_with_yt_dlp(self):
+        try:
+            import yt_dlp  # noqa: F401
+        except ImportError:
+            raise unittest.SkipTest("yt_dlp not installed in this environment")
+
+        try:
+            import yt_dlp_plugins.extractor.getpot_bgutil  # noqa: F401
+            import yt_dlp_plugins.extractor.getpot_bgutil_http  # noqa: F401
+        except ModuleNotFoundError as exc:
+            try:
+                import bgutil_ytdlp_pot_provider  # noqa: F401
+            except ModuleNotFoundError:
+                raise unittest.SkipTest("bgutil-ytdlp-pot-provider package not installed in this Python environment")
+            self.fail(
+                "bgutil-ytdlp-pot-provider failed to import against the pinned "
+                f"yt-dlp version ({exc}). Check requirements.txt's yt-dlp pin "
+                "against the provider's actual yt_dlp.extractor.youtube.pot "
+                "module path requirement."
+            )
+        from yt_dlp.extractor.youtube.pot._registry import _pot_providers
+        self.assertIn(
+            "BgUtilHTTP", _pot_providers.value,
+            "bgutil provider module imported but did not register with yt-dlp's "
+            "PO-token provider registry",
+        )
+
+
 class YtdlpCookieMessageTests(unittest.TestCase):
     def test_bot_check_failures_use_rejected_cookie_message(self):
         app_path = Path(__file__).resolve().parents[1] / "app.py"

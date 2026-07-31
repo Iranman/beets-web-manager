@@ -30,6 +30,14 @@ Frontend
 
 Current migration status: incomplete. Service split is complete; route/service migration is incomplete. The web manager service has zero direct Beets imports and no local SQLite file handles; `backend.beets_client.RemoteLibrary` and `RemoteSQLiteConnection` translate legacy library/SQL call shapes into authenticated internal HTTP requests. Remaining work is to replace those compatibility call shapes with explicit service/repository methods and to move residual media-file mutation call sites behind the control-agent boundary.
 
+## Plugin-First Beets Architecture
+
+- Evaluate Beets core and installed plugins before adding custom media/metadata logic to the web manager.
+- All media/metadata plugin capabilities belong inside the Beets engine container and execute over the authenticated control agent on port 8338.
+- The web manager contains zero local `beet`, `fpcalc`, or `ffprobe` executions and zero direct SQLite file handles.
+- Built-in `beet web` service (`svc-beets`) is disabled in the engine image; `beets-web-manager` is its sole intentional replacement.
+- FFmpeg in the web manager is an approved narrow source-acquisition exception for `yt-dlp` download postprocessing only.
+
 ## External Boundaries
 
 - Beets Engine & CLI: All library mutations, database queries, tag writes, and Beets commands run inside the `beets` container under control-agent supervision or manual CLI execution (`docker compose exec beets /lsiopy/bin/beet ...` for read-only, `docker compose exec beets beet-locked ...` for mutating commands).

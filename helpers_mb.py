@@ -1,5 +1,5 @@
 """MusicBrainz / AcoustID API helpers — no app.py dependencies."""
-import json, os, re, shutil, subprocess, threading, time
+import hashlib, json, logging, os, re, shutil, subprocess, time
 import urllib.error, urllib.parse, urllib.request
 from backend.security import install_secure_urllib
 install_secure_urllib()
@@ -11,12 +11,6 @@ from backend.title_normalize import restore_time_colon_title
 
 _ur = urllib.request
 _up = urllib.parse
-_ACOUSTID_LOOKUP_LOCK = threading.Lock()
-_ACOUSTID_NEXT_LOOKUP_AT = 0.0
-try:
-    _ACOUSTID_MIN_INTERVAL_SECONDS = max(0.0, float(os.environ.get("ACOUSTID_MIN_INTERVAL_SECONDS", "0.35") or "0.35"))
-except Exception:
-    _ACOUSTID_MIN_INTERVAL_SECONDS = 0.35
 
 _MB_UUID_RE = re.compile(
     r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.IGNORECASE)
@@ -630,101 +624,59 @@ def _clean_for_mb(title: str, artist: str):
     return title, artist
 
 
-def _acoustid_lookup(file_path: str) -> List[Dict[str, Any]]:
-    """Run fpcalc + AcoustID lookup. Returns list of MB recording candidate dicts."""
-    fpcalc = shutil.which("fpcalc") or "/usr/bin/fpcalc"
-    if not Path(fpcalc).exists():
-        return []
+_ACOUSTID_TERMINAL_STATUSES = frozenset({"matched", "no_match", "invalid_media"})
+
+
+def _acoustid_lookup_status(file_path: str) -> Dict[str, Any]:
+    """Run AcoustID lookup via the remote engine control agent (port 8338)
+    and return the full status dict (not just candidates).
+
+    `status` is one of: matched, no_match, unavailable, invalid_media,
+    timeout, provider_error, analysis_error. Callers that need to distinguish
+    "no match" from "lookup never really ran" must use this instead of
+    `_acoustid_lookup`, which collapses every non-matched outcome to `[]`.
+    """
+    if not file_path:
+        return {"ok": False, "status": "invalid_media", "candidates": []}
     try:
-        r = subprocess.run([fpcalc, "-json", file_path], capture_output=True, text=True, timeout=30)
-        if r.returncode != 0 or not r.stdout.strip():
-            return []
-        fp_data = json.loads(r.stdout)
-        duration = int(fp_data.get("duration") or 0)
-        fingerprint = (fp_data.get("fingerprint") or "").strip()
-        if not fingerprint or duration < 5:
-            return []
+        from backend.beets_client import beets_client
+        res = beets_client.acoustid_lookup(file_path)
+        if isinstance(res, dict) and res.get("status"):
+            return res
+        return {"ok": False, "status": "analysis_error", "candidates": []}
+    except Exception as exc:
+        path_hash = hashlib.sha256(str(file_path).encode("utf-8", errors="replace")).hexdigest()[:12]
+        logging.warning(
+            "AcoustID lookup via control agent failed (path_hash=%s): %s",
+            path_hash, type(exc).__name__,
+        )
+        return {"ok": False, "status": "analysis_error", "candidates": []}
+
+
+def _acoustid_capability_available() -> bool:
+    """Whether the engine's AcoustID lookup capability is configured at all
+    (fpcalc present + ACOUSTID_API_KEY set) -- independent of whether any
+    particular file's lookup found a match. An empty per-file candidate list
+    must not be read as proof this capability is unavailable, since a
+    genuine no-match looks identical to "not attempted" unless this is
+    checked separately."""
+    try:
+        from backend.beets_client import beets_client
+        status = beets_client.get_status()
+        return bool((((status or {}).get("capabilities") or {}).get("acoustid_lookup") or {}).get("available"))
     except Exception:
-        return []
-    aid_key = os.environ.get("ACOUSTID_API_KEY") or "8XaBELgH"  # env var or test fallback
-    params = _up.urlencode({
-        "client":      aid_key,
-        "meta":        "recordings releases releasegroups",
-        "duration":    duration,
-        "fingerprint": fingerprint,
-        "format":      "json",
-    })
-    data = {}
-    req = _ur.Request(
-        f"https://api.acoustid.org/v2/lookup?{params}",
-        headers={"User-Agent": "BeetsWebControl/1.0"}
-    )
-    for attempt in range(2):
-        try:
-            global _ACOUSTID_NEXT_LOOKUP_AT
-            with _ACOUSTID_LOOKUP_LOCK:
-                now = time.monotonic()
-                if _ACOUSTID_NEXT_LOOKUP_AT > now:
-                    time.sleep(_ACOUSTID_NEXT_LOOKUP_AT - now)
-                _ACOUSTID_NEXT_LOOKUP_AT = time.monotonic() + _ACOUSTID_MIN_INTERVAL_SECONDS
-            with _ur.urlopen(req, timeout=15) as r2:
-                data = json.loads(r2.read())
-            break
-        except Exception:
-            if attempt >= 1:
-                return []
-            time.sleep(1.0)
-    if data.get("status") != "ok":
-        return []
-    out = []
-    seen_mbids: set = set()
-    for result in (data.get("results") or [])[:5]:
-        confidence = int(round((result.get("score") or 0) * 100))
-        acoustid_id = str(result.get("id") or "")
-        for rec in (result.get("recordings") or [])[:3]:
-            mb_id = rec.get("id", "")
-            if not mb_id or mb_id in seen_mbids:
-                continue
-            seen_mbids.add(mb_id)
-            t_title  = rec.get("title", "")
-            artists  = " / ".join(a.get("name", "") for a in (rec.get("artists") or []))
-            releases = rec.get("releases") or []
-            rel = releases[0] if releases else {}
-            rel_title = rel.get("title", "")
-            rel_year  = (rel.get("date", {}).get("year") if isinstance(rel.get("date"), dict) else "")
-            mb_albumids = [r.get("id", "") for r in releases if r.get("id")]
-            releasegroups = rec.get("releasegroups") or rec.get("release-groups") or []
-            rg = releasegroups[0] if releasegroups else {}
-            rg_id = rg.get("id", "") if isinstance(rg, dict) else ""
-            rg_title = rg.get("title", "") if isinstance(rg, dict) else ""
-            if not rg_id:
-                for rel_item in releases:
-                    rel_rg = (
-                        rel_item.get("releasegroup")
-                        or rel_item.get("release-group")
-                        or rel_item.get("release_group")
-                        or {}
-                    )
-                    if isinstance(rel_rg, dict) and rel_rg.get("id"):
-                        rg_id = rel_rg.get("id", "")
-                        rg_title = rel_rg.get("title", "") or rg_title
-                        break
-            out.append({
-                "score":       confidence,
-                "acoustid_id": acoustid_id,
-                "mb_trackid":  mb_id,
-                "mb_url":      f"https://musicbrainz.org/recording/{mb_id}",
-                "title":       t_title,
-                "artist":      artists,
-                "album":       rel_title or rg_title,
-                "year":        str(rel_year) if rel_year else "",
-                "duration":    "",
-                "source":      "acoustid",
-                "mb_albumids": mb_albumids,
-                "mb_releasegroupid": rg_id,
-                "release_group": rg_title,
-            })
-    return out
+        return False
+
+
+def _acoustid_lookup(file_path: str) -> List[Dict[str, Any]]:
+    """Run AcoustID lookup via remote engine control agent (port 8338).
+    Returns list of MB recording candidate dicts.
+
+    This collapses `status` (see `_acoustid_lookup_status`) into a bare
+    list -- callers that need to tell "unavailable"/"timeout"/"provider_error"
+    apart from a genuine "no_match" must call `_acoustid_lookup_status` directly.
+    """
+    return _acoustid_lookup_status(file_path).get("candidates", []) or []
 
 
 def _resolve_release_group_to_release(rg_mbid: str, log: list,

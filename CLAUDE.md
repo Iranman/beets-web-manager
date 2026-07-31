@@ -4,9 +4,18 @@ Concise instructions for Claude Code working in this repository.
 
 ## Required Reading
 
-Read `docs/AI_ENGINEERING_RULES.md` and `docs/AGENT_WORKFLOW.md` before code changes. `docs/AI_ENGINEERING_RULES.md` is the single shared source of truth for product invariants, architecture boundaries, matching rules, mutation safety, job requirements, testing requirements, security rules, and AI-agent behavior. `docs/AGENT_WORKFLOW.md` defines the canonical chain of command, two-stage workflow, review-and-fix policy, and safety boundaries.
+Read `docs/AI_ENGINEERING_RULES.md` and `docs/AGENT_WORKFLOW.md` before code changes. `docs/AI_ENGINEERING_RULES.md` is the single shared source of truth for product invariants, architecture boundaries, matching rules, mutation safety, job requirements, testing requirements, security rules, and AI-agent behavior. `docs/AGENT_WORKFLOW.md` defines the canonical chain of command, two-stage workflow, review-and-fix policy, and safety boundaries. Read `AGENTS.md` for authoritative plugin-first architecture policy.
 
 Use `docs/ARCHITECTURE.md` for the current system shape and intended dependency direction. Use `docs/TECHNICAL_DEBT.md` for known migration targets. Use `REVIEW.md` as the review checklist.
+
+## Plugin-First Requirement
+
+Before implementing custom media or metadata handling in the web manager, document:
+1. Existing Beets/plugin capability reviewed:
+2. Supported CLI command or API endpoint:
+3. Reason Beets core/plugin capability cannot be used directly:
+4. Control agent endpoint or client adapter required:
+5. Technical debt entry created in `docs/TECHNICAL_DEBT.md`:
 
 ## Technical Lead & Final Reviewer Role
 

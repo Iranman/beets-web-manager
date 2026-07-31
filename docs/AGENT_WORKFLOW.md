@@ -36,6 +36,7 @@ Claude does not send routine implementation work back to Agy. Agy is re-engaged 
 Agy performs the primary implementation work.
 
 Agy must:
+* Evaluate Beets core and installed plugins before implementing custom media or metadata operations in the web manager.
 * Reproduce and diagnose the problem before editing code.
 * Prove the root cause using empirical evidence (logs, tracebacks, queries) rather than guessing.
 * Research upstream behavior, issues, and official fixes when modifying dependency-related features.

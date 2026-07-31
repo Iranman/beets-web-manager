@@ -83,7 +83,7 @@ Important variables include:
 - `OPENAI_API_KEY` or compatible provider key: **optional** AI metadata features — see [How AI Matching Works](#how-ai-matching-works).
 - `PLEX_URL` and `PLEX_TOKEN`: Plex sync and refresh integration (optional).
 - `LIDARR_URL` and `LIDARR_API_KEY`: wanted-music and Arr integration (optional).
-- `ACOUSTID_API_KEY` / `ACOUSTID_KEY`: optional — AcoustID lookups work without a key via a shared, rate-limited test key.
+- `ACOUSTID_API_KEY`: set on the Beets engine service — required for `/audio/acoustid-lookup` fingerprint lookups; without it the engine reports AcoustID as `unavailable` rather than falling back to a shared key. `ACOUSTID_KEY` on the web-manager service is used only when submitting fingerprints via `beet submit` (see ARCH-013 in `docs/TECHNICAL_DEBT.md`).
 - `SLSKD_SLSK_USERNAME` and `SLSKD_SLSK_PASSWORD`: Soulseek client credentials (optional, required only for SLSKD-based acquisition).
 - `BEETS_OUTBOUND_ALLOWLIST`: exact host:port or CIDR:port entries for local services the backend may call; defaults to the internal Beets control agent (`beets:8338`).
 - `BEETS_TRUSTED_PROXIES`: direct proxy CIDRs whose forwarded client IP headers may be trusted.
@@ -96,7 +96,7 @@ MusicBrainz needs no key or account — it is a public API used for every releas
 |---|---|---|
 | Authentication (token or password) | **Required** | The app refuses every request until one is configured — see [Authentication](#authentication). An unconfigured install now auto-generates a token instead of locking itself out. |
 | MusicBrainz | **Required** (no setup needed) | N/A — public API, always available. |
-| AcoustID | Optional | Fingerprint-based matching falls back to a shared, rate-limited test key; add your own key for higher-volume use. |
+| AcoustID | Optional | Requires `ACOUSTID_API_KEY` on the Beets engine service. Without it, fingerprint lookups report `unavailable` (fails closed) -- there is no shared or fallback key; matching continues on MusicBrainz evidence alone at a lower confidence tier. |
 | AI (OpenAI-compatible) | Optional | AI-assisted ranking/adjudication is skipped. Matching continues on MusicBrainz + AcoustID evidence alone, at a lower confidence tier — see below. |
 | Plex | Optional | Plex sync/refresh actions are unavailable; everything else works normally. |
 | Lidarr, SLSKD, Discogs, ListenBrainz, Spotify | Optional | Each feature they back (wanted-album import, Soulseek acquisition, discography/art lookups, scrobble history, playlist parsing) is disabled on its own; nothing else is affected. |

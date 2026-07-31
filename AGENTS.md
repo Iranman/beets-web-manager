@@ -24,6 +24,14 @@ Use `docs/ARCHITECTURE.md` for the current architecture and intended dependency 
 - Never expose credentials, cookies, tokens, authorization headers, signed URLs, or secrets in logs, API responses, frontend state, or commits.
 - Preserve the compact existing UI direction and current stack; do not add a component library or redesign unrelated pages.
 
+## Plugin-First Beets Architecture
+
+- Check Beets core and installed plugins before implementing custom media/metadata operations in the web manager.
+- If Beets core or an installed plugin provides a capability, use it via the authenticated control agent on port 8338 rather than re-implementing it in web-manager Python code.
+- The built-in Beets web plugin (`beet web`) is the sole intentional replacement; `svc-beets` must remain disabled in the engine image.
+- No local `beet`, `fpcalc`, `ffprobe` execution, direct SQLite access, or Docker socket usage in the web manager.
+- FFmpeg in the web manager is an approved narrow source-acquisition exception for `yt-dlp` download postprocessing only.
+
 ## Validation Commands
 
 From the repository root:
