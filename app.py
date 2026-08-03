@@ -11726,6 +11726,125 @@ def _pending_review_path_set(items: Optional[List[Dict[str, Any]]] = None) -> se
     }
 
 
+def _import_review_path_text_error(raw: Any, *, allow_relative: bool = False) -> Optional[str]:
+    text = _s(raw).strip()
+    if not text:
+        return "Path is required."
+    raw_path = Path(text)
+    raw_is_absolute = raw_path.is_absolute()
+    if not allow_relative and not raw_is_absolute:
+        return "Path must be an absolute container path."
+
+    values = [text]
+    current = text
+    for _ in range(3):
+        decoded = urllib.parse.unquote(current)
+        if decoded == current:
+            break
+        values.append(decoded)
+        current = decoded
+
+    for value in values:
+        if "\x00" in value:
+            return "Path contains unsafe encoded characters."
+        value_path = Path(value)
+        value_is_native_absolute = os.name == "nt" and value_path.is_absolute()
+        if value.startswith("\\\\") or value.startswith("//"):
+            return "Path must be a POSIX container path."
+        if "\\" in value and not value_is_native_absolute:
+            return "Path must be a POSIX container path."
+        if re.match(r"^[A-Za-z]:", value) and not value_is_native_absolute:
+            return "Path must be a POSIX container path."
+        if "//" in value:
+            return "Path must be a POSIX container path."
+        if re.search(r"%(?:2f|5c|00)", value, re.I):
+            return "Path contains unsafe encoded characters."
+        normalized = value.replace("\\", "/")
+        parts = [part for part in normalized.split("/") if part]
+        if any(part in {".", ".."} for part in parts):
+            return "Path contains unsafe traversal segments."
+        if allow_relative and not raw_is_absolute and value_path.is_absolute():
+            return "Path contains unsafe encoded characters."
+    return None
+
+
+def _import_review_cleanup_roots(*, allow_music: bool = False) -> List[Path]:
+    roots = [DOWNLOADS_ROOT] + [Path(root) for root in _DOWNLOADS_ROOTS]
+    if allow_music:
+        roots.append(MUSIC_ROOT)
+    trusted: List[Path] = []
+    seen: set = set()
+    for root in roots:
+        try:
+            resolved = root.resolve(strict=False)
+        except Exception:
+            resolved = root
+        key = str(resolved).replace("\\", "/").rstrip("/").casefold()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        trusted.append(resolved)
+    return trusted
+
+
+def _resolve_import_review_folder_path(raw: Any, *, allow_music: bool = False) -> Tuple[Optional[Path], Optional[str]]:
+    error = _import_review_path_text_error(raw, allow_relative=False)
+    if error:
+        return None, error
+    folder = Path(_s(raw).strip())
+    if folder.is_symlink():
+        return None, "Review folder cannot be a symlink."
+    if not folder.exists() or not folder.is_dir():
+        return None, "Review folder does not exist."
+    try:
+        resolved = folder.resolve(strict=False)
+    except Exception:
+        return None, "Invalid review folder path."
+    try:
+        music_root = MUSIC_ROOT.resolve(strict=False)
+    except Exception:
+        music_root = MUSIC_ROOT
+    if _path_is_under(resolved, music_root) and not allow_music:
+        return None, "Review file cleanup cannot modify the music library."
+    for root in _import_review_cleanup_roots(allow_music=allow_music):
+        if resolved == root:
+            return None, "Refusing to operate on an approved root."
+        if _path_is_under(resolved, root):
+            return resolved, None
+    return None, "Review folder is outside the allowed cleanup roots."
+
+
+def _resolve_import_review_cleanup_file(raw: Any, folder: Path) -> Tuple[Optional[Path], Optional[str]]:
+    error = _import_review_path_text_error(raw, allow_relative=True)
+    if error:
+        return None, error
+    candidate = Path(_s(raw).strip())
+    if not candidate.is_absolute():
+        candidate = folder / candidate
+    if candidate.is_symlink():
+        return None, "symlink"
+    try:
+        resolved = candidate.resolve(strict=False)
+    except Exception:
+        return None, "Invalid cleanup file path."
+    if resolved == folder or not _path_is_under(resolved, folder):
+        return None, "outside_review_folder"
+    return resolved, None
+
+
+def _trusted_import_review_cleanup_destination(path: Path) -> Tuple[Optional[Path], Optional[str]]:
+    try:
+        root = Path(os.environ.get("IMPORT_REVIEW_QUARANTINE_DIR", "/config/import_review_quarantine"))
+        root_resolved = root.resolve(strict=False)
+        dest = _import_review_cleanup_destination(path)
+        dest_resolved = dest.resolve(strict=False)
+    except Exception:
+        return None, "Cleanup destination is unsafe."
+    if dest_resolved == root_resolved or not _path_is_under(dest_resolved, root_resolved):
+        return None, "Cleanup destination is unsafe."
+    return dest_resolved, None
+
+
 def _library_no_mb_album_matches_folder(album_id: int, folder_path: str) -> bool:
     """True when a missing-MBID album row maps wholly to the requested folder."""
     try:
@@ -11841,13 +11960,13 @@ def _delete_review_source_folder(src_path: str, log: list,
 
     music_root = Path(_MUSIC_LIBRARY_ROOT).resolve(strict=False)
     inside_music_library = _path_is_under(resolved, music_root)
+    pending_review_match = _pending_review_has_path(src_path) or _pending_review_has_path(str(resolved))
     if inside_music_library:
         if not confirmed_wrong_library_folder:
             raise ValueError(
                 "Refusing to delete a folder inside the music library without "
                 "explicit confirmed-wrong-library-folder approval"
             )
-        pending_review_match = _pending_review_has_path(src_path)
         missing_mbid_album_match = _library_no_mb_album_matches_folder(album_id, str(resolved))
         if not pending_review_match and not missing_mbid_album_match:
             raise ValueError(
@@ -11858,6 +11977,8 @@ def _delete_review_source_folder(src_path: str, log: list,
             raise ValueError("Refusing to delete the music library root")
         if _is_top_level_music_artist_folder(resolved):
             raise ValueError("Refusing to delete a top-level artist folder from the music library")
+    elif not pending_review_match:
+        raise ValueError("Refusing to delete a folder that is not currently in Pending Review")
 
     safe_root = None
     if inside_music_library:
@@ -11913,10 +12034,9 @@ def import_folder_stats():
     raw_path = _s(request.args.get("path") or "").strip()
     if not raw_path:
         return jsonify({"ok": False, "error": "path required"})
-    folder = Path(raw_path)
-    if not folder.exists() or not folder.is_dir():
-        return jsonify({"ok": True, "path": raw_path, "exists": False,
-                        "audio_count": 0, "art_count": 0, "other_count": 0, "total_count": 0})
+    folder, error = _resolve_import_review_folder_path(raw_path, allow_music=True)
+    if error or folder is None:
+        return jsonify({"ok": False, "error": error or "Invalid review folder path."}), 400
     audio_count = art_count = other_count = 0
     try:
         for entry in folder.rglob("*"):
@@ -12019,13 +12139,9 @@ def cleanup_import_review_files():
         return jsonify({"ok": False, "error": "Review folder path is required.", "log": log}), 400
     if not raw_files:
         return jsonify({"ok": False, "error": "At least one cleanup file is required.", "log": log}), 400
-    folder = Path(folder_path)
-    if not folder.exists() or not folder.is_dir():
-        return jsonify({"ok": False, "error": "Review folder does not exist.", "log": log}), 400
-    try:
-        folder_res = folder.resolve(strict=False)
-    except Exception:
-        folder_res = folder
+    folder_res, folder_error = _resolve_import_review_folder_path(folder_path, allow_music=False)
+    if folder_error or folder_res is None:
+        return jsonify({"ok": False, "error": folder_error or "Review folder does not exist.", "log": log}), 400
     if not _pending_review_matches(folder_path, review_item_id):
         return jsonify({"ok": False, "error": "Review item does not match the source folder.", "log": log}), 400
 
@@ -12043,22 +12159,27 @@ def cleanup_import_review_files():
         text = _s(raw).strip()
         if not text:
             continue
-        candidate = Path(text)
-        if not candidate.is_absolute():
-            candidate = folder_res / candidate
-        try:
-            resolved = candidate.resolve(strict=False)
-        except Exception:
-            resolved = candidate
+        resolved, file_error = _resolve_import_review_cleanup_file(text, folder_res)
+        if file_error or resolved is None:
+            skipped.append({"path": text, "reason": file_error or "invalid_path"})
+            continue
         key = str(resolved).casefold()
         if key in seen:
             continue
         seen.add(key)
-        if not _path_is_under(resolved, folder_res):
-            skipped.append({"path": str(candidate), "reason": "outside_review_folder"})
-            continue
         if not resolved.exists() or not resolved.is_file():
             skipped.append({"path": str(resolved), "reason": "missing"})
+            continue
+        if resolved.is_symlink():
+            skipped.append({"path": str(resolved), "reason": "symlink"})
+            continue
+        try:
+            current_resolved = resolved.resolve(strict=False)
+        except Exception:
+            skipped.append({"path": str(resolved), "reason": "invalid_path"})
+            continue
+        if current_resolved != resolved or not _path_is_under(current_resolved, folder_res):
+            skipped.append({"path": str(resolved), "reason": "path_changed"})
             continue
         if resolved.suffix.lower() not in AUDIO_EXT:
             skipped.append({"path": str(resolved), "reason": "not_audio"})
@@ -12073,9 +12194,24 @@ def cleanup_import_review_files():
             deleted.append(str(resolved))
             log.append(f"  Deleted review audio file: {resolved.name}")
         else:
-            dest = _unique_import_review_cleanup_path(
-                _import_review_cleanup_destination(Path(folder_res.name) / uuid.uuid4().hex[:8] / rel)
+            dest, dest_error = _trusted_import_review_cleanup_destination(
+                Path(folder_res.name) / uuid.uuid4().hex[:8] / rel
             )
+            if dest_error or dest is None:
+                skipped.append({"path": str(resolved), "reason": "unsafe_destination"})
+                continue
+            dest = _unique_import_review_cleanup_path(dest)
+            try:
+                quarantine_root = Path(
+                    os.environ.get("IMPORT_REVIEW_QUARANTINE_DIR", "/config/import_review_quarantine")
+                ).resolve(strict=False)
+                dest_parent = dest.parent.resolve(strict=False)
+            except Exception:
+                skipped.append({"path": str(resolved), "reason": "unsafe_destination"})
+                continue
+            if not _path_is_under(dest_parent, quarantine_root):
+                skipped.append({"path": str(resolved), "reason": "unsafe_destination"})
+                continue
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(resolved), str(dest))
             moved.append({"source": str(resolved), "quarantined": str(dest)})
