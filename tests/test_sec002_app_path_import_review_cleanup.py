@@ -2,7 +2,7 @@
 
 These tests exercise the import-review source deletion and per-file cleanup
 routes against real temporary folders, files, and symlinks. The sensitive sinks
-(unlink, shutil.move, rmdir, rmtree, and rglob) are not mocked.
+(unlink, os.rename, rmdir, rmtree, and rglob) are not mocked.
 """
 
 import json
@@ -403,6 +403,170 @@ class ImportReviewCleanupPathBoundaryTests(unittest.TestCase):
         self.assertEqual(music_response.get_json()["audio_count"], 1)
         self.assertEqual(root_response.status_code, 400, root_response.get_json())
         self.assertIn("approved root", root_response.get_json()["error"])
+
+    def test_folder_stats_rejects_encoded_traversal_query_values(self):
+        sentinel = self._write_audio(self.outside / "sentinel.flac")
+        payloads = [
+            "%2e%2e%2f" + urllib.parse.quote(str(self.outside), safe=""),
+            "%252e%252e%252f" + urllib.parse.quote(urllib.parse.quote(str(self.outside), safe=""), safe=""),
+            str(self.downloads) + "/%2e%2e/outside",
+        ]
+        for raw in payloads:
+            response = self.client.get("/api/import/folder-stats", query_string={"path": raw})
+            data = response.get_json()
+            self.assertEqual(response.status_code, 400, (raw, data))
+            self.assertFalse(data["ok"])
+        self.assertTrue(sentinel.exists())
+
+    def test_cleanup_skips_deeply_encoded_traversal_beyond_decode_budget(self):
+        # _import_review_path_text_error decodes up to 3 additional layers.
+        # Values still percent-encoded beyond that budget are never decoded
+        # by any downstream consumer either (Path/pathlib never URL-decodes),
+        # so they can only match a literal on-disk filename -- they cannot
+        # resurface as a traversal segment later. This proves 4-, 5-, and
+        # 6-layer encoded traversal payloads fail closed (are skipped, not
+        # silently accepted) rather than resolving through some deeper decode.
+        folder = self.downloads / "deep-encoding-review"
+        self._write_audio(folder / "track.flac")
+        sentinel = self._write_audio(self.outside / "sentinel.flac")
+        self._write_pending(folder)
+
+        segment = "../" + "outside/sentinel.flac"
+        four = urllib.parse.quote(urllib.parse.quote(urllib.parse.quote(urllib.parse.quote(segment, safe=""), safe=""), safe=""), safe="")
+        five = urllib.parse.quote(four, safe="")
+        six = urllib.parse.quote(five, safe="")
+
+        response = self._post_cleanup(
+            folder,
+            [four, five, six],
+            action="delete_rejected",
+            allow_delete=True,
+        )
+        data = response.get_json()
+
+        self.assertEqual(response.status_code, 200, data)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["deleted_count"], 0)
+        self.assertEqual(data["skipped_count"], 3)
+        self.assertTrue(sentinel.exists())
+        self.assertTrue((folder / "track.flac").exists())
+
+    def test_delete_rejects_source_replaced_by_symlink_immediately_before_unlink(self):
+        folder = self.downloads / "source-race-review"
+        track = self._write_audio(folder / "track.flac")
+        sentinel = self._write_audio(self.outside / "sentinel.flac")
+        self._write_pending(folder)
+
+        original_unlink = Path.unlink
+        swapped = False
+
+        def swapping_unlink(path_self, *args, **kwargs):
+            nonlocal swapped
+            if not swapped and path_self == track:
+                swapped = True
+                original_unlink(path_self)
+                try:
+                    path_self.symlink_to(sentinel)
+                except (OSError, NotImplementedError) as exc:
+                    self.skipTest(f"symlink creation unavailable: {exc}")
+            return original_unlink(path_self, *args, **kwargs)
+
+        with mock.patch.object(Path, "unlink", swapping_unlink):
+            response = self._post_cleanup(folder, ["track.flac"], action="delete_rejected", allow_delete=True)
+        data = response.get_json()
+
+        self.assertEqual(response.status_code, 200, data)
+        self.assertTrue(data["ok"])
+        # Whether the app's final symlink recheck catches the swap, or the
+        # unlink() falls through and removes only the symlink entry itself
+        # (POSIX unlink never follows a symlink to its target), the outside
+        # sentinel file must survive intact either way.
+        self.assertTrue(sentinel.exists())
+        self.assertEqual(sentinel.read_bytes(), b"not-real-audio-but-extension-is-enough")
+
+    def test_quarantine_rejects_source_replaced_by_symlink_immediately_before_move(self):
+        folder = self.downloads / "quarantine-source-race-review"
+        track = self._write_audio(folder / "track.flac")
+        sentinel = self._write_audio(self.outside / "sentinel.flac")
+        self._write_pending(folder)
+
+        original_rename = os.rename
+        swapped = False
+
+        def swapping_rename(src, dst, *args, **kwargs):
+            nonlocal swapped
+            if not swapped and Path(src) == track:
+                swapped = True
+                Path(src).unlink()
+                try:
+                    Path(src).symlink_to(sentinel)
+                except (OSError, NotImplementedError) as exc:
+                    self.skipTest(f"symlink creation unavailable: {exc}")
+            return original_rename(src, dst, *args, **kwargs)
+
+        with mock.patch.object(app_module.os, "rename", swapping_rename):
+            response = self._post_cleanup(folder, ["track.flac"])
+        data = response.get_json()
+
+        self.assertEqual(response.status_code, 200, data)
+        self.assertTrue(data["ok"])
+        # rename() moves the symlink itself (not sentinel's content) into the
+        # quarantine dir; the app's post-move check must detect that and
+        # undo it, reporting the file skipped rather than falsely quarantined.
+        self.assertEqual(data["quarantined_count"], 0)
+        self.assertEqual(data["skipped_count"], 1)
+        self.assertEqual(data["skipped"][0]["reason"], "symlink")
+        self.assertTrue(sentinel.exists())
+        self.assertEqual(sentinel.read_bytes(), b"not-real-audio-but-extension-is-enough")
+        for item in data.get("quarantined", []):
+            quarantined_path = Path(item["quarantined"])
+            if quarantined_path.exists():
+                self.assertFalse(quarantined_path.is_symlink())
+        self.assertFalse(any(p.is_symlink() for p in self.quarantine.rglob("*")))
+
+    def test_quarantine_destination_leaf_replaced_by_symlink_before_move(self):
+        folder = self.downloads / "dest-leaf-race-review"
+        source = self._write_audio(folder / "track.flac")
+        escaped_target = self.outside / "dest-leaf-race-escape"
+        escaped_target.mkdir()
+        self._write_pending(folder)
+
+        original_rename = os.rename
+        swapped = False
+
+        def swapping_rename(src, dst, *args, **kwargs):
+            nonlocal swapped
+            if not swapped:
+                swapped = True
+                Path(dst).parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    Path(dst).symlink_to(escaped_target, target_is_directory=True)
+                except (OSError, NotImplementedError) as exc:
+                    self.skipTest(f"symlink creation unavailable: {exc}")
+            return original_rename(src, dst, *args, **kwargs)
+
+        with mock.patch.object(app_module.os, "rename", swapping_rename):
+            response = self._post_cleanup(folder, ["track.flac"])
+        data = response.get_json()
+
+        self.assertEqual(response.status_code, 200, data)
+        self.assertTrue(data["ok"])
+        # os.rename() never auto-descends into an existing directory target
+        # the way shutil.move() does. Depending on platform, replacing a
+        # directory-symlink leaf via rename() either atomically displaces it
+        # (POSIX) or is rejected outright (observed as PermissionError on
+        # this Windows host) -- either disposition is acceptable. What must
+        # never happen, on any platform, is the file being written through
+        # the symlink into escaped_target.
+        self.assertEqual(list(escaped_target.iterdir()), [])
+        if data["quarantined_count"] == 1:
+            self.assertFalse(source.exists())
+            quarantined_path = Path(data["quarantined"][0]["quarantined"])
+            self.assertTrue(quarantined_path.exists())
+            self.assertFalse(quarantined_path.is_symlink())
+        else:
+            self.assertEqual(data["skipped_count"], 1)
+            self.assertTrue(source.exists())
 
 
 if __name__ == "__main__":

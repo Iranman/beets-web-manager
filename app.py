@@ -3,7 +3,7 @@
 Beets Web Control — standalone Flask app.
 Opens the beets library directly. No plugin system, no S6, no beet web.
 """
-import base64, copy, difflib, functools, gzip, hashlib, hmac, importlib, json, math, mimetypes, os, platform, re, secrets, shlex, shutil, socket, sqlite3, subprocess, sys, threading, time, unicodedata, uuid
+import base64, copy, difflib, errno, functools, gzip, hashlib, hmac, importlib, json, math, mimetypes, os, platform, re, secrets, shlex, shutil, socket, sqlite3, subprocess, sys, threading, time, unicodedata, uuid
 import importlib.metadata
 import urllib.error, urllib.parse, urllib.request
 from backend.security import (OutboundPolicyError, bounded_rate_key_store_sweep, direct_peer_is_trusted, install_secure_urllib, validate_outbound_url)
@@ -12243,6 +12243,9 @@ def cleanup_import_review_files():
         except Exception:
             rel = Path(resolved.name)
         if destructive:
+            if resolved.is_symlink():
+                skipped.append({"path": str(resolved), "reason": "symlink"})
+                continue
             resolved.unlink()
             deleted.append(str(resolved))
             log.append(f"  Deleted review audio file: {resolved.name}")
@@ -12278,7 +12281,40 @@ def cleanup_import_review_files():
             if not _path_is_under(dest_parent, quarantine_root):
                 skipped.append({"path": str(resolved), "reason": "unsafe_destination"})
                 continue
-            shutil.move(str(resolved), str(dest))
+            if resolved.is_symlink():
+                skipped.append({"path": str(resolved), "reason": "symlink"})
+                continue
+            if dest.exists() or dest.is_symlink():
+                # shutil.move() silently descends into an existing directory
+                # destination (following a directory symlink to do so); use
+                # os.rename()/copyfile() instead, which always treat dest as
+                # the literal target, and refuse outright if something has
+                # already appeared at the exact chosen leaf.
+                skipped.append({"path": str(resolved), "reason": "unsafe_destination"})
+                continue
+            try:
+                os.rename(str(resolved), str(dest))
+            except OSError as exc:
+                if getattr(exc, "errno", None) != errno.EXDEV:
+                    skipped.append({"path": str(resolved), "reason": "unsafe_destination"})
+                    continue
+                shutil.copyfile(str(resolved), str(dest))
+                try:
+                    shutil.copystat(str(resolved), str(dest))
+                except Exception:
+                    pass
+                resolved.unlink()
+            if dest.is_symlink() or not dest.is_file():
+                # The source was swapped for a symlink in the instant between
+                # our checks and the rename/copy syscall: rename() moved the
+                # link itself rather than a real file. Undo it rather than
+                # reporting a false success.
+                try:
+                    dest.unlink()
+                except Exception:
+                    pass
+                skipped.append({"path": str(resolved), "reason": "symlink"})
+                continue
             moved.append({"source": str(resolved), "quarantined": str(dest)})
             log.append(f"  Quarantined review audio file: {resolved.name}")
 
