@@ -306,6 +306,41 @@ class ImportReviewCleanupPathBoundaryTests(unittest.TestCase):
         self.assertTrue(source.exists())
         self.assertEqual(list(escaped_target.iterdir()), [])
 
+    def test_quarantine_revalidates_destination_parent_after_creation(self):
+        folder = self.downloads / "quarantine-race-review"
+        source = self._write_audio(folder / "track.flac")
+        escaped_target = self.outside / "quarantine-race-escape"
+        date_parent = self.quarantine / time.strftime("%Y%m%d")
+        self._write_pending(folder)
+        original_mkdir = Path.mkdir
+        swapped = False
+
+        def swapping_mkdir(path_self, *args, **kwargs):
+            nonlocal swapped
+            if not swapped:
+                try:
+                    path_self.relative_to(date_parent)
+                except ValueError:
+                    return original_mkdir(path_self, *args, **kwargs)
+                original_mkdir(escaped_target, parents=True, exist_ok=True)
+                try:
+                    date_parent.symlink_to(escaped_target, target_is_directory=True)
+                except (OSError, NotImplementedError) as exc:
+                    self.skipTest(f"symlink creation unavailable: {exc}")
+                swapped = True
+            return original_mkdir(path_self, *args, **kwargs)
+
+        with mock.patch.object(Path, "mkdir", swapping_mkdir):
+            response = self._post_cleanup(folder, ["track.flac"])
+        data = response.get_json()
+
+        self.assertEqual(response.status_code, 200, data)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["quarantined_count"], 0)
+        self.assertEqual(data["skipped_count"], 1)
+        self.assertTrue(source.exists())
+        self.assertEqual(list(escaped_target.rglob("*.flac")), [])
+
     def test_delete_review_folder_requires_pending_review_for_download_folder(self):
         folder = self.downloads / "not-pending"
         track = self._write_audio(folder / "track.flac")

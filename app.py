@@ -11797,6 +11797,23 @@ def _path_lexically_under(path: Path, root: Path) -> bool:
         return False
 
 
+def _path_has_symlink_component_under(path: Path, root: Path, *, include_leaf: bool = True) -> bool:
+    try:
+        relative = path.relative_to(root)
+    except Exception:
+        return True
+    current = root
+    parts = relative.parts if include_leaf else relative.parts[:-1]
+    for part in parts:
+        current = current / part
+        try:
+            if current.is_symlink():
+                return True
+        except Exception:
+            return True
+    return False
+
+
 def _resolve_import_review_folder_path(raw: Any, *, allow_music: bool = False) -> Tuple[Optional[Path], Optional[str]]:
     error = _import_review_path_text_error(raw, allow_relative=False)
     if error:
@@ -11820,6 +11837,8 @@ def _resolve_import_review_folder_path(raw: Any, *, allow_music: bool = False) -
     if matched_root is None:
         return None, "Review folder is outside the allowed cleanup roots."
 
+    if _path_has_symlink_component_under(folder, matched_root):
+        return None, "Review folder cannot contain symlink components."
     if folder.is_symlink():
         return None, "Review folder cannot be a symlink."
     if not folder.exists() or not folder.is_dir():
@@ -11844,6 +11863,8 @@ def _resolve_import_review_cleanup_file(raw: Any, folder: Path) -> Tuple[Optiona
         candidate = folder / candidate
     if candidate == folder or not _path_lexically_under(candidate, folder):
         return None, "outside_review_folder"
+    if _path_has_symlink_component_under(candidate, folder):
+        return None, "symlink"
     if candidate.is_symlink():
         return None, "symlink"
     try:
@@ -11864,6 +11885,8 @@ def _trusted_import_review_cleanup_destination(path: Path) -> Tuple[Optional[Pat
     except Exception:
         return None, "Cleanup destination is unsafe."
     if dest == root or not _path_lexically_under(dest, root):
+        return None, "Cleanup destination is unsafe."
+    if _path_has_symlink_component_under(dest, root, include_leaf=False):
         return None, "Cleanup destination is unsafe."
     try:
         root_resolved = root.resolve(strict=False)
@@ -12235,6 +12258,8 @@ def cleanup_import_review_files():
                 quarantine_root = Path(
                     os.environ.get("IMPORT_REVIEW_QUARANTINE_DIR", "/config/import_review_quarantine")
                 ).resolve(strict=False)
+                if _path_has_symlink_component_under(dest.parent, quarantine_root):
+                    raise ValueError("unsafe destination parent")
                 dest_parent = dest.parent.resolve(strict=False)
             except Exception:
                 skipped.append({"path": str(resolved), "reason": "unsafe_destination"})
@@ -12243,6 +12268,16 @@ def cleanup_import_review_files():
                 skipped.append({"path": str(resolved), "reason": "unsafe_destination"})
                 continue
             dest.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                if _path_has_symlink_component_under(dest.parent, quarantine_root):
+                    raise ValueError("unsafe destination parent")
+                dest_parent = dest.parent.resolve(strict=False)
+            except Exception:
+                skipped.append({"path": str(resolved), "reason": "unsafe_destination"})
+                continue
+            if not _path_is_under(dest_parent, quarantine_root):
+                skipped.append({"path": str(resolved), "reason": "unsafe_destination"})
+                continue
             shutil.move(str(resolved), str(dest))
             moved.append({"source": str(resolved), "quarantined": str(dest)})
             log.append(f"  Quarantined review audio file: {resolved.name}")
