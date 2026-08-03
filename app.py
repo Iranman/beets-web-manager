@@ -11787,11 +11787,39 @@ def _import_review_cleanup_roots(*, allow_music: bool = False) -> List[Path]:
     return trusted
 
 
+def _path_lexically_under(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+    except Exception:
+        return False
+
+
 def _resolve_import_review_folder_path(raw: Any, *, allow_music: bool = False) -> Tuple[Optional[Path], Optional[str]]:
     error = _import_review_path_text_error(raw, allow_relative=False)
     if error:
         return None, error
     folder = Path(_s(raw).strip())
+    try:
+        music_root = MUSIC_ROOT.resolve(strict=False)
+    except Exception:
+        music_root = MUSIC_ROOT
+    if folder == music_root or _path_lexically_under(folder, music_root):
+        if not allow_music:
+            return None, "Review file cleanup cannot modify the music library."
+
+    matched_root: Optional[Path] = None
+    for root in _import_review_cleanup_roots(allow_music=allow_music):
+        if folder == root:
+            return None, "Refusing to operate on an approved root."
+        if _path_lexically_under(folder, root):
+            matched_root = root
+            break
+    if matched_root is None:
+        return None, "Review folder is outside the allowed cleanup roots."
+
     if folder.is_symlink():
         return None, "Review folder cannot be a symlink."
     if not folder.exists() or not folder.is_dir():
@@ -11800,18 +11828,11 @@ def _resolve_import_review_folder_path(raw: Any, *, allow_music: bool = False) -
         resolved = folder.resolve(strict=False)
     except Exception:
         return None, "Invalid review folder path."
-    try:
-        music_root = MUSIC_ROOT.resolve(strict=False)
-    except Exception:
-        music_root = MUSIC_ROOT
-    if _path_is_under(resolved, music_root) and not allow_music:
-        return None, "Review file cleanup cannot modify the music library."
-    for root in _import_review_cleanup_roots(allow_music=allow_music):
-        if resolved == root:
-            return None, "Refusing to operate on an approved root."
-        if _path_is_under(resolved, root):
-            return resolved, None
-    return None, "Review folder is outside the allowed cleanup roots."
+    if resolved == matched_root:
+        return None, "Refusing to operate on an approved root."
+    if not _path_is_under(resolved, matched_root):
+        return None, "Review folder is outside the allowed cleanup roots."
+    return resolved, None
 
 
 def _resolve_import_review_cleanup_file(raw: Any, folder: Path) -> Tuple[Optional[Path], Optional[str]]:
@@ -11821,6 +11842,8 @@ def _resolve_import_review_cleanup_file(raw: Any, folder: Path) -> Tuple[Optiona
     candidate = Path(_s(raw).strip())
     if not candidate.is_absolute():
         candidate = folder / candidate
+    if candidate == folder or not _path_lexically_under(candidate, folder):
+        return None, "outside_review_folder"
     if candidate.is_symlink():
         return None, "symlink"
     try:
@@ -11833,10 +11856,17 @@ def _resolve_import_review_cleanup_file(raw: Any, folder: Path) -> Tuple[Optiona
 
 
 def _trusted_import_review_cleanup_destination(path: Path) -> Tuple[Optional[Path], Optional[str]]:
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        return None, "Cleanup destination is unsafe."
     try:
         root = Path(os.environ.get("IMPORT_REVIEW_QUARANTINE_DIR", "/config/import_review_quarantine"))
-        root_resolved = root.resolve(strict=False)
         dest = _import_review_cleanup_destination(path)
+    except Exception:
+        return None, "Cleanup destination is unsafe."
+    if dest == root or not _path_lexically_under(dest, root):
+        return None, "Cleanup destination is unsafe."
+    try:
+        root_resolved = root.resolve(strict=False)
         dest_resolved = dest.resolve(strict=False)
     except Exception:
         return None, "Cleanup destination is unsafe."
