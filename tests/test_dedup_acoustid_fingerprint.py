@@ -100,9 +100,13 @@ class DedupAcoustidFingerprintTests(unittest.TestCase):
         self.assertIn("_playlist_artist_name_score(canonical_name, c_artist)", fn_body)
 
         merge_idx = self.app_source.index('"plain_stamped_duplicate": True')
-        merge_block = self.app_source[merge_idx - 1500: merge_idx + 200]
+        merge_block = self.app_source[merge_idx - 2200: merge_idx + 200]
         self.assertIn("_artist_folder_fingerprint_confirms(folder, canonical_artist)", merge_block)
         self.assertIn("fp_result is False", merge_block)
+        # Only an explicit True authorizes the merge -- False and None
+        # (unavailable) both block it; the code must not silently proceed
+        # merely because fp_result is not the specific value False.
+        self.assertIn("if fp_result is not True:", merge_block)
         self.assertIn('"fingerprint_verified": fp_result is True', merge_block)
 
     def test_ai_review_also_fingerprint_verifies_matches(self):
