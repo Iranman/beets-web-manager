@@ -1,9 +1,11 @@
 import ast
+import os
 import re
 import sys
 import tempfile
 import types
 import unittest
+import urllib.parse
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -49,10 +51,17 @@ def _load_album_cleanup_helpers() -> Dict[str, Any]:
         "_album_cleanup_duplicate_file_choice",
         "_album_cleanup_file_info",
         "_album_cleanup_apply_plan",
+        "_album_cleanup_issue_identity_blockers",
         "_album_cleanup_apply_issue",
+        "_album_cleanup_trusted_path",
+        "_album_cleanup_trusted_destination",
         "_album_cleanup_trash_path",
         "_album_cleanup_remove_empty_dirs",
         "_album_cleanup_remove_empty_tree",
+        "_import_review_path_text_error",
+        "_path_lexically_under",
+        "_path_has_symlink_component_under",
+        "_path_is_under",
         "_read_file_media_tags",
         "AUDIO_EXT",
         "_ART_EXTS",
@@ -66,8 +75,10 @@ def _load_album_cleanup_helpers() -> Dict[str, Any]:
         "Tuple": Tuple,
         "Path": Path,
         "hashlib": __import__("hashlib"),
+        "os": os,
         "re": re,
         "shutil": __import__("shutil"),
+        "urllib": urllib,
         "uuid": __import__("uuid"),
         "unicodedata": __import__("unicodedata"),
         "_s": lambda value: "" if value is None else str(value),
