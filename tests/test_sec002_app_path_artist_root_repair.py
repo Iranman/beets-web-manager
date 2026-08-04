@@ -72,14 +72,20 @@ class ArtistFolderRepairRootBoundaryTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 200, data)
         self.assertTrue(data["ok"])
 
-    def test_scan_accepts_subfolder_of_music_root(self):
-        sub = self.music / "genre-a"
+    def test_scan_rejects_subfolder_of_music_root(self):
+        # The UI labels this field "Library root" with no supported concept
+        # of scanning an individual artist/album folder. Accepting a
+        # descendant would let the scan misinterpret that folder's own
+        # children (e.g. album folders, if an artist folder were passed) as
+        # "artist folders" and destructively merge unrelated albums, plus
+        # rewrite the Beets DB's albumartist column with garbage. root must
+        # be exactly MUSIC_ROOT.
+        sub = self.music / "Artist A"
         sub.mkdir()
-        (sub / "Artist A").mkdir()
         resp = self._post("/api/clean/artist-folders/scan", {"root": str(sub)})
         data = resp.get_json()
-        self.assertEqual(resp.status_code, 200, data)
-        self.assertTrue(data["ok"])
+        self.assertEqual(resp.status_code, 400, data)
+        self.assertFalse(data["ok"])
 
     def test_scan_rejects_symlink_root_component(self):
         target = self.outside / "escape"
@@ -208,12 +214,24 @@ class ArtistFolderRepairRootHelperTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_literal_percent_subfolder_name_is_preserved(self):
-        folder = self.music / "100% Legit"
+    def test_literal_percent_music_root_is_preserved(self):
+        # MUSIC_ROOT itself may legitimately contain a literal '%' (an
+        # operator-configured path, not request text); the exact-equality
+        # contract must still accept it rather than mistaking it for an
+        # encoded sequence.
+        percent_root = Path(self.tmp.name).resolve() / "100% Legit Music"
+        percent_root.mkdir()
+        with mock.patch.object(app_module, "MUSIC_ROOT", percent_root):
+            resolved, error = app_module._artist_folder_repair_root(str(percent_root))
+        self.assertIsNone(error)
+        self.assertEqual(resolved, percent_root.resolve())
+
+    def test_subfolder_of_music_root_is_rejected(self):
+        folder = self.music / "Some Artist"
         folder.mkdir()
         resolved, error = app_module._artist_folder_repair_root(str(folder))
-        self.assertIsNone(error)
-        self.assertEqual(resolved, folder.resolve())
+        self.assertIsNone(resolved)
+        self.assertIsNotNone(error)
 
     def test_double_encoded_traversal_rejected(self):
         payload = str(self.music) + "/%252e%252e%252foutside"
@@ -295,9 +313,12 @@ class ArtistFolderMergeIdentityTests(unittest.TestCase):
         self.assertEqual(len(surviving), 1)
         self.assertTrue((surviving[0] / "track.mp3").exists())
 
-    def test_group_with_musicbrainz_artist_id_skips_fingerprint_check(self):
-        # When real MB Artist ID evidence already exists for the group, the
-        # (slow, network-dependent) fingerprint check must not run at all.
+    def test_group_with_musicbrainz_artist_id_still_requires_fingerprint_confirmation(self):
+        # group["musicbrainz"]["id"] is derived from a MusicBrainz *text
+        # search on the folder name* (_mb_canonical_for_artist_entries), not
+        # from per-folder audio evidence -- two different real artists who
+        # happen to share a folder name would produce the same search
+        # result. It must not bypass fingerprint verification.
         src = self.music / "Bob  Marley"
         dst = self.music / "Bob Marley"
         src.mkdir()
@@ -313,14 +334,119 @@ class ArtistFolderMergeIdentityTests(unittest.TestCase):
                 "musicbrainz": {"id": "9a70dc00-46ed-4b1b-a415-a4fb6dcb4d0f"},
             }],
         ), mock.patch.object(
-            app_module, "_artist_folder_fingerprint_confirms",
+            app_module, "_artist_folder_fingerprint_confirms", return_value=True,
         ) as fp:
             summary = app_module._apply_artist_folder_groups(
                 str(self.music), None, False, log, use_musicbrainz=True,
             )
-        fp.assert_not_called()
+        fp.assert_called_once()
         self.assertEqual(summary["folders"], 1)
         self.assertFalse(src.exists())
+
+    def test_group_with_musicbrainz_artist_id_blocked_on_fingerprint_mismatch(self):
+        src = self.music / "Bob  Marley"
+        dst = self.music / "Bob Marley"
+        src.mkdir()
+        dst.mkdir()
+        (src / "track.mp3").write_bytes(b"fake-audio")
+        log = []
+        with mock.patch.object(
+            app_module, "_scan_artist_folder_groups",
+            return_value=[{
+                "key": "bobmarley",
+                "canonical": {"path": str(dst), "name": "Bob Marley"},
+                "sources": [{"path": str(src), "name": "Bob  Marley"}],
+                "musicbrainz": {"id": "9a70dc00-46ed-4b1b-a415-a4fb6dcb4d0f"},
+            }],
+        ), mock.patch.object(
+            app_module, "_artist_folder_fingerprint_confirms", return_value=False,
+        ):
+            summary = app_module._apply_artist_folder_groups(
+                str(self.music), None, False, log, use_musicbrainz=True,
+            )
+        self.assertEqual(summary["files"], 0)
+        self.assertTrue(src.exists())
+        self.assertTrue(dst.exists())
+
+    def test_name_only_group_blocked_when_fingerprint_unavailable(self):
+        # fp_result is None (no fingerprint evidence: empty folder, no
+        # fpcalc/AcoustID reachable, provider error, ambiguous result, etc.)
+        # must NOT be treated as authorization -- only an explicit True
+        # confirms the match. This was the actual bug in the pre-review
+        # implementation: it only blocked on False, silently letting a
+        # merge proceed whenever the fingerprint service simply failed to
+        # produce a result.
+        a = self.music / "Bob Marley"
+        b = self.music / "Bob  Marley"
+        a.mkdir()
+        b.mkdir()
+        (a / "track.mp3").write_bytes(b"fake-audio-a")
+        (b / "track.mp3").write_bytes(b"fake-audio-b")
+        log = []
+        with mock.patch.object(app_module, "_artist_folder_fingerprint_confirms", return_value=None) as fp:
+            summary = app_module._apply_artist_folder_groups(
+                str(self.music), None, False, log, use_musicbrainz=False,
+            )
+        self.assertTrue(fp.called)
+        self.assertEqual(summary["files"], 0)
+        self.assertTrue(any("no AcoustID fingerprint evidence was available" in line for line in log))
+        self.assertTrue(a.exists())
+        self.assertTrue(b.exists())
+        self.assertTrue((a / "track.mp3").exists())
+        self.assertTrue((b / "track.mp3").exists())
+
+
+class StampMbidPlainNameDuplicateFingerprintTests(unittest.TestCase):
+    """_stamp_artist_folder_scan()'s plain-name-duplicate path (merging an
+    unstamped folder into a stamped one on name match alone) has the same
+    tri-state fingerprint contract and the same pre-existing None-handling
+    bug, fixed alongside the merge-route fix above."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.music = Path(self.tmp.name).resolve() / "music"
+        self.music.mkdir()
+        self.patches = [
+            mock.patch.object(app_module, "MUSIC_ROOT", self.music),
+            mock.patch.object(app_module, "_MUSIC_LIBRARY_ROOT", str(self.music)),
+        ]
+        for patch in self.patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _stamped_and_plain_folders(self):
+        stamped = self.music / "Bob Marley (9a70dc00-46ed-4b1b-a415-a4fb6dcb4d0f)"
+        plain = self.music / "Bob Marley"
+        stamped.mkdir()
+        plain.mkdir()
+        (stamped / "track.mp3").write_bytes(b"fake-audio-stamped")
+        (plain / "track.mp3").write_bytes(b"fake-audio-plain")
+        return stamped, plain
+
+    def test_plain_duplicate_not_a_candidate_when_fingerprint_unavailable(self):
+        stamped, plain = self._stamped_and_plain_folders()
+        with mock.patch.object(app_module, "_stamp_artist_folder_album_mbid_counts", return_value=({}, {}, "")), \
+             mock.patch.object(app_module, "_mb_artist_lookup_by_id", return_value={"name": "Bob Marley"}), \
+             mock.patch.object(app_module, "_artist_folder_fingerprint_confirms", return_value=None) as fp:
+            result = app_module._stamp_artist_folder_scan(self.music)
+        self.assertTrue(fp.called)
+        candidate_paths = {c["path"] for c in result["candidates"]}
+        self.assertNotIn(str(plain), candidate_paths)
+        skip_reasons = " ".join(s["reason"] for s in result["skipped"])
+        self.assertIn("no AcoustID fingerprint evidence was available", skip_reasons)
+
+    def test_plain_duplicate_is_a_candidate_when_fingerprint_confirms(self):
+        stamped, plain = self._stamped_and_plain_folders()
+        with mock.patch.object(app_module, "_stamp_artist_folder_album_mbid_counts", return_value=({}, {}, "")), \
+             mock.patch.object(app_module, "_mb_artist_lookup_by_id", return_value={"name": "Bob Marley"}), \
+             mock.patch.object(app_module, "_artist_folder_fingerprint_confirms", return_value=True) as fp:
+            result = app_module._stamp_artist_folder_scan(self.music)
+        self.assertTrue(fp.called)
+        candidate_paths = {c["path"] for c in result["candidates"]}
+        self.assertIn(str(plain), candidate_paths)
 
 
 if __name__ == "__main__":

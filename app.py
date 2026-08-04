@@ -38579,10 +38579,16 @@ def _merge_artist_dir_contents(src: Path, dst: Path, *, dry_run: bool,
 def _artist_folder_repair_root(raw: Any) -> Tuple[Optional[Path], Optional[str]]:
     """Resolve and validate the artist-folder-repair `root` request value.
 
-    These routes perform destructive filesystem operations (rename, merge,
-    folder removal) and direct Beets DB path rewrites driven by whatever
-    `root` resolves to, so it must be the configured music library itself or
-    a real folder inside it -- never an arbitrary request-supplied path.
+    The UI labels this field "Library root" and defaults it to MUSIC_ROOT;
+    there is no supported concept of scanning an individual artist or album
+    folder as a repair root. Accepting an arbitrary descendant would let
+    _scan_artist_folder_groups() misinterpret album folders as "duplicate
+    artist folders" and destructively merge two different albums together
+    (and rewrite the Beets DB's albumartist column with the album folder's
+    name). `root` must therefore resolve to exactly the configured music
+    library root -- never a descendant, and never anything else. A failure
+    to resolve the trusted root itself fails closed rather than silently
+    falling back to an unresolved comparison basis.
     """
     text = _s(raw).strip()
     if not text:
@@ -38594,19 +38600,17 @@ def _artist_folder_repair_root(raw: Any) -> Tuple[Optional[Path], Optional[str]]
     try:
         music_root = MUSIC_ROOT.resolve(strict=False)
     except Exception:
-        music_root = MUSIC_ROOT
-    if candidate != music_root and not _path_lexically_under(candidate, music_root):
-        return None, "root must be the configured music library or a folder inside it"
-    if _path_has_symlink_component_under(candidate, music_root):
-        return None, "root cannot contain symlink components"
+        return None, "Music library root is not available"
+    if candidate != music_root:
+        return None, "root must be the configured music library"
     if not candidate.exists() or not candidate.is_dir():
-        return None, f"Path not found: {text}"
+        return None, "Music library root does not exist"
     try:
         resolved = candidate.resolve(strict=False)
     except Exception:
         return None, "Invalid root path"
-    if resolved != music_root and not _path_is_under(resolved, music_root):
-        return None, "root must be the configured music library or a folder inside it"
+    if resolved != music_root:
+        return None, "root must be the configured music library"
     return resolved, None
 
 
@@ -38654,21 +38658,32 @@ def _apply_artist_folder_groups(root: str, keys: Optional[List[str]],
             if not _path_under(src, root_path) or src.parent != root_path:
                 log.append(f"  Skipping unsafe source path: {src}")
                 continue
-            if not mb_artistid:
-                # No MusicBrainz artist ID evidence for this group -- these
-                # folders were only grouped by normalized-name equality
-                # (case/punctuation variants). Sample audio and AcoustID-
-                # verify before merging, same policy as the stamp-mbid
-                # plain-name-duplicate path, so two different artists that
-                # happen to share a folder name are never silently
-                # commingled just because AI/fuzzy name matching agrees.
-                fp_result = _artist_folder_fingerprint_confirms(src, canonical_name)
-                if fp_result is False:
-                    log.append(
-                        f"  Skipping {src.name!r}: folder name matches {canonical.name!r} but "
-                        f"AcoustID fingerprint of sampled tracks resolved to a different artist"
-                    )
-                    continue
+            # group["musicbrainz"]["id"] (mb_artistid) is derived from a
+            # MusicBrainz *text search on the folder name* (see
+            # _mb_canonical_for_artist_entries), not from per-folder audio
+            # evidence -- two different real artists who share a folder name
+            # would produce the same search result, so it is not independent
+            # confirmation that these folders belong to the same artist.
+            # Sample audio and AcoustID-verify before merging any source,
+            # with or without that name-derived MBID, so two different
+            # artists that happen to share a folder name are never silently
+            # commingled just because fuzzy name matching (or a name search
+            # built on top of it) agrees. Only an explicit True confirmation
+            # authorizes the merge -- False (confirmed mismatch) and None
+            # (no fingerprint evidence available: empty folder, no
+            # fpcalc/AcoustID reachable, provider error, etc.) both block
+            # it, since an absent result is not evidence of a safe match.
+            fp_result = _artist_folder_fingerprint_confirms(src, canonical_name)
+            if fp_result is not True:
+                reason = (
+                    "AcoustID fingerprint of sampled tracks resolved to a different artist"
+                    if fp_result is False
+                    else "no AcoustID fingerprint evidence was available to confirm this match"
+                )
+                log.append(
+                    f"  Skipping {src.name!r}: folder name matches {canonical.name!r} but {reason}"
+                )
+                continue
             log.append(f"  Merge folder: {src.name} -> {canonical.name}")
             artist_updates[source["name"]] = canonical_name
             if mb_artistid:
@@ -39286,23 +39301,36 @@ def _stamp_artist_folder_scan(root: Path) -> Dict[str, Any]:
         # per-album MB artist UUID evidence like the block above. Two
         # different artists that happen to share a folder name would
         # otherwise be silently commingled under one wrong MBID. Sample a
-        # few audio files and AcoustID-verify before trusting the name match;
-        # only block on a *confirmed* disagreement, same as elsewhere.
+        # few audio files and AcoustID-verify before trusting the name match.
+        # Only an explicit True confirmation authorizes it -- an absent or
+        # unavailable fingerprint result (None) is not evidence of a safe
+        # match and must not be treated as though it were confirmed.
         canonical_artist = _artist_folder_name_without_mbid(target.name)
         fp_result = _artist_folder_fingerprint_confirms(folder, canonical_artist)
-        if fp_result is False:
+        if fp_result is not True:
+            reason = (
+                f"folder name matches {target.name!r} but AcoustID fingerprint of sampled "
+                f"tracks resolved to a different artist — not merging to avoid commingling "
+                f"two different artists"
+                if fp_result is False
+                else (
+                    f"folder name matches {target.name!r} but no AcoustID fingerprint evidence "
+                    f"was available to confirm this match"
+                )
+            )
             skipped.append({
                 "path": str(folder),
                 "name": folder.name,
-                "reason": (
-                    f"folder name matches {target.name!r} but AcoustID fingerprint of sampled "
-                    f"tracks resolved to a different artist — not merging to avoid commingling "
-                    f"two different artists"
-                ),
+                "reason": reason,
                 "mb_albumartistid": target_mbid,
                 "canonical_artist": canonical_artist,
             })
-            candidate_paths.add(folder_key)
+            # Deliberately not added to candidate_paths: this folder was
+            # skipped, not promoted to a candidate. candidate_paths is used
+            # below to drop *stale* skip entries superseded by a real
+            # candidacy elsewhere -- adding a skip-only path here would
+            # cause the end-of-function filter to erroneously discard this
+            # exact skip reason, silently hiding why the merge was blocked.
             continue
 
         album_total = int(folder_album_totals.get(str(folder)) or 0)
