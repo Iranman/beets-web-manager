@@ -38576,10 +38576,47 @@ def _merge_artist_dir_contents(src: Path, dst: Path, *, dry_run: bool,
         stats["files_moved"] += 1
 
 
+def _artist_folder_repair_root(raw: Any) -> Tuple[Optional[Path], Optional[str]]:
+    """Resolve and validate the artist-folder-repair `root` request value.
+
+    These routes perform destructive filesystem operations (rename, merge,
+    folder removal) and direct Beets DB path rewrites driven by whatever
+    `root` resolves to, so it must be the configured music library itself or
+    a real folder inside it -- never an arbitrary request-supplied path.
+    """
+    text = _s(raw).strip()
+    if not text:
+        return None, "root is required"
+    error = _import_review_path_text_error(text, allow_relative=False)
+    if error:
+        return None, error
+    candidate = Path(text)
+    try:
+        music_root = MUSIC_ROOT.resolve(strict=False)
+    except Exception:
+        music_root = MUSIC_ROOT
+    if candidate != music_root and not _path_lexically_under(candidate, music_root):
+        return None, "root must be the configured music library or a folder inside it"
+    if _path_has_symlink_component_under(candidate, music_root):
+        return None, "root cannot contain symlink components"
+    if not candidate.exists() or not candidate.is_dir():
+        return None, f"Path not found: {text}"
+    try:
+        resolved = candidate.resolve(strict=False)
+    except Exception:
+        return None, "Invalid root path"
+    if resolved != music_root and not _path_is_under(resolved, music_root):
+        return None, "root must be the configured music library or a folder inside it"
+    return resolved, None
+
+
 def _apply_artist_folder_groups(root: str, keys: Optional[List[str]],
                                 dry_run: bool, log: List[str],
                                 use_musicbrainz: bool = True) -> Dict[str, int]:
-    root_path = Path(root).resolve(strict=False)
+    root_path, root_error = _artist_folder_repair_root(root)
+    if root_path is None:
+        log.append(f"Refusing to operate: {root_error}")
+        return {"groups": 0, "folders": 0, "files": 0, "db_paths": 0, "db_artists": 0, "db_tags": 0}
     wanted = set(keys or [])
     groups = _scan_artist_folder_groups(
         str(root_path),
@@ -38617,6 +38654,21 @@ def _apply_artist_folder_groups(root: str, keys: Optional[List[str]],
             if not _path_under(src, root_path) or src.parent != root_path:
                 log.append(f"  Skipping unsafe source path: {src}")
                 continue
+            if not mb_artistid:
+                # No MusicBrainz artist ID evidence for this group -- these
+                # folders were only grouped by normalized-name equality
+                # (case/punctuation variants). Sample audio and AcoustID-
+                # verify before merging, same policy as the stamp-mbid
+                # plain-name-duplicate path, so two different artists that
+                # happen to share a folder name are never silently
+                # commingled just because AI/fuzzy name matching agrees.
+                fp_result = _artist_folder_fingerprint_confirms(src, canonical_name)
+                if fp_result is False:
+                    log.append(
+                        f"  Skipping {src.name!r}: folder name matches {canonical.name!r} but "
+                        f"AcoustID fingerprint of sampled tracks resolved to a different artist"
+                    )
+                    continue
             log.append(f"  Merge folder: {src.name} -> {canonical.name}")
             artist_updates[source["name"]] = canonical_name
             if mb_artistid:
@@ -38764,10 +38816,10 @@ def _auto_merge_case_duplicate_artist_folder(root: str, albumartist: str,
 @app.post("/api/clean/artist-folders/scan")
 def clean_artist_folders_scan():
     payload = request.get_json(silent=True) or {}
-    root = (payload.get("root") or str(MUSIC_ROOT)).strip()
-    root_path = Path(root)
-    if not root_path.exists() or not root_path.is_dir():
-        return jsonify({"ok": False, "error": f"Path not found: {root}"}), 400
+    root_path, root_error = _artist_folder_repair_root(payload.get("root") or str(MUSIC_ROOT))
+    if root_path is None:
+        return jsonify({"ok": False, "error": root_error}), 400
+    root = str(root_path)
 
     def _do(log, cancel_event=None):
         log.append(f"Scanning artist folders: {root}")
@@ -38804,12 +38856,12 @@ def clean_artist_folders_scan():
 @app.post("/api/clean/artist-folders/merge")
 def clean_artist_folders_merge():
     payload = request.get_json(silent=True) or {}
-    root = (payload.get("root") or str(MUSIC_ROOT)).strip()
+    root_path, root_error = _artist_folder_repair_root(payload.get("root") or str(MUSIC_ROOT))
+    if root_path is None:
+        return jsonify({"ok": False, "error": root_error}), 400
+    root = str(root_path)
     keys = payload.get("keys") or []
     dry_run = bool(payload.get("dry_run", True))
-    root_path = Path(root)
-    if not root_path.exists() or not root_path.is_dir():
-        return jsonify({"ok": False, "error": f"Path not found: {root}"})
     if dry_run:
         log: List[str] = []
         summary = _apply_artist_folder_groups(root, keys, True, log)
@@ -39328,12 +39380,11 @@ def clean_artist_folders_stamp_mbid():
     Returns: { ok, renamed, skipped, log } for dry_run - or { ok, job_id } for apply.
     """
     payload = request.get_json(silent=True) or {}
-    root_str = (payload.get("root") or str(MUSIC_ROOT)).strip()
+    root_path, root_error = _artist_folder_repair_root(payload.get("root") or str(MUSIC_ROOT))
+    if root_path is None:
+        return jsonify({"ok": False, "error": root_error}), 400
     dry_run = bool(payload.get("dry_run", True))
     compact_log = bool(payload.get("compact_log", False))
-    root_path = Path(root_str)
-    if not root_path.exists() or not root_path.is_dir():
-        return jsonify({"ok": False, "error": f"Path not found: {root_str}"}), 400
 
     if dry_run:
         log: List[str] = []
