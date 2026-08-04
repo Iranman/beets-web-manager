@@ -587,7 +587,7 @@ def _library_rewrite_path(raw: object, *, require_exists: bool, expected_type: s
             raise UnsafePathError("path is outside the music library") from exc
     if raw_abs == music_root:
         raise UnsafePathError("path cannot be the music library root")
-    include_leaf = require_exists or raw_abs.exists()
+    include_leaf = require_exists
     if _path_has_symlink_component(raw_abs, music_root, include_leaf=include_leaf):
         raise UnsafePathError("path cannot contain symlink components")
     trusted = resolve_safe_path(raw, ["music"], require_exists=require_exists, expected_type=expected_type)

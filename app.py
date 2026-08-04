@@ -11926,27 +11926,14 @@ def _resolve_import_review_db_music_path(
 
 
 def _resolve_import_review_selected_audio_file(raw: Any, source_root: Path) -> Optional[Path]:
-    raw_text = _s(raw).strip()
-    if not raw_text:
-        return None
-    candidate = Path(raw_text)
-    if not candidate.is_absolute():
-        candidate = source_root / candidate
-    resolved, error = _resolve_import_review_source_path(
-        str(candidate),
-        allow_music=True,
-        expected_type="file",
-        require_exists=True,
-    )
-    if error or resolved is None or resolved.suffix.lower() not in AUDIO_EXT:
-        return None
-    try:
-        root_resolved = source_root.resolve(strict=False)
-        if source_root.is_dir():
-            resolved.relative_to(root_resolved)
-        elif resolved != root_resolved:
-            return None
-    except Exception:
+    resolved, error = _resolve_import_review_cleanup_file(raw, source_root)
+    if (
+        error
+        or resolved is None
+        or not resolved.exists()
+        or not resolved.is_file()
+        or resolved.suffix.lower() not in AUDIO_EXT
+    ):
         return None
     return resolved
 
@@ -18552,15 +18539,7 @@ def _import_target_preview_cache_key(payload: Dict[str, Any]) -> str:
         require_exists=True,
     ) if source_path else (None, "source path missing")
     if source_for_stat is not None:
-        try:
-            st = source_for_stat.stat()
-            source_marker.update({
-                "canonical_path": str(source_for_stat),
-                "size": int(st.st_size),
-                "mtime_ns": int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1_000_000_000))),
-            })
-        except Exception:
-            pass
+        source_marker["canonical_path"] = str(source_for_stat)
     material = {
         "version": 1,
         "source": source_marker,
