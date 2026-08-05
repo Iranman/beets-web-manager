@@ -27,11 +27,15 @@ structural match of the target code block (see apply_patch()'s orig/patched
 block-count check).
 """
 
-import importlib
 import re
-import sys
-import beets
-import beets.plugins
+
+# `beets`/`beets.plugins` are deliberately NOT imported at module level: this
+# module's constants (TARGET_FILE, PATCHED_BLOCK, PATCH_APPLY_VERSION, ...)
+# and _parse_version() are also imported by scripts/verify_beets_engine_image.py,
+# which is explicitly designed to run without Beets installed in the runner
+# Python environment (it only ever inspects Beets inside a disposable
+# container). Only apply_patch() itself -- which actually runs inside the
+# engine image at build time, where Beets is always installed -- imports them.
 
 
 TARGET_FILE = "/lsiopy/lib/python3.12/site-packages/beets/plugins.py"
@@ -97,6 +101,9 @@ def _verify_plugin_resolution() -> None:
     dependency's class. Runs regardless of whether the patch was applied in
     this process, so it also catches a hypothetical future regression on
     modern Beets that no longer contains the upstream #6039 fix."""
+    import importlib
+    import beets.plugins
+
     importlib.reload(beets.plugins)
 
     chroma_selected = beets.plugins._get_plugin("chroma")
@@ -147,6 +154,8 @@ def _apply_source_patch() -> None:
 
 
 def apply_patch() -> None:
+    import beets
+
     actual_version_str = getattr(beets, "__version__", "")
     try:
         actual_version = _parse_version(actual_version_str)
