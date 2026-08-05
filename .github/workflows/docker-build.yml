@@ -15,6 +15,7 @@ jobs:
   compose-verification:
     runs-on: ubuntu-latest
     env:
+      BEETS_API_URL: http://beets.ci.invalid:8338
       BEETS_API_TOKEN: changeme
       BEETS_WEB_AUTH_TOKEN: changeme
       OPENAI_API_KEY: changeme
