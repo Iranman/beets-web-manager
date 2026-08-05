@@ -21,6 +21,7 @@ Safety properties:
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import os
 import re
 import subprocess
@@ -112,6 +113,20 @@ def check_version(image: str, expected_version: str, errors: List[str]) -> Optio
     return reported_version
 
 
+def _load_apply_patches_module():
+    """Load docker/beets/apply_patches.py by file path rather than as the
+    dotted package `docker.beets.apply_patches`: some Python environments
+    (observed on a real deployment host, not in CI) already have the
+    unrelated `docker` PyPI SDK package cached in sys.modules, which
+    shadows this repo's local docker/ directory and breaks the dotted
+    import regardless of sys.path ordering."""
+    module_path = _REPO_ROOT / "docker" / "beets" / "apply_patches.py"
+    spec = importlib.util.spec_from_file_location("_beets_apply_patches", module_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def check_patch_state(image: str, beets_version: str, errors: List[str]) -> None:
     """Confirm the obsolete, narrowly-targeted Beets 2.4.0 plugin-resolution
     source patch (docker/beets/apply_patches.py) is present if and only if
@@ -119,8 +134,11 @@ def check_patch_state(image: str, beets_version: str, errors: List[str]) -> None
     other version -- particularly not on a modern Beets release, where the
     upstream fix (beetbox/beets#6039) already covers the same defect through
     different, incompatible source text."""
-    sys.path.insert(0, str(_REPO_ROOT))
-    from docker.beets.apply_patches import PATCH_APPLY_VERSION, PATCHED_BLOCK, TARGET_FILE, _parse_version
+    apply_patches = _load_apply_patches_module()
+    PATCH_APPLY_VERSION = apply_patches.PATCH_APPLY_VERSION
+    PATCHED_BLOCK = apply_patches.PATCHED_BLOCK
+    TARGET_FILE = apply_patches.TARGET_FILE
+    _parse_version = apply_patches._parse_version
 
     try:
         parsed = _parse_version(beets_version)
