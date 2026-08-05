@@ -10516,10 +10516,19 @@ def album_replace_art_from_url(aid):
         except AlbumArtRequestError as ex:
             raise RuntimeError(ex.message) from ex
         except BeetsError as ex:
-            raise RuntimeError(str(ex)) from ex
+            app.logger.warning("Could not replace album artwork for album %s: %s", aid, type(ex).__name__)
+            raise RuntimeError("Could not update album artwork") from ex
         except Exception as ex:
             raise RuntimeError("Could not update album artwork") from ex
         saved = _s(result.get("artpath") or "")
+        # NOTE: this local `beet embedart` invocation cannot succeed in the
+        # standard deployment -- the web-manager container has no local
+        # Beets installation (BEET_BIN resolves to a nonexistent path; see
+        # docs/TECHNICAL_DEBT.md). It is intentionally best-effort/optional
+        # and never fails the overall operation; embedding into file tags
+        # (as opposed to writing the folder-level albumart.jpg the engine
+        # already wrote) is tracked as future engine-side work, not part of
+        # this route's success contract.
         try:
             env = _beet_env()
             r = _beet_run(
@@ -10576,10 +10585,14 @@ def album_upload_art(aid):
         except AlbumArtRequestError as ex:
             raise RuntimeError(ex.message) from ex
         except BeetsError as ex:
-            raise RuntimeError(str(ex)) from ex
+            app.logger.warning("Could not upload album artwork for album %s: %s", aid, type(ex).__name__)
+            raise RuntimeError("Could not update album artwork") from ex
         except Exception as ex:
             raise RuntimeError("Could not update album artwork") from ex
         saved = _s(result.get("artpath") or "")
+        # See the matching note in album_replace_art_from_url: this local
+        # embedart call is intentionally best-effort/optional and cannot
+        # succeed in the standard deployment.
         try:
             env = _beet_env()
             r = _beet_run(
