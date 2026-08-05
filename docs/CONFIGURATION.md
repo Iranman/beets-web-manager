@@ -50,4 +50,4 @@ The engine image includes the bundled `discpath` plugin under `/opt/beets-web-ma
 - `submit`: Beets/Chroma command for AcoustID submission readiness. Requires Chroma loaded and the command registered.
 - `mbsubmit`: MusicBrainz submission command readiness. It is independent of `submit`.
 
-The Beets 2.4.0 engine image carries a temporary Chroma/BPSync plugin-loader compatibility patch. It must remain pinned to the affected version and be removed after upgrading to a fixed upstream Beets release.
+The Beets engine image (`docker/beets/apply_patches.py`) carries a Chroma/BPSync plugin-loader compatibility patch for Beets versions that predate the upstream fix (< 2.5.0, beetbox/beets#6039). Since the base image floats on `latest` rather than a pinned version, the script detects the installed version at build time and only applies the patch when it's actually needed; either way it always runs a runtime sanity check on chroma/bpsync resolution, so a future Beets release regressing this defect still fails the build instead of shipping silently broken.

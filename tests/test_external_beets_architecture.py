@@ -1847,13 +1847,52 @@ class TestChromaPluginClassResolution(unittest.TestCase):
                 apply_patch()
             self.assertIn("Invalid source state", str(ctx.exception))
 
-    def test_apply_patch_rejects_version_mismatch(self):
-        """apply_patch() raises RuntimeError when installed Beets version is not 2.4.0."""
+    def test_apply_patch_skips_source_patch_on_fixed_upstream_version(self):
+        """apply_patch() does not touch beets/plugins.py on Beets >= 2.5.0 (fix already upstream),
+        but still runs the runtime sanity check."""
         from docker.beets.apply_patches import apply_patch
-        with mock.patch("beets.__version__", "2.5.0"):
+        with mock.patch("beets.__version__", "2.13.1"), \
+             mock.patch("builtins.open", side_effect=AssertionError("must not open TARGET_FILE when no patch is needed")), \
+             mock.patch("importlib.reload"), \
+             mock.patch("beets.plugins._get_plugin") as mock_get_plugin:
+            mock_plugin = mock.MagicMock()
+            mock_plugin.__class__.__module__ = "beetsplug.chroma"
+            mock_plugin.__class__.__name__ = "AcoustidPlugin"
+            mock_get_plugin.side_effect = lambda name: mock_plugin if name == "chroma" else None
+
+            apply_patch()  # must not raise, and must not open TARGET_FILE
+
+    def test_apply_patch_still_patches_below_fixed_upstream_version(self):
+        """apply_patch() still applies the source patch on a Beets version that predates 2.5.0,
+        even when it isn't exactly 2.4.0 (e.g. a hypothetical 2.4.x point release)."""
+        from docker.beets.apply_patches import apply_patch, ORIGINAL_BLOCK, PATCHED_BLOCK
+        mock_file = mock.mock_open(read_data=ORIGINAL_BLOCK)
+        with mock.patch("beets.__version__", "2.4.9"), \
+             mock.patch("builtins.open", mock_file), \
+             mock.patch("importlib.reload"), \
+             mock.patch("beets.plugins._get_plugin") as mock_get_plugin:
+            mock_plugin = mock.MagicMock()
+            mock_plugin.__class__.__module__ = "beetsplug.chroma"
+            mock_plugin.__class__.__name__ = "AcoustidPlugin"
+            mock_get_plugin.side_effect = lambda name: mock_plugin if name == "chroma" else None
+
+            with mock.patch.dict("sys.modules", {"beetsplug.chroma": mock.MagicMock(AcoustidPlugin=mock_plugin.__class__)}):
+                apply_patch()
+
+        written_data = "".join(call.args[0] for call in mock_file().write.call_args_list)
+        self.assertEqual(written_data, PATCHED_BLOCK)
+
+    def test_apply_patch_fixed_version_still_fails_on_broken_chroma_resolution(self):
+        """apply_patch() on a fixed-upstream Beets version still raises if the runtime sanity
+        check fails -- the floating-latest safety net must not be a no-op."""
+        from docker.beets.apply_patches import apply_patch
+        with mock.patch("beets.__version__", "2.13.1"), \
+             mock.patch("builtins.open", side_effect=AssertionError("must not open TARGET_FILE when no patch is needed")), \
+             mock.patch("importlib.reload"), \
+             mock.patch("beets.plugins._get_plugin", return_value=None):
             with self.assertRaises(RuntimeError) as ctx:
                 apply_patch()
-            self.assertIn("expected Beets 2.4.0", str(ctx.exception))
+            self.assertIn("Sanity check failed for chroma", str(ctx.exception))
 
     @staticmethod
     def _exec_block(block_src, mod):
@@ -2107,7 +2146,7 @@ class ComposeSecurityValidatorTests(unittest.TestCase):
         with mock.patch.object(vcs, "_dockerfile_beets_base_is_approved", return_value=False):
             errors: list = []
             vcs._check_image_digest_semantics("beets", "beets-engine:2.4.0", has_build=True, errors=errors)
-            self.assertTrue(any("does not pin the approved" in e for e in errors), errors)
+            self.assertTrue(any("does not reference an approved" in e for e in errors), errors)
 
     def test_pulled_third_party_image_without_digest_fails(self):
         import scripts.validate_compose_security as vcs

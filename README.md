@@ -289,7 +289,7 @@ docker compose exec beets /lsiopy/bin/beet version
 docker compose exec beets beet-locked import /data/torrents/music
 ```
 
-No second Beets database is created. The temporary Beets 2.4.0 Chroma compatibility patch in `Dockerfile.beets` is only for the pinned affected release and should be removed after upgrading to a fixed upstream Beets release.
+No second Beets database is created. The Chroma compatibility patch applied by `docker/beets/apply_patches.py` during `Dockerfile.beets`'s build only touches Beets versions that predate the upstream fix (< 2.5.0); since the base image floats on `latest`, the script detects this automatically at build time rather than assuming a fixed version.
 
 ## Architecture Migration & Upgrades
 

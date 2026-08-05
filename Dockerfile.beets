@@ -1,5 +1,17 @@
 # syntax=docker/dockerfile:1
-FROM lscr.io/linuxserver/beets:2.4.0@sha256:4cce2967154e849ca5466469d934a4bb9d8d83c3acf2a5279da47bccd16518f1
+#
+# Base image intentionally floats on `latest` rather than a pinned
+# version/digest (owner decision, 2026-08-05): always builds against
+# whatever Beets release linuxserver currently ships. This trades away
+# the reproducibility/supply-chain-pinning guarantee the rest of this
+# stack relies on for that one image -- see
+# scripts/validate_compose_security.py's APPROVED_BEETS_BASE_IMAGES
+# comment for the full trade-off. docker/beets/apply_patches.py's
+# always-on runtime sanity check (not just the version-gated patch) is
+# what actually protects this: a future Beets release that regresses
+# chroma/bpsync plugin resolution fails the build loudly instead of
+# silently shipping.
+FROM lscr.io/linuxserver/beets:latest
 
 # Immutable image provenance. Required, not optional: a blank/missing
 # VCS_REF fails the build rather than silently producing an unlabeled
@@ -10,7 +22,8 @@ RUN test -n "${VCS_REF}" || (echo "ERROR: VCS_REF build-arg is required and must
 LABEL org.opencontainers.image.revision="${VCS_REF}" \
       org.opencontainers.image.source="https://github.com/Iranman/beets-web-manager"
 
-# Apply pinned Beets 2.4.0 plugin resolution fix
+# Apply the plugin resolution fix on affected (pre-2.5.0) Beets versions,
+# and always run its runtime sanity check regardless of version.
 COPY docker/beets/ /opt/beets-patches/
 RUN /lsiopy/bin/python3 /opt/beets-patches/apply_patches.py
 

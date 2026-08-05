@@ -21,14 +21,27 @@ STANDALONE_COMPOSE = ROOT / "docker-compose.yml"
 DOCKERFILE_BEETS = ROOT / "Dockerfile.beets"
 ENV_EXAMPLE = ROOT / ".env.example"
 
-# The one approved upstream base image digest. Dockerfile.beets's FROM line
-# must reference exactly this -- not an arbitrary sha256, and not attached
-# to the locally-built beets-engine image tag (Docker rejects a digest on
-# any image tag that also has a compose `build:` block: "build tag cannot
-# contain a digest", independently reproduced against docker compose build).
-APPROVED_BEETS_BASE_IMAGE = (
+# The approved upstream base image reference(s). Dockerfile.beets's FROM line
+# must reference exactly one of these -- not an arbitrary sha256/tag, and not
+# attached to the locally-built beets-engine image tag (Docker rejects a
+# digest on any image tag that also has a compose `build:` block: "build tag
+# cannot contain a digest", independently reproduced against docker compose
+# build).
+#
+# The digest-pinned entry is the general policy: reproducible, supply-chain
+# provenance guaranteed, immune to a mutable-tag retag. The plain `:latest`
+# entry is a deliberate, narrower exception the project owner chose on
+# 2026-08-05 specifically for this one image, trading that guarantee away in
+# exchange for always building against whatever Beets release linuxserver
+# currently ships -- not a general relaxation of digest-pinning for any other
+# image in this stack. docker/beets/apply_patches.py's always-on runtime
+# sanity check (independent of this validator) is what actually backstops
+# that trade: a future Beets release regressing chroma/bpsync plugin
+# resolution still fails the build loudly.
+APPROVED_BEETS_BASE_IMAGES = (
     "lscr.io/linuxserver/beets:2.4.0"
-    "@sha256:4cce2967154e849ca5466469d934a4bb9d8d83c3acf2a5279da47bccd16518f1"
+    "@sha256:4cce2967154e849ca5466469d934a4bb9d8d83c3acf2a5279da47bccd16518f1",
+    "lscr.io/linuxserver/beets:latest",
 )
 
 _PRIVATE_IPV4_RE = re.compile(
@@ -99,7 +112,7 @@ def _dockerfile_beets_base_is_approved() -> bool:
     for line in _read(DOCKERFILE_BEETS).splitlines():
         stripped = line.strip()
         if stripped.startswith("FROM "):
-            return stripped[len("FROM "):].strip() == APPROVED_BEETS_BASE_IMAGE
+            return stripped[len("FROM "):].strip() in APPROVED_BEETS_BASE_IMAGES
     return False
 
 
@@ -132,8 +145,8 @@ def _check_image_digest_semantics(label: str, image: str, has_build: bool, error
             errors.append(f"{label} image has no tag: {image}")
         if not _dockerfile_beets_base_is_approved():
             errors.append(
-                f"{label} is locally built but Dockerfile.beets's FROM line does not pin the approved "
-                f"upstream base image digest ({APPROVED_BEETS_BASE_IMAGE})"
+                f"{label} is locally built but Dockerfile.beets's FROM line does not reference an "
+                f"approved upstream base image ({' or '.join(APPROVED_BEETS_BASE_IMAGES)})"
             )
     else:
         if "@sha256:" not in image:

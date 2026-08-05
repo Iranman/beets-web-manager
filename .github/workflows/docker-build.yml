@@ -86,7 +86,10 @@ jobs:
       - name: Verify Beets engine image
         run: |
           set -e
-          args=(--image beets-engine:ci --require-version 2.4.0 --require-command-help mbsubmit --check-s6-supervision)
+          # No --require-version: the base image floats on `latest` (owner
+          # decision, 2026-08-05), so the installed Beets version is
+          # expected to change on any rebuild rather than staying fixed.
+          args=(--image beets-engine:ci --require-command-help mbsubmit --check-s6-supervision)
           if [ -f docker/beets/apply_patches.py ]; then
             echo "Chroma plugin-resolution patch detected; activating Chroma-specific verification."
             args+=(--require-plugin chroma --forbid-duplicate-plugin musicbrainz --require-command-help submit)
