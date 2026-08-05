@@ -10615,7 +10615,7 @@ def album_delete_art(aid):
         result = beets_client.delete_album_art(aid)
     except BeetsError as ex:
         app.logger.warning("Could not delete album artwork for album %s: %s", aid, type(ex).__name__)
-        return jsonify({"ok": False, "error": str(ex)}), 400
+        return jsonify({"ok": False, "error": "Could not delete album artwork."}), 400
     except Exception as ex:
         app.logger.warning("Could not delete album artwork for album %s: %s", aid, type(ex).__name__)
         return jsonify({"ok": False, "error": "Could not delete album artwork."}), 500

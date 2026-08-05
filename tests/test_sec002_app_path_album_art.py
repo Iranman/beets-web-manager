@@ -371,6 +371,20 @@ class FlaskAlbumArtRouteBoundaryTests(unittest.TestCase):
         self.assertNotIn("Traceback", json.dumps(data))
         self.assertNotIn("token=abc", json.dumps(data))
 
+    def test_delete_album_art_does_not_leak_beets_error_text(self):
+        leak = "LEAK_MARKER Traceback /tmp/internal.py token=abc"
+        with app_module.app.test_request_context("/api/albums/1/art", method="DELETE"), \
+             mock.patch.object(app_module.lib, "get_album", return_value=self.album), \
+             mock.patch.object(app_module.beets_client, "delete_album_art", side_effect=BeetsError(leak)):
+            resp, status = app_module.album_delete_art(1)
+
+        data = resp.get_json()
+        self.assertEqual(status, 400, data)
+        self.assertEqual(data["error"], "Could not delete album artwork.")
+        self.assertNotIn("LEAK_MARKER", json.dumps(data))
+        self.assertNotIn("Traceback", json.dumps(data))
+        self.assertNotIn("token=abc", json.dumps(data))
+
     def test_delete_album_art_uses_engine_quarantine_operation(self):
         with app_module.app.test_request_context("/api/albums/1/art", method="DELETE"), \
              mock.patch.object(app_module.lib, "get_album", return_value=self.album), \
