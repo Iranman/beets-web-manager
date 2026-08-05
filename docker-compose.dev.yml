@@ -11,6 +11,7 @@ services:
       context: .
       dockerfile: Dockerfile.beets
       args:
+        BEETS_BASE_IMAGE: ${BEETS_BASE_IMAGE:-lscr.io/linuxserver/beets:2.13.1}
         VCS_REF: ${VCS_REF:-local-development}
     image: beets-engine:dev
     container_name: beets-dev

@@ -79,6 +79,8 @@ docker compose -f docker-compose.full.yml up -d --build
 > [!WARNING]
 > `docker-compose.full.yml` builds `beets-engine` locally from `Dockerfile.beets`. Running it outside the repository root without a local build context will fail with `pull access denied for beets-engine`. Do not copy the `beets` service definition into an external directory unless `Dockerfile.beets` and source files are also present.
 
+Both `docker-compose.dev.yml` and `docker-compose.full.yml` accept a `BEETS_BASE_IMAGE` variable (in `.env` or the shell environment) to select the upstream LinuxServer Beets version the engine is built from -- default is the tested production candidate. See `docs/CONFIGURATION.md` ("Beets engine version") before setting it to `lscr.io/linuxserver/beets:latest`, and see `docs/BEETS_ENGINE_MIGRATION.md` before changing it on a deployment with an existing library.
+
 ---
 
 ## Image Release Channels

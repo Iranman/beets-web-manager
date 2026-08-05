@@ -226,7 +226,7 @@ Packaging status: passing tests on a local or CI branch do not authorize product
 ## Troubleshooting
 
 **`pull access denied for beets-engine`**
-Docker encountered a local-only engine image tag (`beets-engine:2.4.0` or `beets-engine:dev`) without a local build context. Do **not** run `docker login`. Use the production `docker-compose.yml` (web-manager only) with an existing `BEETS_API_URL`, or run `docker compose -f docker-compose.full.yml up -d --build` from the repository root.
+Docker encountered a local-only engine image tag (`beets-engine:local` or `beets-engine:dev`) without a local build context. Do **not** run `docker login`. Use the production `docker-compose.yml` (web-manager only) with an existing `BEETS_API_URL`, or run `docker compose -f docker-compose.full.yml up -d --build` from the repository root.
 
 **`pull access denied for beets-web-manager`**
 Compose is attempting to use a local-only image name instead of the published registry image. Make sure your Compose file uses `image: ghcr.io/iranman/beets-web-manager:${BEETS_WEB_MANAGER_VERSION:-stable}` or run `docker compose -f docker-compose.dev.yml up -d --build` for local source builds.
@@ -289,9 +289,14 @@ docker compose exec beets /lsiopy/bin/beet version
 docker compose exec beets beet-locked import /data/torrents/music
 ```
 
-No second Beets database is created. The temporary Beets 2.4.0 Chroma compatibility patch in `Dockerfile.beets` is only for the pinned affected release and should be removed after upgrading to a fixed upstream Beets release.
+No second Beets database is created. `Dockerfile.beets` applies its Chroma plugin-resolution compatibility patch (`docker/beets/apply_patches.py`) only against exactly Beets 2.4.0; it is skipped (with the upstream fix verified directly) on Beets >= 2.5.0. See `docs/CONFIGURATION.md` ("Beets engine version") and `docs/BEETS_ENGINE_MIGRATION.md` for the version policy and upgrade/rollback procedure.
 
 ## Architecture Migration & Upgrades
+
+Upgrading the Beets **engine version** specifically (not just rebuilding the
+same version) needs the additional backup/verification/rollback steps in
+`docs/BEETS_ENGINE_MIGRATION.md` -- newer Beets releases can perform an
+automatic, one-time, non-reversible database schema migration on first open.
 
 ```bash
 # 1. Back up config and library

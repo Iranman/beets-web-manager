@@ -7,7 +7,7 @@ This guide covers common errors and resolution steps for Beets Web Manager.
 ## Common Deployment Failures
 
 ### 1. `pull access denied for beets-engine`
-* **Cause**: Docker encountered a local-only Beets engine image name (`beets-engine:2.4.0` or `beets-engine:dev`) without a local build context (e.g., running outside the repository root or copying service blocks into another directory).
+* **Cause**: Docker encountered a local-only Beets engine image name (`beets-engine:local` or `beets-engine:dev`) without a local build context (e.g., running outside the repository root or copying service blocks into another directory).
 * **Fix**: Do **NOT** run `docker login` (this is not an authentication issue).
   1. For standard web-manager deployments: Use the production `docker-compose.yml` (which has no `beets` engine build) and point `BEETS_API_URL` to an existing Beets control agent endpoint.
   2. For bundled engine deployments: Run `docker compose -f docker-compose.full.yml up -d --build` or `docker compose -f docker-compose.dev.yml up -d --build` directly from the repository root where `Dockerfile.beets` and build contexts are located.
