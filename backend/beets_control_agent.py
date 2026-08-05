@@ -8,6 +8,9 @@ try:
     import fcntl
 except ImportError:
     fcntl = None
+import base64
+import binascii
+import io
 import hmac
 import json
 import os
@@ -45,6 +48,11 @@ DOWNLOAD_PATH = os.environ.get("DOWNLOAD_PATH", "/data/torrents")
 LOCK_PATH = os.environ.get("BEETS_LOCK_PATH", os.path.join(BEETSDIR, ".beet_db.lock"))
 LIB_PATH = os.path.join(BEETSDIR, "musiclibrary.blb")
 BEET_BIN = os.environ.get("BEET_BIN", "beet")
+ALBUM_ART_MAX_BYTES = int(os.environ.get("BEETS_ALBUM_ART_MAX_BYTES", str(15 * 1024 * 1024)) or str(15 * 1024 * 1024))
+ALBUM_ART_MAX_PIXELS = int(os.environ.get("BEETS_ALBUM_ART_MAX_PIXELS", "50000000") or "50000000")
+ALBUM_ART_MAX_DIMENSION = int(os.environ.get("BEETS_ALBUM_ART_MAX_DIMENSION", "12000") or "12000")
+ALBUM_ART_FILENAME = "albumart.jpg"
+ALBUM_ART_TRASH_ROOT = Path(os.environ.get("BEETS_ALBUM_ART_TRASH_DIR", os.path.join(BEETSDIR, "album-art-trash")))
 
 ALLOWED_COMMANDS = {
     "import", "update", "write", "move", "modify", "ls", "stats", "fields",
@@ -603,6 +611,331 @@ def _library_db_values(path: Path) -> tuple[str, str]:
     except Exception:
         rel_value = abs_value
     return rel_value, abs_value
+
+
+class AlbumArtOperationError(Exception):
+    def __init__(self, message: str, status: int = 400):
+        super().__init__(message)
+        self.message = message
+        self.status = int(status or 400)
+
+
+_DISC_DIR_RE = re.compile(r"^(?:disc|cd|disk)\s*\d+$", re.I)
+_ALBUM_ART_FIXED_NAMES = (
+    "albumart.jpg", "albumart.jpeg", "albumart.png", "albumart.webp",
+    "folder.jpg", "folder.jpeg", "folder.png", "folder.webp",
+    "cover.jpg", "cover.jpeg", "cover.png", "cover.webp",
+    "front.jpg", "front.jpeg", "front.png", "front.webp",
+)
+
+
+def _db_text(value: Any) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value or "")
+
+
+def _trusted_music_db_path(raw: Any, *, require_exists: bool = False, expected_type: str | None = None) -> Path:
+    text = _db_text(raw).strip()
+    if not text:
+        raise UnsafePathError("path is empty")
+    if "\x00" in text or "\\" in text:
+        raise UnsafePathError("path contains a null byte or backslash")
+    if re.match(r"^[A-Za-z]:", text) or text.startswith("//"):
+        raise UnsafePathError("windows and UNC paths are not allowed")
+    if text.startswith("/"):
+        raw_path = text
+    else:
+        music_root_text = _db_text(MUSIC_LIBRARY_PATH).replace("\\", "/").rstrip("/")
+        raw_path = f"{music_root_text}/{text.lstrip('/')}"
+    return _library_rewrite_path(raw_path, require_exists=require_exists, expected_type=expected_type)
+
+
+def _require_album_art_path(path: Path, album_dir: Path, *, require_exists: bool = False) -> Path:
+    music_root = Path(os.path.realpath(MUSIC_LIBRARY_PATH))
+    candidate = Path(os.path.abspath(str(path)))
+    try:
+        candidate.relative_to(album_dir)
+    except Exception as exc:
+        raise UnsafePathError("artwork path is outside the album folder") from exc
+    if candidate == music_root or candidate == album_dir:
+        raise UnsafePathError("artwork path cannot be a root directory")
+    if _path_has_symlink_component(candidate, music_root, include_leaf=require_exists):
+        raise UnsafePathError("artwork path cannot contain symlink components")
+    if candidate.exists():
+        if candidate.is_symlink():
+            raise UnsafePathError("artwork path cannot be a symlink")
+        if not candidate.is_file():
+            raise UnsafePathError("artwork path is not a regular file")
+    elif require_exists:
+        raise UnsafePathError("artwork path does not exist")
+    return candidate
+
+
+def _album_art_album_dir(cur: sqlite3.Cursor, album_id: int) -> tuple[sqlite3.Row, Path]:
+    cur.execute("SELECT id, album, albumartist, mb_releasegroupid, artpath FROM albums WHERE id = ?", (album_id,))
+    album = cur.fetchone()
+    if not album:
+        raise AlbumArtOperationError("Album not found", 404)
+    cur.execute(
+        "SELECT path FROM items WHERE album_id = ? AND path IS NOT NULL ORDER BY id LIMIT 25",
+        (album_id,),
+    )
+    rows = cur.fetchall()
+    if not rows:
+        raise AlbumArtOperationError("Album folder could not be resolved", 400)
+    music_root = Path(os.path.realpath(MUSIC_LIBRARY_PATH))
+    for row in rows:
+        try:
+            item_path = _trusted_music_db_path(row["path"], require_exists=False)
+            album_dir = item_path.parent
+            if _DISC_DIR_RE.match(album_dir.name):
+                album_dir = album_dir.parent
+            album_dir = Path(os.path.abspath(str(album_dir)))
+            if album_dir == music_root:
+                continue
+            album_dir.relative_to(music_root)
+            if not album_dir.exists() or not album_dir.is_dir():
+                continue
+            if _path_has_symlink_component(album_dir, music_root, include_leaf=True):
+                continue
+            return album, album_dir
+        except Exception:
+            continue
+    raise AlbumArtOperationError("Album folder could not be resolved safely", 400)
+
+
+def _check_album_art_identity(album: sqlite3.Row, expected_rgid: Any) -> str:
+    actual = _db_text(album["mb_releasegroupid"]).strip().lower()
+    expected = _db_text(expected_rgid).strip().lower()
+    if expected and expected != actual:
+        raise AlbumArtOperationError("Album identity changed before artwork update", 409)
+    return actual
+
+
+def _normalise_album_art_image(data: bytes) -> tuple[bytes, dict[str, Any]]:
+    if not data or len(data) < 32:
+        raise AlbumArtOperationError("Cover image is empty or too small", 400)
+    if len(data) > ALBUM_ART_MAX_BYTES:
+        raise AlbumArtOperationError("Cover image exceeds the size limit", 400)
+    try:
+        from PIL import Image, ImageOps
+        Image.MAX_IMAGE_PIXELS = ALBUM_ART_MAX_PIXELS
+    except Exception as exc:
+        raise AlbumArtOperationError("Image validation is unavailable", 500) from exc
+    try:
+        with Image.open(io.BytesIO(data)) as probe:
+            image_format = (probe.format or "").upper()
+            width, height = probe.size
+            frames = int(getattr(probe, "n_frames", 1) or 1)
+            if image_format not in {"JPEG", "PNG", "WEBP"}:
+                raise AlbumArtOperationError("Unsupported image type", 400)
+            if frames != 1 or bool(getattr(probe, "is_animated", False)):
+                raise AlbumArtOperationError("Animated artwork is not supported", 400)
+            if width < 1 or height < 1:
+                raise AlbumArtOperationError("Image dimensions are invalid", 400)
+            if width > ALBUM_ART_MAX_DIMENSION or height > ALBUM_ART_MAX_DIMENSION:
+                raise AlbumArtOperationError("Image dimensions exceed the limit", 400)
+            if width * height > ALBUM_ART_MAX_PIXELS:
+                raise AlbumArtOperationError("Image pixel count exceeds the limit", 400)
+            probe.verify()
+        with Image.open(io.BytesIO(data)) as image:
+            image = ImageOps.exif_transpose(image)
+            if image.mode in {"RGBA", "LA"} or "transparency" in image.info:
+                rgba = image.convert("RGBA")
+                background = Image.new("RGB", rgba.size, (255, 255, 255))
+                background.paste(rgba, mask=rgba.getchannel("A"))
+                image = background
+            else:
+                image = image.convert("RGB")
+            out = io.BytesIO()
+            image.save(out, format="JPEG", quality=90, optimize=True)
+            normalized = out.getvalue()
+    except AlbumArtOperationError:
+        raise
+    except Exception as exc:
+        name = type(exc).__name__
+        if name in {"DecompressionBombError", "DecompressionBombWarning", "UnidentifiedImageError"}:
+            raise AlbumArtOperationError("Image could not be safely decoded", 400) from exc
+        raise AlbumArtOperationError("Image could not be safely decoded", 400) from exc
+    if not normalized or len(normalized) > ALBUM_ART_MAX_BYTES:
+        raise AlbumArtOperationError("Normalized artwork exceeds the size limit", 400)
+    return normalized, {
+        "format": "JPEG",
+        "mime": "image/jpeg",
+        "extension": ".jpg",
+        "width": width,
+        "height": height,
+        "bytes": len(normalized),
+    }
+
+
+def _decode_album_art_payload(body: dict[str, Any]) -> tuple[bytes, dict[str, Any]]:
+    raw = body.get("image_data_b64")
+    if not isinstance(raw, str) or not raw.strip():
+        raise AlbumArtOperationError("Cover image data is required", 400)
+    try:
+        data = base64.b64decode(raw, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise AlbumArtOperationError("Cover image data is invalid", 400) from exc
+    return _normalise_album_art_image(data)
+
+
+def _fsync_file(path: Path) -> None:
+    try:
+        with open(path, "rb") as handle:
+            os.fsync(handle.fileno())
+    except Exception:
+        pass
+
+
+def _fsync_directory(path: Path) -> None:
+    flags = getattr(os, "O_DIRECTORY", 0) | os.O_RDONLY
+    fd = None
+    try:
+        fd = os.open(str(path), flags)
+        os.fsync(fd)
+    except Exception:
+        pass
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except Exception:
+                pass
+
+
+def _replace_album_art_locked(con: sqlite3.Connection, album_id: int, body: dict[str, Any]) -> dict[str, Any]:
+    cur = con.cursor()
+    album, album_dir = _album_art_album_dir(cur, album_id)
+    rgid = _check_album_art_identity(album, body.get("expected_mb_releasegroupid"))
+    image_bytes, image_info = _decode_album_art_payload(body)
+    music_root = Path(os.path.realpath(MUSIC_LIBRARY_PATH))
+    if _path_has_symlink_component(album_dir, music_root, include_leaf=True):
+        raise UnsafePathError("album folder cannot contain symlink components")
+    dest = _require_album_art_path(album_dir / ALBUM_ART_FILENAME, album_dir, require_exists=False)
+    tmp_path: Path | None = None
+    backup_path: Path | None = None
+    replaced_existing = False
+    try:
+        fd, tmp_name = tempfile.mkstemp(prefix=".albumart-", suffix=".tmp", dir=str(album_dir))
+        tmp_path = Path(tmp_name)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(image_bytes)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp_path, 0o644)
+        _require_album_art_path(dest, album_dir, require_exists=False)
+        if dest.exists():
+            if dest.is_symlink() or not dest.is_file():
+                raise UnsafePathError("existing artwork is not a regular file")
+            backup_path = album_dir / f".albumart-backup-{uuid.uuid4().hex}.jpg"
+            os.replace(dest, backup_path)
+            replaced_existing = True
+        os.replace(tmp_path, dest)
+        tmp_path = None
+        _fsync_file(dest)
+        _fsync_directory(album_dir)
+        cur.execute("UPDATE albums SET artpath = ? WHERE id = ?", (str(dest), album_id))
+        if cur.rowcount != 1:
+            raise AlbumArtOperationError("Album artpath update did not affect exactly one row", 500)
+        con.commit()
+        if backup_path and backup_path.exists():
+            try:
+                backup_path.unlink()
+            except Exception:
+                pass
+        return {
+            "ok": True,
+            "album_id": album_id,
+            "artpath": str(dest),
+            "album_dir": str(album_dir),
+            "mb_releasegroupid": rgid,
+            "source": _db_text(body.get("source") or "user")[:40],
+            "replaced_existing": replaced_existing,
+            "image": image_info,
+        }
+    except Exception:
+        con.rollback()
+        try:
+            if dest.exists():
+                dest.unlink()
+        except Exception:
+            pass
+        if backup_path and backup_path.exists():
+            try:
+                os.replace(backup_path, dest)
+            except Exception:
+                pass
+        raise
+    finally:
+        if tmp_path and tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
+
+
+def _album_art_delete_candidates(album: sqlite3.Row, album_dir: Path) -> list[Path]:
+    seen: set[str] = set()
+    candidates: list[Path] = []
+    raw_art = _db_text(album["artpath"]).replace("\x00", "").strip()
+    if raw_art:
+        current = _trusted_music_db_path(raw_art, require_exists=False)
+        current = _require_album_art_path(current, album_dir, require_exists=False)
+        if current.exists():
+            candidates.append(current)
+            seen.add(str(current.resolve(strict=False)))
+    for name in _ALBUM_ART_FIXED_NAMES:
+        candidate = _require_album_art_path(album_dir / name, album_dir, require_exists=False)
+        key = str(candidate.resolve(strict=False))
+        if key in seen:
+            continue
+        if candidate.exists():
+            candidates.append(candidate)
+            seen.add(key)
+    return candidates
+
+
+def _delete_album_art_locked(con: sqlite3.Connection, album_id: int) -> dict[str, Any]:
+    cur = con.cursor()
+    album, album_dir = _album_art_album_dir(cur, album_id)
+    candidates = _album_art_delete_candidates(album, album_dir)
+    op_id = uuid.uuid4().hex
+    moved: list[dict[str, str]] = []
+    try:
+        for src in candidates:
+            _require_album_art_path(src, album_dir, require_exists=True)
+            target = ALBUM_ART_TRASH_ROOT / op_id / src.name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists():
+                target = target.with_name(f"{target.stem}-{uuid.uuid4().hex[:8]}{target.suffix}")
+            os.replace(src, target)
+            moved.append({"source": str(src), "quarantined": str(target)})
+        cur.execute("UPDATE albums SET artpath = '' WHERE id = ?", (album_id,))
+        if cur.rowcount != 1:
+            raise AlbumArtOperationError("Album artpath clear did not affect exactly one row", 500)
+        con.commit()
+        return {
+            "ok": True,
+            "album_id": album_id,
+            "album_dir": str(album_dir),
+            "removed": [row["source"] for row in moved],
+            "removed_count": len(moved),
+            "quarantined_art": moved,
+        }
+    except Exception:
+        con.rollback()
+        for row in reversed(moved):
+            src = Path(row["quarantined"])
+            dst = Path(row["source"])
+            try:
+                if src.exists() and not dst.exists():
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(src, dst)
+            except Exception:
+                pass
+        raise
 
 
 def is_safe_path(path: object, allowed_types: list = None) -> bool:
@@ -1264,6 +1597,32 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             self._send_json(403, {"error": "Raw SQL queries are not permitted"})
             return
 
+        if path.startswith("/albums/") and path.endswith("/art"):
+            parts = path.split("/")
+            try:
+                album_id = int(parts[2])
+            except (ValueError, IndexError):
+                self._send_json(400, {"error": "Invalid album ID"})
+                return
+            lock_file = acquire_os_lock(read_only=False)
+            con = None
+            try:
+                con = sqlite3.connect(LIB_PATH, timeout=10)
+                con.row_factory = sqlite3.Row
+                result = _replace_album_art_locked(con, album_id, body if isinstance(body, dict) else {})
+                self._send_json(200, result)
+            except AlbumArtOperationError as exc:
+                self._send_json(exc.status, {"error": exc.message})
+            except UnsafePathError:
+                self._send_json(403, {"error": "Access denied for album artwork path"})
+            except Exception:
+                self._send_json(500, {"error": "Failed to replace album artwork"})
+            finally:
+                if con is not None:
+                    con.close()
+                release_os_lock(lock_file)
+            return
+
         if path == "/library/rewrite-path":
             old_raw = body.get("old_path", "")
             new_raw = body.get("new_path", "")
@@ -1848,6 +2207,32 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             body = json.loads(post_data.decode("utf-8")) if post_data else {}
         except Exception:
             body = {}
+
+        if path.startswith("/albums/") and path.endswith("/art"):
+            parts = path.split("/")
+            try:
+                album_id = int(parts[2])
+            except (ValueError, IndexError):
+                self._send_json(400, {"error": "Invalid album ID"})
+                return
+            lock_file = acquire_os_lock(read_only=False)
+            con = None
+            try:
+                con = sqlite3.connect(LIB_PATH, timeout=10)
+                con.row_factory = sqlite3.Row
+                result = _delete_album_art_locked(con, album_id)
+                self._send_json(200, result)
+            except AlbumArtOperationError as exc:
+                self._send_json(exc.status, {"error": exc.message})
+            except UnsafePathError:
+                self._send_json(403, {"error": "Access denied for album artwork path"})
+            except Exception:
+                self._send_json(500, {"error": "Failed to delete album artwork"})
+            finally:
+                if con is not None:
+                    con.close()
+                release_os_lock(lock_file)
+            return
 
         if path.startswith("/albums/") and path.endswith("/artpath"):
             parts = path.split("/")

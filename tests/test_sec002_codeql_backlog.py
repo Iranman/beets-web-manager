@@ -125,33 +125,21 @@ class FolderImportTrackCountRootContainmentTests(unittest.TestCase):
 
 
 class AlbumArtDeleteExceptionSanitizationTests(unittest.TestCase):
-    """Alert #401 (py/stack-trace-exposure): album_delete_art()'s art-file
-    unlink() failure path returned the raw exception text to the client;
-    it must now log server-side and return a generic message, matching the
-    sibling clear_album_artpath() failure path a few lines below it."""
+    """Alert #401 (py/stack-trace-exposure): album_delete_art() must not
+    return raw filesystem or engine exception text in public JSON errors."""
 
-    def test_unlink_failure_does_not_leak_exception_text(self):
+    def test_delete_failure_does_not_leak_exception_text(self):
         leak = "LEAK_MARKER /internal/host/path errno=13 token=abc123"
-        album_dir = Path(tempfile.mkdtemp(prefix="sec002-art-"))
-        art_file = album_dir / "cover.jpg"
-        art_file.write_bytes(b"x")
-        try:
-            with app_module.app.test_request_context("/api/albums/42/art", method="DELETE"), \
-                 mock.patch.object(app_module.lib, "get_album", return_value=object()), \
-                 mock.patch.object(app_module, "_album_dir_for_art", return_value=album_dir), \
-                 mock.patch.object(app_module, "_album_stored_art_path", return_value=art_file), \
-                 mock.patch.object(app_module, "_path_is_under", return_value=True), \
-                 mock.patch.object(app_module, "_ALBUM_ART_NAMES", ()), \
-                 mock.patch.object(Path, "unlink", side_effect=OSError(leak)):
-                response, status = app_module.album_delete_art(42)
-            data = response.get_json()
-            self.assertEqual(status, 500)
-            self.assertNotIn("LEAK_MARKER", json.dumps(data))
-            self.assertNotIn("token=abc123", json.dumps(data))
-            self.assertIn("cover.jpg", data["error"])
-        finally:
-            import shutil
-            shutil.rmtree(album_dir, ignore_errors=True)
+        with app_module.app.test_request_context("/api/albums/42/art", method="DELETE"), \
+             mock.patch.object(app_module.lib, "get_album", return_value=object()), \
+             mock.patch.object(app_module.beets_client, "delete_album_art", side_effect=RuntimeError(leak)):
+            response, status = app_module.album_delete_art(42)
+        data = response.get_json()
+        self.assertEqual(status, 500)
+        self.assertEqual(data["error"], "Could not delete album artwork.")
+        self.assertNotIn("LEAK_MARKER", json.dumps(data))
+        self.assertNotIn("token=abc123", json.dumps(data))
+        self.assertNotIn("/internal/host/path", json.dumps(data))
 
 
 if __name__ == "__main__":
