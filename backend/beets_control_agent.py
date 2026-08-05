@@ -555,6 +555,56 @@ def resolve_safe_path(
     return trusted
 
 
+def _path_has_symlink_component(path: Path, root: Path, *, include_leaf: bool = True) -> bool:
+    try:
+        relative = path.relative_to(root)
+    except Exception:
+        return True
+    current = root
+    parts = relative.parts if include_leaf else relative.parts[:-1]
+    for part in parts:
+        current = current / part
+        try:
+            if current.is_symlink():
+                return True
+        except Exception:
+            return True
+    return False
+
+
+def _library_rewrite_path(raw: object, *, require_exists: bool, expected_type: str | None) -> Path:
+    if not raw or not isinstance(raw, str):
+        raise UnsafePathError("path must be a non-empty string")
+    raw_abs = Path(os.path.abspath(raw))
+    music_root = Path(os.path.realpath(MUSIC_LIBRARY_PATH))
+    try:
+        if raw_abs != music_root and not raw_abs.is_relative_to(music_root):
+            raise UnsafePathError("path is outside the music library")
+    except AttributeError:
+        try:
+            raw_abs.relative_to(music_root)
+        except ValueError as exc:
+            raise UnsafePathError("path is outside the music library") from exc
+    if raw_abs == music_root:
+        raise UnsafePathError("path cannot be the music library root")
+    include_leaf = require_exists
+    if _path_has_symlink_component(raw_abs, music_root, include_leaf=include_leaf):
+        raise UnsafePathError("path cannot contain symlink components")
+    trusted = resolve_safe_path(raw, ["music"], require_exists=require_exists, expected_type=expected_type)
+    if trusted == music_root:
+        raise UnsafePathError("path cannot be the music library root")
+    return trusted
+
+
+def _library_db_values(path: Path) -> tuple[str, str]:
+    abs_value = str(path)
+    try:
+        rel_value = path.relative_to(Path(os.path.realpath(MUSIC_LIBRARY_PATH))).as_posix()
+    except Exception:
+        rel_value = abs_value
+    return rel_value, abs_value
+
+
 def is_safe_path(path: object, allowed_types: list = None) -> bool:
     """Boolean convenience wrapper for call sites that only need a check
     (e.g. validating job args), not the resolved Path itself."""
@@ -1213,6 +1263,93 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
         if path == "/library/raw_query":
             self._send_json(403, {"error": "Raw SQL queries are not permitted"})
             return
+
+        if path == "/library/rewrite-path":
+            old_raw = body.get("old_path", "")
+            new_raw = body.get("new_path", "")
+            try:
+                old_path = _library_rewrite_path(old_raw, require_exists=False, expected_type=None)
+                new_path = _library_rewrite_path(new_raw, require_exists=True, expected_type="file")
+            except UnsafePathError:
+                self._send_json(403, {"error": "Access denied for library path rewrite"})
+                return
+            if old_path == new_path:
+                self._send_json(400, {"error": "Source and destination paths must differ"})
+                return
+
+            lock_file = acquire_os_lock(read_only=False)
+            con = None
+            try:
+                old_path = _library_rewrite_path(str(old_path), require_exists=False, expected_type=None)
+                new_path = _library_rewrite_path(str(new_path), require_exists=True, expected_type="file")
+                old_rel, old_abs = _library_db_values(old_path)
+                new_rel, _new_abs = _library_db_values(new_path)
+                con = sqlite3.connect(LIB_PATH, timeout=10)
+                cur = con.cursor()
+                changed_items = 0
+                changed_artpaths = 0
+                cur.execute(
+                    "UPDATE items SET path=? WHERE path=? OR path=?",
+                    (new_rel, old_rel, old_abs),
+                )
+                changed_items += max(0, cur.rowcount)
+                cur.execute(
+                    "UPDATE items SET path=? WHERE path=? OR path=?",
+                    (new_rel.encode(), old_rel.encode(), old_abs.encode()),
+                )
+                changed_items += max(0, cur.rowcount)
+                # Isolated per-statement: albums.artpath legitimately has no
+                # matching row for most item-path rewrites (artpath is a
+                # per-album field, not per-item), and a schema/type error on
+                # one form must not discard a real count already earned by
+                # the other -- unlike the previous behavior, which reset the
+                # whole artpath count to 0 on any exception, silently
+                # under-reporting (while still committing) a partially
+                # successful update.
+                try:
+                    cur.execute(
+                        "UPDATE albums SET artpath=? WHERE artpath=? OR artpath=?",
+                        (new_rel, old_rel, old_abs),
+                    )
+                    changed_artpaths += max(0, cur.rowcount)
+                except Exception:
+                    pass
+                try:
+                    cur.execute(
+                        "UPDATE albums SET artpath=? WHERE artpath=? OR artpath=?",
+                        (new_rel.encode(), old_rel.encode(), old_abs.encode()),
+                    )
+                    changed_artpaths += max(0, cur.rowcount)
+                except Exception:
+                    pass
+                changed_total = changed_items + changed_artpaths
+                if changed_total == 0:
+                    con.rollback()
+                    self._send_json(404, {"error": "No stored library rows matched the source path"})
+                    return
+                con.commit()
+                self._send_json(200, {
+                    "ok": True,
+                    "items_changed": changed_items,
+                    "artpaths_changed": changed_artpaths,
+                    "changed": changed_total,
+                    "old_path": str(old_path),
+                    "new_path": str(new_path),
+                    "stored_path": new_rel,
+                })
+            except Exception:
+                if con is not None:
+                    try:
+                        con.rollback()
+                    except Exception:
+                        pass
+                self._send_json(500, {"error": "Failed to rewrite library path"})
+            finally:
+                if con is not None:
+                    con.close()
+                release_os_lock(lock_file)
+            return
+
         if path.startswith("/albums/") and path.endswith("/artpath"):
             parts = path.split("/")
             try:

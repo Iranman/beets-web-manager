@@ -374,17 +374,27 @@ class ImportReviewManualIdBehaviorTests(unittest.TestCase):
         self.assertNoSensitiveExceptionDetails(response)
 
     def test_candidate_track_endpoint_local_scan_exception_is_sanitized(self):
-        with mock.patch.object(self.app_module, "_candidate_track_local_candidates", side_effect=RuntimeError(SENSITIVE_EXCEPTION_TEXT)):
-            response = self.client.get(f"/api/candidates/{RELEASE_ID}/tracks?folder=/tmp/manual-album")
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp).resolve() / "manual-album"
+            folder.mkdir()
+            with mock.patch.object(self.app_module, "DOWNLOADS_ROOT", Path(tmp).resolve()), \
+                 mock.patch.object(self.app_module, "_DOWNLOADS_ROOTS", [Path(tmp).resolve()]), \
+                 mock.patch.object(self.app_module, "_candidate_track_local_candidates", side_effect=RuntimeError(SENSITIVE_EXCEPTION_TEXT)):
+                response = self.client.get(f"/api/candidates/{RELEASE_ID}/tracks", query_string={"folder": str(folder)})
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.get_json()["error"], "Track comparison could not be completed.")
         self.assertNoSensitiveExceptionDetails(response)
 
     def test_candidate_track_endpoint_musicbrainz_error_is_sanitized(self):
-        with mock.patch.object(self.app_module, "_candidate_track_local_candidates", return_value=[]), \
-             mock.patch.object(self.app_module, "_fetch_mb_release_tracklist", return_value={"ok": False, "error": SENSITIVE_EXCEPTION_TEXT}):
-            response = self.client.get(f"/api/candidates/{RELEASE_ID}/tracks?folder=/tmp/manual-album")
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp).resolve() / "manual-album"
+            folder.mkdir()
+            with mock.patch.object(self.app_module, "DOWNLOADS_ROOT", Path(tmp).resolve()), \
+                 mock.patch.object(self.app_module, "_DOWNLOADS_ROOTS", [Path(tmp).resolve()]), \
+                 mock.patch.object(self.app_module, "_candidate_track_local_candidates", return_value=[]), \
+                 mock.patch.object(self.app_module, "_fetch_mb_release_tracklist", return_value={"ok": False, "error": SENSITIVE_EXCEPTION_TEXT}):
+                response = self.client.get(f"/api/candidates/{RELEASE_ID}/tracks", query_string={"folder": str(folder)})
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.get_json()["error"], "MusicBrainz lookup failed.")

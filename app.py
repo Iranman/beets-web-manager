@@ -11854,6 +11854,89 @@ def _resolve_import_review_folder_path(raw: Any, *, allow_music: bool = False) -
     return resolved, None
 
 
+def _resolve_import_review_source_path(
+    raw: Any,
+    *,
+    allow_music: bool = True,
+    expected_type: Optional[str] = None,
+    require_exists: bool = True,
+) -> Tuple[Optional[Path], Optional[str]]:
+    """Resolve an Import Review source file/folder under approved roots."""
+    error = _import_review_path_text_error(raw, allow_relative=False)
+    if error:
+        return None, error
+    candidate = Path(_s(raw).strip())
+    matched_root: Optional[Path] = None
+    for root in _import_review_cleanup_roots(allow_music=allow_music):
+        if candidate == root:
+            return None, "Refusing to operate on an approved root."
+        if _path_lexically_under(candidate, root):
+            matched_root = root
+            break
+    if matched_root is None:
+        return None, "Source path is outside the allowed roots."
+    if _path_has_symlink_component_under(candidate, matched_root):
+        return None, "Source path cannot contain symlink components."
+    if candidate.is_symlink():
+        return None, "Source path cannot be a symlink."
+    if require_exists and not candidate.exists():
+        return None, "Source path does not exist."
+    if expected_type == "file" and candidate.exists() and not candidate.is_file():
+        return None, "Source path is not an audio file."
+    if expected_type == "dir" and candidate.exists() and not candidate.is_dir():
+        return None, "Source path is not a folder."
+    if expected_type is None and candidate.exists() and not (candidate.is_file() or candidate.is_dir()):
+        return None, "Source path is not a file or folder."
+    try:
+        resolved = candidate.resolve(strict=False)
+        root_resolved = matched_root.resolve(strict=False)
+    except Exception:
+        return None, "Invalid source path."
+    if resolved == root_resolved:
+        return None, "Refusing to operate on an approved root."
+    if not _path_is_under(resolved, root_resolved):
+        return None, "Source path is outside the allowed roots."
+    if expected_type == "file" and resolved.exists() and not resolved.is_file():
+        return None, "Source path is not an audio file."
+    if expected_type == "dir" and resolved.exists() and not resolved.is_dir():
+        return None, "Source path is not a folder."
+    return resolved, None
+
+
+def _resolve_import_review_db_music_path(
+    raw: Any,
+    *,
+    expected_type: Optional[str] = None,
+    require_exists: bool = True,
+) -> Tuple[Optional[Path], Optional[str]]:
+    text = os.fsdecode(raw) if isinstance(raw, (bytes, bytearray)) else _s(raw)
+    text = text.strip()
+    error = _import_review_path_text_error(text, allow_relative=True)
+    if error:
+        return None, error
+    candidate = Path(text)
+    if not candidate.is_absolute():
+        candidate = MUSIC_ROOT / candidate
+    return _resolve_import_review_source_path(
+        str(candidate),
+        allow_music=True,
+        expected_type=expected_type,
+        require_exists=require_exists,
+    )
+
+
+def _resolve_import_review_selected_audio_file(raw: Any, source_root: Path) -> Optional[Path]:
+    resolved, error = _resolve_import_review_cleanup_file(raw, source_root)
+    if (
+        error
+        or resolved is None
+        or not resolved.exists()
+        or not resolved.is_file()
+        or resolved.suffix.lower() not in AUDIO_EXT
+    ):
+        return None
+    return resolved
+
 def _resolve_import_review_cleanup_file(raw: Any, folder: Path) -> Tuple[Optional[Path], Optional[str]]:
     error = _import_review_path_text_error(raw, allow_relative=True)
     if error:
@@ -17707,10 +17790,13 @@ def _candidate_track_local_candidates(folder: str) -> List[Dict[str, Any]]:
         if source.is_file() and source.suffix.lower() in AUDIO_EXT:
             paths = [source]
         elif source.is_dir():
-            paths = sorted(
+            for path in sorted(
                 [p for p in source.rglob("*") if p.is_file() and p.suffix.lower() in AUDIO_EXT],
                 key=lambda p: str(p).lower(),
-            )
+            ):
+                selected = _resolve_import_review_selected_audio_file(str(path), source)
+                if selected:
+                    paths.append(selected)
         seen_keys: set = set()
         for fpath in paths:
             disc, track = _audio_position_from_path(str(fpath))
@@ -17892,8 +17978,19 @@ def _candidate_track_comparison_payload(
 ) -> Dict[str, Any]:
     """Build Import Review track mapping with Release Group-scoped validation."""
     log: list = []
+    trusted_folder = _s(folder).strip()
+    if trusted_folder:
+        resolved_folder, folder_error = _resolve_import_review_source_path(
+            trusted_folder,
+            allow_music=True,
+            expected_type=None,
+            require_exists=True,
+        )
+        if folder_error or resolved_folder is None:
+            return {"ok": False, "error": folder_error or "Source path is not allowed."}
+        trusted_folder = str(resolved_folder)
     try:
-        candidates = _candidate_track_local_candidates(folder)
+        candidates = _candidate_track_local_candidates(trusted_folder)
     except Exception as ex:
         app.logger.error("Import Review local folder scan failed: %s", type(ex).__name__)
         return {"ok": False, "error": "Track comparison could not be completed."}
@@ -18274,6 +18371,13 @@ def _target_preview_year(value: Any) -> str:
 def _target_preview_source_files(folder_path: str, existing_album_id: int = 0) -> List[Path]:
     files: List[Path] = []
     seen: set[str] = set()
+
+    def _add(path: Path) -> None:
+        key = str(path).casefold()
+        if key not in seen:
+            files.append(path)
+            seen.add(key)
+
     if existing_album_id:
         try:
             with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:
@@ -18282,50 +18386,57 @@ def _target_preview_source_files(folder_path: str, existing_album_id: int = 0) -
                     (int(existing_album_id),),
                 ).fetchall()
             for row in rows:
-                raw = _s(row["path"]).strip()
-                if not raw:
-                    continue
-                path = Path(raw)
-                if not path.is_absolute():
-                    path = MUSIC_ROOT / raw
-                key = str(path)
-                if key not in seen:
-                    files.append(path)
-                    seen.add(key)
+                db_path, _error = _resolve_import_review_db_music_path(
+                    row["path"],
+                    expected_type="file",
+                    require_exists=True,
+                )
+                if db_path and db_path.suffix.lower() in AUDIO_EXT:
+                    _add(db_path)
         except Exception:
             pass
+
+    source, source_error = _resolve_import_review_source_path(
+        folder_path,
+        allow_music=True,
+        expected_type=None,
+        require_exists=True,
+    ) if _s(folder_path).strip() else (None, "source path missing")
+    if source_error or source is None:
+        return files
     try:
-        source = Path(folder_path)
         if source.is_file() and source.suffix.lower() in AUDIO_EXT:
-            key = str(source)
-            if key not in seen:
-                files.append(source)
+            _add(source)
         elif source.is_dir():
             for path in sorted(
                 [p for p in source.rglob("*") if p.is_file() and p.suffix.lower() in AUDIO_EXT],
                 key=lambda p: str(p).lower(),
             ):
-                key = str(path)
-                if key not in seen:
-                    files.append(path)
-                    seen.add(key)
+                selected = _resolve_import_review_selected_audio_file(str(path), source)
+                if selected:
+                    _add(selected)
     except Exception:
         pass
     return files
 
 
 def _target_preview_artist_folder(folder_path: str, artist: str) -> str:
-    try:
-        source = Path(folder_path)
-        source_resolved = source.resolve(strict=False)
-        music_resolved = MUSIC_ROOT.resolve(strict=False)
-        source_resolved.relative_to(music_resolved)
-        if source.parent and source.parent != MUSIC_ROOT:
-            parent_name = _s(source.parent.name).strip()
-            if parent_name:
-                return _safe_path_component(parent_name, "Unknown Artist")
-    except Exception:
-        pass
+    source, error = _resolve_import_review_source_path(
+        folder_path,
+        allow_music=True,
+        expected_type=None,
+        require_exists=True,
+    ) if _s(folder_path).strip() else (None, "source path missing")
+    if source is not None and not error:
+        try:
+            music_resolved = MUSIC_ROOT.resolve(strict=False)
+            source.relative_to(music_resolved)
+            if source.parent and source.parent != MUSIC_ROOT:
+                parent_name = _s(source.parent.name).strip()
+                if parent_name:
+                    return _safe_path_component(parent_name, "Unknown Artist")
+        except Exception:
+            pass
     return _safe_artist_folder_name(_normalize_albumartist(artist) or artist or "Unknown Artist")
 
 
@@ -18347,7 +18458,15 @@ def _import_review_selected_source_files(
     track_mapping: Optional[List[Any]] = None,
 ) -> List[Path]:
     """Return verified source files selected by Import Review, never extras."""
-    source_root = Path(folder_path)
+    source_root, source_error = _resolve_import_review_source_path(
+        folder_path,
+        allow_music=True,
+        expected_type=None,
+        require_exists=True,
+    ) if _s(folder_path).strip() else (None, "source path missing")
+    if source_error or source_root is None:
+        return []
+
     raw_files: List[Any] = list(selected_source_files or [])
     if not raw_files and track_mapping:
         for raw_row in track_mapping:
@@ -18361,22 +18480,8 @@ def _import_review_selected_source_files(
     selected: List[Path] = []
     seen: set = set()
     for raw in raw_files:
-        raw_text = _s(raw).strip()
-        if not raw_text:
-            continue
-        path = Path(raw_text)
-        if not path.is_absolute():
-            path = source_root / path
-        try:
-            resolved = path.resolve(strict=False)
-            root_resolved = source_root.resolve(strict=False)
-            if source_root.is_dir():
-                resolved.relative_to(root_resolved)
-            elif resolved != root_resolved:
-                continue
-        except Exception:
-            continue
-        if not resolved.is_file() or resolved.suffix.lower() not in AUDIO_EXT:
+        resolved = _resolve_import_review_selected_audio_file(raw, source_root)
+        if not resolved:
             continue
         key = str(resolved).casefold()
         if key in seen:
@@ -18387,15 +18492,27 @@ def _import_review_selected_source_files(
 
 
 def _remaining_audio_files(folder_path: str) -> List[Path]:
+    source, error = _resolve_import_review_source_path(
+        folder_path,
+        allow_music=True,
+        expected_type=None,
+        require_exists=True,
+    ) if _s(folder_path).strip() else (None, "source path missing")
+    if error or source is None:
+        return []
     try:
-        source = Path(folder_path)
         if source.is_file() and source.suffix.lower() in AUDIO_EXT:
             return [source]
         if source.is_dir():
-            return sorted(
+            files: List[Path] = []
+            for path in sorted(
                 [p for p in source.rglob("*") if p.is_file() and p.suffix.lower() in AUDIO_EXT],
                 key=lambda p: str(p).lower(),
-            )
+            ):
+                resolved = _resolve_import_review_selected_audio_file(str(path), source)
+                if resolved:
+                    files.append(resolved)
+            return files
     except Exception:
         pass
     return []
@@ -18415,14 +18532,25 @@ def _import_target_preview_cache_key(payload: Dict[str, Any]) -> str:
             })
     source_path = _s(payload.get("path")).strip()
     source_marker: Dict[str, Any] = {"path": source_path}
-    try:
-        st = Path(source_path).stat()
-        source_marker.update({
-            "size": int(st.st_size),
-            "mtime_ns": int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1_000_000_000))),
-        })
-    except Exception:
-        pass
+    source_for_stat, _source_error = _resolve_import_review_source_path(
+        source_path,
+        allow_music=True,
+        expected_type=None,
+        require_exists=True,
+    ) if source_path else (None, "source path missing")
+    if source_for_stat is not None:
+        source_marker["canonical_path"] = str(source_for_stat)
+        # Containment validation alone does not invalidate the cache when
+        # the folder's own contents change (a file added/replaced/removed)
+        # without the path itself changing -- restore the same freshness
+        # signal the pre-security-fix implementation had, now computed from
+        # the already-validated canonical path rather than raw request text.
+        try:
+            st = source_for_stat.stat()
+            source_marker["size"] = int(st.st_size)
+            source_marker["mtime_ns"] = int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1_000_000_000)))
+        except Exception:
+            pass
     material = {
         "version": 1,
         "source": source_marker,
@@ -18490,8 +18618,22 @@ def _build_import_target_preview(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     blocked: List[str] = []
     warnings: List[str] = []
+    trusted_folder_path = folder_path
+    trusted_source_path: Optional[Path] = None
     if not folder_path:
         blocked.append("source path missing")
+    else:
+        trusted_source_path, source_path_error = _resolve_import_review_source_path(
+            folder_path,
+            allow_music=True,
+            expected_type=None,
+            require_exists=True,
+        )
+        if source_path_error or trusted_source_path is None:
+            blocked.append(source_path_error or "source path is not allowed")
+            trusted_folder_path = ""
+        else:
+            trusted_folder_path = str(trusted_source_path)
     if "$mb_releasegroupid" in _DEFAULT_ALBUM_PATH_TEMPLATE and not _MB_UUID_RE.match(release_group_id):
         blocked.append("Release Group ID missing or invalid")
     if representative_release_id and not _MB_UUID_RE.match(representative_release_id):
@@ -18510,15 +18652,15 @@ def _build_import_target_preview(payload: Dict[str, Any]) -> Dict[str, Any]:
         album_folder = ""
         album_path = MUSIC_ROOT
     else:
-        artist_folder = _target_preview_artist_folder(folder_path, artist)
+        artist_folder = _target_preview_artist_folder(trusted_folder_path, artist)
         album_title = _safe_path_component(_YEAR_SFXRE.sub("", album).strip() or album, "Unknown Album")
         year_suffix = f" ({year})" if year else ""
         rgid_suffix = f" {{{release_group_id}}}" if release_group_id else ""
         album_folder = f"{album_title}{year_suffix}{rgid_suffix}"
         album_path = MUSIC_ROOT / artist_folder / album_folder
-    source_path_obj = Path(folder_path) if folder_path else Path()
+    source_path_obj = trusted_source_path if trusted_source_path is not None else Path()
 
-    source_files = _target_preview_source_files(folder_path, existing_album_id)
+    source_files = _target_preview_source_files(trusted_folder_path, existing_album_id)
     target_folder_exists = False
     target_folder_conflict = False
     try:
@@ -18661,7 +18803,7 @@ def _build_import_target_preview(payload: Dict[str, Any]) -> Dict[str, Any]:
         blocked.append(f"{unresolved_paths} target path(s) contain unresolved placeholders")
     if release_id_path_warnings:
         blocked.append("target path uses representative release ID instead of Release Group ID")
-    if not source_files and folder_path:
+    if not source_files and trusted_folder_path:
         warnings.append("No source audio files found for preview")
     if unmatched_extra_count:
         warnings.append(
@@ -18800,12 +18942,30 @@ def _review_status_key(status: Any) -> str:
 
 
 def _review_paths_equal(a: str, b: str) -> bool:
+    """Used to authorize destructive Pending Review cleanup actions
+    (_pending_review_matches), so this must fail closed: when either side
+    cannot be trust-resolved (outside the approved roots, a symlink, or
+    otherwise invalid), the two paths are never considered equal merely
+    because their raw text normalizes the same way. A stored Pending
+    Review entry that fails trusted resolution must not be treated as
+    authorization evidence."""
     if a == b:
         return True
-    try:
-        return str(Path(a).resolve(strict=False)) == str(Path(b).resolve(strict=False))
-    except Exception:
-        return a.replace("\\", "/").rstrip("/") == b.replace("\\", "/").rstrip("/")
+    left, left_error = _resolve_import_review_source_path(
+        a,
+        allow_music=True,
+        expected_type=None,
+        require_exists=False,
+    ) if _s(a).strip() else (None, "path missing")
+    right, right_error = _resolve_import_review_source_path(
+        b,
+        allow_music=True,
+        expected_type=None,
+        require_exists=False,
+    ) if _s(b).strip() else (None, "path missing")
+    if left is None or right is None or left_error or right_error:
+        return False
+    return str(left) == str(right)
 
 
 def _review_id_matches_path(review_item_id: str, folder_path: str) -> bool:
@@ -18842,10 +19002,15 @@ def _normalised_submission_files(raw_files: Iterable[Any]) -> List[str]:
         text = _s(raw).strip()
         if not text:
             continue
-        try:
-            text = str(Path(text).resolve(strict=False))
-        except Exception:
-            pass
+        resolved, error = _resolve_import_review_source_path(
+            text,
+            allow_music=True,
+            expected_type=None,
+            require_exists=False,
+        )
+        if error or resolved is None:
+            continue
+        text = str(resolved)
         key = text.casefold()
         if key in seen:
             continue
@@ -19595,6 +19760,16 @@ def import_reconcile_job():
     idempotency_key = _s(payload.get("idempotency_key") or payload.get("auto_import_idempotency_key")).strip()
     if not source_path and review_item_id.startswith("pending:"):
         source_path = review_item_id[len("pending:"):]
+    if source_path:
+        trusted_source, source_error = _resolve_import_review_source_path(
+            source_path,
+            allow_music=True,
+            expected_type=None,
+            require_exists=False,
+        )
+        if source_error or trusted_source is None:
+            return jsonify({"ok": False, "error": source_error or "Source path is not allowed."}), 400
+        source_path = str(trusted_source)
     job = _import_review_reconcile_job_lookup(job_id, source_path, review_item_id, idempotency_key)
     if job:
         job_log = list(getattr(job, "log", []) or [])
@@ -20046,6 +20221,16 @@ def import_folder_with_id():
             pass
     if not folder_path:
         return jsonify({"ok": False, "error": "path required"}), 400
+    trusted_folder, folder_error = _resolve_import_review_source_path(
+        folder_path,
+        allow_music=True,
+        expected_type="dir",
+        require_exists=True,
+    )
+    if folder_error or trusted_folder is None:
+        status = 404 if folder_error == "Source path does not exist." else 400
+        return jsonify({"ok": False, "error": folder_error or "Source path is not allowed."}), status
+    folder_path = str(trusted_folder)
     if not raw_mb_input:
         return jsonify({
             "ok": False,
@@ -20056,8 +20241,7 @@ def import_folder_with_id():
             "ok": False,
             "error": "Enter a valid MusicBrainz release-group ID or release ID.",
         }), 400
-    if not Path(folder_path).exists():
-        return jsonify({"ok": False, "error": f"Path not found: {folder_path}"}), 404
+
     raw_track_mapping = payload.get("track_mapping") if isinstance(payload.get("track_mapping"), list) else []
     selected_source_files = _import_review_selected_source_files(
         folder_path,
@@ -36775,6 +36959,75 @@ def _album_cleanup_abs_path(raw_path: Any) -> Optional[Path]:
     return path.resolve(strict=False)
 
 
+def _album_cleanup_trusted_path(
+    raw: Any,
+    root: Path,
+    *,
+    expected_type: Optional[str] = None,
+    require_exists: bool = True,
+    allow_missing_leaf: bool = False,
+    reject_root: bool = True,
+) -> Tuple[Optional[Path], Optional[str]]:
+    text = os.fsdecode(raw) if isinstance(raw, (bytes, bytearray)) else _s(raw)
+    text = text.strip()
+    error = _import_review_path_text_error(text, allow_relative=False)
+    if error:
+        return None, error
+    try:
+        root_resolved = root.resolve(strict=False)
+    except Exception:
+        return None, "Music library root is not available."
+    candidate = Path(text)
+    if reject_root and candidate == root_resolved:
+        return None, "Refusing to operate on the music library root."
+    if candidate != root_resolved and not _path_lexically_under(candidate, root_resolved):
+        return None, "Album cleanup path is outside the music library."
+    if _path_has_symlink_component_under(candidate, root_resolved, include_leaf=not allow_missing_leaf):
+        return None, "Album cleanup path cannot contain symlink components."
+    if candidate.is_symlink():
+        return None, "Album cleanup path cannot be a symlink."
+    if require_exists and not candidate.exists():
+        return None, "Album cleanup path does not exist."
+    if expected_type == "dir" and candidate.exists() and not candidate.is_dir():
+        return None, "Album cleanup path is not a folder."
+    if expected_type == "file" and candidate.exists() and not candidate.is_file():
+        return None, "Album cleanup path is not a file."
+    try:
+        resolved = candidate.resolve(strict=False)
+    except Exception:
+        return None, "Invalid album cleanup path."
+    if reject_root and resolved == root_resolved:
+        return None, "Refusing to operate on the music library root."
+    if not _path_is_under(resolved, root_resolved):
+        return None, "Album cleanup path is outside the music library."
+    if expected_type == "dir" and resolved.exists() and not resolved.is_dir():
+        return None, "Album cleanup path is not a folder."
+    if expected_type == "file" and resolved.exists() and not resolved.is_file():
+        return None, "Album cleanup path is not a file."
+    return resolved, None
+
+
+def _album_cleanup_trusted_destination(raw: Any, root: Path, container: Path) -> Tuple[Optional[Path], Optional[str]]:
+    dest, error = _album_cleanup_trusted_path(
+        raw,
+        root,
+        expected_type="file",
+        require_exists=False,
+        allow_missing_leaf=True,
+        reject_root=True,
+    )
+    if error or dest is None:
+        return None, error
+    try:
+        container_resolved = container.resolve(strict=False)
+    except Exception:
+        return None, "Album cleanup target is invalid."
+    if dest == container_resolved or not _path_is_under(dest, container_resolved):
+        return None, "Album cleanup target is outside the approved folder."
+    if _path_has_symlink_component_under(dest, container_resolved, include_leaf=False):
+        return None, "Album cleanup target cannot contain symlink components."
+    return dest, None
+
 def _album_cleanup_db_index(root: Path) -> Dict[str, Any]:
     folder_db: Dict[str, Dict[str, Any]] = {}
     file_db: Dict[str, Dict[str, Any]] = {}
@@ -36860,11 +37113,11 @@ def _album_cleanup_majority(values: Iterable[Any]) -> str:
 
 def _album_cleanup_file_inventory(folder: Path) -> Dict[str, Dict[str, Any]]:
     files: Dict[str, Dict[str, Any]] = {}
-    if not folder.exists() or not folder.is_dir():
+    if not folder.exists() or not folder.is_dir() or folder.is_symlink():
         return files
     for child in folder.rglob("*"):
         try:
-            if not child.is_file():
+            if child.is_symlink() or not child.is_file():
                 continue
             rel = child.relative_to(folder).as_posix()
             stat = child.stat()
@@ -37793,29 +38046,12 @@ def _album_cleanup_trash_path(path: Path, trash_root: Path) -> Path:
 
 
 def _album_cleanup_update_db_path(old_path: Path, new_path: Path, log: List[str]) -> int:
-    old_abs = str(old_path)
-    old_db = _db_path_value(old_path)
-    new_db = _db_path_value(new_path)
-    changed = 0
     try:
-        with _db(text_factory=bytes) as con:
-            cur = con.execute(
-                "UPDATE items SET path=? WHERE path=? OR path=?",
-                (new_db.encode(), old_db.encode(), old_abs.encode()),
-            )
-            changed += max(0, cur.rowcount)
-            try:
-                cur_art = con.execute(
-                    "UPDATE albums SET artpath=? WHERE artpath=? OR artpath=?",
-                    (new_db.encode(), old_db.encode(), old_abs.encode()),
-                )
-                changed += max(0, cur_art.rowcount)
-            except Exception:
-                pass
-            con.commit()
+        result = beets_client.rewrite_library_path(str(old_path), str(new_path))
+        return int(result.get("changed") or 0)
     except Exception as exc:
-        log.append(f"  [db] WARN: could not update path {old_path} -> {new_path}: {exc}")
-    return changed
+        log.append(f"  [db] WARN: could not update moved file path: {type(exc).__name__}")
+        return -1
 
 
 def _album_cleanup_remove_empty_dirs(folder: Path, stop_at: Path, log: List[str]) -> int:
@@ -37823,6 +38059,8 @@ def _album_cleanup_remove_empty_dirs(folder: Path, stop_at: Path, log: List[str]
     current = folder
     stop_res = stop_at.resolve(strict=False)
     while current.exists() and _path_under(current, stop_res) and current != stop_res:
+        if current.is_symlink() or _path_has_symlink_component_under(current, stop_res):
+            break
         try:
             current.rmdir()
             log.append(f"  Removed empty folder: {current}")
@@ -37835,13 +38073,15 @@ def _album_cleanup_remove_empty_dirs(folder: Path, stop_at: Path, log: List[str]
 
 def _album_cleanup_remove_empty_tree(folder: Path, log: List[str]) -> int:
     removed = 0
-    if not folder.exists() or not folder.is_dir():
+    if not folder.exists() or not folder.is_dir() or folder.is_symlink():
         return removed
     try:
-        child_dirs = [p for p in folder.rglob("*") if p.is_dir()]
+        child_dirs = [p for p in folder.rglob("*") if p.is_dir() and not p.is_symlink()]
     except Exception:
         child_dirs = []
     for child in sorted(child_dirs, key=lambda p: len(p.parts), reverse=True):
+        if child.is_symlink() or not _path_is_under(child, folder):
+            continue
         try:
             child.rmdir()
             log.append(f"  Removed empty folder: {child}")
@@ -37852,8 +38092,8 @@ def _album_cleanup_remove_empty_tree(folder: Path, log: List[str]) -> int:
         folder.rmdir()
         log.append(f"  Removed empty album folder: {folder}")
         removed += 1
-    except Exception as exc:
-        log.append(f"  SKIP empty-folder candidate that is not empty: {folder} ({exc})")
+    except Exception:
+        log.append("  SKIP empty-folder candidate that is not empty.")
     return removed
 
 
@@ -37881,18 +38121,40 @@ def _album_cleanup_apply_plan(issue: Dict[str, Any], scan_root: Path) -> Dict[st
     if not canonical_raw:
         blockers.append("target folder missing")
         return {"safe": False, "blockers": blockers, "actions": actions}
-    canonical = Path(canonical_raw).resolve(strict=False)
-    if not _path_under(canonical, scan_root):
-        blockers.append("target folder outside library")
+    canonical, canonical_error = _album_cleanup_trusted_path(
+        canonical_raw,
+        scan_root,
+        expected_type="dir",
+        require_exists=False,
+        allow_missing_leaf=True,
+        reject_root=True,
+    )
+    if canonical_error or canonical is None:
+        blockers.append(canonical_error or "target folder outside library")
+        return {"safe": False, "blockers": blockers, "actions": actions}
+    parent, parent_error = _album_cleanup_trusted_path(
+        str(canonical.parent),
+        scan_root,
+        expected_type="dir",
+        require_exists=True,
+        allow_missing_leaf=False,
+        reject_root=False,
+    )
+    if parent_error or parent is None:
+        blockers.append(parent_error or "target parent folder missing")
         return {"safe": False, "blockers": blockers, "actions": actions}
 
     if "empty_folder" in (issue.get("issue_types") or []):
         for folder_raw in current_folders:
-            folder = Path(folder_raw).resolve(strict=False)
-            if not _path_under(folder, scan_root):
-                blockers.append("source folder outside library")
-            elif not folder.exists():
-                blockers.append("source folder missing")
+            folder, folder_error = _album_cleanup_trusted_path(
+                folder_raw,
+                scan_root,
+                expected_type="dir",
+                require_exists=True,
+                reject_root=True,
+            )
+            if folder_error or folder is None:
+                blockers.append(folder_error or "source folder outside library")
             elif _folder_cleanup_db_items(folder):
                 blockers.append("source folder contains DB-tracked items")
             elif _album_cleanup_file_inventory(folder):
@@ -37906,19 +38168,42 @@ def _album_cleanup_apply_plan(issue: Dict[str, Any], scan_root: Path) -> Dict[st
         reserved = set(_album_cleanup_file_inventory(canonical).keys())
 
     for folder_raw in current_folders:
-        source = Path(folder_raw).resolve(strict=False)
+        source, source_error = _album_cleanup_trusted_path(
+            folder_raw,
+            scan_root,
+            expected_type="dir",
+            require_exists=True,
+            reject_root=True,
+        )
+        if source_error or source is None:
+            blockers.append(source_error or "source folder outside library")
+            continue
         if source == canonical:
             continue
-        if not _path_under(source, scan_root):
-            blockers.append("source folder outside library")
-            continue
-        if not source.exists() or not source.is_dir():
-            blockers.append("source folder missing")
-            continue
         try:
-            source_files = [p for p in source.rglob("*") if p.is_file()]
+            source_files = []
+            for candidate in source.rglob("*"):
+                if candidate.is_symlink():
+                    blockers.append("source folder contains symlink components")
+                    continue
+                if not candidate.is_file():
+                    continue
+                safe_file, file_error = _album_cleanup_trusted_path(
+                    str(candidate),
+                    scan_root,
+                    expected_type="file",
+                    require_exists=True,
+                    reject_root=True,
+                )
+                if file_error or safe_file is None:
+                    blockers.append(file_error or "source file outside library")
+                    continue
+                if not _path_is_under(safe_file, source):
+                    blockers.append("source file outside source folder")
+                    continue
+                source_files.append(safe_file)
         except Exception as exc:
-            blockers.append(f"filesystem operation failed: {exc}")
+            blockers.append(f"filesystem operation failed: {type(exc).__name__}")
             continue
         for src_file in sorted(source_files, key=lambda p: p.as_posix().casefold()):
             ext = src_file.suffix.lower()
@@ -37966,12 +38251,28 @@ def _album_cleanup_apply_plan(issue: Dict[str, Any], scan_root: Path) -> Dict[st
     return {"safe": not blockers, "blockers": blockers, "actions": actions}
 
 
+def _album_cleanup_issue_identity_blockers(issue: Dict[str, Any]) -> List[str]:
+    blockers: List[str] = []
+    issue_types = {
+        _s(value).strip().casefold()
+        for value in (issue.get("issue_types") or [])
+        if _s(value).strip()
+    }
+    if not _album_cleanup_valid_rgid(issue.get("release_group_id")):
+        blockers.append("Release Group identity is required before album cleanup.")
+    if _s(issue.get("safety") or issue.get("risk_level") or issue.get("status")).strip().casefold() == "blocked":
+        blockers.append("Blocked album cleanup issues cannot be applied.")
+    if any("conflict" in value for value in issue_types):
+        blockers.append("Conflicting album identity requires manual review.")
+    return list(dict.fromkeys(blockers))
+
+
 def _album_cleanup_apply_issue(issue: Dict[str, Any], scan_root: Path, trash_root: Path,
                                log: List[str], summary: Dict[str, Any],
                                operations: List[Dict[str, Any]],
                                verbose_files: bool = True) -> Dict[str, Any]:
     plan = _album_cleanup_apply_plan(issue, scan_root)
-    blockers = list(plan.get("blockers") or [])
+    blockers = _album_cleanup_issue_identity_blockers(issue) + list(plan.get("blockers") or [])
     if blockers:
         reason = blockers[0]
         log.append(f"  BLOCKED: {reason}")
@@ -37990,17 +38291,48 @@ def _album_cleanup_apply_issue(issue: Dict[str, Any], scan_root: Path, trash_roo
     changed = 0
     issue_errors: List[str] = []
     canonical_raw = _s(issue.get("canonical_folder") or issue.get("proposed_canonical_folder")).strip()
-    canonical = Path(canonical_raw).resolve(strict=False) if canonical_raw else scan_root
-    try:
-        canonical.mkdir(parents=True, exist_ok=True)
-    except Exception as exc:
-        issue_errors.append(f"target folder missing: {exc}")
+    canonical, canonical_error = _album_cleanup_trusted_path(
+        canonical_raw,
+        scan_root,
+        expected_type="dir",
+        require_exists=False,
+        allow_missing_leaf=True,
+        reject_root=True,
+    ) if canonical_raw else (None, "target folder missing")
+    if canonical_error or canonical is None:
+        issue_errors.append(canonical_error or "target folder missing")
+    else:
+        try:
+            parent, parent_error = _album_cleanup_trusted_path(
+                str(canonical.parent),
+                scan_root,
+                expected_type="dir",
+                require_exists=True,
+                allow_missing_leaf=False,
+                reject_root=False,
+            )
+            if parent_error or parent is None:
+                raise RuntimeError(parent_error or "target parent folder missing")
+            canonical.mkdir(parents=True, exist_ok=True)
+            if _path_has_symlink_component_under(canonical, scan_root.resolve(strict=False)):
+                raise RuntimeError("target folder contains symlink components")
+        except Exception as exc:
+            issue_errors.append(f"target folder missing: {type(exc).__name__}")
 
     if not issue_errors:
         for action in plan.get("actions") or []:
             kind = _s(action.get("action"))
             if kind == "remove_empty_folder":
-                folder = Path(_s(action.get("source"))).resolve(strict=False)
+                folder, folder_error = _album_cleanup_trusted_path(
+                    action.get("source"),
+                    scan_root,
+                    expected_type="dir",
+                    require_exists=True,
+                    reject_root=True,
+                )
+                if folder_error or folder is None:
+                    issue_errors.append(folder_error or "source folder outside library")
+                    break
                 removed = _album_cleanup_remove_empty_tree(folder, log)
                 if removed:
                     summary["folders_deleted"] += removed
@@ -38008,11 +38340,38 @@ def _album_cleanup_apply_issue(issue: Dict[str, Any], scan_root: Path, trash_roo
                     operations.append({"action": kind, "path": str(folder), "folders_deleted": removed})
                 continue
 
-            src = Path(_s(action.get("source"))).resolve(strict=False)
+            src, src_error = _album_cleanup_trusted_path(
+                action.get("source"),
+                scan_root,
+                expected_type="file",
+                require_exists=True,
+                reject_root=True,
+            )
+            if src_error or src is None:
+                issue_errors.append(src_error or "source file outside library")
+                break
             try:
                 if kind == "quarantine_duplicate":
+                    target, target_error = _album_cleanup_trusted_path(
+                        action.get("target"),
+                        scan_root,
+                        expected_type="file",
+                        require_exists=True,
+                        reject_root=True,
+                    )
+                    if target_error or target is None:
+                        raise RuntimeError(target_error or "target file missing")
+                    if not _album_cleanup_verified_same_file(
+                        _album_cleanup_file_info(src),
+                        _album_cleanup_file_info(target),
+                    ):
+                        raise RuntimeError("duplicate file is no longer identical")
                     trash = _album_cleanup_trash_path(src, trash_root)
+                    if _path_has_symlink_component_under(trash, trash_root, include_leaf=False):
+                        raise RuntimeError("cleanup trash path is unsafe")
                     trash.parent.mkdir(parents=True, exist_ok=True)
+                    if _path_has_symlink_component_under(trash, trash_root, include_leaf=False):
+                        raise RuntimeError("cleanup trash path is unsafe")
                     shutil.move(str(src), str(trash))
                     if not trash.exists() or src.exists():
                         raise RuntimeError("quarantine verification failed")
@@ -38020,36 +38379,54 @@ def _album_cleanup_apply_issue(issue: Dict[str, Any], scan_root: Path, trash_roo
                     changed += 1
                     if verbose_files:
                         log.append(f"  Quarantined duplicate: {src} -> {trash}")
-                    operations.append({"action": kind, "source": str(src), "quarantined": str(trash), "target": action.get("target")})
+                    operations.append({"action": kind, "source": str(src), "quarantined": str(trash), "target": str(target)})
                     continue
 
-                dst = Path(_s(action.get("target"))).resolve(strict=False)
-                if not _path_under(src, scan_root) or not _path_under(dst, canonical):
-                    raise RuntimeError("Move path is outside the approved source/target folders")
-                if not src.exists() or not src.is_file():
-                    raise RuntimeError("source file missing")
+                dst, dst_error = _album_cleanup_trusted_destination(action.get("target"), scan_root, canonical)
+                if dst_error or dst is None:
+                    raise RuntimeError(dst_error or "target file outside approved folder")
                 if dst.exists():
                     raise RuntimeError("target file exists")
                 dst.parent.mkdir(parents=True, exist_ok=True)
+                if _path_has_symlink_component_under(dst, canonical, include_leaf=False):
+                    raise RuntimeError("target parent contains symlink components")
                 shutil.move(str(src), str(dst))
                 if not dst.exists() or src.exists():
                     raise RuntimeError("move verification failed")
+                db_changed = _album_cleanup_update_db_path(src, dst, log)
+                if db_changed < 0:
+                    # The file already moved but the Beets DB still points
+                    # at the old path -- move it back rather than leaving a
+                    # filesystem/database split that a truthful error
+                    # message alone would not repair.
+                    try:
+                        shutil.move(str(dst), str(src))
+                        log.append(f"  [db] Reverted file move after database update failure: {dst} -> {src}")
+                    except Exception:
+                        log.append(f"  [db] WARN: could not revert file move after database update failure: {dst} -> {src}")
+                    raise RuntimeError("database path update failed")
                 summary["files_moved"] += 1
                 if kind == "move_artwork" or dst.suffix.lower() in _ART_EXTS:
                     summary["artwork_moved"] += 1
-                summary["db_paths_updated"] += _album_cleanup_update_db_path(src, dst, log)
+                summary["db_paths_updated"] += db_changed
                 changed += 1
                 if verbose_files:
                     log.append(f"  Moved: {src} -> {dst}")
                 operations.append({"action": kind, "source": str(src), "target": str(dst)})
             except Exception as exc:
-                issue_errors.append(f"{src}: {exc}")
-                log.append(f"  ERROR applying {kind} for {src}: {exc}")
+                issue_errors.append(f"{src}: {type(exc).__name__}")
+                log.append(f"  ERROR applying {kind}: {type(exc).__name__}")
                 break
 
     for folder_raw in issue.get("current_folders") or []:
-        source = Path(_s(folder_raw)).resolve(strict=False)
-        if source == canonical or not _path_under(source, scan_root):
+        source, source_error = _album_cleanup_trusted_path(
+            folder_raw,
+            scan_root,
+            expected_type="dir",
+            require_exists=False,
+            reject_root=True,
+        )
+        if source_error or source is None or source == canonical:
             continue
         summary["folders_deleted"] += _album_cleanup_remove_empty_dirs(source, scan_root, log)
 

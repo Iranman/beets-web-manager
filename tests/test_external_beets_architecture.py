@@ -372,11 +372,20 @@ class TestBeetsClientRemoteOnly(unittest.TestCase):
         except Exception:
             raise unittest.SkipTest("Docker CLI unavailable on this host")
 
-        res = subprocess.run(
-            ["docker", "run", "--rm", "beets-web-manager:0.1.0", "command", "-v", "beet"],
+        inspect = subprocess.run(
+            ["docker", "image", "inspect", "beets-web-manager:0.1.0"],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=5,
+        )
+        if inspect.returncode != 0:
+            raise unittest.SkipTest("beets-web-manager:0.1.0 image unavailable on this host")
+
+        res = subprocess.run(
+            ["docker", "run", "--rm", "--entrypoint", "sh", "beets-web-manager:0.1.0", "-lc", "command -v beet"],
+            capture_output=True,
+            text=True,
+            timeout=20,
         )
         self.assertNotEqual(res.returncode, 0, "beet binary should not be installed in beets-web-manager image")
 
@@ -1480,9 +1489,10 @@ class TestAcoustIDChromaCapability(unittest.TestCase):
             "pyacoustid_available": True,
         }
 
-        with app.test_client() as client:
-            resp = client.post("/api/albums/42/acoustid-submit")
-            self.assertEqual(resp.status_code, 400)
+        from routes_submissions import album_acoustid_submit
+        with app.test_request_context("/api/albums/42/acoustid-submit", method="POST"):
+            resp, status = album_acoustid_submit(42)
+            self.assertEqual(status, 400)
             data = resp.get_json()
             self.assertFalse(data["ok"])
             self.assertIn("chroma plugin is not enabled", data["error"])
@@ -1500,9 +1510,10 @@ class TestAcoustIDChromaCapability(unittest.TestCase):
             "pyacoustid_available": True,
         }
 
-        with app.test_client() as client:
-            resp = client.post("/api/albums/42/acoustid-submit")
-            self.assertEqual(resp.status_code, 400)
+        from routes_submissions import album_acoustid_submit
+        with app.test_request_context("/api/albums/42/acoustid-submit", method="POST"):
+            resp, status = album_acoustid_submit(42)
+            self.assertEqual(status, 400)
             data = resp.get_json()
             self.assertFalse(data["ok"])
             self.assertIn("fpcalc", data["error"])

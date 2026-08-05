@@ -391,6 +391,10 @@ class BeetsClient:
         """Clear artpath field on album in SQLite under lock."""
         return self._request("DELETE", f"/albums/{album_id}/artpath")
 
+    def rewrite_library_path(self, old_path: str, new_path: str) -> Dict[str, Any]:
+        """Rewrite Beets item/art paths after a validated library file move."""
+        return self._request("POST", "/library/rewrite-path", {"old_path": old_path, "new_path": new_path})
+
     def delete_album(self, album_id: int, delete_files: bool = True) -> Dict[str, Any]:
         """Perform transactional single-writer album deletion under lock."""
         return self._request("DELETE", f"/albums/{album_id}", {"delete_files": delete_files})
