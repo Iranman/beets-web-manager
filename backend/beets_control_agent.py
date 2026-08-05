@@ -49,9 +49,34 @@ DOWNLOAD_PATH = os.environ.get("DOWNLOAD_PATH", "/data/torrents")
 LOCK_PATH = os.environ.get("BEETS_LOCK_PATH", os.path.join(BEETSDIR, ".beet_db.lock"))
 LIB_PATH = os.path.join(BEETSDIR, "musiclibrary.blb")
 BEET_BIN = os.environ.get("BEET_BIN", "beet")
-ALBUM_ART_MAX_BYTES = int(os.environ.get("BEETS_ALBUM_ART_MAX_BYTES", str(15 * 1024 * 1024)) or str(15 * 1024 * 1024))
-ALBUM_ART_MAX_PIXELS = int(os.environ.get("BEETS_ALBUM_ART_MAX_PIXELS", "50000000") or "50000000")
-ALBUM_ART_MAX_DIMENSION = int(os.environ.get("BEETS_ALBUM_ART_MAX_DIMENSION", "12000") or "12000")
+
+
+def _env_int_clamped(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    """Read an integer env override, clamped to a safe [minimum, maximum]
+    range. An operator setting a negative, zero, or absurdly large value
+    (accidentally or via a compromised .env) must not be able to disable
+    or effectively remove an image-safety limit -- the clamp always wins,
+    it is not merely a validation warning."""
+    try:
+        value = int(os.environ.get(name, "").strip() or default)
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(maximum, value))
+
+
+# Bounds are deliberately generous (real-world cover art is almost always
+# well under these) but finite: an unbounded ALBUM_ART_MAX_PIXELS/BYTES
+# combined with a highly compressible crafted image is a decompression-bomb
+# style resource-exhaustion vector regardless of how the limit was set.
+ALBUM_ART_MAX_BYTES = _env_int_clamped(
+    "BEETS_ALBUM_ART_MAX_BYTES", 15 * 1024 * 1024, minimum=64 * 1024, maximum=100 * 1024 * 1024
+)
+ALBUM_ART_MAX_PIXELS = _env_int_clamped(
+    "BEETS_ALBUM_ART_MAX_PIXELS", 50_000_000, minimum=100_000, maximum=200_000_000
+)
+ALBUM_ART_MAX_DIMENSION = _env_int_clamped(
+    "BEETS_ALBUM_ART_MAX_DIMENSION", 12_000, minimum=64, maximum=20_000
+)
 ALBUM_ART_FILENAME = "albumart.jpg"
 ALBUM_ART_TRASH_ROOT = Path(os.environ.get("BEETS_ALBUM_ART_TRASH_DIR", os.path.join(BEETSDIR, "album-art-trash")))
 
@@ -686,6 +711,7 @@ def _album_art_album_dir(cur: sqlite3.Cursor, album_id: int) -> tuple[sqlite3.Ro
     if not rows:
         raise AlbumArtOperationError("Album folder could not be resolved", 400)
     music_root = Path(os.path.realpath(MUSIC_LIBRARY_PATH))
+    resolved_dir: Optional[Path] = None
     for row in rows:
         try:
             item_path = _trusted_music_db_path(row["path"], require_exists=False)
@@ -700,10 +726,24 @@ def _album_art_album_dir(cur: sqlite3.Cursor, album_id: int) -> tuple[sqlite3.Ro
                 continue
             if _path_has_symlink_component(album_dir, music_root, include_leaf=True):
                 continue
-            return album, album_dir
         except Exception:
             continue
-    raise AlbumArtOperationError("Album folder could not be resolved safely", 400)
+        if resolved_dir is None:
+            resolved_dir = album_dir
+        elif album_dir != resolved_dir:
+            # Items disagree about which directory the album actually lives
+            # in (e.g. a stale or corrupted database row) -- never silently
+            # mutate based on whichever item happened to resolve first.
+            # Legitimate multidisc layouts (Album/Disc 1, Album/Disc 2, ...)
+            # are already unified to their shared parent above and do not
+            # trigger this.
+            raise AlbumArtOperationError(
+                "Album items are split across conflicting directories; refusing to guess the album folder",
+                409,
+            )
+    if resolved_dir is None:
+        raise AlbumArtOperationError("Album folder could not be resolved safely", 400)
+    return album, resolved_dir
 
 
 def _check_album_art_identity(album: sqlite3.Row, expected_rgid: Any) -> str:
@@ -782,28 +822,39 @@ def _decode_album_art_payload(body: dict[str, Any]) -> tuple[bytes, dict[str, An
     return _normalise_album_art_image(data)
 
 
-def _fsync_file(path: Path) -> None:
+def _fsync_file(path: Path) -> bool:
+    """Best-effort durability step for an already-written, already-renamed
+    file. Returns False (and logs) rather than silently swallowing on
+    failure -- callers that report success must qualify it with the
+    combined result of this and _fsync_directory() rather than presenting
+    an unqualified durability guarantee this function alone cannot
+    provide."""
     try:
         with open(path, "rb") as handle:
             os.fsync(handle.fileno())
-    except Exception:
-        pass
+        return True
+    except Exception as exc:
+        print(f"[BeetsControlAgent] WARNING: fsync failed for {path.name}: {type(exc).__name__}")
+        return False
 
 
-def _fsync_directory(path: Path) -> None:
+def _fsync_directory(path: Path) -> bool:
     flags = getattr(os, "O_DIRECTORY", 0) | os.O_RDONLY
     fd = None
+    ok = False
     try:
         fd = os.open(str(path), flags)
         os.fsync(fd)
-    except Exception:
-        pass
+        ok = True
+    except Exception as exc:
+        print(f"[BeetsControlAgent] WARNING: directory fsync failed for {path.name}: {type(exc).__name__}")
     finally:
         if fd is not None:
             try:
                 os.close(fd)
             except Exception:
                 pass
+    return ok
 
 
 def _replace_or_copy_unlink(src: Path, dst: Path) -> None:
@@ -861,8 +912,11 @@ def _replace_album_art_locked(con: sqlite3.Connection, album_id: int, body: dict
         os.replace(tmp_path, dest)
         tmp_path = None
         dest_replaced = True
-        _fsync_file(dest)
-        _fsync_directory(album_dir)
+        # Best-effort durability for the already-successful rename -- a
+        # failure here does not undo an otherwise-correct replace (the
+        # content itself was already fsync'd above before the rename), but
+        # must not be silently reported as a fully durable write either.
+        durable = _fsync_file(dest) and _fsync_directory(album_dir)
         cur.execute("UPDATE albums SET artpath = ? WHERE id = ?", (str(dest), album_id))
         if cur.rowcount != 1:
             raise AlbumArtOperationError("Album artpath update did not affect exactly one row", 500)
@@ -880,6 +934,7 @@ def _replace_album_art_locked(con: sqlite3.Connection, album_id: int, body: dict
             "mb_releasegroupid": rgid,
             "source": _db_text(body.get("source") or "user")[:40],
             "replaced_existing": replaced_existing,
+            "durable": durable,
             "image": image_info,
         }
     except Exception:
@@ -925,6 +980,23 @@ def _album_art_delete_candidates(album: sqlite3.Row, album_dir: Path) -> list[Pa
     return candidates
 
 
+def _claim_trash_target_exclusive(target: Path) -> None:
+    """Atomically claim `target` as a brand-new, exclusively-created empty
+    file. Raises FileExistsError if anything is already there.
+
+    This exists because the obvious check-then-act pattern (`if
+    target.exists(): ... ; if target.exists(): raise`) leaves a real race
+    window between the check and the later os.replace()/shutil.copy2() in
+    _replace_or_copy_unlink() -- both of those silently overwrite an
+    existing destination and must never be relied on as a no-clobber
+    primitive by themselves. O_CREAT|O_EXCL is the actual atomic
+    "create-if-absent" operation; a random UUID in the path name only
+    reduces collision probability, it is not itself a security boundary.
+    """
+    fd = os.open(str(target), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    os.close(fd)
+
+
 def _delete_album_art_locked(con: sqlite3.Connection, album_id: int) -> dict[str, Any]:
     cur = con.cursor()
     album, album_dir = _album_art_album_dir(cur, album_id)
@@ -939,10 +1011,14 @@ def _delete_album_art_locked(con: sqlite3.Connection, album_id: int) -> dict[str
             target.parent.mkdir(parents=True, exist_ok=True)
             if _path_has_symlink_component(target.parent, trash_root, include_leaf=True):
                 raise UnsafePathError("album artwork trash path cannot contain symlink components")
-            if target.exists() or target.is_symlink():
+            try:
+                _claim_trash_target_exclusive(target)
+            except FileExistsError:
                 target = target.with_name(f"{target.stem}-{uuid.uuid4().hex[:8]}{target.suffix}")
-            if target.exists() or target.is_symlink():
-                raise UnsafePathError("album artwork trash target already exists")
+                try:
+                    _claim_trash_target_exclusive(target)
+                except FileExistsError as exc:
+                    raise UnsafePathError("album artwork trash target already exists") from exc
             _replace_or_copy_unlink(src, target)
             moved.append({"source": str(src), "quarantined": str(target)})
         cur.execute("UPDATE albums SET artpath = '' WHERE id = ?", (album_id,))
