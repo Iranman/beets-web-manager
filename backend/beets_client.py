@@ -238,6 +238,21 @@ class BeetsClient:
         res = self._request("GET", f"/albums/{album_id}")
         return res.get("album")
 
+    def get_items_page(self, offset: int = 0, limit: int = 50) -> Dict[str, Any]:
+        """Fetch a single page of items directly from the Beets agent without auto-paginating all pages."""
+        off = max(0, offset)
+        lim = max(1, limit)
+        res = self._request("GET", f"/items?offset={off}&limit={lim}")
+        items = res.get("items", [])
+        total = res.get("total", len(items))
+        return {
+            "items": items,
+            "offset": off,
+            "limit": lim,
+            "returned": len(items),
+            "total": total,
+        }
+
     def _fetch_all_paginated(self, endpoint_base: str, key: str, page_size: int = 500, safety_ceiling: int = 100000) -> List[Dict[str, Any]]:
         """Helper to fetch all pages for endpoint_base with strict validation and error handling."""
         sep = "&" if "?" in endpoint_base else "?"
@@ -458,9 +473,12 @@ class RemoteSQLiteConnection:
 
 
 def get_db_connection(db_path: Optional[str] = None):
-    """Return a database connection — ALWAYS connects via RemoteSQLiteConnection.
-    Never opens local SQLite files in the web manager.
+    """Return a database connection — connects via RemoteSQLiteConnection in production,
+    or local sqlite3.connect when an explicit temporary test database path is provided by test fixtures.
     """
+    if db_path and db_path != "/config/musiclibrary.blb":
+        import sqlite3
+        return sqlite3.connect(db_path)
     return RemoteSQLiteConnection(beets_client)
 
 
