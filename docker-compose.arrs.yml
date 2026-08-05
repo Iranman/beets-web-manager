@@ -248,8 +248,7 @@ services:
   beets-web-manager:
     <<: *common-keys
     container_name: beets-web-manager
-    build: .
-    image: beets-web-manager:0.1.0
+    image: ghcr.io/iranman/beets-web-manager:${BEETS_WEB_MANAGER_VERSION:-stable}
     security_opt:
       - no-new-privileges:true
     cap_drop:

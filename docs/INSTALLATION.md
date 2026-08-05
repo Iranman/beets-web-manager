@@ -1,69 +1,129 @@
-# Installation
+# Installation & Deployment Guide
 
-This project runs as a two-service Beets deployment.
+Beets Web Manager is packaged as a lightweight, pre-built runtime image published to GitHub Container Registry (`ghcr.io/iranman/beets-web-manager`).
 
-- `beets`: authoritative Beets engine. Owns `/config/config.yaml`, `/config/musiclibrary.blb`, Beets CLI execution, tag writes, and media-library mutations. The control agent listens on internal port `8338` only.
-- `beets-web-manager`: Flask and React web manager. Serves the UI on `127.0.0.1:8337` by default and talks to the engine through `BEETS_API_URL` plus `BEETS_API_TOKEN`. It must not contain Beets, open the Beets SQLite file directly, or mutate media files as the authority.
+It communicates with an existing Beets engine control agent via `BEETS_API_URL` and `BEETS_API_TOKEN`.
 
-## First start
+---
 
+## Production Installation (Recommended)
+
+Production deployment does **not** require Node.js, Python, or build tools on the host system.
+
+### 1. Obtain deployment files
 ```bash
 git clone https://github.com/Iranman/beets-web-manager.git
 cd beets-web-manager
 cp .env.example .env
 ```
+*(Git clone is used only to obtain `docker-compose.yml`, `.env.example`, and setup scripts. No source code compilation is performed.)*
 
-Edit `.env` before starting. `BEETS_API_TOKEN` must be a strong shared secret; blank, short, weak, or placeholder values fail closed in the Beets engine.
+### 2. Configure environment
+Edit `.env` to configure your settings. Ensure `BEETS_API_URL` and `BEETS_API_TOKEN` match your Beets control agent instance:
 
-Standalone stack:
-
-```bash
-docker compose config
-docker compose up -d beets beets-web-manager
+```env
+BEETS_API_URL=http://beets:8338
+BEETS_API_TOKEN=your-secure-beets-token
 ```
 
-Arr stack:
-
+Alternatively, run the automated setup script:
 ```bash
-docker compose -f docker-compose.arrs.yml config
-docker compose -f docker-compose.arrs.yml up -d bgutil-provider beets beets-web-manager
+./setup.sh          # Linux / macOS
+.\setup.ps1         # Windows PowerShell
 ```
 
-## Ports
+### 3. Deploy
+```bash
+docker compose pull
+docker compose up -d
+docker compose ps
+```
 
-- Web manager: `127.0.0.1:${WEBCONTROL_PORT:-8337}:8337`
-- Beets control agent: `8338` exposed only to the Compose network
+---
 
-Do not publish port `8338` to the host. Put the web port behind a reverse proxy only after configuring authentication, TLS, trusted proxy settings, and outbound allowlist entries for private services.
+## Existing Stack Installation (TrueNAS / Portainer / Multi-App Stacks)
 
-## Volumes
+To embed `beets-web-manager` into an existing Compose stack (such as `/mnt/PLEX/Apps/Arrs/docker-compose.yml`):
 
-Generic `docker-compose.yml` uses local disposable-friendly paths by default:
+1. Copy the `beets-web-manager` service block from [docs/EXAMPLES.md](EXAMPLES.md).
+2. Reference the published image `ghcr.io/iranman/beets-web-manager:${BEETS_WEB_MANAGER_VERSION:-stable}`.
+3. Do **not** include `build: .` or local image names.
+4. Mount host data path for persistent state:
+   ```yaml
+   volumes:
+     - /mnt/PLEX/Apps/Arrs/beets-web-manager:/web-manager-data
+   ```
+5. Configure `BEETS_API_URL` and `BEETS_API_TOKEN`.
+6. Remove `depends_on: beets` if Beets is running in a separate stack or host.
 
-- `./config:/config`
-- `${MUSIC_LIBRARY_PATH:-./data/music}:/data/media/music`
-- `${DOWNLOAD_PATH:-./data/downloads}:/data/torrents`
-- `./web-manager-data:/web-manager-data`
+---
 
-`docker-compose.arrs.yml` uses the operator media-stack paths in that file. Change those paths only after backing up config and validating the Compose output.
+## Development Installation (Source Builds)
 
-## Health and readiness
+If you are modifying source code and building images locally:
+
+```bash
+docker compose -f docker-compose.dev.yml up -d --build
+```
+
+---
+
+## Image Release Channels
+
+Configure `BEETS_WEB_MANAGER_VERSION` in `.env` to select the image channel:
+
+```env
+# Recommended production channel
+BEETS_WEB_MANAGER_VERSION=stable
+
+# Conventional newest stable release
+BEETS_WEB_MANAGER_VERSION=latest
+
+# Exact version for predictable deployment and rollback
+BEETS_WEB_MANAGER_VERSION=0.1.0
+
+# Development builds from main; not recommended for production
+BEETS_WEB_MANAGER_VERSION=edge
+```
+
+`stable` is the recommended default for production deployments. Using an exact version tag (e.g. `0.1.0`) is recommended for predictable deployments and rollbacks. Prerelease tags (such as `v0.2.0-rc.1`) publish exact prerelease image tags for testing, but never touch `stable` or `latest`.
+
+---
+
+## Upgrade Process
+
+To upgrade to the latest published release on the active channel (`stable` by default):
+
+```bash
+docker compose pull beets-web-manager
+docker compose up -d beets-web-manager
+docker compose ps beets-web-manager
+docker compose logs --tail=100 beets-web-manager
+```
+
+---
+
+## Rollback Process
+
+To roll back to a specific previous release:
+
+1. Pin the exact release version in `.env`:
+   ```env
+   BEETS_WEB_MANAGER_VERSION=0.1.0
+   ```
+2. Recreate the service:
+   ```bash
+   docker compose pull beets-web-manager
+   docker compose up -d beets-web-manager
+   ```
+
+---
+
+## Health Checks
+
+Verify container health:
 
 ```bash
 curl -s http://127.0.0.1:8337/api/health
-curl -s http://127.0.0.1:8337/health/ready
-curl -s http://127.0.0.1:8337/api/setup/status
+curl -s http://127.0.0.1:8337/health/live
 ```
-
-`/api/setup/status` queries the internal Beets control agent for the remote Beets version, loaded plugins, plugin failures, command readiness, tool availability, and engine path health. It does not contact external providers.
-
-## Backups and migration
-
-Before migrating an existing library, back up at least:
-
-- `/config/config.yaml`
-- `/config/musiclibrary.blb`
-- `/config/beetsplug/` if present
-- web-manager state under `/web-manager-data` or the configured state directory
-
-Passing local tests or building images does not authorize production deployment. Validate with disposable volumes first, then perform a separate migration plan and rollback test before touching production data.

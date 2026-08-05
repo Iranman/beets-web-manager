@@ -3,6 +3,10 @@ name: docker-build
 on:
   pull_request:
   push:
+    branches:
+      - main
+    tags:
+      - 'v*'
 
 permissions:
   contents: read
@@ -28,15 +32,13 @@ jobs:
           python-version: "3.13"
       - run: python scripts/validate_compose_security.py
       - run: docker compose -f docker-compose.arrs.yml config
+      - run: docker compose -f docker-compose.dev.yml config
       - run: docker compose config
       - run: docker build --pull=false --build-arg VCS_REF="${{ github.sha }}" -t beets-web-manager:ci .
       - name: Installation smoke test
         run: |
           set -e
           mkdir -p /tmp/beets-ci-config /tmp/beets-ci-music /tmp/beets-ci-downloads
-          # The image runs as uid 1000 (beets); these are ephemeral CI-only
-          # scratch dirs, so make them world-writable rather than trying to
-          # match uids between the runner and the container.
           chmod -R a+rwX /tmp/beets-ci-config /tmp/beets-ci-music /tmp/beets-ci-downloads
           cp config.yaml.example /tmp/beets-ci-config/config.yaml
           docker run -d --name beets-ci \
@@ -83,24 +85,63 @@ jobs:
         run: |
           set -e
           args=(--image beets-engine:ci --require-version 2.4.0 --require-command-help mbsubmit --check-s6-supervision)
-          # Chroma plugin-resolution assertions activate automatically once
-          # this file marker (the build-time patch script) is present on the
-          # checked-out tree -- e.g. after fix/chroma-acoustid-plugin merges
-          # into this branch's base. No follow-up change to that branch's
-          # own workflow is required.
           if [ -f docker/beets/apply_patches.py ]; then
             echo "Chroma plugin-resolution patch detected; activating Chroma-specific verification."
             args+=(--require-plugin chroma --forbid-duplicate-plugin musicbrainz --require-command-help submit)
           fi
-          # bpsync is verified separately from Chroma: they are unrelated
-          # plugins that happened to be bundled under the same "same defect
-          # class" description in an earlier PR draft. bpsync has its own,
-          # different, credential-independent upstream incompatibility
-          # (BeatportPlugin.setup() requires a session argument bpsync.py's
-          # __init__ never provides) -- verified through Beets' real plugin
-          # loader, not just import+class-identity. Reported, not fatal,
-          # since bpsync is not enabled in production and does not affect
-          # Chroma, submit, or mbsubmit. Add --require-bpsync-operational
-          # only if a deployment actually starts depending on bpsync.
           args+=(--check-bpsync)
           python scripts/verify_beets_engine_image.py "${args[@]}"
+
+  publish-ghcr:
+    name: Build & Publish GHCR Image
+    needs: [compose-verification, beets-engine-verification]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/iranman/beets-web-manager
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=stable,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
+            type=raw,value=edge,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Set build date
+        id: build_date
+        run: echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push Beets Web Manager image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VCS_REF=${{ github.sha }}
+            VERSION=${{ steps.meta.outputs.version }}
+            BUILD_DATE=${{ steps.build_date.outputs.date }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

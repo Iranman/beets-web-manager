@@ -171,6 +171,7 @@ def _check_compose_variant(path: Path, errors: list[str], warnings: list[str]) -
         return
     text = _read(path)
     label = path.name
+
     beets = _service_block(text, "beets")
     if not beets:
         errors.append(f"{label}: beets service not found")
@@ -190,17 +191,29 @@ def _check_compose_variant(path: Path, errors: list[str], warnings: list[str]) -
         errors.append(f"{label}: beets must not run as UID/GID 0")
 
     beets_web = _service_block(text, "beets-web-manager")
+    if not beets_web:
+        errors.append(f"{label}: beets-web-manager service not found")
+        return
+
+    # A bind address is "loopback by default" when it is either the literal
+    # 127.0.0.1 or a ${VAR:-127.0.0.1} expansion whose fallback is loopback --
+    # accepting the parameterized form is required now that the bind address
+    # is intentionally operator-configurable, but the shipped default must
+    # still be safe.
+    loopback_default_re = re.compile(r"^(?:127\.0\.0\.1|\$\{[A-Za-z_][A-Za-z0-9_]*:-127\.0\.0\.1\}):")
+
     beets_ports = _port_lines(beets)
     web_ports = _port_lines(beets_web)
     for p in beets_ports:
-        if "8338" in p and not p.startswith("127.0.0.1:"):
+        if "8338" in p and not loopback_default_re.match(p):
             errors.append(f"{label}: beets control agent port must remain internal-only or bind to loopback")
+
     web_manager_binds_8337_loopback = any(
-        p.startswith("127.0.0.1:") and p.rstrip('"').endswith(":8337")
-        for p in beets_ports + web_ports
+        loopback_default_re.match(p) and p.rstrip('"').endswith(":8337")
+        for p in web_ports
     )
-    if beets_web and not web_manager_binds_8337_loopback:
-        errors.append(f"{label}: beets port must bind to loopback by default")
+    if not web_manager_binds_8337_loopback:
+        errors.append(f"{label}: beets-web-manager port 8337 must bind to loopback by default")
 
     _check_no_hardcoded_lan_allowlist(text, label, errors)
 

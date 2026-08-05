@@ -1,3 +1,7 @@
+# Development Docker Compose file for source builds.
+# Use this file when developing locally or building from source code:
+#   docker compose -f docker-compose.dev.yml up -d --build
+
 services:
   beets:
     build:
@@ -26,8 +30,15 @@ services:
       retries: 3
 
   beets-web-manager:
-    image: ghcr.io/iranman/beets-web-manager:${BEETS_WEB_MANAGER_VERSION:-stable}
-    container_name: beets-web-manager
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VCS_REF: ${VCS_REF:-local-development}
+        VERSION: ${VERSION:-0.1.0-dev}
+        BUILD_DATE: ${BUILD_DATE:-}
+    image: beets-web-manager:dev
+    container_name: beets-web-manager-dev
     restart: unless-stopped
 
     ports:

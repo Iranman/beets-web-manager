@@ -6,15 +6,18 @@ Configuration is split between environment variables for the web-manager and con
 
 | Variable | Service | Required | Meaning |
 |---|---|---:|---|
+| `BEETS_WEB_MANAGER_VERSION` | compose | no | Published image tag to deploy: `stable` (recommended default), `latest`, exact version `0.1.0`, or `edge`. |
+| `WEBCONTROL_PORT` | web | no | Web port inside the container, default `8337`. |
+| `BEETS_WEB_BIND_ADDRESS` | compose | no | Host bind IP address for web UI access (default: `127.0.0.1`, local-only; set to `0.0.0.0` only after configuring authentication, TLS, and a reverse proxy). |
+| `BEETS_WEB_MANAGER_DATA_PATH` | compose | no | Host directory for persistent application state (default: `./web-manager-data`). |
 | `BEETS_API_TOKEN` | both | yes | Strong shared secret for authenticated internal HTTP from `beets-web-manager` to `beets`. Blank, weak, and placeholder values are rejected by the control agent. |
-| `BEETS_API_URL` | web | yes | Internal control-agent URL, normally `http://beets:8338`. |
-| `WEBCONTROL_PORT` | web | no | Web port inside the container, default `8337`; Compose binds it to loopback by default. |
-| `BEETS_WEB_AUTH_TOKEN` | web | yes | Owner API/script token. The app can auto-generate a secure token when only the `changeme` placeholder or no usable owner credential is present. |
-| `BEETS_WEB_PASSWORD` | web | optional | Browser Basic Auth password. Must satisfy the configured strength rules. |
+| `BEETS_API_URL` | web | yes | Control agent endpoint URL. Same stack: `http://beets:8338`, external LAN: `http://192.168.1.50:8338`. |
+| `BEETS_WEB_AUTH_TOKEN` | web | yes | Owner API/script token. The app auto-generates a secure token when no credential is set. |
+| `BEETS_WEB_PASSWORD` | web | optional | Browser Basic Auth password. Must satisfy strength rules (32+ chars, upper, lower, number, special). |
 | `BEETS_WEB_USERNAME` | web | optional | Browser Basic Auth username, default `admin`. |
-| `BEETS_OUTBOUND_ALLOWLIST` | web | optional | Comma-separated host:port or CIDR:port entries for private services the web manager may contact. Defaults to the internal Beets control agent, `beets:8338`; add Plex, Lidarr, SLSKD, or helper hosts explicitly. |
+| `BEETS_OUTBOUND_ALLOWLIST` | web | optional | Comma-separated host:port or CIDR:port entries for private services the web manager may contact. Defaults to `beets:8338`. |
 | `BEETS_TRUSTED_PROXIES` | web | optional | Proxy CIDRs whose forwarded client IP headers may be trusted. |
-| `BEETS_ENABLE_LEGACY_LOCAL_SCAN` | web | optional | Opt-in guard for the old local `/api/library/scan` filesystem walk. Keep `0` in the external-engine architecture unless using a legacy single-process development setup. |
+| `BEETS_ENABLE_LEGACY_LOCAL_SCAN` | web | optional | Opt-in guard for the old local `/api/library/scan` filesystem walk. Keep `0`. |
 | `BEETS_SCAN_STATE_FILE` | web | optional | State file for the legacy local scan guard, default `/web-manager-data/last_scan.txt`. |
 
 ## Optional integrations
