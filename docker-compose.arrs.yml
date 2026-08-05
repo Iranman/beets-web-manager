@@ -208,7 +208,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.beets
-    image: beets-engine:2.4.0
+      args:
+        BEETS_BASE_IMAGE: ${BEETS_BASE_IMAGE:-lscr.io/linuxserver/beets:2.13.1}
+    image: beets-engine:local
     user: "${BEETS_UID:-1000}:${BEETS_GID:-1000}"
     security_opt:
       - no-new-privileges:true

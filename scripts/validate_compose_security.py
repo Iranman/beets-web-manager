@@ -21,15 +21,14 @@ STANDALONE_COMPOSE = ROOT / "docker-compose.yml"
 DOCKERFILE_BEETS = ROOT / "Dockerfile.beets"
 ENV_EXAMPLE = ROOT / ".env.example"
 
-# The one approved upstream base image digest. Dockerfile.beets's FROM line
-# must reference exactly this -- not an arbitrary sha256, and not attached
-# to the locally-built beets-engine image tag (Docker rejects a digest on
-# any image tag that also has a compose `build:` block: "build tag cannot
-# contain a digest", independently reproduced against docker compose build).
-APPROVED_BEETS_BASE_IMAGE = (
-    "lscr.io/linuxserver/beets:2.4.0"
-    "@sha256:4cce2967154e849ca5466469d934a4bb9d8d83c3acf2a5279da47bccd16518f1"
-)
+# Dockerfile.beets selects its upstream base image via `ARG BEETS_BASE_IMAGE`
+# so a build can intentionally pin an explicit version or digest. The digest
+# itself is deliberately not attached to the locally-built beets-engine image
+# tag (Docker rejects a digest on any image tag that also has a compose
+# `build:` block: "build tag cannot contain a digest", independently
+# reproduced against docker compose build) -- immutable upstream provenance
+# belongs in the Dockerfile's ARG default or an explicit --build-arg.
+BEETS_BASE_IMAGE_ARG_PREFIX = "ARG BEETS_BASE_IMAGE="
 
 _PRIVATE_IPV4_RE = re.compile(
     r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}"
@@ -94,12 +93,20 @@ def _port_lines(block: str) -> list[str]:
 
 
 def _dockerfile_beets_base_is_approved() -> bool:
+    """The Dockerfile's BEETS_BASE_IMAGE default must be a concrete, tested
+    reference -- never the moving `latest` tag -- so a build that omits
+    --build-arg BEETS_BASE_IMAGE still gets a safe, reproducible base. An
+    explicit --build-arg override (e.g. CI's latest-compatibility job) is a
+    deliberate, separate decision made at build time, not at this file."""
     if not DOCKERFILE_BEETS.exists():
         return False
     for line in _read(DOCKERFILE_BEETS).splitlines():
         stripped = line.strip()
-        if stripped.startswith("FROM "):
-            return stripped[len("FROM "):].strip() == APPROVED_BEETS_BASE_IMAGE
+        if stripped.startswith(BEETS_BASE_IMAGE_ARG_PREFIX):
+            default_value = stripped[len(BEETS_BASE_IMAGE_ARG_PREFIX):].strip()
+            if not default_value or default_value.endswith(":latest"):
+                return False
+            return ":" in default_value.rsplit("/", 1)[-1]
     return False
 
 
@@ -132,8 +139,8 @@ def _check_image_digest_semantics(label: str, image: str, has_build: bool, error
             errors.append(f"{label} image has no tag: {image}")
         if not _dockerfile_beets_base_is_approved():
             errors.append(
-                f"{label} is locally built but Dockerfile.beets's FROM line does not pin the approved "
-                f"upstream base image digest ({APPROVED_BEETS_BASE_IMAGE})"
+                f"{label} is locally built but Dockerfile.beets's ARG BEETS_BASE_IMAGE default is missing, "
+                "unpinned, or set to a moving `latest` tag"
             )
     else:
         if "@sha256:" not in image:

@@ -26,8 +26,10 @@ import re
 import subprocess
 import sys
 import time
+from pathlib import Path
 from typing import List, Optional
 
+_REPO_ROOT = Path(__file__).resolve().parents[1]
 _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/@-]*$")
 
 
@@ -81,11 +83,13 @@ def run_container_shell(image: str, shell_cmd: str) -> subprocess.CompletedProce
     return _run_docker(["run", "--rm", "--network", "none", "--entrypoint", "/bin/sh", image, "-c", shell_cmd])
 
 
-def check_version(image: str, expected_version: str, errors: List[str]) -> None:
+def get_beets_version(image: str, errors: List[str]) -> Optional[str]:
+    """Read the installed Beets version out of the image. Returns None (and
+    appends an error) if it could not be determined at all."""
     res = run_container_shell(image, "/lsiopy/bin/beet version")
     if res.returncode != 0:
         errors.append(f"beet version command failed: {res.stderr.strip()}")
-        return
+        return None
     version_line = ""
     for line in res.stdout.splitlines():
         if line.lower().startswith("beets version"):
@@ -93,12 +97,60 @@ def check_version(image: str, expected_version: str, errors: List[str]) -> None:
             break
     if not version_line:
         errors.append(f"beet version output did not contain a 'beets version' line: {res.stdout.strip()!r}")
-        return
-    reported_version = version_line.split()[-1]
+        return None
+    return version_line.split()[-1]
+
+
+def check_version(image: str, expected_version: str, errors: List[str]) -> Optional[str]:
+    reported_version = get_beets_version(image, errors)
+    if reported_version is None:
+        return None
     if reported_version != expected_version:
-        errors.append(f"Expected Beets version '{expected_version}', got '{reported_version}' ({version_line})")
+        errors.append(f"Expected Beets version '{expected_version}', got '{reported_version}'")
     else:
         print(f"[OK] Beets version verified: {reported_version}")
+    return reported_version
+
+
+def check_patch_state(image: str, beets_version: str, errors: List[str]) -> None:
+    """Confirm the obsolete, narrowly-targeted Beets 2.4.0 plugin-resolution
+    source patch (docker/beets/apply_patches.py) is present if and only if
+    this image's Beets version is exactly 2.4.0, and is never present on any
+    other version -- particularly not on a modern Beets release, where the
+    upstream fix (beetbox/beets#6039) already covers the same defect through
+    different, incompatible source text."""
+    sys.path.insert(0, str(_REPO_ROOT))
+    from docker.beets.apply_patches import PATCH_APPLY_VERSION, PATCHED_BLOCK, TARGET_FILE, _parse_version
+
+    try:
+        parsed = _parse_version(beets_version)
+    except ValueError as exc:
+        errors.append(f"Cannot parse Beets version {beets_version!r} for patch-state check: {exc}")
+        return
+
+    cat_res = run_container_shell(image, f"cat {TARGET_FILE} 2>/dev/null || true")
+    content = cat_res.stdout
+    if not content:
+        errors.append(f"Could not read {TARGET_FILE} inside image for patch-state verification")
+        return
+
+    patch_present = PATCHED_BLOCK in content
+    if parsed == PATCH_APPLY_VERSION:
+        if patch_present:
+            print(f"[OK] Beets {beets_version}: pinned 2.4.0 plugin-resolution patch is present")
+        else:
+            errors.append(
+                f"Beets {beets_version}: expected the pinned 2.4.0 plugin-resolution patch to be "
+                f"applied, but its patched code block was not found in {TARGET_FILE}"
+            )
+    else:
+        if patch_present:
+            errors.append(
+                f"Beets {beets_version}: the obsolete Beets 2.4.0 plugin-resolution patch text was "
+                f"found in {TARGET_FILE} -- it must never be applied outside Beets 2.4.0"
+            )
+        else:
+            print(f"[OK] Beets {beets_version}: obsolete 2.4.0 patch is correctly absent")
 
 
 def check_control_agent_files(image: str, errors: List[str]) -> None:
@@ -375,10 +427,26 @@ def check_image_exists(image: str, errors: List[str]) -> bool:
     return True
 
 
+def check_revision_label(image: str, expected_revision: str, errors: List[str]) -> None:
+    res = _run_docker([
+        "image", "inspect", image,
+        "--format", '{{index .Config.Labels "org.opencontainers.image.revision"}}',
+    ])
+    if res.returncode != 0:
+        errors.append(f"Could not read image revision label: {res.stderr.strip()}")
+        return
+    actual = res.stdout.strip()
+    if actual != expected_revision:
+        errors.append(f"Image revision label mismatch: expected {expected_revision!r}, got {actual!r}")
+    else:
+        print(f"[OK] Image revision label matches source commit: {actual}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Verify Beets engine image capabilities")
     parser.add_argument("--image", default="beets-engine:ci", help="Docker image tag to verify")
-    parser.add_argument("--require-version", default="", help="Expected Beets version string (e.g. 2.4.0)")
+    parser.add_argument("--require-version", default="", help="Expected Beets version string (e.g. 2.13.1)")
+    parser.add_argument("--require-revision", default="", help="Expected org.opencontainers.image.revision label (e.g. the built commit SHA)")
     parser.add_argument("--require-plugin", action="append", default=[], help="Required loaded plugin name")
     parser.add_argument("--forbid-duplicate-plugin", action="append", default=[], help="Forbidden duplicate plugin name")
     parser.add_argument("--require-command-help", action="append", default=[], help="Subcommand requiring zero exit on --help")
@@ -422,7 +490,15 @@ def main() -> int:
         configured_plugins = list(dict.fromkeys(require_plugins + forbid_duplicates + require_command_help + ["mbsubmit"]))
 
         if args.require_version:
-            check_version(image, args.require_version, errors)
+            beets_version = check_version(image, args.require_version, errors)
+        else:
+            beets_version = get_beets_version(image, errors)
+
+        if beets_version is not None:
+            check_patch_state(image, beets_version, errors)
+
+        if args.require_revision:
+            check_revision_label(image, args.require_revision, errors)
 
         check_control_agent_files(image, errors)
 

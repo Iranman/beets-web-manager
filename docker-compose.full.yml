@@ -3,11 +3,14 @@
 # IMPORTANT NOTICE:
 # 1. This file builds the custom Beets engine locally from Dockerfile.beets.
 # 2. It REQUIRES a full repository checkout to build the beets service.
-# 3. 'beets-engine:2.4.0' is a LOCAL image tag built from source, NOT a public Docker Hub image.
+# 3. 'beets-engine:local' is a LOCAL image tag built from source, NOT a public Docker Hub image.
 # 4. Running this file outside the repository root without building the engine will fail with:
 #      "pull access denied for beets-engine"
 # 5. For standard production deployments without host source code, use the primary docker-compose.yml
 #    and connect to an existing Beets control agent.
+# 6. BEETS_BASE_IMAGE selects the upstream LinuxServer Beets version/digest to build from
+#    (default: the tested production candidate). Set BEETS_BASE_IMAGE=lscr.io/linuxserver/beets:latest
+#    for advanced compatibility testing only -- never as a production default.
 #
 # Usage:
 #   docker compose -f docker-compose.full.yml up -d --build
@@ -18,8 +21,9 @@ services:
       context: .
       dockerfile: Dockerfile.beets
       args:
+        BEETS_BASE_IMAGE: ${BEETS_BASE_IMAGE:-lscr.io/linuxserver/beets:2.13.1}
         VCS_REF: ${VCS_REF:-local-build}
-    image: beets-engine:2.4.0
+    image: beets-engine:local
     container_name: beets
     restart: unless-stopped
     environment:

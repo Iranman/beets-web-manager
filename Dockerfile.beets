@@ -1,5 +1,11 @@
 # syntax=docker/dockerfile:1
-FROM lscr.io/linuxserver/beets:2.4.0@sha256:4cce2967154e849ca5466469d934a4bb9d8d83c3acf2a5279da47bccd16518f1
+
+# Selects the upstream LinuxServer Beets base image at build time. Pin an
+# explicit version (or, once validated, a digest) for anything built for
+# production -- see docs/CONFIGURATION.md for why `latest` must never be the
+# production default. Defaults to the tested production candidate.
+ARG BEETS_BASE_IMAGE=lscr.io/linuxserver/beets:2.13.1
+FROM ${BEETS_BASE_IMAGE}
 
 # Immutable image provenance. Required, not optional: a blank/missing
 # VCS_REF fails the build rather than silently producing an unlabeled
@@ -10,7 +16,11 @@ RUN test -n "${VCS_REF}" || (echo "ERROR: VCS_REF build-arg is required and must
 LABEL org.opencontainers.image.revision="${VCS_REF}" \
       org.opencontainers.image.source="https://github.com/Iranman/beets-web-manager"
 
-# Apply pinned Beets 2.4.0 plugin resolution fix
+# Version-aware compatibility patch: applies the narrow Beets 2.4.0
+# plugin-resolution fix only against exactly 2.4.0, skips it (upstream
+# already contains the fix) on Beets >= 2.5.0, and fails the build for any
+# other unsupported version. See docker/beets/apply_patches.py for the full
+# policy; it never applies source changes based on a loose version match.
 COPY docker/beets/ /opt/beets-patches/
 RUN /lsiopy/bin/python3 /opt/beets-patches/apply_patches.py
 
