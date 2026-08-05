@@ -33,6 +33,7 @@ jobs:
       - run: python scripts/validate_compose_security.py
       - run: docker compose -f docker-compose.arrs.yml config
       - run: docker compose -f docker-compose.dev.yml config
+      - run: docker compose -f docker-compose.full.yml config
       - run: docker compose config
       - run: docker build --pull=false --build-arg VCS_REF="${{ github.sha }}" -t beets-web-manager:ci .
       - name: Installation smoke test

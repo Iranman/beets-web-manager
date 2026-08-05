@@ -101,6 +101,7 @@ docs/*
 !docs/AGENT_WORKFLOW.md
 !docs/ARCHITECTURE.md
 !docs/TECHNICAL_DEBT.md
+!docs/EXAMPLES.md
 !docs/adr/
 docs/adr/*
 !docs/adr/*.md

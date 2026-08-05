@@ -263,7 +263,8 @@ services:
       TZ: America/Los_Angeles
       BEETS_API_URL: http://beets:8338
       BEETS_API_TOKEN: "${BEETS_API_TOKEN:?set in .env}"
-      BEETS_WEB_AUTH_TOKEN: "${BEETS_WEB_AUTH_TOKEN:?set a strong owner token}"
+      BEETS_WEB_AUTH_TOKEN: "${BEETS_WEB_AUTH_TOKEN:-}"
+      BEETS_WEB_AUTH_TOKEN_FILE: /web-manager-data/.auth_token
       # Enforced by backend/security.py's install_secure_urllib() SSRF policy,
       # which runs only in this (web-manager) process -- not in the beets
       # engine container. Defaults to the internal Beets control agent; set additional per-deployment entries in .env.

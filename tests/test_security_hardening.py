@@ -85,7 +85,8 @@ class SecurityHardeningTests(unittest.TestCase):
         combined = CONFIG + "\n" + COMPOSE
         for pattern in ("sk-proj", "K8ter", "6bHjj", "0be70", "HWxo", "f3bdb"):
             self.assertNotIn(pattern, combined)
-        self.assertRegex(COMPOSE, r"BEETS_WEB_AUTH_TOKEN: \"\$\{BEETS_WEB_AUTH_TOKEN:\?set a strong owner token\}\"")
+        self.assertRegex(COMPOSE, r"BEETS_WEB_AUTH_TOKEN: \"\$\{BEETS_WEB_AUTH_TOKEN:-\}\"")
+        self.assertIn("BEETS_WEB_AUTH_TOKEN_FILE: /web-manager-data/.auth_token", COMPOSE)
         self.assertRegex(COMPOSE, r"PUID: \$\{PUID:-1000\}")
         self.assertRegex(COMPOSE, r"PGID: \$\{PGID:-1000\}")
         self.assertIn('OPENAI_API_KEY: "${OPENAI_API_KEY:-}"', COMPOSE)

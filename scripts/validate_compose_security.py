@@ -165,7 +165,41 @@ def _check_no_hardcoded_lan_allowlist(text: str, source_label: str, errors: list
             )
 
 
-def _check_compose_variant(path: Path, errors: list[str], warnings: list[str]) -> None:
+FULL_COMPOSE = ROOT / "docker-compose.full.yml"
+
+
+def _check_production_hardening(text: str, label: str, errors: list[str]) -> None:
+    """docker-compose.yml is the source-independent production deployment
+    file. Unlike docker-compose.arrs.yml's owner-specific hardening block
+    (checked separately below), these invariants must hold for the generic
+    template shipped to every user, so they are enforced unconditionally
+    rather than folded into the same opt-in required_snippets table."""
+    if "beets-engine" in text:
+        errors.append(f"{label}: production Compose must not reference beets-engine")
+
+    web = _service_block(text, "beets-web-manager")
+    active = "\n".join(_active_lines(web))
+
+    if "read_only: true" not in active:
+        errors.append(f"{label}: beets-web-manager must set read_only: true")
+    if "cap_drop:" not in active or "- ALL" not in active:
+        errors.append(f"{label}: beets-web-manager must drop all capabilities (cap_drop: [ALL])")
+    if "no-new-privileges:true" not in active:
+        errors.append(f"{label}: beets-web-manager must set no-new-privileges:true")
+    if "/web-manager-data" not in active:
+        errors.append(f"{label}: beets-web-manager must persist state to /web-manager-data")
+
+    token_file_match = re.search(r"BEETS_WEB_AUTH_TOKEN_FILE:\s*(\S+)", active)
+    if not token_file_match or not token_file_match.group(1).strip("\"'").startswith("/web-manager-data/"):
+        errors.append(f"{label}: BEETS_WEB_AUTH_TOKEN_FILE must persist under /web-manager-data")
+
+    for volume in _volume_lines(web):
+        container_path = volume.split(":")[1] if volume.count(":") >= 1 else volume
+        if volume.endswith(".db") or "library.db" in volume or container_path.startswith("/config"):
+            errors.append(f"{label}: beets-web-manager must not directly mount the Beets SQLite database: {volume}")
+
+
+def _check_compose_variant(path: Path, errors: list[str], warnings: list[str], require_beets: bool = False) -> None:
     if not path.exists():
         errors.append(f"{path.name} not found")
         return
@@ -173,36 +207,32 @@ def _check_compose_variant(path: Path, errors: list[str], warnings: list[str]) -
     label = path.name
 
     beets = _service_block(text, "beets")
-    if not beets:
+    if require_beets and not beets:
         errors.append(f"{label}: beets service not found")
         return
 
-    beets_image = _image_line(beets)
-    _check_image_digest_semantics(f"{label}: beets", beets_image, _has_build_block(beets), errors)
+    if beets:
+        beets_image = _image_line(beets)
+        _check_image_digest_semantics(f"{label}: beets", beets_image, _has_build_block(beets), errors)
 
-    beets_active = "\n".join(_active_lines(beets))
-    if re.search(r"^\s*privileged:\s*true\b", beets_active, re.M):
-        errors.append(f"{label}: beets must not run privileged")
-    if "/var/run/docker.sock" in beets_active:
-        errors.append(f"{label}: beets must not mount the Docker socket")
-    if re.search(r"^\s*network_mode:\s*host\b", beets_active, re.M):
-        errors.append(f"{label}: beets must not use host networking")
-    if re.search(r"^\s*user:\s*[\"']?0(?::0)?[\"']?\s*$", beets_active, re.M):
-        errors.append(f"{label}: beets must not run as UID/GID 0")
+        beets_active = "\n".join(_active_lines(beets))
+        if re.search(r"^\s*privileged:\s*true\b", beets_active, re.M):
+            errors.append(f"{label}: beets must not run privileged")
+        if "/var/run/docker.sock" in beets_active:
+            errors.append(f"{label}: beets must not mount the Docker socket")
+        if re.search(r"^\s*network_mode:\s*host\b", beets_active, re.M):
+            errors.append(f"{label}: beets must not use host networking")
+        if re.search(r"^\s*user:\s*[\"']?0(?::0)?[\"']?\s*$", beets_active, re.M):
+            errors.append(f"{label}: beets must not run as UID/GID 0")
 
     beets_web = _service_block(text, "beets-web-manager")
     if not beets_web:
         errors.append(f"{label}: beets-web-manager service not found")
         return
 
-    # A bind address is "loopback by default" when it is either the literal
-    # 127.0.0.1 or a ${VAR:-127.0.0.1} expansion whose fallback is loopback --
-    # accepting the parameterized form is required now that the bind address
-    # is intentionally operator-configurable, but the shipped default must
-    # still be safe.
     loopback_default_re = re.compile(r"^(?:127\.0\.0\.1|\$\{[A-Za-z_][A-Za-z0-9_]*:-127\.0\.0\.1\}):")
 
-    beets_ports = _port_lines(beets)
+    beets_ports = _port_lines(beets) if beets else []
     web_ports = _port_lines(beets_web)
     for p in beets_ports:
         if "8338" in p and not loopback_default_re.match(p):
@@ -222,8 +252,20 @@ def main() -> int:
     errors: list[str] = []
     warnings: list[str] = []
 
-    _check_compose_variant(STANDALONE_COMPOSE, errors, warnings)
-    _check_compose_variant(ARRS_COMPOSE, errors, warnings)
+    # Primary production compose must have NO build directives and NO local beets service
+    if STANDALONE_COMPOSE.exists():
+        standalone_text = _read(STANDALONE_COMPOSE)
+        if "build:" in standalone_text:
+            errors.append("docker-compose.yml: production Compose file must contain no build: directives")
+        if _service_block(standalone_text, "beets"):
+            errors.append("docker-compose.yml: production Compose file must not include local beets engine service")
+        _check_production_hardening(standalone_text, "docker-compose.yml", errors)
+
+    _check_compose_variant(STANDALONE_COMPOSE, errors, warnings, require_beets=False)
+    _check_compose_variant(ARRS_COMPOSE, errors, warnings, require_beets=True)
+    if FULL_COMPOSE.exists():
+        _check_compose_variant(FULL_COMPOSE, errors, warnings, require_beets=True)
+
     if ENV_EXAMPLE.exists():
         _check_no_hardcoded_lan_allowlist(_read(ENV_EXAMPLE), ENV_EXAMPLE.name, errors)
 

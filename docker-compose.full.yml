@@ -1,9 +1,16 @@
-# Full Source Development Docker Compose file.
-# Requires a complete repository checkout to build both services locally:
-#   docker compose -f docker-compose.dev.yml up -d --build
+# Optional Bundled Beets Stack (Advanced Users)
 #
-# This file is for local development and contributor builds ONLY.
-# It is NOT the standard production installation method.
+# IMPORTANT NOTICE:
+# 1. This file builds the custom Beets engine locally from Dockerfile.beets.
+# 2. It REQUIRES a full repository checkout to build the beets service.
+# 3. 'beets-engine:2.4.0' is a LOCAL image tag built from source, NOT a public Docker Hub image.
+# 4. Running this file outside the repository root without building the engine will fail with:
+#      "pull access denied for beets-engine"
+# 5. For standard production deployments without host source code, use the primary docker-compose.yml
+#    and connect to an existing Beets control agent.
+#
+# Usage:
+#   docker compose -f docker-compose.full.yml up -d --build
 
 services:
   beets:
@@ -11,9 +18,9 @@ services:
       context: .
       dockerfile: Dockerfile.beets
       args:
-        VCS_REF: ${VCS_REF:-local-development}
-    image: beets-engine:dev
-    container_name: beets-dev
+        VCS_REF: ${VCS_REF:-local-build}
+    image: beets-engine:2.4.0
+    container_name: beets
     restart: unless-stopped
     environment:
       - PUID=${PUID:-1000}
@@ -35,15 +42,8 @@ services:
       retries: 3
 
   beets-web-manager:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        VCS_REF: ${VCS_REF:-local-development}
-        VERSION: ${VERSION:-0.1.0-dev}
-        BUILD_DATE: ${BUILD_DATE:-}
-    image: beets-web-manager:dev
-    container_name: beets-web-manager-dev
+    image: ghcr.io/iranman/beets-web-manager:${BEETS_WEB_MANAGER_VERSION:-stable}
+    container_name: beets-web-manager
     restart: unless-stopped
 
     ports:

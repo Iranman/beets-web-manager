@@ -21,7 +21,10 @@ try { docker info | Out-Null } catch {
 }
 
 Write-Host "==> Creating persistent data directories..."
-New-Item -ItemType Directory -Force -Path "config", "data\music", "data\downloads", "web-manager-data" | Out-Null
+New-Item -ItemType Directory -Force -Path "web-manager-data" | Out-Null
+if ($Dev) {
+    New-Item -ItemType Directory -Force -Path "config", "data\music", "data\downloads" | Out-Null
+}
 
 if (Test-Path ".env") {
     Write-Host "==> .env already exists, leaving existing secrets untouched."
@@ -50,7 +53,11 @@ if (-not $apiTokenVal -or $apiTokenVal -eq "changeme") {
 $apiUrlLine = Select-String -Path ".env" -Pattern '^BEETS_API_URL=' | Select-Object -First 1
 $apiUrlVal = if ($apiUrlLine) { ($apiUrlLine.Line -split '=', 2)[1].Trim() } else { "" }
 if (-not $apiUrlVal) {
-    Write-Warning "BEETS_API_URL is empty in .env. Defaulting to http://beets:8338."
+    if ($Dev) {
+        Write-Warning "BEETS_API_URL is empty in .env. Defaulting to http://beets:8338 (docker-compose.dev.yml)."
+    } else {
+        Write-Warning "BEETS_API_URL is empty in .env. docker-compose.yml requires BEETS_API_URL to be set -- the container will fail to start without it."
+    }
 }
 
 $composeFile = "docker-compose.yml"
@@ -60,9 +67,9 @@ if ($Dev) {
     docker compose -f docker-compose.dev.yml up -d --build
 } else {
     Write-Host "==> Pulling published image from GitHub Container Registry..."
-    docker compose pull
+    docker compose pull beets-web-manager
     Write-Host "==> Starting Beets Web Manager..."
-    docker compose up -d
+    docker compose up -d beets-web-manager
 }
 
 Write-Host "==> Waiting for Beets Web Manager to become healthy..."

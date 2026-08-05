@@ -54,17 +54,30 @@ To embed `beets-web-manager` into an existing Compose stack (such as `/mnt/PLEX/
      - /mnt/PLEX/Apps/Arrs/beets-web-manager:/web-manager-data
    ```
 5. Configure `BEETS_API_URL` and `BEETS_API_TOKEN`.
-6. Remove `depends_on: beets` if Beets is running in a separate stack or host.
+6. Choose the connection mode that matches your setup -- see [Beets Connection Modes](EXAMPLES.md#2-beets-connection-modes) for whether `depends_on` applies.
 
 ---
 
 ## Development Installation (Source Builds)
 
-If you are modifying source code and building images locally:
+If you are modifying source code and building both services locally:
 
 ```bash
 docker compose -f docker-compose.dev.yml up -d --build
 ```
+
+---
+
+## Optional Bundled Beets Stack (Advanced Users)
+
+If you want to run the published Beets Web Manager alongside a locally built custom Beets engine (`Dockerfile.beets`), use the bundled Compose file:
+
+```bash
+docker compose -f docker-compose.full.yml up -d --build
+```
+
+> [!WARNING]
+> `docker-compose.full.yml` builds `beets-engine` locally from `Dockerfile.beets`. Running it outside the repository root without a local build context will fail with `pull access denied for beets-engine`. Do not copy the `beets` service definition into an external directory unless `Dockerfile.beets` and source files are also present.
 
 ---
 

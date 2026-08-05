@@ -25,7 +25,10 @@ if ! docker info >/dev/null 2>&1; then
 fi
 
 echo "==> Creating persistent data directories..."
-mkdir -p config data/music data/downloads web-manager-data
+mkdir -p web-manager-data
+if [ "$DEV_MODE" -eq 1 ]; then
+  mkdir -p config data/music data/downloads
+fi
 
 if [ -f .env ]; then
   echo "==> .env already exists, leaving existing secrets untouched."
@@ -48,7 +51,11 @@ fi
 
 API_URL_VAL="$(grep -E '^BEETS_API_URL=' .env | cut -d= -f2- | tr -d '\r" ' || true)"
 if [ -z "$API_URL_VAL" ]; then
-  echo "WARNING: BEETS_API_URL is empty in .env. Defaulting to http://beets:8338." >&2
+  if [ "$DEV_MODE" -eq 1 ]; then
+    echo "WARNING: BEETS_API_URL is empty in .env. Defaulting to http://beets:8338 (docker-compose.dev.yml)." >&2
+  else
+    echo "WARNING: BEETS_API_URL is empty in .env. docker-compose.yml requires BEETS_API_URL to be set -- the container will fail to start without it." >&2
+  fi
 fi
 
 if [ "$DEV_MODE" -eq 1 ]; then
@@ -57,9 +64,9 @@ if [ "$DEV_MODE" -eq 1 ]; then
   COMPOSE_FILE="docker-compose.dev.yml"
 else
   echo "==> Pulling published image from GitHub Container Registry..."
-  docker compose pull
+  docker compose pull beets-web-manager
   echo "==> Starting Beets Web Manager..."
-  docker compose up -d
+  docker compose up -d beets-web-manager
   COMPOSE_FILE="docker-compose.yml"
 fi
 

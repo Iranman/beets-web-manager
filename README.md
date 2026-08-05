@@ -68,10 +68,18 @@ It uses the published image (`ghcr.io/iranman/beets-web-manager:${BEETS_WEB_MANA
 
 ### Development Installation (Source Builds)
 
-To build and run Beets Web Manager from local source code:
+To build both `beets-web-manager` and the `beets` engine from local source code:
 
 ```bash
 docker compose -f docker-compose.dev.yml up -d --build
+```
+
+### Optional Bundled Beets Stack (Advanced Users)
+
+To deploy the published Beets Web Manager alongside a locally built custom Beets engine (`Dockerfile.beets`):
+
+```bash
+docker compose -f docker-compose.full.yml up -d --build
 ```
 
 For backend tests:
@@ -216,6 +224,9 @@ This creates `.env`/`config.yaml` from the example templates, generates a random
 Packaging status: passing tests on a local or CI branch do not authorize production deployment. Rebuild and validate both services in disposable storage before migrating an existing library.
 
 ## Troubleshooting
+
+**`pull access denied for beets-engine`**
+Docker encountered a local-only engine image tag (`beets-engine:2.4.0` or `beets-engine:dev`) without a local build context. Do **not** run `docker login`. Use the production `docker-compose.yml` (web-manager only) with an existing `BEETS_API_URL`, or run `docker compose -f docker-compose.full.yml up -d --build` from the repository root.
 
 **`pull access denied for beets-web-manager`**
 Compose is attempting to use a local-only image name instead of the published registry image. Make sure your Compose file uses `image: ghcr.io/iranman/beets-web-manager:${BEETS_WEB_MANAGER_VERSION:-stable}` or run `docker compose -f docker-compose.dev.yml up -d --build` for local source builds.
