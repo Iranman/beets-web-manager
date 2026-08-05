@@ -66,6 +66,56 @@ def _delete_agent(path: str, payload: dict | None = None):
     return responses[0]
 
 
+class EnvClampedArtworkLimitTests(unittest.TestCase):
+    def test_negative_value_clamps_to_minimum(self):
+        with mock.patch.dict(os.environ, {"X_TEST_LIMIT": "-5"}):
+            self.assertEqual(
+                control_agent._env_int_clamped("X_TEST_LIMIT", 10, minimum=1, maximum=100), 1
+            )
+
+    def test_zero_clamps_to_minimum(self):
+        with mock.patch.dict(os.environ, {"X_TEST_LIMIT": "0"}):
+            self.assertEqual(
+                control_agent._env_int_clamped("X_TEST_LIMIT", 10, minimum=1, maximum=100), 1
+            )
+
+    def test_absurdly_large_value_clamps_to_maximum(self):
+        with mock.patch.dict(os.environ, {"X_TEST_LIMIT": "999999999999999"}):
+            self.assertEqual(
+                control_agent._env_int_clamped("X_TEST_LIMIT", 10, minimum=1, maximum=100), 100
+            )
+
+    def test_non_numeric_value_falls_back_to_default(self):
+        with mock.patch.dict(os.environ, {"X_TEST_LIMIT": "not-a-number"}):
+            self.assertEqual(
+                control_agent._env_int_clamped("X_TEST_LIMIT", 10, minimum=1, maximum=100), 10
+            )
+
+    def test_unset_uses_default(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("X_TEST_LIMIT", None)
+            self.assertEqual(
+                control_agent._env_int_clamped("X_TEST_LIMIT", 10, minimum=1, maximum=100), 10
+            )
+
+    def test_in_range_value_passes_through_unchanged(self):
+        with mock.patch.dict(os.environ, {"X_TEST_LIMIT": "42"}):
+            self.assertEqual(
+                control_agent._env_int_clamped("X_TEST_LIMIT", 10, minimum=1, maximum=100), 42
+            )
+
+    def test_module_level_limits_are_never_non_positive(self):
+        """Whatever the running environment set them to, the actual module
+        constants used by the image-validation code path must always be
+        strictly positive and within the documented hard ceiling."""
+        self.assertGreater(control_agent.ALBUM_ART_MAX_BYTES, 0)
+        self.assertLessEqual(control_agent.ALBUM_ART_MAX_BYTES, 100 * 1024 * 1024)
+        self.assertGreater(control_agent.ALBUM_ART_MAX_PIXELS, 0)
+        self.assertLessEqual(control_agent.ALBUM_ART_MAX_PIXELS, 200_000_000)
+        self.assertGreater(control_agent.ALBUM_ART_MAX_DIMENSION, 0)
+        self.assertLessEqual(control_agent.ALBUM_ART_MAX_DIMENSION, 20_000)
+
+
 class ControlAgentAlbumArtMutationTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(dir="/tmp")
@@ -261,6 +311,136 @@ class ControlAgentAlbumArtMutationTests(unittest.TestCase):
         self.assertEqual(quarantined.read_bytes(), b"previous-cover")
         self.assertTrue(quarantined.resolve(strict=False).is_relative_to(self.trash.resolve(strict=False)))
 
+    def test_replace_album_art_reports_durability_true_on_clean_write(self):
+        code, data = _post_agent("/albums/1/art", self._payload())
+        self.assertEqual(code, 200, data)
+        self.assertIn("durable", data)
+        if os.name != "nt":
+            # _fsync_directory() opens the directory with os.O_DIRECTORY,
+            # which is POSIX-only; this control agent only ever runs in
+            # Linux containers in practice, so the "clean write is fully
+            # durable" assertion is only meaningful on a POSIX runner (this
+            # module's own CI target). On native Windows, os.O_DIRECTORY is
+            # unavailable (getattr(..., 0) fallback) and directory-level
+            # fsync is expected to fail even on a genuinely clean write.
+            self.assertTrue(data["durable"], data)
+
+    def test_replace_album_art_reports_durability_false_without_failing_when_fsync_fails(self):
+        real_fsync = control_agent.os.fsync
+
+        def flaky_fsync(fd):
+            # Let the initial content-write fsync (before the rename)
+            # succeed -- only fail post-rename durability fsyncs, matching
+            # what a real fsync failure at that later stage would do.
+            if getattr(flaky_fsync, "armed", False):
+                raise OSError("synthetic fsync failure")
+            flaky_fsync.armed = True
+            return real_fsync(fd)
+
+        with mock.patch.object(control_agent.os, "fsync", side_effect=flaky_fsync):
+            code, data = _post_agent("/albums/1/art", self._payload())
+
+        self.assertEqual(code, 200, data)
+        self.assertFalse(data["durable"], data)
+        trusted = self.album_dir / "albumart.jpg"
+        self.assertTrue(trusted.exists())
+        self.assertEqual(Path(self._artpath()).resolve(strict=False), trusted.resolve(strict=False))
+
+    def test_replace_album_art_blocks_when_items_point_to_conflicting_directories(self):
+        other_dir = self.music / "Artist" / "OtherAlbum"
+        other_dir.mkdir(parents=True, exist_ok=True)
+        other_track = other_dir / "01 Other.flac"
+        other_track.write_bytes(b"audio")
+        con = sqlite3.connect(self.db_path)
+        con.execute("INSERT INTO items (id, album_id, path) VALUES (2, 1, ?)", (other_track.as_posix(),))
+        con.commit()
+        con.close()
+
+        code, data = _post_agent("/albums/1/art", self._payload())
+
+        self.assertEqual(code, 409, data)
+        self.assertIn("conflicting directories", data["error"])
+        # Neither candidate directory should have been mutated.
+        self.assertFalse((self.album_dir / "albumart.jpg").exists())
+        self.assertFalse((other_dir / "albumart.jpg").exists())
+        self.assertEqual(self._artpath(), "")
+
+    def test_replace_album_art_unifies_legitimate_multidisc_item_directories(self):
+        disc1 = self.album_dir / "Disc 1"
+        disc2 = self.album_dir / "Disc 2"
+        disc1.mkdir(parents=True, exist_ok=True)
+        disc2.mkdir(parents=True, exist_ok=True)
+        (disc1 / "01 Track.flac").write_bytes(b"audio")
+        (disc2 / "01 Track.flac").write_bytes(b"audio")
+        con = sqlite3.connect(self.db_path)
+        con.execute("DELETE FROM items")
+        con.execute("INSERT INTO items (id, album_id, path) VALUES (1, 1, ?)", ((disc1 / "01 Track.flac").as_posix(),))
+        con.execute("INSERT INTO items (id, album_id, path) VALUES (2, 1, ?)", ((disc2 / "01 Track.flac").as_posix(),))
+        con.commit()
+        con.close()
+
+        code, data = _post_agent("/albums/1/art", self._payload())
+
+        self.assertEqual(code, 200, data)
+        self.assertEqual(Path(data["album_dir"]).resolve(strict=False), self.album_dir.resolve(strict=False))
+
+    def test_claim_trash_target_exclusive_rejects_pre_existing_file(self):
+        """Direct test of the atomic no-clobber primitive itself: unlike a
+        target.exists() check (which a concurrent creation can race past
+        undetected), O_CREAT|O_EXCL is a single atomic syscall that always
+        correctly detects and rejects a pre-existing destination."""
+        target = self.trash / "already-there.jpg"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"already here")
+
+        with self.assertRaises(FileExistsError):
+            control_agent._claim_trash_target_exclusive(target)
+
+        self.assertEqual(target.read_bytes(), b"already here")
+
+    def test_claim_trash_target_exclusive_creates_new_file(self):
+        target = self.trash / "brand-new.jpg"
+        target.parent.mkdir(parents=True, exist_ok=True)
+
+        control_agent._claim_trash_target_exclusive(target)
+
+        self.assertTrue(target.exists())
+        self.assertEqual(target.read_bytes(), b"")
+
+    def test_delete_album_art_quarantine_target_does_not_clobber_pre_existing_file(self):
+        """End-to-end contract check: a pre-existing collision at the
+        computed trash path falls back to a suffixed name rather than being
+        overwritten. (This scenario -- collision already present before the
+        check -- is also caught by a naive target.exists() check; the
+        atomicity guarantee itself is what
+        test_claim_trash_target_exclusive_rejects_pre_existing_file proves.)
+        """
+        existing = self.album_dir / "albumart.jpg"
+        existing.write_bytes(b"current-cover")
+        con = sqlite3.connect(self.db_path)
+        con.execute("UPDATE albums SET artpath=? WHERE id=1", (existing.as_posix(),))
+        con.commit()
+        con.close()
+
+        # Pre-create a colliding file at the exact op-id-scoped trash path
+        # the engine will compute, simulating a race winner that got there
+        # first. The engine must not silently overwrite it.
+        fixed_op_id = "fixedopid00000000000000000000"
+        with mock.patch.object(control_agent.uuid, "uuid4") as mock_uuid4:
+            mock_uuid4.return_value = SimpleNamespace(hex=fixed_op_id)
+            target_dir = self.trash / fixed_op_id
+            target_dir.mkdir(parents=True, exist_ok=True)
+            (target_dir / "albumart.jpg").write_bytes(b"race-winner-content")
+
+            code, data = _delete_agent("/albums/1/art")
+
+        self.assertEqual(code, 200, data)
+        # The pre-existing race-winner content must be untouched.
+        self.assertEqual((target_dir / "albumart.jpg").read_bytes(), b"race-winner-content")
+        quarantined = Path(data["quarantined_art"][0]["quarantined"])
+        self.assertNotEqual(quarantined, target_dir / "albumart.jpg")
+        self.assertEqual(quarantined.read_bytes(), b"current-cover")
+
     def test_delete_album_art_rejects_symlink_leaf_and_preserves_outside_sentinel(self):
         sentinel = self.outside / "sentinel.jpg"
         sentinel.write_bytes(b"outside")
@@ -356,6 +536,51 @@ class FlaskAlbumArtRouteBoundaryTests(unittest.TestCase):
         self.assertEqual(captured["source"], "user_upload")
         self.assertEqual(captured["expected_mb_releasegroupid"], RGID)
         self.assertNotIn("outside-cover", json.dumps(captured))
+
+    def test_upload_album_art_does_not_leak_beets_error_text(self):
+        # _replace_album_art_bytes() already converts BeetsError to a safe
+        # RuntimeError internally, so this mocks the helper directly to
+        # simulate a BeetsError reaching album_upload_art's own outer
+        # handler -- exercising that handler's own sanitization as a
+        # defense-in-depth layer, independent of the inner helper's.
+        leak = "LEAK_MARKER Traceback http://beets:8338 token=abc"
+        with app_module.app.test_request_context(
+                "/api/albums/1/art/upload",
+                method="POST",
+                data={"file": (BytesIO(_png_bytes()), "cover.png")},
+                content_type="multipart/form-data",
+             ), \
+             mock.patch.object(app_module.lib, "get_album", return_value=self.album), \
+             mock.patch.object(app_module.jobs, "start_python", side_effect=lambda func, **kwargs: self._run_job_immediately(func, **kwargs)), \
+             mock.patch.object(app_module, "_replace_album_art_bytes", side_effect=BeetsError(leak)):
+            with self.assertRaises(RuntimeError) as ctx:
+                app_module.album_upload_art(1)
+
+        message = str(ctx.exception)
+        self.assertEqual(message, "Could not update album artwork")
+        self.assertNotIn("LEAK_MARKER", message)
+        self.assertNotIn("Traceback", message)
+        self.assertNotIn("token=abc", message)
+        self.assertNotIn("beets:8338", message)
+
+    def test_replace_art_from_url_does_not_leak_beets_error_text(self):
+        leak = "LEAK_MARKER Traceback http://beets:8338 token=abc"
+        with app_module.app.test_request_context(
+                "/api/albums/1/art/url", method="POST", json={"url": "https://images.example/cover.png"},
+             ), \
+             mock.patch.object(app_module.lib, "get_album", return_value=self.album), \
+             mock.patch.object(app_module, "validate_outbound_url", return_value=None), \
+             mock.patch.object(app_module.jobs, "start_python", side_effect=lambda func, **kwargs: self._run_job_immediately(func, **kwargs)), \
+             mock.patch.object(app_module, "_replace_album_art_from_url", side_effect=BeetsError(leak)):
+            with self.assertRaises(RuntimeError) as ctx:
+                app_module.album_replace_art_from_url(1)
+
+        message = str(ctx.exception)
+        self.assertEqual(message, "Could not update album artwork")
+        self.assertNotIn("LEAK_MARKER", message)
+        self.assertNotIn("Traceback", message)
+        self.assertNotIn("token=abc", message)
+        self.assertNotIn("beets:8338", message)
 
     def test_delete_album_art_does_not_leak_remote_exception_text(self):
         leak = "LEAK_MARKER Traceback /tmp/internal.py token=abc"
