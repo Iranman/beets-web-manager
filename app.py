@@ -25697,21 +25697,19 @@ def _ai_import_folder(folder_path: str, mb_albumid: str, suggestion: dict,
     _MROOT_B = b"/data/media/music/"
     try:
         # Search by mb_albumid (most reliable after --search-id import)
-        with _db() as con:
+        with _db(text_factory=bytes) as con:
             row = con.execute("SELECT id FROM albums WHERE mb_albumid = ?",
                               (mb_albumid,)).fetchone()
-        if row:
-            aid = row[0]
-        if aid is None:
-            # Recently added fallback
-            t_before = time.time() - 200   # last few minutes
-            con.text_factory = bytes
-            rows = con.execute(
-                "SELECT DISTINCT album_id FROM items "
-                "WHERE album_id IS NOT NULL AND added >= ?", (t_before,)).fetchall()
-            if rows:
-                aid = rows[-1][0]  # most recently added album
-        con.close()
+            if row:
+                aid = row[0]
+            if aid is None:
+                # Recently added fallback
+                t_before = time.time() - 200   # last few minutes
+                rows = con.execute(
+                    "SELECT DISTINCT album_id FROM items "
+                    "WHERE album_id IS NOT NULL AND added >= ?", (t_before,)).fetchall()
+                if rows:
+                    aid = rows[-1][0]  # most recently added album
     except Exception as ex:
         log.append(f"  DB lookup warning: {ex}")
 
