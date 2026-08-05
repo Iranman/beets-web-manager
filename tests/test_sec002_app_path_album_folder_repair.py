@@ -465,8 +465,81 @@ class AlbumFolderCleanupApplyBoundaryTests(Wave4PathTestCase):
         self.assertNotIn(str(source), json.dumps(data))
 
 
-if __name__ == "__main__":
-    unittest.main()
+class ReviewPathsEqualFailClosedTests(Wave4PathTestCase):
+    """_review_paths_equal() authorizes destructive Pending Review cleanup
+    (_pending_review_matches). It must fail closed -- never fall back to
+    weak raw-string comparison -- when either side cannot be trust-resolved."""
+
+    def test_stored_path_outside_root_is_not_equal_even_with_matching_text(self):
+        outside = self.outside / "hostile"
+        outside.mkdir()
+        # Same raw text on both sides after naive backslash/trailing-slash
+        # normalization, but outside the approved roots -- must not match.
+        self.assertFalse(app_module._review_paths_equal(str(outside), str(outside) + "/"))
+
+    def test_symlink_path_is_not_equal_to_its_target(self):
+        target = self.outside / "target"
+        target.mkdir()
+        link = self.downloads / "linked"
+        self.make_symlink(link, target, directory=True)
+        self.assertFalse(app_module._review_paths_equal(str(link), str(target)))
+
+    def test_two_valid_equivalent_paths_are_equal(self):
+        folder = self.downloads / "Artist" / "Album"
+        folder.mkdir(parents=True)
+        self.assertTrue(app_module._review_paths_equal(str(folder), str(folder) + "/"))
+
+    def test_pending_review_match_refuses_hostile_stored_path(self):
+        folder = self.downloads / "Artist" / "Album"
+        folder.mkdir(parents=True)
+        pending_file = self.state / "ai_pending_review.json"
+        pending_file.write_text(json.dumps([{"path": str(self.outside / "hostile")}]), encoding="utf-8")
+        with mock.patch.object(app_module, "_AI_PENDING_FILE", pending_file):
+            self.assertFalse(app_module._pending_review_matches(str(folder)))
+
+
+class AlbumCleanupMoveDbFailureRecoveryTests(Wave4PathTestCase):
+    """When the Beets-engine path rewrite fails after a file has already
+    been moved, the move must be reverted rather than leaving the
+    filesystem and database split with only a truthful error message."""
+
+    def issue(self, source: Path, target: Path):
+        return {
+            "id": "issue-1",
+            "artist": "Artist",
+            "album": "Album",
+            "release_group_id": RGID,
+            "current_folders": [str(source), str(target)],
+            "canonical_folder": str(target),
+            "proposed_canonical_folder": str(target),
+            "issue_types": ["duplicate_album_folders", "same_release_group_id"],
+            "safety": "Safe",
+            "safe": True,
+        }
+
+    def test_file_move_is_reverted_when_db_rewrite_fails(self):
+        source = self.music / "Artist" / "Album (2024)"
+        target = self.music / "Artist" / f"Album (2024) {{{RGID}}}"
+        source.mkdir(parents=True)
+        target.mkdir(parents=True)
+        source_file = source / "01 Song.flac"
+        source_file.write_bytes(b"audio")
+
+        with mock.patch.object(
+            app_module.beets_client, "rewrite_library_path",
+            side_effect=RuntimeError("engine unavailable"),
+        ):
+            result = app_module._album_cleanup_apply_issue(
+                self.issue(source, target), self.music, self.state / "trash", [], _summary(), [],
+            )
+
+        self.assertEqual(result["status"], "Blocked", result)
+        # The file must be back at its original location, not stranded at
+        # the destination with the database still pointing at the source.
+        self.assertTrue(source_file.exists())
+        self.assertEqual(source_file.read_bytes(), b"audio")
+        self.assertFalse((target / "01 Song.flac").exists())
+
 
 class ControlAgentLibraryRewriteTests(unittest.TestCase):
     def setUp(self):
@@ -549,3 +622,27 @@ class ControlAgentLibraryRewriteTests(unittest.TestCase):
 
         self.assertEqual(code, 403, data)
         self.assertNotIn(str(new_path), json.dumps(data))
+
+    def test_engine_rewrite_library_path_rejects_when_zero_rows_match(self):
+        # old_path is a real, valid, in-library file but was never actually
+        # stored in the DB -- the rewrite must not silently report success
+        # (and must not commit) when nothing was actually changed.
+        if os.name == "nt":
+            self.skipTest("control-agent path rewrite uses POSIX container paths; covered by Docker runtime")
+        folder = self.music / "Artist"
+        folder.mkdir()
+        old_path = folder / "old.flac"
+        old_path.write_bytes(b"audio")
+        new_path = folder / "new.flac"
+        new_path.write_bytes(b"audio")
+
+        code, data = self.post_rewrite({"old_path": str(old_path), "new_path": str(new_path)})
+
+        self.assertEqual(code, 404, data)
+        self.assertFalse(data.get("ok"))
+        with closing(sqlite3.connect(self.db_path)) as con:
+            self.assertEqual(con.execute("SELECT COUNT(*) FROM items").fetchone()[0], 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

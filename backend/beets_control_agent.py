@@ -1278,6 +1278,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 return
 
             lock_file = acquire_os_lock(read_only=False)
+            con = None
             try:
                 old_path = _library_rewrite_path(str(old_path), require_exists=False, expected_type=None)
                 new_path = _library_rewrite_path(str(new_path), require_exists=True, expected_type="file")
@@ -1297,33 +1298,55 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                     (new_rel.encode(), old_rel.encode(), old_abs.encode()),
                 )
                 changed_items += max(0, cur.rowcount)
+                # Isolated per-statement: albums.artpath legitimately has no
+                # matching row for most item-path rewrites (artpath is a
+                # per-album field, not per-item), and a schema/type error on
+                # one form must not discard a real count already earned by
+                # the other -- unlike the previous behavior, which reset the
+                # whole artpath count to 0 on any exception, silently
+                # under-reporting (while still committing) a partially
+                # successful update.
                 try:
                     cur.execute(
                         "UPDATE albums SET artpath=? WHERE artpath=? OR artpath=?",
                         (new_rel, old_rel, old_abs),
                     )
                     changed_artpaths += max(0, cur.rowcount)
+                except Exception:
+                    pass
+                try:
                     cur.execute(
                         "UPDATE albums SET artpath=? WHERE artpath=? OR artpath=?",
                         (new_rel.encode(), old_rel.encode(), old_abs.encode()),
                     )
                     changed_artpaths += max(0, cur.rowcount)
                 except Exception:
-                    changed_artpaths = 0
+                    pass
+                changed_total = changed_items + changed_artpaths
+                if changed_total == 0:
+                    con.rollback()
+                    self._send_json(404, {"error": "No stored library rows matched the source path"})
+                    return
                 con.commit()
-                con.close()
                 self._send_json(200, {
                     "ok": True,
                     "items_changed": changed_items,
                     "artpaths_changed": changed_artpaths,
-                    "changed": changed_items + changed_artpaths,
+                    "changed": changed_total,
                     "old_path": str(old_path),
                     "new_path": str(new_path),
                     "stored_path": new_rel,
                 })
             except Exception:
+                if con is not None:
+                    try:
+                        con.rollback()
+                    except Exception:
+                        pass
                 self._send_json(500, {"error": "Failed to rewrite library path"})
             finally:
+                if con is not None:
+                    con.close()
                 release_os_lock(lock_file)
             return
 

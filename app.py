@@ -18540,6 +18540,17 @@ def _import_target_preview_cache_key(payload: Dict[str, Any]) -> str:
     ) if source_path else (None, "source path missing")
     if source_for_stat is not None:
         source_marker["canonical_path"] = str(source_for_stat)
+        # Containment validation alone does not invalidate the cache when
+        # the folder's own contents change (a file added/replaced/removed)
+        # without the path itself changing -- restore the same freshness
+        # signal the pre-security-fix implementation had, now computed from
+        # the already-validated canonical path rather than raw request text.
+        try:
+            st = source_for_stat.stat()
+            source_marker["size"] = int(st.st_size)
+            source_marker["mtime_ns"] = int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1_000_000_000)))
+        except Exception:
+            pass
     material = {
         "version": 1,
         "source": source_marker,
@@ -18931,6 +18942,13 @@ def _review_status_key(status: Any) -> str:
 
 
 def _review_paths_equal(a: str, b: str) -> bool:
+    """Used to authorize destructive Pending Review cleanup actions
+    (_pending_review_matches), so this must fail closed: when either side
+    cannot be trust-resolved (outside the approved roots, a symlink, or
+    otherwise invalid), the two paths are never considered equal merely
+    because their raw text normalizes the same way. A stored Pending
+    Review entry that fails trusted resolution must not be treated as
+    authorization evidence."""
     if a == b:
         return True
     left, left_error = _resolve_import_review_source_path(
@@ -18945,9 +18963,9 @@ def _review_paths_equal(a: str, b: str) -> bool:
         expected_type=None,
         require_exists=False,
     ) if _s(b).strip() else (None, "path missing")
-    if left is not None and right is not None and not left_error and not right_error:
-        return str(left) == str(right)
-    return _s(a).replace("\\", "/").rstrip("/") == _s(b).replace("\\", "/").rstrip("/")
+    if left is None or right is None or left_error or right_error:
+        return False
+    return str(left) == str(right)
 
 
 def _review_id_matches_path(review_item_id: str, folder_path: str) -> bool:
@@ -38375,12 +38393,21 @@ def _album_cleanup_apply_issue(issue: Dict[str, Any], scan_root: Path, trash_roo
                 shutil.move(str(src), str(dst))
                 if not dst.exists() or src.exists():
                     raise RuntimeError("move verification failed")
+                db_changed = _album_cleanup_update_db_path(src, dst, log)
+                if db_changed < 0:
+                    # The file already moved but the Beets DB still points
+                    # at the old path -- move it back rather than leaving a
+                    # filesystem/database split that a truthful error
+                    # message alone would not repair.
+                    try:
+                        shutil.move(str(dst), str(src))
+                        log.append(f"  [db] Reverted file move after database update failure: {dst} -> {src}")
+                    except Exception:
+                        log.append(f"  [db] WARN: could not revert file move after database update failure: {dst} -> {src}")
+                    raise RuntimeError("database path update failed")
                 summary["files_moved"] += 1
                 if kind == "move_artwork" or dst.suffix.lower() in _ART_EXTS:
                     summary["artwork_moved"] += 1
-                db_changed = _album_cleanup_update_db_path(src, dst, log)
-                if db_changed < 0:
-                    raise RuntimeError("database path update failed")
                 summary["db_paths_updated"] += db_changed
                 changed += 1
                 if verbose_files:
