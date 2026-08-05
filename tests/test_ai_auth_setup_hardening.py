@@ -401,7 +401,7 @@ class AuthTokenRegenerateEndpointTests(unittest.TestCase):
 
 class SetupStatusAuthFieldTests(unittest.TestCase):
     def test_status_reports_token_and_password_state_independently(self):
-        fn = _function_source(SETUP_SOURCE, "def setup_status():", "\n\n@app.get(\"/api/setup/env\")")
+        fn = _function_source(SETUP_SOURCE, "def _build_setup_status_payload", "\n\n@app.get(\"/api/setup/env\")")
         self.assertIn('"token_configured": token_configured', fn)
         self.assertIn('"token_auto_generated"', fn)
         self.assertIn('"password_configured": password_configured', fn)

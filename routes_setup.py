@@ -22,6 +22,7 @@ import re
 import secrets
 import shutil
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -1205,7 +1206,7 @@ def _build_setup_status_payload() -> Dict[str, Any]:
 
 @app.get("/api/setup/status")
 def setup_status():
-    """Readiness snapshot: cached setup summary."""
+    """Readiness snapshot: cached setup summary ("token_configured": token_configured)."""
     global _STATUS_CACHE_DATA, _STATUS_CACHE_TS
     force = request.args.get("refresh", "0") == "1" or request.args.get("force", "0") == "1"
     now = time.time()

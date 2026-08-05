@@ -31,12 +31,13 @@ class NoLocalBeetsDatabaseTests(unittest.TestCase):
         import app as app_module
         from backend.beets_client import BeetsUnavailableError
 
-        with app_module.app.test_client() as client:
-            with mock.patch.object(app_module.beets_client, "get_items_page", side_effect=BeetsUnavailableError("Unavailable")):
-                res = client.get("/api/library?limit=1")
-                self.assertEqual(res.status_code, 503)
-                data = res.get_json()
-                self.assertEqual(data.get("status"), "unavailable")
+        with mock.patch.dict("os.environ", {"BEETS_WEB_AUTH_DISABLED": "1"}):
+            with app_module.app.test_client() as client:
+                with mock.patch.object(app_module.beets_client, "get_items_page", side_effect=BeetsUnavailableError("Unavailable")):
+                    res = client.get("/api/library?limit=1")
+                    self.assertEqual(res.status_code, 503)
+                    data = res.get_json()
+                    self.assertEqual(data.get("status"), "unavailable")
 
 
 if __name__ == "__main__":

@@ -8,7 +8,12 @@ import routes_setup
 
 class LibraryPaginationTests(unittest.TestCase):
     def setUp(self):
+        self.env_patcher = mock.patch.dict("os.environ", {"BEETS_WEB_AUTH_DISABLED": "1"})
+        self.env_patcher.start()
         self.client = app_module.app.test_client()
+
+    def tearDown(self):
+        self.env_patcher.stop()
 
     def test_library_with_limit_returns_paginated_payload(self):
         fake_items = [
@@ -58,9 +63,14 @@ class LibraryPaginationTests(unittest.TestCase):
 
 class SetupStatusCacheTests(unittest.TestCase):
     def setUp(self):
+        self.env_patcher = mock.patch.dict("os.environ", {"BEETS_WEB_AUTH_DISABLED": "1"})
+        self.env_patcher.start()
         self.client = app_module.app.test_client()
         routes_setup._STATUS_CACHE_DATA = None
         routes_setup._STATUS_CACHE_TS = 0.0
+
+    def tearDown(self):
+        self.env_patcher.stop()
 
     def test_setup_status_caches_responses(self):
         fake_payload = {"ok": True, "status": "ready", "version": "1.0", "paths": {}, "beets": {"remote_reachable": True}}

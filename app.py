@@ -2002,9 +2002,14 @@ def _persist_generated_auth_token(token: str) -> None:
         temp_file.write_text(token, encoding="utf-8")
         try:
             os.chmod(temp_file, 0o600)
+            os.chmod(_GENERATED_AUTH_TOKEN_FILE, 0o600)
         except Exception:
             pass
         temp_file.replace(token_file)
+        try:
+            os.chmod(_GENERATED_AUTH_TOKEN_FILE, 0o600)
+        except Exception:
+            pass
     except Exception as ex:
         try:
             app.logger.warning("Failed to persist generated auth token to %s: %s", _GENERATED_AUTH_TOKEN_FILE, ex)
@@ -2017,7 +2022,7 @@ def _bootstrap_auth_token_if_missing() -> None:
     1. Explicit usable BEETS_WEB_AUTH_TOKEN in env is used.
     2. Otherwise, read BEETS_WEB_AUTH_TOKEN_FILE (/web-manager-data/.auth_token).
     3. If token file missing/unusable, generate secure token, write atomically with 0o600, set env, log notice.
-    4. Never fall back to legacy /config/.auth_token.
+    4. Never fall back to legacy token path.
     """
     if _security_auth_configured():
         return
@@ -13220,30 +13225,31 @@ def _library_stats_for_artists(artists: List[Dict[str, Any]]) -> Dict[str, int]:
 
 
 def _library_track_dict(item) -> Dict[str, Any]:
-    raw_path = _s(getattr(item, "path", "") or "")
+    get_val = (lambda k, d=None: item.get(k, d)) if isinstance(item, dict) else (lambda k, d=None: getattr(item, k, d))
+    raw_path = _s(get_val("path", "") or "")
     abs_path = raw_path
     if raw_path and not Path(raw_path).is_absolute():
         abs_path = str(MUSIC_ROOT / raw_path)
     exists = bool(abs_path and Path(abs_path).exists())
-    length = getattr(item, "length", None)
+    length = get_val("length", None)
     try:
         length_value = float(length or 0) or None
     except Exception:
         length_value = None
     return {
-        "id": int(getattr(item, "id", 0) or 0),
-        "album_id": int(getattr(item, "album_id", 0) or 0),
+        "id": int(get_val("id", 0) or 0),
+        "album_id": int(get_val("album_id", 0) or 0),
         "path": abs_path or raw_path,
-        "title": _s(getattr(item, "title", "") or (Path(raw_path).stem if raw_path else "")),
-        "track": int(getattr(item, "track", 0) or 0),
-        "disc": int(getattr(item, "disc", 0) or 1),
-        "tracktotal": int(getattr(item, "tracktotal", 0) or 0),
+        "title": _s(get_val("title", "") or (Path(raw_path).stem if raw_path else "")),
+        "track": int(get_val("track", 0) or 0),
+        "disc": int(get_val("disc", 0) or 1),
+        "tracktotal": int(get_val("tracktotal", 0) or 0),
         "ok": exists,
         "missing": not exists,
         "imported": True,
         "disk_only": False,
         "status": "imported" if exists else "missing_file",
-        "mb_trackid": _s(getattr(item, "mb_trackid", "") or ""),
+        "mb_trackid": _s(get_val("mb_trackid", "") or ""),
         "length": length_value,
     }
 
@@ -13268,7 +13274,7 @@ def library_full():
         try:
             res = beets_client.get_items_page(offset=offset, limit=limit)
             raw_items = res.get("items", [])
-            items = [_library_track_dict(DictAttr(r)) for r in raw_items]
+            items = [_library_track_dict(r) for r in raw_items]
             return jsonify({
                 "items": items,
                 "pagination": {
@@ -20994,16 +21000,15 @@ def import_folder_with_id():
         if not album_ids and not item_ids:
             try:
                 with _db(row_factory=sqlite3.Row) as con:
-                # album is stored as TEXT in beets SQLite (unlike path which is BLOB)
-                rows = con.execute(
-                    "SELECT id, album_id FROM items WHERE album = ? LIMIT 200",
-                    (album_guess,)).fetchall()
-                if not rows and artist_guess.lower() not in {
-                        "music","torrents","downloads","data","failed_imports"}:
+                    # album is stored as TEXT in beets SQLite (unlike path which is BLOB)
                     rows = con.execute(
-                        "SELECT id, album_id FROM items WHERE album = ? AND artist = ? LIMIT 200",
-                        (album_guess, artist_guess)).fetchall()
-                con.close()
+                        "SELECT id, album_id FROM items WHERE album = ? LIMIT 200",
+                        (album_guess,)).fetchall()
+                    if not rows and artist_guess.lower() not in {
+                            "music","torrents","downloads","data","failed_imports"}:
+                        rows = con.execute(
+                            "SELECT id, album_id FROM items WHERE album = ? AND artist = ? LIMIT 200",
+                            (album_guess, artist_guess)).fetchall()
                 for row in rows:
                     if row["album_id"] and row["album_id"] not in album_ids:
                         album_ids.append(row["album_id"])
@@ -21033,15 +21038,14 @@ def import_folder_with_id():
         if not album_ids and not item_ids:
             try:
                 with _db(row_factory=sqlite3.Row) as con:
-                like_term = f"%{album_guess}%"
-                rows = con.execute(
-                    "SELECT id, album_id FROM items WHERE album LIKE ? LIMIT 200",
-                    (like_term,)).fetchall()
-                # If artist_guess is meaningful, narrow by albumartist too
-                if rows and artist_guess.lower() not in {
-                        "music","torrents","downloads","data","failed_imports","ye","kanye"}:
-                    rows = [r for r in rows if r["album_id"] is not None]
-                con.close()
+                    like_term = f"%{album_guess}%"
+                    rows = con.execute(
+                        "SELECT id, album_id FROM items WHERE album LIKE ? LIMIT 200",
+                        (like_term,)).fetchall()
+                    # If artist_guess is meaningful, narrow by albumartist too
+                    if rows and artist_guess.lower() not in {
+                            "music","torrents","downloads","data","failed_imports","ye","kanye"}:
+                        rows = [r for r in rows if r["album_id"] is not None]
                 for row in rows:
                     if row["album_id"] and row["album_id"] not in album_ids:
                         album_ids.append(row["album_id"])
@@ -26176,20 +26180,19 @@ def library_sync_deleted():
         try:
             with _db() as con2:
                 for aid_i, missing_ids in album_missing.items():
-                total = album_total.get(aid_i, len(missing_ids))
-                if len(missing_ids) >= total:
-                    # Every file for this album is gone — remove the whole album
-                    rm_album_ids.append(aid_i)
-                    rm_item_ids.extend(missing_ids)
-                    row = con2.execute(
-                        "SELECT albumartist, album FROM albums WHERE id=?",
-                        (aid_i,)).fetchone()
-                    name = f"{row[0]} — {row[1]}" if row else f"album {aid_i}"
-                    log.append(f"  {'Would remove' if dry_run else 'Removing'}: {name} ({total} files gone)")
-                else:
-                    rm_item_ids.extend(missing_ids)
-                    log.append(f"  Partial: album {aid_i} - {len(missing_ids)}/{total} missing item(s)")
-            con2.close()
+                    total = album_total.get(aid_i, len(missing_ids))
+                    if len(missing_ids) >= total:
+                        # Every file for this album is gone — remove the whole album
+                        rm_album_ids.append(aid_i)
+                        rm_item_ids.extend(missing_ids)
+                        row = con2.execute(
+                            "SELECT albumartist, album FROM albums WHERE id=?",
+                            (aid_i,)).fetchone()
+                        name = f"{row[0]} — {row[1]}" if row else f"album {aid_i}"
+                        log.append(f"  {'Would remove' if dry_run else 'Removing'}: {name} ({total} files gone)")
+                    else:
+                        rm_item_ids.extend(missing_ids)
+                        log.append(f"  Partial: album {aid_i} - {len(missing_ids)}/{total} missing item(s)")
         except Exception as ex:
             log.append(f"WARNING: {ex}")
 
