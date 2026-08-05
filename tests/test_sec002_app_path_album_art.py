@@ -73,7 +73,7 @@ class ControlAgentAlbumArtMutationTests(unittest.TestCase):
         self.music = self.root / "music"
         self.outside = self.root / "outside"
         self.beetsdir = self.root / "config"
-        self.trash = self.root / "trash"
+        self.trash = self.beetsdir / "album-art-trash"
         self.album_dir = self.music / "Artist" / "Album"
         for path in (self.album_dir, self.outside, self.beetsdir, self.trash):
             path.mkdir(parents=True, exist_ok=True)
@@ -93,6 +93,7 @@ class ControlAgentAlbumArtMutationTests(unittest.TestCase):
         self.patches = [
             mock.patch.object(control_agent, "LIB_PATH", str(self.db_path)),
             mock.patch.object(control_agent, "LOCK_PATH", str(self.root / "agent.lock")),
+            mock.patch.object(control_agent, "BEETSDIR", self.beetsdir.as_posix()),
             mock.patch.object(control_agent, "MUSIC_LIBRARY_PATH", self.music.as_posix()),
             mock.patch.object(control_agent, "ALBUM_ART_TRASH_ROOT", self.trash),
         ]
@@ -179,6 +180,39 @@ class ControlAgentAlbumArtMutationTests(unittest.TestCase):
 
         self.assertEqual(code, 500, data)
         self.assertEqual(data["error"], "Failed to replace album artwork")
+        self.assertEqual(existing.read_bytes(), b"previous-cover")
+        self.assertEqual(Path(self._artpath()).resolve(strict=False), existing.resolve(strict=False))
+
+    def test_replace_album_art_preserves_existing_file_when_pre_backup_step_fails(self):
+        existing = self.album_dir / "albumart.jpg"
+        existing.write_bytes(b"previous-cover")
+        con = sqlite3.connect(self.db_path)
+        con.execute("UPDATE albums SET artpath=? WHERE id=1", (existing.as_posix(),))
+        con.commit()
+        con.close()
+
+        with mock.patch.object(control_agent.os, "chmod", side_effect=RuntimeError("synthetic chmod failure")):
+            code, data = _post_agent("/albums/1/art", self._payload())
+
+        self.assertEqual(code, 500, data)
+        self.assertEqual(data["error"], "Failed to replace album artwork")
+        self.assertEqual(existing.read_bytes(), b"previous-cover")
+        self.assertEqual(Path(self._artpath()).resolve(strict=False), existing.resolve(strict=False))
+        self.assertFalse(any(self.album_dir.glob(".albumart-*.tmp")))
+
+    def test_delete_album_art_rejects_trash_root_outside_config(self):
+        existing = self.album_dir / "albumart.jpg"
+        existing.write_bytes(b"previous-cover")
+        con = sqlite3.connect(self.db_path)
+        con.execute("UPDATE albums SET artpath=? WHERE id=1", (existing.as_posix(),))
+        con.commit()
+        con.close()
+
+        with mock.patch.object(control_agent, "ALBUM_ART_TRASH_ROOT", self.outside / "trash"):
+            code, data = _delete_agent("/albums/1/art")
+
+        self.assertEqual(code, 403, data)
+        self.assertEqual(data["error"], "Access denied for album artwork path")
         self.assertEqual(existing.read_bytes(), b"previous-cover")
         self.assertEqual(Path(self._artpath()).resolve(strict=False), existing.resolve(strict=False))
 

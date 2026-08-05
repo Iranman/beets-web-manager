@@ -805,6 +805,18 @@ def _fsync_directory(path: Path) -> None:
                 pass
 
 
+def _album_art_trash_root() -> Path:
+    trash_root = Path(os.path.realpath(str(ALBUM_ART_TRASH_ROOT)))
+    beets_root = Path(os.path.realpath(BEETSDIR))
+    try:
+        trash_root.relative_to(beets_root)
+    except ValueError as exc:
+        raise UnsafePathError("album artwork trash root is outside the Beets config root") from exc
+    if _path_has_symlink_component(trash_root, beets_root, include_leaf=False):
+        raise UnsafePathError("album artwork trash root cannot contain symlink components")
+    return trash_root
+
+
 def _replace_album_art_locked(con: sqlite3.Connection, album_id: int, body: dict[str, Any]) -> dict[str, Any]:
     cur = con.cursor()
     album, album_dir = _album_art_album_dir(cur, album_id)
@@ -817,6 +829,7 @@ def _replace_album_art_locked(con: sqlite3.Connection, album_id: int, body: dict
     tmp_path: Path | None = None
     backup_path: Path | None = None
     replaced_existing = False
+    dest_replaced = False
     try:
         fd, tmp_name = tempfile.mkstemp(prefix=".albumart-", suffix=".tmp", dir=str(album_dir))
         tmp_path = Path(tmp_name)
@@ -834,6 +847,7 @@ def _replace_album_art_locked(con: sqlite3.Connection, album_id: int, body: dict
             replaced_existing = True
         os.replace(tmp_path, dest)
         tmp_path = None
+        dest_replaced = True
         _fsync_file(dest)
         _fsync_directory(album_dir)
         cur.execute("UPDATE albums SET artpath = ? WHERE id = ?", (str(dest), album_id))
@@ -857,11 +871,12 @@ def _replace_album_art_locked(con: sqlite3.Connection, album_id: int, body: dict
         }
     except Exception:
         con.rollback()
-        try:
-            if dest.exists():
-                dest.unlink()
-        except Exception:
-            pass
+        if dest_replaced:
+            try:
+                if dest.exists():
+                    dest.unlink()
+            except Exception:
+                pass
         if backup_path and backup_path.exists():
             try:
                 os.replace(backup_path, dest)
@@ -904,9 +919,10 @@ def _delete_album_art_locked(con: sqlite3.Connection, album_id: int) -> dict[str
     op_id = uuid.uuid4().hex
     moved: list[dict[str, str]] = []
     try:
+        trash_root = _album_art_trash_root()
         for src in candidates:
             _require_album_art_path(src, album_dir, require_exists=True)
-            target = ALBUM_ART_TRASH_ROOT / op_id / src.name
+            target = trash_root / op_id / src.name
             target.parent.mkdir(parents=True, exist_ok=True)
             if target.exists():
                 target = target.with_name(f"{target.stem}-{uuid.uuid4().hex[:8]}{target.suffix}")
