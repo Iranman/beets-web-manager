@@ -174,7 +174,11 @@ class SetupPs1TokenGenerationTests(unittest.TestCase):
             docker_stub = bin_dir / "docker"
             docker_stub.write_text(
                 "#!/usr/bin/env bash\n"
-                "if [ \"$1\" = \"compose\" ] && [ \"$2\" = \"ps\" ]; then echo healthy; exit 0; fi\n"
+                "if [ \"$1\" = \"compose\" ]; then\n"
+                "  for arg in \"$@\"; do\n"
+                "    if [ \"$arg\" = \"ps\" ]; then echo healthy; exit 0; fi\n"
+                "  done\n"
+                "fi\n"
                 "exit 0\n",
                 encoding="utf-8",
             )
