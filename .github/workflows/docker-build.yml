@@ -156,7 +156,11 @@ jobs:
       - name: Compare against pinned production version
         if: always()
         run: |
-          resolved="$(docker run --rm --entrypoint /lsiopy/bin/beet beets-engine:latest-compat version | head -1 | awk '{print $3}')"
+          # `beet version` can print database-migration backup lines before
+          # the actual "beets version X.Y.Z" line on first open of a fresh
+          # database -- match that line specifically rather than assuming
+          # it's the first line of output.
+          resolved="$(docker run --rm --entrypoint /lsiopy/bin/beet beets-engine:latest-compat version | grep -i '^beets version' | awk '{print $3}')"
           echo "lscr.io/linuxserver/beets:latest resolves to Beets ${resolved}"
           if [ "${resolved}" != "${BEETS_PRODUCTION_VERSION}" ]; then
             echo "::notice::lscr.io/linuxserver/beets:latest (Beets ${resolved}) differs from the pinned production version (${BEETS_PRODUCTION_VERSION}). Production is NOT affected by this job; upgrade requires an intentional, tested repository change."
