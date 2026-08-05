@@ -183,6 +183,25 @@ class ControlAgentAlbumArtMutationTests(unittest.TestCase):
         self.assertEqual(existing.read_bytes(), b"previous-cover")
         self.assertEqual(Path(self._artpath()).resolve(strict=False), existing.resolve(strict=False))
 
+    def test_replace_album_art_rejects_dangling_symlink_destination_leaf(self):
+        link = self.album_dir / "albumart.jpg"
+        missing = self.outside / "missing-cover.jpg"
+        try:
+            link.symlink_to(missing)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"symlink creation unavailable: {exc}")
+        outside_sentinel = self.outside / "sentinel.txt"
+        outside_sentinel.write_text("unchanged", encoding="utf-8")
+
+        code, data = _post_agent("/albums/1/art", self._payload())
+
+        self.assertEqual(code, 403, data)
+        self.assertEqual(data["error"], "Access denied for album artwork path")
+        self.assertTrue(link.is_symlink())
+        self.assertFalse(missing.exists())
+        self.assertEqual(outside_sentinel.read_text(encoding="utf-8"), "unchanged")
+        self.assertEqual(self._artpath(), "")
+
     def test_replace_album_art_preserves_existing_file_when_pre_backup_step_fails(self):
         existing = self.album_dir / "albumart.jpg"
         existing.write_bytes(b"previous-cover")

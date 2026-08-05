@@ -662,9 +662,9 @@ def _require_album_art_path(path: Path, album_dir: Path, *, require_exists: bool
         raise UnsafePathError("artwork path cannot be a root directory")
     if _path_has_symlink_component(candidate, music_root, include_leaf=require_exists):
         raise UnsafePathError("artwork path cannot contain symlink components")
+    if candidate.is_symlink():
+        raise UnsafePathError("artwork path cannot be a symlink")
     if candidate.exists():
-        if candidate.is_symlink():
-            raise UnsafePathError("artwork path cannot be a symlink")
         if not candidate.is_file():
             raise UnsafePathError("artwork path is not a regular file")
     elif require_exists:
