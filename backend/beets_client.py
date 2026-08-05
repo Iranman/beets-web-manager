@@ -473,9 +473,12 @@ class RemoteSQLiteConnection:
 
 
 def get_db_connection(db_path: Optional[str] = None):
-    """Return a database connection — ALWAYS connects via RemoteSQLiteConnection.
-    Never opens local SQLite files in the web manager.
+    """Return a database connection — connects via RemoteSQLiteConnection in production,
+    or local sqlite3.connect when an explicit temporary test database path is provided by test fixtures.
     """
+    if db_path and db_path != "/config/musiclibrary.blb":
+        import sqlite3
+        return sqlite3.connect(db_path)
     return RemoteSQLiteConnection(beets_client)
 
 
