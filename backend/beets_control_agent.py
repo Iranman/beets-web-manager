@@ -9,6 +9,7 @@ try:
 except ImportError:
     fcntl = None
 import base64
+import errno
 import binascii
 import io
 import hmac
@@ -805,6 +806,18 @@ def _fsync_directory(path: Path) -> None:
                 pass
 
 
+def _replace_or_copy_unlink(src: Path, dst: Path) -> None:
+    try:
+        os.replace(src, dst)
+        return
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+    shutil.copy2(src, dst, follow_symlinks=False)
+    _fsync_file(dst)
+    _fsync_directory(dst.parent)
+    src.unlink()
+
 def _album_art_trash_root() -> Path:
     trash_root = Path(os.path.realpath(str(ALBUM_ART_TRASH_ROOT)))
     beets_root = Path(os.path.realpath(BEETSDIR))
@@ -924,9 +937,13 @@ def _delete_album_art_locked(con: sqlite3.Connection, album_id: int) -> dict[str
             _require_album_art_path(src, album_dir, require_exists=True)
             target = trash_root / op_id / src.name
             target.parent.mkdir(parents=True, exist_ok=True)
-            if target.exists():
+            if _path_has_symlink_component(target.parent, trash_root, include_leaf=True):
+                raise UnsafePathError("album artwork trash path cannot contain symlink components")
+            if target.exists() or target.is_symlink():
                 target = target.with_name(f"{target.stem}-{uuid.uuid4().hex[:8]}{target.suffix}")
-            os.replace(src, target)
+            if target.exists() or target.is_symlink():
+                raise UnsafePathError("album artwork trash target already exists")
+            _replace_or_copy_unlink(src, target)
             moved.append({"source": str(src), "quarantined": str(target)})
         cur.execute("UPDATE albums SET artpath = '' WHERE id = ?", (album_id,))
         if cur.rowcount != 1:
@@ -948,7 +965,7 @@ def _delete_album_art_locked(con: sqlite3.Connection, album_id: int) -> dict[str
             try:
                 if src.exists() and not dst.exists():
                     dst.parent.mkdir(parents=True, exist_ok=True)
-                    os.replace(src, dst)
+                    _replace_or_copy_unlink(src, dst)
             except Exception:
                 pass
         raise

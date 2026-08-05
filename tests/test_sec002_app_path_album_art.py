@@ -7,6 +7,7 @@ fixed-name, album-folder-scoped, atomic artwork writes and quarantine deletes.
 """
 
 import base64
+import errno
 import json
 import os
 import sqlite3
@@ -234,6 +235,31 @@ class ControlAgentAlbumArtMutationTests(unittest.TestCase):
         self.assertEqual(data["error"], "Access denied for album artwork path")
         self.assertEqual(existing.read_bytes(), b"previous-cover")
         self.assertEqual(Path(self._artpath()).resolve(strict=False), existing.resolve(strict=False))
+
+    def test_delete_album_art_quarantines_across_devices_and_clears_artpath(self):
+        existing = self.album_dir / "albumart.jpg"
+        existing.write_bytes(b"previous-cover")
+        con = sqlite3.connect(self.db_path)
+        con.execute("UPDATE albums SET artpath=? WHERE id=1", (existing.as_posix(),))
+        con.commit()
+        con.close()
+        real_replace = control_agent.os.replace
+
+        def fake_replace(src, dst):
+            if Path(src) == existing:
+                raise OSError(errno.EXDEV, "synthetic cross-device link")
+            return real_replace(src, dst)
+
+        with mock.patch.object(control_agent.os, "replace", side_effect=fake_replace):
+            code, data = _delete_agent("/albums/1/art")
+
+        self.assertEqual(code, 200, data)
+        self.assertEqual(data["removed_count"], 1)
+        self.assertFalse(existing.exists())
+        self.assertEqual(self._artpath(), "")
+        quarantined = Path(data["quarantined_art"][0]["quarantined"])
+        self.assertEqual(quarantined.read_bytes(), b"previous-cover")
+        self.assertTrue(quarantined.resolve(strict=False).is_relative_to(self.trash.resolve(strict=False)))
 
     def test_delete_album_art_rejects_symlink_leaf_and_preserves_outside_sentinel(self):
         sentinel = self.outside / "sentinel.jpg"
