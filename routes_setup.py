@@ -54,7 +54,7 @@ _PASSWORD_SPECIAL_RE = re.compile(r"[^A-Za-z0-9]")
 _PASSWORD_UPPER_RE = re.compile(r"[A-Z]")
 _PASSWORD_LOWER_RE = re.compile(r"[a-z]")
 _PASSWORD_DIGIT_RE = re.compile(r"[0-9]")
-_FALLBACK_AUTH_TOKEN_FILE = Path(os.environ.get("BEETS_WEB_AUTH_TOKEN_FILE", "/config/.auth_token"))
+_FALLBACK_AUTH_TOKEN_FILE = Path(os.environ.get("BEETS_WEB_AUTH_TOKEN_FILE", "/web-manager-data/.auth_token"))
 _FALLBACK_PLACEHOLDER_AUTH_SECRETS = {
     "admin", "password", "password1", "changeme", "changeit", "secret", "token",
     "default", "example", "letmein", "beets", "beetsweb", "setinenv", "setastrongownertoken",
@@ -1015,11 +1015,13 @@ def _fetchart_integration_status(diagnostics: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-@app.get("/api/setup/status")
-def setup_status():
-    """Readiness snapshot: paths, beets config, fpcalc, and each optional
-    integration's configured/not-configured state (does not make live network
-    calls to external providers; it does query the internal Beets control agent)."""
+_STATUS_CACHE_LOCK = threading.Lock()
+_STATUS_CACHE_DATA: Dict[str, Any] | None = None
+_STATUS_CACHE_TS: float = 0.0
+_STATUS_CACHE_TTL_SECONDS: float = 10.0
+
+
+def _build_setup_status_payload() -> Dict[str, Any]:
     settings = _load_settings()
 
     beets_config_path = Path(os.environ.get("BEETS_CONFIG", "/config/config.yaml"))
@@ -1100,6 +1102,36 @@ def setup_status():
             note="User plugins load from /config/beetsplug before bundled plugins in /opt/beets-web-manager-agent/beetsplug.",
         ),
         "fetchart": _fetchart_integration_status(diagnostics),
+        "embedart": _plugin_integration_status(
+            "embedart",
+            diagnostics,
+            note="EmbedArt plugin embeds artwork files directly into audio file tags.",
+        ),
+        "scrub": _plugin_integration_status(
+            "scrub",
+            diagnostics,
+            note="Scrub plugin strips unwanted tags prior to writing official Beets metadata.",
+        ),
+        "zero": _plugin_integration_status(
+            "zero",
+            diagnostics,
+            note="Zero plugin nulls out selected fields upon import.",
+        ),
+        "ftintitle": _plugin_integration_status(
+            "ftintitle",
+            diagnostics,
+            note="FtInTitle plugin moves featured artist names into track titles.",
+        ),
+        "mbsync": _plugin_integration_status(
+            "mbsync",
+            diagnostics,
+            note="MBSync plugin fetches updated release/recording metadata from MusicBrainz.",
+        ),
+        "bpsync": _plugin_integration_status(
+            "bpsync",
+            diagnostics,
+            note="BPSync plugin syncs Beatport metadata.",
+        ),
         "replaygain": _replaygain_integration_status(diagnostics, ffmpeg_path),
         "plex": _integration_status(
             configured=bool(os.environ.get("PLEX_URL") and os.environ.get("PLEX_TOKEN")),
@@ -1113,10 +1145,10 @@ def setup_status():
         ),
     }
 
-    blocking: list = []
+    blocking = []
     if not config_check["writable"]:
-        blocking.append(f"Cannot write to config path {config_check['path']}")
-    if not music_check["exists"]:
+        blocking.append(f"Cannot write to config directory {config_check['path']}")
+    if not music_check["readable"]:
         blocking.append(f"Music library path {music_check['path']} is not accessible")
     if not downloads_check["writable"]:
         blocking.append(f"Cannot write to downloads/staging path {downloads_check['path']}")
@@ -1127,11 +1159,6 @@ def setup_status():
     if not fpcalc_path:
         blocking.append("fpcalc (chromaprint) not found on PATH — AcoustID fingerprinting will not work")
     if beets_config_exists and not diagnostics.get("plugin_loader_ok"):
-        # Config exists but the remote plugin-loader status did not
-        # succeed (nonzero result, timeout, or a recognized plugin failure) --
-        # surface this as at least a warning rather than silently reporting
-        # every configured plugin as healthy. (When the config itself is
-        # missing, the message above already covers it -- avoid a duplicate.)
         blocking.append(
             "Beets plugin loader did not complete successfully — see beets.plugin_loader_error for details."
         )
@@ -1154,7 +1181,7 @@ def setup_status():
         "token_auto_generated": token_auto_generated,
         "password_configured": password_configured,
     }
-    return jsonify({
+    return {
         "ok": True,
         "status": "ready" if ready else "warning",
         "version": _APP_VERSION,
@@ -1173,7 +1200,40 @@ def setup_status():
         "integrations": integrations,
         "settings": {k: (_mask(v) if "key" in k.lower() or "token" in k.lower() else v)
                      for k, v in settings.items()},
-    })
+    }
+
+
+@app.get("/api/setup/status")
+def setup_status():
+    """Readiness snapshot: cached setup summary."""
+    global _STATUS_CACHE_DATA, _STATUS_CACHE_TS
+    force = request.args.get("refresh", "0") == "1" or request.args.get("force", "0") == "1"
+    now = time.time()
+
+    with _STATUS_CACHE_LOCK:
+        if not force and _STATUS_CACHE_DATA is not None and (now - _STATUS_CACHE_TS) < _STATUS_CACHE_TTL_SECONDS:
+            res = dict(_STATUS_CACHE_DATA)
+            res["cached"] = True
+            res["cache_age_seconds"] = round(now - _STATUS_CACHE_TS, 2)
+            return jsonify(res)
+
+    try:
+        payload = _build_setup_status_payload()
+        with _STATUS_CACHE_LOCK:
+            _STATUS_CACHE_DATA = payload
+            _STATUS_CACHE_TS = now
+            res = dict(payload)
+            res["cached"] = False
+            res["cache_age_seconds"] = 0.0
+            return jsonify(res)
+    except Exception as ex:
+        return jsonify({"error": str(ex), "status": "failed"}), 503
+
+
+@app.get("/api/setup/diagnostics")
+def setup_diagnostics():
+    """Explicit fresh setup diagnostics report without using cache."""
+    return setup_status()
 
 
 @app.get("/api/setup/env")
