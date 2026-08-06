@@ -613,28 +613,16 @@ class PublicExceptionResponseTests(unittest.TestCase):
 
     def test_album_delete_art_does_not_return_remote_exception_text(self):
         leak = "LEAK_MARKER Traceback /tmp/internal.py line 12 token=abc"
-        album_dir = Path(tempfile.gettempdir()) / f"pr39-art-{uuid.uuid4().hex}"
-        album_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            with app_module.app.test_request_context("/api/albums/42/art", method="DELETE"), \
-                 mock.patch.object(app_module.lib, "get_album", return_value=object()), \
-                 mock.patch.object(app_module, "_album_dir_for_art", return_value=album_dir), \
-                 mock.patch.object(app_module, "_album_stored_art_path", return_value=""), \
-                 mock.patch.object(app_module, "_path_is_under", return_value=True), \
-                 mock.patch.object(app_module, "_ALBUM_ART_NAMES", ()), \
-                 mock.patch.object(app_module.beets_client, "clear_album_artpath", side_effect=RuntimeError(leak)):
-                response, status = app_module.album_delete_art(42)
-            data = response.get_json()
-            self.assertEqual(status, 500)
-            self.assertEqual(data["error"], "Could not clear artpath.")
-            self.assertNotIn("LEAK_MARKER", json.dumps(data))
-            self.assertNotIn("Traceback", json.dumps(data))
-            self.assertNotIn("token=abc", json.dumps(data))
-        finally:
-            try:
-                album_dir.rmdir()
-            except OSError:
-                pass
+        with app_module.app.test_request_context("/api/albums/42/art", method="DELETE"), \
+             mock.patch.object(app_module.lib, "get_album", return_value=object()), \
+             mock.patch.object(app_module.beets_client, "delete_album_art", side_effect=RuntimeError(leak)):
+            response, status = app_module.album_delete_art(42)
+        data = response.get_json()
+        self.assertEqual(status, 500)
+        self.assertEqual(data["error"], "Could not delete album artwork.")
+        self.assertNotIn("LEAK_MARKER", json.dumps(data))
+        self.assertNotIn("Traceback", json.dumps(data))
+        self.assertNotIn("token=abc", json.dumps(data))
 
 
 class PlexClientIdentifierFileDefaultTests(unittest.TestCase):

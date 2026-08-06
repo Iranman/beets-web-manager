@@ -406,6 +406,25 @@ class BeetsClient:
         """Clear artpath field on album in SQLite under lock."""
         return self._request("DELETE", f"/albums/{album_id}/artpath")
 
+    def replace_album_art(
+        self,
+        album_id: int,
+        image_data_b64: str,
+        *,
+        source: str = "user",
+        expected_mb_releasegroupid: str = "",
+    ) -> Dict[str, Any]:
+        """Atomically replace album artwork inside the Beets engine."""
+        return self._request("POST", f"/albums/{album_id}/art", {
+            "image_data_b64": image_data_b64,
+            "source": source,
+            "expected_mb_releasegroupid": expected_mb_releasegroupid,
+        })
+
+    def delete_album_art(self, album_id: int) -> Dict[str, Any]:
+        """Quarantine local album artwork and clear artpath inside the Beets engine."""
+        return self._request("DELETE", f"/albums/{album_id}/art")
+
     def rewrite_library_path(self, old_path: str, new_path: str) -> Dict[str, Any]:
         """Rewrite Beets item/art paths after a validated library file move."""
         return self._request("POST", "/library/rewrite-path", {"old_path": old_path, "new_path": new_path})
@@ -473,12 +492,9 @@ class RemoteSQLiteConnection:
 
 
 def get_db_connection(db_path: Optional[str] = None):
-    """Return a database connection — connects via RemoteSQLiteConnection in production,
-    or local sqlite3.connect when an explicit temporary test database path is provided by test fixtures.
+    """Return a database connection — ALWAYS connects via RemoteSQLiteConnection.
+    Never opens local SQLite files in the web manager.
     """
-    if db_path and db_path != "/config/musiclibrary.blb":
-        import sqlite3
-        return sqlite3.connect(db_path)
     return RemoteSQLiteConnection(beets_client)
 
 
