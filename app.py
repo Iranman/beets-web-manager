@@ -3,7 +3,7 @@
 Beets Web Control — standalone Flask app.
 Opens the beets library directly. No plugin system, no S6, no beet web.
 """
-import base64, copy, difflib, errno, functools, gzip, hashlib, hmac, importlib, json, math, mimetypes, os, platform, re, secrets, shlex, shutil, socket, sqlite3, subprocess, sys, threading, time, unicodedata, uuid
+import base64, copy, difflib, errno, functools, gzip, hashlib, hmac, importlib, io, json, math, mimetypes, os, platform, re, secrets, shlex, shutil, socket, sqlite3, subprocess, sys, threading, time, unicodedata, uuid
 import importlib.metadata
 import urllib.error, urllib.parse, urllib.request
 from backend.security import (OutboundPolicyError, bounded_rate_key_store_sweep, direct_peer_is_trusted, install_secure_urllib, validate_outbound_url)
@@ -10043,7 +10043,7 @@ def _album_art_candidates(album) -> List[Path]:
     candidates: List[Path] = []
     current = _album_stored_art_path(album)
     aldir = _album_dir_for_art(album)
-    if current and current.exists() and current.is_file():
+    if current and _path_is_under(current, MUSIC_ROOT) and not current.is_symlink() and not _path_has_symlink_component_under(current, MUSIC_ROOT) and current.exists() and current.is_file():
         seen.add(str(current.resolve(strict=False)))
         candidates.append(current)
     if aldir:
@@ -10052,7 +10052,7 @@ def _album_art_candidates(album) -> List[Path]:
             key = str(p.resolve(strict=False))
             if key in seen:
                 continue
-            if p.exists() and p.is_file():
+            if _path_is_under(p, MUSIC_ROOT) and not p.is_symlink() and not _path_has_symlink_component_under(p, MUSIC_ROOT) and p.exists() and p.is_file():
                 seen.add(key)
                 candidates.append(p)
     return candidates
@@ -10060,7 +10060,15 @@ def _album_art_candidates(album) -> List[Path]:
 
 def _usable_album_art_file(path: Optional[Path]) -> bool:
     try:
-        return bool(path and path.exists() and path.is_file() and path.stat().st_size >= 1000)
+        return bool(
+            path
+            and _path_is_under(path, MUSIC_ROOT)
+            and not path.is_symlink()
+            and not _path_has_symlink_component_under(path, MUSIC_ROOT)
+            and path.exists()
+            and path.is_file()
+            and path.stat().st_size >= 1000
+        )
     except Exception:
         return False
 
@@ -10257,7 +10265,7 @@ def _album_art_quarantine_current(aid: int, album, trash_root: Path, log: List[s
     aldir = _album_dir_for_art(album)
     current = _album_stored_art_path(album)
     candidates = _album_art_candidates(album)
-    if current and current.exists() and current.is_file():
+    if current and _path_is_under(current, MUSIC_ROOT) and not current.is_symlink() and not _path_has_symlink_component_under(current, MUSIC_ROOT) and current.exists() and current.is_file():
         candidates.append(current)
     seen: set = set()
     moved: List[Dict[str, str]] = []
@@ -10269,7 +10277,7 @@ def _album_art_quarantine_current(aid: int, album, trash_root: Path, log: List[s
         if not _path_is_under(src, MUSIC_ROOT):
             continue
         try:
-            if not src.exists() or not src.is_file():
+            if not src.exists() or not src.is_file() or src.is_symlink() or _path_has_symlink_component_under(src, MUSIC_ROOT):
                 continue
             if aldir and _path_is_under(src, aldir):
                 rel = src.resolve(strict=False).relative_to(aldir.resolve(strict=False))
@@ -10296,10 +10304,10 @@ def _album_art_restore_quarantine(aid: int, quarantine: Dict[str, Any], log: Lis
     for row in quarantine.get("quarantined_art") or []:
         src = Path(_s(row.get("quarantined")))
         dst = Path(_s(row.get("source")))
-        if not _path_is_under(dst, MUSIC_ROOT):
+        if not _path_is_under(dst, MUSIC_ROOT) or dst.is_symlink() or _path_has_symlink_component_under(dst, MUSIC_ROOT, include_leaf=False):
             continue
         try:
-            if not src.exists() or dst.exists():
+            if not src.exists() or src.is_symlink() or dst.exists():
                 continue
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(src), str(dst))
@@ -10378,7 +10386,14 @@ def _repair_album_art(aid: int, log: List[str], cancel_event=None,
     if url:
         with _album_art_cache_lock:
             _album_art_cache[key] = url
-    saved_path = _save_art_to_disk(url, _s(entry.get("album_dir") or "")) if url else ""
+    expected_rgid = _album_art_expected_release_group(album)
+    saved_path = _save_art_to_disk(
+        url,
+        aid,
+        expected_mb_releasegroupid=expected_rgid,
+        source="discogs",
+        log=log,
+    ) if url else ""
     if not saved_path:
         if fetchart_timed_out and not url:
             error = "fetchart timed out"
@@ -10395,7 +10410,6 @@ def _repair_album_art(aid: int, log: List[str], cancel_event=None,
         }
 
     try:
-        beets_client.set_album_artpath(aid, saved_path)
         r = _beet_run(
             [BEET_BIN, "-c", "/config/config.yaml", "embedart", "-y", f"album_id:{aid}"],
             log,
@@ -10551,22 +10565,40 @@ def album_replace_art_from_url(aid):
     parsed = urllib.parse.urlparse(image_url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         return jsonify({"ok": False, "error": "Valid http(s) image URL required"}), 400
-    aldir = _album_dir_for_art(album)
-    if not aldir or not _path_is_under(aldir, MUSIC_ROOT):
-        return jsonify({"ok": False, "error": "Album folder could not be resolved safely"}), 400
+    try:
+        validate_outbound_url(image_url)
+    except OutboundPolicyError:
+        return jsonify({"ok": False, "error": "Image URL is not allowed"}), 400
+    expected_rgid = _album_art_expected_release_group(album)
 
     def _do(log, cancel_event=None):
         album_obj = lib.get_album(aid)
         if not album_obj:
             raise RuntimeError("Album not found")
-        saved = _save_art_to_disk(image_url, str(aldir))
-        if not saved:
-            raise RuntimeError("Image download failed or was not a supported image")
         try:
-            beets_client.set_album_artpath(aid, saved)
+            result = _replace_album_art_from_url(
+                aid,
+                image_url,
+                source="user_url",
+                expected_mb_releasegroupid=expected_rgid,
+                log=log,
+            )
+        except AlbumArtRequestError as ex:
+            raise RuntimeError(ex.message) from ex
+        except BeetsError as ex:
+            app.logger.warning("Could not replace album artwork for album %s: %s", aid, type(ex).__name__)
+            raise RuntimeError("Could not update album artwork") from ex
         except Exception as ex:
-            raise RuntimeError(f"Could not update beets artpath: {ex}")
-        log.append(f"Saved cover art: {Path(saved).name}")
+            raise RuntimeError("Could not update album artwork") from ex
+        saved = _s(result.get("artpath") or "")
+        # NOTE: this local `beet embedart` invocation cannot succeed in the
+        # standard deployment -- the web-manager container has no local
+        # Beets installation (BEET_BIN resolves to a nonexistent path; see
+        # docs/TECHNICAL_DEBT.md). It is intentionally best-effort/optional
+        # and never fails the overall operation; embedding into file tags
+        # (as opposed to writing the folder-level albumart.jpg the engine
+        # already wrote) is tracked as future engine-side work, not part of
+        # this route's success contract.
         try:
             env = _beet_env()
             r = _beet_run(
@@ -10581,9 +10613,9 @@ def album_replace_art_from_url(aid):
             if r.returncode >= 2:
                 raise RuntimeError(f"embedart failed (rc={r.returncode})")
         except Exception as ex:
-            log.append(f"  embedart warning: {ex}")
+            log.append(f"  embedart warning: {type(ex).__name__}")
         _invalidate_lib_cache()
-        return {"path": saved}
+        return {"path": saved, "image": result.get("image") or {}}
 
     job = jobs.start_python(
         _do,
@@ -10592,7 +10624,6 @@ def album_replace_art_from_url(aid):
     )
     return jsonify({"ok": True, "job_id": job.job_id})
 
-
 @app.post("/api/albums/<int:aid>/art/upload")
 def album_upload_art(aid):
     """Accept a user-uploaded cover image and set it as this album's art."""
@@ -10600,39 +10631,38 @@ def album_upload_art(aid):
     if not album:
         return jsonify({"ok": False, "error": "Album not found"}), 404
     upload = request.files.get("file") or request.files.get("art")
-    if not upload or not upload.filename:
+    if not upload:
         return jsonify({"ok": False, "error": "Cover image file required"}), 400
-    aldir = _album_dir_for_art(album)
-    if not aldir or not _path_is_under(aldir, MUSIC_ROOT):
-        return jsonify({"ok": False, "error": "Album folder could not be resolved safely"}), 400
-
-    max_bytes = 15 * 1024 * 1024
-    data = upload.read(max_bytes + 1)
-    if len(data) > max_bytes:
-        return jsonify({"ok": False, "error": "Cover image must be 15 MB or smaller"}), 400
-    if len(data) < 1000:
-        return jsonify({"ok": False, "error": "Cover image is too small or empty"}), 400
-    ext = _album_art_ext_for_bytes(data, upload.mimetype or "")
-    if not ext:
-        return jsonify({"ok": False, "error": "Unsupported image type; use JPEG, PNG, GIF, or WebP"}), 400
+    data = upload.read(_ALBUM_ART_UPLOAD_MAX_BYTES + 1)
+    try:
+        _validate_album_art_bytes(data)
+    except AlbumArtRequestError as ex:
+        return jsonify({"ok": False, "error": ex.message}), ex.status
+    expected_rgid = _album_art_expected_release_group(album)
 
     def _do(log, cancel_event=None):
         album_obj = lib.get_album(aid)
         if not album_obj:
             raise RuntimeError("Album not found")
-        dest = aldir / f"albumart{ext}"
-        if not _path_is_under(dest, aldir):
-            raise RuntimeError("Album art destination is outside the album folder")
         try:
-            dest.write_bytes(data)
-            os.chmod(dest, 0o644)
+            result = _replace_album_art_bytes(
+                aid,
+                data,
+                source="user_upload",
+                expected_mb_releasegroupid=expected_rgid,
+                log=log,
+            )
+        except AlbumArtRequestError as ex:
+            raise RuntimeError(ex.message) from ex
+        except BeetsError as ex:
+            app.logger.warning("Could not upload album artwork for album %s: %s", aid, type(ex).__name__)
+            raise RuntimeError("Could not update album artwork") from ex
         except Exception as ex:
-            raise RuntimeError(f"Could not save uploaded cover art: {ex}")
-        try:
-            beets_client.set_album_artpath(aid, str(dest))
-        except Exception as ex:
-            raise RuntimeError(f"Could not update beets artpath: {ex}")
-        log.append(f"Uploaded cover art: {dest.name} ({dest.stat().st_size // 1024} KB)")
+            raise RuntimeError("Could not update album artwork") from ex
+        saved = _s(result.get("artpath") or "")
+        # See the matching note in album_replace_art_from_url: this local
+        # embedart call is intentionally best-effort/optional and cannot
+        # succeed in the standard deployment.
         try:
             env = _beet_env()
             r = _beet_run(
@@ -10647,9 +10677,9 @@ def album_upload_art(aid):
             if r.returncode >= 2:
                 raise RuntimeError(f"embedart failed (rc={r.returncode})")
         except Exception as ex:
-            log.append(f"  embedart warning: {ex}")
+            log.append(f"  embedart warning: {type(ex).__name__}")
         _invalidate_lib_cache()
-        return {"path": str(dest)}
+        return {"path": saved, "image": result.get("image") or {}}
 
     job = jobs.start_python(
         _do,
@@ -10658,53 +10688,27 @@ def album_upload_art(aid):
     )
     return jsonify({"ok": True, "job_id": job.job_id})
 
-
 @app.delete("/api/albums/<int:aid>/art")
 def album_delete_art(aid):
-    """Remove local art files from this album folder and clear the artpath."""
+    """Quarantine local art files through the Beets engine and clear artpath."""
     album = lib.get_album(aid)
     if not album:
         return jsonify({"ok": False, "error": "Album not found"}), 404
-    aldir = _album_dir_for_art(album)
-    if not aldir or not _path_is_under(aldir, MUSIC_ROOT):
-        return jsonify({"ok": False, "error": "Album folder could not be resolved safely"}), 400
-
-    candidates = []
-    current = _album_stored_art_path(album)
-    if current and _path_is_under(current, aldir):
-        candidates.append(current)
-    for name in _ALBUM_ART_NAMES:
-        candidates.append(aldir / name)
-
-    removed = []
-    seen = set()
-    for p in candidates:
-        key = str(p.resolve(strict=False))
-        if key in seen:
-            continue
-        seen.add(key)
-        if not _path_is_under(p, aldir):
-            continue
-        if p.exists() and p.is_file():
-            try:
-                p.unlink()
-                removed.append(str(p))
-            except Exception as ex:
-                app.logger.warning("Could not delete art file %s for album %s: %s", p.name, aid, type(ex).__name__)
-                return jsonify({"ok": False, "error": f"Could not delete {p.name}."}), 500
-
     try:
-        beets_client.clear_album_artpath(aid)
+        result = beets_client.delete_album_art(aid)
+    except BeetsError as ex:
+        app.logger.warning("Could not delete album artwork for album %s: %s", aid, type(ex).__name__)
+        return jsonify({"ok": False, "error": "Could not delete album artwork."}), 400
     except Exception as ex:
-        app.logger.warning("Could not clear album artpath for album %s: %s", aid, type(ex).__name__)
-        return jsonify({"ok": False, "error": "Could not clear artpath."}), 500
+        app.logger.warning("Could not delete album artwork for album %s: %s", aid, type(ex).__name__)
+        return jsonify({"ok": False, "error": "Could not delete album artwork."}), 500
     _invalidate_lib_cache()
     return jsonify({
         "ok": True,
-        "removed": removed,
-        "removed_count": len(removed),
+        "removed": result.get("removed") or [],
+        "removed_count": int(result.get("removed_count") or 0),
+        "quarantined_art": result.get("quarantined_art") or [],
     })
-
 
 @app.post("/api/albums/<int:aid>/remove")
 def album_remove(aid):
@@ -12806,102 +12810,231 @@ def album_art_url_api():
 
 
 def _album_art_ext_for_bytes(data: bytes, content_type: str = "") -> str:
-    """Return a safe image extension for cover-art bytes, or empty string."""
+    """Return a supported cover-art extension for validated bytes."""
     ctype = (content_type or "").split(";", 1)[0].strip().lower()
     if data.startswith(b"\xff\xd8\xff"):
         return ".jpg"
     if data.startswith(b"\x89PNG\r\n\x1a\n"):
         return ".png"
-    if data.startswith(b"GIF87a") or data.startswith(b"GIF89a"):
-        return ".gif"
     if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
         return ".webp"
     return {
         "image/jpeg": ".jpg",
         "image/jpg": ".jpg",
         "image/png": ".png",
-        "image/gif": ".gif",
         "image/webp": ".webp",
     }.get(ctype, "")
 
 
-def _save_art_to_disk(image_url: str, aldir: str) -> str:
-    """Download image_url and save as albumart.* inside aldir.
-    Returns the saved file path on success, or empty string on failure."""
+_ALBUM_ART_UPLOAD_MAX_BYTES = 15 * 1024 * 1024
+_ALBUM_ART_MAX_PIXELS = 50_000_000
+_ALBUM_ART_MAX_DIMENSION = 12_000
+
+
+class AlbumArtRequestError(ValueError):
+    def __init__(self, message: str, status: int = 400):
+        super().__init__(message)
+        self.message = message
+        self.status = status
+
+
+def _validate_album_art_bytes(data: bytes) -> Dict[str, Any]:
+    if not data or len(data) < 32:
+        raise AlbumArtRequestError("Cover image is empty or too small", 400)
+    if len(data) > _ALBUM_ART_UPLOAD_MAX_BYTES:
+        raise AlbumArtRequestError("Cover image must be 15 MB or smaller", 400)
     try:
-        dest_dir = Path(aldir)
-        if not _path_is_under(dest_dir, MUSIC_ROOT):
-            return ""
-        req = _ur.Request(image_url, headers={"User-Agent": "BeetsWebControl/1.0"})
+        from PIL import Image
+        Image.MAX_IMAGE_PIXELS = _ALBUM_ART_MAX_PIXELS
+    except Exception as exc:
+        raise AlbumArtRequestError("Image validation is unavailable", 500) from exc
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            image_format = (image.format or "").upper()
+            width, height = image.size
+            frames = int(getattr(image, "n_frames", 1) or 1)
+            if image_format not in {"JPEG", "PNG", "WEBP"}:
+                raise AlbumArtRequestError("Unsupported image type; use JPEG, PNG, or WebP", 400)
+            if frames != 1 or bool(getattr(image, "is_animated", False)):
+                raise AlbumArtRequestError("Animated artwork is not supported", 400)
+            if width < 1 or height < 1:
+                raise AlbumArtRequestError("Image dimensions are invalid", 400)
+            if width > _ALBUM_ART_MAX_DIMENSION or height > _ALBUM_ART_MAX_DIMENSION:
+                raise AlbumArtRequestError("Image dimensions exceed the limit", 400)
+            if width * height > _ALBUM_ART_MAX_PIXELS:
+                raise AlbumArtRequestError("Image pixel count exceeds the limit", 400)
+            image.verify()
+    except AlbumArtRequestError:
+        raise
+    except Exception as exc:
+        raise AlbumArtRequestError("Cover image could not be safely decoded", 400) from exc
+    return {"format": image_format, "width": width, "height": height, "bytes": len(data)}
+
+
+def _download_album_art_bytes(image_url: str) -> Tuple[bytes, Dict[str, Any]]:
+    parsed = urllib.parse.urlparse(image_url or "")
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise AlbumArtRequestError("Valid http(s) image URL required", 400)
+    try:
+        validate_outbound_url(image_url)
+    except OutboundPolicyError as exc:
+        raise AlbumArtRequestError("Image URL is not allowed", 400) from exc
+    req = _ur.Request(image_url, headers={"User-Agent": "BeetsWebControl/1.0"})
+    try:
         with _ur.urlopen(req, timeout=15) as resp:
-            max_bytes = 15 * 1024 * 1024
-            data = resp.read(max_bytes + 1)
-            content_type = resp.headers.get("Content-Type", "")
-        if len(data) > max_bytes or len(data) < 1000:
-            return ""   # suspiciously small — skip
-        ext = _album_art_ext_for_bytes(data, content_type)
-        if not ext:
-            return ""
-        dest = dest_dir / f"albumart{ext}"
-        dest.write_bytes(data)
+            data = resp.read(_ALBUM_ART_UPLOAD_MAX_BYTES + 1)
+    except OutboundPolicyError as exc:
+        raise AlbumArtRequestError("Image URL is not allowed", 400) from exc
+    except Exception as exc:
+        raise AlbumArtRequestError("Image download failed", 400) from exc
+    info = _validate_album_art_bytes(data)
+    return data, info
+
+
+def _album_art_path_text(value: Any) -> str:
+    return _s(value).strip().replace("\\", "/").rstrip("/")
+
+
+def _album_art_album_id(album) -> int:
+    try:
+        return int(getattr(album, "id", 0) or 0)
+    except Exception:
+        return 0
+
+
+def _resolve_album_art_request_album(body: Dict[str, Any]):
+    raw_id = body.get("album_id") or body.get("albumId") or body.get("aid")
+    if raw_id not in (None, ""):
         try:
-            os.chmod(dest, 0o644)
-        except Exception:
-            pass
-        return str(dest)
+            aid = int(raw_id)
+        except Exception as exc:
+            raise AlbumArtRequestError("Invalid album ID", 400) from exc
+        album = lib.get_album(aid)
+        if not album:
+            raise AlbumArtRequestError("Album not found", 404)
+        return aid, album
+
+    artist = _s(body.get("artist") or "").strip().casefold()
+    album_name = _s(body.get("album") or "").strip().casefold()
+    supplied_dir = _album_art_path_text(body.get("aldir") or "")
+    if not (artist or album_name):
+        raise AlbumArtRequestError("album_id or artist/album is required", 400)
+    matches = []
+    for candidate in lib.albums([]):
+        cand_artist = _s(getattr(candidate, "albumartist", "") or getattr(candidate, "artist", "")).strip().casefold()
+        cand_album = _s(getattr(candidate, "album", "") or "").strip().casefold()
+        if artist and cand_artist != artist:
+            continue
+        if album_name and cand_album != album_name:
+            continue
+        if supplied_dir:
+            trusted_dir = _album_dir_for_art(candidate)
+            if not trusted_dir or _album_art_path_text(str(trusted_dir)) != supplied_dir:
+                continue
+        aid = _album_art_album_id(candidate)
+        if aid:
+            matches.append((aid, candidate))
+    if len(matches) != 1:
+        raise AlbumArtRequestError("A unique album_id is required for artwork updates", 400)
+    return matches[0]
+
+
+def _album_art_expected_release_group(album) -> str:
+    return _s(getattr(album, "mb_releasegroupid", "") or "").strip().lower()
+
+
+def _replace_album_art_bytes(album_id: int, data: bytes, *, source: str,
+                             expected_mb_releasegroupid: str = "",
+                             log: Optional[List[str]] = None) -> Dict[str, Any]:
+    _validate_album_art_bytes(data)
+    encoded = base64.b64encode(data).decode("ascii")
+    try:
+        result = beets_client.replace_album_art(
+            album_id,
+            encoded,
+            source=source,
+            expected_mb_releasegroupid=expected_mb_releasegroupid,
+        )
+    except Exception as exc:
+        raise RuntimeError("Could not update album artwork") from exc
+    if not result.get("ok"):
+        raise RuntimeError("Could not update album artwork")
+    if log is not None:
+        log.append(f"Saved cover art: {Path(_s(result.get('artpath') or '')).name or 'albumart.jpg'}")
+    return result
+
+
+def _replace_album_art_from_url(album_id: int, image_url: str, *, source: str,
+                                expected_mb_releasegroupid: str = "",
+                                log: Optional[List[str]] = None) -> Dict[str, Any]:
+    data, _info = _download_album_art_bytes(image_url)
+    return _replace_album_art_bytes(
+        album_id,
+        data,
+        source=source,
+        expected_mb_releasegroupid=expected_mb_releasegroupid,
+        log=log,
+    )
+
+
+def _save_art_to_disk(image_url: str, album_id: int, *, expected_mb_releasegroupid: str = "",
+                      source: str = "discogs", log: Optional[List[str]] = None) -> str:
+    """Compatibility wrapper: download art and delegate the write to the Beets engine."""
+    try:
+        result = _replace_album_art_from_url(
+            int(album_id),
+            image_url,
+            source=source,
+            expected_mb_releasegroupid=expected_mb_releasegroupid,
+            log=log,
+        )
+        return _s(result.get("artpath") or "")
     except Exception:
         return ""
 
-
 @app.post("/api/save-album-art")
 def save_album_art():
-    """Fetch art from Discogs and save to disk for one album.
-    Body JSON: {artist, album, aldir}
-    Returns {ok, path} or {ok:false, error}."""
-    body   = request.get_json(force=True) or {}
-    artist = body.get("artist", "").strip()
-    album  = body.get("album",  "").strip()
-    aldir  = body.get("aldir",  "").strip()
-    if not (artist or album):
-        return jsonify({"ok": False, "error": "artist and album required"})
-    if not aldir:
-        return jsonify({"ok": False, "error": "aldir required"})
-    # Reject paths outside the music root for safety
-    music_root = Path("/data/media/music")
+    """Fetch art from Discogs and save it through the Beets engine for one album."""
+    body = request.get_json(silent=True) or {}
     try:
-        Path(aldir).relative_to(music_root)
-    except ValueError:
-        return jsonify({"ok": False, "error": "aldir must be inside music root"})
-    # Already has art?
-    for aname in ("albumart.jpg", "albumart.png", "folder.jpg", "cover.jpg", "front.jpg"):
-        if (Path(aldir) / aname).exists():
-            return jsonify({"ok": True, "path": str(Path(aldir) / aname), "cached": True})
-    # Fetch URL (use cache if available)
-    key = f"{artist.lower()}::{album.lower()}"
-    url = _album_art_cache.get(key) or _fetch_album_art(artist, album)
-    if not url:
-        return jsonify({"ok": False, "error": "No art found on Discogs"})
-    _album_art_cache[key] = url
-    saved = _save_art_to_disk(url, aldir)
-    if not saved:
-        return jsonify({"ok": False, "error": "Download failed"})
-    # Update beets artpath if this album is in the DB
-    try:
-        for ba in lib.albums([]):
-            try:
-                a_name = _s(getattr(ba, "albumartist", "") or getattr(ba, "artist", "") or "")
-                a_alb  = _s(getattr(ba, "album", "") or "")
-                if a_name.lower() == artist.lower() and a_alb.lower() == album.lower():
-                    ba["artpath"] = saved.encode()
-                    ba.store()
-                    break
-            except Exception:
-                pass
-    except Exception:
-        pass
-    _invalidate_lib_cache()
-    return jsonify({"ok": True, "path": saved})
+        aid, album_obj = _resolve_album_art_request_album(body)
+    except AlbumArtRequestError as ex:
+        return jsonify({"ok": False, "error": ex.message}), ex.status
 
+    artist = (_s(body.get("artist") or "").strip()
+              or _s(getattr(album_obj, "albumartist", "") or getattr(album_obj, "artist", "") or "").strip())
+    album_name = (_s(body.get("album") or "").strip()
+                  or _s(getattr(album_obj, "album", "") or "").strip())
+    if not (artist or album_name):
+        return jsonify({"ok": False, "error": "artist and album required"}), 400
+
+    status = _album_art_status(aid)
+    if status and status.get("has_local_art"):
+        return jsonify({
+            "ok": True,
+            "album_id": aid,
+            "path": _s(status.get("local_art_path") or ""),
+            "cached": True,
+        })
+
+    key = f"{artist.lower()}::{album_name.lower()}"
+    with _album_art_cache_lock:
+        url = _album_art_cache.get(key)
+    url = url or _fetch_album_art(artist, album_name)
+    if not url:
+        return jsonify({"ok": False, "error": "No art found on Discogs"}), 404
+    with _album_art_cache_lock:
+        _album_art_cache[key] = url
+    saved = _save_art_to_disk(
+        url,
+        aid,
+        expected_mb_releasegroupid=_album_art_expected_release_group(album_obj),
+        source="discogs",
+    )
+    if not saved:
+        return jsonify({"ok": False, "error": "Download failed"}), 400
+    _invalidate_lib_cache()
+    return jsonify({"ok": True, "album_id": aid, "path": saved})
 
 @app.post("/api/fetch-missing-art")
 def fetch_missing_art():
