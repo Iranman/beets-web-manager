@@ -21,8 +21,11 @@ v0.1.4  Required for PR #65's corrections: the get_db_connection()
         persisted file instead) plus fail-closed startup when persistence
         can't be verified, and the /api/setup/status cache hardening
         (monotonic clock, single-flighted rebuilds, invalidation on config
-        change). NOT tagged/published yet -- do not deploy a "0.1.4" image
-        reference until it actually exists.
+        change).
+        Image (once published): ghcr.io/iranman/beets-web-manager:0.1.4
+        NOT tagged/published yet -- do not deploy that image reference
+        until it actually exists; VERSION=0.1.4 is this script's default
+        precisely so it's ready to run the moment it does.
 ```
 
 **The hardened rollout in this document targets `v0.1.4`, not `v0.1.3`.**

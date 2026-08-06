@@ -24,6 +24,7 @@ Requires a new release, **v0.1.4**, once merged: `app.py`/`routes_setup.py`/`bac
 ### CI
 
 - `unit-tests`/`security` workflows now set a fake, non-placeholder `BEETS_WEB_AUTH_TOKEN` before running the test suite, so `_bootstrap_auth_token_if_missing`'s now-fail-closed persistence check never triggers against the runner's unwritable default `/web-manager-data` path.
+- The informational `beets-engine-latest-compat` check (does `lscr.io/linuxserver/beets:latest` still build?) moved out of `docker-build.yml` into its own `beets-engine-latest-compat.yml` workflow. `docker-build.yml` now contains only real, required checks (`compose-verification`, `beets-engine-verification`, `Build & Publish GHCR Image`); an infrastructure hiccup or genuine upstream incompatibility in the informational check is now its own clearly-labeled, independent check rather than a red mark inside the production build workflow.
 
 ## v0.1.0 - 2026-07-16
 
