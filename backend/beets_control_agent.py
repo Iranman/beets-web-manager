@@ -2201,32 +2201,68 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             dst = body.get("target_path", "")
             expected_size = body.get("expected_size")
 
+            # Fixed roles, not caller-chosen: this endpoint exists for one
+            # operation (qBittorrent hardlink repair -- relink a torrent-side
+            # gap from the authoritative library copy), so the source must
+            # resolve under the music library and the destination under a
+            # torrent/staging or tmp root. It is deliberately not a generic
+            # cross-root hardlink primitive.
+            source_roots = ["music"]
+            dest_roots = ["staging", "tmp"]
+
+            if expected_size is not None:
+                if isinstance(expected_size, bool) or not isinstance(expected_size, int) or expected_size <= 0:
+                    self._send_json(400, {"error": "Invalid expected_size value"})
+                    return
+
             try:
-                safe_src = resolve_safe_path(src, ["music", "staging", "tmp"])
-                safe_dst = resolve_safe_path(dst, ["music", "staging", "tmp"])
+                safe_src = resolve_safe_path(src, source_roots)
+                safe_dst = resolve_safe_path(dst, dest_roots)
             except UnsafePathError:
                 self._send_json(403, {"error": "Access denied for path outside allowed roots"})
                 return
 
-            if not safe_src.exists() or not safe_src.is_file() or safe_src.is_symlink():
+            # resolve_safe_path() fully dereferences symlinks via realpath()
+            # before returning -- safe_src/safe_dst are already the resolved
+            # target, so is_symlink() on them can never observe a symlink
+            # whose target exists. Check the RAW, caller-supplied strings
+            # instead, which is the only way to actually detect that the
+            # caller named a symlink (regardless of where it points; a
+            # symlink pointing outside every allowed root is already caught
+            # above by the containment check on its resolved form).
+            if os.path.islink(src):
+                self._send_json(400, {"error": "Source path must be a regular non-symlink file"})
+                return
+            if os.path.islink(dst):
+                self._send_json(409, {"error": "Target path exists and is a symlink"})
+                return
+
+            if not safe_src.exists() or not safe_src.is_file():
                 self._send_json(400, {"error": "Source path must be a regular non-symlink file"})
                 return
 
             lock_file = acquire_os_lock(read_only=False)
             try:
                 try:
-                    safe_src = resolve_safe_path(src, ["music", "staging", "tmp"])
-                    safe_dst = resolve_safe_path(dst, ["music", "staging", "tmp"])
+                    safe_src = resolve_safe_path(src, source_roots)
+                    safe_dst = resolve_safe_path(dst, dest_roots)
                 except UnsafePathError:
                     self._send_json(403, {"error": "Access denied for path outside allowed roots"})
                     return
 
-                if not safe_src.exists() or not safe_src.is_file() or safe_src.is_symlink():
+                if os.path.islink(src):
+                    self._send_json(400, {"error": "Source path must be a regular non-symlink file"})
+                    return
+                if os.path.islink(dst):
+                    self._send_json(409, {"error": "Target path exists and is a symlink"})
+                    return
+
+                if not safe_src.exists() or not safe_src.is_file():
                     self._send_json(400, {"error": "Source path must be a regular non-symlink file"})
                     return
 
                 src_stat = safe_src.stat()
-                if expected_size is not None and isinstance(expected_size, int) and expected_size > 0:
+                if expected_size is not None:
                     if src_stat.st_size != expected_size:
                         self._send_json(400, {"error": "Source file size does not match expected size"})
                         return
@@ -2237,20 +2273,31 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                         return
                     dst_stat = safe_dst.stat()
                     if dst_stat.st_dev == src_stat.st_dev and dst_stat.st_ino == src_stat.st_ino:
-                        self._send_json(200, {
-                            "ok": True,
-                            "already_present": True,
-                            "source_path": str(safe_src),
-                            "target_path": str(safe_dst),
-                            "st_dev": src_stat.st_dev,
-                            "st_ino": src_stat.st_ino,
-                        })
+                        self._send_json(200, {"ok": True, "already_present": True})
                         return
                     else:
                         self._send_json(409, {"error": "Target path exists and is a different file"})
                         return
 
                 safe_dst.parent.mkdir(parents=True, exist_ok=True)
+
+                # mkdir(exist_ok=True) accepts a pre-existing parent without
+                # checking whether it is a symlink; re-validate the parent
+                # explicitly so a symlink swapped in between the check above
+                # and this point cannot redirect the link outside the
+                # destination root.
+                if safe_dst.parent.is_symlink():
+                    self._send_json(500, {"error": "Failed to create hardlink"})
+                    return
+                try:
+                    safe_dst_parent_reresolved = resolve_safe_path(str(safe_dst.parent), dest_roots)
+                except UnsafePathError:
+                    self._send_json(500, {"error": "Failed to create hardlink"})
+                    return
+                if safe_dst_parent_reresolved != safe_dst.parent:
+                    self._send_json(500, {"error": "Failed to create hardlink"})
+                    return
+
                 parent_stat = safe_dst.parent.stat()
 
                 if src_stat.st_dev != parent_stat.st_dev:
@@ -2258,13 +2305,14 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                     return
 
                 try:
-                    if hasattr(os, "link"):
-                        try:
-                            os.link(str(safe_src), str(safe_dst), follow_symlinks=False)
-                        except TypeError:
-                            os.link(str(safe_src), str(safe_dst))
-                    else:
-                        os.link(str(safe_src), str(safe_dst))
+                    os.link(str(safe_src), str(safe_dst), follow_symlinks=False)
+                except NotImplementedError:
+                    # This production target is Linux, where follow_symlinks=False
+                    # is always supported for os.link(); fail closed rather than
+                    # silently falling back to a call that could follow a
+                    # symlink source on a platform that lacks the guarantee.
+                    self._send_json(500, {"error": "Failed to create hardlink"})
+                    return
                 except OSError as ex:
                     if ex.errno == errno.EXDEV:
                         self._send_json(400, {"error": "Cross-device hardlink not supported"})
@@ -2292,14 +2340,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                     self._send_json(500, {"error": "Post-link identity mismatch"})
                     return
 
-                self._send_json(200, {
-                    "ok": True,
-                    "linked": True,
-                    "source_path": str(safe_src),
-                    "target_path": str(safe_dst),
-                    "st_dev": src_stat.st_dev,
-                    "st_ino": src_stat.st_ino,
-                })
+                self._send_json(200, {"ok": True, "linked": True})
             except Exception:
                 self._send_json(500, {"error": "Failed to create hardlink"})
             finally:

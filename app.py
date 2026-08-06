@@ -33267,21 +33267,32 @@ def _qbit_path_alias_pairs() -> List[Tuple[str, str]]:
     return sorted(pairs, key=lambda pair: len(pair[0]), reverse=True)
 
 
-def _qbit_map_path(path_value: str) -> Path:
+def _qbit_map_path(path_value: str) -> Optional[Path]:
+    """Map a qBittorrent-reported path through configured aliases.
+
+    Returns None for blank, NUL-containing, or otherwise unmappable input --
+    never Path(""), which stringifies to "." and would silently resolve to
+    the process's current working directory in any downstream containment
+    check or filesystem call.
+    """
     text = _s(path_value).strip().replace("\\", "/")
     if not text or "\x00" in text:
-        return Path("")
+        return None
     for src, dst in _qbit_path_alias_pairs():
         if text == src or text.startswith(src + "/"):
             text = dst + text[len(src):]
             break
-    return Path(text) if text else Path("")
+    return Path(text) if text else None
 
 
 def _qbit_allowed_repair_path(path: Path) -> bool:
     if not QBIT_REPAIR_ALLOWED_ROOTS:
         return False
-    return any(_path_is_under(path, root) for root in QBIT_REPAIR_ALLOWED_ROOTS)
+    # Uses _path_under() (not the older _path_is_under()) deliberately: this
+    # gate authorizes where a qBittorrent-derived path may be written, so it
+    # must use the hardened containment check, not the pattern CodeQL flags
+    # as an unrecognized path-injection sanitizer (see #253/#254).
+    return any(_path_under(path, root) for root in QBIT_REPAIR_ALLOWED_ROOTS)
 
 
 def _qbit_candidate_target_paths(torrent: Dict[str, Any],
@@ -33345,6 +33356,13 @@ def _library_file_candidates_for_qbit(file_name: str, size: int) -> List[Dict[st
         if not path.is_absolute():
             path = MUSIC_ROOT / raw
         try:
+            # The qBittorrent hardlink-repair source becomes the file the
+            # engine links from; a DB row is normally library-authored, but
+            # this must not be assumed -- require the resolved path to
+            # actually be inside MUSIC_ROOT before it is ever eligible as a
+            # hardlink source.
+            if not _path_under(path, MUSIC_ROOT):
+                continue
             if not path.exists() or not path.is_file():
                 continue
             if path.stat().st_size != size:
@@ -33466,6 +33484,8 @@ def _library_file_candidates_for_qbit_metadata(file_name: str, size: int,
         if not path.is_absolute():
             path = MUSIC_ROOT / raw
         try:
+            if not _path_under(path, MUSIC_ROOT):
+                continue
             if not path.exists() or not path.is_file():
                 continue
             actual_size = int(path.stat().st_size)
@@ -33513,6 +33533,38 @@ def _library_file_candidates_for_qbit_metadata(file_name: str, size: int,
             "torrent_title_guess": title_guess,
         })
     return matches
+
+
+_QBIT_HARDLINK_SAFE_ENGINE_ERRORS = frozenset({
+    "Access denied for path outside allowed roots",
+    "Source path must be a regular non-symlink file",
+    "Source file size does not match expected size",
+    "Target path exists and is a symlink",
+    "Target path exists and is a different file",
+    "Target path exists",
+    "Cross-device hardlink not supported",
+    "Failed to create hardlink",
+    "Post-link verification failed",
+    "Post-link identity mismatch",
+    "Invalid expected_size value",
+})
+
+
+def _qbit_hardlink_public_error(res: Any) -> str:
+    """Return a message safe to surface in job logs/status.
+
+    The control agent's error strings are all fixed, enumerable, non-secret
+    messages today, but this boundary must not assume every future engine
+    error is equally safe to forward verbatim -- only a known-safe string
+    passes through; anything else (or a malformed response) collapses to
+    the generic fallback.
+    """
+    if not isinstance(res, dict):
+        return "Could not create this hardlink."
+    err = res.get("error")
+    if isinstance(err, str) and err in _QBIT_HARDLINK_SAFE_ENGINE_ERRORS:
+        return err
+    return "Could not create this hardlink."
 
 
 def _qbit_hardlink_missing_impl(*, dry_run: bool, category: str,
@@ -33705,17 +33757,22 @@ def _qbit_hardlink_missing_impl(*, dry_run: bool, category: str,
             try:
                 res = beets_client.create_hardlink(str(src), str(target), expected_size=size)
                 if res and res.get("ok"):
-                    summary["linked"] += 1
                     touched_hashes.add(thash)
                     if res.get("already_present"):
+                        # Report truthfully: this call did not create a new
+                        # hardlink, so it must not inflate the "linked" count.
+                        summary["already_present"] += 1
                         action["status"] = "already_present"
                         action["reason"] = "qBittorrent target file is already hardlinked"
+                        log.append(f"  already present: {target}")
+                    else:
+                        summary["linked"] += 1
+                        log.append(f"  linked: {target}")
                     add_action(action)
-                    log.append(f"  linked: {target}")
                 else:
                     summary["errors"] += 1
                     action["status"] = "error"
-                    action["error"] = _s(res.get("error")) or "Could not create this hardlink."
+                    action["error"] = _qbit_hardlink_public_error(res)
                     add_action(action)
                     log.append(f"  ERROR linking {target}: {action['error']}")
             except Exception as ex:
