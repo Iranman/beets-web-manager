@@ -38,7 +38,7 @@ When deploying to the configured live share or host:
 
 Never copy raw local backup files, private config, generated caches, or unrelated dirty work into the deployment target.
 
-For the guarded TrueNAS rollout of a specific tagged release (image pin, mount verification, database/token safety checks, backup, rollback), see [`TRUENAS_ROLLOUT_0_1_3.md`](TRUENAS_ROLLOUT_0_1_3.md) and `scripts/deploy_truenas_web_manager_0_1_3.sh`.
+For the guarded TrueNAS rollout of a specific tagged release (image pin, mount verification, database/token safety checks, backup, rollback), see [`TRUENAS_ROLLOUT.md`](TRUENAS_ROLLOUT.md) and `scripts/deploy_truenas_web_manager.sh`.
 
 ## Job And Workflow Operations
 

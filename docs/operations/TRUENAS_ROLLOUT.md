@@ -1,9 +1,35 @@
-# TrueNAS Rollout: Beets Web Manager v0.1.3
+# TrueNAS Rollout: Beets Web Manager
 
-Guarded rollout procedure for deploying `v0.1.3` onto a TrueNAS Docker
-Compose stack, and for cleaning up the stale, web-manager-created SQLite
-database left behind by pre-#64 installs. The tooling for this is
-`scripts/deploy_truenas_web_manager_0_1_3.sh`.
+Guarded rollout procedure for deploying Beets Web Manager onto a TrueNAS
+Docker Compose stack, and for cleaning up the stale, web-manager-created
+SQLite database left behind by pre-#64 installs. The tooling for this is
+`scripts/deploy_truenas_web_manager.sh` -- reusable across releases via its
+`VERSION` env var, not tied to one release in its filename.
+
+## Which version to deploy
+
+```text
+v0.1.3  Contains PR #64 only (fix(architecture): remove local db fallback,
+        fix auth persistence and api performance). Does NOT contain PR
+        #65's fixes below.
+        Image: ghcr.io/iranman/beets-web-manager:0.1.3
+        Revision: 36bfc7554378a9ef6bd8f9c47a7d1be553647503
+
+v0.1.4  Required for PR #65's corrections: the get_db_connection()
+        remote-only regression fix, the auth-token log-leak fix (a
+        generated token is no longer printed anywhere -- read it from its
+        persisted file instead) plus fail-closed startup when persistence
+        can't be verified, and the /api/setup/status cache hardening
+        (monotonic clock, single-flighted rebuilds, invalidation on config
+        change). NOT tagged/published yet -- do not deploy a "0.1.4" image
+        reference until it actually exists.
+```
+
+**The hardened rollout in this document targets `v0.1.4`, not `v0.1.3`.**
+Deploying `0.1.3` with this tooling gets you the guarded rollout mechanics
+(mount discovery, DB/token safety checks, backup, rollback) but not PR
+#65's application-level fixes -- those only ship in `0.1.4`. Do not retag or
+otherwise modify the existing `v0.1.3` tag/image to "backport" them.
 
 ## Release identity
 
@@ -17,9 +43,14 @@ Follow-up test commit:     36bfc7554378a9ef6bd8f9c47a7d1be553647503
                             test_post_retag_artwork_integration to use test
                             temp SQLite library
 
-Release tag:                v0.1.3 (points at 36bfc75, which is 4aed0c6 plus
-                            the follow-up test commit on top)
-Image:                      ghcr.io/iranman/beets-web-manager:0.1.3
+v0.1.3 release tag:        points at 36bfc75, which is 4aed0c6 plus the
+                            follow-up test commit on top
+v0.1.3 image:               ghcr.io/iranman/beets-web-manager:0.1.3
+
+PR #65:                     fix(deploy): harden v0.1.3 TrueNAS rollout,
+                            token persistence, and status cache
+v0.1.4:                     not yet tagged -- create only after PR #65 is
+                            merged to main AND post-merge CI is green
 ```
 
 **36bfc75 is not the PR #64 merge commit** -- it is a small follow-up test
@@ -30,11 +61,11 @@ Verify before every rollout, don't trust this file blindly:
 git merge-base --is-ancestor 4aed0c6af83880afbef4192c8d2e97f605b48b10 v0.1.3
 git merge-base --is-ancestor 36bfc7554378a9ef6bd8f9c47a7d1be553647503 v0.1.3
 
-docker pull ghcr.io/iranman/beets-web-manager:0.1.3
-docker image inspect ghcr.io/iranman/beets-web-manager:0.1.3 \
+docker pull ghcr.io/iranman/beets-web-manager:<VERSION>
+docker image inspect ghcr.io/iranman/beets-web-manager:<VERSION> \
   --format '{{json .Config.Labels}}'
-# org.opencontainers.image.revision must equal 36bfc7554378a9ef6bd8f9c47a7d1be553647503
-# org.opencontainers.image.version  must equal 0.1.3
+# org.opencontainers.image.revision must equal the release commit you expect
+# org.opencontainers.image.version  must equal <VERSION>
 ```
 
 ## Expected host layout (verify, don't trust)
@@ -57,7 +88,7 @@ land somewhere unexpected relative to those sources.
 ## Dry run first, always
 
 ```bash
-scripts/deploy_truenas_web_manager_0_1_3.sh --dry-run
+scripts/deploy_truenas_web_manager.sh --dry-run
 ```
 
 Performs every safety check (mount discovery, authoritative + stale DB
@@ -71,7 +102,7 @@ checks; it's what `tests/test_deploy_truenas_rollout.py` exercises.
 ## Real rollout
 
 ```bash
-scripts/deploy_truenas_web_manager_0_1_3.sh
+scripts/deploy_truenas_web_manager.sh
 ```
 
 Order of operations -- nothing in the second half runs unless every check in
@@ -79,7 +110,7 @@ the first half passes:
 
 1. **Pre-flight (read-only):** resolve Compose file and container mounts;
    verify Compose resolves the `beets-web-manager` service to exactly
-   `ghcr.io/iranman/beets-web-manager:0.1.3`; verify the authoritative
+   `ghcr.io/iranman/beets-web-manager:${VERSION}`; verify the authoritative
    database (`PRAGMA quick_check` = `ok`, readable item/album counts, not
    suspiciously low, distinct path/inode/checksum from any stale DB);
    inspect the stale DB if present (same checks, plus refusing anything that
@@ -133,7 +164,7 @@ logs, or shell history.
 ## Rollback
 
 ```bash
-scripts/deploy_truenas_web_manager_0_1_3.sh --rollback /mnt/PLEX/Apps/Arrs/_backups/web-manager-rollout-YYYYMMDD-HHMMSS
+scripts/deploy_truenas_web_manager.sh --rollback /mnt/PLEX/Apps/Arrs/_backups/web-manager-rollout-YYYYMMDD-HHMMSS
 ```
 
 Stops only `beets-web-manager`, restores the prior Compose file, restores
@@ -154,8 +185,11 @@ All optional environment variables:
 STACK_DIR              default /mnt/PLEX/Apps/Arrs
 SERVICE                default beets-web-manager
 ENGINE_SERVICE          default beets
-VERSION                 default 0.1.3
-EXPECTED_REVISION       default 36bfc7554378a9ef6bd8f9c47a7d1be553647503
+VERSION                 default 0.1.4 (not yet released -- see "Which version to deploy" above)
+EXPECTED_REVISION       unset by default; when unset the revision-label pin is
+                        skipped (warning only) and only the version label is
+                        checked. Set explicitly once VERSION's release commit
+                        is known, e.g. EXPECTED_REVISION=<v0.1.4's commit sha>
 COMPOSE_FILE            auto-detected (docker-compose.arrs.yml, then docker-compose.yml)
 MIN_ITEM_COUNT          default 10 -- raise to your real library size
 STALE_DB_MAX_ITEMS      default 100000
@@ -167,8 +201,8 @@ RESTORE_STALE_DB        rollback only, default 0
 ## Testing
 
 ```bash
-bash -n scripts/deploy_truenas_web_manager_0_1_3.sh
-shellcheck scripts/deploy_truenas_web_manager_0_1_3.sh
+bash -n scripts/deploy_truenas_web_manager.sh
+shellcheck scripts/deploy_truenas_web_manager.sh
 python -m unittest tests.test_deploy_truenas_rollout -v
 ```
 

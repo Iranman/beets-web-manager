@@ -4,7 +4,7 @@
 Emulates just enough of `docker inspect`, `docker image inspect`, and
 `docker compose {ps,config,pull,up,stop,restart}` -- reading/writing a JSON
 "world state" file (path from FAKE_DOCKER_STATE) -- to drive
-scripts/deploy_truenas_web_manager_0_1_3.sh through its real code paths
+scripts/deploy_truenas_web_manager.sh through its real code paths
 without touching a real Docker daemon or TrueNAS host.
 
 Supports a minimal subset of Go template syntax: {{.A.B}}, {{if .A}}X{{else}}Y{{end}},

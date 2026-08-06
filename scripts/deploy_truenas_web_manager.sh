@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
-# Guarded, fail-closed rollout of Beets Web Manager v0.1.3 onto a TrueNAS
-# Docker Compose stack.
+# Guarded, fail-closed rollout of Beets Web Manager onto a TrueNAS Docker
+# Compose stack. Reusable across releases -- pass VERSION (and, once known,
+# EXPECTED_REVISION) rather than editing this file per release.
 #
-# Design goals (see docs/operations/TRUENAS_ROLLOUT_0_1_3.md for the full
-# writeup):
+# Current target: v0.1.4 (v0.1.3's image, ghcr.io/iranman/beets-web-manager:0.1.3
+# at revision 36bfc7554378a9ef6bd8f9c47a7d1be553647503, contains only PR #64.
+# It does NOT contain the token-persistence, status-cache, or
+# get_db_connection fixes from PR #65 -- those require a v0.1.4 release. Do
+# not deploy 0.1.3 expecting PR #65's fixes; do not deploy 0.1.4 with this
+# script until v0.1.4 is actually tagged and published.) See
+# docs/operations/TRUENAS_ROLLOUT.md for the full writeup.
+#
+# Design goals:
 #   - Never touch the authoritative Beets database (/config/musiclibrary.blb
 #     under the `beets` engine's own mount) -- read-only, checksum-verified
 #     before AND after.
@@ -19,9 +27,9 @@
 #     and --rollback DIR (undo this script's own change set).
 #
 # Usage:
-#   scripts/deploy_truenas_web_manager_0_1_3.sh              # real rollout
-#   scripts/deploy_truenas_web_manager_0_1_3.sh --dry-run     # inspect only
-#   scripts/deploy_truenas_web_manager_0_1_3.sh --rollback DIR
+#   scripts/deploy_truenas_web_manager.sh              # real rollout
+#   scripts/deploy_truenas_web_manager.sh --dry-run     # inspect only
+#   scripts/deploy_truenas_web_manager.sh --rollback DIR
 #
 # Configuration (env vars, all optional):
 #   STACK_DIR, SERVICE, ENGINE_SERVICE, VERSION, EXPECTED_REVISION,
@@ -39,11 +47,15 @@ set -Eeuo pipefail
 STACK_DIR="${STACK_DIR:-/mnt/PLEX/Apps/Arrs}"
 SERVICE="${SERVICE:-beets-web-manager}"
 ENGINE_SERVICE="${ENGINE_SERVICE:-beets}"
-VERSION="${VERSION:-0.1.3}"
+VERSION="${VERSION:-0.1.4}"
 EXPECTED_IMAGE="ghcr.io/iranman/beets-web-manager:${VERSION}"
-# v0.1.3 tag commit (test(integration) follow-up on top of PR #64's merge
-# commit 4aed0c6a...) -- see docs/operations/TRUENAS_ROLLOUT_0_1_3.md.
-EXPECTED_REVISION="${EXPECTED_REVISION:-36bfc7554378a9ef6bd8f9c47a7d1be553647503}"
+# Set once the VERSION release's commit is known (e.g. EXPECTED_REVISION=<sha>
+# when actually deploying v0.1.4) to pin the exact org.opencontainers.image.revision
+# label, not just the version label. Left unset here since v0.1.4 has not
+# been tagged yet -- see docs/operations/TRUENAS_ROLLOUT.md. When unset, the
+# revision-label check is skipped with a warning rather than pinned to a
+# guessed value.
+EXPECTED_REVISION="${EXPECTED_REVISION:-}"
 COMPOSE_FILE="${COMPOSE_FILE:-}"
 DB_FILENAME="musiclibrary.blb"
 WAL_FILENAME="musiclibrary.blb-wal"
@@ -673,8 +685,12 @@ verify_image_labels_if_present() {
   revision="$(docker image inspect "$EXPECTED_IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' 2>/dev/null || true)"
   version="$(docker image inspect "$EXPECTED_IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.version"}}' 2>/dev/null || true)"
   [[ "$version" == "$VERSION" ]] || die "image org.opencontainers.image.version label is '${version}', expected '${VERSION}'"
-  [[ "$revision" == "$EXPECTED_REVISION" ]] || die "image org.opencontainers.image.revision label is '${revision}', expected '${EXPECTED_REVISION}'"
-  log "Image labels verified: version=${version} revision=${revision}"
+  if [[ -n "$EXPECTED_REVISION" ]]; then
+    [[ "$revision" == "$EXPECTED_REVISION" ]] || die "image org.opencontainers.image.revision label is '${revision}', expected '${EXPECTED_REVISION}'"
+  else
+    warn "EXPECTED_REVISION not set -- skipping the exact revision-label pin (relying on the version label '${version}' alone). Set EXPECTED_REVISION=<release commit sha> once it's known for a fully pinned deployment."
+  fi
+  log "Image labels verified: version=${version} revision=${revision:-<none>}"
 }
 
 # ---------------------------------------------------------------------------

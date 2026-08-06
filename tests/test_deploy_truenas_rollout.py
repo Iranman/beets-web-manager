@@ -1,4 +1,4 @@
-"""Tests for scripts/deploy_truenas_web_manager_0_1_3.sh.
+"""Tests for scripts/deploy_truenas_web_manager.sh.
 
 Two complementary strategies, matching what each check actually needs:
 
@@ -32,7 +32,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "scripts" / "deploy_truenas_web_manager_0_1_3.sh"
+SCRIPT = ROOT / "scripts" / "deploy_truenas_web_manager.sh"
 FAKE_DOCKER = ROOT / "tests" / "deploy" / "fake_docker.py"
 FAKE_CURL = ROOT / "tests" / "deploy" / "fake_curl.py"
 SCRIPT_SOURCE = SCRIPT.read_text(encoding="utf-8")
@@ -670,6 +670,12 @@ class EndToEndFixture(unittest.TestCase):
         e["STACK_DIR"] = self.stack_dir
         e["COMPOSE_FILE"] = self.compose_file
         e["HEALTH_TIMEOUT_SECONDS"] = "5"
+        # The script's own VERSION default (0.1.4) targets a release that
+        # doesn't exist yet; these tests exercise the mechanics against the
+        # concrete, currently-released 0.1.3 image identity instead. Both
+        # remain overridable per test.
+        e["VERSION"] = "0.1.3"
+        e["EXPECTED_REVISION"] = self.GOOD_REVISION
         for k, v in overrides.items():
             e[k] = str(v)
         return e
