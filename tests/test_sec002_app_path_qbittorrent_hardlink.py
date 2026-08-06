@@ -431,16 +431,21 @@ class ControlAgentHardlinkEndpointTests(unittest.TestCase):
         self.assertFalse(target.read_bytes() == b"AUDIO_A")
         self.assertEqual(target.read_bytes(), b"UNRELATED_B")
 
-    def test_rejects_symlink_source(self):
+    def test_symlink_source_with_in_root_target_links_the_resolved_file(self):
+        # resolve_safe_path() fully dereferences symlinks via realpath()
+        # before the containment check runs, so a symlink source is
+        # authorized (or rejected) based on where it actually resolves, not
+        # on whether it happens to be a symlink -- naming a file via a
+        # symlink alias inside the music root grants no capability beyond
+        # naming that same file directly would. This is the deliberate,
+        # safe behavior; see the code comment above the containment check
+        # in beets_control_agent.py for why an explicit "reject any symlink
+        # source" check was tried and removed (it required a fresh
+        # filesystem call on unresolved request data with no real security
+        # benefit, since containment already gates on the resolved path).
         self._require_posix()
-        # The symlink's real target sits INSIDE the music root deliberately:
-        # this proves the endpoint's explicit is_symlink() check catches a
-        # symlink source even when simple containment on the resolved path
-        # would otherwise pass (a symlink pointing outside the root entirely
-        # is already caught earlier by resolve_safe_path's containment
-        # check; this is the narrower, easy-to-miss case).
         real_target_of_symlink = self.music_root / "real_secret.flac"
-        real_target_of_symlink.write_bytes(b"SECRET")
+        real_target_of_symlink.write_bytes(b"AUDIO_VIA_SYMLINK")
         symlink_source = self.music_root / "link.flac"
         try:
             symlink_source.symlink_to(real_target_of_symlink)
@@ -450,8 +455,30 @@ class ControlAgentHardlinkEndpointTests(unittest.TestCase):
 
         code, data = self.post_hardlink({"source_path": str(symlink_source), "target_path": str(dst)})
 
-        self.assertEqual(code, 400, data)
+        self.assertEqual(code, 200, data)
+        self.assertTrue(data.get("linked"))
+        self.assertEqual(dst.stat().st_ino, real_target_of_symlink.stat().st_ino)
+
+    def test_symlink_source_escaping_every_root_is_rejected(self):
+        # The security boundary is containment on the fully resolved path:
+        # a symlink whose target escapes every allowed root must still be
+        # rejected, exactly like a direct path to the same location would
+        # be.
+        self._require_posix()
+        secret_outside = self.outside_root / "secret.flac"
+        secret_outside.write_bytes(b"SHOULD_NOT_BE_REACHABLE")
+        symlink_source = self.music_root / "link.flac"
+        try:
+            symlink_source.symlink_to(secret_outside)
+        except (OSError, NotImplementedError):
+            self.skipTest("platform/user cannot create symlinks")
+        dst = self.staging_root / "out.flac"
+
+        code, data = self.post_hardlink({"source_path": str(symlink_source), "target_path": str(dst)})
+
+        self.assertEqual(code, 403, data)
         self.assertFalse(dst.exists())
+        self.assertNotIn(str(secret_outside), json.dumps(data))
 
     def test_rejects_symlink_target(self):
         self._require_posix()

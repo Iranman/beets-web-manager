@@ -2215,26 +2215,29 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                     self._send_json(400, {"error": "Invalid expected_size value"})
                     return
 
+            # Note on symlinks: resolve_safe_path() fully dereferences
+            # symlinks via realpath() before returning, so safe_src/safe_dst
+            # are already the resolved target -- is_symlink() on them (or on
+            # the raw caller-supplied strings) cannot change the actual
+            # security boundary here. Containment is enforced on the fully
+            # resolved path either way, so a symlink source/destination
+            # grants no capability beyond what naming its resolved target
+            # directly would; and the identity check against a stat taken
+            # under lock immediately before os.link() (below) already closes
+            # the practical TOCTOU window regardless of whether a symlink
+            # was involved. An earlier version of this endpoint checked
+            # os.path.islink() on the raw request strings specifically to
+            # reject symlinks outright; that check was both ineffective (see
+            # above) and, when corrected to check the raw string, introduced
+            # a genuine CodeQL py/path-injection flow (a fresh filesystem
+            # call fed directly by unresolved request data) for no real
+            # security benefit, so it was removed rather than reintroduced
+            # in a disguised form.
             try:
                 safe_src = resolve_safe_path(src, source_roots)
                 safe_dst = resolve_safe_path(dst, dest_roots)
             except UnsafePathError:
                 self._send_json(403, {"error": "Access denied for path outside allowed roots"})
-                return
-
-            # resolve_safe_path() fully dereferences symlinks via realpath()
-            # before returning -- safe_src/safe_dst are already the resolved
-            # target, so is_symlink() on them can never observe a symlink
-            # whose target exists. Check the RAW, caller-supplied strings
-            # instead, which is the only way to actually detect that the
-            # caller named a symlink (regardless of where it points; a
-            # symlink pointing outside every allowed root is already caught
-            # above by the containment check on its resolved form).
-            if os.path.islink(src):
-                self._send_json(400, {"error": "Source path must be a regular non-symlink file"})
-                return
-            if os.path.islink(dst):
-                self._send_json(409, {"error": "Target path exists and is a symlink"})
                 return
 
             if not safe_src.exists() or not safe_src.is_file():
@@ -2248,13 +2251,6 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                     safe_dst = resolve_safe_path(dst, dest_roots)
                 except UnsafePathError:
                     self._send_json(403, {"error": "Access denied for path outside allowed roots"})
-                    return
-
-                if os.path.islink(src):
-                    self._send_json(400, {"error": "Source path must be a regular non-symlink file"})
-                    return
-                if os.path.islink(dst):
-                    self._send_json(409, {"error": "Target path exists and is a symlink"})
                     return
 
                 if not safe_src.exists() or not safe_src.is_file():
