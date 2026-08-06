@@ -438,7 +438,7 @@ def _env_float(name: str, default: float, *, minimum: Optional[float] = None, ma
         value = min(maximum, value)
     return value
 
-LIB_PATH  = os.environ.get("BEETS_LIBRARY", "/config/musiclibrary.blb")
+LIB_PATH  = os.environ.get("BEETS_LIBRARY", "")
 BEET_BIN  = shutil.which("beet") or "/lsiopy/bin/beet"
 LOG_FILE  = os.environ.get("BEETS_LOG", "/config/beet.log")
 HOST      = "0.0.0.0"
@@ -1983,7 +1983,7 @@ def _security_auth_disabled() -> bool:
 
 
 _GENERATED_AUTH_TOKEN_FILE = Path(
-    os.environ.get("BEETS_WEB_AUTH_TOKEN_FILE", "/config/.auth_token")
+    os.environ.get("BEETS_WEB_AUTH_TOKEN_FILE", "/web-manager-data/.auth_token")
 )
 
 
@@ -1994,35 +1994,47 @@ def generate_secure_auth_token() -> str:
 
 
 def _persist_generated_auth_token(token: str) -> None:
-    """Best-effort: the in-process env var already works for this run even if
-    writing to disk fails (e.g. read-only /config in some environment)."""
+    """Persist generated token atomically to BEETS_WEB_AUTH_TOKEN_FILE (/web-manager-data/.auth_token)."""
     try:
-        _GENERATED_AUTH_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _GENERATED_AUTH_TOKEN_FILE.write_text(token, encoding="utf-8")
+        token_file = _GENERATED_AUTH_TOKEN_FILE
+        token_file.parent.mkdir(parents=True, exist_ok=True)
+        temp_file = token_file.with_name(f".{token_file.name}.tmp.{secrets.token_hex(4)}")
+        temp_file.write_text(token, encoding="utf-8")
+        try:
+            os.chmod(temp_file, 0o600)
+            os.chmod(_GENERATED_AUTH_TOKEN_FILE, 0o600)
+        except Exception:
+            pass
+        temp_file.replace(token_file)
         try:
             os.chmod(_GENERATED_AUTH_TOKEN_FILE, 0o600)
         except Exception:
             pass
-    except Exception:
-        pass
+    except Exception as ex:
+        try:
+            app.logger.warning("Failed to persist generated auth token to %s: %s", _GENERATED_AUTH_TOKEN_FILE, ex)
+        except Exception:
+            pass
 
 
 def _bootstrap_auth_token_if_missing() -> None:
-    """First-run safety net: with neither a usable BEETS_WEB_AUTH_TOKEN nor
-    BEETS_WEB_PASSWORD configured, _enforce_security_boundary 503s every
-    route including the setup wizard itself -- an operator with no shell
-    access has no way in. Never require inventing a token manually: generate
-    one automatically instead, persist it so a plain process restart reuses
-    the same value, and print it once to the startup log (the only channel
-    available before any credential exists). Never runs once a real secret
-    (auto-generated or operator-set) is already configured.
+    """Enforce token precedence & persistence:
+    1. Explicit usable BEETS_WEB_AUTH_TOKEN in env is used.
+    2. Otherwise, read BEETS_WEB_AUTH_TOKEN_FILE (/web-manager-data/.auth_token).
+    3. If token file missing/unusable, generate secure token, write atomically with 0o600, set env, log notice.
+    4. Never fall back to legacy token path.
     """
     if _security_auth_configured():
         return
     existing = ""
     try:
-        existing = _GENERATED_AUTH_TOKEN_FILE.read_text(encoding="utf-8").strip()
-    except Exception:
+        if _GENERATED_AUTH_TOKEN_FILE.exists():
+            existing = _GENERATED_AUTH_TOKEN_FILE.read_text(encoding="utf-8").strip()
+    except Exception as ex:
+        try:
+            app.logger.warning("Could not read token file %s: %s", _GENERATED_AUTH_TOKEN_FILE, ex)
+        except Exception:
+            pass
         existing = ""
     if _auth_secret_is_usable(existing):
         os.environ["BEETS_WEB_AUTH_TOKEN"] = existing
@@ -10975,10 +10987,9 @@ def album_deduplicate(aid):
         mb_albumid = mb_override
         if not mb_albumid:
             try:
-                con0 = sqlite3.connect(LIB_PATH)
-                row0 = con0.execute(
-                    "SELECT mb_albumid FROM albums WHERE id=?", (aid,)).fetchone()
-                con0.close()
+                with _db() as con0:
+                    row0 = con0.execute(
+                        "SELECT mb_albumid FROM albums WHERE id=?", (aid,)).fetchone()
                 mb_albumid = (row0[0] or "").strip() if row0 else ""
             except Exception:
                 pass
@@ -10988,10 +10999,9 @@ def album_deduplicate(aid):
         # `beet mbsync` (Step 6) can read it from the DB.
         if mb_albumid and _MB_UUID_RE.match(mb_albumid):
             try:
-                con_mb = sqlite3.connect(LIB_PATH)
-                con_mb.execute("UPDATE albums SET mb_albumid=? WHERE id=?",
-                               (mb_albumid, aid))
-                con_mb.commit(); con_mb.close()
+                with _db() as con_mb:
+                    con_mb.execute("UPDATE albums SET mb_albumid=? WHERE id=?",
+                                   (mb_albumid, aid))
                 log.append(f"  Stored mb_albumid in DB")
             except Exception as ex:
                 log.append(f"  WARN storing mb_albumid: {ex}")
@@ -11023,12 +11033,10 @@ def album_deduplicate(aid):
             return int(m.group(1)) if m else 0
 
         try:
-            con = sqlite3.connect(LIB_PATH)
-            con.text_factory = bytes   # get raw bytes so we decode ourselves
-            all_rows = con.execute(
-                "SELECT id, track, disc, title, path FROM items WHERE album_id=? ORDER BY track, disc",
-                (aid,)).fetchall()
-            con.close()
+            with _db(text_factory=bytes) as con:
+                all_rows = con.execute(
+                    "SELECT id, track, disc, title, path FROM items WHERE album_id=? ORDER BY track, disc",
+                    (aid,)).fetchall()
         except Exception as ex:
             log.append(f"ERROR loading items: {ex}")
             return
@@ -11122,11 +11130,10 @@ def album_deduplicate(aid):
         if to_delete:
             del_ids = [it["id"] for it in to_delete]
             try:
-                con2 = sqlite3.connect(LIB_PATH)
-                con2.execute(
-                    f"DELETE FROM items WHERE id IN ({','.join('?'*len(del_ids))})",
-                    del_ids)
-                con2.commit(); con2.close()
+                with _db() as con2:
+                    con2.execute(
+                        f"DELETE FROM items WHERE id IN ({','.join('?'*len(del_ids))})",
+                        del_ids)
                 log.append(f"  Removed {len(del_ids)} DB entries, {deleted_files} files from disk")
             except Exception as ex:
                 log.append(f"  DB delete warning: {ex}")
@@ -11142,11 +11149,9 @@ def album_deduplicate(aid):
         #  • If the clean file does NOT exist → rename .N → clean, re-point DB entry
         _coll_stem_re = re.compile(r'^(.*)\.(\d+)$')
         try:
-            con_fix = sqlite3.connect(LIB_PATH)
-            con_fix.text_factory = bytes
-            fix_rows = con_fix.execute(
-                "SELECT id, path FROM items WHERE album_id=?", (aid,)).fetchall()
-            con_fix.close()
+            with _db(text_factory=bytes) as con_fix:
+                fix_rows = con_fix.execute(
+                    "SELECT id, path FROM items WHERE album_id=?", (aid,)).fetchall()
 
             fix_updates = []   # [(new_path_bytes, item_id)]
             for fix_id, fix_raw in fix_rows:
@@ -11189,9 +11194,8 @@ def album_deduplicate(aid):
                 fix_updates.append((new_stored.encode("utf-8"), fix_id))
 
             if fix_updates:
-                con_upd = sqlite3.connect(LIB_PATH)
-                con_upd.executemany("UPDATE items SET path=? WHERE id=?", fix_updates)
-                con_upd.commit(); con_upd.close()
+                with _db() as con_upd:
+                    con_upd.executemany("UPDATE items SET path=? WHERE id=?", fix_updates)
                 log.append(f"  [fix-coll] Resolved {len(fix_updates)} collision path(s) in DB")
         except Exception as ex:
             log.append(f"  [fix-coll] WARN (non-fatal): {ex}")
@@ -11228,12 +11232,10 @@ def album_deduplicate(aid):
         # ── Step 7: Final track listing ───────────────────────────────────────
         _invalidate_lib_cache()
         try:
-            con3 = sqlite3.connect(LIB_PATH)
-            con3.text_factory = bytes
-            rows3 = con3.execute(
-                "SELECT track, title, path FROM items WHERE album_id=? ORDER BY track",
-                (aid,)).fetchall()
-            con3.close()
+            with _db(text_factory=bytes) as con3:
+                rows3 = con3.execute(
+                    "SELECT track, title, path FROM items WHERE album_id=? ORDER BY track",
+                    (aid,)).fetchall()
             log.append(f"Final: {len(rows3)} track(s)")
             for trk, ttl, pth in rows3:
                 fname = Path(
@@ -11432,10 +11434,9 @@ def unmatched_tracks():
     # Build set of album_ids that already have a mb_albumid — these don't need matching
     matched_album_ids: set = set()
     try:
-        con = sqlite3.connect(LIB_PATH)
-        rows = con.execute(
-            "SELECT id FROM albums WHERE mb_albumid IS NOT NULL AND mb_albumid != ''").fetchall()
-        con.close()
+        with _db() as con:
+            rows = con.execute(
+                "SELECT id FROM albums WHERE mb_albumid IS NOT NULL AND mb_albumid != ''").fetchall()
         matched_album_ids = {row[0] for row in rows}
     except Exception:
         pass
@@ -11541,9 +11542,8 @@ def match_album(aid):
             raise RuntimeError(f"modify failed (rc={r.returncode})")
         # Also stamp the album record directly so mbsync can find it
         try:
-            _c = sqlite3.connect(LIB_PATH)
-            _c.execute("UPDATE albums SET mb_albumid=? WHERE id=?", (mb_albumid, aid))
-            _c.commit(); _c.close()
+            with _db() as _c:
+                _c.execute("UPDATE albums SET mb_albumid=? WHERE id=?", (mb_albumid, aid))
             log.append(f"  albums.mb_albumid set to {mb_albumid}")
         except Exception as ex:
             log.append(f"  WARN: could not stamp album record: {ex}")
@@ -13358,30 +13358,31 @@ def _library_stats_for_artists(artists: List[Dict[str, Any]]) -> Dict[str, int]:
 
 
 def _library_track_dict(item) -> Dict[str, Any]:
-    raw_path = _s(getattr(item, "path", "") or "")
+    get_val = (lambda k, d=None: item.get(k, d)) if isinstance(item, dict) else (lambda k, d=None: getattr(item, k, d))
+    raw_path = _s(get_val("path", "") or "")
     abs_path = raw_path
     if raw_path and not Path(raw_path).is_absolute():
         abs_path = str(MUSIC_ROOT / raw_path)
     exists = bool(abs_path and Path(abs_path).exists())
-    length = getattr(item, "length", None)
+    length = get_val("length", None)
     try:
         length_value = float(length or 0) or None
     except Exception:
         length_value = None
     return {
-        "id": int(getattr(item, "id", 0) or 0),
-        "album_id": int(getattr(item, "album_id", 0) or 0),
+        "id": int(get_val("id", 0) or 0),
+        "album_id": int(get_val("album_id", 0) or 0),
         "path": abs_path or raw_path,
-        "title": _s(getattr(item, "title", "") or (Path(raw_path).stem if raw_path else "")),
-        "track": int(getattr(item, "track", 0) or 0),
-        "disc": int(getattr(item, "disc", 0) or 1),
-        "tracktotal": int(getattr(item, "tracktotal", 0) or 0),
+        "title": _s(get_val("title", "") or (Path(raw_path).stem if raw_path else "")),
+        "track": int(get_val("track", 0) or 0),
+        "disc": int(get_val("disc", 0) or 1),
+        "tracktotal": int(get_val("tracktotal", 0) or 0),
         "ok": exists,
         "missing": not exists,
         "imported": True,
         "disk_only": False,
         "status": "imported" if exists else "missing_file",
-        "mb_trackid": _s(getattr(item, "mb_trackid", "") or ""),
+        "mb_trackid": _s(get_val("mb_trackid", "") or ""),
         "length": length_value,
     }
 
@@ -13389,7 +13390,41 @@ def _library_track_dict(item) -> Dict[str, Any]:
 @app.get("/api/library")
 def library_full():
     """Walk /data/media/music on disk + inject library items whose files are missing (shown in red).
-    Results are cached for _LIB_CACHE_TTL seconds; pass ?refresh=1 to force a rebuild."""
+    Results are cached for _LIB_CACHE_TTL seconds; pass ?refresh=1 to force a rebuild.
+    Supports ?limit=N&offset=M for fast paginated queries directly from the engine.
+    """
+    limit_arg = request.args.get("limit")
+    if limit_arg is not None:
+        try:
+            limit = min(max(1, int(limit_arg)), 500)
+        except Exception:
+            limit = 50
+        try:
+            offset = max(0, int(request.args.get("offset", 0)))
+        except Exception:
+            offset = 0
+
+        try:
+            res = beets_client.get_items_page(offset=offset, limit=limit)
+            raw_items = res.get("items", [])
+            items = [_library_track_dict(r) for r in raw_items]
+            return jsonify({
+                "items": items,
+                "pagination": {
+                    "limit": limit,
+                    "offset": offset,
+                    "returned": len(items),
+                    "total": int(res.get("total", len(items)))
+                }
+            })
+        except Exception as ex:
+            if isinstance(ex, (BeetsUnavailableError, TimeoutError)):
+                return jsonify({
+                    "error": f"Beets Control Agent is unavailable: {ex}",
+                    "status": "unavailable"
+                }), 503
+            raise
+
     global _lib_cache, _lib_cache_ts
     force = request.args.get("refresh", "0") == "1"
     include_tracks = request.args.get("include_tracks", "0") == "1"
@@ -13898,7 +13933,7 @@ def _build_library_payload() -> dict:
         "ok":      True,
         "artists": result,
         "stats":   {"artists": total_artists, "albums": total_albums, "tracks": total_tracks},
-        "library_version": Path(LIB_PATH).stat().st_mtime if Path(LIB_PATH).exists() else time.time(),
+        "library_version": _lib_cache_ts or time.time(),
     }
     return payload
 
@@ -20463,11 +20498,9 @@ def import_folder_with_id():
             item_ids_found:  list = []
             _MROOT_B = b"/data/media/music/"
             try:
-                con = sqlite3.connect(LIB_PATH)
-                con.text_factory = bytes
-                cur = con.execute("SELECT id, album_id, path, added FROM items")
-                all_rows = cur.fetchall()
-                con.close()
+                with _db(text_factory=bytes) as con:
+                    cur = con.execute("SELECT id, album_id, path, added FROM items")
+                    all_rows = cur.fetchall()
 
                 prefix_abs = path_prefix.encode('utf-8').rstrip(b'/') + b'/'
                 # Relative prefix: strip music root so we match relative DB paths
@@ -21099,18 +21132,16 @@ def import_folder_with_id():
         artist_guess = Path(folder_path).parent.name
         if not album_ids and not item_ids:
             try:
-                con = sqlite3.connect(LIB_PATH)
-                con.row_factory = sqlite3.Row
-                # album is stored as TEXT in beets SQLite (unlike path which is BLOB)
-                rows = con.execute(
-                    "SELECT id, album_id FROM items WHERE album = ? LIMIT 200",
-                    (album_guess,)).fetchall()
-                if not rows and artist_guess.lower() not in {
-                        "music","torrents","downloads","data","failed_imports"}:
+                with _db(row_factory=sqlite3.Row) as con:
+                    # album is stored as TEXT in beets SQLite (unlike path which is BLOB)
                     rows = con.execute(
-                        "SELECT id, album_id FROM items WHERE album = ? AND artist = ? LIMIT 200",
-                        (album_guess, artist_guess)).fetchall()
-                con.close()
+                        "SELECT id, album_id FROM items WHERE album = ? LIMIT 200",
+                        (album_guess,)).fetchall()
+                    if not rows and artist_guess.lower() not in {
+                            "music","torrents","downloads","data","failed_imports"}:
+                        rows = con.execute(
+                            "SELECT id, album_id FROM items WHERE album = ? AND artist = ? LIMIT 200",
+                            (album_guess, artist_guess)).fetchall()
                 for row in rows:
                     if row["album_id"] and row["album_id"] not in album_ids:
                         album_ids.append(row["album_id"])
@@ -21139,17 +21170,15 @@ def import_folder_with_id():
         # G: LIKE fuzzy on album name (handles "(Taped Over)" suffix mismatches)
         if not album_ids and not item_ids:
             try:
-                con = sqlite3.connect(LIB_PATH)
-                con.row_factory = sqlite3.Row
-                like_term = f"%{album_guess}%"
-                rows = con.execute(
-                    "SELECT id, album_id FROM items WHERE album LIKE ? LIMIT 200",
-                    (like_term,)).fetchall()
-                # If artist_guess is meaningful, narrow by albumartist too
-                if rows and artist_guess.lower() not in {
-                        "music","torrents","downloads","data","failed_imports","ye","kanye"}:
-                    rows = [r for r in rows if r["album_id"] is not None]
-                con.close()
+                with _db(row_factory=sqlite3.Row) as con:
+                    like_term = f"%{album_guess}%"
+                    rows = con.execute(
+                        "SELECT id, album_id FROM items WHERE album LIKE ? LIMIT 200",
+                        (like_term,)).fetchall()
+                    # If artist_guess is meaningful, narrow by albumartist too
+                    if rows and artist_guess.lower() not in {
+                            "music","torrents","downloads","data","failed_imports","ye","kanye"}:
+                        rows = [r for r in rows if r["album_id"] is not None]
                 for row in rows:
                     if row["album_id"] and row["album_id"] not in album_ids:
                         album_ids.append(row["album_id"])
@@ -21164,13 +21193,11 @@ def import_folder_with_id():
         if not album_ids and not item_ids and already_present and \
                 artist_guess.lower() not in {"music","torrents","downloads","data","failed_imports"}:
             try:
-                con = sqlite3.connect(LIB_PATH)
-                con.row_factory = sqlite3.Row
-                rows = con.execute(
-                    "SELECT DISTINCT album_id FROM items "
-                    "WHERE (albumartist = ? OR artist = ?) AND album_id IS NOT NULL LIMIT 50",
-                    (artist_guess, artist_guess)).fetchall()
-                con.close()
+                with _db(row_factory=sqlite3.Row) as con:
+                    rows = con.execute(
+                        "SELECT DISTINCT album_id FROM items "
+                        "WHERE (albumartist = ? OR artist = ?) AND album_id IS NOT NULL LIMIT 50",
+                        (artist_guess, artist_guess)).fetchall()
                 for row in rows:
                     if row["album_id"] not in album_ids:
                         album_ids.append(row["album_id"])
@@ -21391,11 +21418,10 @@ def import_folder_with_id():
             # B: update albums.mb_albumid directly (mbsync reads this column)
             if album_db_id is not None:
                 try:
-                    con2 = sqlite3.connect(LIB_PATH)
-                    rows_updated = con2.execute(
-                        "UPDATE albums SET mb_albumid = ? WHERE id = ?",
-                        (mb_albumid, album_db_id)).rowcount
-                    con2.commit(); con2.close()
+                    with _db() as con2:
+                        rows_updated = con2.execute(
+                            "UPDATE albums SET mb_albumid = ? WHERE id = ?",
+                            (mb_albumid, album_db_id)).rowcount
                     log.append(f"  Albums table updated (id={album_db_id}, rows={rows_updated}).")
                 except Exception as ex:
                     log.append(f"  albums table update warning: {ex}")
@@ -21736,12 +21762,10 @@ def _match_tracks_from_mb(mb_albumid: str, album_db_id, log: list,
 
     # ── Get album items from DB ───────────────────────────────────────────────
     try:
-        con = sqlite3.connect(LIB_PATH)
-        con.row_factory = sqlite3.Row
-        items = con.execute(
-            "SELECT id, title, track, length FROM items WHERE album_id = ?",
-            (album_db_id,)).fetchall()
-        con.close()
+        with _db(row_factory=sqlite3.Row) as con:
+            items = con.execute(
+                "SELECT id, title, track, length FROM items WHERE album_id = ?",
+                (album_db_id,)).fetchall()
     except Exception as ex:
         log.append(f"  DB read warning: {ex}")
         return 0
@@ -21836,10 +21860,10 @@ def _match_tracks_from_mb(mb_albumid: str, album_db_id, log: list,
     # ── Write matches back to DB ──────────────────────────────────────────────
     if updates or (zero_unmatched and unmatched_ids):
         try:
-            con = sqlite3.connect(LIB_PATH)
-            con.executemany(
-                "UPDATE items SET mb_trackid=?, track=?, disc=?, title=? WHERE id=?",
-                updates)
+            with _db() as con:
+                con.executemany(
+                    "UPDATE items SET mb_trackid=?, track=?, disc=?, title=? WHERE id=?",
+                    updates)
             # Also stamp album-level fields from MB
             rg    = mb_data.get("release-group") or {}
             year  = (mb_data.get("date") or "")[:4]
@@ -22718,9 +22742,8 @@ def reimport_disk():
                     existing_album_id, mb_albumid, wanted_tracks, log)
         else:
             try:
-                con0 = sqlite3.connect(LIB_PATH)
-                con0.text_factory = bytes
-                all_rows = con0.execute("SELECT id, album_id, path FROM items").fetchall()
+                with _db(text_factory=bytes) as con0:
+                    all_rows = con0.execute("SELECT id, album_id, path FROM items").fetchall()
                 abs_prefix_b = aldir.encode('utf-8').rstrip(b'/') + b'/'
                 # Relative prefix = path without the music-root prefix
                 # e.g. "/data/media/music" stripped from "/data/media/music/Wiz Khalifa/..."
@@ -23157,12 +23180,10 @@ def reimport_disk():
 
             # Report final filenames
             try:
-                con3 = sqlite3.connect(LIB_PATH)
-                con3.text_factory = bytes
-                rows3 = con3.execute(
-                    "SELECT track, title, path FROM items WHERE album_id = ? ORDER BY track",
-                    (aid,)).fetchall()
-                con3.close()
+                with _db(text_factory=bytes) as con3:
+                    rows3 = con3.execute(
+                        "SELECT track, title, path FROM items WHERE album_id = ? ORDER BY track",
+                        (aid,)).fetchall()
                 log.append(f"  ✓ Final file names ({len(rows3)} tracks):")
                 for trk, ttl, pth in rows3:
                     fname = Path(
@@ -24564,10 +24585,8 @@ def _ai_batch_find_audio_dirs(root: str) -> List[str]:
 
 def _ai_batch_already_in_library(folder_path: str) -> bool:
     try:
-        con = sqlite3.connect(LIB_PATH)
-        con.text_factory = bytes
-        rows = con.execute("SELECT path FROM items").fetchall()
-        con.close()
+        with _db(text_factory=bytes) as con:
+            rows = con.execute("SELECT path FROM items").fetchall()
         prefix_b = folder_path.encode("utf-8").rstrip(b"/") + b"/"
         _mroot_b = b"/data/media/music/"
         for (rp,) in rows:
@@ -25811,21 +25830,19 @@ def _ai_import_folder(folder_path: str, mb_albumid: str, suggestion: dict,
     _MROOT_B = b"/data/media/music/"
     try:
         # Search by mb_albumid (most reliable after --search-id import)
-        con = sqlite3.connect(LIB_PATH)
-        row = con.execute("SELECT id FROM albums WHERE mb_albumid = ?",
-                          (mb_albumid,)).fetchone()
-        if row:
-            aid = row[0]
-        if aid is None:
-            # Recently added fallback
-            t_before = time.time() - 200   # last few minutes
-            con.text_factory = bytes
-            rows = con.execute(
-                "SELECT DISTINCT album_id FROM items "
-                "WHERE album_id IS NOT NULL AND added >= ?", (t_before,)).fetchall()
-            if rows:
-                aid = rows[-1][0]  # most recently added album
-        con.close()
+        with _db(text_factory=bytes) as con:
+            row = con.execute("SELECT id FROM albums WHERE mb_albumid = ?",
+                              (mb_albumid,)).fetchone()
+            if row:
+                aid = row[0]
+            if aid is None:
+                # Recently added fallback
+                t_before = time.time() - 200   # last few minutes
+                rows = con.execute(
+                    "SELECT DISTINCT album_id FROM items "
+                    "WHERE album_id IS NOT NULL AND added >= ?", (t_before,)).fetchall()
+                if rows:
+                    aid = rows[-1][0]  # most recently added album
     except Exception as ex:
         log.append(f"  DB lookup warning: {ex}")
 
@@ -25846,10 +25863,9 @@ def _ai_import_folder(folder_path: str, mb_albumid: str, suggestion: dict,
     # ── Step 3: stamp mb_albumid + retag ─────────────────────────────────────
     log.append(f"  Retagging album_id={aid} with MB data…")
     try:
-        con2 = sqlite3.connect(LIB_PATH)
-        con2.execute("UPDATE albums SET mb_albumid = ? WHERE id = ?", (mb_albumid, aid))
-        con2.execute("UPDATE items  SET mb_albumid = ? WHERE album_id = ?", (mb_albumid, aid))
-        con2.commit(); con2.close()
+        with _db() as con2:
+            con2.execute("UPDATE albums SET mb_albumid = ? WHERE id = ?", (mb_albumid, aid))
+            con2.execute("UPDATE items  SET mb_albumid = ? WHERE album_id = ?", (mb_albumid, aid))
     except Exception as ex:
         log.append(f"  DB stamp warning: {ex}")
 
@@ -26245,11 +26261,9 @@ def library_sync_deleted():
         mode = "Previewing" if dry_run else "Applying"
         log.append(f"{mode} missing-file DB sync...")
         try:
-            con = sqlite3.connect(LIB_PATH)
-            con.text_factory = bytes
-            all_items = con.execute(
-                "SELECT id, album_id, path FROM items").fetchall()
-            con.close()
+            with _db(text_factory=bytes) as con:
+                all_items = con.execute(
+                    "SELECT id, album_id, path FROM items").fetchall()
         except Exception as ex:
             log.append(f"ERROR: {ex}"); return
 
@@ -26295,22 +26309,21 @@ def library_sync_deleted():
         rm_item_ids: list = list(orphan_item_ids)
 
         try:
-            con2 = sqlite3.connect(LIB_PATH)
-            for aid_i, missing_ids in album_missing.items():
-                total = album_total.get(aid_i, len(missing_ids))
-                if len(missing_ids) >= total:
-                    # Every file for this album is gone — remove the whole album
-                    rm_album_ids.append(aid_i)
-                    rm_item_ids.extend(missing_ids)
-                    row = con2.execute(
-                        "SELECT albumartist, album FROM albums WHERE id=?",
-                        (aid_i,)).fetchone()
-                    name = f"{row[0]} — {row[1]}" if row else f"album {aid_i}"
-                    log.append(f"  {'Would remove' if dry_run else 'Removing'}: {name} ({total} files gone)")
-                else:
-                    rm_item_ids.extend(missing_ids)
-                    log.append(f"  Partial: album {aid_i} - {len(missing_ids)}/{total} missing item(s)")
-            con2.close()
+            with _db() as con2:
+                for aid_i, missing_ids in album_missing.items():
+                    total = album_total.get(aid_i, len(missing_ids))
+                    if len(missing_ids) >= total:
+                        # Every file for this album is gone — remove the whole album
+                        rm_album_ids.append(aid_i)
+                        rm_item_ids.extend(missing_ids)
+                        row = con2.execute(
+                            "SELECT albumartist, album FROM albums WHERE id=?",
+                            (aid_i,)).fetchone()
+                        name = f"{row[0]} — {row[1]}" if row else f"album {aid_i}"
+                        log.append(f"  {'Would remove' if dry_run else 'Removing'}: {name} ({total} files gone)")
+                    else:
+                        rm_item_ids.extend(missing_ids)
+                        log.append(f"  Partial: album {aid_i} - {len(missing_ids)}/{total} missing item(s)")
         except Exception as ex:
             log.append(f"WARNING: {ex}")
 
@@ -26352,15 +26365,14 @@ def library_sync_deleted():
             return
 
         try:
-            con3 = sqlite3.connect(LIB_PATH)
-            _batch = 500
-            for i in range(0, len(rm_item_ids), _batch):
-                ch = rm_item_ids[i:i+_batch]
-                con3.execute(f"DELETE FROM items WHERE id IN ({','.join('?'*len(ch))})", ch)
-            for i in range(0, len(rm_album_ids), _batch):
-                ch = rm_album_ids[i:i+_batch]
-                con3.execute(f"DELETE FROM albums WHERE id IN ({','.join('?'*len(ch))})", ch)
-            con3.commit(); con3.close()
+            with _db() as con3:
+                _batch = 500
+                for i in range(0, len(rm_item_ids), _batch):
+                    ch = rm_item_ids[i:i+_batch]
+                    con3.execute(f"DELETE FROM items WHERE id IN ({','.join('?'*len(ch))})", ch)
+                for i in range(0, len(rm_album_ids), _batch):
+                    ch = rm_album_ids[i:i+_batch]
+                    con3.execute(f"DELETE FROM albums WHERE id IN ({','.join('?'*len(ch))})", ch)
         except Exception as ex:
             log.append(f"ERROR deleting from DB: {ex}"); return
 
@@ -26540,14 +26552,13 @@ def library_mbsync_all():
         import subprocess as _sp
         # Remove orphaned album records (albums with no tracks) — mbsync crashes on them
         try:
-            con = sqlite3.connect(LIB_PATH)
-            rows = con.execute(
-                "SELECT id FROM albums WHERE id NOT IN (SELECT DISTINCT album_id FROM items WHERE album_id IS NOT NULL)"
-            ).fetchall()
-            if rows:
-                ids = [r[0] for r in rows]
-                con.execute(f"DELETE FROM albums WHERE id IN ({','.join('?'*len(ids))})", ids)
-                con.commit()
+            with _db() as con:
+                rows = con.execute(
+                    "SELECT id FROM albums WHERE id NOT IN (SELECT DISTINCT album_id FROM items WHERE album_id IS NOT NULL)"
+                ).fetchall()
+                if rows:
+                    ids = [r[0] for r in rows]
+                    con.execute(f"DELETE FROM albums WHERE id IN ({','.join('?'*len(ids))})", ids)
                 log.append(f"Pruned {len(ids)} orphaned album record(s) with no tracks.")
             con.close()
         except Exception as ex:
@@ -42986,7 +42997,7 @@ def _playlist_item_identity(item: Dict[str, Any]) -> tuple:
 
 def _playlist_library_index() -> Dict[str, Any]:
     try:
-        mtime = Path(LIB_PATH).stat().st_mtime
+        mtime = _lib_cache_ts or time.time()
     except Exception:
         mtime = time.time()
     with _PLAYLIST_INDEX_LOCK:

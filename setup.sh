@@ -1,79 +1,95 @@
 #!/usr/bin/env bash
-# One-command setup for the Docker Compose installation.
+# Setup script for Beets Web Manager Docker Compose installation.
 set -euo pipefail
 cd "$(dirname "$0")"
 
+DEV_MODE=0
+for arg in "$@"; do
+  if [ "$arg" = "--dev" ]; then
+    DEV_MODE=1
+  fi
+done
+
 echo "==> Checking Docker..."
 if ! command -v docker >/dev/null 2>&1; then
-  echo "Docker is not installed. Install Docker Desktop or Docker Engine first: https://docs.docker.com/get-docker/" >&2
+  echo "ERROR: Docker is not installed. Install Docker Desktop or Docker Engine first: https://docs.docker.com/get-docker/" >&2
   exit 1
 fi
 if ! docker compose version >/dev/null 2>&1; then
-  echo "Docker Compose v2 (the 'docker compose' subcommand) is required." >&2
+  echo "ERROR: Docker Compose v2 (the 'docker compose' subcommand) is required." >&2
   exit 1
 fi
 if ! docker info >/dev/null 2>&1; then
-  echo "Docker daemon is not running. Start Docker Desktop (or the docker service) and re-run this script." >&2
+  echo "ERROR: Docker daemon is not running. Start Docker Desktop (or the docker service) and re-run this script." >&2
   exit 1
 fi
 
-echo "==> Creating local directories..."
-mkdir -p config data/music data/downloads backups web-manager-data
+echo "==> Creating persistent data directories..."
+mkdir -p web-manager-data
+if [ "$DEV_MODE" -eq 1 ]; then
+  mkdir -p config data/music data/downloads
+fi
 
 if [ -f .env ]; then
-  echo "==> .env already exists, leaving it untouched."
+  echo "==> .env already exists, leaving existing secrets untouched."
 else
   echo "==> Creating .env from .env.example..."
   cp .env.example .env
   TOKEN="$(openssl rand -hex 32 2>/dev/null || head -c32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
   API_TOKEN="$(openssl rand -hex 32 2>/dev/null || head -c32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-  # Portable in-place edit (works on GNU and BSD/macOS sed).
   sed -i.bak "s/^BEETS_WEB_AUTH_TOKEN=.*/BEETS_WEB_AUTH_TOKEN=${TOKEN}/" .env && rm -f .env.bak
-  # BEETS_API_TOKEN ships as the placeholder "changeme" in .env.example, which
-  # the Beets control agent's beets_api_token_is_usable() rejects at startup --
-  # leaving it unset here means the beets engine container fails to start on
-  # first run.
   sed -i.bak "s/^BEETS_API_TOKEN=.*/BEETS_API_TOKEN=${API_TOKEN}/" .env && rm -f .env.bak
-  echo "    Generated random BEETS_WEB_AUTH_TOKEN and BEETS_API_TOKEN values in .env (not printed here)."
-  echo "    Edit .env now to add AI/Plex/AcoustID/Lidarr credentials, or configure them later in the app."
+  echo "    Generated random BEETS_WEB_AUTH_TOKEN and BEETS_API_TOKEN in .env."
 fi
 
-if [ -f config.yaml ]; then
-  echo "==> config.yaml already exists, leaving it untouched."
+# Validation
+API_TOKEN_VAL="$(grep -E '^BEETS_API_TOKEN=' .env | cut -d= -f2- | tr -d '\r" ' || true)"
+if [ -z "$API_TOKEN_VAL" ] || [ "$API_TOKEN_VAL" = "changeme" ]; then
+  echo "WARNING: BEETS_API_TOKEN is unconfigured or set to 'changeme' placeholder." >&2
+  echo "Please set BEETS_API_TOKEN in .env to match your Beets control agent." >&2
+fi
+
+API_URL_VAL="$(grep -E '^BEETS_API_URL=' .env | cut -d= -f2- | tr -d '\r" ' || true)"
+if [ -z "$API_URL_VAL" ]; then
+  if [ "$DEV_MODE" -eq 1 ]; then
+    echo "WARNING: BEETS_API_URL is empty in .env. Defaulting to http://beets:8338 (docker-compose.dev.yml)." >&2
+  else
+    echo "WARNING: BEETS_API_URL is empty in .env. docker-compose.yml requires BEETS_API_URL to be set -- the container will fail to start without it." >&2
+  fi
+fi
+
+if [ "$DEV_MODE" -eq 1 ]; then
+  echo "==> Starting Beets Web Manager in DEVELOPMENT mode (source build)..."
+  docker compose -f docker-compose.dev.yml up -d --build
+  COMPOSE_FILE="docker-compose.dev.yml"
 else
-  echo "==> Creating config.yaml from config.yaml.example..."
-  cp config.yaml.example config.yaml
+  echo "==> Pulling published image from GitHub Container Registry..."
+  docker compose pull beets-web-manager
+  echo "==> Starting Beets Web Manager..."
+  docker compose up -d beets-web-manager
+  COMPOSE_FILE="docker-compose.yml"
 fi
 
-read -r -p "Host UID for file ownership [$(id -u)]: " uid_input
-read -r -p "Host GID for file ownership [$(id -g)]: " gid_input
-UID_VAL="${uid_input:-$(id -u)}"
-GID_VAL="${gid_input:-$(id -g)}"
-if grep -q '^PUID=' .env; then
-  sed -i.bak "s/^PUID=.*/PUID=${UID_VAL}/" .env && rm -f .env.bak
-else
-  echo "PUID=${UID_VAL}" >> .env
-fi
-if grep -q '^PGID=' .env; then
-  sed -i.bak "s/^PGID=.*/PGID=${GID_VAL}/" .env && rm -f .env.bak
-else
-  echo "PGID=${GID_VAL}" >> .env
-fi
-
-echo "==> Building and starting the stack..."
-docker compose up -d --build
-
-echo "==> Waiting for the app to become healthy..."
-for _ in $(seq 1 30); do
-  if docker compose ps --format '{{.Health}}' 2>/dev/null | grep -q healthy; then
+echo "==> Waiting for Beets Web Manager to become healthy..."
+HEALTHY=0
+for i in $(seq 1 30); do
+  if docker compose -f "$COMPOSE_FILE" ps --format '{{.Health}}' 2>/dev/null | grep -q healthy; then
+    HEALTHY=1
     break
   fi
   sleep 2
 done
 
-PORT="$(grep -m1 '^WEBCONTROL_PORT=' .env | cut -d= -f2)"
+PORT="$(grep -E '^WEBCONTROL_PORT=' .env | cut -d= -f2 | tr -d '\r" ' || true)"
 PORT="${PORT:-8337}"
 
-echo ""
-echo "Done. Open http://localhost:${PORT} in your browser."
-echo "If this is a fresh install, complete the guided setup at http://localhost:${PORT}/setup."
+if [ "$HEALTHY" -eq 1 ]; then
+  echo ""
+  echo "SUCCESS: Beets Web Manager is running and healthy."
+  echo "Access the UI at: http://localhost:${PORT}"
+else
+  echo ""
+  echo "ERROR: Beets Web Manager did not reach healthy state within 60 seconds." >&2
+  echo "Check container logs with: docker compose -f $COMPOSE_FILE logs beets-web-manager" >&2
+  exit 1
+fi

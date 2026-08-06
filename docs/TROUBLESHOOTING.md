@@ -1,59 +1,72 @@
-# Troubleshooting
+# Troubleshooting Guide
 
-## `beets` is unhealthy or exits on startup
+This guide covers common errors and resolution steps for Beets Web Manager.
 
-Check `BEETS_API_TOKEN`. The control agent rejects blank, weak, and placeholder tokens. Generate a strong value, update `.env`, then recreate both services.
+---
 
+## Common Deployment Failures
+
+### 1. `pull access denied for beets-engine`
+* **Cause**: Docker encountered a local-only Beets engine image name (`beets-engine:local` or `beets-engine:dev`) without a local build context (e.g., running outside the repository root or copying service blocks into another directory).
+* **Fix**: Do **NOT** run `docker login` (this is not an authentication issue).
+  1. For standard web-manager deployments: Use the production `docker-compose.yml` (which has no `beets` engine build) and point `BEETS_API_URL` to an existing Beets control agent endpoint.
+  2. For bundled engine deployments: Run `docker compose -f docker-compose.full.yml up -d --build` or `docker compose -f docker-compose.dev.yml up -d --build` directly from the repository root where `Dockerfile.beets` and build contexts are located.
+
+---
+
+### 2. `pull access denied for beets-web-manager`
+* **Cause**: Compose is attempting to pull a local-only image name (e.g. `beets-web-manager:0.1.0`) from Docker Hub instead of using the published GitHub Container Registry image.
+* **Fix**: Ensure your `docker-compose.yml` references the official published registry image:
+  ```yaml
+  image: ghcr.io/iranman/beets-web-manager:${BEETS_WEB_MANAGER_VERSION:-stable}
+  ```
+  If you intended to build locally from source, use the development Compose file instead:
+  ```bash
+  docker compose -f docker-compose.dev.yml up -d --build
+  ```
+
+---
+
+### 2. `failed to read dockerfile`
+* **Cause**: Docker Compose is attempting to execute a build directive (`build: .`) when running outside the source repository root directory (e.g. when copying Compose service blocks into an existing TrueNAS stack).
+* **Fix**: Use the production `docker-compose.yml` or Compose fragment from [docs/EXAMPLES.md](EXAMPLES.md). Production deployments use published pre-built images and do **not** require a local `Dockerfile` or repository source code.
+
+---
+
+### 3. `cannot connect to Beets API`
+* **Cause**: `BEETS_API_URL`, Docker network routing, agent service availability, or `BEETS_API_TOKEN` is incorrect.
+* **Fix**:
+  1. Confirm the Beets control agent container is running and healthy.
+  2. Verify network connectivity from `beets-web-manager` to `BEETS_API_URL`.
+  3. Ensure `BEETS_API_TOKEN` in `.env` matches the token configured in the Beets control agent.
+  4. If Beets runs in a separate Compose stack or host, update `BEETS_API_URL` to point to the host IP (e.g. `http://192.168.1.50:8338`).
+
+---
+
+### 4. `authentication is required` (HTTP 503 / 401)
+* **Cause**: Web manager authentication configuration is incomplete or secrets failed to resolve at startup.
+* **Fix**:
+  1. Set `BEETS_WEB_AUTH_TOKEN` in `.env` for API clients.
+  2. Set `BEETS_WEB_USERNAME` and `BEETS_WEB_PASSWORD` (32+ chars with upper, lower, number, special) for browser Basic Auth.
+  3. On fresh installs, check container logs for the auto-generated API token printed on first boot.
+  4. Ensure `/web-manager-data` volume is writable by container user (UID 1000).
+
+---
+
+## Operational Diagnostics
+
+### Check Container Health
 ```bash
-docker compose logs beets
-docker compose config
-docker compose up -d --force-recreate beets beets-web-manager
+docker compose ps beets-web-manager
+curl -fsS http://127.0.0.1:8337/api/health
 ```
 
-## `/api/setup/status` reports Beets unavailable
-
-`/api/setup/status` fails closed when the web manager cannot query the authenticated internal control agent. Check:
-
-- `BEETS_API_URL=http://beets:8338` in the web-manager environment
-- matching `BEETS_API_TOKEN` values in both services
-- `beets` service health
-- no host publication of port `8338`
-
-The web-manager container must not fall back to a local `beet` executable.
-
-## Chroma or AcoustID readiness is unavailable
-
-Chroma readiness comes from the Beets engine's loaded-plugin list, not local Python importability. Confirm the engine can load Chroma and that `fpcalc` is available:
-
+### View Recent Logs
 ```bash
-docker compose exec beets /lsiopy/bin/beet version
-curl -s http://127.0.0.1:8337/api/setup/status
+docker compose logs --tail=100 beets-web-manager
 ```
 
-AcoustID lookup readiness requires Chroma loaded, `fpcalc`, and pyacoustid. AcoustID submission readiness also requires the `submit` command to be registered and appropriate submission configuration. `mbsubmit` is a separate MusicBrainz capability.
-
-## FetchArt, ReplayGain, Discpath, or other plugin readiness looks wrong
-
-Setup status reports configured plugins, loaded plugins, plugin failures, and capability flags from the remote Beets engine. If a plugin is configured but not loaded, inspect the Beets engine logs and `beet version` output. Do not treat a Python `find_spec()` result in the web-manager process as proof that a Beets plugin is operational.
-
-## The web UI is unreachable
-
-By default the web port binds to loopback only:
-
-```text
-127.0.0.1:${WEBCONTROL_PORT:-8337}:8337
+### Inspect Beets Setup Status
+```bash
+curl -fsS -H "Authorization: Bearer <your-token>" http://127.0.0.1:8337/api/setup/status
 ```
-
-Use a reverse proxy for remote access. Configure authentication, TLS, trusted proxies, and outbound allowlist entries before exposing the UI beyond localhost.
-
-## Plex or Lidarr integration is not configured
-
-The example files intentionally ship with blank `PLEX_URL` and `LIDARR_URL`. Set deployment-specific URLs and tokens in `.env`. Private LAN addresses must not be committed as active defaults.
-
-## MusicBrainz, AcoustID, AI, or Plex connectivity tests fail
-
-`GET /api/setup/status` is a readiness snapshot. It does not contact external providers. Use `POST /api/setup/test/{ai,musicbrainz,acoustid,plex}` or the System page connection tests for live provider connectivity.
-
-## Migration or rollback
-
-Do not test migration against a production library first. Use disposable volumes and synthetic config, then back up `/config/config.yaml`, `/config/musiclibrary.blb`, plugin files, and web-manager state before touching production data. Passing tests is not deployment approval.

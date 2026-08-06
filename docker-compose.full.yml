@@ -1,8 +1,50 @@
-# Production Docker Compose file for Beets Web Manager.
-# Connects to an existing Beets control agent endpoint via BEETS_API_URL and BEETS_API_TOKEN.
-# Uses the published GHCR container image -- no local source or Dockerfile required.
+# Optional Bundled Beets Stack (Advanced Users)
+#
+# IMPORTANT NOTICE:
+# 1. This file builds the custom Beets engine locally from Dockerfile.beets.
+# 2. It REQUIRES a full repository checkout to build the beets service.
+# 3. 'beets-engine:local' is a LOCAL image tag built from source, NOT a public Docker Hub image.
+# 4. Running this file outside the repository root without building the engine will fail with:
+#      "pull access denied for beets-engine"
+# 5. For standard production deployments without host source code, use the primary docker-compose.yml
+#    and connect to an existing Beets control agent.
+# 6. BEETS_BASE_IMAGE selects the upstream LinuxServer Beets version/digest to build from
+#    (default: the tested production candidate). Set BEETS_BASE_IMAGE=lscr.io/linuxserver/beets:latest
+#    for advanced compatibility testing only -- never as a production default.
+#
+# Usage:
+#   docker compose -f docker-compose.full.yml up -d --build
 
 services:
+  beets:
+    build:
+      context: .
+      dockerfile: Dockerfile.beets
+      args:
+        BEETS_BASE_IMAGE: ${BEETS_BASE_IMAGE:-lscr.io/linuxserver/beets:2.13.1}
+        VCS_REF: ${VCS_REF:-local-build}
+    image: beets-engine:local
+    container_name: beets
+    restart: unless-stopped
+    environment:
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
+      - TZ=${TZ:-America/Los_Angeles}
+      - BEETSDIR=/config
+      - BEETS_API_TOKEN=${BEETS_API_TOKEN:?set BEETS_API_TOKEN in .env}
+      - BEETS_AGENT_PORT=8338
+    volumes:
+      - ./config:/config
+      - ${MUSIC_LIBRARY_PATH:-./data/music}:/data/media/music
+      - ${DOWNLOAD_PATH:-./data/downloads}:/data/torrents
+    expose:
+      - "8338"
+    healthcheck:
+      test: ["CMD", "/lsiopy/bin/python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8338/health', timeout=4)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
   beets-web-manager:
     image: ghcr.io/iranman/beets-web-manager:${BEETS_WEB_MANAGER_VERSION:-stable}
     container_name: beets-web-manager
@@ -15,7 +57,7 @@ services:
       TZ: ${TZ:-America/Los_Angeles}
       WEBCONTROL_PORT: ${WEBCONTROL_PORT:-8337}
 
-      BEETS_API_URL: ${BEETS_API_URL:?set BEETS_API_URL in .env}
+      BEETS_API_URL: ${BEETS_API_URL:-http://beets:8338}
       BEETS_API_TOKEN: ${BEETS_API_TOKEN:?set BEETS_API_TOKEN in .env}
 
       BEETS_WEB_AUTH_TOKEN: ${BEETS_WEB_AUTH_TOKEN:-}
@@ -24,7 +66,7 @@ services:
       BEETS_WEB_PASSWORD: ${BEETS_WEB_PASSWORD:-}
       BEETS_WEB_AUTH_DISABLED: ${BEETS_WEB_AUTH_DISABLED:-0}
       BEETS_TRUSTED_PROXIES: ${BEETS_TRUSTED_PROXIES:-}
-      BEETS_OUTBOUND_ALLOWLIST: ${BEETS_OUTBOUND_ALLOWLIST:-}
+      BEETS_OUTBOUND_ALLOWLIST: ${BEETS_OUTBOUND_ALLOWLIST:-beets:8338}
 
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
@@ -61,6 +103,10 @@ services:
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=512m
       - /run:rw,nosuid,nodev,size=64m
+
+    depends_on:
+      beets:
+        condition: service_healthy
 
     healthcheck:
       test:

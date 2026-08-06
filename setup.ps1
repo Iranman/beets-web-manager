@@ -1,4 +1,8 @@
-# One-command setup for the Docker Compose installation (Windows).
+# Setup script for Beets Web Manager Docker Compose installation (Windows).
+param(
+    [switch]$Dev
+)
+
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
@@ -16,11 +20,14 @@ try { docker info | Out-Null } catch {
     exit 1
 }
 
-Write-Host "==> Creating local directories..."
-New-Item -ItemType Directory -Force -Path "config", "data\music", "data\downloads", "backups", "web-manager-data" | Out-Null
+Write-Host "==> Creating persistent data directories..."
+New-Item -ItemType Directory -Force -Path "web-manager-data" | Out-Null
+if ($Dev) {
+    New-Item -ItemType Directory -Force -Path "config", "data\music", "data\downloads" | Out-Null
+}
 
 if (Test-Path ".env") {
-    Write-Host "==> .env already exists, leaving it untouched."
+    Write-Host "==> .env already exists, leaving existing secrets untouched."
 } else {
     Write-Host "==> Creating .env from .env.example..."
     Copy-Item ".env.example" ".env"
@@ -31,35 +38,60 @@ if (Test-Path ".env") {
     [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($apiBytes)
     $apiToken = -join ($apiBytes | ForEach-Object { $_.ToString("x2") })
     (Get-Content ".env") -replace '^BEETS_WEB_AUTH_TOKEN=.*', "BEETS_WEB_AUTH_TOKEN=$token" | Set-Content ".env"
-    # BEETS_API_TOKEN ships as the placeholder "changeme" in .env.example, which
-    # the Beets control agent's beets_api_token_is_usable() rejects at startup --
-    # leaving it unset here means the beets engine container fails to start on
-    # first run.
     (Get-Content ".env") -replace '^BEETS_API_TOKEN=.*', "BEETS_API_TOKEN=$apiToken" | Set-Content ".env"
-    Write-Host "    Generated random BEETS_WEB_AUTH_TOKEN and BEETS_API_TOKEN values in .env (not printed here)."
-    Write-Host "    Edit .env now to add AI/Plex/AcoustID/Lidarr credentials, or configure them later in the app."
+    Write-Host "    Generated random BEETS_WEB_AUTH_TOKEN and BEETS_API_TOKEN in .env."
 }
 
-if (Test-Path "config.yaml") {
-    Write-Host "==> config.yaml already exists, leaving it untouched."
+# Validation
+$apiTokenLine = Select-String -Path ".env" -Pattern '^BEETS_API_TOKEN=' | Select-Object -First 1
+$apiTokenVal = if ($apiTokenLine) { ($apiTokenLine.Line -split '=', 2)[1].Trim() } else { "" }
+if (-not $apiTokenVal -or $apiTokenVal -eq "changeme") {
+    Write-Warning "BEETS_API_TOKEN is unconfigured or set to 'changeme' placeholder."
+    Write-Warning "Please set BEETS_API_TOKEN in .env to match your Beets control agent."
+}
+
+$apiUrlLine = Select-String -Path ".env" -Pattern '^BEETS_API_URL=' | Select-Object -First 1
+$apiUrlVal = if ($apiUrlLine) { ($apiUrlLine.Line -split '=', 2)[1].Trim() } else { "" }
+if (-not $apiUrlVal) {
+    if ($Dev) {
+        Write-Warning "BEETS_API_URL is empty in .env. Defaulting to http://beets:8338 (docker-compose.dev.yml)."
+    } else {
+        Write-Warning "BEETS_API_URL is empty in .env. docker-compose.yml requires BEETS_API_URL to be set -- the container will fail to start without it."
+    }
+}
+
+$composeFile = "docker-compose.yml"
+if ($Dev) {
+    Write-Host "==> Starting Beets Web Manager in DEVELOPMENT mode (source build)..."
+    $composeFile = "docker-compose.dev.yml"
+    docker compose -f docker-compose.dev.yml up -d --build
 } else {
-    Write-Host "==> Creating config.yaml from config.yaml.example..."
-    Copy-Item "config.yaml.example" "config.yaml"
+    Write-Host "==> Pulling published image from GitHub Container Registry..."
+    docker compose pull beets-web-manager
+    Write-Host "==> Starting Beets Web Manager..."
+    docker compose up -d beets-web-manager
 }
 
-Write-Host "==> Building and starting the stack..."
-docker compose up -d --build
-
-Write-Host "==> Waiting for the app to become healthy..."
+Write-Host "==> Waiting for Beets Web Manager to become healthy..."
+$healthy = $false
 for ($i = 0; $i -lt 30; $i++) {
-    $health = docker compose ps --format '{{.Health}}' 2>$null
-    if ($health -match "healthy") { break }
+    $status = docker compose -f $composeFile ps --format '{{.Health}}' 2>$null
+    if ($status -match "healthy") {
+        $healthy = $true
+        break
+    }
     Start-Sleep -Seconds 2
 }
 
 $portLine = Select-String -Path ".env" -Pattern '^WEBCONTROL_PORT=' | Select-Object -First 1
-$port = if ($portLine) { ($portLine.Line -split '=')[1] } else { "8337" }
+$port = if ($portLine) { ($portLine.Line -split '=')[1].Trim() } else { "8337" }
 
-Write-Host ""
-Write-Host "Done. Open http://localhost:$port in your browser."
-Write-Host "If this is a fresh install, complete the guided setup at http://localhost:$port/setup."
+if ($healthy) {
+    Write-Host ""
+    Write-Host "SUCCESS: Beets Web Manager is running and healthy."
+    Write-Host "Access the UI at: http://localhost:$port"
+} else {
+    Write-Host ""
+    Write-Error "Beets Web Manager did not reach healthy state within 60 seconds. Check logs with: docker compose -f $composeFile logs beets-web-manager"
+    exit 1
+}

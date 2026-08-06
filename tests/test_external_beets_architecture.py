@@ -1847,13 +1847,80 @@ class TestChromaPluginClassResolution(unittest.TestCase):
                 apply_patch()
             self.assertIn("Invalid source state", str(ctx.exception))
 
-    def test_apply_patch_rejects_version_mismatch(self):
-        """apply_patch() raises RuntimeError when installed Beets version is not 2.4.0."""
+    def test_parse_version_numeric_dotted(self):
+        from docker.beets.apply_patches import _parse_version
+        self.assertEqual(_parse_version("2.4.0"), (2, 4, 0))
+        self.assertEqual(_parse_version("2.13.1"), (2, 13, 1))
+
+    def test_parse_version_drops_nonnumeric_suffix(self):
+        """A prerelease-style suffix (e.g. '2.5.0rc1') still compares
+        correctly against its base release rather than raising."""
+        from docker.beets.apply_patches import _parse_version
+        self.assertEqual(_parse_version("2.5.0rc1"), (2, 5, 0))
+
+    def test_parse_version_rejects_unparseable_string(self):
+        from docker.beets.apply_patches import _parse_version
+        with self.assertRaises(ValueError):
+            _parse_version("unknown")
+
+    def _mock_working_chroma_bpsync_resolution(self):
+        """Returns the mock.patch context needed so _verify_plugin_resolution()
+        succeeds without touching real plugin modules."""
+        mock_chroma = mock.MagicMock()
+        mock_chroma.__class__.__module__ = "beetsplug.chroma"
+        mock_chroma.__class__.__name__ = "AcoustidPlugin"
+        return mock.patch(
+            "beets.plugins._get_plugin",
+            side_effect=lambda name: mock_chroma if name == "chroma" else None,
+        )
+
+    def test_apply_patch_skips_source_patch_on_modern_version(self):
+        """apply_patch() must never open/modify plugins.py on Beets >= 2.5.0
+        -- the upstream fix is already present, so the obsolete 2.4.0 patch
+        is skipped entirely (proven here by making any open() call fail the
+        test, not merely by asserting no error was raised)."""
         from docker.beets.apply_patches import apply_patch
-        with mock.patch("beets.__version__", "2.5.0"):
+
+        def _fail_if_opened(*args, **kwargs):
+            raise AssertionError("apply_patch() must not open plugins.py on modern Beets")
+
+        with mock.patch("beets.__version__", "2.13.1"), \
+             mock.patch("builtins.open", side_effect=_fail_if_opened), \
+             mock.patch("importlib.reload"), \
+             self._mock_working_chroma_bpsync_resolution():
+            apply_patch()  # must not raise
+
+    def test_apply_patch_modern_version_still_verifies_plugin_resolution(self):
+        """Even though the source patch is skipped on modern Beets, apply_patch()
+        must still fail the build if chroma does not resolve correctly --
+        this is the safety net for a hypothetical future upstream regression."""
+        from docker.beets.apply_patches import apply_patch
+        with mock.patch("beets.__version__", "2.13.1"), \
+             mock.patch("importlib.reload"), \
+             mock.patch("beets.plugins._get_plugin", return_value=None):
             with self.assertRaises(RuntimeError) as ctx:
                 apply_patch()
-            self.assertIn("expected Beets 2.4.0", str(ctx.exception))
+            self.assertIn("Sanity check failed for chroma", str(ctx.exception))
+
+    def test_apply_patch_rejects_version_between_min_and_fixed_upstream(self):
+        """A version that is >= the minimum supported floor but is neither
+        exactly the patched 2.4.0 nor >= the upstream-fixed 2.5.0 (e.g. a
+        hypothetical 2.4.5) is not explicitly supported/tested and must fail
+        the build rather than silently apply or silently skip the patch."""
+        from docker.beets.apply_patches import apply_patch
+        with mock.patch("beets.__version__", "2.4.5"):
+            with self.assertRaises(RuntimeError) as ctx:
+                apply_patch()
+            self.assertIn("not explicitly supported", str(ctx.exception))
+
+    def test_apply_patch_rejects_version_below_minimum(self):
+        """A Beets version older than the minimum supported floor fails the
+        build outright rather than attempting to patch or skip."""
+        from docker.beets.apply_patches import apply_patch
+        with mock.patch("beets.__version__", "2.3.0"):
+            with self.assertRaises(RuntimeError) as ctx:
+                apply_patch()
+            self.assertIn("older than the minimum supported", str(ctx.exception))
 
     @staticmethod
     def _exec_block(block_src, mod):
@@ -2107,7 +2174,7 @@ class ComposeSecurityValidatorTests(unittest.TestCase):
         with mock.patch.object(vcs, "_dockerfile_beets_base_is_approved", return_value=False):
             errors: list = []
             vcs._check_image_digest_semantics("beets", "beets-engine:2.4.0", has_build=True, errors=errors)
-            self.assertTrue(any("does not pin the approved" in e for e in errors), errors)
+            self.assertTrue(any("missing, unpinned, or set to a moving" in e for e in errors), errors)
 
     def test_pulled_third_party_image_without_digest_fails(self):
         import scripts.validate_compose_security as vcs
@@ -2566,6 +2633,82 @@ class BeetsEngineImageVerifierTests(unittest.TestCase):
             vbi.check_command_help("beets-engine:ci", "submit", ["chroma"], errors)
             self.assertTrue(any("failed with exit code" in e for e in errors))
 
+    def test_get_beets_version_parses_version_line(self):
+        import scripts.verify_beets_engine_image as vbi
+        mock_proc = mock.MagicMock(returncode=0, stdout="beets version 2.13.1\nPython version 3.12.13\n", stderr="")
+        with mock.patch.object(vbi, "run_container_shell", return_value=mock_proc):
+            errors: list = []
+            self.assertEqual(vbi.get_beets_version("beets-engine:ci", errors), "2.13.1")
+            self.assertEqual(errors, [])
+
+    def test_get_beets_version_command_failure_is_reported(self):
+        import scripts.verify_beets_engine_image as vbi
+        mock_proc = mock.MagicMock(returncode=1, stdout="", stderr="boom")
+        with mock.patch.object(vbi, "run_container_shell", return_value=mock_proc):
+            errors: list = []
+            self.assertIsNone(vbi.get_beets_version("beets-engine:ci", errors))
+            self.assertTrue(any("beet version command failed" in e for e in errors))
+
+    def test_check_patch_state_2_4_0_missing_patch_fails(self):
+        """The core regression this check exists for: a 2.4.0 image whose
+        plugins.py does NOT contain the required patch must fail."""
+        import scripts.verify_beets_engine_image as vbi
+        unpatched = mock.MagicMock(returncode=0, stdout="def _get_plugin(): pass\n", stderr="")
+        with mock.patch.object(vbi, "run_container_shell", return_value=unpatched):
+            errors: list = []
+            vbi.check_patch_state("beets-engine:ci", "2.4.0", errors)
+            self.assertTrue(any("expected the pinned 2.4.0" in e for e in errors))
+
+    def test_check_patch_state_2_4_0_with_patch_passes(self):
+        import scripts.verify_beets_engine_image as vbi
+        from docker.beets.apply_patches import PATCHED_BLOCK
+        patched = mock.MagicMock(returncode=0, stdout=PATCHED_BLOCK, stderr="")
+        with mock.patch.object(vbi, "run_container_shell", return_value=patched):
+            errors: list = []
+            vbi.check_patch_state("beets-engine:ci", "2.4.0", errors)
+            self.assertEqual(errors, [])
+
+    def test_check_patch_state_modern_version_with_obsolete_patch_text_fails(self):
+        """The exact regression Step 5 requires coverage for: the obsolete
+        2.4.0 patch text must never be present in a modern Beets image."""
+        import scripts.verify_beets_engine_image as vbi
+        from docker.beets.apply_patches import PATCHED_BLOCK
+        contaminated = mock.MagicMock(returncode=0, stdout=PATCHED_BLOCK, stderr="")
+        with mock.patch.object(vbi, "run_container_shell", return_value=contaminated):
+            errors: list = []
+            vbi.check_patch_state("beets-engine:ci", "2.13.1", errors)
+            self.assertTrue(any("must never be applied outside Beets 2.4.0" in e for e in errors))
+
+    def test_check_patch_state_modern_version_without_patch_text_passes(self):
+        import scripts.verify_beets_engine_image as vbi
+        clean = mock.MagicMock(returncode=0, stdout="def _get_plugin(): ...\n", stderr="")
+        with mock.patch.object(vbi, "run_container_shell", return_value=clean):
+            errors: list = []
+            vbi.check_patch_state("beets-engine:ci", "2.13.1", errors)
+            self.assertEqual(errors, [])
+
+    def test_check_patch_state_unparseable_version_fails(self):
+        import scripts.verify_beets_engine_image as vbi
+        errors: list = []
+        vbi.check_patch_state("beets-engine:ci", "not-a-version", errors)
+        self.assertTrue(any("Cannot parse Beets version" in e for e in errors))
+
+    def test_check_revision_label_match_passes(self):
+        import scripts.verify_beets_engine_image as vbi
+        mock_proc = mock.MagicMock(returncode=0, stdout="abc123\n", stderr="")
+        with mock.patch.object(vbi, "_run_docker", return_value=mock_proc):
+            errors: list = []
+            vbi.check_revision_label("beets-engine:ci", "abc123", errors)
+            self.assertEqual(errors, [])
+
+    def test_check_revision_label_mismatch_fails(self):
+        import scripts.verify_beets_engine_image as vbi
+        mock_proc = mock.MagicMock(returncode=0, stdout="old-sha\n", stderr="")
+        with mock.patch.object(vbi, "_run_docker", return_value=mock_proc):
+            errors: list = []
+            vbi.check_revision_label("beets-engine:ci", "abc123", errors)
+            self.assertTrue(any("revision label mismatch" in e for e in errors))
+
     def test_malformed_plugin_output_fails(self):
         import scripts.verify_beets_engine_image as vbi
         mock_proc = mock.MagicMock(returncode=0, stdout="unexpected garbage, no OK prefix", stderr="")
@@ -2590,9 +2733,12 @@ class BeetsEngineImageVerifierTests(unittest.TestCase):
 
     def test_end_to_end_argument_parsing_success(self):
         import scripts.verify_beets_engine_image as vbi
+        from docker.beets.apply_patches import PATCHED_BLOCK
+
         mock_inspect = mock.MagicMock(returncode=0, stdout="", stderr="")
         mock_version = mock.MagicMock(returncode=0, stdout="beets version 2.4.0\n", stderr="")
         mock_agent_files = mock.MagicMock(returncode=0, stdout="", stderr="")
+        mock_patch_cat = mock.MagicMock(returncode=0, stdout=PATCHED_BLOCK, stderr="")
         mock_help = mock.MagicMock(returncode=0, stdout="", stderr="")
 
         def fake_run_docker(args, input_text=None):
@@ -2603,6 +2749,8 @@ class BeetsEngineImageVerifierTests(unittest.TestCase):
                 return mock_version
             if "test -f" in joined:
                 return mock_agent_files
+            if joined.startswith("run") and "cat " in joined:
+                return mock_patch_cat
             return mock_help
 
         with mock.patch.object(vbi, "_run_docker", side_effect=fake_run_docker):

@@ -21,15 +21,14 @@ STANDALONE_COMPOSE = ROOT / "docker-compose.yml"
 DOCKERFILE_BEETS = ROOT / "Dockerfile.beets"
 ENV_EXAMPLE = ROOT / ".env.example"
 
-# The one approved upstream base image digest. Dockerfile.beets's FROM line
-# must reference exactly this -- not an arbitrary sha256, and not attached
-# to the locally-built beets-engine image tag (Docker rejects a digest on
-# any image tag that also has a compose `build:` block: "build tag cannot
-# contain a digest", independently reproduced against docker compose build).
-APPROVED_BEETS_BASE_IMAGE = (
-    "lscr.io/linuxserver/beets:2.4.0"
-    "@sha256:4cce2967154e849ca5466469d934a4bb9d8d83c3acf2a5279da47bccd16518f1"
-)
+# Dockerfile.beets selects its upstream base image via `ARG BEETS_BASE_IMAGE`
+# so a build can intentionally pin an explicit version or digest. The digest
+# itself is deliberately not attached to the locally-built beets-engine image
+# tag (Docker rejects a digest on any image tag that also has a compose
+# `build:` block: "build tag cannot contain a digest", independently
+# reproduced against docker compose build) -- immutable upstream provenance
+# belongs in the Dockerfile's ARG default or an explicit --build-arg.
+BEETS_BASE_IMAGE_ARG_PREFIX = "ARG BEETS_BASE_IMAGE="
 
 _PRIVATE_IPV4_RE = re.compile(
     r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}"
@@ -94,12 +93,20 @@ def _port_lines(block: str) -> list[str]:
 
 
 def _dockerfile_beets_base_is_approved() -> bool:
+    """The Dockerfile's BEETS_BASE_IMAGE default must be a concrete, tested
+    reference -- never the moving `latest` tag -- so a build that omits
+    --build-arg BEETS_BASE_IMAGE still gets a safe, reproducible base. An
+    explicit --build-arg override (e.g. CI's latest-compatibility job) is a
+    deliberate, separate decision made at build time, not at this file."""
     if not DOCKERFILE_BEETS.exists():
         return False
     for line in _read(DOCKERFILE_BEETS).splitlines():
         stripped = line.strip()
-        if stripped.startswith("FROM "):
-            return stripped[len("FROM "):].strip() == APPROVED_BEETS_BASE_IMAGE
+        if stripped.startswith(BEETS_BASE_IMAGE_ARG_PREFIX):
+            default_value = stripped[len(BEETS_BASE_IMAGE_ARG_PREFIX):].strip()
+            if not default_value or default_value.endswith(":latest"):
+                return False
+            return ":" in default_value.rsplit("/", 1)[-1]
     return False
 
 
@@ -132,8 +139,8 @@ def _check_image_digest_semantics(label: str, image: str, has_build: bool, error
             errors.append(f"{label} image has no tag: {image}")
         if not _dockerfile_beets_base_is_approved():
             errors.append(
-                f"{label} is locally built but Dockerfile.beets's FROM line does not pin the approved "
-                f"upstream base image digest ({APPROVED_BEETS_BASE_IMAGE})"
+                f"{label} is locally built but Dockerfile.beets's ARG BEETS_BASE_IMAGE default is missing, "
+                "unpinned, or set to a moving `latest` tag"
             )
     else:
         if "@sha256:" not in image:
@@ -165,42 +172,85 @@ def _check_no_hardcoded_lan_allowlist(text: str, source_label: str, errors: list
             )
 
 
-def _check_compose_variant(path: Path, errors: list[str], warnings: list[str]) -> None:
+FULL_COMPOSE = ROOT / "docker-compose.full.yml"
+
+
+def _check_production_hardening(text: str, label: str, errors: list[str]) -> None:
+    """docker-compose.yml is the source-independent production deployment
+    file. Unlike docker-compose.arrs.yml's owner-specific hardening block
+    (checked separately below), these invariants must hold for the generic
+    template shipped to every user, so they are enforced unconditionally
+    rather than folded into the same opt-in required_snippets table."""
+    if "beets-engine" in text:
+        errors.append(f"{label}: production Compose must not reference beets-engine")
+
+    web = _service_block(text, "beets-web-manager")
+    active = "\n".join(_active_lines(web))
+
+    if "read_only: true" not in active:
+        errors.append(f"{label}: beets-web-manager must set read_only: true")
+    if "cap_drop:" not in active or "- ALL" not in active:
+        errors.append(f"{label}: beets-web-manager must drop all capabilities (cap_drop: [ALL])")
+    if "no-new-privileges:true" not in active:
+        errors.append(f"{label}: beets-web-manager must set no-new-privileges:true")
+    if "/web-manager-data" not in active:
+        errors.append(f"{label}: beets-web-manager must persist state to /web-manager-data")
+
+    token_file_match = re.search(r"BEETS_WEB_AUTH_TOKEN_FILE:\s*(\S+)", active)
+    if not token_file_match or not token_file_match.group(1).strip("\"'").startswith("/web-manager-data/"):
+        errors.append(f"{label}: BEETS_WEB_AUTH_TOKEN_FILE must persist under /web-manager-data")
+
+    for volume in _volume_lines(web):
+        container_path = volume.split(":")[1] if volume.count(":") >= 1 else volume
+        if volume.endswith(".db") or "library.db" in volume or container_path.startswith("/config"):
+            errors.append(f"{label}: beets-web-manager must not directly mount the Beets SQLite database: {volume}")
+
+
+def _check_compose_variant(path: Path, errors: list[str], warnings: list[str], require_beets: bool = False) -> None:
     if not path.exists():
         errors.append(f"{path.name} not found")
         return
     text = _read(path)
     label = path.name
+
     beets = _service_block(text, "beets")
-    if not beets:
+    if require_beets and not beets:
         errors.append(f"{label}: beets service not found")
         return
 
-    beets_image = _image_line(beets)
-    _check_image_digest_semantics(f"{label}: beets", beets_image, _has_build_block(beets), errors)
+    if beets:
+        beets_image = _image_line(beets)
+        _check_image_digest_semantics(f"{label}: beets", beets_image, _has_build_block(beets), errors)
 
-    beets_active = "\n".join(_active_lines(beets))
-    if re.search(r"^\s*privileged:\s*true\b", beets_active, re.M):
-        errors.append(f"{label}: beets must not run privileged")
-    if "/var/run/docker.sock" in beets_active:
-        errors.append(f"{label}: beets must not mount the Docker socket")
-    if re.search(r"^\s*network_mode:\s*host\b", beets_active, re.M):
-        errors.append(f"{label}: beets must not use host networking")
-    if re.search(r"^\s*user:\s*[\"']?0(?::0)?[\"']?\s*$", beets_active, re.M):
-        errors.append(f"{label}: beets must not run as UID/GID 0")
+        beets_active = "\n".join(_active_lines(beets))
+        if re.search(r"^\s*privileged:\s*true\b", beets_active, re.M):
+            errors.append(f"{label}: beets must not run privileged")
+        if "/var/run/docker.sock" in beets_active:
+            errors.append(f"{label}: beets must not mount the Docker socket")
+        if re.search(r"^\s*network_mode:\s*host\b", beets_active, re.M):
+            errors.append(f"{label}: beets must not use host networking")
+        if re.search(r"^\s*user:\s*[\"']?0(?::0)?[\"']?\s*$", beets_active, re.M):
+            errors.append(f"{label}: beets must not run as UID/GID 0")
 
     beets_web = _service_block(text, "beets-web-manager")
-    beets_ports = _port_lines(beets)
+    if not beets_web:
+        errors.append(f"{label}: beets-web-manager service not found")
+        return
+
+    loopback_default_re = re.compile(r"^(?:127\.0\.0\.1|\$\{[A-Za-z_][A-Za-z0-9_]*:-127\.0\.0\.1\}):")
+
+    beets_ports = _port_lines(beets) if beets else []
     web_ports = _port_lines(beets_web)
     for p in beets_ports:
-        if "8338" in p and not p.startswith("127.0.0.1:"):
+        if "8338" in p and not loopback_default_re.match(p):
             errors.append(f"{label}: beets control agent port must remain internal-only or bind to loopback")
+
     web_manager_binds_8337_loopback = any(
-        p.startswith("127.0.0.1:") and p.rstrip('"').endswith(":8337")
-        for p in beets_ports + web_ports
+        loopback_default_re.match(p) and p.rstrip('"').endswith(":8337")
+        for p in web_ports
     )
-    if beets_web and not web_manager_binds_8337_loopback:
-        errors.append(f"{label}: beets port must bind to loopback by default")
+    if not web_manager_binds_8337_loopback:
+        errors.append(f"{label}: beets-web-manager port 8337 must bind to loopback by default")
 
     _check_no_hardcoded_lan_allowlist(text, label, errors)
 
@@ -209,8 +259,20 @@ def main() -> int:
     errors: list[str] = []
     warnings: list[str] = []
 
-    _check_compose_variant(STANDALONE_COMPOSE, errors, warnings)
-    _check_compose_variant(ARRS_COMPOSE, errors, warnings)
+    # Primary production compose must have NO build directives and NO local beets service
+    if STANDALONE_COMPOSE.exists():
+        standalone_text = _read(STANDALONE_COMPOSE)
+        if "build:" in standalone_text:
+            errors.append("docker-compose.yml: production Compose file must contain no build: directives")
+        if _service_block(standalone_text, "beets"):
+            errors.append("docker-compose.yml: production Compose file must not include local beets engine service")
+        _check_production_hardening(standalone_text, "docker-compose.yml", errors)
+
+    _check_compose_variant(STANDALONE_COMPOSE, errors, warnings, require_beets=False)
+    _check_compose_variant(ARRS_COMPOSE, errors, warnings, require_beets=True)
+    if FULL_COMPOSE.exists():
+        _check_compose_variant(FULL_COMPOSE, errors, warnings, require_beets=True)
+
     if ENV_EXAMPLE.exists():
         _check_no_hardcoded_lan_allowlist(_read(ENV_EXAMPLE), ENV_EXAMPLE.name, errors)
 

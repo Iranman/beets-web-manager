@@ -82,7 +82,13 @@ class SetupShTokenGenerationTests(unittest.TestCase):
         docker_stub = bin_dir / "docker"
         docker_stub.write_text(
             "#!/usr/bin/env bash\n"
-            "if [ \"$1\" = \"compose\" ] && [ \"$2\" = \"ps\" ]; then echo healthy; exit 0; fi\n"
+            "# 'ps' may not be $2 -- setup.sh's health-check loop runs\n"
+            "# 'docker compose -f <file> ps ...', inserting -f/<file> before ps.\n"
+            "if [ \"$1\" = \"compose\" ]; then\n"
+            "  for arg in \"$@\"; do\n"
+            "    if [ \"$arg\" = \"ps\" ]; then echo healthy; exit 0; fi\n"
+            "  done\n"
+            "fi\n"
             "exit 0\n",
             encoding="utf-8",
         )
@@ -158,7 +164,9 @@ class SetupPs1TokenGenerationTests(unittest.TestCase):
             docker_stub = bin_dir / "docker.cmd"
             docker_stub.write_text(
                 "@echo off\r\n"
-                "if \"%1\"==\"compose\" if \"%2\"==\"ps\" (echo healthy & exit /b 0)\r\n"
+                "if not \"%1\"==\"compose\" exit /b 0\r\n"
+                "echo %* | findstr /C:\" ps \" >nul && (echo healthy & exit /b 0)\r\n"
+                "echo %* | findstr /R /C:\" ps$\" >nul && (echo healthy & exit /b 0)\r\n"
                 "exit /b 0\r\n",
                 encoding="utf-8",
             )
@@ -166,7 +174,11 @@ class SetupPs1TokenGenerationTests(unittest.TestCase):
             docker_stub = bin_dir / "docker"
             docker_stub.write_text(
                 "#!/usr/bin/env bash\n"
-                "if [ \"$1\" = \"compose\" ] && [ \"$2\" = \"ps\" ]; then echo healthy; exit 0; fi\n"
+                "if [ \"$1\" = \"compose\" ]; then\n"
+                "  for arg in \"$@\"; do\n"
+                "    if [ \"$arg\" = \"ps\" ]; then echo healthy; exit 0; fi\n"
+                "  done\n"
+                "fi\n"
                 "exit 0\n",
                 encoding="utf-8",
             )

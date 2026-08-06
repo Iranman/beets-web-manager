@@ -24,9 +24,13 @@ I made this because the beets web plugin just wasn't cutting it. Not only does t
 
 See [SCREENSHOTS.md](SCREENSHOTS.md) for a tour of the app (Library, Import, Playlists, Jobs, Submissions, Settings, Library Changes).
 
-## Installation
+## Installation & Deployment
 
-Clone the repository and copy `.env.example` to `.env`. Replace every placeholder value with credentials for your own services before starting the stack.
+Beets Web Manager is packaged as a container image published to GitHub Container Registry (`ghcr.io/iranman/beets-web-manager`). End users do not need Node.js, Python, or build tools on the host system.
+
+### Quick Start (Production)
+
+Clone the repository to obtain `docker-compose.yml`, `.env.example`, and setup scripts:
 
 ```bash
 git clone https://github.com/Iranman/beets-web-manager.git
@@ -34,27 +38,57 @@ cd beets-web-manager
 cp .env.example .env
 ```
 
-## Docker Installation
+Configure your Beets control agent credentials in `.env`:
 
-The provided Compose files run two Beets-related services: `beets`, the authoritative Beets engine, and `beets-web-manager`, the Flask/React operator UI. The engine owns `/config/config.yaml`, `/config/musiclibrary.blb`, Beets CLI execution, tag writes, and media mutations. The web manager image intentionally contains no Beets executable, no Beets Python package, and no direct Beets SQLite access.
-
-```bash
-docker compose -f docker-compose.arrs.yml config
-docker compose -f docker-compose.arrs.yml up -d bgutil-provider beets beets-web-manager
+```env
+BEETS_API_URL=http://beets:8338
+BEETS_API_TOKEN=your-beets-api-token
 ```
 
-By default the web app binds to `127.0.0.1:8337`, while the Beets control-agent port `8338` is exposed only on the internal Compose network. Put the web port behind a reverse proxy only after configuring authentication, allowed outbound internal services, TLS, and trusted proxy settings.
-
-## Development Installation
-
-Backend checks use the system Python available in the deployment environment:
+Pull the published image and start the container:
 
 ```bash
-python -m py_compile app.py helpers_mb.py job_engine.py routes_jobs.py
+docker compose pull
+docker compose up -d
+docker compose ps
+```
+
+Or run the automated setup script:
+
+```bash
+./setup.sh          # Linux / macOS
+.\setup.ps1         # Windows PowerShell
+```
+
+### Existing Stack Integration (TrueNAS / Portainer / Multi-App Stacks)
+
+To add `beets-web-manager` to an existing Docker Compose stack (e.g., `/mnt/PLEX/Apps/Arrs/docker-compose.yml`), copy the service block from [docs/EXAMPLES.md](docs/EXAMPLES.md).
+
+It uses the published image (`ghcr.io/iranman/beets-web-manager:${BEETS_WEB_MANAGER_VERSION:-stable}`), requires no local `build:` directive, and persists state to a host path (e.g., `/mnt/PLEX/Apps/Arrs/beets-web-manager:/web-manager-data`).
+
+### Development Installation (Source Builds)
+
+To build both `beets-web-manager` and the `beets` engine from local source code:
+
+```bash
+docker compose -f docker-compose.dev.yml up -d --build
+```
+
+### Optional Bundled Beets Stack (Advanced Users)
+
+To deploy the published Beets Web Manager alongside a locally built custom Beets engine (`Dockerfile.beets`):
+
+```bash
+docker compose -f docker-compose.full.yml up -d --build
+```
+
+For backend tests:
+
+```bash
 python -m unittest discover -s tests -p "test_*.py"
 ```
 
-Frontend development uses Node and npm from `frontend/`:
+For frontend development:
 
 ```bash
 cd frontend
@@ -191,17 +225,29 @@ Packaging status: passing tests on a local or CI branch do not authorize product
 
 ## Troubleshooting
 
-**"AI authentication failed" / no OpenAI key configured — will my imports still work?**
-Yes. AI is optional everywhere it's used for matching. A missing/invalid AI key, an HTTP 401/403 from the provider, a timeout, or a rate limit never stops MusicBrainz or AcoustID matching — those run unconditionally and are what actually identify releases and recordings. The AI call, when it succeeds, only re-ranks candidates that search/fingerprinting already found. When AI isn't available, the top-ranked MusicBrainz/AcoustID candidate is used instead, at a lower confidence tier, with a reason string starting `Matched using MusicBrainz and AcoustID (AI unavailable: ...)`. See [How AI Matching Works](#how-ai-matching-works).
+**`pull access denied for beets-engine`**
+Docker encountered a local-only engine image tag (`beets-engine:local` or `beets-engine:dev`) without a local build context. Do **not** run `docker login`. Use the production `docker-compose.yml` (web-manager only) with an existing `BEETS_API_URL`, or run `docker compose -f docker-compose.full.yml up -d --build` from the repository root.
+
+**`pull access denied for beets-web-manager`**
+Compose is attempting to use a local-only image name instead of the published registry image. Make sure your Compose file uses `image: ghcr.io/iranman/beets-web-manager:${BEETS_WEB_MANAGER_VERSION:-stable}` or run `docker compose -f docker-compose.dev.yml up -d --build` for local source builds.
+
+**`failed to read dockerfile`**
+A development Compose file or `build: .` block is being run outside the repository root directory. Production Compose files use published images and do not require a local Dockerfile. See [docs/EXAMPLES.md](docs/EXAMPLES.md) for existing stack snippets.
+
+**`cannot connect to Beets API`**
+Verify that `BEETS_API_URL` and `BEETS_API_TOKEN` are set correctly in `.env` and that the Beets control agent service is healthy and reachable over the network.
 
 **The app returns 503 "Authentication is required" and I can't reach the UI at all.**
-This means neither `BEETS_WEB_AUTH_TOKEN` nor `BEETS_WEB_PASSWORD` resolved to a usable value when the process started. On a fresh install this shouldn't happen — the app auto-generates a token on first boot specifically to avoid this lockout (check your container logs for the one-time printed value). If you still hit this, check that `/config` is writable (the generated token is persisted to `/config/.auth_token`) and that `BEETS_WEB_AUTH_DISABLED` isn't accidentally set to a falsy-looking-but-truthy value.
+This means neither `BEETS_WEB_AUTH_TOKEN` nor `BEETS_WEB_PASSWORD` resolved to a usable value when the process started. On a fresh install, check container logs for the auto-generated API token printed on first boot. The provided Compose files persist that generated token to `/web-manager-data/.auth_token` (via `BEETS_WEB_AUTH_TOKEN_FILE`) so it survives a restart — make sure the mounted `web-manager-data` host directory is writable.
+
+**"AI authentication failed" / no OpenAI key configured — will my imports still work?**
+Yes. AI is optional everywhere it's used for matching. A missing/invalid AI key, an HTTP 401/403 from the provider, a timeout, or a rate limit never stops MusicBrainz or AcoustID matching — those run unconditionally and are what actually identify releases and recordings.
 
 **I set `BEETS_WEB_PASSWORD` but saving it was rejected.**
-Passwords must be at least 32 characters (the same floor `_MIN_AUTH_SECRET_LENGTH`/`BEETS_WEB_AUTH_MIN_LENGTH` uses to decide whether a secret is usable at all) and include an uppercase letter, a lowercase letter, a number, and a special character. The System page's password field shows a live strength meter and a checklist of which requirements are still unmet.
+Passwords must be at least 32 characters (the same floor `_MIN_AUTH_SECRET_LENGTH`/`BEETS_WEB_AUTH_MIN_LENGTH` uses to decide whether a secret is usable at all) and include an uppercase letter, a lowercase letter, a number, and a special character.
 
 **Where do I check whether MusicBrainz, AcoustID, AI, and Plex are actually reachable right now?**
-`GET /api/setup/status` queries the internal Beets control agent for the authoritative Beets version, loaded plugins, plugin failures, command readiness, and path health. It does not contact external providers. For live external connectivity checks, use `POST /api/setup/test/{ai,musicbrainz,acoustid,plex}` - each integration is tested and reported independently, so one being down or misconfigured never hides or blocks the results of the others. The System page's Integrations panel has a "Test connections" button that runs all four and shows a Connected / Warning / Not Configured badge per integration.
+`GET /api/setup/status` queries the internal Beets control agent for readiness. Use `POST /api/setup/test/{ai,musicbrainz,acoustid,plex}` or the System page connection tests for live provider connectivity.
 
 ## Documentation
 
@@ -243,9 +289,14 @@ docker compose exec beets /lsiopy/bin/beet version
 docker compose exec beets beet-locked import /data/torrents/music
 ```
 
-No second Beets database is created. The temporary Beets 2.4.0 Chroma compatibility patch in `Dockerfile.beets` is only for the pinned affected release and should be removed after upgrading to a fixed upstream Beets release.
+No second Beets database is created. `Dockerfile.beets` applies its Chroma plugin-resolution compatibility patch (`docker/beets/apply_patches.py`) only against exactly Beets 2.4.0; it is skipped (with the upstream fix verified directly) on Beets >= 2.5.0. See `docs/CONFIGURATION.md` ("Beets engine version") and `docs/BEETS_ENGINE_MIGRATION.md` for the version policy and upgrade/rollback procedure.
 
 ## Architecture Migration & Upgrades
+
+Upgrading the Beets **engine version** specifically (not just rebuilding the
+same version) needs the additional backup/verification/rollback steps in
+`docs/BEETS_ENGINE_MIGRATION.md` -- newer Beets releases can perform an
+automatic, one-time, non-reversible database schema migration on first open.
 
 ```bash
 # 1. Back up config and library

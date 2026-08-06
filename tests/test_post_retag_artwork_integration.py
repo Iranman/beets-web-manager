@@ -171,6 +171,23 @@ class AiImportFolderSequenceTests(unittest.TestCase):
         self._clear_library()
         self.call_order = []
         self.log = []
+
+        db_path = str(_TMP_ROOT / "config" / "musiclibrary.blb")
+        from contextlib import contextmanager
+        @contextmanager
+        def _mock_db(path=None, *, text_factory=None, row_factory=None):
+            import sqlite3
+            con = sqlite3.connect(db_path)
+            if row_factory is not None:
+                con.row_factory = row_factory
+            if text_factory is not None:
+                con.text_factory = text_factory
+            try:
+                yield con
+            finally:
+                con.close()
+        self._patch(mock.patch.object(APP, "_db", side_effect=_mock_db))
+
         self.aid = _seed_album(APP, mb_albumid=MB_ALBUMID)
 
         def fake_beet_run(cmd, log, **kwargs):
