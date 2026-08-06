@@ -357,3 +357,15 @@ Statuses: Open, In Progress, Blocked, Done.
 - Docker: both images rebuilt `--no-cache` with `VCS_REF=c9c4aae0e0bf429626b4eee7ff0a70dd623e806a`; OCI revision labels confirmed exact; `scripts/verify_beets_engine_image.py --check-s6-supervision` passed in full including a real S6 crash/restart cycle.
 - PR description corrected to remove the inaccurate SHAs, mangled backtick escaping, and inconsistent test counts; replaced with the values verified above.
 - Status: Open (SEC-002 overall). See the final report for the merge decision.
+
+### SEC-002 Wave 6: qBittorrent Hardlink Repair Path Security -- Codex implementation, pending Claude final review
+
+- Starting main SHA: `3994d6818531e6b4855bb3717a7ef2b94fd326a4` (PR #61 merged).
+- Overlap verification: PR #65 (`fix/harden-truenas-rollout`) verified open; modifies auth token persistence and deployment scripts with ZERO overlap with qBittorrent hardlink repair helpers.
+- Live inventory: 198 total open alerts, 180 `app.py` open alerts, 155 `py/path-injection` open alerts in `app.py`.
+- Selected Wave 6 alerts: `#253` and `#254` (`py/path-injection` at `app.py:33176` for qBittorrent hardlink repair path injection).
+- Architecture boundary & refactoring: Moved direct local filesystem hardlink creation (`os.link`) out of `app.py` and behind the Beets control agent boundary (`POST /files/hardlink` in `backend/beets_control_agent.py` and `BeetsClient.create_hardlink` in `backend/beets_client.py`).
+- Path safety & containment: `_path_under` updated to use `os.path.realpath` with root-parent containment check instead of `resolve(strict=False).relative_to()`, eliminating CodeQL's untrusted `resolve` path-injection source. `_qbit_map_path` updated to enforce component-boundary matching.
+- Security contract: Fixed root containment (`music`, `staging`, `tmp`), source file regular/non-symlink check, same-inode idempotency check (`already_present`), cross-device link rejection (`EXDEV`), pre- and post-link identity verification under lock, and error message sanitization.
+- Tests added: `tests/test_sec002_app_path_qbittorrent_hardlink.py` covers path containment, alias prefix mapping, control agent endpoint validation, idempotency, size checks, and error message sanitization.
+- Status: In Progress / Ready for Draft PR and Handoff to Claude.

@@ -429,6 +429,13 @@ class BeetsClient:
         """Rewrite Beets item/art paths after a validated library file move."""
         return self._request("POST", "/library/rewrite-path", {"old_path": old_path, "new_path": new_path})
 
+    def create_hardlink(self, source_path: str, target_path: str, expected_size: Optional[int] = None) -> Dict[str, Any]:
+        """Create a hardlink under control-agent validation and lock."""
+        payload: Dict[str, Any] = {"source_path": source_path, "target_path": target_path}
+        if expected_size is not None:
+            payload["expected_size"] = expected_size
+        return self._request("POST", "/files/hardlink", payload)
+
     def delete_album(self, album_id: int, delete_files: bool = True) -> Dict[str, Any]:
         """Perform transactional single-writer album deletion under lock."""
         return self._request("DELETE", f"/albums/{album_id}", {"delete_files": delete_files})

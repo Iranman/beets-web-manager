@@ -33173,8 +33173,13 @@ def _scan_artist_folder_groups(root: str, *, use_musicbrainz: bool = False,
 
 def _path_under(path: Path, root: Path) -> bool:
     try:
-        path.resolve(strict=False).relative_to(root.resolve(strict=False))
-        return True
+        raw_p = str(path)
+        raw_r = str(root)
+        if "\x00" in raw_p or "\x00" in raw_r:
+            return False
+        rp = Path(os.path.realpath(raw_p))
+        rr = Path(os.path.realpath(raw_r))
+        return rp == rr or rr in rp.parents
     except Exception:
         return False
 
@@ -33264,11 +33269,13 @@ def _qbit_path_alias_pairs() -> List[Tuple[str, str]]:
 
 def _qbit_map_path(path_value: str) -> Path:
     text = _s(path_value).strip().replace("\\", "/")
+    if not text or "\x00" in text:
+        return Path("")
     for src, dst in _qbit_path_alias_pairs():
         if text == src or text.startswith(src + "/"):
             text = dst + text[len(src):]
             break
-    return Path(text)
+    return Path(text) if text else Path("")
 
 
 def _qbit_allowed_repair_path(path: Path) -> bool:
@@ -33696,18 +33703,27 @@ def _qbit_hardlink_missing_impl(*, dry_run: bool, category: str,
                 log.append(f"  would link: {target.name}")
                 continue
             try:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                os.link(str(src), str(target))
-                summary["linked"] += 1
-                touched_hashes.add(thash)
-                add_action(action)
-                log.append(f"  linked: {target}")
+                res = beets_client.create_hardlink(str(src), str(target), expected_size=size)
+                if res and res.get("ok"):
+                    summary["linked"] += 1
+                    touched_hashes.add(thash)
+                    if res.get("already_present"):
+                        action["status"] = "already_present"
+                        action["reason"] = "qBittorrent target file is already hardlinked"
+                    add_action(action)
+                    log.append(f"  linked: {target}")
+                else:
+                    summary["errors"] += 1
+                    action["status"] = "error"
+                    action["error"] = _s(res.get("error")) or "Could not create this hardlink."
+                    add_action(action)
+                    log.append(f"  ERROR linking {target}: {action['error']}")
             except Exception as ex:
                 summary["errors"] += 1
                 action["status"] = "error"
                 action["error"] = "Could not create this hardlink."
                 add_action(action)
-                log.append(f"  ERROR linking {target}: {ex}")
+                log.append(f"  ERROR linking {target}: {type(ex).__name__}")
         if limit and summary["checked"] >= limit:
             break
 
