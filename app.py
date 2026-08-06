@@ -1994,25 +1994,46 @@ def generate_secure_auth_token() -> str:
 
 
 def _persist_generated_auth_token(token: str) -> None:
-    """Persist generated token atomically to BEETS_WEB_AUTH_TOKEN_FILE (/web-manager-data/.auth_token)."""
+    """Persist generated token atomically to BEETS_WEB_AUTH_TOKEN_FILE (/web-manager-data/.auth_token).
+
+    Write-flush-fsync a same-directory temp file, chmod it 0600, then atomically
+    rename it onto the destination -- a crash mid-write can never leave a
+    partially written or wrongly permissioned token file in place. The temp
+    file is removed on any failure so nothing orphans, and failure is logged
+    at ERROR (not swallowed) since an unpersisted token will not survive a
+    restart.
+    """
+    token_file = _GENERATED_AUTH_TOKEN_FILE
+    temp_file = token_file.with_name(f".{token_file.name}.tmp.{secrets.token_hex(4)}")
     try:
-        token_file = _GENERATED_AUTH_TOKEN_FILE
         token_file.parent.mkdir(parents=True, exist_ok=True)
-        temp_file = token_file.with_name(f".{token_file.name}.tmp.{secrets.token_hex(4)}")
-        temp_file.write_text(token, encoding="utf-8")
-        try:
-            os.chmod(temp_file, 0o600)
-            os.chmod(_GENERATED_AUTH_TOKEN_FILE, 0o600)
-        except Exception:
-            pass
+        fd = os.open(str(temp_file), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(token)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(temp_file, 0o600)
         temp_file.replace(token_file)
+        os.chmod(_GENERATED_AUTH_TOKEN_FILE, 0o600)
         try:
-            os.chmod(_GENERATED_AUTH_TOKEN_FILE, 0o600)
-        except Exception:
-            pass
+            dir_fd = os.open(str(token_file.parent), os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            pass  # directory fsync is best-effort; unsupported on some platforms/filesystems
     except Exception as ex:
         try:
-            app.logger.warning("Failed to persist generated auth token to %s: %s", _GENERATED_AUTH_TOKEN_FILE, ex)
+            temp_file.unlink(missing_ok=True)
+        except Exception:
+            pass
+        try:
+            app.logger.error(
+                "Failed to persist generated auth token to %s -- it will NOT "
+                "survive a restart until this is resolved: %s",
+                _GENERATED_AUTH_TOKEN_FILE, ex,
+            )
         except Exception:
             pass
 
