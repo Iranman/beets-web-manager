@@ -16,5 +16,17 @@ jobs:
         with:
           python-version: "3.13"
       - run: pip install -r requirements.txt
+      - name: Set a fake CI-only web auth token
+        # Prevents _bootstrap_auth_token_if_missing() from generating and
+        # attempting to persist a token to the (unwritable, non-container)
+        # /web-manager-data default on this runner -- which would now fail
+        # startup closed (see app.py) instead of silently degrading. Not a
+        # real secret; set via $GITHUB_ENV rather than a workflow `env:`
+        # assignment so scripts/security_secret_scan.py's config-secret-
+        # assignment check (which only allowlists the literal word
+        # "changeme" for YAML `KEY: value` nodes) doesn't need a bespoke
+        # exception for a value that has to fail the app's own placeholder
+        # check.
+        run: echo "BEETS_WEB_AUTH_TOKEN=ci-unit-test-token-not-a-real-secret-0000000000" >> "$GITHUB_ENV"
       - run: python -m py_compile app.py helpers_mb.py job_engine.py routes_jobs.py routes_lidarr.py routes_setup.py scripts/security_secret_scan.py scripts/validate_compose_security.py scripts/verify_security_config.py
       - run: python -m unittest discover -s tests -p "test_*.py"

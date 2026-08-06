@@ -1,4 +1,7 @@
 """Tests verifying authentication token file path defaults and atomic persistence."""
+import contextlib
+import io
+import logging
 import os
 import stat
 import tempfile
@@ -80,6 +83,103 @@ class AuthTokenPersistenceTests(unittest.TestCase):
                  mock.patch.object(app_module, "_GENERATED_AUTH_TOKEN_FILE", token_file):
                 app_module._bootstrap_auth_token_if_missing()
                 self.assertEqual(os.environ.get("BEETS_WEB_AUTH_TOKEN"), existing_token)
+
+
+_MARKER_TOKEN = "MARKER-TOKEN-do-not-leak-1234567890123456789012345"
+
+
+class _CapturingLogHandler(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.messages = []
+
+    def emit(self, record):
+        self.messages.append(record.getMessage())
+
+
+@contextlib.contextmanager
+def _capture_everything():
+    """Captures stdout, stderr, and every log record emitted through the
+    root logger (app.logger propagates to it) during the block."""
+    out, err = io.StringIO(), io.StringIO()
+    handler = _CapturingLogHandler()
+    root_logger = logging.getLogger()
+    root_logger.addHandler(handler)
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            yield out, err, handler.messages
+    finally:
+        root_logger.removeHandler(handler)
+
+
+class BootstrapTokenNeverLeaksTests(unittest.TestCase):
+    """Covers the no-leak / fail-closed contract for _bootstrap_auth_token_if_missing():
+    the generated token must never appear in stdout, stderr, or logs, under
+    either a successful or a failed persistence attempt."""
+
+    def setUp(self):
+        self.env_patcher = mock.patch.dict(
+            os.environ, {"BEETS_WEB_AUTH_TOKEN": "", "BEETS_WEB_PASSWORD": ""}, clear=False,
+        )
+        self.env_patcher.start()
+        self.addCleanup(self.env_patcher.stop)
+
+    def test_generated_token_absent_from_stdout_stderr_and_logs_on_success(self):
+        import app as app_module
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            token_file = Path(tmpdir) / ".auth_token"
+            with mock.patch.object(app_module, "_GENERATED_AUTH_TOKEN_FILE", token_file), \
+                 mock.patch.object(app_module, "generate_secure_auth_token", return_value=_MARKER_TOKEN), \
+                 _capture_everything() as (out, err, log_messages):
+                app_module._bootstrap_auth_token_if_missing()
+
+            self.assertEqual(os.environ.get("BEETS_WEB_AUTH_TOKEN"), _MARKER_TOKEN)
+            self.assertNotIn(_MARKER_TOKEN, out.getvalue())
+            self.assertNotIn(_MARKER_TOKEN, err.getvalue())
+            self.assertTrue(all(_MARKER_TOKEN not in m for m in log_messages))
+            # The persisted file legitimately contains it -- that's the
+            # intended retrieval mechanism, not a leak.
+            self.assertEqual(token_file.read_text(encoding="utf-8"), _MARKER_TOKEN)
+
+    def test_generated_token_absent_everywhere_when_persistence_fails_and_startup_fails_closed(self):
+        import app as app_module
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            token_file = Path(tmpdir) / ".auth_token"
+            with mock.patch.object(app_module, "_GENERATED_AUTH_TOKEN_FILE", token_file), \
+                 mock.patch.object(app_module, "generate_secure_auth_token", return_value=_MARKER_TOKEN), \
+                 mock.patch("os.fsync", side_effect=OSError("disk full")), \
+                 _capture_everything() as (out, err, log_messages):
+                with self.assertRaises(RuntimeError) as ctx:
+                    app_module._bootstrap_auth_token_if_missing()
+
+            self.assertNotIn(_MARKER_TOKEN, str(ctx.exception))
+            self.assertNotIn(_MARKER_TOKEN, out.getvalue())
+            self.assertNotIn(_MARKER_TOKEN, err.getvalue())
+            self.assertTrue(all(_MARKER_TOKEN not in m for m in log_messages))
+            self.assertFalse(token_file.exists())
+            leftovers = list(Path(tmpdir).glob(".auth_token.tmp.*"))
+            self.assertEqual(leftovers, [], f"orphaned temp token file(s) left behind: {leftovers}")
+
+    def test_startup_is_deterministic_when_token_directory_is_unwritable(self):
+        """Simulates an unwritable /web-manager-data mount: the same failure
+        (RuntimeError, no leaked token) must occur every time, not just on
+        first attempt."""
+        import app as app_module
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            unwritable_target = Path(tmpdir) / "not-a-real-dir" / ".auth_token"
+            with mock.patch.object(app_module, "_GENERATED_AUTH_TOKEN_FILE", unwritable_target), \
+                 mock.patch.object(app_module, "generate_secure_auth_token", return_value=_MARKER_TOKEN), \
+                 mock.patch.object(Path, "mkdir", side_effect=PermissionError("read-only mount")):
+                for _ in range(2):
+                    with _capture_everything() as (out, err, log_messages):
+                        with self.assertRaises(RuntimeError):
+                            app_module._bootstrap_auth_token_if_missing()
+                    self.assertNotIn(_MARKER_TOKEN, out.getvalue())
+                    self.assertNotIn(_MARKER_TOKEN, err.getvalue())
+                    self.assertTrue(all(_MARKER_TOKEN not in m for m in log_messages))
 
 
 if __name__ == "__main__":

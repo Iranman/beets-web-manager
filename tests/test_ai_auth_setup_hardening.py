@@ -346,15 +346,28 @@ class AuthTokenAutoGenerationTests(unittest.TestCase):
         self.assertIn("_GENERATED_AUTH_TOKEN_FILE.read_text(", fn)
         self.assertIn("_auth_secret_is_usable(existing)", fn)
 
-    def test_bootstrap_persists_and_prints_new_token_once(self):
+    def test_bootstrap_persists_new_token_and_never_prints_it(self):
         fn = _function_source(
             APP_SOURCE,
             "def _bootstrap_auth_token_if_missing() -> None:",
             "\n\ndef _constant_time_equal(",
         )
         self.assertIn("_persist_generated_auth_token(token)", fn)
-        self.assertIn("it will not be printed again", fn)
         self.assertIn('os.environ["BEETS_WEB_AUTH_TOKEN"] = token', fn)
+        # The startup banner announces where the token was written, but the
+        # f-string interpolating the raw secret into process output (the
+        # previous, log-leaking behavior) must be gone.
+        self.assertNotIn("BEETS_WEB_AUTH_TOKEN={token}", fn)
+        self.assertIn("never printed to logs", fn)
+
+    def test_bootstrap_fails_closed_when_persistence_cannot_be_verified(self):
+        fn = _function_source(
+            APP_SOURCE,
+            "def _bootstrap_auth_token_if_missing() -> None:",
+            "\n\ndef _constant_time_equal(",
+        )
+        self.assertIn("persisted_ok", fn)
+        self.assertIn("raise RuntimeError(", fn)
 
     def test_bootstrap_runs_at_module_import_time(self):
         # Must be called unconditionally at module scope so it runs before

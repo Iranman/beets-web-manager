@@ -20,6 +20,11 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
+      - name: Set a fake CI-only web auth token
+        # See unit-tests.yml for why this is a $GITHUB_ENV append rather
+        # than a workflow `env:` assignment.
+        run: echo "BEETS_WEB_AUTH_TOKEN=ci-unit-test-token-not-a-real-secret-0000000000" >> "$GITHUB_ENV"
+
       - name: Python syntax and security regression tests
         run: |
           python3 -m py_compile app.py tests/test_security_hardening.py scripts/security_secret_scan.py
