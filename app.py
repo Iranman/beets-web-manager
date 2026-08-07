@@ -3,7 +3,7 @@
 Beets Web Control — standalone Flask app.
 Opens the beets library directly. No plugin system, no S6, no beet web.
 """
-import base64, copy, difflib, errno, functools, gzip, hashlib, hmac, importlib, io, json, math, mimetypes, os, platform, re, secrets, shlex, shutil, socket, sqlite3, subprocess, sys, tempfile, threading, time, unicodedata, uuid
+import base64, copy, difflib, errno, functools, gzip, hashlib, hmac, importlib, io, json, math, mimetypes, os, platform, re, secrets, shlex, shutil, socket, sqlite3, subprocess, sys, threading, time, unicodedata, uuid
 import importlib.metadata
 import urllib.error, urllib.parse, urllib.request
 from backend.security import (OutboundPolicyError, bounded_rate_key_store_sweep, direct_peer_is_trusted, install_secure_urllib, validate_outbound_url)
@@ -11667,7 +11667,7 @@ _lib_cache_ts: float = 0.0
 _lib_cache_lock = threading.Lock()
 _LIB_CACHE_TTL = 180.0  # comfortably longer than _auto_scan_loop's 2-min proactive rebuild tick, so a page visit essentially never has to pay for a synchronous rebuild
 
-_DOWNLOADS_ROOTS = ["/data/torrents", "/data/downloads", "/tmp", tempfile.gettempdir()]
+_DOWNLOADS_ROOTS = ["/data/torrents", "/data/downloads", "/tmp"]
 _MUSIC_LIBRARY_ROOT = "/data/media/music"
 
 def _delete_if_already_in_library(src_path: str, beet_output: str, log: list) -> bool:
@@ -11831,7 +11831,14 @@ def _import_review_path_text_error(raw: Any, *, allow_relative: bool = False) ->
 
 
 def _import_review_cleanup_roots(*, allow_music: bool = False) -> List[Path]:
-    roots = [DOWNLOADS_ROOT, PLAYLIST_DOWNLOAD_ROOT] + [Path(root) for root in _DOWNLOADS_ROOTS] + list(TORRENT_SOURCE_ROOTS) + list(QBIT_REPAIR_ALLOWED_ROOTS)
+    # Deliberately does NOT include QBIT_REPAIR_ALLOWED_ROOTS: that list is an
+    # independently-configurable authorization boundary for a different
+    # feature (qBittorrent hardlink-repair destinations, SEC-002 Wave 6).
+    # Reusing it here would couple two unrelated features' authorization --
+    # reconfiguring one would silently widen or narrow the other. Import
+    # review's own TORRENT_SOURCE_ROOTS already covers the same download-area
+    # territory for this feature's own purposes, independently configurable.
+    roots = [DOWNLOADS_ROOT, PLAYLIST_DOWNLOAD_ROOT] + [Path(root) for root in _DOWNLOADS_ROOTS] + list(TORRENT_SOURCE_ROOTS)
     if allow_music:
         roots.append(MUSIC_ROOT)
     trusted: List[Path] = []
@@ -16687,7 +16694,7 @@ def _import_review_folder_signature(folder_path: str) -> str:
     entries = []
     try:
         for p in sorted(source.rglob("*"), key=lambda x: str(x).lower()):
-            if p.is_file() and not p.is_symlink() and p.suffix.lower() in AUDIO_EXT:
+            if not p.is_symlink() and p.is_file() and p.suffix.lower() in AUDIO_EXT:
                 st = p.stat()
                 entries.append(f"{p.name}:{st.st_size}:{int(st.st_mtime)}")
     except Exception:
@@ -16734,11 +16741,11 @@ def _build_folder_evidence(folder_path: str) -> Dict[str, Any]:
 
     direct_audio = sorted(
         p for p in folder.iterdir()
-        if p.is_file() and not p.is_symlink() and p.suffix.lower() in AUDIO_EXT
+        if not p.is_symlink() and p.is_file() and p.suffix.lower() in AUDIO_EXT
     ) if folder.is_dir() else []
     all_audio = sorted(
         p for p in folder.rglob("*")
-        if p.is_file() and not p.is_symlink() and p.suffix.lower() in AUDIO_EXT
+        if not p.is_symlink() and p.is_file() and p.suffix.lower() in AUDIO_EXT
     ) if folder.is_dir() else []
     audio_files = direct_audio or all_audio
     nested_audio_count = max(0, len(all_audio) - len(direct_audio))
@@ -17587,7 +17594,7 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
 
     direct_audio_count = sum(
         1 for p in (folder_obj.iterdir() if folder_obj.is_dir() else [])
-        if p.is_file() and not p.is_symlink() and p.suffix.lower() in AUDIO_EXT
+        if not p.is_symlink() and p.is_file() and p.suffix.lower() in AUDIO_EXT
     )
 
     # ── AcoustID fingerprinting (multi-file, cached) ──────────────────────────
@@ -18040,11 +18047,11 @@ def _candidate_track_local_candidates(folder: str) -> List[Dict[str, Any]]:
         return candidates
 
     paths: List[Path] = []
-    if source.is_file() and not source.is_symlink() and source.suffix.lower() in AUDIO_EXT:
+    if not source.is_symlink() and source.is_file() and source.suffix.lower() in AUDIO_EXT:
         paths = [source]
     elif source.is_dir():
         for path in sorted(
-            [p for p in source.rglob("*") if p.is_file() and not p.is_symlink() and p.suffix.lower() in AUDIO_EXT],
+            [p for p in source.rglob("*") if not p.is_symlink() and p.is_file() and p.suffix.lower() in AUDIO_EXT],
             key=lambda p: str(p).lower(),
         ):
             selected = _resolve_import_review_selected_audio_file(str(path), source)

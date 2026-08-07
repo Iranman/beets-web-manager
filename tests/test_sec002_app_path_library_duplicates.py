@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any, Dict
+from unittest import mock
 
 import app
 
@@ -16,6 +17,18 @@ class TestSec002AppPathLibraryDuplicates(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.TemporaryDirectory()
         self.tmp_path = Path(self.tmp_dir.name).resolve()
+        # Patch the trusted-root list to include this test's own scratch
+        # directory rather than relying on production's _DOWNLOADS_ROOTS
+        # happening to already cover the OS temp dir (it doesn't: that was
+        # a test-only accommodation removed from production for widening
+        # trusted-root authorization on non-production platforms for no
+        # production benefit -- tempfile.gettempdir() is /tmp on Linux
+        # anyway, already covered).
+        self._downloads_roots_patcher = mock.patch.object(
+            app, "_DOWNLOADS_ROOTS", app._DOWNLOADS_ROOTS + [str(self.tmp_path)]
+        )
+        self._downloads_roots_patcher.start()
+        self.addCleanup(self._downloads_roots_patcher.stop)
 
     def tearDown(self):
         self.tmp_dir.cleanup()
