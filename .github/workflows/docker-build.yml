@@ -35,10 +35,6 @@ jobs:
       OPENAI_API_KEY: changeme
       PLEX_TOKEN: changeme
       LIDARR_API_KEY: changeme
-      SLSKD_SLSK_USERNAME: changeme
-      SLSKD_SLSK_PASSWORD: changeme
-      DIGARR_INITIAL_PASSWORD: changeme
-      POSTGRES_PASSWORD: changeme
       AI_API_KEY: changeme
     steps:
       - uses: actions/checkout@v7
@@ -46,7 +42,6 @@ jobs:
         with:
           python-version: "3.13"
       - run: python scripts/validate_compose_security.py
-      - run: docker compose -f docker-compose.arrs.yml config
       - run: docker compose -f docker-compose.dev.yml config
       - run: docker compose -f docker-compose.full.yml config
       - run: docker compose config

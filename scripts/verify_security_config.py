@@ -17,10 +17,6 @@ REQUIRED_ENV = [
     "PLEX_TOKEN",
     "LIDARR_API_KEY",
     "OPENAI_API_KEY",
-    "DIGARR_INITIAL_PASSWORD",
-    "POSTGRES_PASSWORD",
-    "SLSKD_SLSK_USERNAME",
-    "SLSKD_SLSK_PASSWORD",
 ]
 OPTIONAL_ROTATION_ENV = [
     "BEETS_WEB_PASSWORD",
@@ -30,9 +26,7 @@ OPTIONAL_ROTATION_ENV = [
     "OPENROUTER_API_KEY",
     "ACOUSTID_API_KEY",
     "ACOUSTID_KEY",
-    "RADARR_API_KEY",
-    "SONARR_API_KEY",
-    "PROWLARR_API_KEY",
+    "SLSKD_API_KEY",
     "YTDLP_COOKIE_FILE",
 ]
 PLACEHOLDER_MARKERS = (
@@ -48,7 +42,8 @@ PLACEHOLDER_MARKERS = (
 )
 TRACKED_FILES = [
     ROOT / "config.yaml",
-    ROOT / "docker-compose.arrs.yml",
+    ROOT / "docker-compose.yml",
+    ROOT / "docker-compose.full.yml",
     ROOT / ".env",
     ROOT / ".env.example",
 ]
