@@ -328,8 +328,7 @@ class EndpointVerificationModeTests(RolloutScriptTestBase):
         state_file = os.path.join(self.tmp, "curl_state.json")
         Path(state_file).write_text(json.dumps({"fail_paths": ["/api/health"]}), encoding="utf-8")
         res = self.run_snippet("""
-verify_endpoints "dry-run"
-rc=$?
+verify_endpoints "dry-run" || rc=$?
 echo "RC=$rc"
 """, env=self.base_env(FAKE_CURL_STATE=state_file))
         self.assertEqual(res.returncode, 0, res.stderr)
