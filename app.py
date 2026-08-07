@@ -3,7 +3,7 @@
 Beets Web Control — standalone Flask app.
 Opens the beets library directly. No plugin system, no S6, no beet web.
 """
-import base64, copy, difflib, errno, functools, gzip, hashlib, hmac, importlib, io, json, math, mimetypes, os, platform, re, secrets, shlex, shutil, socket, sqlite3, subprocess, sys, threading, time, unicodedata, uuid
+import base64, copy, difflib, errno, functools, gzip, hashlib, hmac, importlib, io, json, math, mimetypes, os, platform, re, secrets, shlex, shutil, socket, sqlite3, subprocess, sys, tempfile, threading, time, unicodedata, uuid
 import importlib.metadata
 import urllib.error, urllib.parse, urllib.request
 from backend.security import (OutboundPolicyError, bounded_rate_key_store_sweep, direct_peer_is_trusted, install_secure_urllib, validate_outbound_url)
@@ -11609,7 +11609,7 @@ _lib_cache_ts: float = 0.0
 _lib_cache_lock = threading.Lock()
 _LIB_CACHE_TTL = 180.0  # comfortably longer than _auto_scan_loop's 2-min proactive rebuild tick, so a page visit essentially never has to pay for a synchronous rebuild
 
-_DOWNLOADS_ROOTS = ["/data/torrents", "/data/downloads", "/tmp"]
+_DOWNLOADS_ROOTS = ["/data/torrents", "/data/downloads", "/tmp", tempfile.gettempdir()]
 _MUSIC_LIBRARY_ROOT = "/data/media/music"
 
 def _delete_if_already_in_library(src_path: str, beet_output: str, log: list) -> bool:
@@ -11773,7 +11773,7 @@ def _import_review_path_text_error(raw: Any, *, allow_relative: bool = False) ->
 
 
 def _import_review_cleanup_roots(*, allow_music: bool = False) -> List[Path]:
-    roots = [DOWNLOADS_ROOT] + [Path(root) for root in _DOWNLOADS_ROOTS]
+    roots = [DOWNLOADS_ROOT, PLAYLIST_DOWNLOAD_ROOT] + [Path(root) for root in _DOWNLOADS_ROOTS] + list(TORRENT_SOURCE_ROOTS) + list(QBIT_REPAIR_ALLOWED_ROOTS)
     if allow_music:
         roots.append(MUSIC_ROOT)
     trusted: List[Path] = []
@@ -15581,10 +15581,12 @@ def _is_music_root_path(path_value: str) -> bool:
 def _library_album_ids_for_folder(folder_path: str) -> List[int]:
     """Return Beets album IDs that already have items under a music-root folder."""
     raw = _s(folder_path).strip()
-    if not raw:
+    if not raw or "\x00" in raw or "\\" in raw:
         return []
     try:
-        folder_res = Path(raw).resolve(strict=False)
+        folder_res, err = _resolve_import_review_source_path(raw, allow_music=True, expected_type="dir", require_exists=False)
+        if err or not folder_res:
+            return []
         music_res = MUSIC_ROOT.resolve(strict=False)
         rel = folder_res.relative_to(music_res)
         abs_prefix = str(folder_res).replace("\\", "/").rstrip("/") + "/"
@@ -15989,10 +15991,12 @@ def _normalize_review_origin_type(value: Any, allow_all: bool = False) -> str:
 
 def _path_origin_hint(folder_path: str) -> Dict[str, Any]:
     raw = _s(folder_path).strip()
-    if not raw:
+    if not raw or "\x00" in raw or "\\" in raw:
         return {}
     try:
-        resolved = Path(raw).resolve(strict=False)
+        resolved, err = _resolve_import_review_source_path(raw, allow_music=True, require_exists=False)
+        if err or not resolved:
+            return {"source_folder": raw}
         playlist_root = PLAYLIST_DOWNLOAD_ROOT.resolve(strict=False)
         if _path_is_under(resolved, playlist_root):
             rel_name = ""
@@ -16619,11 +16623,13 @@ def _import_review_folder_signature(folder_path: str) -> str:
     """Hash of the audio file list (name/size/mtime) so a stored AI Suggest
     result can be checked for staleness against a folder that changed since
     the suggestion was generated (files added/removed/replaced)."""
-    source = Path(folder_path)
+    source, err = _resolve_import_review_source_path(folder_path, allow_music=True, expected_type="dir")
+    if err or not source:
+        return ""
     entries = []
     try:
         for p in sorted(source.rglob("*"), key=lambda x: str(x).lower()):
-            if p.is_file() and p.suffix.lower() in AUDIO_EXT:
+            if p.is_file() and not p.is_symlink() and p.suffix.lower() in AUDIO_EXT:
                 st = p.stat()
                 entries.append(f"{p.name}:{st.st_size}:{int(st.st_mtime)}")
     except Exception:
@@ -16653,15 +16659,28 @@ def _build_folder_evidence(folder_path: str) -> Dict[str, Any]:
     nested_audio_count, guessed_artist, guessed_album, guessed_year,
     track_titles (list[str]), track_lines (list[str]), filenames (list[str]).
     """
-    folder = Path(folder_path) if folder_path else Path(".")
+    folder, err = _resolve_import_review_source_path(folder_path, allow_music=True, expected_type="dir")
+    if err or not folder:
+        return {
+            "folder_path": _s(folder_path),
+            "audio_files": [],
+            "folder_track_count": 0,
+            "nested_audio_count": 0,
+            "guessed_artist": "",
+            "guessed_album": "",
+            "guessed_year": "",
+            "track_titles": [],
+            "track_lines": [],
+            "filenames": [],
+        }
 
     direct_audio = sorted(
         p for p in folder.iterdir()
-        if p.is_file() and p.suffix.lower() in AUDIO_EXT
+        if p.is_file() and not p.is_symlink() and p.suffix.lower() in AUDIO_EXT
     ) if folder.is_dir() else []
     all_audio = sorted(
         p for p in folder.rglob("*")
-        if p.is_file() and p.suffix.lower() in AUDIO_EXT
+        if p.is_file() and not p.is_symlink() and p.suffix.lower() in AUDIO_EXT
     ) if folder.is_dir() else []
     audio_files = direct_audio or all_audio
     nested_audio_count = max(0, len(all_audio) - len(direct_audio))
@@ -17504,10 +17523,13 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
     filenames          = ev["filenames"]
 
     # Detect whether direct (root-level) audio was found for the nested-file note.
-    folder_obj = Path(folder_path)
+    folder_obj, err = _resolve_import_review_source_path(folder_path, allow_music=True, expected_type="dir")
+    if err or not folder_obj:
+        return {"ok": False, "error": err or "Invalid folder path."}
+
     direct_audio_count = sum(
         1 for p in (folder_obj.iterdir() if folder_obj.is_dir() else [])
-        if p.is_file() and p.suffix.lower() in AUDIO_EXT
+        if p.is_file() and not p.is_symlink() and p.suffix.lower() in AUDIO_EXT
     )
 
     # ── AcoustID fingerprinting (multi-file, cached) ──────────────────────────
@@ -17952,19 +17974,24 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
 
 def _candidate_track_local_candidates(folder: str) -> List[Dict[str, Any]]:
     candidates: List[Dict[str, Any]] = []
-    if folder:
-        source = Path(folder)
-        paths: List[Path] = []
-        if source.is_file() and source.suffix.lower() in AUDIO_EXT:
-            paths = [source]
-        elif source.is_dir():
-            for path in sorted(
-                [p for p in source.rglob("*") if p.is_file() and p.suffix.lower() in AUDIO_EXT],
-                key=lambda p: str(p).lower(),
-            ):
-                selected = _resolve_import_review_selected_audio_file(str(path), source)
-                if selected:
-                    paths.append(selected)
+    if not folder:
+        return candidates
+
+    source, err = _resolve_import_review_source_path(folder, allow_music=True)
+    if err or not source:
+        return candidates
+
+    paths: List[Path] = []
+    if source.is_file() and not source.is_symlink() and source.suffix.lower() in AUDIO_EXT:
+        paths = [source]
+    elif source.is_dir():
+        for path in sorted(
+            [p for p in source.rglob("*") if p.is_file() and not p.is_symlink() and p.suffix.lower() in AUDIO_EXT],
+            key=lambda p: str(p).lower(),
+        ):
+            selected = _resolve_import_review_selected_audio_file(str(path), source)
+            if selected:
+                paths.append(selected)
         seen_keys: set = set()
         for fpath in paths:
             disc, track = _audio_position_from_path(str(fpath))
