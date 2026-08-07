@@ -15,10 +15,14 @@ export default function nextConfig(phase) {
   };
 
   if (isDev) {
+    // Points at a running beets-web-manager backend during local frontend
+    // development. Defaults to localhost; override with DEV_API_PROXY_TARGET
+    // (e.g. a LAN host) if the backend isn't running on this machine.
+    const target = process.env.DEV_API_PROXY_TARGET || 'http://localhost:8337';
     config.rewrites = async () => [
       {
         source: '/api/:path*',
-        destination: 'http://192.168.0.250:8337/api/:path*',
+        destination: `${target}/api/:path*`,
       },
     ];
   }
