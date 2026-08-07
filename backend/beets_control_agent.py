@@ -2195,6 +2195,153 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             finally:
                 release_os_lock(lock_file)
             return
+
+        if path == "/files/hardlink":
+            src = body.get("source_path", "")
+            dst = body.get("target_path", "")
+            expected_size = body.get("expected_size")
+
+            # Fixed roles, not caller-chosen: this endpoint exists for one
+            # operation (qBittorrent hardlink repair -- relink a torrent-side
+            # gap from the authoritative library copy), so the source must
+            # resolve under the music library and the destination under a
+            # torrent/staging or tmp root. It is deliberately not a generic
+            # cross-root hardlink primitive.
+            source_roots = ["music"]
+            dest_roots = ["staging", "tmp"]
+
+            if expected_size is not None:
+                if isinstance(expected_size, bool) or not isinstance(expected_size, int) or expected_size <= 0:
+                    self._send_json(400, {"error": "Invalid expected_size value"})
+                    return
+
+            # Note on symlinks: resolve_safe_path() fully dereferences
+            # symlinks via realpath() before returning, so safe_src/safe_dst
+            # are already the resolved target -- is_symlink() on them (or on
+            # the raw caller-supplied strings) cannot change the actual
+            # security boundary here. Containment is enforced on the fully
+            # resolved path either way, so a symlink source/destination
+            # grants no capability beyond what naming its resolved target
+            # directly would; and the identity check against a stat taken
+            # under lock immediately before os.link() (below) already closes
+            # the practical TOCTOU window regardless of whether a symlink
+            # was involved. An earlier version of this endpoint checked
+            # os.path.islink() on the raw request strings specifically to
+            # reject symlinks outright; that check was both ineffective (see
+            # above) and, when corrected to check the raw string, introduced
+            # a genuine CodeQL py/path-injection flow (a fresh filesystem
+            # call fed directly by unresolved request data) for no real
+            # security benefit, so it was removed rather than reintroduced
+            # in a disguised form.
+            try:
+                safe_src = resolve_safe_path(src, source_roots)
+                safe_dst = resolve_safe_path(dst, dest_roots)
+            except UnsafePathError:
+                self._send_json(403, {"error": "Access denied for path outside allowed roots"})
+                return
+
+            if not safe_src.exists() or not safe_src.is_file():
+                self._send_json(400, {"error": "Source path must be a regular non-symlink file"})
+                return
+
+            lock_file = acquire_os_lock(read_only=False)
+            try:
+                try:
+                    safe_src = resolve_safe_path(src, source_roots)
+                    safe_dst = resolve_safe_path(dst, dest_roots)
+                except UnsafePathError:
+                    self._send_json(403, {"error": "Access denied for path outside allowed roots"})
+                    return
+
+                if not safe_src.exists() or not safe_src.is_file():
+                    self._send_json(400, {"error": "Source path must be a regular non-symlink file"})
+                    return
+
+                src_stat = safe_src.stat()
+                if expected_size is not None:
+                    if src_stat.st_size != expected_size:
+                        self._send_json(400, {"error": "Source file size does not match expected size"})
+                        return
+
+                if safe_dst.exists():
+                    if safe_dst.is_symlink():
+                        self._send_json(409, {"error": "Target path exists and is a symlink"})
+                        return
+                    dst_stat = safe_dst.stat()
+                    if dst_stat.st_dev == src_stat.st_dev and dst_stat.st_ino == src_stat.st_ino:
+                        self._send_json(200, {"ok": True, "already_present": True})
+                        return
+                    else:
+                        self._send_json(409, {"error": "Target path exists and is a different file"})
+                        return
+
+                safe_dst.parent.mkdir(parents=True, exist_ok=True)
+
+                # mkdir(exist_ok=True) accepts a pre-existing parent without
+                # checking whether it is a symlink; re-validate the parent
+                # explicitly so a symlink swapped in between the check above
+                # and this point cannot redirect the link outside the
+                # destination root.
+                if safe_dst.parent.is_symlink():
+                    self._send_json(500, {"error": "Failed to create hardlink"})
+                    return
+                try:
+                    safe_dst_parent_reresolved = resolve_safe_path(str(safe_dst.parent), dest_roots)
+                except UnsafePathError:
+                    self._send_json(500, {"error": "Failed to create hardlink"})
+                    return
+                if safe_dst_parent_reresolved != safe_dst.parent:
+                    self._send_json(500, {"error": "Failed to create hardlink"})
+                    return
+
+                parent_stat = safe_dst.parent.stat()
+
+                if src_stat.st_dev != parent_stat.st_dev:
+                    self._send_json(400, {"error": "Cross-device hardlink not supported"})
+                    return
+
+                try:
+                    os.link(str(safe_src), str(safe_dst), follow_symlinks=False)
+                except NotImplementedError:
+                    # This production target is Linux, where follow_symlinks=False
+                    # is always supported for os.link(); fail closed rather than
+                    # silently falling back to a call that could follow a
+                    # symlink source on a platform that lacks the guarantee.
+                    self._send_json(500, {"error": "Failed to create hardlink"})
+                    return
+                except OSError as ex:
+                    if ex.errno == errno.EXDEV:
+                        self._send_json(400, {"error": "Cross-device hardlink not supported"})
+                    elif ex.errno == errno.EEXIST:
+                        self._send_json(409, {"error": "Target path exists"})
+                    else:
+                        self._send_json(500, {"error": "Failed to create hardlink"})
+                    return
+
+                if not safe_dst.exists() or safe_dst.is_symlink():
+                    try:
+                        if safe_dst.exists() or safe_dst.is_symlink():
+                            safe_dst.unlink()
+                    except Exception:
+                        pass
+                    self._send_json(500, {"error": "Post-link verification failed"})
+                    return
+
+                dst_stat_new = safe_dst.stat()
+                if dst_stat_new.st_dev != src_stat.st_dev or dst_stat_new.st_ino != src_stat.st_ino:
+                    try:
+                        safe_dst.unlink()
+                    except Exception:
+                        pass
+                    self._send_json(500, {"error": "Post-link identity mismatch"})
+                    return
+
+                self._send_json(200, {"ok": True, "linked": True})
+            except Exception:
+                self._send_json(500, {"error": "Failed to create hardlink"})
+            finally:
+                release_os_lock(lock_file)
+            return
         self._send_json(404, {"error": f"Endpoint not found: {path}"})
 
     def do_PATCH(self):
