@@ -3,13 +3,7 @@
 # Compose stack. Reusable across releases -- pass VERSION (and, once known,
 # EXPECTED_REVISION) rather than editing this file per release.
 #
-# Current target: v0.1.4 (v0.1.3's image, ghcr.io/iranman/beets-web-manager:0.1.3
-# at revision 36bfc7554378a9ef6bd8f9c47a7d1be553647503, contains only PR #64.
-# It does NOT contain the token-persistence, status-cache, or
-# get_db_connection fixes from PR #65 -- those require a v0.1.4 release. Do
-# not deploy 0.1.3 expecting PR #65's fixes; do not deploy 0.1.4 with this
-# script until v0.1.4 is actually tagged and published.) See
-# docs/operations/TRUENAS_ROLLOUT.md for the full writeup.
+# See docs/operations/TRUENAS_ROLLOUT.md for the full writeup.
 #
 # Design goals:
 #   - Never touch the authoritative Beets database (/config/musiclibrary.blb
@@ -27,13 +21,15 @@
 #     and --rollback DIR (undo this script's own change set).
 #
 # Usage:
-#   scripts/deploy_truenas_web_manager.sh              # real rollout
-#   scripts/deploy_truenas_web_manager.sh --dry-run     # inspect only
-#   scripts/deploy_truenas_web_manager.sh --rollback DIR
+#   /bin/bash scripts/deploy_truenas_web_manager.sh              # real rollout
+#   /bin/bash scripts/deploy_truenas_web_manager.sh --dry-run     # inspect only
+#   /bin/bash scripts/deploy_truenas_web_manager.sh --rollback DIR
 #
-# Configuration (env vars, all optional):
-#   STACK_DIR, SERVICE, ENGINE_SERVICE, VERSION, EXPECTED_REVISION,
-#   COMPOSE_FILE, MIN_ITEM_COUNT, STALE_DB_MAX_ITEMS,
+# Configuration (env vars):
+#   STACK_DIR (required for --dry-run/deploy/--rollback; not for --help),
+#   VERSION (required and validated for --dry-run/deploy only -- --rollback
+#   and --help do not need it), EXPECTED_REVISION (strongly recommended),
+#   SERVICE, ENGINE_SERVICE, COMPOSE_FILE, MIN_ITEM_COUNT, STALE_DB_MAX_ITEMS,
 #   ENDPOINT_BASE_URL, RESTORE_STALE_DB (rollback only)
 #
 # Exit codes: 0 success/dry-run-clean, 1 any safety check or stage failure
@@ -45,19 +41,25 @@ set -Eeuo pipefail
 # Configuration
 # ---------------------------------------------------------------------------
 # No generic default makes sense here -- every deployment stack directory
-# is host-specific. Required, not defaulted, matching this script's
-# convention for other per-deployment values below.
-STACK_DIR="${STACK_DIR:?set STACK_DIR to your deployment stack directory}"
+# is host-specific. Left unset here (not required at global init) so
+# --help works with zero environment configured; --dry-run, deploy, and
+# --rollback all require it -- enforced just after arg parsing below, once
+# we know the requested mode isn't --help.
+STACK_DIR="${STACK_DIR:-}"
 SERVICE="${SERVICE:-beets-web-manager}"
 ENGINE_SERVICE="${ENGINE_SERVICE:-beets}"
-VERSION="${VERSION:-0.1.4}"
+# No release default -- pinning one here would make the script silently
+# redeploy a stale version forever. Left unset at global init (same reason
+# as STACK_DIR: --help must work without it); required and validated only
+# for --dry-run and the real rollout via validate_version(), called from
+# run_dry_run()/run_deploy() only. --rollback never needs a version -- it
+# restores whatever image reference the backup recorded.
+VERSION="${VERSION:-}"
 EXPECTED_IMAGE="ghcr.io/iranman/beets-web-manager:${VERSION}"
-# Set once the VERSION release's commit is known (e.g. EXPECTED_REVISION=<sha>
-# when actually deploying v0.1.4) to pin the exact org.opencontainers.image.revision
-# label, not just the version label. Left unset here since v0.1.4 has not
-# been tagged yet -- see docs/operations/TRUENAS_ROLLOUT.md. When unset, the
-# revision-label check is skipped with a warning rather than pinned to a
-# guessed value.
+# Set once the VERSION release's commit is known (e.g. EXPECTED_REVISION=<sha>)
+# to pin the exact org.opencontainers.image.revision label. Strongly recommended
+# for pinned production rollouts. When unset, revision-label check is skipped
+# with a warning.
 EXPECTED_REVISION="${EXPECTED_REVISION:-}"
 COMPOSE_FILE="${COMPOSE_FILE:-}"
 DB_FILENAME="musiclibrary.blb"
@@ -120,12 +122,6 @@ warn() { printf '[%s] WARNING: %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
 _FAILURE_REPORTED=0
 
 # Prints the failed-stage/backup-dir/rollback-command diagnostic block.
-# Called from both die() (the normal, deliberate rejection path -- an
-# explicit `exit` builtin does NOT fire bash's ERR trap, so die() cannot
-# rely on the trap alone) and on_error() (the ERR trap, for genuinely
-# unexpected failures: unbound variables, a command failing under -e that
-# nothing explicitly checked). Guarded so a failure that somehow triggers
-# both paths only prints once.
 report_failure() {
   local ec="$1"
   [[ "$_FAILURE_REPORTED" -eq 1 ]] && return 0
@@ -142,7 +138,9 @@ report_failure() {
         || echo "  (container '${SERVICE}' not found or docker unavailable)"
     fi
     echo "Rollback command:"
-    if [[ -n "$BACKUP_DIR" ]]; then
+    if [[ "$DRY_RUN" -eq 1 || "$MODE" == "dry-run" ]]; then
+      echo "  (Dry-run only: no production mutation occurred; no rollback is required.)"
+    elif [[ -n "$BACKUP_DIR" && -d "$BACKUP_DIR" && -f "$BACKUP_DIR/docker-compose.yml.bak" ]]; then
       echo "  $0 --rollback ${BACKUP_DIR}"
     else
       echo "  (no backup was created yet -- nothing to roll back; production was not touched)"
@@ -166,16 +164,25 @@ on_error() {
 }
 trap on_error ERR
 
+# STACK_DIR is required for every mode that reaches this point: --help
+# exits inside the arg-parsing loop above, before here, so it never hits
+# this check and needs no environment configured at all.
+[[ -n "$STACK_DIR" ]] || die "STACK_DIR is required (set STACK_DIR to your deployment stack directory)"
+
 # ---------------------------------------------------------------------------
 # Generic helpers
 # ---------------------------------------------------------------------------
+validate_version() {
+  [[ -n "${VERSION:-}" ]] || die "VERSION is required (set VERSION to the exact release version, e.g. VERSION=0.1.6)"
+  if [[ "$VERSION" =~ ^(latest|stable|edge)$ ]] || ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9\.-]+)?$ ]]; then
+    die "VERSION must be an explicit numbered release (e.g. 0.1.6, 1.0.0, 1.2.3-rc.1), got: '${VERSION}'"
+  fi
+}
+
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "required command not found on PATH: $1"
 }
 
-# Prefer a real interpreter check up front -- almost every safety check below
-# depends on python3 (compose-config JSON parsing, SQLite inspection
-# fallback, checksum/permission reporting).
 require_cmd docker
 require_cmd python3
 
@@ -183,20 +190,10 @@ _compose() {
   docker compose -f "$COMPOSE_FILE" "$@"
 }
 
-# Runs python3 and strips any \r from its output before bash ever sees it.
-# On Linux (the real TrueNAS target) this is a no-op. It exists because a
-# Windows-hosted python3 (dev/test environments only) CRLF-translates
-# stdout by default, and bash's $(...) command substitution strips only
-# trailing \n -- silently leaving \r embedded in captured multi-line output,
-# which then breaks exact string comparisons (mount-source matching,
-# before/after container-ID diffing, etc). Every python3 call whose output
-# this script captures goes through here.
 _py() {
   python3 "$@" | tr -d '\r'
 }
 
-# Resolve the compose file once, never guessing a container/service exists
-# just because a directory name matches.
 resolve_compose_file() {
   if [[ -n "$COMPOSE_FILE" ]]; then
     [[ -f "$COMPOSE_FILE" ]] || die "COMPOSE_FILE does not exist: $COMPOSE_FILE"
@@ -212,16 +209,17 @@ resolve_compose_file() {
   die "no Compose file found under ${STACK_DIR} (looked for docker-compose.arrs.yml, docker-compose.yml) -- set COMPOSE_FILE explicitly"
 }
 
-# Canonicalize a path without requiring the target to exist (works for a
-# not-yet-created backup dir, and for DB paths we check existence of
-# separately).
 canon_path() {
   _py -c 'import os,sys; print(os.path.realpath(sys.argv[1]).replace("\\","/"))' "$1"
 }
 
 sha256_file() {
   if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$1" | awk '{print $1}'
+    # GNU coreutils prefixes the whole output line with a literal '\' when
+    # the filename needs escaping (contains a backslash, newline, or CR) --
+    # `canon_path()` output never does, but defend anyway rather than
+    # silently returning that marker as part of the hash if ever fed one.
+    sha256sum "$1" | awk '{print $1}' | sed 's/^\\//'
   else
     _py -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$1"
   fi
@@ -251,9 +249,6 @@ file_size() {
   _py -c 'import os,sys; print(os.path.getsize(sys.argv[1]))' "$1"
 }
 
-# Read-only SQL against a SQLite file: cannot write, cannot create -wal/-shm,
-# cannot modify the file even on error. NEVER converts a query failure into
-# "0 rows" -- any failure here is a hard stop (fail closed per spec).
 sqlite_ro_query() {
   local db="$1" sql="$2"
   _py - "$db" "$sql" <<'PYEOF'
@@ -271,10 +266,6 @@ finally:
 PYEOF
 }
 
-# Any process holding the file open, on the host or in any container sharing
-# the bind mount. Prefers lsof, falls back to fuser. Fails closed (refuses to
-# proceed) if neither tool is available -- "we couldn't verify" is never
-# treated as "so it's fine".
 file_is_open() {
   local f="$1"
   if command -v lsof >/dev/null 2>&1; then
@@ -288,8 +279,6 @@ file_is_open() {
   fi
 }
 
-# docker compose config, resolved to JSON, parsed with python3 (never
-# regex/grep over YAML).
 compose_config_json() {
   _compose config --format json 2>/dev/null || _compose config | _py -c '
 import sys, json
@@ -318,8 +307,6 @@ resolve_container_id() {
   echo "$cid"
 }
 
-# Mount source for a given destination inside a container, resolved from
-# `docker inspect`, never inferred from directory naming conventions.
 mount_source_for_dest() {
   local cid="$1" dest="$2"
   docker inspect --format '{{json .Mounts}}' "$cid" | _py -c "
@@ -370,8 +357,6 @@ discover_and_verify_mounts() {
   WEBMGR_DATA_SRC="$(mount_source_for_dest "$WEBMGR_CID" /web-manager-data)"
   [[ -n "$WEBMGR_DATA_SRC" ]] || die "could not determine web-manager's /web-manager-data host source from 'docker inspect ${SERVICE}' -- is /web-manager-data mounted at all?"
 
-  # Optional: an old-architecture web-manager may still mount /config too
-  # (pre-#64 local-db-fallback deployments). Not fatal if absent.
   WEBMGR_LEGACY_CONFIG_SRC="$(mount_source_for_dest "$WEBMGR_CID" /config || true)"
 
   local engine_canon webmgr_canon
@@ -406,9 +391,6 @@ discover_and_verify_mounts() {
 verify_compose_image() {
   STAGE="compose-image-verification"
   local resolved_image
-  # Force the exact pinned release for THIS invocation only -- never edits
-  # the operator's .env, just overrides the process environment used to
-  # resolve/pull/recreate the service.
   export BEETS_WEB_MANAGER_VERSION="$VERSION"
   resolved_image="$(compose_service_image "$SERVICE")"
   [[ -n "$resolved_image" ]] || die "compose service '${SERVICE}' has no image defined in ${COMPOSE_FILE}"
@@ -523,24 +505,29 @@ TOKEN_EXISTS=0
 TOKEN_SIZE="" TOKEN_MODE="" TOKEN_OWNER="" TOKEN_SHA256=""
 NEEDS_TOKEN_MIGRATION=0
 LEGACY_TOKEN_PATH=""
+ACTIVE_AUTH_TOKEN_PATH=""
 
 inspect_auth_token() {
   STAGE="token-inspection"
   log "Token env vars present (names only, values never read here): $(env | awk -F= '/^BEETS_(API|WEB_AUTH)_TOKEN/{print $1}' | paste -sd, -)"
 
   if [[ -f "$TOKEN_PATH" ]]; then
-    TOKEN_EXISTS=1
     TOKEN_SIZE="$(file_size "$TOKEN_PATH")"
-    [[ "$TOKEN_SIZE" -gt 0 ]] || die "persistent auth token file exists but is empty: ${TOKEN_PATH}"
-    TOKEN_MODE="$(file_mode_octal "$TOKEN_PATH")"
-    TOKEN_OWNER="$(file_owner "$TOKEN_PATH")"
-    TOKEN_SHA256="$(sha256_file "$TOKEN_PATH")"
-    case "$TOKEN_MODE" in
-      0o600|0o400) : ;;
-      *) warn "persistent auth token file mode is ${TOKEN_MODE}, expected 0o600 (world/group readable tokens are a real risk)" ;;
-    esac
-    log "Persistent web auth token found: path=${TOKEN_PATH} size=${TOKEN_SIZE} mode=${TOKEN_MODE} owner=${TOKEN_OWNER} sha256=${TOKEN_SHA256}"
-    return 0
+    if [[ "$TOKEN_SIZE" -gt 0 ]]; then
+      TOKEN_EXISTS=1
+      ACTIVE_AUTH_TOKEN_PATH="$TOKEN_PATH"
+      TOKEN_MODE="$(file_mode_octal "$TOKEN_PATH")"
+      TOKEN_OWNER="$(file_owner "$TOKEN_PATH")"
+      TOKEN_SHA256="$(sha256_file "$TOKEN_PATH")"
+      case "$TOKEN_MODE" in
+        0o600|0o400) : ;;
+        *) warn "persistent auth token file mode is ${TOKEN_MODE}, expected 0o600 (world/group readable tokens are a real risk)" ;;
+      esac
+      log "Persistent web auth token found: path=${TOKEN_PATH} size=${TOKEN_SIZE} mode=${TOKEN_MODE} owner=${TOKEN_OWNER} sha256=${TOKEN_SHA256}"
+      return 0
+    else
+      die "persistent auth token file exists but is empty: ${TOKEN_PATH}"
+    fi
   fi
 
   log "No persistent token file at ${TOKEN_PATH} yet."
@@ -549,11 +536,32 @@ inspect_auth_token() {
     legacy_canon="$(canon_path "$WEBMGR_LEGACY_CONFIG_SRC")"
     candidate="${legacy_canon%/}/${TOKEN_FILENAME}"
     if [[ -f "$candidate" ]]; then
-      LEGACY_TOKEN_PATH="$candidate"
-      NEEDS_TOKEN_MIGRATION=1
-      log "Legacy web-manager token candidate found: ${LEGACY_TOKEN_PATH} (guarded migration will run in Phase C)"
+      local legacy_size api_token_val legacy_val
+      legacy_size="$(file_size "$candidate")"
+      if [[ "$legacy_size" -gt 0 ]]; then
+        api_token_val="${BEETS_API_TOKEN:-}"
+        legacy_val="$(cat "$candidate")"
+        if [[ -n "$api_token_val" && "$legacy_val" == "$api_token_val" ]]; then
+          unset legacy_val api_token_val
+          warn "legacy token candidate at ${candidate} is identical to BEETS_API_TOKEN -- unusable as web auth token; ignoring"
+        else
+          unset legacy_val api_token_val
+          LEGACY_TOKEN_PATH="$candidate"
+          NEEDS_TOKEN_MIGRATION=1
+          ACTIVE_AUTH_TOKEN_PATH="$candidate"
+          if [[ "$DRY_RUN" -eq 1 ]]; then
+            log "Using validated legacy auth token read-only for dry-run endpoint verification"
+          else
+            log "Legacy web-manager token candidate found: ${LEGACY_TOKEN_PATH} (guarded migration will run in Phase C)"
+          fi
+          return 0
+        fi
+      else
+        warn "legacy token candidate at ${candidate} is empty -- ignoring"
+      fi
     fi
   fi
+  ACTIVE_AUTH_TOKEN_PATH=""
 }
 
 # ---------------------------------------------------------------------------
@@ -572,15 +580,14 @@ plan_backup_dir() {
 }
 
 # ---------------------------------------------------------------------------
-# Phase A.7 -- Endpoint reachability (best-effort, read-only, used by both
-# dry-run and the post-deploy verification phase)
+# Phase A.7 -- Endpoint reachability
 # ---------------------------------------------------------------------------
 probe_endpoint() {
   # probe_endpoint <path> <auth: 0|1> -- prints "status|elapsed_ms|bytes"
   local path="$1" auth="$2" tok_arg=()
-  if [[ "$auth" -eq 1 && "$TOKEN_EXISTS" -eq 1 ]]; then
+  if [[ "$auth" -eq 1 && -n "$ACTIVE_AUTH_TOKEN_PATH" && -f "$ACTIVE_AUTH_TOKEN_PATH" ]]; then
     local tok
-    tok="$(cat "$TOKEN_PATH")"
+    tok="$(cat "$ACTIVE_AUTH_TOKEN_PATH")"
     tok_arg=(-H "Authorization: Bearer ${tok}")
     unset tok
   fi
@@ -597,6 +604,7 @@ probe_endpoint() {
 }
 
 verify_endpoints() {
+  local mode="${1:-post-deploy}"
   STAGE="endpoint-verification"
   local endpoints=("/api/health:0:500" "/api/setup/status:1:2000" "/api/library?limit=1:1:2000" "/api/library?limit=50:1:5000")
   local spec path auth budget_ms i result status ms size any_failed=0
@@ -621,8 +629,8 @@ verify_endpoints() {
   # Pagination contract check against the authoritative item count recorded
   # earlier -- never hard-coded.
   local tok pagination_json total returned
-  if [[ "$TOKEN_EXISTS" -eq 1 ]]; then
-    tok="$(cat "$TOKEN_PATH")"
+  if [[ -n "$ACTIVE_AUTH_TOKEN_PATH" && -f "$ACTIVE_AUTH_TOKEN_PATH" ]]; then
+    tok="$(cat "$ACTIVE_AUTH_TOKEN_PATH")"
     pagination_json="$(curl -sS --max-time 10 -H "Authorization: Bearer ${tok}" "${ENDPOINT_BASE_URL}/api/library?limit=1" 2>/dev/null || true)"
     unset tok
     total="$(_py -c "
@@ -653,8 +661,14 @@ except Exception:
   fi
 
   if [[ "$any_failed" -eq 1 ]]; then
-    die "one or more endpoint checks failed -- see warnings above"
+    if [[ "$mode" == "dry-run" ]]; then
+      warn "one or more endpoint checks failed during dry-run (see warnings above)"
+      return 1
+    else
+      die "one or more endpoint checks failed -- see warnings above"
+    fi
   fi
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -662,6 +676,7 @@ except Exception:
 # ---------------------------------------------------------------------------
 run_dry_run() {
   log "=== DRY RUN: no containers will be stopped/recreated, no files moved, no tokens copied, no Compose changes ==="
+  validate_version
   resolve_compose_file
   discover_and_verify_mounts
   verify_compose_image
@@ -674,7 +689,7 @@ run_dry_run() {
   _compose pull "$SERVICE" >&2 || warn "image pull failed in dry-run (network/registry issue) -- label verification skipped"
   verify_image_labels_if_present || true
   if docker inspect --format '{{.State.Status}}' "$SERVICE" >/dev/null 2>&1; then
-    verify_endpoints || warn "endpoint verification reported issues (see above) -- not fatal in dry-run"
+    verify_endpoints "dry-run" || warn "endpoint verification reported issues (see above) -- not fatal in dry-run"
   else
     log "Service '${SERVICE}' is not currently running -- skipping live endpoint checks."
   fi
@@ -736,18 +751,27 @@ create_backup_dir() {
     echo "auth_album_count=${AUTH_ALBUM_COUNT}"
   } > "$BACKUP_DIR/authoritative-db-metadata.txt"
 
-  if [[ "$TOKEN_EXISTS" -eq 1 ]]; then
+  local persistent_existed=0 legacy_existed=0 persistent_sha="" legacy_sha=""
+  if [[ -f "$TOKEN_PATH" ]]; then
+    persistent_existed=1
+    persistent_sha="$(sha256_file "$TOKEN_PATH")"
     cp "$TOKEN_PATH" "$BACKUP_DIR/auth_token.bak"
     chmod 600 "$BACKUP_DIR/auth_token.bak"
-    {
-      echo "token_path=${TOKEN_PATH}"
-      echo "token_size=${TOKEN_SIZE}"
-      echo "token_mode=${TOKEN_MODE}"
-      echo "token_owner=${TOKEN_OWNER}"
-      echo "token_sha256=${TOKEN_SHA256}"
-    } > "$BACKUP_DIR/token-metadata.txt"
-    chmod 600 "$BACKUP_DIR/token-metadata.txt"
   fi
+  if [[ -n "$LEGACY_TOKEN_PATH" && -f "$LEGACY_TOKEN_PATH" ]]; then
+    legacy_existed=1
+    legacy_sha="$(sha256_file "$LEGACY_TOKEN_PATH")"
+  fi
+  {
+    echo "persistent_token_existed_before=${persistent_existed}"
+    echo "legacy_token_existed_before=${legacy_existed}"
+    echo "token_migration_planned=${NEEDS_TOKEN_MIGRATION}"
+    echo "persistent_token_path=${TOKEN_PATH}"
+    echo "legacy_token_path=${LEGACY_TOKEN_PATH}"
+    echo "persistent_token_sha256=${persistent_sha}"
+    echo "legacy_token_sha256=${legacy_sha}"
+  } > "$BACKUP_DIR/token-metadata.txt"
+  chmod 600 "$BACKUP_DIR/token-metadata.txt"
 
   log "Backup created at ${BACKUP_DIR}"
 }
@@ -814,7 +838,11 @@ migrate_token_if_needed() {
 
   TOKEN_EXISTS=1
   TOKEN_SHA256="$dst_sha"
-  echo "token_migration_performed=1" >> "$BACKUP_DIR/token-metadata.txt" 2>/dev/null || true
+  ACTIVE_AUTH_TOKEN_PATH="$TOKEN_PATH"
+  {
+    echo "token_migration_performed=1"
+    echo "migrated_token_sha256=${dst_sha}"
+  } >> "$BACKUP_DIR/token-metadata.txt" 2>/dev/null || true
   log "Legacy token migrated to ${TOKEN_PATH} (checksum verified, contents never printed)."
 }
 
@@ -825,8 +853,6 @@ deploy_image() {
   _compose pull "$SERVICE"
   verify_image_labels_if_present
 
-  # Snapshot every other running service's container ID so we can prove
-  # nothing else was touched by --force-recreate.
   local other_services other_before other_after
   other_services="$(compose_config_json | _py -c "
 import json, sys
@@ -857,9 +883,6 @@ print('\n'.join(s for s in data.get('services', {}) if s != '$SERVICE'))
   log "${SERVICE} is healthy on image ${EXPECTED_IMAGE} (id=${running_image_id})."
 }
 
-# Standalone (directly unit-testable) re-check that the authoritative
-# database's quick_check/counts/checksum are byte-for-byte what they were
-# before this rollout touched anything.
 assert_authoritative_db_unchanged() {
   local quick_check item_count album_count sha
   quick_check="$(sqlite_ro_query "$AUTH_DB_PATH" 'PRAGMA quick_check;')" || die "post-deploy PRAGMA quick_check failed against authoritative database"
@@ -873,9 +896,6 @@ assert_authoritative_db_unchanged() {
   log "Authoritative database confirmed unchanged post-deploy (items=${item_count} albums=${album_count} sha256=${sha})."
 }
 
-# Standalone (directly unit-testable) proof the local-DB-fallback
-# architecture removed by PR #64 has not regressed: nothing reappears at the
-# stale web-manager-owned DB/WAL/SHM paths after a (re)start.
 assert_no_local_db_recreated() {
   local f
   for f in "$STALE_DB_PATH" "$STALE_WAL_PATH" "$STALE_SHM_PATH"; do
@@ -906,11 +926,12 @@ verify_post_deploy() {
 
   assert_no_local_db_recreated
 
-  verify_endpoints
+  verify_endpoints "post-deploy"
 }
 
 run_deploy() {
   log "=== Beets Web Manager ${VERSION} guarded rollout starting ==="
+  validate_version
   resolve_compose_file
   discover_and_verify_mounts
   verify_compose_image
@@ -947,19 +968,51 @@ run_rollback() {
   log "Restoring Compose file from backup..."
   cp "$ROLLBACK_DIR/docker-compose.yml.bak" "$COMPOSE_FILE"
 
-  if [[ -f "$ROLLBACK_DIR/token-metadata.txt" ]] && grep -q '^token_migration_performed=1' "$ROLLBACK_DIR/token-metadata.txt" 2>/dev/null; then
-    if [[ -f "$ROLLBACK_DIR/auth_token.bak" && -f "$TOKEN_PATH" ]]; then
-      local current_sha backup_sha
-      current_sha="$(sha256_file "$TOKEN_PATH")"
-      backup_sha="$(grep '^token_sha256=' "$ROLLBACK_DIR/token-metadata.txt" | cut -d= -f2)"
-      if [[ "$current_sha" != "$backup_sha" ]]; then
-        warn "current token differs from the one recorded before this rollout's migration -- NOT restoring it automatically (something else changed it since); restore ${ROLLBACK_DIR}/auth_token.bak manually if needed"
-      else
+  if [[ -f "$ROLLBACK_DIR/token-metadata.txt" ]]; then
+    local p_existed l_existed migration_performed p_sha m_sha meta_p_path
+    p_existed="$(grep '^persistent_token_existed_before=' "$ROLLBACK_DIR/token-metadata.txt" | cut -d= -f2 || echo "")"
+    l_existed="$(grep '^legacy_token_existed_before=' "$ROLLBACK_DIR/token-metadata.txt" | cut -d= -f2 || echo "")"
+    migration_performed="$(grep '^token_migration_performed=' "$ROLLBACK_DIR/token-metadata.txt" | cut -d= -f2 || echo "")"
+    p_sha="$(grep '^persistent_token_sha256=' "$ROLLBACK_DIR/token-metadata.txt" | cut -d= -f2 || echo "")"
+    m_sha="$(grep '^migrated_token_sha256=' "$ROLLBACK_DIR/token-metadata.txt" | cut -d= -f2 || echo "")"
+    meta_p_path="$(grep '^persistent_token_path=' "$ROLLBACK_DIR/token-metadata.txt" | cut -d= -f2 || echo "")"
+
+    if [[ "$p_existed" == "1" ]]; then
+      if [[ -f "$ROLLBACK_DIR/auth_token.bak" && -f "$TOKEN_PATH" ]]; then
+        local current_sha
+        current_sha="$(sha256_file "$TOKEN_PATH")"
+        if [[ -n "$p_sha" && "$current_sha" != "$p_sha" ]]; then
+          warn "current token differs from recorded pre-rollout value (${p_sha}) -- NOT restoring automatically; restore ${ROLLBACK_DIR}/auth_token.bak manually if needed"
+        else
+          cp "$ROLLBACK_DIR/auth_token.bak" "$TOKEN_PATH"
+          chmod 600 "$TOKEN_PATH"
+          log "Restored pre-rollout persistent token."
+        fi
+      elif [[ -f "$ROLLBACK_DIR/auth_token.bak" && ! -f "$TOKEN_PATH" ]]; then
         cp "$ROLLBACK_DIR/auth_token.bak" "$TOKEN_PATH"
         chmod 600 "$TOKEN_PATH"
-        log "Restored pre-migration token."
+        log "Restored pre-rollout persistent token (file was missing)."
+      fi
+    elif [[ "$p_existed" == "0" && "$migration_performed" == "1" ]]; then
+      if [[ -f "$TOKEN_PATH" ]]; then
+        local current_sha canon_dst canon_meta
+        current_sha="$(sha256_file "$TOKEN_PATH")"
+        canon_dst="$(canon_path "$TOKEN_PATH")"
+        canon_meta="$(canon_path "${meta_p_path:-$TOKEN_PATH}")"
+        if [[ "$canon_dst" == "$canon_meta" && -n "$m_sha" && "$current_sha" == "$m_sha" ]]; then
+          rm -f "$TOKEN_PATH"
+          log "Removed persistent token created by this rollout migration (restored pre-rollout state: no persistent token)."
+        else
+          warn "refusing automatic deletion of persistent token ${TOKEN_PATH}: path or checksum (${current_sha}) differs from recorded migration value (${m_sha}); leaving file in place"
+        fi
+      fi
+    elif [[ "$p_existed" == "0" && "$migration_performed" != "1" ]]; then
+      if [[ -f "$TOKEN_PATH" ]]; then
+        warn "a new persistent token appeared at ${TOKEN_PATH} during/after rollout; refusing automatic deletion without explicit operator verification"
       fi
     fi
+  else
+    warn "missing token metadata in backup directory ${ROLLBACK_DIR} -- leaving token file at ${TOKEN_PATH} untouched"
   fi
 
   if [[ "$RESTORE_STALE_DB" -eq 1 && -d "$ROLLBACK_DIR/stale-database" ]]; then
@@ -986,13 +1039,6 @@ run_rollback() {
 
   WEBMGR_CID="$(resolve_container_id "$SERVICE")"
   wait_for_health "$WEBMGR_CID" "$HEALTH_TIMEOUT_SECONDS" || die "container did not become healthy after rollback"
-
-  if [[ -f "$TOKEN_PATH" && -f "$ROLLBACK_DIR/token-metadata.txt" ]]; then
-    local expected_sha actual_sha
-    expected_sha="$(grep '^token_sha256=' "$ROLLBACK_DIR/token-metadata.txt" | cut -d= -f2)"
-    actual_sha="$(sha256_file "$TOKEN_PATH")"
-    [[ -z "$expected_sha" || "$expected_sha" == "$actual_sha" ]] || warn "token checksum after rollback (${actual_sha}) differs from the recorded pre-rollout value (${expected_sha})"
-  fi
 
   log "=== Rollback complete. Beets engine and its database were never touched. ==="
 }

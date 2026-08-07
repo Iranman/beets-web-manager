@@ -8,68 +8,17 @@ SQLite database left behind by pre-#64 installs. The tooling for this is
 
 ## Which version to deploy
 
-```text
-v0.1.3  Contains PR #64 only (fix(architecture): remove local db fallback,
-        fix auth persistence and api performance). Does NOT contain PR
-        #65's fixes below.
-        Image: ghcr.io/iranman/beets-web-manager:0.1.3
-        Revision: 36bfc7554378a9ef6bd8f9c47a7d1be553647503
-
-v0.1.4  Required for PR #65's corrections: the get_db_connection()
-        remote-only regression fix, the auth-token log-leak fix (a
-        generated token is no longer printed anywhere -- read it from its
-        persisted file instead) plus fail-closed startup when persistence
-        can't be verified, and the /api/setup/status cache hardening
-        (monotonic clock, single-flighted rebuilds, invalidation on config
-        change).
-        Image (once published): ghcr.io/iranman/beets-web-manager:0.1.4
-        NOT tagged/published yet -- do not deploy that image reference
-        until it actually exists; VERSION=0.1.4 is this script's default
-        precisely so it's ready to run the moment it does.
-```
-
-**The hardened rollout in this document targets `v0.1.4`, not `v0.1.3`.**
-Deploying `0.1.3` with this tooling gets you the guarded rollout mechanics
-(mount discovery, DB/token safety checks, backup, rollback) but not PR
-#65's application-level fixes -- those only ship in `0.1.4`. Do not retag or
-otherwise modify the existing `v0.1.3` tag/image to "backport" them.
-
-## Release identity
-
-```text
-PR #64 merge commit:       4aed0c6af83880afbef4192c8d2e97f605b48b10
-                            fix(architecture): remove local db fallback,
-                            fix auth persistence and api performance
-
-Follow-up test commit:     36bfc7554378a9ef6bd8f9c47a7d1be553647503
-                            test(integration): patch _db in
-                            test_post_retag_artwork_integration to use test
-                            temp SQLite library
-
-v0.1.3 release tag:        points at 36bfc75, which is 4aed0c6 plus the
-                            follow-up test commit on top
-v0.1.3 image:               ghcr.io/iranman/beets-web-manager:0.1.3
-
-PR #65:                     fix(deploy): harden v0.1.3 TrueNAS rollout,
-                            token persistence, and status cache
-v0.1.4:                     not yet tagged -- create only after PR #65 is
-                            merged to main AND post-merge CI is green
-```
-
-**36bfc75 is not the PR #64 merge commit** -- it is a small follow-up test
-correction committed on `main` after the PR merged. `v0.1.3` includes both.
-Verify before every rollout, don't trust this file blindly:
+Always deploy a tagged, published release of `beets-web-manager` (e.g. `0.1.5`, `0.1.6`, `1.0.0`).
 
 ```bash
-git merge-base --is-ancestor 4aed0c6af83880afbef4192c8d2e97f605b48b10 v0.1.3
-git merge-base --is-ancestor 36bfc7554378a9ef6bd8f9c47a7d1be553647503 v0.1.3
-
 docker pull ghcr.io/iranman/beets-web-manager:<VERSION>
 docker image inspect ghcr.io/iranman/beets-web-manager:<VERSION> \
   --format '{{json .Config.Labels}}'
 # org.opencontainers.image.revision must equal the release commit you expect
 # org.opencontainers.image.version  must equal <VERSION>
 ```
+
+Do not deploy moving aliases such as `latest`, `stable`, or `edge`. `VERSION` must be an explicit numbered release.
 
 ## Expected host layout (verify, don't trust)
 
@@ -90,8 +39,10 @@ land somewhere unexpected relative to those sources.
 
 ## Dry run first, always
 
+To execute on TrueNAS or any host with a `noexec` filesystem policy on `/tmp`, invoke the script explicitly via `/bin/bash`:
+
 ```bash
-scripts/deploy_truenas_web_manager.sh --dry-run
+STACK_DIR=/path/to/docker-stack VERSION=<VERSION> EXPECTED_REVISION=<RELEASE_COMMIT_SHA> /bin/bash /path/to/deploy_truenas_web_manager.sh --dry-run
 ```
 
 Performs every safety check (mount discovery, authoritative + stale DB
@@ -105,7 +56,7 @@ checks; it's what `tests/test_deploy_truenas_rollout.py` exercises.
 ## Real rollout
 
 ```bash
-scripts/deploy_truenas_web_manager.sh
+STACK_DIR=/path/to/docker-stack VERSION=<VERSION> EXPECTED_REVISION=<RELEASE_COMMIT_SHA> /bin/bash /path/to/deploy_truenas_web_manager.sh
 ```
 
 Order of operations -- nothing in the second half runs unless every check in
@@ -123,10 +74,9 @@ the first half passes:
    `$STACK_DIR/_backups/web-manager-rollout-YYYYMMDD-HHMMSS/`,
    `chmod 700`, containing the Compose file, `.env` (if present), resolved
    `docker compose config`, the current container's `docker inspect` output,
-   the previous image ID/ref and its labels, the current token (copy +
-   metadata, contents never printed), and the authoritative DB's metadata
-   (path/size/checksum/counts -- **never a copy of the authoritative DB
-   itself**).
+   the previous image ID/ref and its labels, token metadata (contents never
+   printed), and the authoritative DB's metadata (path/size/checksum/counts --
+   **never a copy of the authoritative DB itself**).
 3. **Stop** only `beets-web-manager`, confirm it stopped.
 4. **Archive the stale DB** (only after confirming, via `lsof`/`fuser`, that
    the exact files `musiclibrary.blb`, `musiclibrary.blb-wal`,
@@ -167,33 +117,28 @@ logs, or shell history.
 ## Rollback
 
 ```bash
-scripts/deploy_truenas_web_manager.sh --rollback "$STACK_DIR/_backups/web-manager-rollout-YYYYMMDD-HHMMSS"
+/bin/bash /path/to/deploy_truenas_web_manager.sh --rollback "$STACK_DIR/_backups/web-manager-rollout-YYYYMMDD-HHMMSS"
 ```
 
-Stops only `beets-web-manager`, restores the prior Compose file, restores
-the pre-migration token only if its checksum still matches what was
-recorded (never silently overwrites a token that changed since), recreates
-`beets-web-manager` on the previous image reference, and verifies health and
-token checksum. Stale database files are **left archived** by default --
-current-architecture code never reads them, so restoring them is a no-op at
-best. Pass `RESTORE_STALE_DB=1` to restore them anyway (e.g. rolling back to
-a pre-#64 image that still depends on the local-DB fallback). The Beets
+Stops only `beets-web-manager`, restores the prior Compose file, restores or
+removes the persistent token according to token migration metadata and recorded
+checksums, recreates `beets-web-manager` on the previous image reference, and
+verifies health and token checksum. Stale database files are **left archived**
+by default -- current-architecture code never reads them, so restoring them is
+a no-op at best. Pass `RESTORE_STALE_DB=1` to restore them anyway (e.g. rolling
+back to a pre-#64 image that still depends on the local-DB fallback). The Beets
 engine and its database are never touched or recreated by rollback.
 
 ## Configuration knobs
 
-`STACK_DIR` is required (no generic default makes sense for a host-specific
-path). All other environment variables are optional:
+`STACK_DIR` is required for `--dry-run`, the real rollout, and `--rollback` (no generic default makes sense for a host-specific path); `--help` needs neither it nor `VERSION` and works with nothing configured. `VERSION` is required and validated only for `--dry-run` and the real rollout -- `--rollback` restores whatever image reference the backup itself recorded, so it never needs one. All other environment variables are optional:
 
 ```text
-STACK_DIR              required, no default (your deployment's stack directory)
+STACK_DIR              required for --dry-run/rollout/--rollback, no default (your deployment's stack directory)
+VERSION                required for --dry-run/rollout only, no default (e.g. 1.0.0)
+EXPECTED_REVISION       strongly recommended; when set, validates exact Git commit revision label
 SERVICE                default beets-web-manager
 ENGINE_SERVICE          default beets
-VERSION                 default 0.1.4 (not yet released -- see "Which version to deploy" above)
-EXPECTED_REVISION       unset by default; when unset the revision-label pin is
-                        skipped (warning only) and only the version label is
-                        checked. Set explicitly once VERSION's release commit
-                        is known, e.g. EXPECTED_REVISION=<v0.1.4's commit sha>
 COMPOSE_FILE            auto-detected (docker-compose.arrs.yml, then docker-compose.yml)
 MIN_ITEM_COUNT          default 10 -- raise to your real library size
 STALE_DB_MAX_ITEMS      default 100000
@@ -205,23 +150,11 @@ RESTORE_STALE_DB        rollback only, default 0
 ## Testing
 
 ```bash
-bash -n scripts/deploy_truenas_web_manager.sh
-shellcheck scripts/deploy_truenas_web_manager.sh
+/bin/bash -n scripts/deploy_truenas_web_manager.sh
 python -m unittest tests.test_deploy_truenas_rollout -v
 ```
 
-`tests/test_deploy_truenas_rollout.py` covers the safety checks directly
-(by sourcing the script's functions against real temp SQLite files -- no
-Docker needed) and the end-to-end dry-run/deploy/rollback flows against a
-fake `docker`/`docker compose`/`curl` (`tests/deploy/fake_docker.py`,
-`tests/deploy/fake_curl.py`) driven by a JSON world-state file. No real
-Docker daemon or TrueNAS host is used. Passing these tests is necessary but
-not sufficient for production confidence -- validate against a disposable
-two-container Compose environment before touching the real stack.
-
-Requires a working POSIX `bash` on PATH (true on Linux CI/TrueNAS, and in a
-correctly configured Git-Bash-first Windows PATH). On a Windows dev machine
-where a `C:\WINDOWS\system32\bash.exe` WSL-launcher stub shadows Git for
-Windows' real bash (seen from a plain PowerShell session with no Linux
-distro registered), point the test suite at the real one:
-`$env:ROLLOUT_TEST_BASH = 'C:\Program Files\Git\bin\bash.exe'`.
+`tests/test_deploy_truenas_rollout.py` covers safety checks directly
+(by sourcing the script's functions against real temp SQLite files) and
+end-to-end dry-run/deploy/rollback flows against a fake `docker`/`docker compose`/`curl`
+(`tests/deploy/fake_docker.py`, `tests/deploy/fake_curl.py`) driven by a JSON world-state file. No real Docker daemon or TrueNAS host is used. Passing these tests is necessary but not sufficient for production confidence -- validate against a disposable two-container Compose environment before touching the real stack.
