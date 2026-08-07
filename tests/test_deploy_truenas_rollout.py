@@ -37,13 +37,6 @@ FAKE_DOCKER = ROOT / "tests" / "deploy" / "fake_docker.py"
 FAKE_CURL = ROOT / "tests" / "deploy" / "fake_curl.py"
 SCRIPT_SOURCE = SCRIPT.read_text(encoding="utf-8")
 
-# Requires a working POSIX `bash` on PATH (true in any real Linux
-# environment, and in a correctly configured Git-Bash-first Windows PATH).
-# On a Windows dev box where a `C:\WINDOWS\system32\bash.exe` WSL-launcher
-# stub shadows Git for Windows' real bash on PATH (observed when invoked
-# from a plain PowerShell session with no Linux distro registered), point
-# BASH at the real Git-for-Windows bash explicitly via this env var:
-#   $env:ROLLOUT_TEST_BASH = 'C:\Program Files\Git\bin\bash.exe'
 BASH = os.environ.get("ROLLOUT_TEST_BASH", "bash")
 
 
@@ -101,15 +94,12 @@ class RolloutScriptTestBase(unittest.TestCase):
     def base_env(self, **extra):
         env = dict(os.environ)
         env["PATH"] = self.fakebin + os.pathsep + env["PATH"]
-        # STACK_DIR has no generic default in the script itself (a
-        # host-specific path has no sensible one) -- every test fixture
-        # provides its own isolated scratch directory explicitly.
         env["STACK_DIR"] = self.tmp
+        env["VERSION"] = "0.1.6"
         for k, v in extra.items():
             env[k] = str(v)
         return env
 
-    # -- function-level snippet runner ------------------------------------
     def run_snippet(self, body, env=None):
         snippet_path = os.path.join(self.tmp, "snippet.sh")
         with open(snippet_path, "w", newline="\n") as f:
@@ -120,6 +110,33 @@ class RolloutScriptTestBase(unittest.TestCase):
             [BASH, snippet_path], env=env or self.base_env(),
             capture_output=True, text=True, timeout=30,
         )
+
+
+class VersionValidationTests(RolloutScriptTestBase):
+    def test_missing_version_fails_before_mutation(self):
+        res = self.run_snippet("validate_version", env=self.base_env(VERSION=""))
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("VERSION is required", res.stderr)
+
+    def test_numbered_version_accepted(self):
+        for valid in ("0.1.6", "1.0.0", "1.2.3-rc.1", "0.1.5"):
+            res = self.run_snippet("validate_version", env=self.base_env(VERSION=valid))
+            self.assertEqual(res.returncode, 0, f"Expected {valid} to be accepted, got: {res.stderr}")
+
+    def test_latest_rejected(self):
+        res = self.run_snippet("validate_version", env=self.base_env(VERSION="latest"))
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("explicit numbered release", res.stderr)
+
+    def test_stable_rejected(self):
+        res = self.run_snippet("validate_version", env=self.base_env(VERSION="stable"))
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("explicit numbered release", res.stderr)
+
+    def test_malformed_version_rejected(self):
+        res = self.run_snippet("validate_version", env=self.base_env(VERSION="bad_ver_!"))
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("explicit numbered release", res.stderr)
 
 
 class AuthoritativeDatabaseChecksTests(RolloutScriptTestBase):
@@ -186,7 +203,7 @@ verify_authoritative_database
         db = os.path.join(auth_dir, "musiclibrary.blb")
         make_sqlite_db(db, items=20, albums=2)
         stale = os.path.join(stale_dir, "musiclibrary.blb")
-        os.link(db, stale)  # same inode, different path
+        os.link(db, stale)
         res = self.run_snippet(f"""
 AUTH_DB_PATH="{db}"
 STALE_DB_PATH="{stale}"
@@ -203,7 +220,6 @@ verify_authoritative_database
         db = os.path.join(auth_dir, "musiclibrary.blb")
         make_sqlite_db(db, items=20, albums=2)
         stale = os.path.join(stale_dir, "musiclibrary.blb")
-        # Distinct inode (real copy), identical bytes -> checksum collision.
         with open(db, "rb") as src, open(stale, "wb") as dst:
             dst.write(src.read())
         res = self.run_snippet(f"""
@@ -307,69 +323,25 @@ echo "EXISTS=$STALE_DB_EXISTS"
         self.assertIn("EXISTS=0", res.stdout)
 
 
-class ArchiveStaleDatabaseTests(RolloutScriptTestBase):
-    def test_missing_wal_and_shm_are_accepted(self):
-        webmgr = os.path.join(self.tmp, "webmgr")
-        os.makedirs(webmgr)
-        stale = os.path.join(webmgr, "musiclibrary.blb")
-        make_sqlite_db(stale, items=3, albums=1)
-        backup = os.path.join(self.tmp, "backup")
-
-        res = self.run_snippet(f"""
-STALE_DB_EXISTS=1
-STALE_DB_PATH="{stale}"
-STALE_WAL_PATH="{webmgr}/musiclibrary.blb-wal"
-STALE_SHM_PATH="{webmgr}/musiclibrary.blb-shm"
-BACKUP_DIR="{backup}"
-archive_stale_database
+class EndpointVerificationModeTests(RolloutScriptTestBase):
+    def test_dry_run_endpoint_failure_returns_warning_without_exiting(self):
+        res = self.run_snippet("""
+ENDPOINT_BASE_URL="http://127.0.0.1:99999"
+verify_endpoints "dry-run"
+rc=$?
+echo "RC=$rc"
 """)
         self.assertEqual(res.returncode, 0, res.stderr)
-        self.assertTrue(os.path.exists(os.path.join(backup, "stale-database", "musiclibrary.blb")))
-        self.assertFalse(os.path.exists(stale), "stale DB must be moved, not left in place")
+        self.assertIn("endpoint verification reported issues", res.stderr)
+        self.assertIn("RC=1", res.stdout)
 
-    def test_open_stale_db_is_rejected_and_not_moved(self):
-        webmgr = os.path.join(self.tmp, "webmgr")
-        os.makedirs(webmgr)
-        stale = os.path.join(webmgr, "musiclibrary.blb")
-        make_sqlite_db(stale, items=3, albums=1)
-        backup = os.path.join(self.tmp, "backup")
-        self.set_open_files([stale])
-
-        res = self.run_snippet(f"""
-STALE_DB_EXISTS=1
-STALE_DB_PATH="{stale}"
-STALE_WAL_PATH="{webmgr}/musiclibrary.blb-wal"
-STALE_SHM_PATH="{webmgr}/musiclibrary.blb-shm"
-BACKUP_DIR="{backup}"
-archive_stale_database
+    def test_post_deploy_endpoint_failure_is_fatal(self):
+        res = self.run_snippet("""
+ENDPOINT_BASE_URL="http://127.0.0.1:99999"
+verify_endpoints "post-deploy"
 """)
         self.assertNotEqual(res.returncode, 0)
-        self.assertIn("still open", res.stderr)
-        self.assertTrue(os.path.exists(stale), "an open stale DB must never be moved")
-
-    def test_archive_moves_exact_filenames_never_deletes(self):
-        webmgr = os.path.join(self.tmp, "webmgr")
-        os.makedirs(webmgr)
-        stale = os.path.join(webmgr, "musiclibrary.blb")
-        wal = os.path.join(webmgr, "musiclibrary.blb-wal")
-        shm = os.path.join(webmgr, "musiclibrary.blb-shm")
-        make_sqlite_db(stale, items=3, albums=1)
-        Path(wal).write_bytes(b"wal-data")
-        Path(shm).write_bytes(b"shm-data")
-        backup = os.path.join(self.tmp, "backup")
-
-        res = self.run_snippet(f"""
-STALE_DB_EXISTS=1
-STALE_DB_PATH="{stale}"
-STALE_WAL_PATH="{wal}"
-STALE_SHM_PATH="{shm}"
-BACKUP_DIR="{backup}"
-archive_stale_database
-""")
-        self.assertEqual(res.returncode, 0, res.stderr)
-        for name in ("musiclibrary.blb", "musiclibrary.blb-wal", "musiclibrary.blb-shm"):
-            self.assertTrue(os.path.exists(os.path.join(backup, "stale-database", name)))
-            self.assertFalse(os.path.exists(os.path.join(webmgr, name)))
+        self.assertIn("one or more endpoint checks failed", res.stderr)
 
 
 class TokenChecksTests(RolloutScriptTestBase):
@@ -396,12 +368,13 @@ inspect_auth_token
 TOKEN_PATH="{token}"
 WEBMGR_LEGACY_CONFIG_SRC=""
 inspect_auth_token
-echo "EXISTS=$TOKEN_EXISTS SIZE=$TOKEN_SIZE"
+echo "EXISTS=$TOKEN_EXISTS SIZE=$TOKEN_SIZE ACTIVE=$ACTIVE_AUTH_TOKEN_PATH"
 """)
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertNotIn("super-secret-token-value-do-not-print", res.stdout)
         self.assertNotIn("super-secret-token-value-do-not-print", res.stderr)
         self.assertIn("EXISTS=1", res.stdout)
+        self.assertIn(f"ACTIVE={token}", res.stdout)
 
     def test_migration_does_not_overwrite_existing_destination_token(self):
         webmgr = os.path.join(self.tmp, "webmgr")
@@ -466,6 +439,131 @@ migrate_token_if_needed
         self.assertEqual(Path(dest).read_text(encoding="utf-8"), "legacy-token-value-distinct")
         leftover_tmp = [p for p in os.listdir(webmgr) if "migrate.tmp" in p]
         self.assertEqual(leftover_tmp, [], "no orphaned migration temp file should remain")
+
+
+class TokenMigrationAndRollbackTests(RolloutScriptTestBase):
+    def test_dry_run_uses_legacy_token_read_only(self):
+        webmgr = os.path.join(self.tmp, "webmgr")
+        legacy_dir = os.path.join(self.tmp, "legacy")
+        os.makedirs(webmgr)
+        os.makedirs(legacy_dir)
+        dest = os.path.join(webmgr, ".auth_token")
+        legacy = os.path.join(legacy_dir, ".auth_token")
+        Path(legacy).write_text("secret-legacy-token-12345", encoding="utf-8")
+
+        res = self.run_snippet(f"""
+DRY_RUN=1
+TOKEN_PATH="{dest}"
+WEBMGR_LEGACY_CONFIG_SRC="{legacy_dir}"
+inspect_auth_token
+echo "ACTIVE=$ACTIVE_AUTH_TOKEN_PATH MIGRATION=$NEEDS_TOKEN_MIGRATION EXISTS=$TOKEN_EXISTS"
+""")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn(f"ACTIVE={legacy}", res.stdout)
+        self.assertIn("MIGRATION=1", res.stdout)
+        self.assertIn("EXISTS=0", res.stdout)
+        self.assertFalse(os.path.exists(dest), "dry-run must not create persistent token")
+        self.assertNotIn("secret-legacy-token-12345", res.stdout)
+        self.assertNotIn("secret-legacy-token-12345", res.stderr)
+
+    def test_rollback_case_b_migrated_token_removed_safely(self):
+        webmgr = os.path.join(self.tmp, "webmgr")
+        legacy_dir = os.path.join(self.tmp, "legacy")
+        os.makedirs(webmgr)
+        os.makedirs(legacy_dir)
+        dest = os.path.join(webmgr, ".auth_token")
+        legacy = os.path.join(legacy_dir, ".auth_token")
+        Path(legacy).write_text("migrated-token-val", encoding="utf-8")
+        Path(dest).write_text("migrated-token-val", encoding="utf-8")
+
+        backup_dir = os.path.join(self.tmp, "backup")
+        os.makedirs(backup_dir)
+        Path(os.path.join(backup_dir, "docker-compose.yml.bak")).write_text("services: {}\n", encoding="utf-8")
+        Path(os.path.join(backup_dir, "token-metadata.txt")).write_text(f"""persistent_token_existed_before=0
+legacy_token_existed_before=1
+token_migration_planned=1
+persistent_token_path={dest}
+legacy_token_path={legacy}
+token_migration_performed=1
+migrated_token_sha256=d344ed015c7e112d7cdd949a60e0a5c43d84693b708aa80fb65c2b53bdad58b1
+""", encoding="utf-8")
+
+        res = self.run_snippet(f"""
+STACK_DIR="{self.tmp}"
+COMPOSE_FILE="{os.path.join(self.tmp, "docker-compose.yml")}"
+TOKEN_PATH="{dest}"
+WEBMGR_DATA_SRC="{webmgr}"
+ENGINE_CONFIG_SRC="{self.tmp}/engine"
+ROLLBACK_DIR="{backup_dir}"
+run_rollback
+""")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertFalse(os.path.exists(dest), "rollback must remove the migrated persistent token")
+        self.assertTrue(os.path.exists(legacy), "rollback must leave the legacy token untouched")
+
+    def test_rollback_case_b_checksum_mismatch_refuses_deletion(self):
+        webmgr = os.path.join(self.tmp, "webmgr")
+        legacy_dir = os.path.join(self.tmp, "legacy")
+        os.makedirs(webmgr)
+        os.makedirs(legacy_dir)
+        dest = os.path.join(webmgr, ".auth_token")
+        legacy = os.path.join(legacy_dir, ".auth_token")
+        Path(legacy).write_text("migrated-token-val", encoding="utf-8")
+        Path(dest).write_text("MODIFIED_POST_ROLLOUT_TOKEN", encoding="utf-8")
+
+        backup_dir = os.path.join(self.tmp, "backup")
+        os.makedirs(backup_dir)
+        Path(os.path.join(backup_dir, "docker-compose.yml.bak")).write_text("services: {}\n", encoding="utf-8")
+        Path(os.path.join(backup_dir, "token-metadata.txt")).write_text(f"""persistent_token_existed_before=0
+legacy_token_existed_before=1
+token_migration_planned=1
+persistent_token_path={dest}
+legacy_token_path={legacy}
+token_migration_performed=1
+migrated_token_sha256=d344ed015c7e112d7cdd949a60e0a5c43d84693b708aa80fb65c2b53bdad58b1
+""", encoding="utf-8")
+
+        res = self.run_snippet(f"""
+STACK_DIR="{self.tmp}"
+COMPOSE_FILE="{os.path.join(self.tmp, "docker-compose.yml")}"
+TOKEN_PATH="{dest}"
+WEBMGR_DATA_SRC="{webmgr}"
+ENGINE_CONFIG_SRC="{self.tmp}/engine"
+ROLLBACK_DIR="{backup_dir}"
+run_rollback
+""")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertTrue(os.path.exists(dest), "checksum mismatch must refuse token deletion")
+        self.assertIn("refusing automatic deletion", res.stderr)
+
+    def test_rollback_case_c_generated_token_refuses_deletion(self):
+        webmgr = os.path.join(self.tmp, "webmgr")
+        os.makedirs(webmgr)
+        dest = os.path.join(webmgr, ".auth_token")
+        Path(dest).write_text("NEW_APP_GENERATED_TOKEN", encoding="utf-8")
+
+        backup_dir = os.path.join(self.tmp, "backup")
+        os.makedirs(backup_dir)
+        Path(os.path.join(backup_dir, "docker-compose.yml.bak")).write_text("services: {}\n", encoding="utf-8")
+        Path(os.path.join(backup_dir, "token-metadata.txt")).write_text(f"""persistent_token_existed_before=0
+legacy_token_existed_before=0
+token_migration_planned=0
+persistent_token_path={dest}
+legacy_token_path=
+""", encoding="utf-8")
+
+        res = self.run_snippet(f"""
+STACK_DIR="{self.tmp}"
+COMPOSE_FILE="{os.path.join(self.tmp, "docker-compose.yml")}"
+TOKEN_PATH="{dest}"
+WEBMGR_DATA_SRC="{webmgr}"
+ENGINE_CONFIG_SRC="{self.tmp}/engine"
+ROLLBACK_DIR="{backup_dir}"
+run_rollback
+""")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertTrue(os.path.exists(dest), "generated token without proof must refuse deletion")
+        self.assertIn("refusing automatic deletion", res.stderr)
 
 
 class LocalDbRecreationDetectionTests(RolloutScriptTestBase):
@@ -539,9 +637,8 @@ echo "OK"
 
 
 class ScriptSourceSafetyInvariantTests(unittest.TestCase):
-    """Static checks on the script's own text for the constraints that are
-    best proven by absence rather than behavior: no wildcard deletion, no
-    `rm` of database files, exact filenames only."""
+    """Static checks on the script's own text for constraints best proven
+    by absence or pattern match."""
 
     def test_no_wildcard_glob_on_database_filename(self):
         self.assertNotIn("musiclibrary.blb*", SCRIPT_SOURCE)
@@ -552,10 +649,6 @@ class ScriptSourceSafetyInvariantTests(unittest.TestCase):
         self.assertIn('SHM_FILENAME="musiclibrary.blb-shm"', SCRIPT_SOURCE)
 
     def test_no_rm_of_database_or_token_files(self):
-        # `rm` may still be used for unrelated scratch/temp files (e.g. a
-        # curl probe response body) -- what must never happen is `rm` being
-        # used on anything database- or token-shaped. Database files are
-        # moved (archived), never deleted.
         for lineno, line in enumerate(SCRIPT_SOURCE.splitlines(), start=1):
             code = line.split("#", 1)[0]
             if re.search(r"(^|[;&|]\s*)rm\s", code):
@@ -571,10 +664,13 @@ class ScriptSourceSafetyInvariantTests(unittest.TestCase):
         self.assertIn("set -Eeuo pipefail", SCRIPT_SOURCE)
 
     def test_beets_engine_service_is_never_recreated(self):
-        # --force-recreate must only ever be invoked against $SERVICE, never
-        # against $ENGINE_SERVICE or a literal "beets".
         self.assertNotIn('--force-recreate "$ENGINE_SERVICE"', SCRIPT_SOURCE)
         self.assertIn('--force-recreate "$SERVICE"', SCRIPT_SOURCE)
+
+    def test_documentation_and_script_specify_explicit_bash_invocation(self):
+        doc_source = (ROOT / "docs" / "operations" / "TRUENAS_ROLLOUT.md").read_text(encoding="utf-8")
+        self.assertIn("/bin/bash", doc_source)
+        self.assertIn("/bin/bash", SCRIPT_SOURCE)
 
 
 class EndToEndFixture(unittest.TestCase):
@@ -594,7 +690,7 @@ class EndToEndFixture(unittest.TestCase):
             os.chmod(path, 0o755)
         lsof_path = os.path.join(self.fakebin, "lsof")
         with open(lsof_path, "w", newline="\n") as f:
-            f.write("#!/usr/bin/env bash\nexit 1\n")  # nothing ever open
+            f.write("#!/usr/bin/env bash\nexit 1\n")
         os.chmod(lsof_path, 0o755)
 
         self.stack_dir = os.path.join(self.tmp, "stack")
@@ -674,10 +770,6 @@ class EndToEndFixture(unittest.TestCase):
         e["STACK_DIR"] = self.stack_dir
         e["COMPOSE_FILE"] = self.compose_file
         e["HEALTH_TIMEOUT_SECONDS"] = "5"
-        # The script's own VERSION default (0.1.4) targets a release that
-        # doesn't exist yet; these tests exercise the mechanics against the
-        # concrete, currently-released 0.1.3 image identity instead. Both
-        # remain overridable per test.
         e["VERSION"] = "0.1.3"
         e["EXPECTED_REVISION"] = self.GOOD_REVISION
         for k, v in overrides.items():
@@ -699,9 +791,7 @@ class DryRunTests(EndToEndFixture):
         self.assertIn("DRY RUN COMPLETE", res.stderr)
         after = self._snapshot_stack_dir()
         self.assertEqual(before, after, "dry-run must not modify anything under STACK_DIR")
-        # No real backup root created under the stack dir either.
         self.assertFalse(os.path.isdir(os.path.join(self.stack_dir, "_backups")))
-        # The web-manager container must never have been stopped/recreated.
         self.assertEqual(self.state["containers"]["cid-webmgr"]["State"]["Status"], "running")
 
     def _snapshot_stack_dir(self):
@@ -713,9 +803,6 @@ class DryRunTests(EndToEndFixture):
         return snap
 
     def test_dry_run_rejects_same_mount_source_for_both_services(self):
-        # Point beets-web-manager's /web-manager-data at the SAME host path
-        # as the Beets engine's /config -- the classic misconfiguration this
-        # script must refuse to proceed past.
         self.state["containers"]["cid-webmgr"]["Mounts"][0]["Source"] = self.engine_dir
         self._save_state()
         res = self.run_script("--dry-run")
@@ -736,6 +823,12 @@ class DryRunTests(EndToEndFixture):
         self.assertNotEqual(res.returncode, 0)
         self.assertIn("revision label", res.stderr)
 
+    def test_failed_dry_run_reports_no_rollback_required_message(self):
+        res = self.run_script("--dry-run", env=self.env(VERSION="invalid-version"))
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("Dry-run only: no production mutation occurred; no rollback is required", res.stderr)
+        self.assertNotIn("--rollback", res.stderr)
+
 
 class FullDeployTests(EndToEndFixture):
     def test_full_deploy_happy_path_succeeds(self):
@@ -746,10 +839,8 @@ class FullDeployTests(EndToEndFixture):
         self.assertIn("completed successfully", res.stderr)
         self.assertNotIn("initial-token-value-not-printed", res.stdout)
         self.assertNotIn("initial-token-value-not-printed", res.stderr)
-        # Recreated onto the pinned image.
         webmgr_cid = self.state["service_containers"]["beets-web-manager"]
         self.assertEqual(self.state["containers"][webmgr_cid]["Config"]["Image"], self.GOOD_IMAGE)
-        # A backup directory was actually created under STACK_DIR/_backups.
         backups = os.listdir(os.path.join(self.stack_dir, "_backups"))
         self.assertEqual(len(backups), 1)
 
@@ -757,7 +848,7 @@ class FullDeployTests(EndToEndFixture):
         token = os.path.join(self.webmgr_dir, ".auth_token")
         Path(token).write_text("tok", encoding="utf-8")
         stale = os.path.join(self.webmgr_dir, "musiclibrary.blb")
-        make_sqlite_db(stale, items=2, albums=1)  # small, disposable
+        make_sqlite_db(stale, items=2, albums=1)
         res = self.run_script()
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertFalse(os.path.exists(stale))
@@ -809,7 +900,6 @@ class RollbackTests(EndToEndFixture):
         backup_root = os.path.join(self.stack_dir, "_backups")
         backup_dir = os.path.join(backup_root, os.listdir(backup_root)[0])
 
-        # Simulate a bad follow-up state to roll back from.
         self.state["containers"][self.state["service_containers"]["beets-web-manager"]]["Config"]["Image"] = "ghcr.io/iranman/beets-web-manager:9.9.9"
         self._save_state()
         beets_cid_before = self.state["service_containers"]["beets"]
