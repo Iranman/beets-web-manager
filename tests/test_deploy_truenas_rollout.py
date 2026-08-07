@@ -116,7 +116,7 @@ class VersionValidationTests(RolloutScriptTestBase):
     def test_missing_version_fails_before_mutation(self):
         res = self.run_snippet("validate_version", env=self.base_env(VERSION=""))
         self.assertNotEqual(res.returncode, 0)
-        self.assertIn("VERSION is required", res.stderr)
+        self.assertIn("set VERSION", res.stderr)
 
     def test_numbered_version_accepted(self):
         for valid in ("0.1.6", "1.0.0", "1.2.3-rc.1", "0.1.5"):
@@ -325,21 +325,23 @@ echo "EXISTS=$STALE_DB_EXISTS"
 
 class EndpointVerificationModeTests(RolloutScriptTestBase):
     def test_dry_run_endpoint_failure_returns_warning_without_exiting(self):
+        state_file = os.path.join(self.tmp, "curl_state.json")
+        Path(state_file).write_text(json.dumps({"fail_paths": ["/api/health"]}), encoding="utf-8")
         res = self.run_snippet("""
-ENDPOINT_BASE_URL="http://127.0.0.1:99999"
 verify_endpoints "dry-run"
 rc=$?
 echo "RC=$rc"
-""")
+""", env=self.base_env(FAKE_CURL_STATE=state_file))
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn("endpoint verification reported issues", res.stderr)
         self.assertIn("RC=1", res.stdout)
 
     def test_post_deploy_endpoint_failure_is_fatal(self):
+        state_file = os.path.join(self.tmp, "curl_state.json")
+        Path(state_file).write_text(json.dumps({"fail_paths": ["/api/health"]}), encoding="utf-8")
         res = self.run_snippet("""
-ENDPOINT_BASE_URL="http://127.0.0.1:99999"
 verify_endpoints "post-deploy"
-""")
+""", env=self.base_env(FAKE_CURL_STATE=state_file))
         self.assertNotEqual(res.returncode, 0)
         self.assertIn("one or more endpoint checks failed", res.stderr)
 
@@ -473,6 +475,8 @@ echo "ACTIVE=$ACTIVE_AUTH_TOKEN_PATH MIGRATION=$NEEDS_TOKEN_MIGRATION EXISTS=$TO
         os.makedirs(legacy_dir)
         dest = os.path.join(webmgr, ".auth_token")
         legacy = os.path.join(legacy_dir, ".auth_token")
+        compose_file = os.path.join(self.tmp, "docker-compose.yml")
+        Path(compose_file).write_text("services: {}\n", encoding="utf-8")
         Path(legacy).write_text("migrated-token-val", encoding="utf-8")
         Path(dest).write_text("migrated-token-val", encoding="utf-8")
 
@@ -489,8 +493,12 @@ migrated_token_sha256=d344ed015c7e112d7cdd949a60e0a5c43d84693b708aa80fb65c2b53bd
 """, encoding="utf-8")
 
         res = self.run_snippet(f"""
+_compose() {{ return 0; }}
+docker() {{ echo "healthy"; }}
+resolve_container_id() {{ echo "cid-mock"; }}
+discover_and_verify_mounts() {{ return 0; }}
 STACK_DIR="{self.tmp}"
-COMPOSE_FILE="{os.path.join(self.tmp, "docker-compose.yml")}"
+COMPOSE_FILE="{compose_file}"
 TOKEN_PATH="{dest}"
 WEBMGR_DATA_SRC="{webmgr}"
 ENGINE_CONFIG_SRC="{self.tmp}/engine"
@@ -508,6 +516,8 @@ run_rollback
         os.makedirs(legacy_dir)
         dest = os.path.join(webmgr, ".auth_token")
         legacy = os.path.join(legacy_dir, ".auth_token")
+        compose_file = os.path.join(self.tmp, "docker-compose.yml")
+        Path(compose_file).write_text("services: {}\n", encoding="utf-8")
         Path(legacy).write_text("migrated-token-val", encoding="utf-8")
         Path(dest).write_text("MODIFIED_POST_ROLLOUT_TOKEN", encoding="utf-8")
 
@@ -524,8 +534,12 @@ migrated_token_sha256=d344ed015c7e112d7cdd949a60e0a5c43d84693b708aa80fb65c2b53bd
 """, encoding="utf-8")
 
         res = self.run_snippet(f"""
+_compose() {{ return 0; }}
+docker() {{ echo "healthy"; }}
+resolve_container_id() {{ echo "cid-mock"; }}
+discover_and_verify_mounts() {{ return 0; }}
 STACK_DIR="{self.tmp}"
-COMPOSE_FILE="{os.path.join(self.tmp, "docker-compose.yml")}"
+COMPOSE_FILE="{compose_file}"
 TOKEN_PATH="{dest}"
 WEBMGR_DATA_SRC="{webmgr}"
 ENGINE_CONFIG_SRC="{self.tmp}/engine"
@@ -540,6 +554,8 @@ run_rollback
         webmgr = os.path.join(self.tmp, "webmgr")
         os.makedirs(webmgr)
         dest = os.path.join(webmgr, ".auth_token")
+        compose_file = os.path.join(self.tmp, "docker-compose.yml")
+        Path(compose_file).write_text("services: {}\n", encoding="utf-8")
         Path(dest).write_text("NEW_APP_GENERATED_TOKEN", encoding="utf-8")
 
         backup_dir = os.path.join(self.tmp, "backup")
@@ -553,8 +569,12 @@ legacy_token_path=
 """, encoding="utf-8")
 
         res = self.run_snippet(f"""
+_compose() {{ return 0; }}
+docker() {{ echo "healthy"; }}
+resolve_container_id() {{ echo "cid-mock"; }}
+discover_and_verify_mounts() {{ return 0; }}
 STACK_DIR="{self.tmp}"
-COMPOSE_FILE="{os.path.join(self.tmp, "docker-compose.yml")}"
+COMPOSE_FILE="{compose_file}"
 TOKEN_PATH="{dest}"
 WEBMGR_DATA_SRC="{webmgr}"
 ENGINE_CONFIG_SRC="{self.tmp}/engine"

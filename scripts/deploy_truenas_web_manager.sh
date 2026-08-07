@@ -789,7 +789,7 @@ archive_stale_database() {
 
 migrate_token_if_needed() {
   STAGE="token-migration"
-  if [[ "$TOKEN_EXISTS" -eq 1 && "$NEEDS_TOKEN_MIGRATION" -eq 0 ]]; then
+  if [[ "$TOKEN_EXISTS" -eq 1 ]]; then
     log "Persistent token already present -- no migration needed."
     return 0
   fi
