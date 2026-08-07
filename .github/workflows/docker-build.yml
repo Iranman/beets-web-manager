@@ -38,7 +38,7 @@ jobs:
       AI_API_KEY: changeme
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
       - run: python scripts/validate_compose_security.py
@@ -96,7 +96,7 @@ jobs:
         beets_version: ["2.13.1", "2.4.0"]
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
       - name: Build Beets engine image
