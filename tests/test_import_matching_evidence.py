@@ -5,7 +5,7 @@ import tempfile
 import unittest
 import urllib.parse
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _app_ast_cache import get_app_ast  # noqa: E402
@@ -38,6 +38,8 @@ def _load_evidence_namespace():
         "Any": Any,
         "Dict": Dict,
         "List": List,
+        "Optional": Optional,
+        "Tuple": Tuple,
         "Path": Path,
         "re": __import__("re"),
         "urllib": __import__("urllib"),
