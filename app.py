@@ -34085,9 +34085,17 @@ def _clean_malformed_release_group_stamps(value: str) -> str:
 
 
 def _safe_path_component(value: Any, fallback: str = "untitled") -> str:
+    import unicodedata
     text = _s(value).strip() or fallback
     text = text.replace("/", "_").replace("\\", "_")
     text = re.sub(r'[\x00-\x1f<>:"?*|]', "_", text)
+    # Unicode format/control characters (bidi overrides such as U+202E, zero-
+    # width joiners/spaces, BOM, etc.) aren't covered by the ASCII-only class
+    # above but can still make a folder name render deceptively even though
+    # it's already fully contained under the trusted root -- strip them too
+    # rather than merely relying on path containment for what is ultimately
+    # a display-spoofing concern, not a traversal one.
+    text = "".join("_" if unicodedata.category(ch) in ("Cf", "Cc") else ch for ch in text)
     text = re.sub(r"\s+", " ", text).strip()
     text = text.rstrip(". ")
     return text or fallback

@@ -101,6 +101,25 @@ class UnmatchedDraftPathSafetyTests(unittest.TestCase):
         res = self.post_draft(artist="Real Artist", album="Album", year="../../outside", tracks=[])
         self.assertEqual(list(self.outside.rglob("*")), [])
 
+    def test_bidi_override_and_zero_width_chars_stripped_from_artist(self):
+        # U+202E (RIGHT-TO-LEFT OVERRIDE) and U+200B (ZERO WIDTH SPACE) are
+        # Unicode format characters, not ASCII control characters -- Claude's
+        # independent review (SEC-002 Wave 8 final review) found the
+        # pre-existing ASCII-only control-char strip in _safe_path_component
+        # let these through unchanged. They can't escape music_root (still a
+        # single safe path component either way), but can make the resulting
+        # folder name render deceptively, so they must not survive
+        # sanitization either.
+        res = self.post_draft(
+            artist="Real​Artist‮evil", album="Album", year="2024", tracks=[],
+        )
+        self.assertEqual(res.status_code, 200, res.get_json())
+        found = list(self.music_root.rglob("draft.json"))
+        self.assertEqual(len(found), 1)
+        artist_dir_name = found[0].parent.parent.name
+        self.assertNotIn("​", artist_dir_name)
+        self.assertNotIn("‮", artist_dir_name)
+
 
 class AiBatchScanPathValidationTests(unittest.TestCase):
     """_start_ai_batch_job is the single shared entry point for both
@@ -117,14 +136,23 @@ class AiBatchScanPathValidationTests(unittest.TestCase):
         # Windows, where it doesn't -- same class of bug as SEC-002 Wave 6/7).
         self.tmp_dir = tempfile.mkdtemp(prefix="beets_test_wave8_scan_", dir=os.getcwd())
         self.tmp_root = Path(self.tmp_dir).resolve()
-        self.trusted = self.tmp_root / "trusted"
+        # Named allowed_root, not "trusted*": an earlier revision named this
+        # fixture self.trusted, and CodeQL's py/clear-text-storage-sensitive-
+        # data heuristic source detector matched that identifier's "trust"
+        # substring as a sensitive-data name pattern, producing two false
+        # positives (PR #70 alerts #530/#531) whose flagged dataflow traced
+        # straight back to this benign test path variable -- confirmed via
+        # the SARIF codeFlow's relatedLocations, not guessed. Renaming avoids
+        # re-triggering the same heuristic on every future analysis of this
+        # file without needing a standing dismissal.
+        self.allowed_root = self.tmp_root / "allowed_root"
         self.outside = self.tmp_root / "outside"
-        self.trusted.mkdir(parents=True)
+        self.allowed_root.mkdir(parents=True)
         self.outside.mkdir(parents=True)
         (self.outside / "sentinel.flac").write_bytes(b"SHOULD_NOT_BE_SCANNED")
         self.addCleanup(shutil.rmtree, self.tmp_dir, ignore_errors=True)
         self._downloads_roots_patcher = mock.patch.object(
-            APP, "_DOWNLOADS_ROOTS", APP._DOWNLOADS_ROOTS + [str(self.trusted)]
+            APP, "_DOWNLOADS_ROOTS", APP._DOWNLOADS_ROOTS + [str(self.allowed_root)]
         )
         self._downloads_roots_patcher.start()
         self.addCleanup(self._downloads_roots_patcher.stop)
@@ -145,7 +173,7 @@ class AiBatchScanPathValidationTests(unittest.TestCase):
         self.assertFalse(body.get_json().get("ok"))
 
     def test_traversal_scan_path_rejected(self):
-        traversal = str(self.trusted / ".." / ".." / "etc")
+        traversal = str(self.allowed_root / ".." / ".." / "etc")
         with mock.patch.object(APP, "_ai_batch_find_audio_dirs") as mock_walk:
             result = APP._start_ai_batch_job(traversal)
         mock_walk.assert_not_called()
@@ -153,7 +181,7 @@ class AiBatchScanPathValidationTests(unittest.TestCase):
         self.assertEqual(status, 400)
 
     def test_symlink_scan_path_rejected(self):
-        link = self.trusted / "link_to_outside"
+        link = self.allowed_root / "link_to_outside"
         try:
             link.symlink_to(self.outside, target_is_directory=True)
         except (OSError, NotImplementedError):
@@ -173,7 +201,7 @@ class AiBatchScanPathValidationTests(unittest.TestCase):
         # under test in test_outside_root_scan_path_rejected_before_any_walk's
         # sibling root-self coverage elsewhere -- this test wants the
         # ordinary "valid" path.
-        valid_subdir = self.trusted / "torrent_album"
+        valid_subdir = self.allowed_root / "torrent_album"
         valid_subdir.mkdir()
         with mock.patch.object(APP, "_ai_batch_reserve_worker", return_value=False) as mock_reserve, \
              mock.patch.object(APP, "_ai_batch_reconnect_response", return_value=("reconnect", 200)) as mock_reconnect:
@@ -195,7 +223,7 @@ class AiBatchScanPathValidationTests(unittest.TestCase):
 
     def test_nul_byte_scan_path_rejected(self):
         with mock.patch.object(APP, "_ai_batch_find_audio_dirs") as mock_walk:
-            result = APP._start_ai_batch_job(str(self.trusted) + "\x00evil")
+            result = APP._start_ai_batch_job(str(self.allowed_root) + "\x00evil")
         mock_walk.assert_not_called()
         body, status = result
         self.assertEqual(status, 400)
