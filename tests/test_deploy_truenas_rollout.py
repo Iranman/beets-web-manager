@@ -333,7 +333,7 @@ rc=$?
 echo "RC=$rc"
 """, env=self.base_env(FAKE_CURL_STATE=state_file))
         self.assertEqual(res.returncode, 0, res.stderr)
-        self.assertIn("endpoint verification reported issues", res.stderr)
+        self.assertIn("endpoint checks failed during dry-run", res.stderr)
         self.assertIn("RC=1", res.stdout)
 
     def test_post_deploy_endpoint_failure_is_fatal(self):
