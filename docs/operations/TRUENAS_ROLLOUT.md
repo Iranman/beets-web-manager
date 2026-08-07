@@ -42,7 +42,7 @@ land somewhere unexpected relative to those sources.
 To execute on TrueNAS or any host with a `noexec` filesystem policy on `/tmp`, invoke the script explicitly via `/bin/bash`:
 
 ```bash
-STACK_DIR=/mnt/PLEX/Apps/Arrs VERSION=0.1.5 EXPECTED_REVISION=8ae9bf0cc742d036d5ca460cf47db7e6edbda989 /bin/bash /path/to/deploy_truenas_web_manager.sh --dry-run
+STACK_DIR=/path/to/docker-stack VERSION=<VERSION> EXPECTED_REVISION=<RELEASE_COMMIT_SHA> /bin/bash /path/to/deploy_truenas_web_manager.sh --dry-run
 ```
 
 Performs every safety check (mount discovery, authoritative + stale DB
@@ -56,7 +56,7 @@ checks; it's what `tests/test_deploy_truenas_rollout.py` exercises.
 ## Real rollout
 
 ```bash
-STACK_DIR=/mnt/PLEX/Apps/Arrs VERSION=0.1.5 EXPECTED_REVISION=8ae9bf0cc742d036d5ca460cf47db7e6edbda989 /bin/bash /path/to/deploy_truenas_web_manager.sh
+STACK_DIR=/path/to/docker-stack VERSION=<VERSION> EXPECTED_REVISION=<RELEASE_COMMIT_SHA> /bin/bash /path/to/deploy_truenas_web_manager.sh
 ```
 
 Order of operations -- nothing in the second half runs unless every check in
@@ -131,11 +131,11 @@ engine and its database are never touched or recreated by rollback.
 
 ## Configuration knobs
 
-`STACK_DIR` and `VERSION` are required (no generic default makes sense for a host-specific path or version). All other environment variables are optional:
+`STACK_DIR` is required for `--dry-run`, the real rollout, and `--rollback` (no generic default makes sense for a host-specific path); `--help` needs neither it nor `VERSION` and works with nothing configured. `VERSION` is required and validated only for `--dry-run` and the real rollout -- `--rollback` restores whatever image reference the backup itself recorded, so it never needs one. All other environment variables are optional:
 
 ```text
-STACK_DIR              required, no default (your deployment's stack directory)
-VERSION                required, no default (e.g. 0.1.5, 0.1.6, 1.0.0)
+STACK_DIR              required for --dry-run/rollout/--rollback, no default (your deployment's stack directory)
+VERSION                required for --dry-run/rollout only, no default (e.g. 1.0.0)
 EXPECTED_REVISION       strongly recommended; when set, validates exact Git commit revision label
 SERVICE                default beets-web-manager
 ENGINE_SERVICE          default beets

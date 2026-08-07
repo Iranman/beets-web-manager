@@ -26,7 +26,9 @@
 #   /bin/bash scripts/deploy_truenas_web_manager.sh --rollback DIR
 #
 # Configuration (env vars):
-#   STACK_DIR (required), VERSION (required), EXPECTED_REVISION (strongly recommended),
+#   STACK_DIR (required for --dry-run/deploy/--rollback; not for --help),
+#   VERSION (required and validated for --dry-run/deploy only -- --rollback
+#   and --help do not need it), EXPECTED_REVISION (strongly recommended),
 #   SERVICE, ENGINE_SERVICE, COMPOSE_FILE, MIN_ITEM_COUNT, STALE_DB_MAX_ITEMS,
 #   ENDPOINT_BASE_URL, RESTORE_STALE_DB (rollback only)
 #
@@ -39,12 +41,20 @@ set -Eeuo pipefail
 # Configuration
 # ---------------------------------------------------------------------------
 # No generic default makes sense here -- every deployment stack directory
-# is host-specific. Required, not defaulted, matching this script's
-# convention for other per-deployment values below.
-STACK_DIR="${STACK_DIR:?set STACK_DIR to your deployment stack directory}"
+# is host-specific. Left unset here (not required at global init) so
+# --help works with zero environment configured; --dry-run, deploy, and
+# --rollback all require it -- enforced just after arg parsing below, once
+# we know the requested mode isn't --help.
+STACK_DIR="${STACK_DIR:-}"
 SERVICE="${SERVICE:-beets-web-manager}"
 ENGINE_SERVICE="${ENGINE_SERVICE:-beets}"
-VERSION="${VERSION:?set VERSION to the exact Beets Web Manager release version}"
+# No release default -- pinning one here would make the script silently
+# redeploy a stale version forever. Left unset at global init (same reason
+# as STACK_DIR: --help must work without it); required and validated only
+# for --dry-run and the real rollout via validate_version(), called from
+# run_dry_run()/run_deploy() only. --rollback never needs a version -- it
+# restores whatever image reference the backup recorded.
+VERSION="${VERSION:-}"
 EXPECTED_IMAGE="ghcr.io/iranman/beets-web-manager:${VERSION}"
 # Set once the VERSION release's commit is known (e.g. EXPECTED_REVISION=<sha>)
 # to pin the exact org.opencontainers.image.revision label. Strongly recommended
@@ -154,6 +164,11 @@ on_error() {
 }
 trap on_error ERR
 
+# STACK_DIR is required for every mode that reaches this point: --help
+# exits inside the arg-parsing loop above, before here, so it never hits
+# this check and needs no environment configured at all.
+[[ -n "$STACK_DIR" ]] || die "STACK_DIR is required (set STACK_DIR to your deployment stack directory)"
+
 # ---------------------------------------------------------------------------
 # Generic helpers
 # ---------------------------------------------------------------------------
@@ -200,7 +215,11 @@ canon_path() {
 
 sha256_file() {
   if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$1" | awk '{print $1}'
+    # GNU coreutils prefixes the whole output line with a literal '\' when
+    # the filename needs escaping (contains a backslash, newline, or CR) --
+    # `canon_path()` output never does, but defend anyway rather than
+    # silently returning that marker as part of the hash if ever fed one.
+    sha256sum "$1" | awk '{print $1}' | sed 's/^\\//'
   else
     _py -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$1"
   fi

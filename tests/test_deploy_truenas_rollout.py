@@ -460,7 +460,12 @@ inspect_auth_token
 echo "ACTIVE=$ACTIVE_AUTH_TOKEN_PATH MIGRATION=$NEEDS_TOKEN_MIGRATION EXISTS=$TOKEN_EXISTS"
 """)
         self.assertEqual(res.returncode, 0, res.stderr)
-        self.assertIn(f"ACTIVE={legacy}", res.stdout)
+        # The script's own canon_path() always normalizes to forward
+        # slashes (os.path.realpath(...).replace("\\", "/")) regardless of
+        # platform; match that here rather than asserting the raw
+        # os.path.join() result, which is backslash-separated on Windows.
+        expected_active = os.path.realpath(legacy).replace("\\", "/")
+        self.assertIn(f"ACTIVE={expected_active}", res.stdout)
         self.assertIn("MIGRATION=1", res.stdout)
         self.assertIn("EXISTS=0", res.stdout)
         self.assertFalse(os.path.exists(dest), "dry-run must not create persistent token")
@@ -671,14 +676,70 @@ class ScriptSourceSafetyInvariantTests(unittest.TestCase):
         self.assertIn('WAL_FILENAME="musiclibrary.blb-wal"', SCRIPT_SOURCE)
         self.assertIn('SHM_FILENAME="musiclibrary.blb-shm"', SCRIPT_SOURCE)
 
-    def test_no_rm_of_database_or_token_files(self):
+    @staticmethod
+    def _statements():
+        """Yield (lineno, statement) for every ';'/'&'/'|'-separated
+        statement in the script, comments stripped and whitespace trimmed --
+        a line-anchored regex (`^rm\\s`) misses `rm` inside an indented
+        if-block entirely, since the line then starts with spaces, not
+        'rm'. Splitting on statement separators and stripping each piece
+        finds 'rm' regardless of indentation."""
         for lineno, line in enumerate(SCRIPT_SOURCE.splitlines(), start=1):
             code = line.split("#", 1)[0]
-            if re.search(r"(^|[;&|]\s*)rm\s", code):
+            for statement in re.split(r"[;&|]", code):
+                statement = statement.strip()
+                if statement:
+                    yield lineno, statement
+
+    def test_no_rm_of_database_files(self):
+        # Databases are archived (moved), never deleted -- no exception.
+        for lineno, statement in self._statements():
+            if re.match(r"rm\b", statement):
                 self.assertNotRegex(
-                    code, r"musiclibrary|auth_token|DB_PATH|WAL_PATH|SHM_PATH|TOKEN_PATH",
-                    f"line {lineno} uses 'rm' on what looks like a database/token path: {line!r}",
+                    statement, r"musiclibrary|DB_PATH|WAL_PATH|SHM_PATH",
+                    f"line {lineno} uses 'rm' on what looks like a database path: {statement!r}",
                 )
+
+    def test_token_rm_appears_exactly_once_and_only_in_guarded_rollback_path(self):
+        """Guarded rollback intentionally removes a rollout-created token
+        (Case B in run_rollback()) once persistent_token_existed_before=0,
+        token_migration_performed=1, the canonical path matches exactly,
+        and the checksum matches -- see TokenMigrationAndRollbackTests for
+        behavioral proof. Any OTHER 'rm' touching a token anywhere in the
+        script would mean deletion logic exists outside that single
+        reviewed, guarded, tested path -- a real regression, not a style
+        nit, so this stays a hard failure rather than a warning."""
+        token_rm_statements = [
+            (lineno, statement) for lineno, statement in self._statements()
+            if re.match(r"rm\b", statement) and re.search(r"auth_token|TOKEN_PATH", statement)
+        ]
+        self.assertEqual(
+            len(token_rm_statements), 1,
+            f"expected exactly one token-deleting 'rm' statement in the script, found: {token_rm_statements}",
+        )
+        _, statement = token_rm_statements[0]
+        self.assertRegex(statement, r'rm\s+-f\s+"\$TOKEN_PATH"')
+
+        func_start = SCRIPT_SOURCE.index("run_rollback() {")
+        func_end = SCRIPT_SOURCE.index("\n}\n", func_start)
+        rollback_body = SCRIPT_SOURCE[func_start:func_end]
+        rm_pos = rollback_body.index('rm -f "$TOKEN_PATH"')
+        guard_scope = rollback_body[:rm_pos]
+
+        for condition in (
+            '"$p_existed" == "0"',
+            '"$migration_performed" == "1"',
+            '"$canon_dst" == "$canon_meta"',
+            '"$current_sha" == "$m_sha"',
+        ):
+            self.assertIn(condition, guard_scope, f"token rm is not preceded by required guard: {condition}")
+
+        # The rm must be the very next statement after its guarding `if`'s
+        # `then` -- not merely present somewhere earlier in the function.
+        self.assertTrue(
+            guard_scope.rstrip().endswith("then"),
+            "token rm must immediately follow its guarding `if ...; then`, not float free in the function body",
+        )
 
     def test_stale_database_is_moved_not_deleted(self):
         self.assertIn("mv \"$STALE_DB_PATH\"", SCRIPT_SOURCE)
@@ -939,6 +1000,55 @@ class RollbackTests(EndToEndFixture):
             "beets-engine:local",
             "rollback must never touch the Beets engine",
         )
+
+    def test_rollback_succeeds_with_version_completely_absent(self):
+        """VERSION must never be required for --rollback: it restores
+        whatever image reference the backup itself recorded, so there is
+        nothing for VERSION to mean here -- and requiring it would block
+        recovery at exactly the moment an operator needs the script to just
+        work without having to remember/guess which version was running."""
+        token = os.path.join(self.webmgr_dir, ".auth_token")
+        Path(token).write_text("tok", encoding="utf-8")
+        deploy_res = self.run_script()  # normal deploy; VERSION is set here
+        self.assertEqual(deploy_res.returncode, 0, deploy_res.stderr)
+
+        backup_root = os.path.join(self.stack_dir, "_backups")
+        backup_dir = os.path.join(backup_root, os.listdir(backup_root)[0])
+
+        rollback_env = self.env()
+        del rollback_env["VERSION"]
+        self.assertNotIn("VERSION", rollback_env)
+
+        res = self.run_script("--rollback", backup_dir, env=rollback_env)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("Rollback complete", res.stderr)
+        self.assertNotIn("set VERSION", res.stderr)
+
+
+class HelpAndCliLifecycleTests(unittest.TestCase):
+    """--help must work standalone: no STACK_DIR, no VERSION, nothing else
+    configured. It exits inside argument parsing, before any of the
+    required-configuration checks that gate the real modes."""
+
+    def test_help_works_with_zero_environment_configured(self):
+        env = {k: v for k, v in os.environ.items() if k not in ("STACK_DIR", "VERSION")}
+        res = subprocess.run(
+            [BASH, str(SCRIPT), "--help"], env=env,
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("Usage:", res.stdout)
+        self.assertNotIn("STACK_DIR", res.stderr)
+        self.assertNotIn("VERSION", res.stderr)
+
+    def test_short_help_flag_behaves_the_same(self):
+        env = {k: v for k, v in os.environ.items() if k not in ("STACK_DIR", "VERSION")}
+        res = subprocess.run(
+            [BASH, str(SCRIPT), "-h"], env=env,
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("Usage:", res.stdout)
 
 
 if __name__ == "__main__":
