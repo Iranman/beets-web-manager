@@ -469,6 +469,7 @@ echo "ACTIVE=$ACTIVE_AUTH_TOKEN_PATH MIGRATION=$NEEDS_TOKEN_MIGRATION EXISTS=$TO
         self.assertNotIn("secret-legacy-token-12345", res.stderr)
 
     def test_rollback_case_b_migrated_token_removed_safely(self):
+        import hashlib
         webmgr = os.path.join(self.tmp, "webmgr")
         legacy_dir = os.path.join(self.tmp, "legacy")
         os.makedirs(webmgr)
@@ -479,6 +480,7 @@ echo "ACTIVE=$ACTIVE_AUTH_TOKEN_PATH MIGRATION=$NEEDS_TOKEN_MIGRATION EXISTS=$TO
         Path(compose_file).write_text("services: {}\n", encoding="utf-8")
         Path(legacy).write_text("migrated-token-val", encoding="utf-8")
         Path(dest).write_text("migrated-token-val", encoding="utf-8")
+        token_sha = hashlib.sha256(b"migrated-token-val").hexdigest()
 
         backup_dir = os.path.join(self.tmp, "backup")
         os.makedirs(backup_dir)
@@ -489,7 +491,7 @@ token_migration_planned=1
 persistent_token_path={dest}
 legacy_token_path={legacy}
 token_migration_performed=1
-migrated_token_sha256=d344ed015c7e112d7cdd949a60e0a5c43d84693b708aa80fb65c2b53bdad58b1
+migrated_token_sha256={token_sha}
 """, encoding="utf-8")
 
         res = self.run_snippet(f"""
@@ -510,6 +512,7 @@ run_rollback
         self.assertTrue(os.path.exists(legacy), "rollback must leave the legacy token untouched")
 
     def test_rollback_case_b_checksum_mismatch_refuses_deletion(self):
+        import hashlib
         webmgr = os.path.join(self.tmp, "webmgr")
         legacy_dir = os.path.join(self.tmp, "legacy")
         os.makedirs(webmgr)
@@ -520,6 +523,7 @@ run_rollback
         Path(compose_file).write_text("services: {}\n", encoding="utf-8")
         Path(legacy).write_text("migrated-token-val", encoding="utf-8")
         Path(dest).write_text("MODIFIED_POST_ROLLOUT_TOKEN", encoding="utf-8")
+        token_sha = hashlib.sha256(b"migrated-token-val").hexdigest()
 
         backup_dir = os.path.join(self.tmp, "backup")
         os.makedirs(backup_dir)
@@ -530,7 +534,7 @@ token_migration_planned=1
 persistent_token_path={dest}
 legacy_token_path={legacy}
 token_migration_performed=1
-migrated_token_sha256=d344ed015c7e112d7cdd949a60e0a5c43d84693b708aa80fb65c2b53bdad58b1
+migrated_token_sha256={token_sha}
 """, encoding="utf-8")
 
         res = self.run_snippet(f"""
