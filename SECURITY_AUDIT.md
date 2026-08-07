@@ -8,7 +8,7 @@ Critical and high findings that were fixed in this pass now have focused regress
 
 ## Scope and Reviewed Snapshot
 
-- Workspace: `C:\Users\irand\beets-art-fix`
+- Workspace: local staged working copy (pre-publication, not a Git checkout)
 - Date: 2026-07-16
 - Git status: this staged directory is not a Git checkout, so no reviewed commit SHA was available.
 - Reviewed files: `app.py`, `routes_jobs.py`, `job_engine.py`, `helpers_mb.py`, `backend/`, `frontend/src/`, `frontend/package.json`, `frontend/package-lock.json`, `config.yaml`, `docker-compose.arrs.yml`, `AGENTS.md`, `CLAUDE.md`, and existing tests.

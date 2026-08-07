@@ -1,6 +1,6 @@
 # Security Best Practices Review
 
-Target: `C:\Users\irand\beets-art-fix`
+Target: local staged working copy (pre-publication, not a Git checkout)
 Date: 2026-07-17
 Scope: Flask backend, React/Next static frontend, Docker/deployment config, staged `frontend/dist` assets.
 
