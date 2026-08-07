@@ -22184,16 +22184,17 @@ def reimport_disk():
         return jsonify({"ok": False, "error": "aldir required"}), 400
     if not mb_albumid:
         return jsonify({"ok": False, "error": "mb_albumid required"}), 400
-    if not Path(aldir).exists():
-        return jsonify({"ok": False, "error": f"Directory not found: {aldir}"}), 400
-    # Safety: must be under the music root OR the downloads folder
-    _allowed_roots = ["/data/media/music", "/data/torrents/music"]
-    _aldir_ok = any(
-        Path(aldir).resolve().is_relative_to(r) for r in _allowed_roots
+    # Containment must be checked before any filesystem existence probe: an
+    # unauthenticated-of-root path reaching Path.exists() first is an
+    # existence oracle for arbitrary container paths. Reuses the same
+    # trusted-root resolver as the rest of the import-review/AI-suggest
+    # flow instead of an ad-hoc hardcoded root list.
+    trusted_aldir, aldir_error = _resolve_import_review_source_path(
+        aldir, allow_music=True, expected_type="dir",
     )
-    if not _aldir_ok:
-        return jsonify({"ok": False,
-                        "error": "aldir must be under /data/media/music or /data/torrents/music"}), 400
+    if aldir_error or trusted_aldir is None:
+        return jsonify({"ok": False, "error": aldir_error or f"Directory not found: {aldir}"}), 400
+    aldir = str(trusted_aldir)
     if not existing_album_id:
         try:
             existing_ids = _library_album_ids_for_folder(aldir)
@@ -25397,6 +25398,21 @@ def _ai_batch_reconnect_response(batch_job_id: str):
 
 
 def _start_ai_batch_job(scan_path: str, recover_batch_job_id: str = "", *, retry_failed: bool = False):
+    # Authoritative gate, not merely a route-level convenience: scan_path
+    # reaches an unbounded recursive filesystem walk
+    # (_ai_batch_find_audio_dirs) that queues every discovered folder for
+    # AI-driven import review. Both callers of this function (a fresh
+    # /api/ai-batch-import request and /api/ai-batch-import/recover, which
+    # can source scan_path from a stored job-state file rather than the
+    # current request) must go through this check -- stored state is
+    # untrusted at execution time just like a fresh request body.
+    trusted_scan_path, scan_path_error = _resolve_import_review_source_path(
+        scan_path, allow_music=True, expected_type="dir",
+    )
+    if scan_path_error or trusted_scan_path is None:
+        return jsonify({"ok": False, "error": scan_path_error or f"Path not found: {scan_path}"}), 400
+    scan_path = str(trusted_scan_path)
+
     batch_job_id = recover_batch_job_id or uuid.uuid4().hex
 
     # Atomic check-then-start protection: _ai_batch_reserve_worker is the
@@ -26035,14 +26051,26 @@ def start_ai_batch_import():
         state = _ai_batch_find_state(recover_batch_job_id)
         if not state:
             return jsonify({"ok": False, "error": "AI batch state not found"}), 404
+        # Stored job state is untrusted at execution time (it can be old,
+        # or a recover/retry call can race a state file edited between
+        # requests) -- revalidate exactly like a fresh caller-supplied path,
+        # not "already validated when queued".
         scan_path = _s(state.get("source_path") or payload.get("path") or "/data/torrents/music").strip()
     else:
         scan_path = _s(payload.get("path") or "/data/torrents/music").strip()
 
     if not scan_path:
         return jsonify({"ok": False, "error": "Import source path is required"}), 400
-    if not Path(scan_path).exists():
-        return jsonify({"ok": False, "error": f"Path not found: {scan_path}"}), 400
+    # scan_path feeds an unbounded recursive os.walk() (_ai_batch_find_audio_dirs)
+    # that queues every discovered folder for AI-driven import review -- it
+    # must be confined to the same trusted import-source roots as the rest
+    # of the import-review/AI-suggest flow, not merely checked for existence.
+    trusted_scan_path, scan_path_error = _resolve_import_review_source_path(
+        scan_path, allow_music=True, expected_type="dir",
+    )
+    if scan_path_error or trusted_scan_path is None:
+        return jsonify({"ok": False, "error": scan_path_error or f"Path not found: {scan_path}"}), 400
+    scan_path = str(trusted_scan_path)
     if not os.environ.get("OPENAI_API_KEY", ""):
         return jsonify({"ok": False, "error": "OPENAI_API_KEY not configured"}), 400
 
@@ -26517,8 +26545,31 @@ def create_unmatched_draft():
     slug_album = re.sub(r"[\s_]+", "-", re.sub(r"[^\w\s-]", "", album.lower())).strip("-")
     local_id = f"{slug_artist}-{slug_album}"[:60].strip("-") or "unmatched"
 
-    album_folder = f"{album} ({year}) [unmatched-{local_id}]" if year else f"{album} [unmatched-{local_id}]"
-    draft_path = MUSIC_ROOT / artist / album_folder
+    # artist/album/year are client-supplied free text with no validation
+    # above other than non-empty; sanitize each into a single safe path
+    # component BEFORE building the folder name, so an embedded "/" or a
+    # pure ".."/"." value can never smuggle a path separator or traversal
+    # segment into draft_path (Path's / operator re-parses embedded
+    # separators as additional components -- concatenating first and
+    # sanitizing the combined string after the fact would not catch that).
+    safe_artist = _safe_path_component(artist, "Unknown Artist")
+    safe_album = _safe_path_component(album, "Unknown Album")
+    safe_year = _safe_path_component(year, "") if year else ""
+
+    album_folder = f"{safe_album} ({safe_year}) [unmatched-{local_id}]" if safe_year else f"{safe_album} [unmatched-{local_id}]"
+    draft_path = MUSIC_ROOT / safe_artist / album_folder
+
+    try:
+        music_root_resolved = MUSIC_ROOT.resolve(strict=False)
+        draft_path_resolved = draft_path.resolve(strict=False)
+    except Exception:
+        return jsonify({"ok": False, "error": "Could not resolve draft folder path."}), 400
+    if not _path_is_under(draft_path_resolved, music_root_resolved):
+        # Defense-in-depth: sanitization above should already make this
+        # unreachable, but the destructive mkdir/write below must never
+        # run against an unverified path regardless.
+        return jsonify({"ok": False, "error": "Draft folder is outside the music library."}), 400
+    draft_path = draft_path_resolved
 
     try:
         draft_path.mkdir(parents=True, exist_ok=True)

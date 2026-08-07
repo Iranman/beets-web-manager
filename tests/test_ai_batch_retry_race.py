@@ -540,6 +540,16 @@ class BehavioralTestCase(unittest.TestCase):
         self._job_ids: list = []
         with APP._ai_batch_worker_lock:
             APP._ai_batch_active_workers.pop(self.batch_job_id, None)
+        # _behavioral_scan_path()'s directory must be a trusted import-source
+        # root for _start_ai_batch_job's path validation (SEC-002 Wave 8) to
+        # accept it -- patch it in explicitly rather than relying on
+        # production's trusted-root list happening to already cover an
+        # arbitrary test scratch directory.
+        self._downloads_roots_patcher = mock.patch.object(
+            APP, "_DOWNLOADS_ROOTS", APP._DOWNLOADS_ROOTS + [str(_BEHAVIORAL_TMP_ROOT)]
+        )
+        self._downloads_roots_patcher.start()
+        self.addCleanup(self._downloads_roots_patcher.stop)
 
     def track_job(self, job_id: str) -> None:
         """Register a real JobStore job this test started, so tearDown can
