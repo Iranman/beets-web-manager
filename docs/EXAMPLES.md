@@ -6,7 +6,7 @@ This document provides deployment examples for embedding **Beets Web Manager** i
 
 ## 1. Existing Compose Stack Example (e.g., TrueNAS / Arrs Stack)
 
-When adding `beets-web-manager` to an existing Compose file (such as `/mnt/PLEX/Apps/Arrs/docker-compose.yml`), copy only the service definition below.
+When adding `beets-web-manager` to an existing Compose file (such as `/srv/media-stack/docker-compose.yml`), copy only the service definition below.
 
 > [!IMPORTANT]
 > - Use the published GHCR image.
@@ -25,14 +25,14 @@ services:
       - "${BEETS_WEB_BIND_ADDRESS:-127.0.0.1}:8337:8337"
 
     environment:
-      TZ: America/Los_Angeles
+      TZ: UTC
       BEETS_API_URL: http://beets:8338
       BEETS_API_TOKEN: "${BEETS_API_TOKEN:?set in .env}"
       BEETS_WEB_AUTH_TOKEN: "${BEETS_WEB_AUTH_TOKEN:-}"
       BEETS_WEB_AUTH_TOKEN_FILE: /web-manager-data/.auth_token
 
     volumes:
-      - /mnt/PLEX/Apps/Arrs/beets-web-manager:/web-manager-data
+      - ${BEETS_WEB_MANAGER_DATA_PATH:-./web-manager-data}:/web-manager-data
 
     security_opt:
       - no-new-privileges:true

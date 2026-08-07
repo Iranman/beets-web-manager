@@ -443,7 +443,7 @@ BEET_BIN  = shutil.which("beet") or "/lsiopy/bin/beet"
 LOG_FILE  = os.environ.get("BEETS_LOG", "/config/beet.log")
 HOST      = "0.0.0.0"
 PORT      = int(os.environ.get("WEBCONTROL_PORT", "8337"))
-PLEX_URL      = os.environ.get("PLEX_URL",   "http://192.168.0.250:32400").rstrip("/")
+PLEX_URL      = os.environ.get("PLEX_URL",   "").rstrip("/")
 PLEX_TOKEN    = os.environ.get("PLEX_TOKEN", "")
 PLEX_API_TIMEOUT = _env_int("PLEX_API_TIMEOUT", 20, minimum=5)
 PLEX_SCAN_TIMEOUT = _env_int("PLEX_SCAN_TIMEOUT", 90, minimum=0)

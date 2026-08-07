@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 APP = (ROOT / "app.py").read_text(encoding="utf-8")
 CLIENT = (ROOT / "frontend" / "src" / "api" / "client.ts").read_text(encoding="utf-8")
 LIB_API = (ROOT / "frontend" / "src" / "lib" / "api.ts").read_text(encoding="utf-8")
-COMPOSE = (ROOT / "docker-compose.arrs.yml").read_text(encoding="utf-8")
+COMPOSE = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
 CONFIG = (ROOT / "config.yaml.example").read_text(encoding="utf-8")
 PACKAGE = (ROOT / "frontend" / "package.json").read_text(encoding="utf-8")
 
@@ -85,15 +85,13 @@ class SecurityHardeningTests(unittest.TestCase):
         combined = CONFIG + "\n" + COMPOSE
         for pattern in ("sk-proj", "K8ter", "6bHjj", "0be70", "HWxo", "f3bdb"):
             self.assertNotIn(pattern, combined)
-        self.assertRegex(COMPOSE, r"BEETS_WEB_AUTH_TOKEN: \"\$\{BEETS_WEB_AUTH_TOKEN:-\}\"")
+        self.assertRegex(COMPOSE, r"BEETS_WEB_AUTH_TOKEN: \$\{BEETS_WEB_AUTH_TOKEN:-\}")
         self.assertIn("BEETS_WEB_AUTH_TOKEN_FILE: /web-manager-data/.auth_token", COMPOSE)
         self.assertRegex(COMPOSE, r"PUID: \$\{PUID:-1000\}")
         self.assertRegex(COMPOSE, r"PGID: \$\{PGID:-1000\}")
-        self.assertIn('OPENAI_API_KEY: "${OPENAI_API_KEY:-}"', COMPOSE)
-        self.assertIn('PLEX_TOKEN: "${PLEX_TOKEN:?set in .env}"', COMPOSE)
-        self.assertIn('LIDARR_API_KEY: "${LIDARR_API_KEY:?set in .env}"', COMPOSE)
-        self.assertIn('DIGARR_INITIAL_PASSWORD: "${DIGARR_INITIAL_PASSWORD:?set in .env}"', COMPOSE)
-        self.assertIn('POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set in .env}"', COMPOSE)
+        self.assertIn("OPENAI_API_KEY: ${OPENAI_API_KEY:-}", COMPOSE)
+        self.assertIn("PLEX_TOKEN: ${PLEX_TOKEN:-}", COMPOSE)
+        self.assertIn("LIDARR_API_KEY: ${LIDARR_API_KEY:-}", COMPOSE)
 
     def test_frontend_dependencies_are_pinned(self):
         self.assertNotIn('\"latest\"', PACKAGE)

@@ -1,6 +1,6 @@
 # Beets Web React Frontend
 
-This is the production React frontend for Beets Web Control. Flask serves the built static export at `http://192.168.0.250:8337`; Next.js is used for local development and production builds.
+This is the production React frontend for Beets Web Control. Flask serves the built static export from wherever `beets-web-manager` is running; Next.js is used for local development and production builds.
 
 ## Commands
 
@@ -12,7 +12,7 @@ npm run build
 npm run preview
 ```
 
-During local development, Next runs at `http://localhost:3000` and rewrites `/api/*` to `http://192.168.0.250:8337`.
+During local development, Next runs at `http://localhost:3000` and rewrites `/api/*` to `http://localhost:8337` by default (a running `beets-web-manager` backend). Set `DEV_API_PROXY_TARGET` to point at a different host if the backend isn't running locally.
 
 ## Stack
 
@@ -30,17 +30,6 @@ During local development, Next runs at `http://localhost:3000` and rewrites `/ap
 - `/jobs`: global job monitor with filters, logs, retry, kill, and clear actions.
 - `/config`: integration status, library health, MusicBrainz coverage, config.yaml editor, restart.
 
-## Deploy
+## Build output
 
-```powershell
-cd C:\Users\irand\beets-art-fix\frontend
-npm run typecheck
-npm run build
-
-$root = '\\TRUENAS\Apps\Arrs\beets'
-$ts = Get-Date -Format 'yyyyMMdd-HHmmss'
-Copy-Item "$root\static\index.html" "$root\static\index.html.bak-$ts-react"
-Copy-Item dist\* "$root\frontend\dist\" -Recurse -Force
-```
-
-`next.config.mjs` uses `output: 'export'` for production builds and a dev-only `/api/*` rewrite. `npm run build` writes Next's raw export to `out/` and syncs it to `dist/` for the existing Flask deployment path. Flask serves `/_next/static/...` chunks from `frontend/dist/_next/static/` and returns the React entrypoint for direct browser loads of app routes like `/library` and `/config`.
+`next.config.mjs` uses `output: 'export'` for production builds and a dev-only `/api/*` rewrite. `npm run build` writes Next's raw export to `out/` and syncs it to `dist/`, which Flask serves directly -- `/_next/static/...` chunks from `frontend/dist/_next/static/`, and the React entrypoint for direct browser loads of app routes like `/library` and `/config`. The published Docker image (see the repository root README) builds this automatically; no manual copy step is needed for a container deployment.

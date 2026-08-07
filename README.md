@@ -62,9 +62,9 @@ Or run the automated setup script:
 
 ### Existing Stack Integration (TrueNAS / Portainer / Multi-App Stacks)
 
-To add `beets-web-manager` to an existing Docker Compose stack (e.g., `/mnt/PLEX/Apps/Arrs/docker-compose.yml`), copy the service block from [docs/EXAMPLES.md](docs/EXAMPLES.md).
+To add `beets-web-manager` to an existing Docker Compose stack (e.g., `/srv/media-stack/docker-compose.yml`), copy the service block from [docs/EXAMPLES.md](docs/EXAMPLES.md).
 
-It uses the published image (`ghcr.io/iranman/beets-web-manager:${BEETS_WEB_MANAGER_VERSION:-stable}`), requires no local `build:` directive, and persists state to a host path (e.g., `/mnt/PLEX/Apps/Arrs/beets-web-manager:/web-manager-data`).
+It uses the published image (`ghcr.io/iranman/beets-web-manager:${BEETS_WEB_MANAGER_VERSION:-stable}`), requires no local `build:` directive, and persists state to a host path (e.g., `/srv/media-stack/beets-web-manager:/web-manager-data`).
 
 ### Development Installation (Source Builds)
 
