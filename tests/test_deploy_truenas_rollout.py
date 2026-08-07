@@ -101,6 +101,10 @@ class RolloutScriptTestBase(unittest.TestCase):
     def base_env(self, **extra):
         env = dict(os.environ)
         env["PATH"] = self.fakebin + os.pathsep + env["PATH"]
+        # STACK_DIR has no generic default in the script itself (a
+        # host-specific path has no sensible one) -- every test fixture
+        # provides its own isolated scratch directory explicitly.
+        env["STACK_DIR"] = self.tmp
         for k, v in extra.items():
             env[k] = str(v)
         return env

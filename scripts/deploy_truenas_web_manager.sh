@@ -44,7 +44,10 @@ set -Eeuo pipefail
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-STACK_DIR="${STACK_DIR:-/mnt/PLEX/Apps/Arrs}"
+# No generic default makes sense here -- every deployment stack directory
+# is host-specific. Required, not defaulted, matching this script's
+# convention for other per-deployment values below.
+STACK_DIR="${STACK_DIR:?set STACK_DIR to your deployment stack directory}"
 SERVICE="${SERVICE:-beets-web-manager}"
 ENGINE_SERVICE="${ENGINE_SERVICE:-beets}"
 VERSION="${VERSION:-0.1.4}"

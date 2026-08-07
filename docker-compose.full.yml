@@ -17,7 +17,6 @@
 
 services:
   beets:
-    platform: linux/amd64
     build:
       context: .
       dockerfile: Dockerfile.beets
@@ -50,10 +49,11 @@ services:
       timeout: 5s
       retries: 3
 
-  # Optional: PO token provider for yt-dlp YouTube downloads (only needed if
-  # you use the ytdlp acquisition method and hit YouTube's PO token
-  # requirement). Remove this service and YTDLP_PO_PROVIDER_URL below if
-  # unused.
+  # Included by default so yt-dlp YouTube downloads work out of the box
+  # (YouTube's PO token requirement). This service starts unconditionally
+  # and beets-web-manager's YTDLP_PO_PROVIDER_URL default points at it below
+  # -- it is not conditionally enabled. If you don't use the ytdlp
+  # acquisition method, remove this service and blank YTDLP_PO_PROVIDER_URL.
   bgutil-provider:
     image: brainicism/bgutil-ytdlp-pot-provider:1.3.1-deno
     container_name: bgutil-provider

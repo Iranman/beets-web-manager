@@ -74,11 +74,11 @@ docker image inspect ghcr.io/iranman/beets-web-manager:<VERSION> \
 ## Expected host layout (verify, don't trust)
 
 ```text
-/mnt/PLEX/Apps/Arrs                                        stack directory
-/mnt/PLEX/Apps/Arrs/beets/musiclibrary.blb                  authoritative DB
-/mnt/PLEX/Apps/Arrs/beets-web-manager/                      web-manager state dir
-/mnt/PLEX/Apps/Arrs/beets-web-manager/musiclibrary.blb       stale DB (if present)
-/mnt/PLEX/Apps/Arrs/beets-web-manager/.auth_token            persistent web token
+$STACK_DIR                                                  stack directory
+$STACK_DIR/beets/musiclibrary.blb                            authoritative DB
+$STACK_DIR/beets-web-manager/                                web-manager state dir
+$STACK_DIR/beets-web-manager/musiclibrary.blb                 stale DB (if present)
+$STACK_DIR/beets-web-manager/.auth_token                      persistent web token
 ```
 
 **These paths are never trusted as given.** The script resolves the real
@@ -120,7 +120,7 @@ the first half passes:
    looks like real library data); inspect the persistent auth token; plan
    (not create) the backup directory.
 2. **Backup:** timestamped directory under
-   `/mnt/PLEX/Apps/Arrs/_backups/web-manager-rollout-YYYYMMDD-HHMMSS/`,
+   `$STACK_DIR/_backups/web-manager-rollout-YYYYMMDD-HHMMSS/`,
    `chmod 700`, containing the Compose file, `.env` (if present), resolved
    `docker compose config`, the current container's `docker inspect` output,
    the previous image ID/ref and its labels, the current token (copy +
@@ -167,7 +167,7 @@ logs, or shell history.
 ## Rollback
 
 ```bash
-scripts/deploy_truenas_web_manager.sh --rollback /mnt/PLEX/Apps/Arrs/_backups/web-manager-rollout-YYYYMMDD-HHMMSS
+scripts/deploy_truenas_web_manager.sh --rollback "$STACK_DIR/_backups/web-manager-rollout-YYYYMMDD-HHMMSS"
 ```
 
 Stops only `beets-web-manager`, restores the prior Compose file, restores
@@ -182,10 +182,11 @@ engine and its database are never touched or recreated by rollback.
 
 ## Configuration knobs
 
-All optional environment variables:
+`STACK_DIR` is required (no generic default makes sense for a host-specific
+path). All other environment variables are optional:
 
 ```text
-STACK_DIR              default /mnt/PLEX/Apps/Arrs
+STACK_DIR              required, no default (your deployment's stack directory)
 SERVICE                default beets-web-manager
 ENGINE_SERVICE          default beets
 VERSION                 default 0.1.4 (not yet released -- see "Which version to deploy" above)

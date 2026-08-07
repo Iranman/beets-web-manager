@@ -172,7 +172,7 @@ The music-format replacement route is protected by auth/CSRF and existing tests 
 
 Fixed: Beets/SLSKD/Cleanuparr PUID/PGID defaults no longer default to root; sensitive Compose credentials now require environment variables; `BEETS_WEB_AUTH_TOKEN` is required by the Beets service recipe.
 
-Open: many images still use `:latest`, broad `/mnt/PLEX/data:/data` mounts remain, and services do not consistently set `cap_drop`, `security_opt: no-new-privileges`, `read_only`, tmpfs, or narrow writable mounts. A compromised Beets app can still affect any writable mounted dataset.
+Open: many images still use `:latest`, broad host-mount-to-`/data` bindings remain, and services do not consistently set `cap_drop`, `security_opt: no-new-privileges`, `read_only`, tmpfs, or narrow writable mounts. A compromised Beets app can still affect any writable mounted dataset.
 
 ## Dependency and Supply-Chain Assessment
 

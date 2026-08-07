@@ -260,18 +260,35 @@ def _check_compose_variant(path: Path, errors: list[str], warnings: list[str], r
     _check_no_hardcoded_lan_allowlist(text, label, errors)
 
 
-_OWNER_SPECIFIC_PATH_RE = re.compile(r"/mnt/PLEX(?:/|\b)", re.IGNORECASE)
+# Structural classes of "this looks like somebody's real machine", not any
+# one maintainer's specific former value -- a denylist of exact former
+# literals would itself have to contain them. See
+# tests/test_no_owner_specific_deployment_details.py for the synthetic-
+# fixture self-test proving each pattern actually fires.
+_HOST_SPECIFIC_PATH_PATTERNS = (
+    re.compile(r"/mnt/[A-Za-z0-9_.-]+/"),                                    # absolute /mnt/<pool>/... mount
+    re.compile(r"/home/[A-Za-z0-9_.-]+/"),                                   # absolute /home/<user>/... path
+    re.compile(r"[A-Za-z]:\\\\?Users\\\\?[A-Za-z0-9_.-]+", re.IGNORECASE),   # C:\Users\<user>\... path
+    re.compile(r"\\\\[A-Za-z0-9_.-]+\\"),                                    # UNC \\<host>\... path
+    re.compile(
+        r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}"
+        r"|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}"
+        r"|192\.168\.\d{1,3}\.\d{1,3})\b"
+    ),                                                                        # hardcoded RFC1918 host address
+)
 
 
 def _check_no_owner_specific_paths(text: str, label: str, errors: list[str]) -> None:
-    """Regression guard: no public Compose file may ship the project owner's
-    actual host paths as an active default (see docs/operations/TRUENAS_ROLLOUT.md
-    and the deployment-architecture rule in AGENTS.md)."""
+    """Regression guard: no public Compose file may ship a maintainer's
+    actual host paths or LAN addresses as an active default (see the
+    deployment-architecture rule in AGENTS.md)."""
     for line_no, line in enumerate(text.splitlines(), start=1):
         if line.strip().startswith("#"):
             continue
-        if _OWNER_SPECIFIC_PATH_RE.search(line):
-            errors.append(f"{label}:{line_no}: owner-specific host path must not appear in a public example: {line.strip()}")
+        for pattern in _HOST_SPECIFIC_PATH_PATTERNS:
+            if pattern.search(line):
+                errors.append(f"{label}:{line_no}: host-specific path/address must not appear in a public example: {line.strip()}")
+                break
 
 
 def _check_full_compose_hardening(errors: list[str]) -> None:

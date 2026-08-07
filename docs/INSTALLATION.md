@@ -81,6 +81,8 @@ docker compose -f docker-compose.full.yml up -d --build
 
 Both `docker-compose.dev.yml` and `docker-compose.full.yml` accept a `BEETS_BASE_IMAGE` variable (in `.env` or the shell environment) to select the upstream LinuxServer Beets version the engine is built from -- default is the tested production candidate. See `docs/CONFIGURATION.md` ("Beets engine version") before setting it to `lscr.io/linuxserver/beets:latest`, and see `docs/BEETS_ENGINE_MIGRATION.md` before changing it on a deployment with an existing library.
 
+`docker-compose.full.yml` also accepts `BEETS_EXPECT_EXISTING_LIBRARY` (default `1`): the locally built engine refuses to start if it expects an existing library but `./config` is empty, so it doesn't silently treat a missing database as an empty one. On a genuine first run against a brand new `./config` with no prior library, set `BEETS_EXPECT_EXISTING_LIBRARY=0` in `.env` for that first run; leave it at `1` (or unset) for every run afterward, so the engine keeps refusing to start against an unexpectedly empty database later.
+
 ---
 
 ## Image Release Channels
