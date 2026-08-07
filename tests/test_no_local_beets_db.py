@@ -5,7 +5,6 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_SOURCE = (ROOT / "app.py").read_text(encoding="utf-8")
-COMPOSE_ARRS_SOURCE = (ROOT / "docker-compose.arrs.yml").read_text(encoding="utf-8")
 COMPOSE_MAIN_SOURCE = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
 
 

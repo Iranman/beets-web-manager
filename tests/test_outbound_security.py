@@ -62,9 +62,9 @@ class OutboundSecurityTests(unittest.TestCase):
     def test_allows_public_hosts_and_explicit_arr_allowlist(self):
         self.assert_allowed("https://musicbrainz.org/ws/2/release", "138.201.227.205")
         self.assert_allowed(
-            "http://192.168.0.250:8686/api/v1/system/status",
-            "192.168.0.250",
-            allowlist="192.168.0.250:8686",
+            "http://192.168.1.50:8686/api/v1/system/status",
+            "192.168.1.50",
+            allowlist="192.168.1.50:8686",
         )
         self.assert_allowed(
             "http://lidarr:8686/api/v1/system/status",

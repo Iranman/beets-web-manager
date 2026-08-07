@@ -36,6 +36,12 @@ Claude acts as Technical Lead and Final Reviewer for all engineering tasks (Stag
 - Jobs need persistent status, readable progress, raw debug detail, cancellation, bounded retries, checkpoints, resume behavior, and idempotency.
 - Never expose secrets in logs, API responses, frontend state, or committed files.
 
+## Deployment Configuration
+
+Repository deployment files are generic product examples only. The project owner's live TrueNAS, Docker Compose, media paths, service topology, credentials, LAN addresses, and private deployment configuration must never be copied into the public repository. Production configuration remains outside Git and is validated separately from public examples.
+
+Never copy a live server's Compose file, host paths, LAN addresses, credentials, private topology, or user-specific configuration into Git. Use `docker-compose.yml` (generic, web-manager only, connects to an existing Beets control agent) and `docker-compose.full.yml` (generic, bundled `beets` + `beets-web-manager`, built from source) instead, with host paths driven entirely by environment variables (see `.env.example`). `tests/test_no_owner_specific_deployment_details.py` enforces this.
+
 ## Validation Commands
 
 From repo root:

@@ -85,7 +85,7 @@ def parse_outbound_allowlist(raw: Optional[str] = None) -> Tuple[OutboundAllowRu
     """Parse BEETS_OUTBOUND_ALLOWLIST.
 
     Entries must be exact and port-scoped, for example:
-      192.168.0.250:32400,lidarr:8686,10.0.0.0/24:8080
+      192.168.1.100:32400,lidarr:8686,10.0.0.0/24:8080
     Wildcards and suffix matching are deliberately unsupported.
     """
     value = os.environ.get("BEETS_OUTBOUND_ALLOWLIST", "") if raw is None else raw

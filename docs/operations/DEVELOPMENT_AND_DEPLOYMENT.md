@@ -38,6 +38,8 @@ When deploying to the configured live share or host:
 
 Never copy raw local backup files, private config, generated caches, or unrelated dirty work into the deployment target.
 
+For the guarded TrueNAS rollout of a specific tagged release (image pin, mount verification, database/token safety checks, backup, rollback), see [`TRUENAS_ROLLOUT.md`](TRUENAS_ROLLOUT.md) and `scripts/deploy_truenas_web_manager.sh`.
+
 ## Job And Workflow Operations
 
 Long-running operations should use the shared job surface (`JobStore`, `PythonJob`, job status endpoints, and frontend job polling) rather than ad hoc background threads. New or changed workflows should preserve visible status, cancellation checks, checkpoint/resume behavior, and idempotency.

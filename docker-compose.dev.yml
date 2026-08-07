@@ -19,7 +19,7 @@ services:
     environment:
       - PUID=${PUID:-1000}
       - PGID=${PGID:-1000}
-      - TZ=${TZ:-America/Los_Angeles}
+      - TZ=${TZ:-UTC}
       - BEETSDIR=/config
       - BEETS_API_TOKEN=${BEETS_API_TOKEN:?set BEETS_API_TOKEN in .env}
       - BEETS_AGENT_PORT=8338
@@ -51,7 +51,7 @@ services:
       - "${BEETS_WEB_BIND_ADDRESS:-127.0.0.1}:${WEBCONTROL_PORT:-8337}:8337"
 
     environment:
-      TZ: ${TZ:-America/Los_Angeles}
+      TZ: ${TZ:-UTC}
       WEBCONTROL_PORT: ${WEBCONTROL_PORT:-8337}
 
       BEETS_API_URL: ${BEETS_API_URL:-http://beets:8338}

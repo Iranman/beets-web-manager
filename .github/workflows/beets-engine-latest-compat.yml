@@ -1,0 +1,72 @@
+name: beets-engine-latest-compat
+
+# Informational only: does lscr.io/linuxserver/beets:latest still build and
+# pass verification today? Split into its own workflow (out of
+# docker-build.yml) specifically so this check's result can never be
+# entangled with -- or read as reflecting on -- the required production
+# build/verification jobs there (compose-verification,
+# beets-engine-verification, Build & Publish GHCR Image). Those stay green
+# independently of whatever this reports. It never influences what
+# production uses -- that stays pinned to BEETS_PRODUCTION_VERSION in
+# docker-build.yml until an intentional, tested repository change updates
+# it. `continue-on-error: true` additionally ensures this job's own
+# conclusion, even a hard failure, cannot fail this workflow run overall.
+
+on:
+  pull_request:
+  schedule:
+    # Weekly: same cadence as before the split.
+    - cron: '0 6 * * 1'
+
+permissions:
+  contents: read
+
+env:
+  # Kept in sync with docker-build.yml's BEETS_PRODUCTION_VERSION -- the
+  # tested, pinned production Beets version this job compares `latest`
+  # against. Not the source of truth for production (that's
+  # docker-build.yml); duplicated here only because this workflow no
+  # longer shares docker-build.yml's env block after the split.
+  BEETS_PRODUCTION_VERSION: "2.13.1"
+
+jobs:
+  beets-engine-latest-compat:
+    name: beets-engine-latest-compat (informational)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Build Beets engine image against latest
+        run: |
+          docker build --pull=true \
+            --build-arg BEETS_BASE_IMAGE="lscr.io/linuxserver/beets:latest" \
+            --build-arg VCS_REF="${{ github.sha }}" \
+            -f Dockerfile.beets -t beets-engine:latest-compat .
+      - name: Verify Beets engine image (version auto-detected)
+        run: |
+          python scripts/verify_beets_engine_image.py \
+            --image beets-engine:latest-compat \
+            --require-revision "${{ github.sha }}" \
+            --require-plugin chroma \
+            --forbid-duplicate-plugin musicbrainz \
+            --require-command-help mbsubmit \
+            --require-command-help submit \
+            --check-bpsync \
+            --check-s6-supervision
+      - name: Compare against pinned production version
+        if: always()
+        run: |
+          # `beet version` can print database-migration backup lines before
+          # the actual "beets version X.Y.Z" line on first open of a fresh
+          # database -- match that line specifically rather than assuming
+          # it's the first line of output.
+          resolved="$(docker run --rm --entrypoint /lsiopy/bin/beet beets-engine:latest-compat version | grep -i '^beets version' | awk '{print $3}')"
+          echo "lscr.io/linuxserver/beets:latest resolves to Beets ${resolved}"
+          if [ "${resolved}" != "${BEETS_PRODUCTION_VERSION}" ]; then
+            echo "::notice::lscr.io/linuxserver/beets:latest (Beets ${resolved}) differs from the pinned production version (${BEETS_PRODUCTION_VERSION}). Production is NOT affected by this job; upgrade requires an intentional, tested repository change."
+          else
+            echo "::notice::lscr.io/linuxserver/beets:latest matches the pinned production version (${BEETS_PRODUCTION_VERSION})."
+          fi

@@ -2312,8 +2312,8 @@ class ComposeSecurityValidatorTests(unittest.TestCase):
     def test_both_compose_files_are_validated(self):
         import scripts.validate_compose_security as vcs
         errors: list = []
-        vcs._check_compose_variant(vcs.STANDALONE_COMPOSE, errors, [])
-        vcs._check_compose_variant(vcs.ARRS_COMPOSE, errors, [])
+        vcs._check_compose_variant(vcs.STANDALONE_COMPOSE, errors, [], require_beets=False)
+        vcs._check_compose_variant(vcs.FULL_COMPOSE, errors, [], require_beets=True)
         self.assertEqual(errors, [])
 
 

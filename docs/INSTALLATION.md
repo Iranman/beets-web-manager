@@ -43,7 +43,7 @@ docker compose ps
 
 ## Existing Stack Installation (TrueNAS / Portainer / Multi-App Stacks)
 
-To embed `beets-web-manager` into an existing Compose stack (such as `/mnt/PLEX/Apps/Arrs/docker-compose.yml`):
+To embed `beets-web-manager` into an existing Compose stack (such as `/srv/media-stack/docker-compose.yml`):
 
 1. Copy the `beets-web-manager` service block from [docs/EXAMPLES.md](EXAMPLES.md).
 2. Reference the published image `ghcr.io/iranman/beets-web-manager:${BEETS_WEB_MANAGER_VERSION:-stable}`.
@@ -51,7 +51,7 @@ To embed `beets-web-manager` into an existing Compose stack (such as `/mnt/PLEX/
 4. Mount host data path for persistent state:
    ```yaml
    volumes:
-     - /mnt/PLEX/Apps/Arrs/beets-web-manager:/web-manager-data
+     - ${BEETS_WEB_MANAGER_DATA_PATH:-./web-manager-data}:/web-manager-data
    ```
 5. Configure `BEETS_API_URL` and `BEETS_API_TOKEN`.
 6. Choose the connection mode that matches your setup -- see [Beets Connection Modes](EXAMPLES.md#2-beets-connection-modes) for whether `depends_on` applies.
@@ -80,6 +80,8 @@ docker compose -f docker-compose.full.yml up -d --build
 > `docker-compose.full.yml` builds `beets-engine` locally from `Dockerfile.beets`. Running it outside the repository root without a local build context will fail with `pull access denied for beets-engine`. Do not copy the `beets` service definition into an external directory unless `Dockerfile.beets` and source files are also present.
 
 Both `docker-compose.dev.yml` and `docker-compose.full.yml` accept a `BEETS_BASE_IMAGE` variable (in `.env` or the shell environment) to select the upstream LinuxServer Beets version the engine is built from -- default is the tested production candidate. See `docs/CONFIGURATION.md` ("Beets engine version") before setting it to `lscr.io/linuxserver/beets:latest`, and see `docs/BEETS_ENGINE_MIGRATION.md` before changing it on a deployment with an existing library.
+
+`docker-compose.full.yml` also accepts `BEETS_EXPECT_EXISTING_LIBRARY` (default `1`): the locally built engine refuses to start if it expects an existing library but `./config` is empty, so it doesn't silently treat a missing database as an empty one. On a genuine first run against a brand new `./config` with no prior library, set `BEETS_EXPECT_EXISTING_LIBRARY=0` in `.env` for that first run; leave it at `1` (or unset) for every run afterward, so the engine keeps refusing to start against an unexpectedly empty database later.
 
 ---
 

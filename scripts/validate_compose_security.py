@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
 """Validate Beets-specific Docker Compose security invariants.
 
-This intentionally scopes the strictest hard-hardening failures (mounts,
-security_opt, cap_drop, mem_limit, etc.) to docker-compose.arrs.yml, the
-project owner's real deployment file. The image/digest-semantics, outbound
-allowlist, and port-exposure checks below apply to both docker-compose.yml
-(the generic reusable template) and docker-compose.arrs.yml, since both are
-real deployable configurations for the same Beets services.
+This repository ships only generic, reusable Compose configurations --
+docker-compose.yml (web-manager only, connects to an existing Beets
+control agent) and docker-compose.full.yml (bundled beets +
+beets-web-manager, built from source). Neither may encode the project
+owner's actual deployment topology, host paths, or credentials; see
+docs/operations/TRUENAS_ROLLOUT.md and the "Deployment architecture rule"
+in AGENTS.md for the policy this enforces. docker-compose.full.yml's
+`beets` service intentionally does NOT carry the same container-level
+hardening (security_opt/cap_drop/read_only/tmpfs) as a hand-built service
+would: it runs the upstream LinuxServer image as-is, whose own s6-overlay
+init requires starting as root and self-dropping privileges via PUID/PGID
+-- only the UID/GID/mount checks below are safe to enforce there.
 """
 from __future__ import annotations
 
@@ -16,7 +22,6 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-ARRS_COMPOSE = ROOT / "docker-compose.arrs.yml"
 STANDALONE_COMPOSE = ROOT / "docker-compose.yml"
 DOCKERFILE_BEETS = ROOT / "Dockerfile.beets"
 ENV_EXAMPLE = ROOT / ".env.example"
@@ -177,7 +182,7 @@ FULL_COMPOSE = ROOT / "docker-compose.full.yml"
 
 def _check_production_hardening(text: str, label: str, errors: list[str]) -> None:
     """docker-compose.yml is the source-independent production deployment
-    file. Unlike docker-compose.arrs.yml's owner-specific hardening block
+    file. Unlike docker-compose.full.yml's beets-service hardening block
     (checked separately below), these invariants must hold for the generic
     template shipped to every user, so they are enforced unconditionally
     rather than folded into the same opt-in required_snippets table."""
@@ -255,6 +260,68 @@ def _check_compose_variant(path: Path, errors: list[str], warnings: list[str], r
     _check_no_hardcoded_lan_allowlist(text, label, errors)
 
 
+# Structural classes of "this looks like somebody's real machine", not any
+# one maintainer's specific former value -- a denylist of exact former
+# literals would itself have to contain them. See
+# tests/test_no_owner_specific_deployment_details.py for the synthetic-
+# fixture self-test proving each pattern actually fires.
+_HOST_SPECIFIC_PATH_PATTERNS = (
+    re.compile(r"/mnt/[A-Za-z0-9_.-]+/"),                                    # absolute /mnt/<pool>/... mount
+    re.compile(r"/home/[A-Za-z0-9_.-]+/"),                                   # absolute /home/<user>/... path
+    re.compile(r"[A-Za-z]:\\\\?Users\\\\?[A-Za-z0-9_.-]+", re.IGNORECASE),   # C:\Users\<user>\... path
+    re.compile(r"\\\\[A-Za-z0-9_.-]+\\"),                                    # UNC \\<host>\... path
+    re.compile(
+        r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}"
+        r"|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}"
+        r"|192\.168\.\d{1,3}\.\d{1,3})\b"
+    ),                                                                        # hardcoded RFC1918 host address
+)
+
+
+def _check_no_owner_specific_paths(text: str, label: str, errors: list[str]) -> None:
+    """Regression guard: no public Compose file may ship a maintainer's
+    actual host paths or LAN addresses as an active default (see the
+    deployment-architecture rule in AGENTS.md)."""
+    for line_no, line in enumerate(text.splitlines(), start=1):
+        if line.strip().startswith("#"):
+            continue
+        for pattern in _HOST_SPECIFIC_PATH_PATTERNS:
+            if pattern.search(line):
+                errors.append(f"{label}:{line_no}: host-specific path/address must not appear in a public example: {line.strip()}")
+                break
+
+
+def _check_full_compose_hardening(errors: list[str]) -> None:
+    """docker-compose.full.yml's `beets` service is the one generic file in
+    this repo that runs a local Beets engine container. Its hardening is
+    deliberately lighter than a from-scratch service: LinuxServer images
+    (this one included) run their own s6-overlay init as root and self-drop
+    privileges via PUID/PGID -- a container-level `user:` override or a
+    read_only root + tmpfs `/run` combination fights that init and breaks
+    startup (verified empirically: s6 cannot exec its own init under
+    either). Only the checks below are safe to enforce unconditionally."""
+    if not FULL_COMPOSE.exists():
+        errors.append("docker-compose.full.yml not found")
+        return
+    text = _read(FULL_COMPOSE)
+    beets = _service_block(text, "beets")
+    if not beets:
+        errors.append("docker-compose.full.yml: beets service not found")
+        return
+    beets_active = "\n".join(_active_lines(beets))
+
+    if re.search(r"^\s*user:\s*[\"']?0(?::0)?[\"']?\s*$", beets_active, re.M):
+        errors.append("docker-compose.full.yml: beets must not run as UID/GID 0")
+    if "${PUID:-0}" in beets_active or "${PGID:-0}" in beets_active:
+        errors.append("docker-compose.full.yml: beets UID/GID defaults must not be root")
+    if re.search(r"^\s*privileged:\s*true\b", beets_active, re.M):
+        errors.append("docker-compose.full.yml: beets must not run privileged")
+
+    for volume in _volume_lines(beets):
+        if volume in {"/:/host", "/:/data"} or "/var/run/docker.sock" in volume:
+            errors.append(f"docker-compose.full.yml: beets broad/forbidden mount: {volume}")
+
+
 def main() -> int:
     errors: list[str] = []
     warnings: list[str] = []
@@ -269,65 +336,21 @@ def main() -> int:
         _check_production_hardening(standalone_text, "docker-compose.yml", errors)
 
     _check_compose_variant(STANDALONE_COMPOSE, errors, warnings, require_beets=False)
-    _check_compose_variant(ARRS_COMPOSE, errors, warnings, require_beets=True)
     if FULL_COMPOSE.exists():
         _check_compose_variant(FULL_COMPOSE, errors, warnings, require_beets=True)
 
     if ENV_EXAMPLE.exists():
         _check_no_hardcoded_lan_allowlist(_read(ENV_EXAMPLE), ENV_EXAMPLE.name, errors)
 
-    if not ARRS_COMPOSE.exists():
-        print(json.dumps({"ok": False, "errors": errors, "warnings": warnings}, indent=2, sort_keys=True))
-        return 1
+    _check_full_compose_hardening(errors)
 
-    text = _read(ARRS_COMPOSE)
-    beets = _service_block(text, "beets")
-    bgutil = _service_block(text, "bgutil-provider")
-
-    if not bgutil:
-        errors.append("bgutil-provider service not found")
-    bgutil_image = _image_line(bgutil)
-    _check_image_digest_semantics("bgutil-provider", bgutil_image, _has_build_block(bgutil), errors)
-
-    beets_active = "\n".join(_active_lines(beets))
-    required_snippets = {
-        "platform: linux/amd64": "beets platform must be explicit for the architecture-specific digest",
-        "security_opt:": "beets must set security_opt",
-        "no-new-privileges:true": "beets must disable privilege escalation",
-        "cap_drop:": "beets must drop capabilities",
-        "- ALL": "beets must drop all Linux capabilities",
-        "read_only: true": "beets must use a read-only root filesystem",
-        "tmpfs:": "beets must provide tmpfs for writable runtime temp paths",
-        "pids_limit:": "beets must set a PID limit",
-        "mem_limit:": "beets must set a memory limit",
-    }
-    for snippet, message in required_snippets.items():
-        if snippet not in beets_active:
-            errors.append(message)
-
-    if "${BEETS_UID:-0}" in beets_active or "${BEETS_GID:-0}" in beets_active:
-        errors.append("beets UID/GID defaults must not be root")
-
-    volumes = _volume_lines(beets)
-    forbidden_mounts = {"/mnt/PLEX/data:/data", "/:/host", "/:/data", "/mnt/PLEX:/data"}
-    for volume in volumes:
-        if volume in forbidden_mounts or volume.startswith("/mnt/PLEX/data:/data"):
-            errors.append(f"beets broad writable mount is forbidden: {volume}")
-        if "/var/run/docker.sock" in volume:
-            errors.append("beets Docker socket mount is forbidden")
-    expected_mounts = {
-        "/mnt/PLEX/Apps/Arrs/beets:/config:rw",
-        "/mnt/PLEX/data/media/music:/data/media/music:rw",
-        "/mnt/PLEX/data/torrents/music:/data/torrents/music:rw",
-    }
-    missing_mounts = sorted(expected_mounts.difference(volumes))
-    for volume in missing_mounts:
-        errors.append(f"beets required narrowed mount missing: {volume}")
-
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("image:") and ":latest" in stripped and "beets" not in stripped:
-            warnings.append(f"non-Beets mutable image remains for separate review: {stripped}")
+    for path in (STANDALONE_COMPOSE, FULL_COMPOSE, ROOT / "docker-compose.dev.yml", ENV_EXAMPLE):
+        if path.exists():
+            _check_no_owner_specific_paths(_read(path), path.name, errors)
+    examples_dir = ROOT / "examples"
+    if examples_dir.is_dir():
+        for path in sorted(examples_dir.glob("*.yml")):
+            _check_no_owner_specific_paths(_read(path), f"examples/{path.name}", errors)
 
     result = {"ok": not errors, "errors": errors, "warnings": warnings}
     print(json.dumps(result, indent=2, sort_keys=True))

@@ -1020,6 +1020,22 @@ _STATUS_CACHE_LOCK = threading.Lock()
 _STATUS_CACHE_DATA: Dict[str, Any] | None = None
 _STATUS_CACHE_TS: float = 0.0
 _STATUS_CACHE_TTL_SECONDS: float = 10.0
+# How long a previously-good snapshot may still be served (marked "stale")
+# after a rebuild attempt fails, e.g. the control agent goes down mid-outage.
+# Bounded so a dead engine can never make /api/setup/status report old
+# "healthy" data forever -- past this window a failed rebuild is a hard 503.
+_STATUS_CACHE_MAX_STALE_SECONDS: float = 60.0
+
+
+def _invalidate_setup_status_cache() -> None:
+    """Drop the cached /api/setup/status snapshot so the next request rebuilds
+    it from the live control agent instead of serving a now-outdated one.
+    Call after any change that can affect setup status (env/config writes,
+    auth token regeneration, setup completion)."""
+    global _STATUS_CACHE_DATA, _STATUS_CACHE_TS
+    with _STATUS_CACHE_LOCK:
+        _STATUS_CACHE_DATA = None
+        _STATUS_CACHE_TS = 0.0
 
 
 def _build_setup_status_payload() -> Dict[str, Any]:
@@ -1206,35 +1222,75 @@ def _build_setup_status_payload() -> Dict[str, Any]:
 
 @app.get("/api/setup/status")
 def setup_status():
-    """Readiness snapshot: cached setup summary ("token_configured": token_configured)."""
+    """Readiness snapshot, single-flight cached for _STATUS_CACHE_TTL_SECONDS.
+
+    The whole check-build-store sequence runs under one lock so N concurrent
+    requests past the TTL trigger exactly one upstream rebuild against the
+    control agent, not N of them (no cache-stampede thundering herd). Uses
+    time.monotonic() so a wall-clock adjustment (NTP, DST, manual change)
+    can never make the cache look older or younger than it really is.
+
+    A failed rebuild serves the last-known snapshot marked "stale": true
+    (bounded by _STATUS_CACHE_MAX_STALE_SECONDS) instead of either wiping out
+    a still-useful snapshot or silently reporting it as fresh/healthy
+    forever. Past that bound, or with no prior snapshot at all, a failed
+    rebuild is a hard 503 -- never a masked 200.
+    """
     global _STATUS_CACHE_DATA, _STATUS_CACHE_TS
     force = request.args.get("refresh", "0") == "1" or request.args.get("force", "0") == "1"
-    now = time.time()
 
     with _STATUS_CACHE_LOCK:
+        now = time.monotonic()
         if not force and _STATUS_CACHE_DATA is not None and (now - _STATUS_CACHE_TS) < _STATUS_CACHE_TTL_SECONDS:
             res = dict(_STATUS_CACHE_DATA)
             res["cached"] = True
+            res["stale"] = False
             res["cache_age_seconds"] = round(now - _STATUS_CACHE_TS, 2)
             return jsonify(res)
 
-    try:
-        payload = _build_setup_status_payload()
-        with _STATUS_CACHE_LOCK:
-            _STATUS_CACHE_DATA = payload
-            _STATUS_CACHE_TS = now
-            res = dict(payload)
-            res["cached"] = False
-            res["cache_age_seconds"] = 0.0
-            return jsonify(res)
-    except Exception as ex:
-        return jsonify({"error": str(ex), "status": "failed"}), 503
+        try:
+            payload = _build_setup_status_payload()
+        except Exception as ex:
+            has_prior = _STATUS_CACHE_DATA is not None
+            age = (now - _STATUS_CACHE_TS) if has_prior else None
+            if has_prior and age < _STATUS_CACHE_MAX_STALE_SECONDS:
+                res = dict(_STATUS_CACHE_DATA)
+                res["cached"] = True
+                res["stale"] = True
+                res["cache_age_seconds"] = round(age, 2)
+                res["refresh_error"] = str(ex)
+                return jsonify(res)
+            return jsonify({"error": str(ex), "status": "failed"}), 503
+
+        _STATUS_CACHE_DATA = payload
+        _STATUS_CACHE_TS = now
+        res = dict(payload)
+        res["cached"] = False
+        res["stale"] = False
+        res["cache_age_seconds"] = 0.0
+        return jsonify(res)
 
 
 @app.get("/api/setup/diagnostics")
 def setup_diagnostics():
-    """Explicit fresh setup diagnostics report without using cache."""
-    return setup_status()
+    """Explicit fresh setup diagnostics report: always bypasses the cache and
+    rebuilds from the live control agent (unlike /api/setup/status, which
+    previously called through to this same cached path despite the docstring
+    promising otherwise), then re-primes the cache with the fresh result so
+    the next /api/setup/status call is also fresh."""
+    global _STATUS_CACHE_DATA, _STATUS_CACHE_TS
+    try:
+        payload = _build_setup_status_payload()
+    except Exception as ex:
+        return jsonify({"error": str(ex), "status": "failed"}), 503
+    with _STATUS_CACHE_LOCK:
+        _STATUS_CACHE_DATA = payload
+        _STATUS_CACHE_TS = time.monotonic()
+    res = dict(payload)
+    res["cached"] = False
+    res["stale"] = False
+    res["cache_age_seconds"] = 0.0
+    return jsonify(res)
 
 
 @app.get("/api/setup/env")
@@ -1279,6 +1335,7 @@ def setup_save_env():
     except Exception as ex:
         app.logger.warning("Could not save environment file: %s", type(ex).__name__)
         return jsonify({"ok": False, "error": "Could not save environment file."}), 500
+    _invalidate_setup_status_cache()
     return jsonify(_setup_env_payload({
         "saved": sorted(set(updates) | set(clear)),
         "backup_path": backup_path,
@@ -1468,6 +1525,7 @@ def setup_regenerate_auth_token():
         token_file.write_text(token, encoding="utf-8")
     except Exception:
         pass
+    _invalidate_setup_status_cache()
     return jsonify({
         "ok": True,
         "token": token,
@@ -1481,6 +1539,7 @@ def setup_mark_complete():
     """Mark first-run setup as done. Idempotent — safe to call repeatedly."""
     _SETUP_COMPLETE_MARKER.parent.mkdir(parents=True, exist_ok=True)
     _SETUP_COMPLETE_MARKER.write_text("1", encoding="utf-8")
+    _invalidate_setup_status_cache()
     return jsonify({"ok": True})
 
 

@@ -62,9 +62,9 @@ Or run the automated setup script:
 
 ### Existing Stack Integration (TrueNAS / Portainer / Multi-App Stacks)
 
-To add `beets-web-manager` to an existing Docker Compose stack (e.g., `/mnt/PLEX/Apps/Arrs/docker-compose.yml`), copy the service block from [docs/EXAMPLES.md](docs/EXAMPLES.md).
+To add `beets-web-manager` to an existing Docker Compose stack (e.g., `/srv/media-stack/docker-compose.yml`), copy the service block from [docs/EXAMPLES.md](docs/EXAMPLES.md).
 
-It uses the published image (`ghcr.io/iranman/beets-web-manager:${BEETS_WEB_MANAGER_VERSION:-stable}`), requires no local `build:` directive, and persists state to a host path (e.g., `/mnt/PLEX/Apps/Arrs/beets-web-manager:/web-manager-data`).
+It uses the published image (`ghcr.io/iranman/beets-web-manager:${BEETS_WEB_MANAGER_VERSION:-stable}`), requires no local `build:` directive, and persists state to a host path (e.g., `/srv/media-stack/beets-web-manager:/web-manager-data`).
 
 ### Development Installation (Source Builds)
 
@@ -139,16 +139,19 @@ MusicBrainz needs no key or account — it is a public API used for every releas
 
 The app requires at least one working credential — a bearer token, a browser password, or both — before it will serve any route other than health checks and static assets.
 
-**You never have to invent `BEETS_WEB_AUTH_TOKEN` yourself.** If the app starts with no usable token and no usable password configured, it automatically generates a cryptographically secure 256-bit token, stores it (`/config/.auth_token` by default, overridable with `BEETS_WEB_AUTH_TOKEN_FILE`), applies it for that process, and prints it once to the startup log:
+**You never have to invent `BEETS_WEB_AUTH_TOKEN` yourself.** If the app starts with no usable token and no usable password configured, it automatically generates a cryptographically secure 256-bit token and persists it to `/web-manager-data/.auth_token` (default; overridable with `BEETS_WEB_AUTH_TOKEN_FILE`) with `0600` permissions. The token is never printed to stdout, stderr, or any log — read it from the persisted file instead:
 
 ```
 No BEETS_WEB_AUTH_TOKEN or BEETS_WEB_PASSWORD was configured.
 Generated a secure API token automatically...
-  BEETS_WEB_AUTH_TOKEN=<token>
-Save this now -- it will not be printed again.
+  <path to the persisted token file>
+The token itself is never printed to logs -- read that file to get it,
+e.g. `docker exec <container> cat <path>`.
 ```
 
-Save that value from your container logs, or regenerate a fresh one any time from **System → Authentication → Regenerate API token** (the plaintext is shown exactly once, then masked forever after, same as every other secret in the environment editor). The token is a Bearer credential for API/script clients (`Authorization: Bearer <token>`) — the browser UI has no login form and does not send it.
+If the token cannot be persisted (most commonly an unwritable `web-manager-data` mount), startup fails closed with a clear, secret-free error instead of running with a credential that only ever existed in memory and that you'd have no way to retrieve. Fix the mount and restart, or set `BEETS_WEB_AUTH_TOKEN` / `BEETS_WEB_PASSWORD` explicitly.
+
+Read the value from the persisted file, or regenerate a fresh one any time from **System → Authentication → Regenerate API token** (the plaintext is shown exactly once in that request's response, then masked forever after, same as every other secret in the environment editor — and, like generation, it is never written to a log). The token is a Bearer credential for API/script clients (`Authorization: Bearer <token>`) — the browser UI has no login form and does not send it.
 
 For **browser access**, set `BEETS_WEB_PASSWORD` (paired with `BEETS_WEB_USERNAME`, default `admin`). The server sends `WWW-Authenticate: Basic` on an unauthenticated request, so your browser's native credential prompt handles sign-in — there is no in-app login page. Passwords must meet these requirements (enforced server-side when you save it, and shown live as a strength meter in the System page):
 
@@ -238,7 +241,7 @@ A development Compose file or `build: .` block is being run outside the reposito
 Verify that `BEETS_API_URL` and `BEETS_API_TOKEN` are set correctly in `.env` and that the Beets control agent service is healthy and reachable over the network.
 
 **The app returns 503 "Authentication is required" and I can't reach the UI at all.**
-This means neither `BEETS_WEB_AUTH_TOKEN` nor `BEETS_WEB_PASSWORD` resolved to a usable value when the process started. On a fresh install, check container logs for the auto-generated API token printed on first boot. The provided Compose files persist that generated token to `/web-manager-data/.auth_token` (via `BEETS_WEB_AUTH_TOKEN_FILE`) so it survives a restart — make sure the mounted `web-manager-data` host directory is writable.
+This means neither `BEETS_WEB_AUTH_TOKEN` nor `BEETS_WEB_PASSWORD` resolved to a usable value when the process started. On a fresh install, read the auto-generated API token from the file it was persisted to (it is never printed to logs): `docker exec <container> cat /web-manager-data/.auth_token`. The provided Compose files persist that generated token to `/web-manager-data/.auth_token` (via `BEETS_WEB_AUTH_TOKEN_FILE`) so it survives a restart — make sure the mounted `web-manager-data` host directory is writable, or startup will fail closed rather than run with an unrecoverable, unpersisted token.
 
 **"AI authentication failed" / no OpenAI key configured — will my imports still work?**
 Yes. AI is optional everywhere it's used for matching. A missing/invalid AI key, an HTTP 401/403 from the provider, a timeout, or a rate limit never stops MusicBrainz or AcoustID matching — those run unconditionally and are what actually identify releases and recordings.

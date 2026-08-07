@@ -29,10 +29,14 @@ services:
     environment:
       - PUID=${PUID:-1000}
       - PGID=${PGID:-1000}
-      - TZ=${TZ:-America/Los_Angeles}
+      - TZ=${TZ:-UTC}
       - BEETSDIR=/config
       - BEETS_API_TOKEN=${BEETS_API_TOKEN:?set BEETS_API_TOKEN in .env}
       - BEETS_AGENT_PORT=8338
+      # The image defaults this to 1 (refuse to start against a missing/empty
+      # database) -- see Dockerfile.beets. A genuine first run on a brand new
+      # /config must override it: set BEETS_EXPECT_EXISTING_LIBRARY=0 in .env.
+      - BEETS_EXPECT_EXISTING_LIBRARY=${BEETS_EXPECT_EXISTING_LIBRARY:-1}
     volumes:
       - ./config:/config
       - ${MUSIC_LIBRARY_PATH:-./data/music}:/data/media/music
@@ -45,6 +49,18 @@ services:
       timeout: 5s
       retries: 3
 
+  # Included by default so yt-dlp YouTube downloads work out of the box
+  # (YouTube's PO token requirement). This service starts unconditionally
+  # and beets-web-manager's YTDLP_PO_PROVIDER_URL default points at it below
+  # -- it is not conditionally enabled. If you don't use the ytdlp
+  # acquisition method, remove this service and blank YTDLP_PO_PROVIDER_URL.
+  bgutil-provider:
+    image: brainicism/bgutil-ytdlp-pot-provider:1.3.1-deno
+    container_name: bgutil-provider
+    restart: unless-stopped
+    expose:
+      - "4416"
+
   beets-web-manager:
     image: ghcr.io/iranman/beets-web-manager:${BEETS_WEB_MANAGER_VERSION:-stable}
     container_name: beets-web-manager
@@ -54,7 +70,7 @@ services:
       - "${BEETS_WEB_BIND_ADDRESS:-127.0.0.1}:${WEBCONTROL_PORT:-8337}:8337"
 
     environment:
-      TZ: ${TZ:-America/Los_Angeles}
+      TZ: ${TZ:-UTC}
       WEBCONTROL_PORT: ${WEBCONTROL_PORT:-8337}
 
       BEETS_API_URL: ${BEETS_API_URL:-http://beets:8338}
@@ -74,6 +90,7 @@ services:
       AI_BASE_URL: ${AI_BASE_URL:-}
       AI_MODEL: ${AI_MODEL:-}
       ACOUSTID_API_KEY: ${ACOUSTID_API_KEY:-}
+      ACOUSTID_KEY: ${ACOUSTID_KEY:-}
       PLEX_URL: ${PLEX_URL:-}
       PLEX_TOKEN: ${PLEX_TOKEN:-}
       LIDARR_URL: ${LIDARR_URL:-}
@@ -81,10 +98,11 @@ services:
       SLSKD_URL: ${SLSKD_URL:-}
       SLSKD_API_KEY: ${SLSKD_API_KEY:-}
       DISCOGS_TOKEN: ${DISCOGS_TOKEN:-}
+      DISCOGS_USER_TOKEN: ${DISCOGS_USER_TOKEN:-}
       LISTENBRAINZ_TOKEN: ${LISTENBRAINZ_TOKEN:-}
       SPOTIFY_CLIENT_ID: ${SPOTIFY_CLIENT_ID:-}
       SPOTIFY_CLIENT_SECRET: ${SPOTIFY_CLIENT_SECRET:-}
-      YTDLP_PO_PROVIDER_URL: ${YTDLP_PO_PROVIDER_URL:-}
+      YTDLP_PO_PROVIDER_URL: ${YTDLP_PO_PROVIDER_URL:-http://bgutil-provider:4416}
       DEMO_MODE: ${DEMO_MODE:-0}
       PUID: ${PUID:-1000}
       PGID: ${PGID:-1000}
