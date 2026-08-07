@@ -1994,25 +1994,46 @@ def generate_secure_auth_token() -> str:
 
 
 def _persist_generated_auth_token(token: str) -> None:
-    """Persist generated token atomically to BEETS_WEB_AUTH_TOKEN_FILE (/web-manager-data/.auth_token)."""
+    """Persist generated token atomically to BEETS_WEB_AUTH_TOKEN_FILE (/web-manager-data/.auth_token).
+
+    Write-flush-fsync a same-directory temp file, chmod it 0600, then atomically
+    rename it onto the destination -- a crash mid-write can never leave a
+    partially written or wrongly permissioned token file in place. The temp
+    file is removed on any failure so nothing orphans, and failure is logged
+    at ERROR (not swallowed) since an unpersisted token will not survive a
+    restart.
+    """
+    token_file = _GENERATED_AUTH_TOKEN_FILE
+    temp_file = token_file.with_name(f".{token_file.name}.tmp.{secrets.token_hex(4)}")
     try:
-        token_file = _GENERATED_AUTH_TOKEN_FILE
         token_file.parent.mkdir(parents=True, exist_ok=True)
-        temp_file = token_file.with_name(f".{token_file.name}.tmp.{secrets.token_hex(4)}")
-        temp_file.write_text(token, encoding="utf-8")
-        try:
-            os.chmod(temp_file, 0o600)
-            os.chmod(_GENERATED_AUTH_TOKEN_FILE, 0o600)
-        except Exception:
-            pass
+        fd = os.open(str(temp_file), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(token)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(temp_file, 0o600)
         temp_file.replace(token_file)
+        os.chmod(_GENERATED_AUTH_TOKEN_FILE, 0o600)
         try:
-            os.chmod(_GENERATED_AUTH_TOKEN_FILE, 0o600)
-        except Exception:
-            pass
+            dir_fd = os.open(str(token_file.parent), os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            pass  # directory fsync is best-effort; unsupported on some platforms/filesystems
     except Exception as ex:
         try:
-            app.logger.warning("Failed to persist generated auth token to %s: %s", _GENERATED_AUTH_TOKEN_FILE, ex)
+            temp_file.unlink(missing_ok=True)
+        except Exception:
+            pass
+        try:
+            app.logger.error(
+                "Failed to persist generated auth token to %s -- it will NOT "
+                "survive a restart until this is resolved: %s",
+                _GENERATED_AUTH_TOKEN_FILE, ex,
+            )
         except Exception:
             pass
 
@@ -2021,8 +2042,27 @@ def _bootstrap_auth_token_if_missing() -> None:
     """Enforce token precedence & persistence:
     1. Explicit usable BEETS_WEB_AUTH_TOKEN in env is used.
     2. Otherwise, read BEETS_WEB_AUTH_TOKEN_FILE (/web-manager-data/.auth_token).
-    3. If token file missing/unusable, generate secure token, write atomically with 0o600, set env, log notice.
+    3. If token file missing/unusable, generate a secure token and persist it
+       atomically with 0o600 permissions, then set it in-process.
     4. Never fall back to legacy token path.
+
+    The generated token is NEVER printed to stdout/stderr/logs -- only
+    the fact that one was generated and the path it was written to. A
+    startup banner announcing "here is your secret" via ordinary process
+    output is exactly the kind of exposure that leaks into CI logs,
+    aggregated container-log shippers, and anywhere else those streams are
+    archived or cached, all well beyond the operator who actually needs the
+    value. The persisted file at a known, documented path (readable via
+    `docker exec <container> cat <path>`, or directly on the host through
+    the bind mount) is the explicit first-run credential retrieval
+    mechanism instead.
+
+    Persistence is verified by reading the file back, not by trusting
+    _persist_generated_auth_token()'s internal success/failure -- if it
+    doesn't come back byte-for-byte, startup fails closed with a clear,
+    secret-free error rather than running with a credential that exists
+    only in this process's memory and that the operator has no way to ever
+    retrieve (not persisted, and -- by design -- never logged either).
     """
     if _security_auth_configured():
         return
@@ -2040,18 +2080,36 @@ def _bootstrap_auth_token_if_missing() -> None:
         os.environ["BEETS_WEB_AUTH_TOKEN"] = existing
         return
     token = generate_secure_auth_token()
-    os.environ["BEETS_WEB_AUTH_TOKEN"] = token
     _persist_generated_auth_token(token)
+    try:
+        persisted_ok = _GENERATED_AUTH_TOKEN_FILE.read_text(encoding="utf-8").strip() == token
+    except Exception:
+        persisted_ok = False
+    if not persisted_ok:
+        raise RuntimeError(
+            "Startup refused: no BEETS_WEB_AUTH_TOKEN or BEETS_WEB_PASSWORD is "
+            "configured, and a newly generated token could not be persisted to "
+            f"{_GENERATED_AUTH_TOKEN_FILE} (see the preceding log line for why "
+            "-- commonly a read-only or wrongly-owned /web-manager-data mount). "
+            "Refusing to run with a credential that exists only in this "
+            "process's memory and was never shown to you. Fix the persistence "
+            "problem and restart, or set BEETS_WEB_AUTH_TOKEN / "
+            "BEETS_WEB_PASSWORD explicitly."
+        )
+    os.environ["BEETS_WEB_AUTH_TOKEN"] = token
     print(
         "\n" + "=" * 72 +
         "\nNo BEETS_WEB_AUTH_TOKEN or BEETS_WEB_PASSWORD was configured."
         "\nGenerated a secure API token automatically so the app is not"
-        "\nlocked out on first run:\n"
-        f"\n  BEETS_WEB_AUTH_TOKEN={token}\n"
-        "\nSave this now -- it will not be printed again. Use it as a Bearer"
-        "\ntoken for API clients, or set BEETS_WEB_PASSWORD (any authenticated"
-        "\nclient can do this via POST /api/setup/env) for browser access."
-        "\nRegenerate anytime with POST /api/setup/auth-token/regenerate."
+        "\nlocked out on first run, and persisted it to:\n"
+        f"\n  {_GENERATED_AUTH_TOKEN_FILE}\n"
+        "\nThe token itself is never printed to logs -- read that file to get"
+        "\nit, e.g. `docker exec <container> cat " + str(_GENERATED_AUTH_TOKEN_FILE) + "`."
+        "\nUse it as a Bearer token for API clients, or set BEETS_WEB_PASSWORD"
+        "\n(any authenticated client can do this via POST /api/setup/env) for"
+        "\nbrowser access. Regenerate anytime with POST"
+        "\n/api/setup/auth-token/regenerate -- that response returns the new"
+        "\nvalue exactly once and also never logs it."
         "\n" + "=" * 72 + "\n",
         flush=True,
     )

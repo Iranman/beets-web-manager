@@ -48,8 +48,8 @@ This guide covers common errors and resolution steps for Beets Web Manager.
 * **Fix**:
   1. Set `BEETS_WEB_AUTH_TOKEN` in `.env` for API clients.
   2. Set `BEETS_WEB_USERNAME` and `BEETS_WEB_PASSWORD` (32+ chars with upper, lower, number, special) for browser Basic Auth.
-  3. On fresh installs, check container logs for the auto-generated API token printed on first boot.
-  4. Ensure `/web-manager-data` volume is writable by container user (UID 1000).
+  3. On fresh installs, read the auto-generated API token from where it was persisted (never printed to logs): `docker exec <container> cat /web-manager-data/.auth_token`.
+  4. Ensure `/web-manager-data` volume is writable by container user (UID 1000) — if it isn't, startup now fails closed with a clear error rather than running with an unrecoverable in-memory-only token.
 
 ---
 

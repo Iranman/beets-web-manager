@@ -499,9 +499,26 @@ class RemoteSQLiteConnection:
 
 
 def get_db_connection(db_path: Optional[str] = None):
-    """Return a database connection — ALWAYS connects via RemoteSQLiteConnection.
+    """Always returns a RemoteSQLiteConnection to the Beets control agent.
     Never opens local SQLite files in the web manager.
+
+    `db_path` is accepted (and threaded through unused) only so app.py's
+    `_db(path=None, ...)` context manager keeps its existing call shape
+    (`get_db_connection(path)`; see tests/test_sqlite_db_timeout.py) -- it
+    is NOT a local-sqlite escape hatch. PR #64 removed the local DB
+    fallback specifically so production code can never silently read/write
+    a stale on-disk copy instead of the authoritative remote database;
+    resurrecting a path-triggered `sqlite3.connect()` branch here would
+    reintroduce exactly that regression (see
+    tests/test_external_beets_architecture.py's
+    test_get_db_connection_never_uses_local_sqlite).
+
+    Tests that need a real local SQLite connection (e.g. to seed rows for
+    an integration test) must patch `app._db` itself, not rely on this
+    function -- see tests/test_post_retag_artwork_integration.py's
+    `_mock_db` fixture for the pattern.
     """
+    del db_path  # intentionally unused; see docstring
     return RemoteSQLiteConnection(beets_client)
 
 
