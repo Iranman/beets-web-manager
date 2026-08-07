@@ -1252,6 +1252,13 @@ def _ytdlp_youtube_status(js_runtime: Optional[Dict[str, Any]] = None) -> Dict[s
 # ── Derived constants ──────────────────────────────────────────────────────────
 MUSIC_ROOT   = Path("/data/media/music")    # canonical library root on disk
 CONFIG_FILE  = "/config/config.yaml"        # main beets config
+# Unmatched-draft review metadata (submission text + JSON, no audio) is
+# web-manager orchestration state, not authoritative media -- it must not
+# live under MUSIC_ROOT, which the web manager neither owns nor (per the
+# shipped Compose topology) has mounted at all. /web-manager-data is the
+# one path volume every shipped Compose file actually gives this container
+# (SEC-002 Wave 8 architecture review).
+UNMATCHED_DRAFT_ROOT = Path(os.environ.get("UNMATCHED_DRAFT_DIR", "/web-manager-data/unmatched_drafts"))
 METADATA_CACHE_ROOT = Path(os.environ.get("METADATA_CACHE_DIR", "/config/.cache/metadata"))
 ARTIST_IMAGE_CACHE_DIR = METADATA_CACHE_ROOT / "artist-images"
 RELEASE_ART_CACHE_DIR = METADATA_CACHE_ROOT / "release-art"
@@ -22253,6 +22260,17 @@ def reimport_disk():
             log.append(f"[1/3] {repair_desc}")
             repair_cfg = _write_job_beets_config("/tmp/beets_existing_album_repair.yaml")
             base_std = [BEET_BIN, "-c", repair_cfg]
+            # _beet_run/_parse_remote_beet_command strips any "-c <path>" token
+            # from base_std before sending the command to the control agent --
+            # a local web-manager path has no meaning on the remote engine.
+            # The config content itself (plugin list, path templates, disabled
+            # lyrics/replaygain auto-fetch) still needs to reach the engine, so
+            # it's forwarded explicitly via config_override below rather than
+            # silently lost.
+            try:
+                repair_cfg_content = Path(repair_cfg).read_text(encoding="utf-8")
+            except Exception:
+                repair_cfg_content = ""
             expected_tracks = _mb_release_track_count(mb_albumid, log)
             if not expected_tracks:
                 raise RuntimeError(
@@ -22309,7 +22327,8 @@ def reimport_disk():
                 ("write", ["write", f"album_id:{aid}"], 120),
                 ("move", ["move", f"album_id:{aid}"], 120),
             ]:
-                r2 = _beet_run(base_std + args, log, timeout=tmo, env=env, cancel=cancel_event)
+                r2 = _beet_run(base_std + args, log, timeout=tmo, env=env, cancel=cancel_event,
+                               config_override=repair_cfg_content)
                 out2 = _ANSI_RE.sub('', (r2.stdout + r2.stderr).strip())
                 if out2:
                     log.append(f"  [{cmd_label}] {out2[:300]}")
@@ -22877,7 +22896,7 @@ def reimport_disk():
         # so they don't fire web requests on every track during write/mbsync.
         temp_cfg = "/tmp/beets_reimport_disk.yaml"
         _plugins = _beet_plugins()
-        Path(temp_cfg).write_text(
+        temp_cfg_content = (
             "include:\n  - /config/config.yaml\n"
             + _BEETS_PLUGINPATH_CONFIG
             + (f"plugins: {_plugins}\n" if _plugins else "")
@@ -22894,7 +22913,14 @@ def reimport_disk():
             "replaygain:\n"
             "  auto: no\n"
         )
-        # Use temp_cfg (no slow plugins) for ALL beet sub-commands in this job
+        Path(temp_cfg).write_text(temp_cfg_content)
+        # Use temp_cfg (no slow plugins) for ALL beet sub-commands in this job.
+        # The "-c temp_cfg" token itself is stripped by _beet_run before the
+        # command reaches the control agent (a local web-manager path has no
+        # meaning on the remote engine) -- temp_cfg_content is forwarded
+        # explicitly via config_override on every _beet_run call below so the
+        # copy/move/duplicate_action/lyrics/replaygain overrides still apply
+        # on the engine side, not just this now-unused local file.
         base_tmp = [BEET_BIN, "-c", temp_cfg]
         base_std = base_tmp   # was "/config/config.yaml" — avoid triggering lyrics/replaygain
 
@@ -22903,12 +22929,18 @@ def reimport_disk():
         t_before = time.time() - 5
         import_timed_out = False
         import_timeout = _beet_import_timeout(aldir)
-        try:
-            r = subprocess.run(
-                base_tmp + ["import", "-q", "--noincremental", "--quiet-fallback", "asis",
-                            "--search-id", mb_albumid, aldir],
-                capture_output=True, text=True, timeout=import_timeout, env=env)
-        except subprocess.TimeoutExpired:
+        # Beets import/tagging/move is authoritative-library work and must run
+        # on the Beets engine, not as a local subprocess in the web manager --
+        # the web-manager image has no beet binary in the shipped topology
+        # (SEC-002 Wave 8 architecture review). _beet_run already routes
+        # every other command in this function through the control agent;
+        # this was the one remaining direct local-subprocess invocation.
+        r = _beet_run(
+            base_tmp + ["import", "-q", "--noincremental", "--quiet-fallback", "asis",
+                        "--search-id", mb_albumid, aldir],
+            log, timeout=import_timeout, cancel=cancel_event, config_override=temp_cfg_content,
+        )
+        if r.returncode == 1 and "timed out" in (r.stderr or "").lower():
             import_timed_out = True
             log.append(f"  ⚠ 'beet import' timed out after {import_timeout}s — checking if files were processed")
             class _R:
@@ -23225,7 +23257,7 @@ def reimport_disk():
             # names, etc.) from MusicBrainz. beet import already stamped mb_albumid,
             # so no separate modify step is needed.
             r2 = _beet_run(base_std + ["mbsync", f"album_id:{aid}"], log,
-                           timeout=120, env=env, cancel=cancel_event)
+                           timeout=120, env=env, cancel=cancel_event, config_override=temp_cfg_content)
             out2 = _ANSI_RE.sub('', (r2.stdout + r2.stderr).strip())
             if out2:
                 log.append(f"  [mbsync] {out2[:300]}")
@@ -23258,7 +23290,8 @@ def reimport_disk():
                 ("write",   ["write",  f"album_id:{aid}"], 120),
                 ("rename",  ["move",   f"album_id:{aid}"], 120),
             ]:
-                r2 = _beet_run(base_std + args, log, timeout=tmo, env=env, cancel=cancel_event)
+                r2 = _beet_run(base_std + args, log, timeout=tmo, env=env, cancel=cancel_event,
+                               config_override=temp_cfg_content)
                 out2 = _ANSI_RE.sub('', (r2.stdout + r2.stderr).strip())
                 if out2:
                     log.append(f"  [{cmd_label}] {out2[:300]}")
@@ -23315,7 +23348,8 @@ def reimport_disk():
                 ("write",   ["write",  f"id:{iid}"], 30),
                 ("rename",  ["move",   f"id:{iid}"], 30),
             ]:
-                r2 = _beet_run(base_std + args, log, timeout=tmo, env=env, cancel=cancel_event)
+                r2 = _beet_run(base_std + args, log, timeout=tmo, env=env, cancel=cancel_event,
+                               config_override=temp_cfg_content)
                 out2 = _ANSI_RE.sub('', (r2.stdout + r2.stderr).strip())
                 if out2:
                     log.append(f"  [{cmd_label}] {out2[:200]}")
@@ -23339,7 +23373,8 @@ def reimport_disk():
                 ("embedart", ["embedart", "-y", f"album_id:{_art_aid}"], 60),
             ]:
                 try:
-                    _r_art = _beet_run(base_std + _art_args, log, timeout=_art_tmo, env=env, cancel=cancel_event)
+                    _r_art = _beet_run(base_std + _art_args, log, timeout=_art_tmo, env=env, cancel=cancel_event,
+                                       config_override=temp_cfg_content)
                     _art_out = _ANSI_RE.sub('', (_r_art.stdout + _r_art.stderr).strip())
                     if _art_out:
                         log.append(f"  [{_art_cmd}] {_art_out[:200]}")
@@ -26520,19 +26555,56 @@ def library_sync_deleted():
     return jsonify({"ok": True, "job_id": job.job_id})
 
 
+_UNMATCHED_DRAFT_TRACK_FIELDS = ("title", "duration")
+
+
+def _redact_unmatched_draft_tracks(tracks: Any) -> List[Dict[str, str]]:
+    """Project client-supplied track entries down to a fixed, known-safe
+    field set before they can reach persisted draft.json/submission text.
+
+    tracks is client-controlled free-form JSON; without this, an extra
+    field (or a title string itself) could carry a stray
+    Authorization/api_key/password/URL-credential value straight into a
+    file. Only title/duration are ever meaningful for a submission draft,
+    so this also drops anything else outright rather than merely
+    redacting it in place.
+    """
+    if not isinstance(tracks, list):
+        return []
+    result: List[Dict[str, str]] = []
+    for entry in tracks:
+        if not isinstance(entry, dict):
+            continue
+        result.append({
+            field: _redact_security_text(entry.get(field) or "")
+            for field in _UNMATCHED_DRAFT_TRACK_FIELDS
+        })
+    return result
+
+
 @app.post("/api/library/unmatched-draft")
 def create_unmatched_draft():
-    """Create a local album draft for releases not found in MusicBrainz/Discogs.
+    """Create a local review draft for releases not found in MusicBrainz/Discogs.
 
     Writes a musicbrainz_submission.txt and draft.json into a clean
-    Artist/Album (Year) [unmatched-<id>]/ folder under the music root.
+    Artist/Album (Year) [unmatched-<id>]/ folder under UNMATCHED_DRAFT_ROOT.
+
+    This is web-manager orchestration/review state, not authoritative media:
+    no audio file is placed or referenced here, and nothing downstream reads
+    these files back to drive an import. Per SEC-002 Wave 8's architecture
+    review, it must not be written under MUSIC_ROOT -- the web manager does
+    not own that root and, in the shipped Compose topology, does not even
+    have it mounted. If a draft is later actually imported into the
+    library, that import goes through the normal reimport_disk()/Beets
+    engine path, which owns MUSIC_ROOT and validates its own identity
+    evidence at that time; this route only ever prepares review metadata.
     """
     payload = request.get_json(silent=True) or {}
     artist = _s(payload.get("artist") or "").strip()
     album = _s(payload.get("album") or "").strip()
     year = _s(payload.get("year") or "").strip()
-    source_url = _s(payload.get("source_url") or "").strip()
-    tracks = payload.get("tracks") or []
+    source_url = _redact_security_text(payload.get("source_url") or "").strip()
+    tracks = _redact_unmatched_draft_tracks(payload.get("tracks") or [])
 
     if not artist:
         return jsonify({"ok": False, "error": "artist is required"}), 400
@@ -26557,19 +26629,38 @@ def create_unmatched_draft():
     safe_year = _safe_path_component(year, "") if year else ""
 
     album_folder = f"{safe_album} ({safe_year}) [unmatched-{local_id}]" if safe_year else f"{safe_album} [unmatched-{local_id}]"
-    draft_path = MUSIC_ROOT / safe_artist / album_folder
+    draft_path = UNMATCHED_DRAFT_ROOT / safe_artist / album_folder
 
     try:
-        music_root_resolved = MUSIC_ROOT.resolve(strict=False)
+        draft_root_resolved = UNMATCHED_DRAFT_ROOT.resolve(strict=False)
         draft_path_resolved = draft_path.resolve(strict=False)
     except Exception:
         return jsonify({"ok": False, "error": "Could not resolve draft folder path."}), 400
-    if not _path_is_under(draft_path_resolved, music_root_resolved):
+    if not _path_is_under(draft_path_resolved, draft_root_resolved):
         # Defense-in-depth: sanitization above should already make this
         # unreachable, but the destructive mkdir/write below must never
         # run against an unverified path regardless.
-        return jsonify({"ok": False, "error": "Draft folder is outside the music library."}), 400
+        return jsonify({"ok": False, "error": "Draft folder is outside the allowed draft root."}), 400
     draft_path = draft_path_resolved
+
+    # Collision policy: two different raw (artist, album) pairs can sanitize
+    # to the same folder (e.g. "A/B" and "A\B" both become "A_B"). Silently
+    # overwriting a previous, unrelated draft would lose it without warning.
+    # Re-submitting the SAME (artist, album) is treated as an idempotent
+    # update; a different pair mapping to the same sanitized folder is a
+    # genuine collision and must not silently overwrite the existing draft.
+    existing_draft_json = draft_path / "draft.json"
+    if existing_draft_json.exists():
+        try:
+            existing_data = json.loads(existing_draft_json.read_text(encoding="utf-8"))
+        except Exception:
+            existing_data = {}
+        if existing_data.get("artist") != artist or existing_data.get("album") != album:
+            return jsonify({
+                "ok": False,
+                "error": "A different draft already maps to this folder name.",
+                "local_id": local_id,
+            }), 409
 
     try:
         draft_path.mkdir(parents=True, exist_ok=True)
@@ -26588,7 +26679,7 @@ def create_unmatched_draft():
         f"Year: {year}\n"
         f"Source URL: {source_url}\n"
         f"\nTracklist:\n{tracklist_lines}\n"
-        f"\nLocal path: {draft_path}\n"
+        f"\nLocal draft path: {draft_path}\n"
         f"Status: unmatched — not found in MusicBrainz/Discogs\n"
         f"Notes: Local release. Submit at https://musicbrainz.org/release/add\n"
     )

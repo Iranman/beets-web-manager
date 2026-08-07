@@ -115,8 +115,18 @@ def _parse_remote_beet_command(command: Any) -> ParsedRemoteBeetCommand:
     return ParsedRemoteBeetCommand(subcommand=subcommand, args=args, config_override="")
 
 
-def _beet_run(cmd, log, *, timeout=120, env=None, warn_msg=None, cancel=None):
-    """Run a beet command via the external Beets Control Agent API."""
+def _beet_run(cmd, log, *, timeout=120, env=None, warn_msg=None, cancel=None, config_override=""):
+    """Run a beet command via the external Beets Control Agent API.
+
+    config_override, when given, is forwarded as-is to the control agent's
+    own config_override handling (it writes the string to its own temp YAML
+    file and passes "-c <that file>" to its local beet invocation) -- it is
+    NOT the same as a "-c <path>" token inside cmd, which _parse_remote_beet_command
+    strips and discards (a local path on the caller's side has no meaning on
+    the remote engine). Callers whose command semantics depend on config
+    content (e.g. import's copy/move/duplicate_action policy) must pass that
+    content explicitly here rather than relying on a stripped "-c" token.
+    """
     class _R:
         def __init__(self, rc=0, out="", err=""):
             self.returncode = rc
@@ -133,7 +143,10 @@ def _beet_run(cmd, log, *, timeout=120, env=None, warn_msg=None, cancel=None):
         return _R(1, "", str(exc))
 
     try:
-        res = beets_client.run_command(parsed.subcommand, args=parsed.args, timeout=float(timeout), config_override=parsed.config_override)
+        res = beets_client.run_command(
+            parsed.subcommand, args=parsed.args, timeout=float(timeout),
+            config_override=config_override or parsed.config_override,
+        )
         rc = res.get("returncode", 0)
         stdout = res.get("stdout", "")
         stderr = res.get("stderr", "")

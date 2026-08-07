@@ -19,7 +19,19 @@ positives:
    embedded separators as additional components). Fixed by sanitizing each
    field into a single safe path component before folder-name construction,
    plus a final containment re-check before any destructive filesystem call.
+
+Claude's independent final review (docs/TECHNICAL_DEBT.md, "Claude
+independent final review of Wave 8") additionally found that
+create_unmatched_draft() writing under MUSIC_ROOT was itself an
+architecture violation: the web manager neither owns nor (in the shipped
+Compose topology) has MUSIC_ROOT mounted at all. The route now writes
+review-only metadata (no audio) under UNMATCHED_DRAFT_ROOT
+(/web-manager-data/unmatched_drafts by default), which every shipped
+Compose file actually mounts into this container. The tests below assert
+containment under UNMATCHED_DRAFT_ROOT and, separately, that MUSIC_ROOT is
+never touched at all.
 """
+import json
 import os
 import shutil
 import tempfile
@@ -34,11 +46,20 @@ class UnmatchedDraftPathSafetyTests(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp(prefix="beets_test_wave8_draft_")
         self.tmp_root = Path(self.tmp_dir).resolve()
+        self.draft_root = self.tmp_root / "web-manager-data" / "unmatched_drafts"
         self.music_root = self.tmp_root / "music"
         self.outside = self.tmp_root / "outside"
+        self.draft_root.mkdir(parents=True)
         self.music_root.mkdir(parents=True)
         self.outside.mkdir(parents=True)
         self.addCleanup(shutil.rmtree, self.tmp_dir, ignore_errors=True)
+        self._draft_root_patcher = mock.patch.object(APP, "UNMATCHED_DRAFT_ROOT", self.draft_root)
+        self._draft_root_patcher.start()
+        self.addCleanup(self._draft_root_patcher.stop)
+        # MUSIC_ROOT is deliberately ALSO patched to an isolated, empty temp
+        # directory (never used as UNMATCHED_DRAFT_ROOT) so that
+        # test_music_root_is_never_touched below is a genuine architecture
+        # assertion, not just "the test happens not to look there."
         self._music_root_patcher = mock.patch.object(APP, "MUSIC_ROOT", self.music_root)
         self._music_root_patcher.start()
         self.addCleanup(self._music_root_patcher.stop)
@@ -50,32 +71,38 @@ class UnmatchedDraftPathSafetyTests(unittest.TestCase):
     def post_draft(self, **payload):
         return self.client.post("/api/library/unmatched-draft", json=payload)
 
-    def test_normal_creation_succeeds_under_music_root(self):
+    def test_normal_creation_succeeds_under_draft_root(self):
         res = self.post_draft(artist="Real Artist", album="Real Album", year="2024", tracks=[])
         self.assertEqual(res.status_code, 200, res.get_json())
         data = res.get_json()
         self.assertTrue(data.get("ok"))
-        created = Path(data["path"]) if "path" in data else None
         # Whatever path was reported (or not), the only files actually
-        # written must live under music_root.
-        found = list(self.music_root.rglob("draft.json"))
+        # written must live under draft_root.
+        found = list(self.draft_root.rglob("draft.json"))
         self.assertEqual(len(found), 1)
-        self.assertTrue(APP._path_is_under(found[0].resolve(), self.music_root.resolve()))
+        self.assertTrue(APP._path_is_under(found[0].resolve(), self.draft_root.resolve()))
 
-    def test_traversal_in_artist_does_not_escape_music_root(self):
+    def test_music_root_is_never_touched(self):
+        # The architecture point of this fix: create_unmatched_draft() must
+        # not write into MUSIC_ROOT at all, not merely "not outside of it."
+        self.post_draft(artist="Real Artist", album="Real Album", year="2024", tracks=[])
+        self.post_draft(artist="../../../outside", album="Escape Album", year="", tracks=[])
+        self.assertEqual(list(self.music_root.rglob("*")), [])
+
+    def test_traversal_in_artist_does_not_escape_draft_root(self):
         res = self.post_draft(artist="../../../outside", album="Escape Album", year="", tracks=[])
         # Whether this returns ok=True (sanitized into a safe literal
         # component) or an error, the critical invariant is: nothing is
-        # ever written outside music_root.
+        # ever written outside draft_root.
         self.assertEqual(list(self.outside.rglob("*")), [])
         for p in self.tmp_root.rglob("draft.json"):
-            self.assertTrue(APP._path_is_under(p.resolve(), self.music_root.resolve()), p)
+            self.assertTrue(APP._path_is_under(p.resolve(), self.draft_root.resolve()), p)
 
-    def test_traversal_in_album_does_not_escape_music_root(self):
+    def test_traversal_in_album_does_not_escape_draft_root(self):
         res = self.post_draft(artist="Real Artist", album="../../../outside/pwned", year="", tracks=[])
         self.assertEqual(list(self.outside.rglob("*")), [])
         for p in self.tmp_root.rglob("draft.json"):
-            self.assertTrue(APP._path_is_under(p.resolve(), self.music_root.resolve()), p)
+            self.assertTrue(APP._path_is_under(p.resolve(), self.draft_root.resolve()), p)
 
     def test_embedded_slash_in_artist_does_not_create_nested_traversal(self):
         res = self.post_draft(artist="foo/../../outside", album="Album", year="", tracks=[])
@@ -93,11 +120,11 @@ class UnmatchedDraftPathSafetyTests(unittest.TestCase):
     def test_unicode_and_literal_names_create_real_draft(self):
         res = self.post_draft(artist="Café Müsic", album="Naïve (Deluxe)", year="2024", tracks=[])
         self.assertEqual(res.status_code, 200, res.get_json())
-        found = list(self.music_root.rglob("musicbrainz_submission.txt"))
+        found = list(self.draft_root.rglob("musicbrainz_submission.txt"))
         self.assertEqual(len(found), 1)
         self.assertIn("Café Müsic", found[0].read_text(encoding="utf-8"))
 
-    def test_traversal_in_year_does_not_escape_music_root(self):
+    def test_traversal_in_year_does_not_escape_draft_root(self):
         res = self.post_draft(artist="Real Artist", album="Album", year="../../outside", tracks=[])
         self.assertEqual(list(self.outside.rglob("*")), [])
 
@@ -106,7 +133,7 @@ class UnmatchedDraftPathSafetyTests(unittest.TestCase):
         # Unicode format characters, not ASCII control characters -- Claude's
         # independent review (SEC-002 Wave 8 final review) found the
         # pre-existing ASCII-only control-char strip in _safe_path_component
-        # let these through unchanged. They can't escape music_root (still a
+        # let these through unchanged. They can't escape draft_root (still a
         # single safe path component either way), but can make the resulting
         # folder name render deceptively, so they must not survive
         # sanitization either.
@@ -114,11 +141,47 @@ class UnmatchedDraftPathSafetyTests(unittest.TestCase):
             artist="Real​Artist‮evil", album="Album", year="2024", tracks=[],
         )
         self.assertEqual(res.status_code, 200, res.get_json())
-        found = list(self.music_root.rglob("draft.json"))
+        found = list(self.draft_root.rglob("draft.json"))
         self.assertEqual(len(found), 1)
         artist_dir_name = found[0].parent.parent.name
         self.assertNotIn("​", artist_dir_name)
         self.assertNotIn("‮", artist_dir_name)
+
+    def test_different_draft_mapping_to_same_folder_is_a_collision(self):
+        res1 = self.post_draft(artist="A/B", album="Album", year="2024", tracks=[])
+        self.assertEqual(res1.status_code, 200, res1.get_json())
+        res2 = self.post_draft(artist=r"A\B", album="Album", year="2024", tracks=[])
+        # "A/B" and "A\B" both sanitize to the same folder component but are
+        # different raw identities -- must not silently overwrite.
+        self.assertEqual(res2.status_code, 409, res2.get_json())
+
+    def test_same_draft_resubmitted_is_idempotent(self):
+        res1 = self.post_draft(artist="Real Artist", album="Real Album", year="2024", tracks=[])
+        self.assertEqual(res1.status_code, 200, res1.get_json())
+        res2 = self.post_draft(artist="Real Artist", album="Real Album", year="2024", tracks=[])
+        self.assertEqual(res2.status_code, 200, res2.get_json())
+
+    def test_secret_like_track_fields_are_not_persisted(self):
+        res = self.post_draft(
+            artist="Real Artist", album="Real Album", year="2024",
+            source_url="https://user:hunter2@example.test/release/1",
+            tracks=[{
+                "title": "Track One",
+                "duration": "3:45",
+                "api_key": "sk-should-not-be-here",
+                "authorization": "Bearer super-secret-token",
+            }],
+        )
+        self.assertEqual(res.status_code, 200, res.get_json())
+        draft_json_path = next(self.draft_root.rglob("draft.json"))
+        submission_path = next(self.draft_root.rglob("musicbrainz_submission.txt"))
+        draft_text = draft_json_path.read_text(encoding="utf-8")
+        submission_text = submission_path.read_text(encoding="utf-8")
+        for secret in ("hunter2", "sk-should-not-be-here", "super-secret-token"):
+            self.assertNotIn(secret, draft_text)
+            self.assertNotIn(secret, submission_text)
+        data = json.loads(draft_text)
+        self.assertEqual(data["tracks"], [{"title": "Track One", "duration": "3:45"}])
 
 
 class AiBatchScanPathValidationTests(unittest.TestCase):
