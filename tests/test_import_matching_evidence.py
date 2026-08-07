@@ -1,9 +1,11 @@
 import ast
+import os
 import sys
 import tempfile
 import unittest
+import urllib.parse
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _app_ast_cache import get_app_ast  # noqa: E402
@@ -25,14 +27,31 @@ def _load_evidence_namespace():
         "_ai_evidence_weak_album_guess",
         "_ai_evidence_scene_guess",
         "_build_folder_evidence",
+        "_import_review_path_text_error",
+        "_import_review_cleanup_roots",
+        "_path_lexically_under",
+        "_path_has_symlink_component_under",
+        "_path_is_under",
+        "_resolve_import_review_source_path",
     }
     ns = {
         "Any": Any,
         "Dict": Dict,
         "List": List,
+        "Optional": Optional,
+        "Tuple": Tuple,
         "Path": Path,
         "re": __import__("re"),
+        "urllib": __import__("urllib"),
+        "os": __import__("os"),
+        "tempfile": tempfile,
         "AUDIO_EXT": {".flac", ".mp3", ".m4a"},
+        "DOWNLOADS_ROOT": Path("/data/torrents/music"),
+        "PLAYLIST_DOWNLOAD_ROOT": Path("/data/playlists"),
+        "_DOWNLOADS_ROOTS": ["/data/torrents", "/data/downloads", "/tmp", tempfile.gettempdir()],
+        "TORRENT_SOURCE_ROOTS": [],
+        "QBIT_REPAIR_ALLOWED_ROOTS": [],
+        "MUSIC_ROOT": Path("/music"),
         "_s": lambda value: (
             value.decode("utf-8", errors="replace")
             if isinstance(value, bytes)
