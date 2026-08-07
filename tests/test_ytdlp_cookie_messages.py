@@ -158,7 +158,7 @@ class YtdlpCookieMessageTests(unittest.TestCase):
         type_source = (root / "frontend" / "src" / "api" / "types.ts").read_text(encoding="utf-8")
         helper_source = (root / "frontend" / "src" / "lib" / "downloadMethods.ts").read_text(encoding="utf-8")
         playlist_source = (root / "frontend" / "src" / "views" / "Playlists.tsx").read_text(encoding="utf-8")
-        compose_source = (root / "docker-compose.arrs.yml").read_text(encoding="utf-8")
+        compose_source = (root / "docker-compose.full.yml").read_text(encoding="utf-8")
 
         self.assertIn('_DOWNLOAD_METHODS = {"slskd", "spotiflac", "ytdlp", "soundcloud"}', app_source)
         self.assertIn('_SLSKD_FALLBACK_METHODS = os.environ.get("SLSKD_FALLBACK_METHODS", "spotiflac,ytdlp,soundcloud")', app_source)
@@ -180,7 +180,7 @@ class YtdlpCookieMessageTests(unittest.TestCase):
         self.assertIn("{ value: 'ytdlp', label: 'YouTube' }", playlist_source)
         self.assertIn("bgutil-provider:", compose_source)
         self.assertIn("image: brainicism/bgutil-ytdlp-pot-provider:1.3.1-deno", compose_source)
-        self.assertIn("YTDLP_PO_PROVIDER_URL: http://bgutil-provider:4416", compose_source)
+        self.assertIn("YTDLP_PO_PROVIDER_URL: ${YTDLP_PO_PROVIDER_URL:-http://bgutil-provider:4416}", compose_source)
         self.assertNotIn("127.0.0.1:4416", compose_source)
 
 

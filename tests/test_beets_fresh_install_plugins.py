@@ -11,7 +11,7 @@ CONFIG = (ROOT / "config.yaml.example").read_text(encoding="utf-8")
 APP = (ROOT / "app.py").read_text(encoding="utf-8")
 SETUP = (ROOT / "routes_setup.py").read_text(encoding="utf-8")
 COMPOSE = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
-ARR_COMPOSE = (ROOT / "docker-compose.arrs.yml").read_text(encoding="utf-8")
+FULL_COMPOSE = (ROOT / "docker-compose.full.yml").read_text(encoding="utf-8")
 
 
 class BeetsFreshInstallPackagingTests(unittest.TestCase):
@@ -40,7 +40,7 @@ class BeetsFreshInstallPackagingTests(unittest.TestCase):
         self.assertNotIn("command: mp3gain", CONFIG)
 
     def test_compose_ai_and_metadata_env_are_optional(self):
-        combined = COMPOSE + "\n" + ARR_COMPOSE
+        combined = COMPOSE + "\n" + FULL_COMPOSE
         for var in (
             "OPENAI_API_KEY", "OPENROUTER_API_KEY", "AI_API_KEY", "AI_BASE_URL", "AI_MODEL",
             "ACOUSTID_API_KEY", "ACOUSTID_KEY", "DISCOGS_TOKEN", "DISCOGS_USER_TOKEN", "LISTENBRAINZ_TOKEN",
@@ -48,6 +48,22 @@ class BeetsFreshInstallPackagingTests(unittest.TestCase):
             self.assertIn(var, combined)
         self.assertNotIn("OPENAI_API_KEY:?", combined)
         self.assertNotIn("AI_API_KEY:?", combined)
+
+    def test_compose_passes_expect_existing_library_override_to_beets(self):
+        # Dockerfile.beets bakes BEETS_EXPECT_EXISTING_LIBRARY=1 as the image
+        # default (fail closed on a missing/empty database). A genuine first
+        # run needs to override that to 0 via .env, but that override only
+        # reaches the container if docker-compose.full.yml's `beets` service
+        # actually forwards the variable -- verified missing this passthrough
+        # makes .env's BEETS_EXPECT_EXISTING_LIBRARY=0 silently have no
+        # effect, permanently refusing to start a brand new deployment.
+        beets_start = FULL_COMPOSE.index("\n  beets:")
+        beets_end = FULL_COMPOSE.index("\n  bgutil-provider:", beets_start)
+        beets_block = FULL_COMPOSE[beets_start:beets_end]
+        self.assertIn(
+            "BEETS_EXPECT_EXISTING_LIBRARY=${BEETS_EXPECT_EXISTING_LIBRARY:-1}",
+            beets_block,
+        )
 
     def test_beetsplug_has_no_package_initializer(self):
         # A beetsplug/__init__.py makes /app/beetsplug a regular package,
