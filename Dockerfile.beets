@@ -27,9 +27,18 @@ RUN /lsiopy/bin/python3 /opt/beets-patches/apply_patches.py
 # Create agent application, plugin, and LinuxServer custom service directories
 RUN mkdir -p /opt/beets-web-manager-agent/beetsplug /custom-services.d
 
-# Copy agent application code and bundled custom plugins
+# Copy agent application code and bundled custom plugins.
+# audio_preferences.py is a portable, stdlib+ffprobe-only module (no Flask/
+# app.py coupling) shared with the web manager's own import -- copied here
+# so the control agent's /imports/source/inspect endpoint can inspect audio
+# files on the engine side, where the real media/staging mounts and a real
+# ffprobe binary actually exist (SEC-002 Wave 8 ARCH-003 fix). Placed
+# alongside beets_control_agent.py so Python's default sys.path[0] (the
+# running script's own directory) makes "import audio_preferences" resolve
+# without any path manipulation.
 COPY backend/beets_control_agent.py /opt/beets-web-manager-agent/beets_control_agent.py
 COPY backend/beets_startup_guard.py /opt/beets-web-manager-agent/beets_startup_guard.py
+COPY backend/audio_preferences.py /opt/beets-web-manager-agent/audio_preferences.py
 COPY beetsplug/ /opt/beets-web-manager-agent/beetsplug/
 
 # Install S6 supervision service for the control agent and locked CLI wrapper.

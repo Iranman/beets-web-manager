@@ -312,22 +312,35 @@ class ReimportDiskPathSafetyTests(unittest.TestCase):
         self.addCleanup(self.env_patcher.stop)
         self.client = APP.app.test_client()
 
+    # SEC-002 Wave 8 ARCH-003: reimport_disk() no longer validates aldir
+    # against its own filesystem at all -- it has no local view of
+    # MUSIC_ROOT/DOWNLOADS_ROOT in the shipped Compose topology. Path
+    # containment, existence, and symlink-safety are now engine-authoritative
+    # (backend.beets_control_agent.inspect_import_source(), reusing
+    # resolve_safe_path()'s full-realpath-then-containment check). These
+    # tests now verify reimport_disk() correctly maps the engine's rejection
+    # to a safe, generic web-manager-facing error, not a local check.
+    # inspect_import_source() itself is tested directly (with real temp
+    # directories, no mocking) in
+    # tests/test_sec002_wave8_engine_ownership.py.
+
     def test_outside_root_aldir_rejected_with_generic_error_not_existence_leak(self):
-        # A nonexistent, outside-root path must fail with the generic
-        # containment error, not an existence-specific message -- proving
-        # containment is checked before any filesystem existence probe.
         missing_outside = self.outside / "does_not_exist_either"
-        res = self.client.post("/api/albums/reimport-disk", json={
-            "aldir": str(missing_outside), "mb_albumid": "11111111-1111-1111-1111-111111111111",
-        })
+        with mock.patch.object(APP.beets_client, "inspect_import_source",
+                                side_effect=APP.BeetsError("Beets API request error: invalid_path")):
+            res = self.client.post("/api/albums/reimport-disk", json={
+                "aldir": str(missing_outside), "mb_albumid": "11111111-1111-1111-1111-111111111111",
+            })
         self.assertEqual(res.status_code, 400)
         data = res.get_json()
         self.assertNotIn(str(self.outside), str(data.get("error", "")))
 
     def test_existing_outside_root_aldir_rejected(self):
-        res = self.client.post("/api/albums/reimport-disk", json={
-            "aldir": str(self.outside), "mb_albumid": "11111111-1111-1111-1111-111111111111",
-        })
+        with mock.patch.object(APP.beets_client, "inspect_import_source",
+                                side_effect=APP.BeetsError("Beets API request error: invalid_path")):
+            res = self.client.post("/api/albums/reimport-disk", json={
+                "aldir": str(self.outside), "mb_albumid": "11111111-1111-1111-1111-111111111111",
+            })
         self.assertEqual(res.status_code, 400)
 
     def test_symlink_aldir_rejected(self):
@@ -336,10 +349,37 @@ class ReimportDiskPathSafetyTests(unittest.TestCase):
             link.symlink_to(self.outside, target_is_directory=True)
         except (OSError, NotImplementedError):
             self.skipTest("platform/user cannot create symlinks")
-        res = self.client.post("/api/albums/reimport-disk", json={
-            "aldir": str(link), "mb_albumid": "11111111-1111-1111-1111-111111111111",
-        })
+        with mock.patch.object(APP.beets_client, "inspect_import_source",
+                                side_effect=APP.BeetsError("Beets API request error: invalid_path")):
+            res = self.client.post("/api/albums/reimport-disk", json={
+                "aldir": str(link), "mb_albumid": "11111111-1111-1111-1111-111111111111",
+            })
         self.assertEqual(res.status_code, 400)
+
+    def test_engine_unavailable_returns_502_not_500(self):
+        with mock.patch.object(APP.beets_client, "inspect_import_source",
+                                side_effect=APP.BeetsUnavailableError("Beets Control Agent is unavailable")):
+            res = self.client.post("/api/albums/reimport-disk", json={
+                "aldir": "/data/torrents/music/some_album", "mb_albumid": "11111111-1111-1111-1111-111111111111",
+            })
+        self.assertEqual(res.status_code, 502)
+
+    def test_valid_engine_inspection_reaches_past_validation(self):
+        # A successful inspection response must be accepted and its
+        # canonical_path used -- proving the route reaches past the
+        # (now engine-side) validation gate for a legitimate source.
+        with mock.patch.object(APP.beets_client, "inspect_import_source", return_value={
+                    "ok": True, "canonical_path": "/data/torrents/music/real_album",
+                    "audio_count": 3, "audio_files": [], "source_signature": "abc",
+                }), \
+             mock.patch.object(APP, "_library_album_ids_for_folder", return_value=[]):
+            res = self.client.post("/api/albums/reimport-disk", json={
+                "aldir": "/data/torrents/music/real_album", "mb_albumid": "11111111-1111-1111-1111-111111111111",
+            })
+        # Fails further downstream (no real job/DB/engine wired up in this
+        # unit test) -- the point is it is NOT rejected at the validation
+        # gate (400) the way the outside-root/symlink cases above are.
+        self.assertNotEqual(res.status_code, 400)
 
 
 if __name__ == "__main__":

@@ -170,6 +170,28 @@ class BeetsClient:
         """Raw SQL is intentionally unavailable; use structured query helpers."""
         raise BeetsError("Raw SQLite queries are not permitted; use structured library query helpers")
 
+    def inspect_import_source(self, source_path: str, operation: str, *, timeout: float = 60.0) -> Dict[str, Any]:
+        """Engine-authoritative validation + bounded audio inventory for an
+        import/reimport source (SEC-002 Wave 8 ARCH-003).
+
+        The web manager has no local filesystem access to the engine's
+        music/staging roots in the shipped Compose topology, so it cannot
+        validate existence, reject symlinks, or read audio properties
+        itself -- this asks the engine (which owns those mounts) to do it
+        and return structured evidence instead. `operation` is required and
+        selects a fixed, engine-defined root policy; the caller never
+        supplies its own trusted-root list.
+
+        Raises BeetsError/BeetsUnavailableError/BeetsAuthError on transport
+        failure. On a caller-facing rejection (invalid path, wrong root,
+        etc.) the engine returns a normal non-2xx JSON error, which
+        _request() already turns into a BeetsError with the engine's own
+        stable error_code string as the message -- callers should not parse
+        HTML/traceback text out of it.
+        """
+        payload = {"source_path": source_path, "operation": operation}
+        return self._request("POST", "/imports/source/inspect", payload, timeout=timeout + 5.0)
+
     def run_command(self, command: str, args: Optional[List[str]] = None, timeout: float = 120.0, config_override: str = "", source_path: str = "") -> Dict[str, Any]:
         """Execute a beet command synchronously on the Beets control agent."""
         payload = {

@@ -312,6 +312,7 @@ from backend.audio_preferences import (
     mark_needs_replacement as _mark_music_format_needs_replacement,
     validate_audio_file as _validate_audio_file_preferences,
     validate_audio_tree as _validate_audio_tree_preferences,
+    validate_audio_properties as _validate_audio_properties,
     handle_rejected_download as _handle_rejected_audio_download,
 )
 from backend.transaction_engine import TransactionStore, metadata_diff
@@ -1435,6 +1436,14 @@ _BEETS_PLUGINPATH_CONFIG = (
 )
 
 
+def _beet_import_timeout_for_count(count: int, minimum: int = 300, maximum: int = 1200) -> int:
+    """Scale beet import timeout with a known audio-file count while
+    keeping a hard cap. Shared formula for _beet_import_timeout() (local
+    scan) and reimport_disk() (engine-supplied audio_count -- SEC-002
+    Wave 8 ARCH-003, since this route's source is not locally scannable)."""
+    return max(minimum, min(maximum, 180 + (max(0, int(count or 0)) * 20)))
+
+
 def _beet_import_timeout(source_path: str, minimum: int = 300, maximum: int = 1200) -> int:
     """Scale beet import timeout with album size while keeping a hard cap."""
     count = 0
@@ -1446,7 +1455,7 @@ def _beet_import_timeout(source_path: str, minimum: int = 300, maximum: int = 12
             count = sum(1 for p in root.rglob("*") if p.is_file() and p.suffix.lower() in AUDIO_EXT)
     except Exception:
         count = 0
-    return max(minimum, min(maximum, 180 + (count * 20)))
+    return _beet_import_timeout_for_count(count, minimum, maximum)
 
 
 def _read_beets_plugin_list(config_path: str = "/config/config.yaml") -> List[str]:
@@ -9906,6 +9915,75 @@ def _validate_import_source_audio(path_value: str, log: list, *, reject_download
     raise RuntimeError(
         _music_format_policy_rejection_error(len(rejected), handled_results, prefs)
     )
+
+def _validate_import_source_evidence(evidence: Dict[str, Any], log: list, *, reject_downloads: bool = True) -> Dict[str, Any]:
+    """Same policy as _validate_import_source_audio(), but evaluated against
+    already-computed engine-side audio evidence instead of walking the
+    source locally (SEC-002 Wave 8 ARCH-003: reimport_disk()'s source lives
+    on the Beets engine, not the web manager, so audio properties must come
+    from beets_client.inspect_import_source(), not a local ffprobe/rglob
+    pass this container cannot perform).
+
+    Uses validate_audio_properties() directly -- the pure, already-existing
+    evidence-in/decision-out half of the same code _validate_audio_tree_preferences()
+    calls -- so the accept/reject policy itself is identical, not
+    reimplemented.
+
+    Only _validate_import_source_audio()'s other six call sites (unrelated
+    to Wave 8) still use the local-filesystem path; this function is used
+    by reimport_disk() only. Rejected-download handling
+    (_handle_rejected_audio_download, which deletes/quarantines the file)
+    still assumes local access and is not migrated here -- rejections are
+    the uncommon case for an already-organized reimport source, and
+    building an engine-side quarantine/delete capability for that edge case
+    is deferred, not silently dropped (see docs/TECHNICAL_DEBT.md)."""
+    prefs = _music_format_preferences()
+    canonical_path = _s(evidence.get("canonical_path"))
+    try:
+        root_is_library = _path_is_under(Path(canonical_path).resolve(strict=False), MUSIC_ROOT.resolve(strict=False))
+    except Exception:
+        root_is_library = False
+
+    accepted: List[Dict[str, Any]] = []
+    rejected: List[Dict[str, Any]] = []
+    for entry in evidence.get("audio_files") or []:
+        rel = _s(entry.get("relative_path"))
+        abs_path = str(Path(canonical_path) / rel) if rel else canonical_path
+        result = _validate_audio_properties(entry.get("properties") or {}, prefs)
+        row = {"path": abs_path, **result}
+        (accepted if result.get("ok") else rejected).append(row)
+
+    for row in accepted:
+        msg = row.get("message") or "Accepted: audio matches Music Format Preferences"
+        log.append(f"  [audio] {msg}")
+    if not rejected:
+        return {"ok": True, "accepted": accepted, "rejected": rejected, "total": len(accepted)}
+
+    handled_results: List[Dict[str, Any]] = []
+    for row in rejected:
+        msg = row.get("message") or "Rejected download: audio does not match Music Format Preferences"
+        log.append(f"  [audio] {msg}: {Path(row.get('path') or '').name}")
+        if reject_downloads and not root_is_library and row.get("path"):
+            log.append("  [audio] Rejected-file quarantine/delete requires local access this route no longer has; leaving file in place for manual review.")
+    if root_is_library:
+        _mark_music_format_needs_replacement([
+            {
+                "path": row.get("path"),
+                "status": "Needs replacement",
+                "reason": "; ".join(row.get("reasons") or ["does not match Music Format Preferences"]),
+                "audio": row.get("properties") or {},
+                "queued_retry": True,
+            }
+            for row in rejected
+        ])
+        raise RuntimeError(
+            "Existing library audio does not match Music Format Preferences. "
+            "Current files were kept and marked Needs replacement."
+        )
+    raise RuntimeError(
+        _music_format_policy_rejection_error(len(rejected), handled_results, prefs)
+    )
+
 
 def _app_managed_download_path(path: Path) -> bool:
     managed_roots = [
@@ -22191,17 +22269,33 @@ def reimport_disk():
         return jsonify({"ok": False, "error": "aldir required"}), 400
     if not mb_albumid:
         return jsonify({"ok": False, "error": "mb_albumid required"}), 400
-    # Containment must be checked before any filesystem existence probe: an
-    # unauthenticated-of-root path reaching Path.exists() first is an
-    # existence oracle for arbitrary container paths. Reuses the same
-    # trusted-root resolver as the rest of the import-review/AI-suggest
-    # flow instead of an ad-hoc hardcoded root list.
-    trusted_aldir, aldir_error = _resolve_import_review_source_path(
-        aldir, allow_music=True, expected_type="dir",
-    )
-    if aldir_error or trusted_aldir is None:
-        return jsonify({"ok": False, "error": aldir_error or f"Directory not found: {aldir}"}), 400
-    aldir = str(trusted_aldir)
+    # SEC-002 Wave 8 ARCH-003: _resolve_import_review_source_path() validated
+    # existence/containment/symlink-safety against THIS process's own
+    # filesystem -- which has no view of MUSIC_ROOT/DOWNLOADS_ROOT in the
+    # shipped web-manager topology, so it could never succeed for a real
+    # path (confirmed by the mandatory two-service runtime test). The Beets
+    # engine owns those mounts, so it -- not the web manager -- must be the
+    # one to validate and inspect the source. inspect_import_source() is
+    # engine-authoritative: it reuses the engine's own resolve_safe_path()
+    # (full realpath resolution + root containment, closing symlink escapes
+    # the same way) and returns only the canonical path plus bounded audio
+    # evidence, never letting the caller pick its own trusted root.
+    try:
+        import_source_evidence = beets_client.inspect_import_source(aldir, operation="reimport")
+    except BeetsAuthError:
+        return jsonify({"ok": False, "error": "Beets engine authentication failed."}), 502
+    except BeetsUnavailableError:
+        return jsonify({"ok": False, "error": "Beets engine is unavailable."}), 502
+    except BeetsError as exc:
+        # exc's message is the engine's own stable error_code (invalid_path,
+        # root_self_rejected, invalid_operation, inspection_failed) wrapped
+        # by BeetsClient._request -- never a raw traceback/OSError text.
+        return jsonify({"ok": False, "error": f"Import source rejected: {exc}"}), 400
+    if not import_source_evidence.get("ok"):
+        return jsonify({"ok": False, "error": "Import source rejected."}), 400
+    # Only the engine's own canonical path is ever used from here on --
+    # the raw client-supplied aldir is never reused after this point.
+    aldir = str(import_source_evidence["canonical_path"])
     if not existing_album_id:
         try:
             existing_ids = _library_album_ids_for_folder(aldir)
@@ -22924,11 +23018,14 @@ def reimport_disk():
         base_tmp = [BEET_BIN, "-c", temp_cfg]
         base_std = base_tmp   # was "/config/config.yaml" — avoid triggering lyrics/replaygain
 
-        _validate_import_source_audio(aldir, log, reject_downloads=True)
+        # Uses the engine-supplied evidence captured at request time (see
+        # import_source_evidence above), not a local scan -- this route's
+        # source lives on the Beets engine, not the web manager.
+        _validate_import_source_evidence(import_source_evidence, log, reject_downloads=True)
         log.append(f"[1/3] Importing & tagging '{Path(aldir).name}' in-place with MB {mb_albumid}…")
         t_before = time.time() - 5
         import_timed_out = False
-        import_timeout = _beet_import_timeout(aldir)
+        import_timeout = _beet_import_timeout_for_count(import_source_evidence.get("audio_count", 0))
         # Beets import/tagging/move is authoritative-library work and must run
         # on the Beets engine, not as a local subprocess in the web manager --
         # the web-manager image has no beet binary in the shipped topology

@@ -25,12 +25,16 @@ This module guards both fixes:
    see test_sec002_app_path_ai_batch_replacement_staging.py for its
    containment/collision/secret-redaction tests.
 """
+import os
+import shutil
+import tempfile
 import unittest
 import unittest.mock as mock
 from pathlib import Path
 
 import app as APP
 import job_engine
+import backend.beets_control_agent as CONTROL_AGENT
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -144,6 +148,118 @@ class ReimportDiskNoBeetBinaryRequiredTests(unittest.TestCase):
         self.assertEqual(r.stdout, "tagged and imported")
         mock_run.assert_called_once()
         self.assertEqual(mock_run.call_args.args[0], "import")
+
+
+@unittest.skipUnless(os.name == "posix", "resolve_safe_path() requires POSIX-absolute paths; the control agent only ever runs inside the Linux engine container")
+class ImportSourceInspectionTests(unittest.TestCase):
+    """Real, unmocked tests of inspect_import_source() -- the engine-side
+    function that replaces reimport_disk()'s old web-manager-local
+    _resolve_import_review_source_path() call (SEC-002 Wave 8 ARCH-003).
+    Uses real temp directories and real symlinks, exactly as this function
+    will actually run inside the beets engine container, where
+    MUSIC_LIBRARY_PATH/DOWNLOAD_PATH are real mounts."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp(prefix="beets_test_arch003_", dir=".")
+        self.tmp_root = Path(self.tmp_dir).resolve()
+        self.music_root = self.tmp_root / "music"
+        self.staging_root = self.tmp_root / "staging"
+        self.outside = self.tmp_root / "outside"
+        self.music_root.mkdir(parents=True)
+        self.staging_root.mkdir(parents=True)
+        self.outside.mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, self.tmp_dir, ignore_errors=True)
+        self._music_patcher = mock.patch.object(CONTROL_AGENT, "MUSIC_LIBRARY_PATH", str(self.music_root))
+        self._staging_patcher = mock.patch.object(CONTROL_AGENT, "DOWNLOAD_PATH", str(self.staging_root))
+        self._music_patcher.start()
+        self._staging_patcher.start()
+        self.addCleanup(self._music_patcher.stop)
+        self.addCleanup(self._staging_patcher.stop)
+
+    def test_unknown_operation_rejected(self):
+        result = CONTROL_AGENT.inspect_import_source(str(self.staging_root), "not_a_real_operation")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_code"], "invalid_operation")
+
+    def test_outside_root_rejected(self):
+        result = CONTROL_AGENT.inspect_import_source(str(self.outside), "reimport")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_code"], "invalid_path")
+
+    def test_nonexistent_path_rejected(self):
+        result = CONTROL_AGENT.inspect_import_source(str(self.staging_root / "does_not_exist"), "reimport")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_code"], "invalid_path")
+
+    def test_traversal_rejected(self):
+        result = CONTROL_AGENT.inspect_import_source(str(self.staging_root / ".." / "outside"), "reimport")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_code"], "invalid_path")
+
+    def test_root_self_rejected(self):
+        result = CONTROL_AGENT.inspect_import_source(str(self.staging_root), "reimport")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_code"], "root_self_rejected")
+
+    def test_symlink_directory_escaping_root_is_not_traversed(self):
+        (self.outside / "private.flac").write_bytes(b"not-real-audio")
+        album_dir = self.staging_root / "album_with_link"
+        album_dir.mkdir()
+        link = album_dir / "escape_link"
+        try:
+            link.symlink_to(self.outside, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("platform/user cannot create symlinks")
+        (album_dir / "01.flac").write_bytes(b"not-real-audio-either")
+        result = CONTROL_AGENT.inspect_import_source(str(album_dir), "reimport")
+        self.assertTrue(result["ok"], result)
+        relative_paths = [e["relative_path"] for e in result["audio_files"]]
+        self.assertIn("01.flac", relative_paths)
+        self.assertNotIn("escape_link/private.flac", relative_paths)
+        # The outside file must never even have been touched/read.
+        self.assertEqual(len(result["audio_files"]), 1)
+
+    def test_valid_staging_directory_returns_canonical_path_and_audio_evidence(self):
+        album_dir = self.staging_root / "real_album"
+        album_dir.mkdir()
+        (album_dir / "01.flac").write_bytes(b"not-real-audio")
+        (album_dir / "readme.txt").write_text("not audio")
+        result = CONTROL_AGENT.inspect_import_source(str(album_dir), "reimport")
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(Path(result["canonical_path"]), album_dir.resolve())
+        self.assertEqual(result["audio_count"], 1)
+        self.assertEqual(result["audio_files"][0]["relative_path"], "01.flac")
+        self.assertIn("properties", result["audio_files"][0])
+        self.assertIn("source_signature", result)
+
+    def test_valid_music_directory_permitted_for_reimport(self):
+        album_dir = self.music_root / "Artist" / "Album"
+        album_dir.mkdir(parents=True)
+        (album_dir / "01.mp3").write_bytes(b"not-real-audio")
+        result = CONTROL_AGENT.inspect_import_source(str(album_dir), "reimport")
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["audio_count"], 1)
+
+    def test_source_signature_changes_when_files_change(self):
+        album_dir = self.staging_root / "changeable_album"
+        album_dir.mkdir()
+        (album_dir / "01.flac").write_bytes(b"version one")
+        first = CONTROL_AGENT.inspect_import_source(str(album_dir), "reimport")
+        (album_dir / "01.flac").write_bytes(b"version two but different length!!")
+        second = CONTROL_AGENT.inspect_import_source(str(album_dir), "reimport")
+        self.assertNotEqual(first["source_signature"], second["source_signature"])
+
+    def test_nul_byte_rejected(self):
+        result = CONTROL_AGENT.inspect_import_source(str(self.staging_root) + "\x00evil", "reimport")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_code"], "invalid_path")
+
+    def test_ai_batch_discovery_operation_also_permits_music_root(self):
+        album_dir = self.music_root / "Some Artist" / "Some Album"
+        album_dir.mkdir(parents=True)
+        (album_dir / "01.flac").write_bytes(b"not-real-audio")
+        result = CONTROL_AGENT.inspect_import_source(str(album_dir), "ai_batch_discovery")
+        self.assertTrue(result["ok"], result)
 
 
 if __name__ == "__main__":

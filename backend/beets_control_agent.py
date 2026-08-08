@@ -11,6 +11,7 @@ except ImportError:
 import base64
 import errno
 import binascii
+import hashlib
 import io
 import hmac
 import json
@@ -29,6 +30,19 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import parse_qs, urlparse
+
+# Portable helper module (stdlib + ffprobe only, no Flask/app.py coupling).
+# This file itself is deliberately standalone (no other project imports)
+# because it's copied out of the repo and run as a lone script inside the
+# engine image -- see Dockerfile.beets, which copies audio_preferences.py
+# alongside it as a sibling for exactly this import to resolve there. The
+# fallback lets this same file also import cleanly as backend.beets_control_agent
+# from a full repo checkout (unit tests, tooling), where audio_preferences
+# is a package member instead of a sibling script.
+try:
+    import audio_preferences
+except ImportError:
+    from backend import audio_preferences
 
 # Configuration
 PORT = int(os.environ.get("BEETS_AGENT_PORT", "8338"))
@@ -587,6 +601,143 @@ def resolve_safe_path(
         raise UnsafePathError("path is not a directory")
 
     return trusted
+
+
+# SEC-002 Wave 8 ARCH-003: which trusted roots each import-source-inspection
+# operation may resolve against. The caller (web manager) never chooses its
+# own root -- it only names the operation it's performing, and the engine
+# decides what that operation is allowed to touch. "reimport" covers both
+# already-in-library untracked audio and staged/downloaded audio, matching
+# reimport_disk()'s two pre-existing scenarios; "ai_batch_discovery" is
+# staging-primary but also allows "music" since the AI Batch Import UI is an
+# explicit, authenticated, free-text operator field that has always allowed
+# pointing at the library itself.
+IMPORT_SOURCE_OPERATIONS: dict[str, list[str]] = {
+    "reimport": ["music", "staging"],
+    "ai_batch_discovery": ["music", "staging"],
+}
+
+IMPORT_INSPECT_MAX_ENTRIES_SCANNED = _env_int_clamped(
+    "BEETS_IMPORT_INSPECT_MAX_ENTRIES", 20_000, minimum=100, maximum=200_000
+)
+IMPORT_INSPECT_MAX_AUDIO_FILES = _env_int_clamped(
+    "BEETS_IMPORT_INSPECT_MAX_AUDIO_FILES", 500, minimum=1, maximum=5_000
+)
+
+
+def _import_source_audio_extensions() -> set[str]:
+    return set(audio_preferences._AUDIO_EXT_TO_FORMAT.keys())
+
+
+def _import_source_signature(entries: list[dict[str, Any]]) -> str:
+    """A cheap staleness fingerprint (NOT recording identity -- see the
+    caller). Two inspections of an unchanged source produce the same
+    signature; any added/removed/resized/retimestamped file changes it."""
+    parts = sorted(f"{e['relative_path']}:{e['size']}:{e['mtime_ns']}" for e in entries)
+    return hashlib.sha256("|".join(parts).encode("utf-8", "surrogatepass")).hexdigest()
+
+
+def inspect_import_source(source_path: object, operation: str) -> dict[str, Any]:
+    """Engine-authoritative validation + bounded audio inventory for an
+    import/reimport source. Returns a plain result dict (never raises for
+    caller-facing conditions) so /imports/source/inspect can map it to a
+    stable JSON response without leaking exception internals.
+
+    This is the fix for the ARCH-003 gap: the web manager has no local
+    filesystem access to MUSIC_LIBRARY_PATH/DOWNLOAD_PATH in the shipped
+    Compose topology, so it cannot validate existence, reject symlinks, or
+    inspect audio properties itself. The engine can and must do all of
+    that, since it is the only place those roots are actually mounted.
+    """
+    allowed_types = IMPORT_SOURCE_OPERATIONS.get(operation)
+    if allowed_types is None:
+        return {"ok": False, "error_code": "invalid_operation"}
+
+    try:
+        trusted = resolve_safe_path(
+            source_path, allowed_types, require_exists=True, expected_type="dir",
+        )
+    except UnsafePathError:
+        return {"ok": False, "error_code": "invalid_path"}
+
+    # Root-self is refused for the same reason the web-manager-side
+    # validator refuses it: "import the entire library/staging root as one
+    # album" is never a legitimate request and would be a uniquely
+    # dangerous one to silently accept.
+    for root_type in allowed_types:
+        for candidate_root in _allowed_root_paths([root_type]):
+            try:
+                if trusted == Path(os.path.realpath(candidate_root)):
+                    return {"ok": False, "error_code": "root_self_rejected"}
+            except Exception:
+                continue
+
+    entries: list[dict[str, Any]] = []
+    audio_exts = _import_source_audio_extensions()
+    scanned = 0
+    truncated_scan = False
+    truncated_audio = False
+    try:
+        stack = [trusted]
+        while stack:
+            current = stack.pop()
+            try:
+                children = sorted(current.iterdir())
+            except Exception:
+                continue
+            for child in children:
+                if scanned >= IMPORT_INSPECT_MAX_ENTRIES_SCANNED:
+                    truncated_scan = True
+                    break
+                scanned += 1
+                try:
+                    # Do not follow symlinked directories out of the
+                    # trusted root -- resolve_safe_path() already fully
+                    # dereferenced the root itself, but nothing below stops
+                    # a symlink planted *inside* the tree from pointing
+                    # elsewhere.
+                    if child.is_symlink():
+                        continue
+                    if child.is_dir():
+                        stack.append(child)
+                        continue
+                    if not child.is_file():
+                        continue
+                except Exception:
+                    continue
+                if child.suffix.lower() not in audio_exts:
+                    continue
+                if len(entries) >= IMPORT_INSPECT_MAX_AUDIO_FILES:
+                    truncated_audio = True
+                    continue
+                try:
+                    rel = str(child.relative_to(trusted))
+                    st = child.stat()
+                except Exception:
+                    continue
+                properties = audio_preferences.inspect_audio_file(str(child))
+                entries.append({
+                    "relative_path": rel,
+                    "size": st.st_size,
+                    "mtime_ns": st.st_mtime_ns,
+                    "properties": properties,
+                })
+            if truncated_scan:
+                break
+    except Exception:
+        return {"ok": False, "error_code": "inspection_failed"}
+
+    entries.sort(key=lambda e: e["relative_path"])
+    return {
+        "ok": True,
+        "canonical_path": str(trusted),
+        "type": "dir",
+        "audio_count": len(entries),
+        "audio_files": entries,
+        "truncated_scan": truncated_scan,
+        "truncated_audio": truncated_audio,
+        "source_signature": _import_source_signature(entries),
+    }
 
 
 def _path_has_symlink_component(path: Path, root: Path, *, include_leaf: bool = True) -> bool:
@@ -1855,6 +2006,29 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 self._send_json(500, {"error": "Failed to set artpath"})
             finally:
                 release_os_lock(lock_file)
+            return
+
+        if path == "/imports/source/inspect":
+            # SEC-002 Wave 8 ARCH-003: read-only, bounded inspection of an
+            # import/reimport source -- the engine-side counterpart to
+            # web-manager path validation the web manager can no longer do
+            # itself (it has no local view of MUSIC_LIBRARY_PATH/
+            # DOWNLOAD_PATH in the shipped Compose topology). Not a general
+            # filesystem browser: it only validates against a fixed,
+            # operation-specific root policy and returns audio evidence,
+            # never raw file contents.
+            source_path = body.get("source_path", "")
+            operation = body.get("operation", "")
+            result = inspect_import_source(source_path, operation)
+            if not result.get("ok"):
+                status = {
+                    "invalid_operation": 400,
+                    "invalid_path": 403,
+                    "root_self_rejected": 403,
+                }.get(result.get("error_code"), 500)
+                self._send_json(status, {"ok": False, "error": result.get("error_code", "inspection_failed")})
+                return
+            self._send_json(200, result)
             return
 
         if path == "/commands/execute":
