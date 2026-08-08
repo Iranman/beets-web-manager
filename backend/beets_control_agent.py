@@ -11,6 +11,7 @@ except ImportError:
 import base64
 import errno
 import binascii
+import hashlib
 import io
 import hmac
 import json
@@ -29,6 +30,19 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import parse_qs, urlparse
+
+# Portable helper module (stdlib + ffprobe only, no Flask/app.py coupling).
+# This file itself is deliberately standalone (no other project imports)
+# because it's copied out of the repo and run as a lone script inside the
+# engine image -- see Dockerfile.beets, which copies audio_preferences.py
+# alongside it as a sibling for exactly this import to resolve there. The
+# fallback lets this same file also import cleanly as backend.beets_control_agent
+# from a full repo checkout (unit tests, tooling), where audio_preferences
+# is a package member instead of a sibling script.
+try:
+    import audio_preferences
+except ImportError:
+    from backend import audio_preferences
 
 # Configuration
 PORT = int(os.environ.get("BEETS_AGENT_PORT", "8338"))
@@ -587,6 +601,733 @@ def resolve_safe_path(
         raise UnsafePathError("path is not a directory")
 
     return trusted
+
+
+# SEC-002 Wave 8 ARCH-003: which trusted roots each import-source-inspection
+# operation may resolve against. The caller (web manager) never chooses its
+# own root -- it only names the operation it's performing, and the engine
+# decides what that operation is allowed to touch. "reimport" covers both
+# already-in-library untracked audio and staged/downloaded audio, matching
+# reimport_disk()'s two pre-existing scenarios; "ai_batch_discovery" is
+# staging-primary but also allows "music" since the AI Batch Import UI is an
+# explicit, authenticated, free-text operator field that has always allowed
+# pointing at the library itself.
+IMPORT_SOURCE_OPERATIONS: dict[str, list[str]] = {
+    "reimport": ["music", "staging"],
+    "ai_batch_discovery": ["music", "staging"],
+}
+
+IMPORT_INSPECT_MAX_ENTRIES_SCANNED = _env_int_clamped(
+    "BEETS_IMPORT_INSPECT_MAX_ENTRIES", 20_000, minimum=100, maximum=200_000
+)
+IMPORT_INSPECT_MAX_AUDIO_FILES = _env_int_clamped(
+    "BEETS_IMPORT_INSPECT_MAX_AUDIO_FILES", 500, minimum=1, maximum=5_000
+)
+
+
+def _import_source_audio_extensions() -> set[str]:
+    return set(audio_preferences._AUDIO_EXT_TO_FORMAT.keys())
+
+
+def _import_source_signature(entries: list[dict[str, Any]]) -> str:
+    """A cheap staleness fingerprint (NOT recording identity -- see the
+    caller). Two inspections of an unchanged source produce the same
+    signature; any added/removed/resized/retimestamped file changes it."""
+    parts = sorted(f"{e['relative_path']}:{e['size']}:{e['mtime_ns']}" for e in entries)
+    return hashlib.sha256("|".join(parts).encode("utf-8", "surrogatepass")).hexdigest()
+
+
+def inspect_import_source(source_path: object, operation: str) -> dict[str, Any]:
+    """Engine-authoritative validation + bounded audio inventory for an
+    import/reimport source. Returns a plain result dict (never raises for
+    caller-facing conditions) so /imports/source/inspect can map it to a
+    stable JSON response without leaking exception internals.
+
+    This is the fix for the ARCH-003 gap: the web manager has no local
+    filesystem access to MUSIC_LIBRARY_PATH/DOWNLOAD_PATH in the shipped
+    Compose topology, so it cannot validate existence, reject symlinks, or
+    inspect audio properties itself. The engine can and must do all of
+    that, since it is the only place those roots are actually mounted.
+    """
+    allowed_types = IMPORT_SOURCE_OPERATIONS.get(operation)
+    if allowed_types is None:
+        return {"ok": False, "error_code": "invalid_operation"}
+
+    try:
+        trusted = resolve_safe_path(
+            source_path, allowed_types, require_exists=True, expected_type="dir",
+        )
+    except UnsafePathError:
+        return {"ok": False, "error_code": "invalid_path"}
+
+    # Root-self is refused for the same reason the web-manager-side
+    # validator refuses it: "import the entire library/staging root as one
+    # album" is never a legitimate request and would be a uniquely
+    # dangerous one to silently accept.
+    for root_type in allowed_types:
+        for candidate_root in _allowed_root_paths([root_type]):
+            try:
+                if trusted == Path(os.path.realpath(candidate_root)):
+                    return {"ok": False, "error_code": "root_self_rejected"}
+            except Exception:
+                continue
+
+    entries: list[dict[str, Any]] = []
+    audio_exts = _import_source_audio_extensions()
+    scanned = 0
+    truncated_scan = False
+    truncated_audio = False
+    try:
+        stack = [trusted]
+        while stack:
+            current = stack.pop()
+            try:
+                children = sorted(current.iterdir())
+            except Exception:
+                continue
+            for child in children:
+                if scanned >= IMPORT_INSPECT_MAX_ENTRIES_SCANNED:
+                    truncated_scan = True
+                    break
+                scanned += 1
+                try:
+                    # Do not follow symlinked directories out of the
+                    # trusted root -- resolve_safe_path() already fully
+                    # dereferenced the root itself, but nothing below stops
+                    # a symlink planted *inside* the tree from pointing
+                    # elsewhere.
+                    if child.is_symlink():
+                        continue
+                    if child.is_dir():
+                        stack.append(child)
+                        continue
+                    if not child.is_file():
+                        continue
+                except Exception:
+                    continue
+                if child.suffix.lower() not in audio_exts:
+                    continue
+                if len(entries) >= IMPORT_INSPECT_MAX_AUDIO_FILES:
+                    truncated_audio = True
+                    continue
+                try:
+                    rel = str(child.relative_to(trusted))
+                    st = child.stat()
+                except Exception:
+                    continue
+                properties = audio_preferences.inspect_audio_file(str(child))
+                entries.append({
+                    "relative_path": rel,
+                    "size": st.st_size,
+                    "mtime_ns": st.st_mtime_ns,
+                    "properties": properties,
+                })
+            if truncated_scan:
+                break
+    except Exception:
+        return {"ok": False, "error_code": "inspection_failed"}
+
+    entries.sort(key=lambda e: e["relative_path"])
+    return {
+        "ok": True,
+        "canonical_path": str(trusted),
+        "type": "dir",
+        "audio_count": len(entries),
+        "audio_files": entries,
+        "truncated_scan": truncated_scan,
+        "truncated_audio": truncated_audio,
+        "source_signature": _import_source_signature(entries),
+    }
+
+
+# SEC-002 Wave 8 ARCH-003: Discovery, Preservation, and Atomic Reimport
+
+IMPORT_DISCOVER_MAX_DIRS_VISITED = _env_int_clamped(
+    "BEETS_IMPORT_DISCOVER_MAX_DIRS", 10_000, minimum=10, maximum=50_000
+)
+IMPORT_DISCOVER_MAX_FILES_EXAMINED = _env_int_clamped(
+    "BEETS_IMPORT_DISCOVER_MAX_FILES", 50_000, minimum=100, maximum=200_000
+)
+IMPORT_DISCOVER_MAX_CANDIDATES = _env_int_clamped(
+    "BEETS_IMPORT_DISCOVER_MAX_CANDIDATES", 100, minimum=1, maximum=500
+)
+
+
+def discover_import_sources(
+    source_path: object,
+    operation: str = "ai_batch_discovery",
+    cursor: str = None,
+    limits: dict = None,
+) -> dict[str, Any]:
+    op = str(operation or "ai_batch_discovery")
+    allowed_types = IMPORT_SOURCE_OPERATIONS.get(op)
+    if allowed_types is None:
+        return {"ok": False, "error_code": "invalid_operation"}
+
+    try:
+        trusted = resolve_safe_path(
+            source_path, allowed_types, require_exists=True, expected_type="dir"
+        )
+    except UnsafePathError:
+        return {"ok": False, "error_code": "invalid_path"}
+
+    # Deliberately no root-self rejection here, unlike inspect_import_source()/
+    # preserve_import_source()/reimport_source_atomic(): those operate on the
+    # assumption that source_path IS one candidate album, where "the whole
+    # trusted root" is a nonsensical/dangerous input. Discovery's entire
+    # purpose is the opposite -- scanning a whole root for multiple candidate
+    # subdirectories -- and its default, most common caller
+    # (start_ai_batch_import()'s scan_path defaults to "/data/torrents/music",
+    # i.e. the trusted staging root itself) passes the root directly. Rejecting
+    # root-self here would break AI Batch Import's primary use case outright.
+
+    req_limits = limits if isinstance(limits, dict) else {}
+    max_dirs = _env_int_clamped(
+        "BEETS_DISCOVER_DIRS",
+        int(req_limits.get("max_dirs", IMPORT_DISCOVER_MAX_DIRS_VISITED)),
+        minimum=10,
+        maximum=50_000,
+    )
+    max_files = _env_int_clamped(
+        "BEETS_DISCOVER_FILES",
+        int(req_limits.get("max_files", IMPORT_DISCOVER_MAX_FILES_EXAMINED)),
+        minimum=100,
+        maximum=200_000,
+    )
+    max_candidates = _env_int_clamped(
+        "BEETS_DISCOVER_CANDIDATES",
+        int(req_limits.get("max_candidates", IMPORT_DISCOVER_MAX_CANDIDATES)),
+        minimum=1,
+        maximum=500,
+    )
+
+    # The cursor encodes the EXACT remaining DFS stack (as relative paths)
+    # at the moment traversal paused, not a lexicographic "resume after this
+    # name" marker. A lexicographic marker looks equivalent to DFS order but
+    # is not: DFS visits a directory's children (name "parent/child") before
+    # any lexicographically-later sibling, but "/" (0x2F) sorts ABOVE space,
+    # "-", and "." (0x20/0x2D/0x2E) -- extremely common characters in real
+    # album/artist folder names ("Artist - Album") -- so a sibling named
+    # "Parent-suffix" can sort *before* "Parent/child" as a string while
+    # still being visited *after* it in DFS order. Resuming by skipping
+    # every rel_dir <= the lexicographic marker then silently skips that
+    # sibling's whole subtree: a real, silent candidate-loss bug, not a
+    # theoretical one. Storing the actual stack sidesteps the comparison
+    # entirely -- resuming is just "restore the stack and keep going",
+    # which is correct by construction for a stack-based DFS.
+    #
+    # canonical_root and operation are bound into the cursor so a cursor
+    # from a different root/operation (stale reuse, or a client trying to
+    # splice cursors across calls) is rejected outright rather than mixing
+    # partial results from two different traversals. This is not
+    # cryptographic -- source_path/operation are independently
+    # re-validated via resolve_safe_path() on every call regardless of
+    # cursor content, so a tampered cursor can never grant access to a
+    # path the caller wasn't already authorized to discover; the binding
+    # exists purely for traversal correctness, not as a security boundary.
+    resume_stack_rel: list[str] | None = None
+    if cursor and isinstance(cursor, str):
+        try:
+            decoded_json = json.loads(base64.b64decode(cursor.encode("utf-8")).decode("utf-8"))
+        except Exception:
+            return {"ok": False, "error_code": "invalid_cursor"}
+        if not isinstance(decoded_json, dict) or decoded_json.get("v") != 1:
+            return {"ok": False, "error_code": "invalid_cursor"}
+        if decoded_json.get("root") != str(trusted) or decoded_json.get("op") != op:
+            return {"ok": False, "error_code": "invalid_cursor"}
+        raw_stack = decoded_json.get("stack")
+        if not isinstance(raw_stack, list) or not all(isinstance(p, str) for p in raw_stack):
+            return {"ok": False, "error_code": "invalid_cursor"}
+        resume_stack_rel = raw_stack
+
+    audio_exts = _import_source_audio_extensions()
+    candidates: list[dict[str, Any]] = []
+    dirs_visited = 0
+    files_examined = 0
+    limit_reached = False
+
+    if resume_stack_rel is not None:
+        stack = [trusted / rel if rel != "." else trusted for rel in resume_stack_rel]
+    else:
+        stack = [trusted]
+
+    while stack and len(candidates) < max_candidates and not limit_reached:
+        current = stack.pop()
+        dirs_visited += 1
+
+        if dirs_visited > max_dirs:
+            # Restore the directory this iteration popped (it was never
+            # processed) before capturing the continuation stack below.
+            stack.append(current)
+            limit_reached = True
+            break
+
+        try:
+            children = sorted(current.iterdir())
+        except Exception:
+            continue
+
+        # A directory is processed all-or-nothing: if examining its full
+        # child list would exceed the per-page file budget, defer the
+        # *whole* directory to the next page (push it back untouched)
+        # rather than pushing only some of its subdirectories onto the
+        # stack and silently dropping the rest -- that would either
+        # duplicate or lose entries once paired with the stack-based
+        # continuation cursor above.
+        if files_examined + len(children) > max_files:
+            stack.append(current)
+            limit_reached = True
+            break
+
+        dir_audio_files: list[tuple[Path, os.stat_result, str]] = []
+
+        for child in children:
+            files_examined += 1
+
+            try:
+                if child.is_symlink():
+                    continue
+                if child.is_dir():
+                    stack.append(child)
+                    continue
+                if not child.is_file():
+                    continue
+            except Exception:
+                continue
+
+            if child.suffix.lower() in audio_exts:
+                try:
+                    rel_file = str(child.relative_to(trusted))
+                    st = child.stat()
+                    dir_audio_files.append((child, st, rel_file))
+                except Exception:
+                    continue
+
+        if dir_audio_files:
+            dir_entries = [
+                {"relative_path": rel_file, "size": st.st_size, "mtime_ns": st.st_mtime_ns}
+                for _, st, rel_file in dir_audio_files
+            ]
+            cand_rel = str(current.relative_to(trusted)) if current != trusted else "."
+
+            mb_ids = {}
+            try:
+                first_audio = str(dir_audio_files[0][0])
+                from beets.mediafile import MediaFile
+                mf = MediaFile(first_audio)
+                if getattr(mf, "mb_albumid", None):
+                    mb_ids["mb_albumid"] = mf.mb_albumid
+                if getattr(mf, "mb_releasegroupid", None):
+                    mb_ids["mb_releasegroupid"] = mf.mb_releasegroupid
+                if getattr(mf, "mb_artistid", None):
+                    mb_ids["mb_artistid"] = mf.mb_artistid
+            except Exception:
+                pass
+
+            candidates.append({
+                "canonical_path": str(current),
+                "relative_path": cand_rel,
+                "audio_file_count": len(dir_audio_files),
+                "source_signature": _import_source_signature(dir_entries),
+                "musicbrainz_ids": mb_ids,
+                "relative_files": [rel for _, _, rel in dir_audio_files],
+            })
+
+    continuation_token = None
+    if stack:
+        stack_rel = [
+            str(p.relative_to(trusted)) if p != trusted else "."
+            for p in stack
+        ]
+        token_payload = {"v": 1, "root": str(trusted), "op": op, "stack": stack_rel}
+        continuation_token = base64.b64encode(json.dumps(token_payload).encode("utf-8")).decode("utf-8")
+
+    return {
+        "ok": True,
+        "canonical_root": str(trusted),
+        "candidates": candidates,
+        "complete": not (limit_reached or stack),
+        "limit_reached": limit_reached,
+        "continuation": continuation_token,
+        "dirs_visited": dirs_visited,
+        "files_examined": files_examined,
+    }
+
+
+def preserve_import_source(
+    source_path: object,
+    expected_source_signature: str = None,
+    plan_id: str = None,
+) -> dict[str, Any]:
+    # staging-only, deliberately: this exists to protect torrent/download
+    # sources from Beets mutating them during import, not to make a
+    # protective copy of already-organized library content -- library
+    # content never needs this operation, so it is not in scope for it
+    # (least privilege; SEC-002 Wave 8 review).
+    try:
+        trusted_src = resolve_safe_path(
+            source_path, ["staging"], require_exists=True, expected_type="dir"
+        )
+    except UnsafePathError:
+        return {"ok": False, "error_code": "invalid_path"}
+
+    for candidate_root in _allowed_root_paths(["staging"]):
+        try:
+            if trusted_src == Path(os.path.realpath(candidate_root)):
+                return {"ok": False, "error_code": "root_self_rejected"}
+        except Exception:
+            continue
+
+    inspect_res = inspect_import_source(str(trusted_src), "reimport")
+    if not inspect_res.get("ok"):
+        return {"ok": False, "error_code": inspect_res.get("error_code", "inspection_failed")}
+
+    curr_signature = inspect_res.get("source_signature", "")
+    if expected_source_signature and curr_signature != expected_source_signature:
+        return {
+            "ok": False,
+            "error_code": "stale_source",
+            "message": "Source signature changed since inspection",
+        }
+
+    src_hash = hashlib.sha256(str(trusted_src).encode("utf-8")).hexdigest()[:12]
+    plan_part = re.sub(r"[^a-zA-Z0-9_-]", "_", str(plan_id or ""))[:20]
+    folder_name = f"preserve_{plan_part}_{src_hash}" if plan_part else f"preserve_{src_hash}"
+
+    preserved_root = Path(os.path.realpath(os.path.join(DOWNLOAD_PATH, ".preserved_staging")))
+    dest_path = preserved_root / folder_name
+
+    try:
+        safe_dest = resolve_safe_path(str(dest_path), ["staging"])
+    except UnsafePathError:
+        return {"ok": False, "error_code": "invalid_destination"}
+
+    lock_file = acquire_os_lock(read_only=False)
+    try:
+        if safe_dest.exists():
+            if safe_dest.is_symlink():
+                return {"ok": False, "error_code": "collision", "message": "Destination is a symlink"}
+
+            dest_inspect = inspect_import_source(str(safe_dest), "reimport")
+            if dest_inspect.get("ok") and dest_inspect.get("source_signature") == curr_signature:
+                return {
+                    "ok": True,
+                    "already_preserved": True,
+                    "preserved_path": str(safe_dest),
+                    "source_signature": curr_signature,
+                    "audio_count": dest_inspect.get("audio_count", 0),
+                }
+            else:
+                return {"ok": False, "error_code": "collision", "message": "Destination exists with conflicting contents"}
+
+        audio_files = inspect_res.get("audio_files") or []
+        total_bytes = sum(int(f.get("size", 0)) for f in audio_files)
+
+        preserved_root.mkdir(parents=True, exist_ok=True)
+        usage = shutil.disk_usage(str(preserved_root))
+        if usage.free < total_bytes + (10 * 1024 * 1024):
+            return {"ok": False, "error_code": "insufficient_space", "message": "Not enough free space for preservation copy"}
+
+        safe_dest.mkdir(parents=True, exist_ok=True)
+        copied_count = 0
+        for entry in audio_files:
+            rel = entry["relative_path"]
+            src_file = trusted_src / rel
+            dst_file = safe_dest / rel
+
+            if src_file.is_symlink():
+                continue
+
+            dst_file.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(src_file), str(dst_file))
+            copied_count += 1
+
+        dest_inspect = inspect_import_source(str(safe_dest), "reimport")
+        if not dest_inspect.get("ok") or dest_inspect.get("source_signature") != curr_signature:
+            if safe_dest.exists():
+                shutil.rmtree(str(safe_dest))
+            return {"ok": False, "error_code": "copy_failed", "message": "Preservation copy post-verification failed"}
+
+        return {
+            "ok": True,
+            "already_preserved": False,
+            "preserved_path": str(safe_dest),
+            "source_signature": curr_signature,
+            "copied_files_count": copied_count,
+            "audio_count": dest_inspect.get("audio_count", 0),
+        }
+    except Exception:
+        if safe_dest.exists():
+            try:
+                shutil.rmtree(str(safe_dest))
+            except Exception:
+                pass
+        return {"ok": False, "error_code": "copy_failed", "message": "Preservation copy failed"}
+    finally:
+        release_os_lock(lock_file)
+
+
+def verify_deterministic_identity(
+    source_inspect: dict[str, Any],
+    expected_identity: dict[str, Any],
+) -> dict[str, Any]:
+    """Fail-closed by design: every path that cannot positively confirm the
+    source belongs to the expected identity returns review_required, never
+    ok: True. Missing embedded MusicBrainz tags, a missing
+    expected_identity argument, and a DB verification error are all
+    *absence of evidence*, not evidence of a match -- silently treating
+    them as success would let path containment plus an unverified caller
+    claim stand in for actual identity proof (SEC-002 Wave 8, Claude's
+    independent review of the original implementation, which did exactly
+    that)."""
+    if not expected_identity or not isinstance(expected_identity, dict):
+        return {"ok": False, "error_code": "review_required", "message": "No expected identity supplied to verify against"}
+
+    target_mb_albumid = str(expected_identity.get("mb_albumid") or "").strip().lower()
+    target_mb_rgid = str(expected_identity.get("mb_releasegroupid") or "").strip().lower()
+    target_existing_album_id = expected_identity.get("existing_album_id")
+    target_track_count = expected_identity.get("track_count")
+
+    audio_files = source_inspect.get("audio_files") or []
+    source_audio_count = len(audio_files)
+
+    if target_track_count and isinstance(target_track_count, int) and target_track_count > 0:
+        if source_audio_count != target_track_count:
+            return {
+                "ok": False,
+                "error_code": "identity_mismatch",
+                "message": f"Track count mismatch (source has {source_audio_count}, target expects {target_track_count})",
+            }
+
+    source_album_mbids: set[str] = set()
+    source_rg_mbids: set[str] = set()
+    for entry in audio_files:
+        props = entry.get("properties") or {}
+        if props.get("mb_albumid"):
+            source_album_mbids.add(str(props["mb_albumid"]).strip().lower())
+        if props.get("mb_releasegroupid"):
+            source_rg_mbids.add(str(props["mb_releasegroupid"]).strip().lower())
+
+    if target_mb_albumid:
+        if not source_album_mbids:
+            return {
+                "ok": False,
+                "error_code": "review_required",
+                "message": "Source audio has no embedded MusicBrainz album ID to verify against the target",
+            }
+        if target_mb_albumid not in source_album_mbids:
+            return {
+                "ok": False,
+                "error_code": "identity_mismatch",
+                "message": f"Source embedded MusicBrainz album ID conflicts with target {target_mb_albumid}",
+            }
+    if target_mb_rgid:
+        if not source_rg_mbids:
+            return {
+                "ok": False,
+                "error_code": "review_required",
+                "message": "Source audio has no embedded MusicBrainz Release Group ID to verify against the target",
+            }
+        if target_mb_rgid not in source_rg_mbids:
+            return {
+                "ok": False,
+                "error_code": "identity_mismatch",
+                "message": f"Source embedded MusicBrainz Release Group ID conflicts with target {target_mb_rgid}",
+            }
+
+    if target_existing_album_id:
+        try:
+            with sqlite3.connect(LIB_PATH, timeout=10) as con:
+                con.row_factory = sqlite3.Row
+                cur = con.cursor()
+                row = cur.execute("SELECT id, mb_albumid FROM albums WHERE id = ?", (target_existing_album_id,)).fetchone()
+        except Exception:
+            # A verification query that failed to run is not proof the
+            # target is valid -- treat it exactly like "could not confirm",
+            # not "confirmed". Never let a DB error silently authorize a
+            # mutation this check exists specifically to gate.
+            return {"ok": False, "error_code": "identity_verification_failed", "message": "Could not verify existing album identity against the library database"}
+        if not row:
+            return {"ok": False, "error_code": "identity_mismatch", "message": f"Target album ID {target_existing_album_id} not found in library"}
+        db_mb_albumid = str(row["mb_albumid"] or "").strip().lower()
+        if db_mb_albumid and source_album_mbids and db_mb_albumid not in source_album_mbids:
+            return {"ok": False, "error_code": "identity_mismatch", "message": "Source audio MBID conflicts with library album"}
+
+    if not target_mb_albumid and not target_mb_rgid and not target_existing_album_id:
+        # A caller that supplied expected_identity but none of its actual
+        # identity fields cannot have anything positively confirmed either.
+        return {"ok": False, "error_code": "review_required", "message": "No verifiable identity fields were supplied"}
+
+    return {"ok": True}
+
+
+_MB_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
+_REIMPORT_ALLOWED_DUPLICATE_ACTIONS = {"skip", "keep", "remove", "merge"}
+_REIMPORT_CONFIG_OVERRIDE_MAX_CHARS = 8192
+
+
+def reimport_source_atomic(
+    source_path: object,
+    expected_source_signature: str = None,
+    expected_deterministic_identity: dict = None,
+    beets_options: dict = None,
+) -> dict[str, Any]:
+    try:
+        trusted = resolve_safe_path(
+            source_path, ["music", "staging"], require_exists=True, expected_type="dir"
+        )
+    except UnsafePathError:
+        return {"ok": False, "error_code": "invalid_path"}
+
+    target_existing_album_id_for_lookup = None
+    if isinstance(expected_deterministic_identity, dict):
+        target_existing_album_id_for_lookup = expected_deterministic_identity.get("existing_album_id")
+
+    for candidate_root in _allowed_root_paths(["music", "staging"]):
+        try:
+            if trusted == Path(os.path.realpath(candidate_root)):
+                return {"ok": False, "error_code": "root_self_rejected"}
+        except Exception:
+            continue
+
+    source_inspect = inspect_import_source(str(trusted), "reimport")
+    if not source_inspect.get("ok"):
+        return {"ok": False, "error_code": source_inspect.get("error_code", "inspection_failed")}
+
+    curr_signature = source_inspect.get("source_signature", "")
+    if expected_source_signature and curr_signature != expected_source_signature:
+        return {
+            "ok": False,
+            "error_code": "stale_source",
+            "message": "Source contents modified since inspection",
+        }
+
+    id_check = verify_deterministic_identity(source_inspect, expected_deterministic_identity)
+    if not id_check.get("ok"):
+        return id_check
+
+    is_torrent_staged = False
+    try:
+        staging_roots = [os.path.realpath(r) for r in _allowed_root_paths(["staging"])]
+        is_torrent_staged = any(_path_is_within(str(trusted), r) for r in staging_roots)
+    except Exception:
+        pass
+
+    import_target_path = str(trusted)
+    preserved_path = None
+    if is_torrent_staged:
+        pres_res = preserve_import_source(str(trusted), expected_source_signature=curr_signature)
+        if not pres_res.get("ok"):
+            return pres_res
+        preserved_path = pres_res.get("preserved_path")
+        import_target_path = preserved_path
+
+    options = beets_options if isinstance(beets_options, dict) else {}
+    mb_albumid = str(options.get("mb_albumid") or "").strip()
+    if mb_albumid and not _MB_UUID_RE.match(mb_albumid):
+        return {"ok": False, "error_code": "invalid_beets_options", "message": "mb_albumid is not a valid MusicBrainz UUID"}
+    config_override = str(options.get("config_override") or "")
+    if len(config_override) > _REIMPORT_CONFIG_OVERRIDE_MAX_CHARS:
+        return {"ok": False, "error_code": "invalid_beets_options", "message": "config_override is too large"}
+    duplicate_action = str(options.get("duplicate_action") or "remove").strip().lower()
+    if duplicate_action not in _REIMPORT_ALLOWED_DUPLICATE_ACTIONS:
+        return {"ok": False, "error_code": "invalid_beets_options", "message": "duplicate_action is not one of the allowed values"}
+
+    if not preserved_path and not config_override:
+        # Already-in-library ("already organized, just untracked by Beets")
+        # sources must be tagged in place, never relocated -- this matches
+        # reimport_disk()'s own established config (copy: no / move: no).
+        # A bare `--move` flag (the original implementation's default for
+        # this branch) would relocate correctly-placed files according to
+        # Beets' path template for no reason; only the preserved-staging
+        # branch (a disposable protected copy made specifically to be
+        # organized into the library) should ever move/copy anything.
+        config_override = "import:\n  copy: no\n  move: no\n"
+
+    lock_file = acquire_os_lock(read_only=False)
+    tmp_cfg_path = None
+    try:
+        full_cmd = [BEET_BIN]
+        if config_override:
+            tmp_cfg_path = f"/tmp/beets_reimport_cfg_{uuid.uuid4().hex}.yaml"
+            with open(tmp_cfg_path, "w", encoding="utf-8") as f:
+                f.write(config_override)
+            os.chmod(tmp_cfg_path, 0o600)
+            full_cmd.extend(["-c", tmp_cfg_path])
+
+        cmd_args = ["import", "-q", "--noincremental", "asis"]
+        if preserved_path:
+            # The preserved copy is disposable and exists specifically so
+            # Beets can safely relocate/organize it -- copy (not move) it
+            # into the library so the preserved staging copy is left intact
+            # for the caller to clean up only after confirming success.
+            cmd_args.append("--copy")
+        if duplicate_action:
+            cmd_args.extend(["-D", duplicate_action])
+        if mb_albumid:
+            cmd_args.extend(["--search-id", mb_albumid])
+        cmd_args.append(import_target_path)
+        full_cmd.extend(cmd_args)
+
+        env = os.environ.copy()
+        env["BEETSDIR"] = BEETSDIR
+        res = subprocess.run(
+            full_cmd,
+            capture_output=True,
+            text=True,
+            timeout=180,
+            env=env
+        )
+
+        if res.returncode >= 2:
+            return {
+                "ok": False,
+                "error_code": "import_failed",
+                "message": "Beets import failed",
+            }
+
+        aid = None
+        db_error = False
+        try:
+            with sqlite3.connect(LIB_PATH, timeout=10) as con:
+                con.row_factory = sqlite3.Row
+                cur = con.cursor()
+                if mb_albumid:
+                    row = cur.execute("SELECT id FROM albums WHERE mb_albumid = ?", (mb_albumid,)).fetchone()
+                    if row:
+                        aid = row[0]
+                elif target_existing_album_id_for_lookup:
+                    row = cur.execute("SELECT id FROM albums WHERE id = ?", (target_existing_album_id_for_lookup,)).fetchone()
+                    if row:
+                        aid = row[0]
+        except Exception:
+            db_error = True
+
+        # Never fall back to "most recently inserted album row": under
+        # concurrency, or if Beets resolved to an unexpected release, that
+        # can silently attribute this import's result to the wrong album.
+        # A result the caller cannot deterministically confirm is reported
+        # as such, not guessed.
+        return {
+            "ok": True,
+            "album_id": aid,
+            "album_id_verified": aid is not None,
+            "album_lookup_failed": db_error,
+            "preserved_path": preserved_path,
+            "source_path": str(trusted),
+            "source_signature": curr_signature,
+        }
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error_code": "import_failed", "message": "Beets import timed out"}
+    except Exception:
+        return {"ok": False, "error_code": "import_failed", "message": "Beets import failed"}
+    finally:
+        if tmp_cfg_path and os.path.exists(tmp_cfg_path):
+            try:
+                os.unlink(tmp_cfg_path)
+            except Exception:
+                pass
+        release_os_lock(lock_file)
 
 
 def _path_has_symlink_component(path: Path, root: Path, *, include_leaf: bool = True) -> bool:
@@ -1855,6 +2596,88 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 self._send_json(500, {"error": "Failed to set artpath"})
             finally:
                 release_os_lock(lock_file)
+            return
+
+        if path == "/imports/source/inspect":
+            # SEC-002 Wave 8 ARCH-003: read-only, bounded inspection of an
+            # import/reimport source -- the engine-side counterpart to
+            # web-manager path validation the web manager can no longer do
+            # itself (it has no local view of MUSIC_LIBRARY_PATH/
+            # DOWNLOAD_PATH in the shipped Compose topology). Not a general
+            # filesystem browser: it only validates against a fixed,
+            # operation-specific root policy and returns audio evidence,
+            # never raw file contents.
+            source_path = body.get("source_path", "")
+            operation = body.get("operation", "")
+            result = inspect_import_source(source_path, operation)
+            if not result.get("ok"):
+                status = {
+                    "invalid_operation": 400,
+                    "invalid_path": 403,
+                    "root_self_rejected": 403,
+                }.get(result.get("error_code"), 500)
+                self._send_json(status, {"ok": False, "error": result.get("error_code", "inspection_failed")})
+                return
+            self._send_json(200, result)
+            return
+
+        if path == "/imports/source/discover":
+            source_path = body.get("source_path", "")
+            operation = body.get("operation", "ai_batch_discovery")
+            cursor = body.get("cursor")
+            limits = body.get("limits")
+            result = discover_import_sources(source_path, operation, cursor, limits)
+            if not result.get("ok"):
+                status = {
+                    "invalid_operation": 400,
+                    "invalid_path": 403,
+                    "root_self_rejected": 403,
+                    "invalid_cursor": 400,
+                }.get(result.get("error_code"), 500)
+                self._send_json(status, {"ok": False, "error": result.get("error_code", "discovery_failed")})
+                return
+            self._send_json(200, result)
+            return
+
+        if path == "/imports/source/preserve":
+            source_path = body.get("source_path", "")
+            expected_source_signature = body.get("expected_source_signature")
+            plan_id = body.get("plan_id")
+            result = preserve_import_source(source_path, expected_source_signature, plan_id)
+            if not result.get("ok"):
+                status = {
+                    "invalid_path": 403,
+                    "root_self_rejected": 403,
+                    "stale_source": 409,
+                    "collision": 409,
+                    "insufficient_space": 400,
+                    "copy_failed": 500,
+                }.get(result.get("error_code"), 500)
+                self._send_json(status, {"ok": False, "error": result.get("error_code", "preservation_failed"), "message": result.get("message", "")})
+                return
+            self._send_json(200, result)
+            return
+
+        if path == "/imports/reimport":
+            source_path = body.get("source_path", "")
+            expected_source_signature = body.get("expected_source_signature")
+            expected_deterministic_identity = body.get("expected_deterministic_identity")
+            beets_options = body.get("beets_options")
+            result = reimport_source_atomic(
+                source_path, expected_source_signature, expected_deterministic_identity, beets_options
+            )
+            if not result.get("ok"):
+                status = {
+                    "invalid_path": 403,
+                    "root_self_rejected": 403,
+                    "stale_source": 409,
+                    "identity_mismatch": 409,
+                    "review_required": 409,
+                    "import_failed": 500,
+                }.get(result.get("error_code"), 500)
+                self._send_json(status, {"ok": False, "error": result.get("error_code", "reimport_failed"), "message": result.get("message", "")})
+                return
+            self._send_json(200, result)
             return
 
         if path == "/commands/execute":
