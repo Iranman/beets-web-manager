@@ -740,6 +740,500 @@ def inspect_import_source(source_path: object, operation: str) -> dict[str, Any]
     }
 
 
+# SEC-002 Wave 8 ARCH-003: Discovery, Preservation, and Atomic Reimport
+
+IMPORT_DISCOVER_MAX_DIRS_VISITED = _env_int_clamped(
+    "BEETS_IMPORT_DISCOVER_MAX_DIRS", 10_000, minimum=10, maximum=50_000
+)
+IMPORT_DISCOVER_MAX_FILES_EXAMINED = _env_int_clamped(
+    "BEETS_IMPORT_DISCOVER_MAX_FILES", 50_000, minimum=100, maximum=200_000
+)
+IMPORT_DISCOVER_MAX_CANDIDATES = _env_int_clamped(
+    "BEETS_IMPORT_DISCOVER_MAX_CANDIDATES", 100, minimum=1, maximum=500
+)
+
+
+def discover_import_sources(
+    source_path: object,
+    operation: str = "ai_batch_discovery",
+    cursor: str = None,
+    limits: dict = None,
+) -> dict[str, Any]:
+    op = str(operation or "ai_batch_discovery")
+    allowed_types = IMPORT_SOURCE_OPERATIONS.get(op)
+    if allowed_types is None:
+        return {"ok": False, "error_code": "invalid_operation"}
+
+    try:
+        trusted = resolve_safe_path(
+            source_path, allowed_types, require_exists=True, expected_type="dir"
+        )
+    except UnsafePathError:
+        return {"ok": False, "error_code": "invalid_path"}
+
+    for root_type in allowed_types:
+        for candidate_root in _allowed_root_paths([root_type]):
+            try:
+                if trusted == Path(os.path.realpath(candidate_root)):
+                    return {"ok": False, "error_code": "root_self_rejected"}
+            except Exception:
+                continue
+
+    req_limits = limits if isinstance(limits, dict) else {}
+    max_dirs = _env_int_clamped(
+        "BEETS_DISCOVER_DIRS",
+        int(req_limits.get("max_dirs", IMPORT_DISCOVER_MAX_DIRS_VISITED)),
+        minimum=10,
+        maximum=50_000,
+    )
+    max_files = _env_int_clamped(
+        "BEETS_DISCOVER_FILES",
+        int(req_limits.get("max_files", IMPORT_DISCOVER_MAX_FILES_EXAMINED)),
+        minimum=100,
+        maximum=200_000,
+    )
+    max_candidates = _env_int_clamped(
+        "BEETS_DISCOVER_CANDIDATES",
+        int(req_limits.get("max_candidates", IMPORT_DISCOVER_MAX_CANDIDATES)),
+        minimum=1,
+        maximum=500,
+    )
+
+    start_after_rel = ""
+    if cursor and isinstance(cursor, str):
+        try:
+            decoded_json = json.loads(base64.b64decode(cursor.encode("utf-8")).decode("utf-8"))
+            if isinstance(decoded_json, dict):
+                start_after_rel = str(decoded_json.get("last_rel", ""))
+        except Exception:
+            return {"ok": False, "error_code": "invalid_cursor"}
+
+    audio_exts = _import_source_audio_extensions()
+    candidates: list[dict[str, Any]] = []
+    dirs_visited = 0
+    files_examined = 0
+    limit_reached = False
+    last_processed_rel = ""
+
+    stack = [trusted]
+    resuming = bool(start_after_rel)
+
+    while stack and len(candidates) < max_candidates and not limit_reached:
+        current = stack.pop()
+        dirs_visited += 1
+
+        if dirs_visited > max_dirs:
+            limit_reached = True
+            break
+
+        try:
+            rel_dir = str(current.relative_to(trusted))
+        except Exception:
+            rel_dir = ""
+
+        if resuming:
+            if rel_dir <= start_after_rel:
+                try:
+                    children = sorted(current.iterdir())
+                    for child in reversed(children):
+                        if not child.is_symlink() and child.is_dir():
+                            stack.append(child)
+                except Exception:
+                    pass
+                continue
+            else:
+                resuming = False
+
+        last_processed_rel = rel_dir
+
+        try:
+            children = sorted(current.iterdir())
+        except Exception:
+            continue
+
+        dir_audio_files: list[tuple[Path, os.stat_result, str]] = []
+
+        for child in children:
+            files_examined += 1
+            if files_examined > max_files:
+                limit_reached = True
+                break
+
+            try:
+                if child.is_symlink():
+                    continue
+                if child.is_dir():
+                    stack.append(child)
+                    continue
+                if not child.is_file():
+                    continue
+            except Exception:
+                continue
+
+            if child.suffix.lower() in audio_exts:
+                try:
+                    rel_file = str(child.relative_to(trusted))
+                    st = child.stat()
+                    dir_audio_files.append((child, st, rel_file))
+                except Exception:
+                    continue
+
+        if limit_reached:
+            break
+
+        if dir_audio_files:
+            dir_entries = [
+                {"relative_path": rel_file, "size": st.st_size, "mtime_ns": st.st_mtime_ns}
+                for _, st, rel_file in dir_audio_files
+            ]
+            cand_rel = str(current.relative_to(trusted)) if current != trusted else "."
+
+            mb_ids = {}
+            try:
+                first_audio = str(dir_audio_files[0][0])
+                from beets.mediafile import MediaFile
+                mf = MediaFile(first_audio)
+                if getattr(mf, "mb_albumid", None):
+                    mb_ids["mb_albumid"] = mf.mb_albumid
+                if getattr(mf, "mb_releasegroupid", None):
+                    mb_ids["mb_releasegroupid"] = mf.mb_releasegroupid
+                if getattr(mf, "mb_artistid", None):
+                    mb_ids["mb_artistid"] = mf.mb_artistid
+            except Exception:
+                pass
+
+            candidates.append({
+                "canonical_path": str(current),
+                "relative_path": cand_rel,
+                "audio_file_count": len(dir_audio_files),
+                "source_signature": _import_source_signature(dir_entries),
+                "musicbrainz_ids": mb_ids,
+                "relative_files": [rel for _, _, rel in dir_audio_files],
+            })
+
+    continuation_token = None
+    if limit_reached or stack:
+        if last_processed_rel:
+            token_payload = {"last_rel": last_processed_rel}
+            continuation_token = base64.b64encode(json.dumps(token_payload).encode("utf-8")).decode("utf-8")
+
+    return {
+        "ok": True,
+        "canonical_root": str(trusted),
+        "candidates": candidates,
+        "complete": not (limit_reached or stack),
+        "limit_reached": limit_reached,
+        "continuation": continuation_token,
+        "dirs_visited": dirs_visited,
+        "files_examined": files_examined,
+    }
+
+
+def preserve_import_source(
+    source_path: object,
+    expected_source_signature: str = None,
+    plan_id: str = None,
+) -> dict[str, Any]:
+    try:
+        trusted_src = resolve_safe_path(
+            source_path, ["staging", "music"], require_exists=True, expected_type="dir"
+        )
+    except UnsafePathError:
+        return {"ok": False, "error_code": "invalid_path"}
+
+    for candidate_root in _allowed_root_paths(["staging", "music"]):
+        try:
+            if trusted_src == Path(os.path.realpath(candidate_root)):
+                return {"ok": False, "error_code": "root_self_rejected"}
+        except Exception:
+            continue
+
+    inspect_res = inspect_import_source(str(trusted_src), "reimport")
+    if not inspect_res.get("ok"):
+        return {"ok": False, "error_code": inspect_res.get("error_code", "inspection_failed")}
+
+    curr_signature = inspect_res.get("source_signature", "")
+    if expected_source_signature and curr_signature != expected_source_signature:
+        return {
+            "ok": False,
+            "error_code": "stale_source",
+            "message": "Source signature changed since inspection",
+        }
+
+    src_hash = hashlib.sha256(str(trusted_src).encode("utf-8")).hexdigest()[:12]
+    plan_part = re.sub(r"[^a-zA-Z0-9_-]", "_", str(plan_id or ""))[:20]
+    folder_name = f"preserve_{plan_part}_{src_hash}" if plan_part else f"preserve_{src_hash}"
+
+    preserved_root = Path(os.path.realpath(os.path.join(DOWNLOAD_PATH, ".preserved_staging")))
+    dest_path = preserved_root / folder_name
+
+    try:
+        safe_dest = resolve_safe_path(str(dest_path), ["staging"])
+    except UnsafePathError:
+        return {"ok": False, "error_code": "invalid_destination"}
+
+    lock_file = acquire_os_lock(read_only=False)
+    try:
+        if safe_dest.exists():
+            if safe_dest.is_symlink():
+                return {"ok": False, "error_code": "collision", "message": "Destination is a symlink"}
+
+            dest_inspect = inspect_import_source(str(safe_dest), "reimport")
+            if dest_inspect.get("ok") and dest_inspect.get("source_signature") == curr_signature:
+                return {
+                    "ok": True,
+                    "already_preserved": True,
+                    "preserved_path": str(safe_dest),
+                    "source_signature": curr_signature,
+                    "audio_count": dest_inspect.get("audio_count", 0),
+                }
+            else:
+                return {"ok": False, "error_code": "collision", "message": "Destination exists with conflicting contents"}
+
+        audio_files = inspect_res.get("audio_files") or []
+        total_bytes = sum(int(f.get("size", 0)) for f in audio_files)
+
+        preserved_root.mkdir(parents=True, exist_ok=True)
+        usage = shutil.disk_usage(str(preserved_root))
+        if usage.free < total_bytes + (10 * 1024 * 1024):
+            return {"ok": False, "error_code": "insufficient_space", "message": "Not enough free space for preservation copy"}
+
+        safe_dest.mkdir(parents=True, exist_ok=True)
+        copied_count = 0
+        for entry in audio_files:
+            rel = entry["relative_path"]
+            src_file = trusted_src / rel
+            dst_file = safe_dest / rel
+
+            if src_file.is_symlink():
+                continue
+
+            dst_file.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(src_file), str(dst_file))
+            copied_count += 1
+
+        dest_inspect = inspect_import_source(str(safe_dest), "reimport")
+        if not dest_inspect.get("ok") or dest_inspect.get("source_signature") != curr_signature:
+            if safe_dest.exists():
+                shutil.rmtree(str(safe_dest))
+            return {"ok": False, "error_code": "copy_failed", "message": "Preservation copy post-verification failed"}
+
+        return {
+            "ok": True,
+            "already_preserved": False,
+            "preserved_path": str(safe_dest),
+            "source_signature": curr_signature,
+            "copied_files_count": copied_count,
+            "audio_count": dest_inspect.get("audio_count", 0),
+        }
+    except Exception as ex:
+        if safe_dest.exists():
+            try:
+                shutil.rmtree(str(safe_dest))
+            except Exception:
+                pass
+        return {"ok": False, "error_code": "copy_failed", "message": f"Preservation copy failed: {ex}"}
+    finally:
+        release_os_lock(lock_file)
+
+
+def verify_deterministic_identity(
+    source_inspect: dict[str, Any],
+    expected_identity: dict[str, Any],
+) -> dict[str, Any]:
+    if not expected_identity or not isinstance(expected_identity, dict):
+        return {"ok": True}
+
+    target_mb_albumid = str(expected_identity.get("mb_albumid") or "").strip().lower()
+    target_mb_rgid = str(expected_identity.get("mb_releasegroupid") or "").strip().lower()
+    target_existing_album_id = expected_identity.get("existing_album_id")
+    target_track_count = expected_identity.get("track_count")
+
+    audio_files = source_inspect.get("audio_files") or []
+    source_audio_count = len(audio_files)
+
+    if target_track_count and isinstance(target_track_count, int) and target_track_count > 0:
+        if source_audio_count != target_track_count:
+            return {
+                "ok": False,
+                "error_code": "identity_mismatch",
+                "message": f"Track count mismatch (source has {source_audio_count}, target expects {target_track_count})",
+            }
+
+    source_album_mbids: set[str] = set()
+    source_rg_mbids: set[str] = set()
+    for entry in audio_files:
+        props = entry.get("properties") or {}
+        if props.get("mb_albumid"):
+            source_album_mbids.add(str(props["mb_albumid"]).strip().lower())
+        if props.get("mb_releasegroupid"):
+            source_rg_mbids.add(str(props["mb_releasegroupid"]).strip().lower())
+
+    if target_mb_albumid:
+        if source_album_mbids and target_mb_albumid not in source_album_mbids:
+            return {
+                "ok": False,
+                "error_code": "identity_mismatch",
+                "message": f"Source embedded MusicBrainz album ID conflicts with target {target_mb_albumid}",
+            }
+    if target_mb_rgid:
+        if source_rg_mbids and target_mb_rgid not in source_rg_mbids:
+            return {
+                "ok": False,
+                "error_code": "identity_mismatch",
+                "message": f"Source embedded MusicBrainz Release Group ID conflicts with target {target_mb_rgid}",
+            }
+
+    if target_existing_album_id:
+        try:
+            with sqlite3.connect(LIB_PATH, timeout=10) as con:
+                con.row_factory = sqlite3.Row
+                cur = con.cursor()
+                row = cur.execute("SELECT id, mb_albumid FROM albums WHERE id = ?", (target_existing_album_id,)).fetchone()
+                if not row:
+                    return {"ok": False, "error_code": "identity_mismatch", "message": f"Target album ID {target_existing_album_id} not found in library"}
+                db_mb_albumid = str(row["mb_albumid"] or "").strip().lower()
+                if db_mb_albumid and source_album_mbids and db_mb_albumid not in source_album_mbids:
+                    return {"ok": False, "error_code": "identity_mismatch", "message": "Source audio MBID conflicts with library album"}
+        except Exception:
+            pass
+
+    return {"ok": True}
+
+
+def reimport_source_atomic(
+    source_path: object,
+    expected_source_signature: str = None,
+    expected_deterministic_identity: dict = None,
+    beets_options: dict = None,
+) -> dict[str, Any]:
+    try:
+        trusted = resolve_safe_path(
+            source_path, ["music", "staging"], require_exists=True, expected_type="dir"
+        )
+    except UnsafePathError:
+        return {"ok": False, "error_code": "invalid_path"}
+
+    for candidate_root in _allowed_root_paths(["music", "staging"]):
+        try:
+            if trusted == Path(os.path.realpath(candidate_root)):
+                return {"ok": False, "error_code": "root_self_rejected"}
+        except Exception:
+            continue
+
+    source_inspect = inspect_import_source(str(trusted), "reimport")
+    if not source_inspect.get("ok"):
+        return {"ok": False, "error_code": source_inspect.get("error_code", "inspection_failed")}
+
+    curr_signature = source_inspect.get("source_signature", "")
+    if expected_source_signature and curr_signature != expected_source_signature:
+        return {
+            "ok": False,
+            "error_code": "stale_source",
+            "message": "Source contents modified since inspection",
+        }
+
+    id_check = verify_deterministic_identity(source_inspect, expected_deterministic_identity)
+    if not id_check.get("ok"):
+        return id_check
+
+    is_torrent_staged = False
+    try:
+        staging_roots = [os.path.realpath(r) for r in _allowed_root_paths(["staging"])]
+        is_torrent_staged = any(_path_is_within(str(trusted), r) for r in staging_roots)
+    except Exception:
+        pass
+
+    import_target_path = str(trusted)
+    preserved_path = None
+    if is_torrent_staged:
+        pres_res = preserve_import_source(str(trusted), expected_source_signature=curr_signature)
+        if not pres_res.get("ok"):
+            return pres_res
+        preserved_path = pres_res.get("preserved_path")
+        import_target_path = preserved_path
+
+    options = beets_options if isinstance(beets_options, dict) else {}
+    mb_albumid = str(options.get("mb_albumid") or "").strip()
+    config_override = str(options.get("config_override") or "").strip()
+    duplicate_action = str(options.get("duplicate_action") or "remove").strip()
+
+    lock_file = acquire_os_lock(read_only=False)
+    tmp_cfg_path = None
+    try:
+        full_cmd = [BEET_BIN]
+        if config_override:
+            tmp_cfg_path = f"/tmp/beets_reimport_cfg_{uuid.uuid4().hex}.yaml"
+            with open(tmp_cfg_path, "w", encoding="utf-8") as f:
+                f.write(config_override)
+            os.chmod(tmp_cfg_path, 0o600)
+            full_cmd.extend(["-c", tmp_cfg_path])
+
+        cmd_args = ["import", "-q", "--noincremental", "asis", "--copy" if preserved_path else "--move"]
+        if duplicate_action:
+            cmd_args.extend(["-D", duplicate_action])
+        if mb_albumid:
+            cmd_args.extend(["--search-id", mb_albumid])
+        cmd_args.append(import_target_path)
+        full_cmd.extend(cmd_args)
+
+        env = os.environ.copy()
+        env["BEETSDIR"] = BEETSDIR
+        res = subprocess.run(
+            full_cmd,
+            capture_output=True,
+            text=True,
+            timeout=180,
+            env=env
+        )
+
+        if res.returncode >= 2:
+            return {
+                "ok": False,
+                "error_code": "import_failed",
+                "message": f"Beets import failed with return code {res.returncode}",
+                "stdout": res.stdout,
+                "stderr": res.stderr,
+            }
+
+        aid = None
+        try:
+            with sqlite3.connect(LIB_PATH, timeout=10) as con:
+                con.row_factory = sqlite3.Row
+                cur = con.cursor()
+                if mb_albumid:
+                    row = cur.execute("SELECT id FROM albums WHERE mb_albumid = ?", (mb_albumid,)).fetchone()
+                    if row:
+                        aid = row[0]
+                if aid is None:
+                    row = cur.execute("SELECT id FROM albums ORDER BY id DESC LIMIT 1").fetchone()
+                    if row:
+                        aid = row[0]
+        except Exception:
+            pass
+
+        return {
+            "ok": True,
+            "album_id": aid,
+            "preserved_path": preserved_path,
+            "source_path": str(trusted),
+            "source_signature": curr_signature,
+            "returncode": res.returncode,
+            "stdout": res.stdout,
+        }
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error_code": "import_failed", "message": "Beets import timed out after 180s"}
+    except Exception as ex:
+        return {"ok": False, "error_code": "import_failed", "message": f"Beets import failed: {ex}"}
+    finally:
+        if tmp_cfg_path and os.path.exists(tmp_cfg_path):
+            try:
+                os.unlink(tmp_cfg_path)
+            except Exception:
+                pass
+        release_os_lock(lock_file)
+
+
 def _path_has_symlink_component(path: Path, root: Path, *, include_leaf: bool = True) -> bool:
     try:
         relative = path.relative_to(root)
@@ -2027,6 +2521,65 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                     "root_self_rejected": 403,
                 }.get(result.get("error_code"), 500)
                 self._send_json(status, {"ok": False, "error": result.get("error_code", "inspection_failed")})
+                return
+            self._send_json(200, result)
+            return
+
+        if path == "/imports/source/discover":
+            source_path = body.get("source_path", "")
+            operation = body.get("operation", "ai_batch_discovery")
+            cursor = body.get("cursor")
+            limits = body.get("limits")
+            result = discover_import_sources(source_path, operation, cursor, limits)
+            if not result.get("ok"):
+                status = {
+                    "invalid_operation": 400,
+                    "invalid_path": 403,
+                    "root_self_rejected": 403,
+                    "invalid_cursor": 400,
+                }.get(result.get("error_code"), 500)
+                self._send_json(status, {"ok": False, "error": result.get("error_code", "discovery_failed")})
+                return
+            self._send_json(200, result)
+            return
+
+        if path == "/imports/source/preserve":
+            source_path = body.get("source_path", "")
+            expected_source_signature = body.get("expected_source_signature")
+            plan_id = body.get("plan_id")
+            result = preserve_import_source(source_path, expected_source_signature, plan_id)
+            if not result.get("ok"):
+                status = {
+                    "invalid_path": 403,
+                    "root_self_rejected": 403,
+                    "stale_source": 409,
+                    "collision": 409,
+                    "insufficient_space": 400,
+                    "copy_failed": 500,
+                }.get(result.get("error_code"), 500)
+                self._send_json(status, {"ok": False, "error": result.get("error_code", "preservation_failed"), "message": result.get("message", "")})
+                return
+            self._send_json(200, result)
+            return
+
+        if path == "/imports/reimport":
+            source_path = body.get("source_path", "")
+            expected_source_signature = body.get("expected_source_signature")
+            expected_deterministic_identity = body.get("expected_deterministic_identity")
+            beets_options = body.get("beets_options")
+            result = reimport_source_atomic(
+                source_path, expected_source_signature, expected_deterministic_identity, beets_options
+            )
+            if not result.get("ok"):
+                status = {
+                    "invalid_path": 403,
+                    "root_self_rejected": 403,
+                    "stale_source": 409,
+                    "identity_mismatch": 409,
+                    "review_required": 409,
+                    "import_failed": 500,
+                }.get(result.get("error_code"), 500)
+                self._send_json(status, {"ok": False, "error": result.get("error_code", "reimport_failed"), "message": result.get("message", "")})
                 return
             self._send_json(200, result)
             return

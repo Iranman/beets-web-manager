@@ -192,6 +192,35 @@ class BeetsClient:
         payload = {"source_path": source_path, "operation": operation}
         return self._request("POST", "/imports/source/inspect", payload, timeout=timeout + 5.0)
 
+    def discover_import_sources(self, source_path: str, operation: str = "ai_batch_discovery", cursor: Optional[str] = None, limits: Optional[Dict[str, Any]] = None, *, timeout: float = 60.0) -> Dict[str, Any]:
+        """Engine-side recursive import candidate discovery operation (SEC-002 Wave 8 ARCH-003)."""
+        payload: Dict[str, Any] = {"source_path": source_path, "operation": operation}
+        if cursor:
+            payload["cursor"] = cursor
+        if limits:
+            payload["limits"] = limits
+        return self._request("POST", "/imports/source/discover", payload, timeout=timeout + 5.0)
+
+    def preserve_import_source(self, source_path: str, expected_source_signature: Optional[str] = None, plan_id: Optional[str] = None, *, timeout: float = 120.0) -> Dict[str, Any]:
+        """Engine-side torrent preservation operation (SEC-002 Wave 8 ARCH-003)."""
+        payload: Dict[str, Any] = {"source_path": source_path}
+        if expected_source_signature:
+            payload["expected_source_signature"] = expected_source_signature
+        if plan_id:
+            payload["plan_id"] = plan_id
+        return self._request("POST", "/imports/source/preserve", payload, timeout=timeout + 5.0)
+
+    def reimport_source(self, source_path: str, expected_source_signature: Optional[str] = None, expected_deterministic_identity: Optional[Dict[str, Any]] = None, beets_options: Optional[Dict[str, Any]] = None, *, timeout: float = 180.0) -> Dict[str, Any]:
+        """Engine-side atomic reimport operation (SEC-002 Wave 8 ARCH-003)."""
+        payload: Dict[str, Any] = {"source_path": source_path}
+        if expected_source_signature:
+            payload["expected_source_signature"] = expected_source_signature
+        if expected_deterministic_identity:
+            payload["expected_deterministic_identity"] = expected_deterministic_identity
+        if beets_options:
+            payload["beets_options"] = beets_options
+        return self._request("POST", "/imports/reimport", payload, timeout=timeout + 5.0)
+
     def run_command(self, command: str, args: Optional[List[str]] = None, timeout: float = 120.0, config_override: str = "", source_path: str = "") -> Dict[str, Any]:
         """Execute a beet command synchronously on the Beets control agent."""
         payload = {

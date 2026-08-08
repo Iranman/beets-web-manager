@@ -262,5 +262,37 @@ class ImportSourceInspectionTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
 
 
+class AiBatchEngineDiscoveryTests(unittest.TestCase):
+    """Tests for _ai_batch_find_audio_dirs using engine beets_client discovery."""
+
+    def test_ai_batch_find_audio_dirs_uses_beets_client_discover(self):
+        source_code = function_source("_ai_batch_find_audio_dirs")
+        self.assertIn("beets_client.discover_import_sources", source_code)
+        self.assertNotIn("os.walk(", source_code)
+
+    def test_ai_batch_find_audio_dirs_paginates_continuation(self):
+        mock_responses = [
+            {"ok": True, "candidates": [{"canonical_path": "/data/media/music/Artist/Album1"}], "continuation": "tok1"},
+            {"ok": True, "candidates": [{"canonical_path": "/data/media/music/Artist/Album2"}], "continuation": None},
+        ]
+        with mock.patch.object(APP.beets_client, "discover_import_sources", side_effect=mock_responses) as mock_disc:
+            res = APP._ai_batch_find_audio_dirs("/data/media/music")
+            self.assertEqual(res, ["/data/media/music/Artist/Album1", "/data/media/music/Artist/Album2"])
+            self.assertEqual(mock_disc.call_count, 2)
+
+
+class PreserveImportSourceSignatureBindingTests(unittest.TestCase):
+    """Tests for engine source signature binding during preservation and reimport."""
+
+    def test_stage_preserved_torrent_source_forwards_expected_signature(self):
+        source_code = function_source("_stage_preserved_torrent_source")
+        self.assertIn("expected_source_signature=expected_source_signature", source_code)
+        with mock.patch.object(APP.beets_client, "preserve_import_source", return_value={"ok": True, "preserved_path": "/data/torrents/.preserved_staging/test_123"}) as mock_pres:
+            path = APP._stage_preserved_torrent_source("/data/torrents/torrent1", "Artist", "Album", [], expected_source_signature="sig123")
+            self.assertEqual(path, "/data/torrents/.preserved_staging/test_123")
+            mock_pres.assert_called_once_with("/data/torrents/torrent1", expected_source_signature="sig123")
+
+
 if __name__ == "__main__":
     unittest.main()
+

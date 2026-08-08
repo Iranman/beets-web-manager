@@ -5324,16 +5324,32 @@ def _source_audio_missing_track_scan(folder_path: str, existing_album_id: int,
     result["in_library"] = int(comp.get("in_library") or 0)
     result["missing_count"] = len(missing)
 
+    audio_files: List[Path] = []
+    inspect_evidence: Optional[Dict[str, Any]] = None
     try:
-        audio_files = sorted(
-            [p for p in source.rglob("*") if p.is_file() and p.suffix.lower() in AUDIO_EXT],
-            key=lambda p: str(p).lower(),
-        )
+        if source.exists() and source.is_dir():
+            audio_files = sorted(
+                [p for p in source.rglob("*") if p.is_file() and p.suffix.lower() in AUDIO_EXT],
+                key=lambda p: str(p).lower(),
+            )
     except Exception as ex:
         log.append(f"  [import] Source scan warning: {ex}")
-        return result
-    result["audio_count"] = len(audio_files)
-    if not audio_files:
+
+    if not audio_files and folder_path:
+        try:
+            inspect_res = beets_client.inspect_import_source(folder_path, "reimport")
+            if inspect_res.get("ok"):
+                inspect_evidence = inspect_res
+        except Exception as ex:
+            log.append(f"  [import] Remote source inspection warning: {ex}")
+
+    if inspect_evidence:
+        audio_entries = inspect_evidence.get("audio_files") or []
+        result["audio_count"] = len(audio_entries)
+    else:
+        result["audio_count"] = len(audio_files)
+
+    if not audio_files and not inspect_evidence:
         result["ok"] = True
         return result
 
@@ -5370,11 +5386,32 @@ def _source_audio_missing_track_scan(folder_path: str, existing_album_id: int,
             for t in missing
         ]
 
+    scan_candidates: List[Tuple[Path, str, int, int]] = []
+    if inspect_evidence:
+        for entry in inspect_evidence.get("audio_files") or []:
+            rel = _s(entry.get("relative_path"))
+            fpath = Path(folder_path) / rel if rel else Path(folder_path)
+            props = entry.get("properties") if isinstance(entry.get("properties"), dict) else {}
+            disc = int(props.get("disc") or 0)
+            track = int(props.get("track") or 0)
+            if not track or not disc:
+                path_disc, path_track = _audio_position_from_path(str(fpath))
+                if not track:
+                    track = path_track
+                if not disc or disc == 1:
+                    disc = path_disc or 1
+            title = _s(props.get("title")) or _slskd_title_guess_from_name(fpath.name) or fpath.stem
+            scan_candidates.append((fpath, title, disc, track))
+    else:
+        for fpath in audio_files:
+            disc, track = _audio_position_from_path(str(fpath))
+            title = _slskd_title_guess_from_name(fpath.name) or fpath.stem
+            scan_candidates.append((fpath, title, disc, track))
+
     selected_by_key: Dict[tuple, Dict[str, Any]] = {}
-    for fpath in audio_files:
-        disc, track = _audio_position_from_path(str(fpath))
+    for fpath, title, disc, track in scan_candidates:
         item = {
-            "title": _slskd_title_guess_from_name(fpath.name) or fpath.stem,
+            "title": title,
             "path": str(fpath),
             "track": int(track or 0),
             "disc": int(disc or 1),
@@ -5491,6 +5528,7 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
         result["artist_ok"] = True
 
     audio_files: List[Path] = []
+    inspect_evidence: Optional[Dict[str, Any]] = None
     try:
         if source.is_dir():
             audio_files = sorted(
@@ -5499,10 +5537,21 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
                 key=lambda p: str(p).lower(),
             )
     except Exception as ex:
-        app.logger.warning("Could not scan source folder: %s", type(ex).__name__)
+        app.logger.warning("Could not scan source folder locally: %s", type(ex).__name__)
+
+    if not audio_files and folder_path:
+        try:
+            inspect_res = beets_client.inspect_import_source(folder_path, "reimport")
+            if inspect_res.get("ok"):
+                inspect_evidence = inspect_res
+        except Exception:
+            pass
+
+    if not audio_files and not inspect_evidence:
         result["error"] = "Could not scan source folder."
         return result
-    result["audio_count"] = len(audio_files)
+
+    result["audio_count"] = len(inspect_evidence.get("audio_files") or []) if inspect_evidence else len(audio_files)
 
     acoustid_release_hits: Dict[str, int] = {}
     try:
@@ -5554,14 +5603,31 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
             "length": float(length or 0),
         })
 
-    for fpath in audio_files:
-        disc, track = _audio_position_from_path(str(fpath))
-        _add_candidate(
-            _slskd_title_guess_from_name(fpath.name) or fpath.stem,
-            str(fpath),
-            track=track,
-            disc=disc or 1,
-        )
+    if inspect_evidence:
+        for entry in inspect_evidence.get("audio_files") or []:
+            rel_path = _s(entry.get("relative_path"))
+            props = entry.get("properties") if isinstance(entry.get("properties"), dict) else {}
+            disc = int(props.get("disc") or 1)
+            track = int(props.get("track") or 0)
+            if not track or not disc:
+                path_disc, path_track = _audio_position_from_path(rel_path)
+                if not track:
+                    track = path_track
+                if not disc or disc == 1:
+                    disc = path_disc or 1
+            title = _s(props.get("title")) or _slskd_title_guess_from_name(Path(rel_path).name) or Path(rel_path).stem
+            mb_trackid = _s(props.get("mb_trackid"))
+            length = float(props.get("length") or 0.0)
+            _add_candidate(title, rel_path, track=track, disc=disc, mb_trackid=mb_trackid, length=length)
+    else:
+        for fpath in audio_files:
+            disc, track = _audio_position_from_path(str(fpath))
+            _add_candidate(
+                _slskd_title_guess_from_name(fpath.name) or fpath.stem,
+                str(fpath),
+                track=track,
+                disc=disc or 1,
+            )
 
     if existing_album_id:
         try:
@@ -10022,24 +10088,23 @@ def _preserve_torrent_source_path(path_value: str | Path) -> bool:
 
 def _stage_preserved_torrent_source(aldir: str, artist: str, album: str,
                                     log: list,
+                                    expected_source_signature: Optional[str] = None,
                                     target_tracks: Optional[List[Dict[str, Any]]] = None) -> str:
-    audio_files = sorted(Path(p) for p in _audio_files_in_dir(aldir))
-    if not audio_files:
-        raise RuntimeError(f"No audio files found in torrent source folder: {aldir}")
-    staged = _stage_selected_audio_files(
+    pres_res = beets_client.preserve_import_source(
         aldir,
-        audio_files,
-        artist,
-        album,
-        log,
-        force_stage=True,
-        target_tracks=target_tracks,
+        expected_source_signature=expected_source_signature,
     )
+    if not pres_res.get("ok"):
+        err = pres_res.get("error_code") or pres_res.get("message") or "Preservation failed"
+        raise RuntimeError(f"Engine torrent preservation failed: {err}")
+    preserved_path = pres_res.get("preserved_path")
+    if not preserved_path:
+        raise RuntimeError(f"Engine torrent preservation returned empty path for {aldir}")
     log.append(
         "  [torrent] Preserving torrent source; importing staged copy "
         f"instead of moving files from {aldir}"
     )
-    return staged
+    return str(preserved_path)
 
 
 def _album_dir_for_art(album) -> Optional[Path]:
@@ -22339,6 +22404,7 @@ def reimport_disk():
                 _guess_artist,
                 _guess_album,
                 log,
+                expected_source_signature=import_source_evidence.get("source_signature"),
                 target_tracks=wanted_tracks or None,
             )
             source_is_music_library = False
@@ -24819,10 +24885,23 @@ def _ai_batch_initial_state(batch_job_id: str, source_path: str, job_id: str = "
 
 def _ai_batch_find_audio_dirs(root: str) -> List[str]:
     result: List[str] = []
-    for dirpath, _dirnames, filenames in os.walk(root):
-        if any(Path(f).suffix.lower() in _AI_BATCH_AUDIO_EXTS for f in filenames):
-            result.append(dirpath)
-    return sorted(result)
+    cursor = None
+    try:
+        while True:
+            res = beets_client.discover_import_sources(root, operation="ai_batch_discovery", cursor=cursor)
+            if not res.get("ok"):
+                raise RuntimeError(f"Engine discovery failed for {root}: {res.get('error_code', 'unknown_error')}")
+            candidates = res.get("candidates") or []
+            for cand in candidates:
+                cpath = cand.get("canonical_path")
+                if cpath and cpath not in result:
+                    result.append(cpath)
+            if res.get("complete") or not res.get("continuation"):
+                break
+            cursor = res.get("continuation")
+        return sorted(result)
+    except (BeetsError, BeetsUnavailableError, BeetsAuthError) as exc:
+        raise RuntimeError(f"Engine discovery failed for {root}: {exc}") from exc
 
 
 def _ai_batch_already_in_library(folder_path: str) -> bool:
