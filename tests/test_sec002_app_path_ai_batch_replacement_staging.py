@@ -381,6 +381,28 @@ class ReimportDiskPathSafetyTests(unittest.TestCase):
         # gate (400) the way the outside-root/symlink cases above are.
         self.assertNotEqual(res.status_code, 400)
 
+    def test_unrecognized_engine_error_never_leaks_raw_response_text(self):
+        # BeetsClient._request() falls back to embedding up to 200 raw
+        # response-body characters in its exception message for any
+        # non-JSON/unrecognized error response (e.g. an unexpected proxy or
+        # framework error page) -- which could carry stack-trace-shaped
+        # text. reimport_disk() must never forward that text verbatim.
+        fake_traceback = (
+            "Traceback (most recent call last):\n"
+            '  File "/opt/beets-web-manager-agent/beets_control_agent.py", line 999\n'
+            "  ZeroDivisionError: division by zero"
+        )
+        with mock.patch.object(APP.beets_client, "inspect_import_source",
+                                side_effect=APP.BeetsError(f"Beets API request error: HTTP 500: {fake_traceback}")):
+            res = self.client.post("/api/albums/reimport-disk", json={
+                "aldir": "/data/torrents/music/some_album", "mb_albumid": "11111111-1111-1111-1111-111111111111",
+            })
+        self.assertEqual(res.status_code, 400)
+        error_text = str(res.get_json().get("error", ""))
+        self.assertNotIn("Traceback", error_text)
+        self.assertNotIn("ZeroDivisionError", error_text)
+        self.assertNotIn("beets_control_agent.py", error_text)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -22287,10 +22287,27 @@ def reimport_disk():
     except BeetsUnavailableError:
         return jsonify({"ok": False, "error": "Beets engine is unavailable."}), 502
     except BeetsError as exc:
-        # exc's message is the engine's own stable error_code (invalid_path,
-        # root_self_rejected, invalid_operation, inspection_failed) wrapped
-        # by BeetsClient._request -- never a raw traceback/OSError text.
-        return jsonify({"ok": False, "error": f"Import source rejected: {exc}"}), 400
+        # The engine's /imports/source/inspect only ever returns one of a
+        # fixed set of stable error_code strings (see inspect_import_source()
+        # in backend/beets_control_agent.py) -- BeetsClient._request() wraps
+        # that string as this exception's message. Still, never interpolate
+        # the exception text directly into a response: _request() falls back
+        # to embedding up to 200 raw response-body characters for any
+        # non-JSON error response it doesn't recognize (e.g. an unexpected
+        # proxy/framework error page), which could carry stack-trace-shaped
+        # text. Map only the known codes to a safe message; anything else
+        # collapses to one generic string.
+        _known_source_errors = {
+            "invalid_path": "Import source is outside the allowed roots or does not exist.",
+            "root_self_rejected": "Import source cannot be an entire trusted root.",
+            "invalid_operation": "Import source inspection request was malformed.",
+            "inspection_failed": "Could not inspect the import source.",
+        }
+        _error_text = next(
+            (msg for code, msg in _known_source_errors.items() if code in str(exc)),
+            "Import source rejected.",
+        )
+        return jsonify({"ok": False, "error": _error_text}), 400
     if not import_source_evidence.get("ok"):
         return jsonify({"ok": False, "error": "Import source rejected."}), 400
     # Only the engine's own canonical path is ever used from here on --
