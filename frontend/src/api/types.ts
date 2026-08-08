@@ -471,6 +471,8 @@ export interface SetupStatusResponse {
     token_configured: boolean;
     token_auto_generated: boolean;
     password_configured: boolean;
+    password_auto_generated?: boolean;
+    username?: string;
   };
   integrations: Record<string, {
     configured: boolean;

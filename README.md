@@ -137,31 +137,48 @@ MusicBrainz needs no key or account — it is a public API used for every releas
 
 ## Authentication
 
-The app requires at least one working credential — a bearer token, a browser password, or both — before it will serve any route other than health checks and static assets.
+The app provides separate authentication boundaries for human browser operators and API/script clients.
 
-**You never have to invent `BEETS_WEB_AUTH_TOKEN` yourself.** If the app starts with no usable token and no usable password configured, it automatically generates a cryptographically secure 256-bit token and persists it to `/web-manager-data/.auth_token` (default; overridable with `BEETS_WEB_AUTH_TOKEN_FILE`) with `0600` permissions. The token is never printed to stdout, stderr, or any log — read it from the persisted file instead:
+### Quick Reference: Login Credentials & Tokens
 
-```
-No BEETS_WEB_AUTH_TOKEN or BEETS_WEB_PASSWORD was configured.
-Generated a secure API token automatically...
-  <path to the persisted token file>
-The token itself is never printed to logs -- read that file to get it,
-e.g. `docker exec <container> cat <path>`.
-```
+| Purpose | Credential | Where to find / set | Details |
+|---|---|---|---|
+| **Browser Login** | Username: `admin` (or `BEETS_WEB_USERNAME`) <br>Password: Configured in `.env` or auto-generated | Prompted during `setup.sh`/`setup.ps1`, or generated to `/web-manager-data/.initial_admin_password` | Native browser Basic Auth prompt (`http://localhost:8337`) |
+| **API / Scripts** | `BEETS_WEB_AUTH_TOKEN` (Bearer token) | Persisted to `/web-manager-data/.auth_token` | Used via header `Authorization: Bearer <token>`. **NOT** your browser password! |
+| **Beets Engine** | `BEETS_API_TOKEN` | Configured in `.env` | Internal service token between Web Manager and Beets control agent |
 
-If the token cannot be persisted (most commonly an unwritable `web-manager-data` mount), startup fails closed with a clear, secret-free error instead of running with a credential that only ever existed in memory and that you'd have no way to retrieve. Fix the mount and restart, or set `BEETS_WEB_AUTH_TOKEN` / `BEETS_WEB_PASSWORD` explicitly.
+> [!IMPORTANT]
+> `BEETS_WEB_AUTH_TOKEN` is an API bearer token for scripts and tools. It is **NOT** your browser password. Use your browser username and browser password when prompted by your web browser.
 
-Read the value from the persisted file, or regenerate a fresh one any time from **System → Authentication → Regenerate API token** (the plaintext is shown exactly once in that request's response, then masked forever after, same as every other secret in the environment editor — and, like generation, it is never written to a log). The token is a Bearer credential for API/script clients (`Authorization: Bearer <token>`) — the browser UI has no login form and does not send it.
+**You never have to invent `BEETS_WEB_AUTH_TOKEN` yourself.** Same as the browser password, if it's left blank the app generates a cryptographically secure 256-bit token on first boot and persists it to `/web-manager-data/.auth_token` (`0600` permissions) — the two are generated and persisted independently of each other.
 
-For **browser access**, set `BEETS_WEB_PASSWORD` (paired with `BEETS_WEB_USERNAME`, default `admin`). The server sends `WWW-Authenticate: Basic` on an unauthenticated request, so your browser's native credential prompt handles sign-in — there is no in-app login page. Passwords must meet these requirements (enforced server-side when you save it, and shown live as a strength meter in the System page):
+### First-Run Browser Credentials
 
-- At least 32 characters (matches `BEETS_WEB_AUTH_MIN_LENGTH`, the same floor the app uses to decide whether *any* configured secret is usable — a shorter password can never be accepted here, because it would immediately fail that separate check and lock browser access out on the next request)
-- One uppercase letter
-- One lowercase letter
-- One number
-- One special (non-alphanumeric) character
+1. **Interactive Setup (`setup.sh` / `setup.ps1`):**  
+   Prompt you to create your browser username and browser password during first-run setup.
+2. **Direct Docker Startup (`docker compose up -d`):**  
+   If no browser password is set in `.env` or environment variables, a cryptographically secure initial browser password is generated automatically on first boot and persisted to:
+   ```text
+   /web-manager-data/.initial_admin_password
+   ```
+   Retrieve it using:
+   ```bash
+   docker exec beets-web-manager cat /web-manager-data/.initial_admin_password
+   ```
+3. **Changing Your Browser Password:**  
+   Sign in to the web UI, go to **System → Environment Variables**, enter a new password for `BEETS_WEB_PASSWORD`, and click **Save environment**. Once the new password is verified, `.initial_admin_password` is automatically removed.
 
-Set `BEETS_WEB_AUTH_DISABLED=1` only for local development with no network exposure — it fully disables the authentication boundary.
+### Password Requirements
+
+Browser passwords must satisfy these complexity rules (enforced server-side when saving, and shown live as a strength meter in System settings):
+
+- At least 32 characters (matches `BEETS_WEB_AUTH_MIN_LENGTH`)
+- At least one uppercase letter (`A-Z`)
+- At least one lowercase letter (`a-z`)
+- At least one number (`0-9`)
+- At least one special (non-alphanumeric) character
+
+Set `BEETS_WEB_AUTH_DISABLED=1` only for isolated local development with no network exposure.
 
 ## How Imports Work
 
@@ -223,6 +240,30 @@ For the simplest possible start:
 ```
 
 This creates `.env`/`config.yaml` from the example templates, generates a random `BEETS_WEB_AUTH_TOKEN`, and starts the two-service stack via `docker-compose.yml`. You must set a strong `BEETS_API_TOKEN` before the Beets engine will accept internal control-agent requests. Readiness and per-integration connectivity checks are available at `GET /api/setup/status` and `POST /api/setup/test/{ai,musicbrainz,acoustid,plex}`, and standard health probes at `/health`, `/health/live`, `/health/ready`.
+
+On a fresh `.env`, the setup script also asks how the web UI should be reachable:
+
+```text
+=== Web Access ===
+1. This computer only (127.0.0.1)
+2. Other devices on my local network (0.0.0.0)
+
+Choose [2 for most NAS/server installs]:
+```
+
+This sets `BEETS_WEB_BIND_ADDRESS` in `.env`. **`docker-compose.yml` defaults to `127.0.0.1`** (published as `127.0.0.1:8337->8337`) — secure by default, but if Beets Web Manager runs on a NAS/server (TrueNAS, Portainer, Unraid, a headless Linux box, etc.) and you access it from another computer, the UI will be unreachable until you set:
+
+```env
+BEETS_WEB_BIND_ADDRESS=0.0.0.0
+```
+
+**`BEETS_WEB_BIND_ADDRESS` is the container's *listening* address, not a browser URL** — setting it to `0.0.0.0` does not mean browsing to `http://0.0.0.0:8337`. From another device on your network, browse to:
+
+```text
+http://<server-ip>:8337
+```
+
+using that server's actual LAN IP (find it with `ip addr` / `hostname -I` on Linux, `ipconfig` on Windows, or your NAS's network settings page — this README does not assume or print one for you). `0.0.0.0` widens *which network interfaces* the container listens on; authentication (see below) still gates every request regardless of bind address.
 
 Packaging status: passing tests on a local or CI branch do not authorize production deployment. Rebuild and validate both services in disposable storage before migrating an existing library.
 

@@ -79,7 +79,15 @@ class AuthTokenPersistenceTests(unittest.TestCase):
             existing_token = "existing_token_value_32_chars_long_entropy_test_string"
             token_file.write_text(existing_token, encoding="utf-8")
 
-            with mock.patch.dict(os.environ, {"BEETS_WEB_AUTH_TOKEN": "", "BEETS_WEB_PASSWORD": ""}, clear=False), \
+            # BEETS_WEB_AUTH_DISABLED explicitly reset to "0": under
+            # `python -m unittest discover`, test_ai_batch_retry_race.py sets
+            # it to "1" at module-import time and only reverts via
+            # addModuleCleanup (see that file's own setUpModule docstring for
+            # the same pre-existing, already-documented full-suite-order
+            # issue) -- without this, a full-suite run can see this test's
+            # bootstrap call short-circuit at _security_auth_disabled() and
+            # never reach the reuse-existing-token logic under test.
+            with mock.patch.dict(os.environ, {"BEETS_WEB_AUTH_TOKEN": "", "BEETS_WEB_PASSWORD": "", "BEETS_WEB_AUTH_DISABLED": "0"}, clear=False), \
                  mock.patch.object(app_module, "_GENERATED_AUTH_TOKEN_FILE", token_file):
                 app_module._bootstrap_auth_token_if_missing()
                 self.assertEqual(os.environ.get("BEETS_WEB_AUTH_TOKEN"), existing_token)
@@ -118,8 +126,14 @@ class BootstrapTokenNeverLeaksTests(unittest.TestCase):
     either a successful or a failed persistence attempt."""
 
     def setUp(self):
+        # BEETS_WEB_AUTH_DISABLED explicitly reset to "0": see the identical
+        # note in test_bootstrap_token_reuses_existing_file_on_restart above
+        # -- test_ai_batch_retry_race.py leaks "1" into os.environ at
+        # module-import time under a full-suite `unittest discover` run,
+        # which would otherwise make _bootstrap_auth_token_if_missing()
+        # short-circuit before reaching any of the behavior under test here.
         self.env_patcher = mock.patch.dict(
-            os.environ, {"BEETS_WEB_AUTH_TOKEN": "", "BEETS_WEB_PASSWORD": ""}, clear=False,
+            os.environ, {"BEETS_WEB_AUTH_TOKEN": "", "BEETS_WEB_PASSWORD": "", "BEETS_WEB_AUTH_DISABLED": "0"}, clear=False,
         )
         self.env_patcher.start()
         self.addCleanup(self.env_patcher.stop)
