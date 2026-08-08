@@ -86,7 +86,7 @@ class PlaylistBackendJobTests(unittest.TestCase):
         self.assertIn("def playlist_resolve_track", app_source)
         self.assertIn("def playlist_suggestions", app_source)
         self.assertIn("def playlist_apply_safe_suggestions", app_source)
-        self.assertIn("def _playlist_suggestions_for_track", app_source)
+        self.assertIn("def _playlist_decisions_for_track", app_source)
         self.assertIn('def playlist_delete', app_source)
         self.assertIn('"library_tracks_deleted": 0', app_source)
         self.assertIn('"/api/playlists/quality-cleanup"', app_source)
