@@ -262,6 +262,133 @@ class ImportSourceInspectionTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
 
 
+@unittest.skipUnless(os.name == "posix", "resolve_safe_path() requires POSIX-absolute paths; the control agent only ever runs inside the Linux engine container")
+class DiscoverImportSourcesPaginationTests(unittest.TestCase):
+    """Real, unmocked tests of discover_import_sources() -- specifically its
+    pagination correctness, which Claude's independent review proved
+    unsound in the original implementation.
+
+    The original cursor was a lexicographic "resume after this relative
+    path" string marker. That looks equivalent to DFS traversal order but
+    is not: "/" (0x2F) sorts *above* space, "-", and "." (0x20/0x2D/0x2E),
+    all extremely common in real album/artist folder names ("Artist -
+    Album"), so a sibling directory named "Parent-suffix" can sort
+    *before* "Parent/child" as a string while still being visited *after*
+    it in DFS order. Resuming by skipping every rel_dir <= the
+    lexicographic marker then silently drops that sibling's entire
+    subtree -- a real candidate-loss bug for common real-world names, not
+    a theoretical one. The fix encodes the actual remaining DFS stack in
+    the cursor instead of a lexicographic marker."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp(prefix="beets_test_discover_pagination_", dir=".")
+        self.tmp_root = Path(self.tmp_dir).resolve()
+        self.staging_root = self.tmp_root / "staging"
+        self.staging_root.mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, self.tmp_dir, ignore_errors=True)
+        self._staging_patcher = mock.patch.object(CONTROL_AGENT, "DOWNLOAD_PATH", str(self.staging_root))
+        self._staging_patcher.start()
+        self.addCleanup(self._staging_patcher.stop)
+
+    def _make_album(self, rel_dir: str) -> None:
+        album = self.staging_root / rel_dir
+        album.mkdir(parents=True)
+        (album / "01.flac").write_bytes(b"not-real-audio")
+
+    def _collect_all_pages(self, root: str, *, max_candidates: int = 1, max_dirs: int = 1000, max_files: int = 1000):
+        seen: list[str] = []
+        cursor = None
+        pages = 0
+        while True:
+            pages += 1
+            self.assertLess(pages, 50, "pagination did not converge -- possible infinite loop")
+            res = CONTROL_AGENT.discover_import_sources(
+                root, "ai_batch_discovery", cursor,
+                {"max_candidates": max_candidates, "max_dirs": max_dirs, "max_files": max_files},
+            )
+            self.assertTrue(res["ok"], res)
+            for cand in res["candidates"]:
+                seen.append(cand["relative_path"])
+            if res["complete"]:
+                self.assertIsNone(res["continuation"])
+                break
+            cursor = res["continuation"]
+            self.assertIsNotNone(cursor)
+        return seen
+
+    def test_pagination_finds_every_candidate_exactly_once_with_adversarial_names(self):
+        # "A-suffix" is the adversarial sibling: it sorts lexicographically
+        # *before* "A/Z" (hyphen 0x2D < slash 0x2F) but is only visited
+        # *after* "A/Z" in DFS order, since "A/Z" is A's own child.
+        for rel in ("A/Z", "A-suffix", "AA", "B/A", "Z/A"):
+            self._make_album(rel)
+
+        seen = self._collect_all_pages(str(self.staging_root), max_candidates=1)
+
+        expected = {"A/Z", "A-suffix", "AA", "B/A", "Z/A"}
+        self.assertEqual(set(seen), expected, seen)
+        self.assertEqual(len(seen), len(expected), f"duplicate candidates: {seen}")
+
+    def test_pagination_survives_directory_limit_boundary(self):
+        for i in range(6):
+            self._make_album(f"Album{i:02d}")
+        seen = self._collect_all_pages(str(self.staging_root), max_candidates=100, max_dirs=2)
+        self.assertEqual(len(seen), 6, seen)
+        self.assertEqual(len(set(seen)), 6, f"duplicate candidates: {seen}")
+
+    def test_pagination_survives_file_limit_boundary_mid_directory(self):
+        # Force the per-page file budget to be smaller than a single
+        # directory's own child count, so the "defer whole directory"
+        # all-or-nothing logic is actually exercised.
+        album = self.staging_root / "BigAlbum"
+        album.mkdir()
+        for i in range(5):
+            (album / f"{i:02d}.flac").write_bytes(b"x")
+        self._make_album("OtherAlbum")
+        seen = self._collect_all_pages(str(self.staging_root), max_candidates=100, max_dirs=1000, max_files=3)
+        self.assertEqual(set(seen), {"BigAlbum", "OtherAlbum"}, seen)
+        self.assertEqual(len(seen), 2, f"duplicate candidates: {seen}")
+
+    def test_tampered_cursor_root_mismatch_rejected(self):
+        self._make_album("Album1")
+        self._make_album("Album2")
+        res1 = CONTROL_AGENT.discover_import_sources(
+            str(self.staging_root), "ai_batch_discovery", None, {"max_candidates": 1},
+        )
+        self.assertTrue(res1["ok"], res1)
+        self.assertIsNotNone(res1["continuation"])
+
+        other_root = self.staging_root / "Album1"
+        res2 = CONTROL_AGENT.discover_import_sources(
+            str(other_root), "ai_batch_discovery", res1["continuation"], {"max_candidates": 1},
+        )
+        self.assertFalse(res2["ok"])
+        self.assertEqual(res2["error_code"], "invalid_cursor")
+
+    def test_malformed_cursor_rejected_not_crashed(self):
+        self._make_album("Album1")
+        for bad_cursor in ("not-base64-json!!!", "", "e30=", "null"):
+            res = CONTROL_AGENT.discover_import_sources(
+                str(self.staging_root), "ai_batch_discovery", bad_cursor, None,
+            )
+            if bad_cursor:
+                self.assertFalse(res["ok"], (bad_cursor, res))
+                self.assertEqual(res["error_code"], "invalid_cursor")
+
+    def test_symlink_directory_never_traversed_by_discovery(self):
+        outside = self.tmp_root / "outside"
+        outside.mkdir()
+        (outside / "secret.flac").write_bytes(b"should never be seen")
+        self._make_album("RealAlbum")
+        link = self.staging_root / "escape_link"
+        try:
+            link.symlink_to(outside, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("platform/user cannot create symlinks")
+        seen = self._collect_all_pages(str(self.staging_root), max_candidates=100)
+        self.assertEqual(seen, ["RealAlbum"])
+
+
 class AiBatchEngineDiscoveryTests(unittest.TestCase):
     """Tests for _ai_batch_find_audio_dirs using engine beets_client discovery."""
 
@@ -293,6 +420,163 @@ class PreserveImportSourceSignatureBindingTests(unittest.TestCase):
             mock_pres.assert_called_once_with("/data/torrents/torrent1", expected_source_signature="sig123")
 
 
+class VerifyDeterministicIdentityFailClosedTests(unittest.TestCase):
+    """verify_deterministic_identity() must never return ok: True on the
+    strength of absent evidence -- Claude's independent review found the
+    original implementation did exactly that (empty expected_identity,
+    empty source MBID sets, and a swallowed DB exception all produced
+    ok: True). None of these tests touch a real database (existing_album_id
+    is omitted throughout), so they need no POSIX/engine-container
+    environment."""
+
+    def test_no_expected_identity_requires_review_not_success(self):
+        result = CONTROL_AGENT.verify_deterministic_identity({"audio_files": []}, None)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_code"], "review_required")
+
+    def test_empty_expected_identity_dict_requires_review(self):
+        result = CONTROL_AGENT.verify_deterministic_identity({"audio_files": []}, {})
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_code"], "review_required")
+
+    def test_target_mb_albumid_with_no_source_tags_requires_review_not_success(self):
+        # This is the exact fail-open case Claude's review found: expecting
+        # mb_albumid but the source has zero embedded MusicBrainz tags to
+        # check it against previously produced ok: True.
+        source_inspect = {"audio_files": [{"properties": {}}, {"properties": {}}]}
+        result = CONTROL_AGENT.verify_deterministic_identity(
+            source_inspect, {"mb_albumid": "11111111-1111-1111-1111-111111111111"},
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_code"], "review_required")
+
+    def test_target_mb_rgid_with_no_source_tags_requires_review(self):
+        source_inspect = {"audio_files": [{"properties": {}}]}
+        result = CONTROL_AGENT.verify_deterministic_identity(
+            source_inspect, {"mb_releasegroupid": "22222222-2222-2222-2222-222222222222"},
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_code"], "review_required")
+
+    def test_matching_embedded_mb_albumid_succeeds(self):
+        mbid = "11111111-1111-1111-1111-111111111111"
+        source_inspect = {"audio_files": [{"properties": {"mb_albumid": mbid}}]}
+        result = CONTROL_AGENT.verify_deterministic_identity(source_inspect, {"mb_albumid": mbid})
+        self.assertTrue(result["ok"], result)
+
+    def test_conflicting_embedded_mb_albumid_is_a_hard_mismatch(self):
+        source_inspect = {"audio_files": [{"properties": {"mb_albumid": "33333333-3333-3333-3333-333333333333"}}]}
+        result = CONTROL_AGENT.verify_deterministic_identity(
+            source_inspect, {"mb_albumid": "11111111-1111-1111-1111-111111111111"},
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_code"], "identity_mismatch")
+
+    def test_track_count_mismatch_is_a_hard_mismatch(self):
+        source_inspect = {"audio_files": [{"properties": {}}] * 3}
+        result = CONTROL_AGENT.verify_deterministic_identity(source_inspect, {"track_count": 12})
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_code"], "identity_mismatch")
+
+    def test_existing_album_id_db_error_fails_closed_not_open(self):
+        source_inspect = {"audio_files": [{"properties": {"mb_albumid": "11111111-1111-1111-1111-111111111111"}}]}
+        with mock.patch("sqlite3.connect", side_effect=OSError("db unavailable")):
+            result = CONTROL_AGENT.verify_deterministic_identity(
+                source_inspect, {"existing_album_id": 42},
+            )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_code"], "identity_verification_failed")
+
+    def test_error_messages_never_leak_raw_exception_text(self):
+        source_inspect = {"audio_files": []}
+        with mock.patch("sqlite3.connect", side_effect=OSError("/config/musiclibrary.blb: permission denied")):
+            result = CONTROL_AGENT.verify_deterministic_identity(source_inspect, {"existing_album_id": 1})
+        self.assertNotIn("musiclibrary.blb", result.get("message", ""))
+        self.assertNotIn("permission denied", result.get("message", ""))
+
+
+@unittest.skipUnless(os.name == "posix", "resolve_safe_path() requires POSIX-absolute paths; the control agent only ever runs inside the Linux engine container")
+class PreserveImportSourceRootPolicyTests(unittest.TestCase):
+    """preserve_import_source() must be staging-only (it exists specifically
+    to protect torrent/download sources during import) and must never
+    silently overwrite a differently-sourced preserved copy."""
+
+    def setUp(self):
+        # Deliberately the OS temp dir here, NOT dir="." (repo checkout):
+        # preserve_import_source()'s post-copy verification compares
+        # shutil.copy2()-preserved mtime_ns between source and destination,
+        # and a Windows-host bind mount (as used elsewhere in this session
+        # specifically to avoid "/tmp is already a trusted root" false
+        # positives on the *web-manager* side) truncates that precision to
+        # whole seconds through its file-sharing translation layer, causing
+        # a false post-copy mismatch that never happens on a real Linux
+        # filesystem. That web-manager concern doesn't apply here:
+        # _allowed_root_paths()'s "tmp" category is never requested by
+        # these tests (only "staging"/"music" are), so using the OS temp
+        # dir cannot make an "outside" fixture accidentally trusted.
+        self.tmp_dir = tempfile.mkdtemp(prefix="beets_test_preserve_policy_")
+        self.tmp_root = Path(self.tmp_dir).resolve()
+        self.staging_root = self.tmp_root / "staging"
+        self.music_root = self.tmp_root / "music"
+        self.staging_root.mkdir(parents=True)
+        self.music_root.mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, self.tmp_dir, ignore_errors=True)
+        self._staging_patcher = mock.patch.object(CONTROL_AGENT, "DOWNLOAD_PATH", str(self.staging_root))
+        self._music_patcher = mock.patch.object(CONTROL_AGENT, "MUSIC_LIBRARY_PATH", str(self.music_root))
+        self._staging_patcher.start()
+        self._music_patcher.start()
+        self.addCleanup(self._staging_patcher.stop)
+        self.addCleanup(self._music_patcher.stop)
+
+    def test_music_library_source_rejected(self):
+        album = self.music_root / "Artist" / "Album"
+        album.mkdir(parents=True)
+        (album / "01.flac").write_bytes(b"not-real-audio")
+        result = CONTROL_AGENT.preserve_import_source(str(album))
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_code"], "invalid_path")
+
+    def test_staging_source_preserved_successfully(self):
+        album = self.staging_root / "Artist" / "Album"
+        album.mkdir(parents=True)
+        (album / "01.flac").write_bytes(b"not-real-audio")
+        result = CONTROL_AGENT.preserve_import_source(str(album))
+        self.assertTrue(result["ok"], result)
+        preserved = Path(result["preserved_path"])
+        self.assertTrue(preserved.is_dir())
+        self.assertTrue((preserved / "01.flac").exists())
+        # Original source must be untouched.
+        self.assertTrue((album / "01.flac").exists())
+
+    def test_stale_source_rejected_before_copy(self):
+        album = self.staging_root / "Artist" / "Album"
+        album.mkdir(parents=True)
+        (album / "01.flac").write_bytes(b"not-real-audio")
+        result = CONTROL_AGENT.preserve_import_source(str(album), expected_source_signature="stale-signature-that-never-matches")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_code"], "stale_source")
+
+    def test_retry_with_unchanged_source_is_idempotent(self):
+        album = self.staging_root / "Artist" / "Album"
+        album.mkdir(parents=True)
+        (album / "01.flac").write_bytes(b"not-real-audio")
+        first = CONTROL_AGENT.preserve_import_source(str(album), plan_id="plan1")
+        self.assertTrue(first["ok"], first)
+        second = CONTROL_AGENT.preserve_import_source(str(album), plan_id="plan1")
+        self.assertTrue(second["ok"], second)
+        self.assertTrue(second.get("already_preserved"))
+        self.assertEqual(second["preserved_path"], first["preserved_path"])
+
+    def test_error_message_never_leaks_raw_exception_text(self):
+        album = self.staging_root / "Artist" / "Album"
+        album.mkdir(parents=True)
+        (album / "01.flac").write_bytes(b"not-real-audio")
+        with mock.patch("shutil.copy2", side_effect=OSError("/some/internal/host/path: disk quota exceeded")):
+            result = CONTROL_AGENT.preserve_import_source(str(album))
+        self.assertFalse(result["ok"])
+        self.assertNotIn("/some/internal/host/path", result.get("message", ""))
+        self.assertNotIn("disk quota exceeded", result.get("message", ""))
+
+
 if __name__ == "__main__":
     unittest.main()
-
