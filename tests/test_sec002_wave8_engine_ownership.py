@@ -59,10 +59,18 @@ class ReimportDiskNoLocalSubprocessTests(unittest.TestCase):
         self.assertNotIn("subprocess.Popen(", source)
         self.assertNotIn("subprocess.call(", source)
 
-    def test_reimport_disk_import_step_routes_through_beet_run(self):
+    def test_reimport_disk_import_step_routes_through_beets_client_reimport_source(self):
+        # SEC-002 Wave 8 final mutation binding: the mutation itself moved
+        # from a bare _beet_run(... "import" ...) call to the reviewed,
+        # signature-and-identity-bound atomic engine endpoint. The old
+        # pattern reappearing here would silently reopen the "final
+        # reimport mutation is not source-bound" gap.
         source = function_source("reimport_disk")
-        self.assertIn('_beet_run(\n            base_tmp + ["import"', source)
-        self.assertIn("config_override=temp_cfg_content", source)
+        self.assertNotIn('_beet_run(\n            base_tmp + ["import"', source)
+        self.assertIn("beets_client.reimport_source(", source)
+        self.assertIn("expected_source_signature=import_source_evidence.get(\"source_signature\")", source)
+        self.assertIn("expected_deterministic_identity=expected_identity", source)
+        self.assertIn('"config_override": temp_cfg_content', source)
 
     def test_create_unmatched_draft_never_references_music_root(self):
         # Excludes the docstring, which legitimately explains in prose why
@@ -408,16 +416,26 @@ class AiBatchEngineDiscoveryTests(unittest.TestCase):
             self.assertEqual(mock_disc.call_count, 2)
 
 
-class PreserveImportSourceSignatureBindingTests(unittest.TestCase):
-    """Tests for engine source signature binding during preservation and reimport."""
+class ReimportDiskSinglePreservationTests(unittest.TestCase):
+    """reimport_source_atomic() (called by reimport_disk() at the mutation
+    boundary) detects a torrent-staged source and preserves it internally,
+    immediately before the same Beets import it protects. reimport_disk()
+    must not also preserve up front -- doing both would silently double-copy
+    the source (see docs/TECHNICAL_DEBT.md, "SEC-002 Wave 8: production
+    reimport binding")."""
 
-    def test_stage_preserved_torrent_source_forwards_expected_signature(self):
-        source_code = function_source("_stage_preserved_torrent_source")
-        self.assertIn("expected_source_signature=expected_source_signature", source_code)
-        with mock.patch.object(APP.beets_client, "preserve_import_source", return_value={"ok": True, "preserved_path": "/data/torrents/.preserved_staging/test_123"}) as mock_pres:
-            path = APP._stage_preserved_torrent_source("/data/torrents/torrent1", "Artist", "Album", [], expected_source_signature="sig123")
-            self.assertEqual(path, "/data/torrents/.preserved_staging/test_123")
-            mock_pres.assert_called_once_with("/data/torrents/torrent1", expected_source_signature="sig123")
+    def test_stage_preserved_torrent_source_helper_removed(self):
+        self.assertFalse(
+            hasattr(APP, "_stage_preserved_torrent_source"),
+            "a separate up-front preservation helper reappeared; "
+            "reimport_source_atomic() must be the only thing that preserves "
+            "a torrent-staged source before import",
+        )
+
+    def test_reimport_disk_does_not_call_preserve_import_source_directly(self):
+        source = function_source("reimport_disk")
+        self.assertNotIn("beets_client.preserve_import_source", source)
+        self.assertNotIn("_preserve_torrent_source_path(aldir)", source)
 
 
 class VerifyDeterministicIdentityFailClosedTests(unittest.TestCase):
@@ -486,6 +504,40 @@ class VerifyDeterministicIdentityFailClosedTests(unittest.TestCase):
             )
         self.assertFalse(result["ok"])
         self.assertEqual(result["error_code"], "identity_verification_failed")
+
+    def test_existing_album_id_alone_with_no_embedded_source_tags_succeeds(self):
+        # reimport_disk()'s existing-album-repair branch deliberately passes
+        # ONLY existing_album_id (never mb_albumid alongside it) as expected
+        # identity: the DB row is real, already-authoritative evidence, and
+        # the whole point of a repair is often to retag audio that has no
+        # embedded MusicBrainz tags yet. Requiring embedded tags here (as
+        # the mb_albumid check does) would make the repair path unusable
+        # for its most common case.
+        source_inspect = {"audio_files": [{"properties": {}}, {"properties": {}}]}
+        with mock.patch("sqlite3.connect") as mock_connect:
+            mock_con = mock_connect.return_value.__enter__.return_value
+            mock_con.row_factory = None
+            mock_cur = mock_con.cursor.return_value
+            mock_cur.execute.return_value.fetchone.return_value = {"id": 42, "mb_albumid": ""}
+            result = CONTROL_AGENT.verify_deterministic_identity(
+                source_inspect, {"existing_album_id": 42},
+            )
+        self.assertTrue(result["ok"], result)
+
+    def test_existing_album_id_conflicting_with_embedded_source_tags_is_a_mismatch(self):
+        source_inspect = {"audio_files": [{"properties": {"mb_albumid": "33333333-3333-3333-3333-333333333333"}}]}
+        with mock.patch("sqlite3.connect") as mock_connect:
+            mock_con = mock_connect.return_value.__enter__.return_value
+            mock_con.row_factory = None
+            mock_cur = mock_con.cursor.return_value
+            mock_cur.execute.return_value.fetchone.return_value = {
+                "id": 42, "mb_albumid": "11111111-1111-1111-1111-111111111111",
+            }
+            result = CONTROL_AGENT.verify_deterministic_identity(
+                source_inspect, {"existing_album_id": 42},
+            )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_code"], "identity_mismatch")
 
     def test_error_messages_never_leak_raw_exception_text(self):
         source_inspect = {"audio_files": []}
@@ -576,6 +628,154 @@ class PreserveImportSourceRootPolicyTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertNotIn("/some/internal/host/path", result.get("message", ""))
         self.assertNotIn("disk quota exceeded", result.get("message", ""))
+
+
+class ReimportTimeoutScalingTests(unittest.TestCase):
+    """The engine's own Beets-import subprocess timeout must scale with the
+    freshly re-inspected audio_count instead of a flat 180s -- a flat
+    timeout silently regressed large-album imports (SEC-002 Wave 8
+    production reimport binding). Mirrors reimport_disk()'s own
+    _beet_import_timeout_for_count() bounds exactly."""
+
+    def test_small_count_uses_the_floor(self):
+        self.assertEqual(CONTROL_AGENT._reimport_timeout_for_count(0), 300)
+        self.assertEqual(CONTROL_AGENT._reimport_timeout_for_count(1), 300)
+
+    def test_scales_linearly_between_bounds(self):
+        self.assertEqual(CONTROL_AGENT._reimport_timeout_for_count(10), 380)
+
+    def test_large_count_is_capped_at_the_ceiling(self):
+        self.assertEqual(CONTROL_AGENT._reimport_timeout_for_count(1000), 1200)
+        self.assertEqual(CONTROL_AGENT._reimport_timeout_for_count(10_000), 1200)
+
+    def test_negative_or_missing_count_does_not_break_the_floor(self):
+        self.assertEqual(CONTROL_AGENT._reimport_timeout_for_count(-5), 300)
+        self.assertEqual(CONTROL_AGENT._reimport_timeout_for_count(None), 300)
+
+
+@unittest.skipUnless(os.name == "posix", "resolve_safe_path() requires POSIX-absolute paths; the control agent only ever runs inside the Linux engine container")
+class ReimportSourceAtomicProductionPathTests(unittest.TestCase):
+    """Real (non-mocked filesystem) behavioral tests of reimport_source_atomic()
+    for the two scenarios reimport_disk() now depends on: an already-in-library
+    source (copy:no/move:no, no preservation) and a torrent-staged source
+    (preserved exactly once, internally, as part of the same atomic call)."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp(prefix="beets_test_reimport_atomic_")
+        self.tmp_root = Path(self.tmp_dir).resolve()
+        self.staging_root = self.tmp_root / "staging"
+        self.music_root = self.tmp_root / "music"
+        self.staging_root.mkdir(parents=True)
+        self.music_root.mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, self.tmp_dir, ignore_errors=True)
+        self._staging_patcher = mock.patch.object(CONTROL_AGENT, "DOWNLOAD_PATH", str(self.staging_root))
+        self._music_patcher = mock.patch.object(CONTROL_AGENT, "MUSIC_LIBRARY_PATH", str(self.music_root))
+        self._staging_patcher.start()
+        self._music_patcher.start()
+        self.addCleanup(self._staging_patcher.stop)
+        self.addCleanup(self._music_patcher.stop)
+
+        # A real (not mocked) sqlite DB so verify_deterministic_identity()'s
+        # existing_album_id lookup and reimport_source_atomic()'s own
+        # post-import album lookup -- two different call sites with
+        # different row-access shapes (dict-style vs. positional) -- both
+        # behave exactly as they do against the real engine, without having
+        # to reconcile two mocks' row shapes by hand.
+        import sqlite3 as _sqlite3
+        self.lib_path = str(self.tmp_root / "musiclibrary.blb")
+        con = _sqlite3.connect(self.lib_path)
+        con.execute("CREATE TABLE albums (id INTEGER PRIMARY KEY, mb_albumid TEXT)")
+        con.execute("INSERT INTO albums (id, mb_albumid) VALUES (42, '')")
+        con.commit()
+        con.close()
+        self._lib_patcher = mock.patch.object(CONTROL_AGENT, "LIB_PATH", self.lib_path)
+        self._lib_patcher.start()
+        self.addCleanup(self._lib_patcher.stop)
+
+    def _fake_subprocess_run(self, returncode=0, stdout="", stderr=""):
+        class _Res:
+            pass
+        res = _Res()
+        res.returncode = returncode
+        res.stdout = stdout
+        res.stderr = stderr
+        # inspect_import_source() also shells out to ffprobe per audio file
+        # via subprocess.run -- patching the module-global subprocess.run
+        # intercepts those calls too, so callers must pick the "beet
+        # import" invocation out of call_args_list rather than assuming
+        # it's the only (or last) call.
+        return mock.patch.object(CONTROL_AGENT.subprocess, "run", return_value=res)
+
+    @staticmethod
+    def _find_beet_import_call(mock_run):
+        for call in mock_run.call_args_list:
+            cmd = call.args[0] if call.args else call.kwargs.get("args")
+            if isinstance(cmd, list) and "import" in cmd:
+                return call
+        raise AssertionError(
+            f"no 'beet import' subprocess.run call found among {mock_run.call_args_list}"
+        )
+
+    def test_already_in_library_source_uses_copy_no_move_no_and_no_preservation(self):
+        album = self.music_root / "Artist" / "Album"
+        album.mkdir(parents=True)
+        (album / "01.flac").write_bytes(b"not-real-audio")
+        # The temp config file is written just before the beet subprocess
+        # call and unlinked in reimport_source_atomic()'s own finally block
+        # -- it no longer exists by the time this test function regains
+        # control, so its content must be captured while it's still there.
+        with self._fake_subprocess_run() as mock_run, \
+             mock.patch.object(CONTROL_AGENT.os, "unlink") as mock_unlink:
+            result = CONTROL_AGENT.reimport_source_atomic(
+                str(album),
+                expected_deterministic_identity={"existing_album_id": 42},
+                beets_options={"mb_albumid": "11111111-1111-1111-1111-111111111111"},
+            )
+            cfg_path = mock_unlink.call_args.args[0]
+            cfg_content = Path(cfg_path).read_text(encoding="utf-8")
+        Path(cfg_path).unlink(missing_ok=True)
+        self.assertTrue(result["ok"], result)
+        self.assertIsNone(result["preserved_path"])
+        cmd = self._find_beet_import_call(mock_run).args[0]
+        self.assertNotIn("--copy", cmd)
+        self.assertNotIn("--move", cmd)
+        self.assertIn("copy: no", cfg_content)
+        self.assertIn("move: no", cfg_content)
+
+    def test_torrent_staged_source_is_preserved_exactly_once(self):
+        album = self.staging_root / "Torrent Album"
+        album.mkdir(parents=True)
+        (album / "01.flac").write_bytes(b"not-real-audio")
+        with self._fake_subprocess_run() as mock_run, \
+             mock.patch.object(CONTROL_AGENT, "preserve_import_source",
+                                wraps=CONTROL_AGENT.preserve_import_source) as mock_preserve:
+            result = CONTROL_AGENT.reimport_source_atomic(
+                str(album),
+                expected_deterministic_identity={"existing_album_id": 42},
+                beets_options={"mb_albumid": "11111111-1111-1111-1111-111111111111"},
+            )
+        self.assertTrue(result["ok"], result)
+        mock_preserve.assert_called_once()
+        self.assertIsNotNone(result["preserved_path"])
+        cmd = self._find_beet_import_call(mock_run).args[0]
+        self.assertIn("--copy", cmd)
+        self.assertIn(result["preserved_path"], cmd)
+
+    def test_subprocess_timeout_scales_with_reinspected_audio_count(self):
+        album = self.music_root / "Artist" / "BigAlbum"
+        album.mkdir(parents=True)
+        for i in range(20):
+            (album / f"{i:02d}.flac").write_bytes(b"not-real-audio")
+        with self._fake_subprocess_run() as mock_run:
+            result = CONTROL_AGENT.reimport_source_atomic(
+                str(album),
+                expected_deterministic_identity={"existing_album_id": 42},
+                beets_options={"mb_albumid": "11111111-1111-1111-1111-111111111111"},
+            )
+        self.assertTrue(result["ok"], result)
+        kwargs = self._find_beet_import_call(mock_run).kwargs
+        self.assertEqual(kwargs["timeout"], CONTROL_AGENT._reimport_timeout_for_count(20))
+        self.assertGreater(kwargs["timeout"], 180)
 
 
 if __name__ == "__main__":

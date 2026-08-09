@@ -1166,6 +1166,16 @@ _REIMPORT_ALLOWED_DUPLICATE_ACTIONS = {"skip", "keep", "remove", "merge"}
 _REIMPORT_CONFIG_OVERRIDE_MAX_CHARS = 8192
 
 
+def _reimport_timeout_for_count(count: int, minimum: int = 300, maximum: int = 1200) -> int:
+    """Scale the Beets import subprocess timeout with the freshly re-inspected
+    audio_count, mirroring reimport_disk()'s own _beet_import_timeout_for_count()
+    formula on the web-manager side. A flat 180s timeout regardless of album
+    size regresses large albums (production compatibility fix, SEC-002 Wave 8
+    final mutation binding) -- computed from the engine's own authoritative
+    reinspection, never trusted from the caller."""
+    return max(minimum, min(maximum, 180 + (max(0, int(count or 0)) * 20)))
+
+
 def reimport_source_atomic(
     source_path: object,
     expected_source_signature: str = None,
@@ -1271,11 +1281,12 @@ def reimport_source_atomic(
 
         env = os.environ.copy()
         env["BEETSDIR"] = BEETSDIR
+        proc_timeout = _reimport_timeout_for_count(source_inspect.get("audio_count", 0))
         res = subprocess.run(
             full_cmd,
             capture_output=True,
             text=True,
-            timeout=180,
+            timeout=proc_timeout,
             env=env
         )
 

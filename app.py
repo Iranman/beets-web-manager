@@ -10212,27 +10212,6 @@ def _preserve_torrent_source_path(path_value: str | Path) -> bool:
     return any(_path_is_under(path, root) for root in roots)
 
 
-def _stage_preserved_torrent_source(aldir: str, artist: str, album: str,
-                                    log: list,
-                                    expected_source_signature: Optional[str] = None,
-                                    target_tracks: Optional[List[Dict[str, Any]]] = None) -> str:
-    pres_res = beets_client.preserve_import_source(
-        aldir,
-        expected_source_signature=expected_source_signature,
-    )
-    if not pres_res.get("ok"):
-        err = pres_res.get("error_code") or pres_res.get("message") or "Preservation failed"
-        raise RuntimeError(f"Engine torrent preservation failed: {err}")
-    preserved_path = pres_res.get("preserved_path")
-    if not preserved_path:
-        raise RuntimeError(f"Engine torrent preservation returned empty path for {aldir}")
-    log.append(
-        "  [torrent] Preserving torrent source; importing staged copy "
-        f"instead of moving files from {aldir}"
-    )
-    return str(preserved_path)
-
-
 def _album_dir_for_art(album) -> Optional[Path]:
     """Return the album directory under MUSIC_ROOT, if it can be resolved."""
     try:
@@ -22524,16 +22503,14 @@ def reimport_disk():
             re.sub(r'\s*[\(\[]\d{4}[\)\]]\s*$', '', Path(aldir).name).strip()
         )
         source_is_music_library = str(aldir).rstrip("/").startswith("/data/media/music/")
-        if _preserve_torrent_source_path(aldir):
-            aldir = _stage_preserved_torrent_source(
-                aldir,
-                _guess_artist,
-                _guess_album,
-                log,
-                expected_source_signature=import_source_evidence.get("source_signature"),
-                target_tracks=wanted_tracks or None,
-            )
-            source_is_music_library = False
+        # SEC-002 Wave 8 final mutation binding: torrent-staged sources are no
+        # longer preserved here as a separate up-front step. reimport_source_atomic()
+        # (called at the actual import mutation below) detects a torrent-staged
+        # source itself and performs the protective copy internally, immediately
+        # before the same Beets import it protects -- preserving here AND letting
+        # the atomic endpoint preserve again would silently double-copy. aldir
+        # stays the original canonical torrent source throughout preflight; only
+        # the final mutation call operates on the engine's own preserved copy.
         def _maybe_queue_review(folder_path: str, suggestion: Optional[dict],
                                 reason: str, *, allow_existing: bool = False,
                                 evidence: Optional[Dict[str, Any]] = None) -> bool:
@@ -23232,136 +23209,144 @@ def reimport_disk():
         # source lives on the Beets engine, not the web manager.
         _validate_import_source_evidence(import_source_evidence, log, reject_downloads=True)
         log.append(f"[1/3] Importing & tagging '{Path(aldir).name}' in-place with MB {mb_albumid}…")
-        t_before = time.time() - 5
         import_timed_out = False
         import_timeout = _beet_import_timeout_for_count(import_source_evidence.get("audio_count", 0))
-        # Beets import/tagging/move is authoritative-library work and must run
-        # on the Beets engine, not as a local subprocess in the web manager --
-        # the web-manager image has no beet binary in the shipped topology
-        # (SEC-002 Wave 8 architecture review). _beet_run already routes
-        # every other command in this function through the control agent;
-        # this was the one remaining direct local-subprocess invocation.
-        r = _beet_run(
-            base_tmp + ["import", "-q", "--noincremental", "--quiet-fallback", "asis",
-                        "--search-id", mb_albumid, aldir],
-            log, timeout=import_timeout, cancel=cancel_event, config_override=temp_cfg_content,
-        )
-        if r.returncode == 1 and "timed out" in (r.stderr or "").lower():
-            import_timed_out = True
-            log.append(f"  ⚠ 'beet import' timed out after {import_timeout}s — checking if files were processed")
-            class _R:
-                returncode = 0; stdout = ""; stderr = ""
-            r = _R()
-        out = _ANSI_RE.sub('', (r.stdout + r.stderr).strip())
-        if out:
-            log.append(out[:400])
-        # If beet reported the album already exists (e.g. called from downloads folder),
-        # delete the source — safe only when not under the music library root.
-        if existing_album_id and any(p in out.lower() for p in (
-                "already in the library", "already in library",
-                "already imported", "no files imported", "nothing was imported")):
-            log.append("  Existing-album import reported duplicates; keeping source until merge validation completes")
+        # SEC-002 Wave 8 final mutation binding: the actual Beets import now
+        # runs through the engine's reviewed reimport_source_atomic() (POST
+        # /imports/reimport), not a bare `_beet_run(... "import" ...)`. This
+        # binds the final mutation itself -- not just the earlier inspect
+        # step -- to a fresh, engine-side re-verification of the source
+        # signature and, where real deterministic evidence exists, album
+        # identity, immediately before any file is touched. See
+        # docs/TECHNICAL_DEBT.md ("SEC-002 Wave 8: production reimport
+        # binding") for the evidence-selection rationale and known limits.
+        expected_identity: Dict[str, Any] = {}
+        if existing_album_id:
+            # Strong, DB-backed evidence: the engine looks this row up
+            # itself and only objects if the source audio's own embedded
+            # tags actively conflict with it -- absence of embedded tags
+            # (the common case for a folder being repaired in place) is not
+            # itself treated as a conflict. See verify_deterministic_identity().
+            expected_identity["existing_album_id"] = existing_album_id
         else:
-            _delete_if_already_in_library(aldir, out, log)
+            # No prior DB row exists. mb_albumid (already resolved, and for
+            # existing-library/known folders already preflight-matched
+            # above) is the only concrete deterministic claim available for
+            # a brand-new folder. If the source has no embedded MusicBrainz
+            # tags to confirm it against -- the common case for freshly
+            # downloaded, not-yet-tagged audio -- the engine correctly
+            # returns review_required rather than importing on trust alone.
+            expected_identity["mb_albumid"] = mb_albumid
+
+        if cancel_event and cancel_event.is_set():
+            raise RuntimeError("cancelled")
+        try:
+            atomic_res = beets_client.reimport_source(
+                aldir,
+                expected_source_signature=import_source_evidence.get("source_signature"),
+                expected_deterministic_identity=expected_identity,
+                beets_options={
+                    "mb_albumid": mb_albumid,
+                    "config_override": temp_cfg_content,
+                    "duplicate_action": "keep" if existing_album_id else "remove",
+                },
+                timeout=import_timeout + 15.0,
+            )
+        except BeetsAuthError:
+            raise RuntimeError("Beets engine authentication failed.")
+        except BeetsUnavailableError:
+            raise RuntimeError("Beets engine is unavailable.")
+        except BeetsError:
+            raise RuntimeError("Beets import request failed.")
+
+        if not atomic_res.get("ok"):
+            err_code = atomic_res.get("error_code", "import_failed")
+            err_msg = str(atomic_res.get("message") or err_code)
+            if err_code == "import_failed" and "timed out" in err_msg.lower():
+                # Soft-timeout recovery, matching the previous behavior: the
+                # Beets CLI process may exceed its timeout while having
+                # still completed the actual mutation. The web manager has
+                # its own authoritative read access to the same Beets
+                # library DB, so check directly rather than treating this
+                # as a hard failure immediately.
+                import_timed_out = True
+                log.append(f"  ⚠ Beets import timed out — checking if files were processed")
+            elif err_code in ("review_required", "identity_mismatch", "stale_source",
+                               "identity_verification_failed"):
+                _review_reasons = {
+                    "review_required": "Could not verify this source's MusicBrainz identity with enough confidence to import automatically.",
+                    "identity_mismatch": "This source's embedded MusicBrainz identity conflicts with the requested target; refusing to import automatically.",
+                    "stale_source": "Source files changed after they were inspected; refusing to import a possibly different set of files.",
+                    "identity_verification_failed": "Could not verify this source's identity against the library database.",
+                }
+                review_reason = _review_reasons[err_code]
+                _maybe_queue_review(
+                    aldir,
+                    {
+                        "mb_albumid": mb_albumid,
+                        "mb_url": f"https://musicbrainz.org/release/{mb_albumid}",
+                        "mb_valid": True,
+                        "confidence": "low",
+                        "albumartist": _guess_artist,
+                        "album": _guess_album,
+                        "reason": review_reason,
+                    },
+                    review_reason,
+                    allow_existing=bool(existing_album_id),
+                )
+                raise RuntimeError(f"{review_reason} Queued for Review without changing library files.")
+            else:
+                raise RuntimeError(f"Beets import failed ({err_code}).")
+
+        # atomic_res never carries raw stdout/stderr (SEC-002 Wave 8
+        # sanitization). The previous "already in the library" phrase-
+        # detection cleanup relied on that text and, in the shipped
+        # topology, already had no local view of engine-owned download
+        # paths to act on regardless -- calling it with an empty string
+        # preserves its existing (already inert here) behavior.
+        _delete_if_already_in_library(aldir, "", log)
 
         # ── Find album in DB ───────────────────────────────────────────────────
         log.append("[2/3] Locating album in library…")
-        time.sleep(1)
         album_ids: list = []
-        item_ids:  list = []
+        item_ids: list = []
         strategy = ""
 
-        # Load all rows once — reused by strategies A and B
-        all_rows: list = []
-        try:
-            with _db(text_factory=bytes) as con:
-                all_rows = con.execute(
-                    "SELECT id, album_id, path, added FROM items").fetchall()
-        except Exception as ex:
-            log.append(f"  DB warning (read): {ex}")
-
-        # A: items whose path is under aldir (absolute OR relative to music root)
-        if all_rows:
-            abs_prefix_b = aldir.encode('utf-8').rstrip(b'/') + b'/'
-            rel_raw = aldir
-            if rel_raw.startswith("/data/media/music/"):
-                rel_raw = rel_raw[len("/data/media/music/"):]
-            rel_prefix_b = rel_raw.encode('utf-8').rstrip(b'/') + b'/'
-            seen_aids: set = set()
-            for row_id, album_id, raw_path, added in all_rows:
-                if raw_path is None: continue
-                p = raw_path if isinstance(raw_path, bytes) else str(raw_path).encode()
-                if not (p.startswith(abs_prefix_b) or p.startswith(rel_prefix_b)):
-                    continue
-                if album_id and album_id not in seen_aids:
-                    seen_aids.add(album_id); album_ids.append(album_id)
-                elif not album_id:
-                    item_ids.append(row_id)
-            if album_ids or item_ids:
-                strategy = "aldir path"
-
-        # B: recently added (beet move may have relocated the folder) — reuse all_rows
-        if (not source_is_music_library and not existing_album_id
-                and not album_ids and not item_ids and all_rows):
-            music_root_b = b"/data/media/music/"
-            seen_aids = set()
-            for row_id, album_id, raw_path, added in all_rows:
-                if raw_path is None: continue
-                p = raw_path if isinstance(raw_path, bytes) else str(raw_path).encode()
-                is_abs = p.startswith(music_root_b)
-                is_rel = not p.startswith(b"/")
-                if not (is_abs or is_rel): continue
-                if added and float(added) < t_before: continue
-                if album_id and album_id not in seen_aids:
-                    seen_aids.add(album_id); album_ids.append(album_id)
-                elif not album_id:
-                    item_ids.append(row_id)
-            if album_ids or item_ids:
-                strategy = "recently added"
-
-        # Existing-album repairs should only fall back to the known album row.
-        if existing_album_id and not album_ids and not item_ids:
-            try:
-                with _db() as con:
-                    cnt = int(con.execute(
-                        "SELECT COUNT(*) FROM items WHERE album_id=?",
-                        (existing_album_id,),
-                    ).fetchone()[0] or 0)
-                if cnt:
-                    album_ids.append(existing_album_id)
-                    strategy = "existing album"
-            except Exception as ex:
-                log.append(f"  DB warning (existing album): {ex}")
-
-        # C: album name search
-        if not album_ids and not item_ids:
-            album_guess = _guess_album or _restore_time_colon_title(
-                re.sub(r'\s*[\(\[]\d{4}[\)\]]\s*$', '', Path(aldir).name).strip()
-            )
+        if not import_timed_out and atomic_res.get("ok"):
+            aid = atomic_res.get("album_id")
+            if aid and atomic_res.get("album_id_verified") and not atomic_res.get("album_lookup_failed"):
+                album_ids = [int(aid)]
+                strategy = "engine-verified mb_albumid"
+            else:
+                raise RuntimeError(
+                    "Beets import completed but the engine could not deterministically "
+                    "verify the resulting album; refusing to guess which library row it "
+                    "created."
+                )
+        else:
+            # Soft-timeout recovery: the mutation call itself reported a
+            # timeout, so fall back to a direct, deterministic DB lookup by
+            # mb_albumid (the same authoritative key the engine's own
+            # atomic endpoint uses), never a heuristic path/name guess.
+            time.sleep(1)
             try:
                 with _db(row_factory=sqlite3.Row) as con:
-                    rows = con.execute(
-                        "SELECT id, album_id FROM items WHERE album = ? LIMIT 200",
-                        (album_guess,)).fetchall()
-                for row in rows:
-                    if row["album_id"] and row["album_id"] not in album_ids:
-                        album_ids.append(row["album_id"])
-                    elif not row["album_id"] and row["id"] not in item_ids:
-                        item_ids.append(row["id"])
-                if album_ids or item_ids:
-                    strategy = f"album name ({album_guess!r})"
+                    row = con.execute(
+                        "SELECT id FROM albums WHERE mb_albumid = ?", (mb_albumid,)
+                    ).fetchone()
+                    if row:
+                        cnt = int(con.execute(
+                            "SELECT COUNT(*) FROM items WHERE album_id=?", (row["id"],)
+                        ).fetchone()[0] or 0)
+                        if cnt:
+                            album_ids = [int(row["id"])]
+                            strategy = "post-timeout mb_albumid lookup"
             except Exception as ex:
-                log.append(f"  DB warning (name): {ex}")
-
-        if not album_ids and not item_ids:
-            if import_timed_out:
+                log.append(f"  DB warning (post-timeout lookup): {ex}")
+            if not album_ids:
                 raise RuntimeError("import timed out and album was not found in the Beets DB")
-            raise RuntimeError("album was not found in the Beets DB after import")
-        else:
-            if album_ids:
-                log.append(f"Found {len(album_ids)} album(s) via {strategy}: {album_ids}")
-            else:
-                log.append(f"Found {len(item_ids)} item(s) via {strategy}")
+
+        log.append(f"Found {len(album_ids)} album(s) via {strategy}: {album_ids}")
 
         # ── Retag + rename ────────────────────────────────────────────────────
         log.append("[3/3] Matching tracks, writing tags, renaming files…")
