@@ -43,9 +43,17 @@ from backend.beets_client import BeetsAuthError, BeetsError, BeetsUnavailableErr
 # in isolation without booting the full app -- a module-level import of
 # app.py-only names would break that stub import for every test in the file.
 
-_SETTINGS_FILE = Path(os.environ.get("SETUP_SETTINGS_FILE", "/config/app_settings.json"))
-_SETUP_COMPLETE_MARKER = Path(os.environ.get("SETUP_COMPLETE_FILE", "/config/.setup_complete"))
-_SETUP_ENV_FILE = Path(os.environ.get("SETUP_ENV_FILE", "/config/.env"))
+# Default to /web-manager-data, not /config: neither docker-compose.yml nor
+# docker-compose.full.yml mounts /config on the beets-web-manager service at
+# all (that mount belongs to the beets engine service) -- combined with this
+# service's read_only:true root filesystem, a /config default means every
+# settings save (including the System page's browser-password change) fails
+# closed with a 500 in the actual shipped configuration. /web-manager-data
+# is the one mount this service is guaranteed to own and can write to
+# (already used for .auth_token/.browser_password/.initial_admin_password).
+_SETTINGS_FILE = Path(os.environ.get("SETUP_SETTINGS_FILE", "/web-manager-data/app_settings.json"))
+_SETUP_COMPLETE_MARKER = Path(os.environ.get("SETUP_COMPLETE_FILE", "/web-manager-data/.setup_complete"))
+_SETUP_ENV_FILE = Path(os.environ.get("SETUP_ENV_FILE", "/web-manager-data/.env"))
 _ENV_EXAMPLE_FILE = Path(os.environ.get("SETUP_ENV_EXAMPLE_FILE", str(Path(__file__).parent / ".env.example")))
 _ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 _BLOCKED_ENV_NAMES = {"SETUP_ENV_FILE", "SETUP_ENV_EXAMPLE_FILE", "SETUP_SETTINGS_FILE", "SETUP_COMPLETE_FILE"}
@@ -435,6 +443,26 @@ def _write_env_file(updates: Dict[str, str], clear: List[str]) -> str:
     tmp.replace(_SETUP_ENV_FILE)
     for key, value in desired.items():
         os.environ[key] = value
+    try:
+        from app import (
+            _cleanup_initial_browser_password_if_replaced,
+            _PERSISTED_BROWSER_PASSWORD_FILE,
+            _PERSISTED_BROWSER_USERNAME_FILE,
+            _persist_file_atomically,
+        )
+        if updates.get("BEETS_WEB_PASSWORD"):
+            _persist_file_atomically(_PERSISTED_BROWSER_PASSWORD_FILE, updates["BEETS_WEB_PASSWORD"])
+        elif "BEETS_WEB_PASSWORD" in clear and _PERSISTED_BROWSER_PASSWORD_FILE.exists():
+            _PERSISTED_BROWSER_PASSWORD_FILE.unlink(missing_ok=True)
+
+        if updates.get("BEETS_WEB_USERNAME"):
+            _persist_file_atomically(_PERSISTED_BROWSER_USERNAME_FILE, updates["BEETS_WEB_USERNAME"])
+        elif "BEETS_WEB_USERNAME" in clear and _PERSISTED_BROWSER_USERNAME_FILE.exists():
+            _PERSISTED_BROWSER_USERNAME_FILE.unlink(missing_ok=True)
+
+        _cleanup_initial_browser_password_if_replaced()
+    except Exception:
+        pass
     return backup_path
 
 
@@ -1183,20 +1211,33 @@ def _build_setup_status_payload() -> Dict[str, Any]:
     ready = not blocking
     demo_mode = os.environ.get("DEMO_MODE", "0").strip().lower() in ("1", "true", "yes", "on")
     try:
-        from app import _auth_secret_is_usable, _security_auth_token, _security_auth_password, _GENERATED_AUTH_TOKEN_FILE
+        from app import (
+            _auth_secret_is_usable,
+            _security_auth_token,
+            _security_auth_password,
+            _security_auth_username,
+            _GENERATED_AUTH_TOKEN_FILE,
+            _INITIAL_BROWSER_PASSWORD_FILE,
+        )
         token_configured = _auth_secret_is_usable(_security_auth_token())
         password_configured = _auth_secret_is_usable(_security_auth_password())
         token_auto_generated = token_configured and _GENERATED_AUTH_TOKEN_FILE.exists()
+        password_auto_generated = password_configured and _INITIAL_BROWSER_PASSWORD_FILE.exists()
+        username = _security_auth_username()
     except ImportError:
         token_configured = _fallback_auth_secret_usable(
             os.environ.get("BEETS_WEB_AUTH_TOKEN", "") or os.environ.get("BEETS_WEB_TOKEN", "")
         )
         password_configured = _fallback_auth_secret_usable(os.environ.get("BEETS_WEB_PASSWORD", ""))
         token_auto_generated = token_configured and _FALLBACK_AUTH_TOKEN_FILE.exists()
+        password_auto_generated = False
+        username = os.environ.get("BEETS_WEB_USERNAME", "admin").strip() or "admin"
     auth_status = {
         "token_configured": token_configured,
         "token_auto_generated": token_auto_generated,
         "password_configured": password_configured,
+        "password_auto_generated": password_auto_generated,
+        "username": username,
     }
     return {
         "ok": True,

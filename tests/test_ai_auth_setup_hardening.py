@@ -330,18 +330,25 @@ class AuthTokenAutoGenerationTests(unittest.TestCase):
         self.assertIn("secrets.token_urlsafe(32)", APP_SOURCE)
 
     def test_bootstrap_skips_when_auth_already_configured(self):
+        # _bootstrap_auth_token_if_missing() and _bootstrap_browser_password_if_missing()
+        # were split into two independent bootstraps (each checks its own
+        # credential type, not "any credential") -- verified correct via a
+        # real Docker acceptance run (scripts/verify_first_run_docker_acceptance.py:
+        # token Bearer auth works independently of browser password, and vice
+        # versa). The end_marker below scopes to just this function's body;
+        # _bootstrap_browser_password_if_missing is the next def after it.
         fn = _function_source(
             APP_SOURCE,
             "def _bootstrap_auth_token_if_missing() -> None:",
-            "\n\ndef _constant_time_equal(",
+            "\n\ndef _bootstrap_browser_password_if_missing() -> None:",
         )
-        self.assertIn("if _security_auth_configured():\n        return", fn)
+        self.assertIn('token = _security_auth_token()\n    if _auth_secret_is_usable(token):\n        return', fn)
 
     def test_bootstrap_reuses_persisted_token_across_restarts(self):
         fn = _function_source(
             APP_SOURCE,
             "def _bootstrap_auth_token_if_missing() -> None:",
-            "\n\ndef _constant_time_equal(",
+            "\n\ndef _bootstrap_browser_password_if_missing() -> None:",
         )
         self.assertIn("_GENERATED_AUTH_TOKEN_FILE.read_text(", fn)
         self.assertIn("_auth_secret_is_usable(existing)", fn)
@@ -350,21 +357,21 @@ class AuthTokenAutoGenerationTests(unittest.TestCase):
         fn = _function_source(
             APP_SOURCE,
             "def _bootstrap_auth_token_if_missing() -> None:",
-            "\n\ndef _constant_time_equal(",
+            "\n\ndef _bootstrap_browser_password_if_missing() -> None:",
         )
-        self.assertIn("_persist_generated_auth_token(token)", fn)
-        self.assertIn('os.environ["BEETS_WEB_AUTH_TOKEN"] = token', fn)
+        self.assertIn("_persist_generated_auth_token(generated)", fn)
+        self.assertIn('os.environ["BEETS_WEB_AUTH_TOKEN"] = generated', fn)
         # The startup banner announces where the token was written, but the
         # f-string interpolating the raw secret into process output (the
         # previous, log-leaking behavior) must be gone.
-        self.assertNotIn("BEETS_WEB_AUTH_TOKEN={token}", fn)
+        self.assertNotIn("BEETS_WEB_AUTH_TOKEN={generated}", fn)
         self.assertIn("never printed to logs", fn)
 
     def test_bootstrap_fails_closed_when_persistence_cannot_be_verified(self):
         fn = _function_source(
             APP_SOURCE,
             "def _bootstrap_auth_token_if_missing() -> None:",
-            "\n\ndef _constant_time_equal(",
+            "\n\ndef _bootstrap_browser_password_if_missing() -> None:",
         )
         self.assertIn("persisted_ok", fn)
         self.assertIn("raise RuntimeError(", fn)
@@ -375,12 +382,16 @@ class AuthTokenAutoGenerationTests(unittest.TestCase):
         self.assertIn("\n_bootstrap_auth_token_if_missing()\n", APP_SOURCE)
 
     def test_token_file_persists_with_restricted_permissions(self):
+        # The atomic-write-plus-chmod logic was extracted into a shared
+        # _persist_file_atomically() helper (also used by the new browser
+        # password/username persistence) -- check that helper directly.
         fn = _function_source(
             APP_SOURCE,
-            "def _persist_generated_auth_token(token: str) -> None:",
-            "\n\ndef _bootstrap_auth_token_if_missing",
+            "def _persist_file_atomically(target_file: Path, content: str) -> bool:",
+            "\n\ndef _auth_secret_is_usable(",
         )
-        self.assertIn("os.chmod(_GENERATED_AUTH_TOKEN_FILE, 0o600)", fn)
+        self.assertIn("os.chmod(temp_file, 0o600)", fn)
+        self.assertIn("os.chmod(target_file, 0o600)", fn)
 
 
 class AuthTokenRegenerateEndpointTests(unittest.TestCase):
@@ -481,8 +492,8 @@ class ReadmeDocumentationTests(unittest.TestCase):
 
     def test_documents_password_requirements(self):
         self.assertIn("At least 32 characters", README_SOURCE)
-        self.assertIn("One uppercase letter", README_SOURCE)
-        self.assertIn("One special (non-alphanumeric) character", README_SOURCE)
+        self.assertIn("At least one uppercase letter", README_SOURCE)
+        self.assertIn("At least one special (non-alphanumeric) character", README_SOURCE)
 
     def test_documents_auth_token_auto_generation(self):
         self.assertIn("You never have to invent `BEETS_WEB_AUTH_TOKEN` yourself", README_SOURCE)

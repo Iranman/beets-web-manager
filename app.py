@@ -3,7 +3,7 @@
 Beets Web Control — standalone Flask app.
 Opens the beets library directly. No plugin system, no S6, no beet web.
 """
-import base64, copy, difflib, errno, functools, gzip, hashlib, hmac, importlib, io, json, math, mimetypes, os, platform, re, secrets, shlex, shutil, socket, sqlite3, subprocess, sys, threading, time, unicodedata, uuid
+import base64, copy, difflib, errno, functools, gzip, hashlib, hmac, importlib, io, json, math, mimetypes, os, platform, re, secrets, shlex, shutil, socket, sqlite3, string, subprocess, sys, threading, time, unicodedata, uuid
 import importlib.metadata
 import urllib.error, urllib.parse, urllib.request
 from backend.security import (OutboundPolicyError, bounded_rate_key_store_sweep, direct_peer_is_trusted, install_secure_urllib, validate_outbound_url)
@@ -1958,21 +1958,144 @@ def _security_auth_token() -> str:
     return _first_config_secret("BEETS_WEB_AUTH_TOKEN", "BEETS_WEB_TOKEN")
 
 
+_GENERATED_AUTH_TOKEN_FILE = Path(
+    os.environ.get("BEETS_WEB_AUTH_TOKEN_FILE", "/web-manager-data/.auth_token")
+)
+
+_PERSISTED_BROWSER_PASSWORD_FILE = Path(
+    os.environ.get("BEETS_WEB_PERSISTED_PASSWORD_FILE", "/web-manager-data/.browser_password")
+)
+
+_INITIAL_BROWSER_PASSWORD_FILE = Path(
+    os.environ.get("BEETS_WEB_INITIAL_PASSWORD_FILE", "/web-manager-data/.initial_admin_password")
+)
+
+_PERSISTED_BROWSER_USERNAME_FILE = Path(
+    os.environ.get("BEETS_WEB_PERSISTED_USERNAME_FILE", "/web-manager-data/.browser_username")
+)
+
+
 def _security_auth_password() -> str:
     value = _first_config_secret("BEETS_WEB_PASSWORD")
     if value:
         return value
     path = os.environ.get("BEETS_WEB_PASSWORD_FILE", "").strip()
-    if not path:
-        return ""
+    if path:
+        try:
+            val = Path(path).read_text(encoding="utf-8", errors="ignore").splitlines()[0].strip()
+            if val:
+                return val
+        except Exception:
+            pass
     try:
-        return Path(path).read_text(encoding="utf-8", errors="ignore").splitlines()[0].strip()
+        if _PERSISTED_BROWSER_PASSWORD_FILE.exists():
+            val = _PERSISTED_BROWSER_PASSWORD_FILE.read_text(encoding="utf-8", errors="ignore").splitlines()[0].strip()
+            if val:
+                return val
     except Exception:
-        return ""
+        pass
+    try:
+        if _INITIAL_BROWSER_PASSWORD_FILE.exists():
+            val = _INITIAL_BROWSER_PASSWORD_FILE.read_text(encoding="utf-8", errors="ignore").splitlines()[0].strip()
+            if val:
+                return val
+    except Exception:
+        pass
+    return ""
 
 
 def _security_auth_username() -> str:
-    return os.environ.get("BEETS_WEB_USERNAME", "admin").strip() or "admin"
+    val = os.environ.get("BEETS_WEB_USERNAME", "").strip()
+    if val:
+        return val
+    try:
+        if _PERSISTED_BROWSER_USERNAME_FILE.exists():
+            p_user = _PERSISTED_BROWSER_USERNAME_FILE.read_text(encoding="utf-8", errors="ignore").splitlines()[0].strip()
+            if p_user:
+                return p_user
+    except Exception:
+        pass
+    return "admin"
+
+
+_PASSWORD_UPPER_RE = re.compile(r"[A-Z]")
+_PASSWORD_LOWER_RE = re.compile(r"[a-z]")
+_PASSWORD_DIGIT_RE = re.compile(r"[0-9]")
+_PASSWORD_SPECIAL_RE = re.compile(r"[^A-Za-z0-9]")
+
+
+def _password_requirements_unmet(password: str) -> List[str]:
+    """Returns unmet BEETS_WEB_PASSWORD requirements (empty list = passes)."""
+    unmet: List[str] = []
+    try:
+        configured = int(os.environ.get("BEETS_WEB_AUTH_MIN_LENGTH", "32"))
+    except ValueError:
+        configured = 32
+    min_length = max(24, min(256, configured))
+    if len(password) < min_length:
+        unmet.append(f"at least {min_length} characters")
+    if not _PASSWORD_UPPER_RE.search(password):
+        unmet.append("an uppercase letter")
+    if not _PASSWORD_LOWER_RE.search(password):
+        unmet.append("a lowercase letter")
+    if not _PASSWORD_DIGIT_RE.search(password):
+        unmet.append("a number")
+    if not _PASSWORD_SPECIAL_RE.search(password):
+        unmet.append("a special character")
+    return unmet
+
+
+def generate_secure_browser_password(length: int = 36) -> str:
+    """Generate a cryptographically secure browser password meeting all complexity rules."""
+    alphabet = string.ascii_letters + string.digits + "!@#$%^&*()_+-=[]{}|;:,.<>?"
+    while True:
+        upper = secrets.choice(string.ascii_uppercase)
+        lower = secrets.choice(string.ascii_lowercase)
+        digit = secrets.choice(string.digits)
+        special = secrets.choice("!@#$%^&*()_+-=[]{}|;:,.<>?")
+        rest = [secrets.choice(alphabet) for _ in range(max(0, length - 4))]
+        chars = [upper, lower, digit, special] + rest
+        secrets.SystemRandom().shuffle(chars)
+        pwd = "".join(chars)
+        if not _password_requirements_unmet(pwd) and _auth_secret_is_usable(pwd):
+            return pwd
+
+
+def _persist_file_atomically(target_file: Path, content: str) -> bool:
+    """Write-flush-fsync a same-directory temp file, chmod 0600, replace target."""
+    temp_file = target_file.with_name(f".{target_file.name}.tmp.{secrets.token_hex(4)}")
+    try:
+        target_file.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(temp_file), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(content)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(temp_file, 0o600)
+        temp_file.replace(target_file)
+        try:
+            os.chmod(target_file, 0o600)
+        except Exception:
+            pass
+        try:
+            dir_fd = os.open(str(target_file.parent), os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except Exception:
+            pass
+        return True
+    except Exception as ex:
+        try:
+            temp_file.unlink(missing_ok=True)
+        except Exception:
+            pass
+        try:
+            app.logger.error("Failed to persist %s: %s", target_file, ex)
+        except Exception:
+            pass
+        return False
 
 
 def _auth_secret_is_usable(value: str) -> bool:
@@ -1998,11 +2121,6 @@ def _security_auth_disabled() -> bool:
     return os.environ.get("BEETS_WEB_AUTH_DISABLED", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-_GENERATED_AUTH_TOKEN_FILE = Path(
-    os.environ.get("BEETS_WEB_AUTH_TOKEN_FILE", "/web-manager-data/.auth_token")
-)
-
-
 def generate_secure_auth_token() -> str:
     """256-bit-entropy URL-safe token, well above _MIN_AUTH_SECRET_LENGTH and
     never a placeholder string -- suitable for signing/bearer authentication."""
@@ -2010,77 +2128,15 @@ def generate_secure_auth_token() -> str:
 
 
 def _persist_generated_auth_token(token: str) -> None:
-    """Persist generated token atomically to BEETS_WEB_AUTH_TOKEN_FILE (/web-manager-data/.auth_token).
-
-    Write-flush-fsync a same-directory temp file, chmod it 0600, then atomically
-    rename it onto the destination -- a crash mid-write can never leave a
-    partially written or wrongly permissioned token file in place. The temp
-    file is removed on any failure so nothing orphans, and failure is logged
-    at ERROR (not swallowed) since an unpersisted token will not survive a
-    restart.
-    """
-    token_file = _GENERATED_AUTH_TOKEN_FILE
-    temp_file = token_file.with_name(f".{token_file.name}.tmp.{secrets.token_hex(4)}")
-    try:
-        token_file.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(str(temp_file), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(token)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.chmod(temp_file, 0o600)
-        temp_file.replace(token_file)
-        os.chmod(_GENERATED_AUTH_TOKEN_FILE, 0o600)
-        try:
-            dir_fd = os.open(str(token_file.parent), os.O_RDONLY)
-            try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
-        except OSError:
-            pass  # directory fsync is best-effort; unsupported on some platforms/filesystems
-    except Exception as ex:
-        try:
-            temp_file.unlink(missing_ok=True)
-        except Exception:
-            pass
-        try:
-            app.logger.error(
-                "Failed to persist generated auth token to %s -- it will NOT "
-                "survive a restart until this is resolved: %s",
-                _GENERATED_AUTH_TOKEN_FILE, ex,
-            )
-        except Exception:
-            pass
+    """Persist generated token atomically to BEETS_WEB_AUTH_TOKEN_FILE (/web-manager-data/.auth_token)."""
+    _persist_file_atomically(_GENERATED_AUTH_TOKEN_FILE, token)
 
 
 def _bootstrap_auth_token_if_missing() -> None:
-    """Enforce token precedence & persistence:
-    1. Explicit usable BEETS_WEB_AUTH_TOKEN in env is used.
-    2. Otherwise, read BEETS_WEB_AUTH_TOKEN_FILE (/web-manager-data/.auth_token).
-    3. If token file missing/unusable, generate a secure token and persist it
-       atomically with 0o600 permissions, then set it in-process.
-    4. Never fall back to legacy token path.
-
-    The generated token is NEVER printed to stdout/stderr/logs -- only
-    the fact that one was generated and the path it was written to. A
-    startup banner announcing "here is your secret" via ordinary process
-    output is exactly the kind of exposure that leaks into CI logs,
-    aggregated container-log shippers, and anywhere else those streams are
-    archived or cached, all well beyond the operator who actually needs the
-    value. The persisted file at a known, documented path (readable via
-    `docker exec <container> cat <path>`, or directly on the host through
-    the bind mount) is the explicit first-run credential retrieval
-    mechanism instead.
-
-    Persistence is verified by reading the file back, not by trusting
-    _persist_generated_auth_token()'s internal success/failure -- if it
-    doesn't come back byte-for-byte, startup fails closed with a clear,
-    secret-free error rather than running with a credential that exists
-    only in this process's memory and that the operator has no way to ever
-    retrieve (not persisted, and -- by design -- never logged either).
-    """
-    if _security_auth_configured():
+    if _security_auth_disabled():
+        return
+    token = _security_auth_token()
+    if _auth_secret_is_usable(token):
         return
     existing = ""
     try:
@@ -2095,43 +2151,113 @@ def _bootstrap_auth_token_if_missing() -> None:
     if _auth_secret_is_usable(existing):
         os.environ["BEETS_WEB_AUTH_TOKEN"] = existing
         return
-    token = generate_secure_auth_token()
-    _persist_generated_auth_token(token)
+    generated = generate_secure_auth_token()
+    _persist_generated_auth_token(generated)
     try:
-        persisted_ok = _GENERATED_AUTH_TOKEN_FILE.read_text(encoding="utf-8").strip() == token
+        persisted_ok = _GENERATED_AUTH_TOKEN_FILE.read_text(encoding="utf-8").strip() == generated
     except Exception:
         persisted_ok = False
     if not persisted_ok:
         raise RuntimeError(
-            "Startup refused: no BEETS_WEB_AUTH_TOKEN or BEETS_WEB_PASSWORD is "
-            "configured, and a newly generated token could not be persisted to "
-            f"{_GENERATED_AUTH_TOKEN_FILE} (see the preceding log line for why "
-            "-- commonly a read-only or wrongly-owned /web-manager-data mount). "
-            "Refusing to run with a credential that exists only in this "
-            "process's memory and was never shown to you. Fix the persistence "
-            "problem and restart, or set BEETS_WEB_AUTH_TOKEN / "
-            "BEETS_WEB_PASSWORD explicitly."
+            "Startup refused: no BEETS_WEB_AUTH_TOKEN is configured, and a newly "
+            f"generated token could not be persisted to {_GENERATED_AUTH_TOKEN_FILE}. "
+            "Fix the persistence problem and restart, or set BEETS_WEB_AUTH_TOKEN explicitly."
         )
-    os.environ["BEETS_WEB_AUTH_TOKEN"] = token
+    os.environ["BEETS_WEB_AUTH_TOKEN"] = generated
     print(
         "\n" + "=" * 72 +
-        "\nNo BEETS_WEB_AUTH_TOKEN or BEETS_WEB_PASSWORD was configured."
-        "\nGenerated a secure API token automatically so the app is not"
+        "\nNo BEETS_WEB_AUTH_TOKEN was configured."
+        "\nGenerated a secure API token automatically so API access is not"
         "\nlocked out on first run, and persisted it to:\n"
         f"\n  {_GENERATED_AUTH_TOKEN_FILE}\n"
         "\nThe token itself is never printed to logs -- read that file to get"
         "\nit, e.g. `docker exec <container> cat " + str(_GENERATED_AUTH_TOKEN_FILE) + "`."
-        "\nUse it as a Bearer token for API clients, or set BEETS_WEB_PASSWORD"
-        "\n(any authenticated client can do this via POST /api/setup/env) for"
-        "\nbrowser access. Regenerate anytime with POST"
-        "\n/api/setup/auth-token/regenerate -- that response returns the new"
-        "\nvalue exactly once and also never logs it."
+        "\nUse it as a Bearer token for API clients. It is NOT your browser password."
+        "\nRegenerate anytime with POST /api/setup/auth-token/regenerate."
         "\n" + "=" * 72 + "\n",
         flush=True,
     )
 
 
+def _bootstrap_browser_password_if_missing() -> None:
+    """Enforce browser credential availability & persistence.
+    If no usable browser password exists, generate a cryptographically secure initial
+    password, persist it to /web-manager-data/.initial_admin_password (0600), and print a
+    secret-free banner announcing where to retrieve it."""
+    if _security_auth_disabled():
+        return
+    current_pwd = _security_auth_password()
+    if _auth_secret_is_usable(current_pwd):
+        return
+
+    pwd = generate_secure_browser_password(36)
+    try:
+        _persist_file_atomically(_INITIAL_BROWSER_PASSWORD_FILE, pwd)
+    except Exception as ex:
+        try:
+            app.logger.error("Failed to persist generated initial browser password to %s: %s", _INITIAL_BROWSER_PASSWORD_FILE, ex)
+        except Exception:
+            pass
+    try:
+        persisted_ok = _INITIAL_BROWSER_PASSWORD_FILE.read_text(encoding="utf-8").strip() == pwd
+    except Exception:
+        persisted_ok = False
+
+    if not persisted_ok:
+        raise RuntimeError(
+            "Startup refused: no browser password was configured, and a newly generated "
+            f"initial password could not be persisted to {_INITIAL_BROWSER_PASSWORD_FILE}. "
+            "Fix permissions on /web-manager-data and restart, or set BEETS_WEB_PASSWORD explicitly."
+        )
+
+    username = _security_auth_username()
+    print(
+        "\n" + "=" * 72 +
+        "\nNo browser password was configured."
+        "\nA secure initial browser password has been generated."
+        f"\n\nBrowser username: {username}"
+        "\n\nRetrieve the password from:"
+        f"\n  {_INITIAL_BROWSER_PASSWORD_FILE}"
+        "\n\nExample:"
+        f"\n  docker exec beets-web-manager cat {_INITIAL_BROWSER_PASSWORD_FILE}"
+        "\n\nChange this password after signing in."
+        "\n" + "=" * 72 + "\n",
+        flush=True,
+    )
+
+
+def _cleanup_initial_browser_password_if_replaced() -> None:
+    """If an explicit or persisted replacement password exists and is usable, remove
+    .initial_admin_password so stale initial credentials do not linger unnecessarily."""
+    try:
+        if not _INITIAL_BROWSER_PASSWORD_FILE.exists():
+            return
+        initial_content = ""
+        try:
+            initial_content = _INITIAL_BROWSER_PASSWORD_FILE.read_text(encoding="utf-8").strip()
+        except Exception:
+            pass
+
+        env_pwd = _first_config_secret("BEETS_WEB_PASSWORD")
+        persisted_pwd = ""
+        if _PERSISTED_BROWSER_PASSWORD_FILE.exists():
+            try:
+                persisted_pwd = _PERSISTED_BROWSER_PASSWORD_FILE.read_text(encoding="utf-8").strip()
+            except Exception:
+                pass
+
+        if (env_pwd and env_pwd != initial_content and _auth_secret_is_usable(env_pwd)) or \
+           (persisted_pwd and persisted_pwd != initial_content and _auth_secret_is_usable(persisted_pwd)):
+            _INITIAL_BROWSER_PASSWORD_FILE.unlink(missing_ok=True)
+    except Exception as ex:
+        try:
+            app.logger.warning("Could not remove initial password file: %s", ex)
+        except Exception:
+            pass
+
+
 _bootstrap_auth_token_if_missing()
+_bootstrap_browser_password_if_missing()
 
 
 _LEGACY_BEETS_CONFIG_MIGRATION_MARKER = "# beets-web-manager: legacy-plugin-config-migrated"
