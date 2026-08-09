@@ -719,12 +719,16 @@ export default function System() {
               )}
             </div>
             <div className="border-t border-graphite-800 py-2 sm:border-t-0 sm:pl-3">
-              <div className="text-[0.78rem] font-medium text-zinc-300">Browser password (Basic Auth)</div>
+              <div className="text-[0.78rem] font-medium text-zinc-300">Browser Login (Basic Auth)</div>
               <div className={`mt-1 text-[0.72rem] font-semibold ${status.auth.password_configured ? 'text-emerald-300' : 'text-zinc-500'}`}>
-                {status.auth.password_configured ? '✓ Configured' : '✗ Not configured'}
+                {status.auth.password_configured
+                  ? status.auth.password_auto_generated ? '✓ Configured (auto-generated)' : '✓ Configured'
+                  : '✗ Not configured'}
               </div>
               <div className="mt-1 text-[0.68rem] text-zinc-500">
-                Set BEETS_WEB_PASSWORD below to enable native browser sign-in.
+                {status.auth.password_auto_generated
+                  ? `Username: ${status.auth.username || 'admin'}. Initial password was generated on first boot in /web-manager-data/.initial_admin_password. Set BEETS_WEB_PASSWORD below to replace it.`
+                  : `Username: ${status.auth.username || 'admin'}. Set BEETS_WEB_PASSWORD or BEETS_WEB_USERNAME below to change browser credentials.`}
               </div>
             </div>
           </div>

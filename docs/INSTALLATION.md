@@ -26,7 +26,15 @@ BEETS_API_URL=http://beets:8338
 BEETS_API_TOKEN=your-secure-beets-token
 ```
 
-Alternatively, run the automated setup script:
+`docker-compose.yml` defaults `BEETS_WEB_BIND_ADDRESS` to `127.0.0.1` (published as `127.0.0.1:8337->8337`) — the UI is reachable only from the machine running Docker. If Beets Web Manager runs on a NAS/server and you access it from another computer, set:
+
+```env
+BEETS_WEB_BIND_ADDRESS=0.0.0.0
+```
+
+This is the container's *listening* address, not a browser URL. From another device, browse to `http://<server-ip>:8337` using that server's actual LAN IP (`ip addr` / `hostname -I` / `ipconfig`, or your NAS's network settings) — not `0.0.0.0`.
+
+Alternatively, run the automated setup script, which asks this as a first-run question:
 ```bash
 ./setup.sh          # Linux / macOS
 .\setup.ps1         # Windows PowerShell
