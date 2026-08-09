@@ -312,6 +312,7 @@ from backend.audio_preferences import (
     mark_needs_replacement as _mark_music_format_needs_replacement,
     validate_audio_file as _validate_audio_file_preferences,
     validate_audio_tree as _validate_audio_tree_preferences,
+    validate_audio_properties as _validate_audio_properties,
     handle_rejected_download as _handle_rejected_audio_download,
 )
 from backend.transaction_engine import TransactionStore, metadata_diff
@@ -1252,6 +1253,13 @@ def _ytdlp_youtube_status(js_runtime: Optional[Dict[str, Any]] = None) -> Dict[s
 # ── Derived constants ──────────────────────────────────────────────────────────
 MUSIC_ROOT   = Path("/data/media/music")    # canonical library root on disk
 CONFIG_FILE  = "/config/config.yaml"        # main beets config
+# Unmatched-draft review metadata (submission text + JSON, no audio) is
+# web-manager orchestration state, not authoritative media -- it must not
+# live under MUSIC_ROOT, which the web manager neither owns nor (per the
+# shipped Compose topology) has mounted at all. /web-manager-data is the
+# one path volume every shipped Compose file actually gives this container
+# (SEC-002 Wave 8 architecture review).
+UNMATCHED_DRAFT_ROOT = Path(os.environ.get("UNMATCHED_DRAFT_DIR", "/web-manager-data/unmatched_drafts"))
 METADATA_CACHE_ROOT = Path(os.environ.get("METADATA_CACHE_DIR", "/config/.cache/metadata"))
 ARTIST_IMAGE_CACHE_DIR = METADATA_CACHE_ROOT / "artist-images"
 RELEASE_ART_CACHE_DIR = METADATA_CACHE_ROOT / "release-art"
@@ -1428,6 +1436,14 @@ _BEETS_PLUGINPATH_CONFIG = (
 )
 
 
+def _beet_import_timeout_for_count(count: int, minimum: int = 300, maximum: int = 1200) -> int:
+    """Scale beet import timeout with a known audio-file count while
+    keeping a hard cap. Shared formula for _beet_import_timeout() (local
+    scan) and reimport_disk() (engine-supplied audio_count -- SEC-002
+    Wave 8 ARCH-003, since this route's source is not locally scannable)."""
+    return max(minimum, min(maximum, 180 + (max(0, int(count or 0)) * 20)))
+
+
 def _beet_import_timeout(source_path: str, minimum: int = 300, maximum: int = 1200) -> int:
     """Scale beet import timeout with album size while keeping a hard cap."""
     count = 0
@@ -1439,7 +1455,7 @@ def _beet_import_timeout(source_path: str, minimum: int = 300, maximum: int = 12
             count = sum(1 for p in root.rglob("*") if p.is_file() and p.suffix.lower() in AUDIO_EXT)
     except Exception:
         count = 0
-    return max(minimum, min(maximum, 180 + (count * 20)))
+    return _beet_import_timeout_for_count(count, minimum, maximum)
 
 
 def _read_beets_plugin_list(config_path: str = "/config/config.yaml") -> List[str]:
@@ -5434,16 +5450,32 @@ def _source_audio_missing_track_scan(folder_path: str, existing_album_id: int,
     result["in_library"] = int(comp.get("in_library") or 0)
     result["missing_count"] = len(missing)
 
+    audio_files: List[Path] = []
+    inspect_evidence: Optional[Dict[str, Any]] = None
     try:
-        audio_files = sorted(
-            [p for p in source.rglob("*") if p.is_file() and p.suffix.lower() in AUDIO_EXT],
-            key=lambda p: str(p).lower(),
-        )
+        if source.exists() and source.is_dir():
+            audio_files = sorted(
+                [p for p in source.rglob("*") if p.is_file() and p.suffix.lower() in AUDIO_EXT],
+                key=lambda p: str(p).lower(),
+            )
     except Exception as ex:
         log.append(f"  [import] Source scan warning: {ex}")
-        return result
-    result["audio_count"] = len(audio_files)
-    if not audio_files:
+
+    if not audio_files and folder_path:
+        try:
+            inspect_res = beets_client.inspect_import_source(folder_path, "reimport")
+            if inspect_res.get("ok"):
+                inspect_evidence = inspect_res
+        except Exception as ex:
+            log.append(f"  [import] Remote source inspection warning: {ex}")
+
+    if inspect_evidence:
+        audio_entries = inspect_evidence.get("audio_files") or []
+        result["audio_count"] = len(audio_entries)
+    else:
+        result["audio_count"] = len(audio_files)
+
+    if not audio_files and not inspect_evidence:
         result["ok"] = True
         return result
 
@@ -5480,11 +5512,32 @@ def _source_audio_missing_track_scan(folder_path: str, existing_album_id: int,
             for t in missing
         ]
 
+    scan_candidates: List[Tuple[Path, str, int, int]] = []
+    if inspect_evidence:
+        for entry in inspect_evidence.get("audio_files") or []:
+            rel = _s(entry.get("relative_path"))
+            fpath = Path(folder_path) / rel if rel else Path(folder_path)
+            props = entry.get("properties") if isinstance(entry.get("properties"), dict) else {}
+            disc = int(props.get("disc") or 0)
+            track = int(props.get("track") or 0)
+            if not track or not disc:
+                path_disc, path_track = _audio_position_from_path(str(fpath))
+                if not track:
+                    track = path_track
+                if not disc or disc == 1:
+                    disc = path_disc or 1
+            title = _s(props.get("title")) or _slskd_title_guess_from_name(fpath.name) or fpath.stem
+            scan_candidates.append((fpath, title, disc, track))
+    else:
+        for fpath in audio_files:
+            disc, track = _audio_position_from_path(str(fpath))
+            title = _slskd_title_guess_from_name(fpath.name) or fpath.stem
+            scan_candidates.append((fpath, title, disc, track))
+
     selected_by_key: Dict[tuple, Dict[str, Any]] = {}
-    for fpath in audio_files:
-        disc, track = _audio_position_from_path(str(fpath))
+    for fpath, title, disc, track in scan_candidates:
         item = {
-            "title": _slskd_title_guess_from_name(fpath.name) or fpath.stem,
+            "title": title,
             "path": str(fpath),
             "track": int(track or 0),
             "disc": int(disc or 1),
@@ -5601,6 +5654,7 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
         result["artist_ok"] = True
 
     audio_files: List[Path] = []
+    inspect_evidence: Optional[Dict[str, Any]] = None
     try:
         if source.is_dir():
             audio_files = sorted(
@@ -5609,10 +5663,21 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
                 key=lambda p: str(p).lower(),
             )
     except Exception as ex:
-        app.logger.warning("Could not scan source folder: %s", type(ex).__name__)
+        app.logger.warning("Could not scan source folder locally: %s", type(ex).__name__)
+
+    if not audio_files and folder_path:
+        try:
+            inspect_res = beets_client.inspect_import_source(folder_path, "reimport")
+            if inspect_res.get("ok"):
+                inspect_evidence = inspect_res
+        except Exception:
+            pass
+
+    if not audio_files and not inspect_evidence:
         result["error"] = "Could not scan source folder."
         return result
-    result["audio_count"] = len(audio_files)
+
+    result["audio_count"] = len(inspect_evidence.get("audio_files") or []) if inspect_evidence else len(audio_files)
 
     acoustid_release_hits: Dict[str, int] = {}
     try:
@@ -5664,14 +5729,31 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
             "length": float(length or 0),
         })
 
-    for fpath in audio_files:
-        disc, track = _audio_position_from_path(str(fpath))
-        _add_candidate(
-            _slskd_title_guess_from_name(fpath.name) or fpath.stem,
-            str(fpath),
-            track=track,
-            disc=disc or 1,
-        )
+    if inspect_evidence:
+        for entry in inspect_evidence.get("audio_files") or []:
+            rel_path = _s(entry.get("relative_path"))
+            props = entry.get("properties") if isinstance(entry.get("properties"), dict) else {}
+            disc = int(props.get("disc") or 1)
+            track = int(props.get("track") or 0)
+            if not track or not disc:
+                path_disc, path_track = _audio_position_from_path(rel_path)
+                if not track:
+                    track = path_track
+                if not disc or disc == 1:
+                    disc = path_disc or 1
+            title = _s(props.get("title")) or _slskd_title_guess_from_name(Path(rel_path).name) or Path(rel_path).stem
+            mb_trackid = _s(props.get("mb_trackid"))
+            length = float(props.get("length") or 0.0)
+            _add_candidate(title, rel_path, track=track, disc=disc, mb_trackid=mb_trackid, length=length)
+    else:
+        for fpath in audio_files:
+            disc, track = _audio_position_from_path(str(fpath))
+            _add_candidate(
+                _slskd_title_guess_from_name(fpath.name) or fpath.stem,
+                str(fpath),
+                track=track,
+                disc=disc or 1,
+            )
 
     if existing_album_id:
         try:
@@ -10026,6 +10108,75 @@ def _validate_import_source_audio(path_value: str, log: list, *, reject_download
         _music_format_policy_rejection_error(len(rejected), handled_results, prefs)
     )
 
+def _validate_import_source_evidence(evidence: Dict[str, Any], log: list, *, reject_downloads: bool = True) -> Dict[str, Any]:
+    """Same policy as _validate_import_source_audio(), but evaluated against
+    already-computed engine-side audio evidence instead of walking the
+    source locally (SEC-002 Wave 8 ARCH-003: reimport_disk()'s source lives
+    on the Beets engine, not the web manager, so audio properties must come
+    from beets_client.inspect_import_source(), not a local ffprobe/rglob
+    pass this container cannot perform).
+
+    Uses validate_audio_properties() directly -- the pure, already-existing
+    evidence-in/decision-out half of the same code _validate_audio_tree_preferences()
+    calls -- so the accept/reject policy itself is identical, not
+    reimplemented.
+
+    Only _validate_import_source_audio()'s other six call sites (unrelated
+    to Wave 8) still use the local-filesystem path; this function is used
+    by reimport_disk() only. Rejected-download handling
+    (_handle_rejected_audio_download, which deletes/quarantines the file)
+    still assumes local access and is not migrated here -- rejections are
+    the uncommon case for an already-organized reimport source, and
+    building an engine-side quarantine/delete capability for that edge case
+    is deferred, not silently dropped (see docs/TECHNICAL_DEBT.md)."""
+    prefs = _music_format_preferences()
+    canonical_path = _s(evidence.get("canonical_path"))
+    try:
+        root_is_library = _path_is_under(Path(canonical_path).resolve(strict=False), MUSIC_ROOT.resolve(strict=False))
+    except Exception:
+        root_is_library = False
+
+    accepted: List[Dict[str, Any]] = []
+    rejected: List[Dict[str, Any]] = []
+    for entry in evidence.get("audio_files") or []:
+        rel = _s(entry.get("relative_path"))
+        abs_path = str(Path(canonical_path) / rel) if rel else canonical_path
+        result = _validate_audio_properties(entry.get("properties") or {}, prefs)
+        row = {"path": abs_path, **result}
+        (accepted if result.get("ok") else rejected).append(row)
+
+    for row in accepted:
+        msg = row.get("message") or "Accepted: audio matches Music Format Preferences"
+        log.append(f"  [audio] {msg}")
+    if not rejected:
+        return {"ok": True, "accepted": accepted, "rejected": rejected, "total": len(accepted)}
+
+    handled_results: List[Dict[str, Any]] = []
+    for row in rejected:
+        msg = row.get("message") or "Rejected download: audio does not match Music Format Preferences"
+        log.append(f"  [audio] {msg}: {Path(row.get('path') or '').name}")
+        if reject_downloads and not root_is_library and row.get("path"):
+            log.append("  [audio] Rejected-file quarantine/delete requires local access this route no longer has; leaving file in place for manual review.")
+    if root_is_library:
+        _mark_music_format_needs_replacement([
+            {
+                "path": row.get("path"),
+                "status": "Needs replacement",
+                "reason": "; ".join(row.get("reasons") or ["does not match Music Format Preferences"]),
+                "audio": row.get("properties") or {},
+                "queued_retry": True,
+            }
+            for row in rejected
+        ])
+        raise RuntimeError(
+            "Existing library audio does not match Music Format Preferences. "
+            "Current files were kept and marked Needs replacement."
+        )
+    raise RuntimeError(
+        _music_format_policy_rejection_error(len(rejected), handled_results, prefs)
+    )
+
+
 def _app_managed_download_path(path: Path) -> bool:
     managed_roots = [
         DOWNLOADS_ROOT / "_beets_missing_import",
@@ -10059,28 +10210,6 @@ def _preserve_torrent_source_path(path_value: str | Path) -> bool:
         return False
     roots = TORRENT_SOURCE_ROOTS or (DOWNLOADS_ROOT,)
     return any(_path_is_under(path, root) for root in roots)
-
-
-def _stage_preserved_torrent_source(aldir: str, artist: str, album: str,
-                                    log: list,
-                                    target_tracks: Optional[List[Dict[str, Any]]] = None) -> str:
-    audio_files = sorted(Path(p) for p in _audio_files_in_dir(aldir))
-    if not audio_files:
-        raise RuntimeError(f"No audio files found in torrent source folder: {aldir}")
-    staged = _stage_selected_audio_files(
-        aldir,
-        audio_files,
-        artist,
-        album,
-        log,
-        force_stage=True,
-        target_tracks=target_tracks,
-    )
-    log.append(
-        "  [torrent] Preserving torrent source; importing staged copy "
-        f"instead of moving files from {aldir}"
-    )
-    return staged
 
 
 def _album_dir_for_art(album) -> Optional[Path]:
@@ -22310,16 +22439,50 @@ def reimport_disk():
         return jsonify({"ok": False, "error": "aldir required"}), 400
     if not mb_albumid:
         return jsonify({"ok": False, "error": "mb_albumid required"}), 400
-    if not Path(aldir).exists():
-        return jsonify({"ok": False, "error": f"Directory not found: {aldir}"}), 400
-    # Safety: must be under the music root OR the downloads folder
-    _allowed_roots = ["/data/media/music", "/data/torrents/music"]
-    _aldir_ok = any(
-        Path(aldir).resolve().is_relative_to(r) for r in _allowed_roots
-    )
-    if not _aldir_ok:
-        return jsonify({"ok": False,
-                        "error": "aldir must be under /data/media/music or /data/torrents/music"}), 400
+    # SEC-002 Wave 8 ARCH-003: _resolve_import_review_source_path() validated
+    # existence/containment/symlink-safety against THIS process's own
+    # filesystem -- which has no view of MUSIC_ROOT/DOWNLOADS_ROOT in the
+    # shipped web-manager topology, so it could never succeed for a real
+    # path (confirmed by the mandatory two-service runtime test). The Beets
+    # engine owns those mounts, so it -- not the web manager -- must be the
+    # one to validate and inspect the source. inspect_import_source() is
+    # engine-authoritative: it reuses the engine's own resolve_safe_path()
+    # (full realpath resolution + root containment, closing symlink escapes
+    # the same way) and returns only the canonical path plus bounded audio
+    # evidence, never letting the caller pick its own trusted root.
+    try:
+        import_source_evidence = beets_client.inspect_import_source(aldir, operation="reimport")
+    except BeetsAuthError:
+        return jsonify({"ok": False, "error": "Beets engine authentication failed."}), 502
+    except BeetsUnavailableError:
+        return jsonify({"ok": False, "error": "Beets engine is unavailable."}), 502
+    except BeetsError as exc:
+        # The engine's /imports/source/inspect only ever returns one of a
+        # fixed set of stable error_code strings (see inspect_import_source()
+        # in backend/beets_control_agent.py) -- BeetsClient._request() wraps
+        # that string as this exception's message. Still, never interpolate
+        # the exception text directly into a response: _request() falls back
+        # to embedding up to 200 raw response-body characters for any
+        # non-JSON error response it doesn't recognize (e.g. an unexpected
+        # proxy/framework error page), which could carry stack-trace-shaped
+        # text. Map only the known codes to a safe message; anything else
+        # collapses to one generic string.
+        _known_source_errors = {
+            "invalid_path": "Import source is outside the allowed roots or does not exist.",
+            "root_self_rejected": "Import source cannot be an entire trusted root.",
+            "invalid_operation": "Import source inspection request was malformed.",
+            "inspection_failed": "Could not inspect the import source.",
+        }
+        _error_text = next(
+            (msg for code, msg in _known_source_errors.items() if code in str(exc)),
+            "Import source rejected.",
+        )
+        return jsonify({"ok": False, "error": _error_text}), 400
+    if not import_source_evidence.get("ok"):
+        return jsonify({"ok": False, "error": "Import source rejected."}), 400
+    # Only the engine's own canonical path is ever used from here on --
+    # the raw client-supplied aldir is never reused after this point.
+    aldir = str(import_source_evidence["canonical_path"])
     if not existing_album_id:
         try:
             existing_ids = _library_album_ids_for_folder(aldir)
@@ -22340,15 +22503,14 @@ def reimport_disk():
             re.sub(r'\s*[\(\[]\d{4}[\)\]]\s*$', '', Path(aldir).name).strip()
         )
         source_is_music_library = str(aldir).rstrip("/").startswith("/data/media/music/")
-        if _preserve_torrent_source_path(aldir):
-            aldir = _stage_preserved_torrent_source(
-                aldir,
-                _guess_artist,
-                _guess_album,
-                log,
-                target_tracks=wanted_tracks or None,
-            )
-            source_is_music_library = False
+        # SEC-002 Wave 8 final mutation binding: torrent-staged sources are no
+        # longer preserved here as a separate up-front step. reimport_source_atomic()
+        # (called at the actual import mutation below) detects a torrent-staged
+        # source itself and performs the protective copy internally, immediately
+        # before the same Beets import it protects -- preserving here AND letting
+        # the atomic endpoint preserve again would silently double-copy. aldir
+        # stays the original canonical torrent source throughout preflight; only
+        # the final mutation call operates on the engine's own preserved copy.
         def _maybe_queue_review(folder_path: str, suggestion: Optional[dict],
                                 reason: str, *, allow_existing: bool = False,
                                 evidence: Optional[Dict[str, Any]] = None) -> bool:
@@ -22378,6 +22540,17 @@ def reimport_disk():
             log.append(f"[1/3] {repair_desc}")
             repair_cfg = _write_job_beets_config("/tmp/beets_existing_album_repair.yaml")
             base_std = [BEET_BIN, "-c", repair_cfg]
+            # _beet_run/_parse_remote_beet_command strips any "-c <path>" token
+            # from base_std before sending the command to the control agent --
+            # a local web-manager path has no meaning on the remote engine.
+            # The config content itself (plugin list, path templates, disabled
+            # lyrics/replaygain auto-fetch) still needs to reach the engine, so
+            # it's forwarded explicitly via config_override below rather than
+            # silently lost.
+            try:
+                repair_cfg_content = Path(repair_cfg).read_text(encoding="utf-8")
+            except Exception:
+                repair_cfg_content = ""
             expected_tracks = _mb_release_track_count(mb_albumid, log)
             if not expected_tracks:
                 raise RuntimeError(
@@ -22434,7 +22607,8 @@ def reimport_disk():
                 ("write", ["write", f"album_id:{aid}"], 120),
                 ("move", ["move", f"album_id:{aid}"], 120),
             ]:
-                r2 = _beet_run(base_std + args, log, timeout=tmo, env=env, cancel=cancel_event)
+                r2 = _beet_run(base_std + args, log, timeout=tmo, env=env, cancel=cancel_event,
+                               config_override=repair_cfg_content)
                 out2 = _ANSI_RE.sub('', (r2.stdout + r2.stderr).strip())
                 if out2:
                     log.append(f"  [{cmd_label}] {out2[:300]}")
@@ -23002,7 +23176,7 @@ def reimport_disk():
         # so they don't fire web requests on every track during write/mbsync.
         temp_cfg = "/tmp/beets_reimport_disk.yaml"
         _plugins = _beet_plugins()
-        Path(temp_cfg).write_text(
+        temp_cfg_content = (
             "include:\n  - /config/config.yaml\n"
             + _BEETS_PLUGINPATH_CONFIG
             + (f"plugins: {_plugins}\n" if _plugins else "")
@@ -23019,136 +23193,160 @@ def reimport_disk():
             "replaygain:\n"
             "  auto: no\n"
         )
-        # Use temp_cfg (no slow plugins) for ALL beet sub-commands in this job
+        Path(temp_cfg).write_text(temp_cfg_content)
+        # Use temp_cfg (no slow plugins) for ALL beet sub-commands in this job.
+        # The "-c temp_cfg" token itself is stripped by _beet_run before the
+        # command reaches the control agent (a local web-manager path has no
+        # meaning on the remote engine) -- temp_cfg_content is forwarded
+        # explicitly via config_override on every _beet_run call below so the
+        # copy/move/duplicate_action/lyrics/replaygain overrides still apply
+        # on the engine side, not just this now-unused local file.
         base_tmp = [BEET_BIN, "-c", temp_cfg]
         base_std = base_tmp   # was "/config/config.yaml" — avoid triggering lyrics/replaygain
 
-        _validate_import_source_audio(aldir, log, reject_downloads=True)
+        # Uses the engine-supplied evidence captured at request time (see
+        # import_source_evidence above), not a local scan -- this route's
+        # source lives on the Beets engine, not the web manager.
+        _validate_import_source_evidence(import_source_evidence, log, reject_downloads=True)
         log.append(f"[1/3] Importing & tagging '{Path(aldir).name}' in-place with MB {mb_albumid}…")
-        t_before = time.time() - 5
         import_timed_out = False
-        import_timeout = _beet_import_timeout(aldir)
-        try:
-            r = subprocess.run(
-                base_tmp + ["import", "-q", "--noincremental", "--quiet-fallback", "asis",
-                            "--search-id", mb_albumid, aldir],
-                capture_output=True, text=True, timeout=import_timeout, env=env)
-        except subprocess.TimeoutExpired:
-            import_timed_out = True
-            log.append(f"  ⚠ 'beet import' timed out after {import_timeout}s — checking if files were processed")
-            class _R:
-                returncode = 0; stdout = ""; stderr = ""
-            r = _R()
-        out = _ANSI_RE.sub('', (r.stdout + r.stderr).strip())
-        if out:
-            log.append(out[:400])
-        # If beet reported the album already exists (e.g. called from downloads folder),
-        # delete the source — safe only when not under the music library root.
-        if existing_album_id and any(p in out.lower() for p in (
-                "already in the library", "already in library",
-                "already imported", "no files imported", "nothing was imported")):
-            log.append("  Existing-album import reported duplicates; keeping source until merge validation completes")
+        import_timeout = _beet_import_timeout_for_count(import_source_evidence.get("audio_count", 0))
+        # SEC-002 Wave 8 final mutation binding: the actual Beets import now
+        # runs through the engine's reviewed reimport_source_atomic() (POST
+        # /imports/reimport), not a bare `_beet_run(... "import" ...)`. This
+        # binds the final mutation itself -- not just the earlier inspect
+        # step -- to a fresh, engine-side re-verification of the source
+        # signature and, where real deterministic evidence exists, album
+        # identity, immediately before any file is touched. See
+        # docs/TECHNICAL_DEBT.md ("SEC-002 Wave 8: production reimport
+        # binding") for the evidence-selection rationale and known limits.
+        expected_identity: Dict[str, Any] = {}
+        if existing_album_id:
+            # Strong, DB-backed evidence: the engine looks this row up
+            # itself and only objects if the source audio's own embedded
+            # tags actively conflict with it -- absence of embedded tags
+            # (the common case for a folder being repaired in place) is not
+            # itself treated as a conflict. See verify_deterministic_identity().
+            expected_identity["existing_album_id"] = existing_album_id
         else:
-            _delete_if_already_in_library(aldir, out, log)
+            # No prior DB row exists. mb_albumid (already resolved, and for
+            # existing-library/known folders already preflight-matched
+            # above) is the only concrete deterministic claim available for
+            # a brand-new folder. If the source has no embedded MusicBrainz
+            # tags to confirm it against -- the common case for freshly
+            # downloaded, not-yet-tagged audio -- the engine correctly
+            # returns review_required rather than importing on trust alone.
+            expected_identity["mb_albumid"] = mb_albumid
+
+        if cancel_event and cancel_event.is_set():
+            raise RuntimeError("cancelled")
+        try:
+            atomic_res = beets_client.reimport_source(
+                aldir,
+                expected_source_signature=import_source_evidence.get("source_signature"),
+                expected_deterministic_identity=expected_identity,
+                beets_options={
+                    "mb_albumid": mb_albumid,
+                    "config_override": temp_cfg_content,
+                    "duplicate_action": "keep" if existing_album_id else "remove",
+                },
+                timeout=import_timeout + 15.0,
+            )
+        except BeetsAuthError:
+            raise RuntimeError("Beets engine authentication failed.")
+        except BeetsUnavailableError:
+            raise RuntimeError("Beets engine is unavailable.")
+        except BeetsError:
+            raise RuntimeError("Beets import request failed.")
+
+        if not atomic_res.get("ok"):
+            err_code = atomic_res.get("error_code", "import_failed")
+            err_msg = str(atomic_res.get("message") or err_code)
+            if err_code == "import_failed" and "timed out" in err_msg.lower():
+                # Soft-timeout recovery, matching the previous behavior: the
+                # Beets CLI process may exceed its timeout while having
+                # still completed the actual mutation. The web manager has
+                # its own authoritative read access to the same Beets
+                # library DB, so check directly rather than treating this
+                # as a hard failure immediately.
+                import_timed_out = True
+                log.append(f"  ⚠ Beets import timed out — checking if files were processed")
+            elif err_code in ("review_required", "identity_mismatch", "stale_source",
+                               "identity_verification_failed"):
+                _review_reasons = {
+                    "review_required": "Could not verify this source's MusicBrainz identity with enough confidence to import automatically.",
+                    "identity_mismatch": "This source's embedded MusicBrainz identity conflicts with the requested target; refusing to import automatically.",
+                    "stale_source": "Source files changed after they were inspected; refusing to import a possibly different set of files.",
+                    "identity_verification_failed": "Could not verify this source's identity against the library database.",
+                }
+                review_reason = _review_reasons[err_code]
+                _maybe_queue_review(
+                    aldir,
+                    {
+                        "mb_albumid": mb_albumid,
+                        "mb_url": f"https://musicbrainz.org/release/{mb_albumid}",
+                        "mb_valid": True,
+                        "confidence": "low",
+                        "albumartist": _guess_artist,
+                        "album": _guess_album,
+                        "reason": review_reason,
+                    },
+                    review_reason,
+                    allow_existing=bool(existing_album_id),
+                )
+                raise RuntimeError(f"{review_reason} Queued for Review without changing library files.")
+            else:
+                raise RuntimeError(f"Beets import failed ({err_code}).")
+
+        # atomic_res never carries raw stdout/stderr (SEC-002 Wave 8
+        # sanitization). The previous "already in the library" phrase-
+        # detection cleanup relied on that text and, in the shipped
+        # topology, already had no local view of engine-owned download
+        # paths to act on regardless -- calling it with an empty string
+        # preserves its existing (already inert here) behavior.
+        _delete_if_already_in_library(aldir, "", log)
 
         # ── Find album in DB ───────────────────────────────────────────────────
         log.append("[2/3] Locating album in library…")
-        time.sleep(1)
         album_ids: list = []
-        item_ids:  list = []
+        item_ids: list = []
         strategy = ""
 
-        # Load all rows once — reused by strategies A and B
-        all_rows: list = []
-        try:
-            with _db(text_factory=bytes) as con:
-                all_rows = con.execute(
-                    "SELECT id, album_id, path, added FROM items").fetchall()
-        except Exception as ex:
-            log.append(f"  DB warning (read): {ex}")
-
-        # A: items whose path is under aldir (absolute OR relative to music root)
-        if all_rows:
-            abs_prefix_b = aldir.encode('utf-8').rstrip(b'/') + b'/'
-            rel_raw = aldir
-            if rel_raw.startswith("/data/media/music/"):
-                rel_raw = rel_raw[len("/data/media/music/"):]
-            rel_prefix_b = rel_raw.encode('utf-8').rstrip(b'/') + b'/'
-            seen_aids: set = set()
-            for row_id, album_id, raw_path, added in all_rows:
-                if raw_path is None: continue
-                p = raw_path if isinstance(raw_path, bytes) else str(raw_path).encode()
-                if not (p.startswith(abs_prefix_b) or p.startswith(rel_prefix_b)):
-                    continue
-                if album_id and album_id not in seen_aids:
-                    seen_aids.add(album_id); album_ids.append(album_id)
-                elif not album_id:
-                    item_ids.append(row_id)
-            if album_ids or item_ids:
-                strategy = "aldir path"
-
-        # B: recently added (beet move may have relocated the folder) — reuse all_rows
-        if (not source_is_music_library and not existing_album_id
-                and not album_ids and not item_ids and all_rows):
-            music_root_b = b"/data/media/music/"
-            seen_aids = set()
-            for row_id, album_id, raw_path, added in all_rows:
-                if raw_path is None: continue
-                p = raw_path if isinstance(raw_path, bytes) else str(raw_path).encode()
-                is_abs = p.startswith(music_root_b)
-                is_rel = not p.startswith(b"/")
-                if not (is_abs or is_rel): continue
-                if added and float(added) < t_before: continue
-                if album_id and album_id not in seen_aids:
-                    seen_aids.add(album_id); album_ids.append(album_id)
-                elif not album_id:
-                    item_ids.append(row_id)
-            if album_ids or item_ids:
-                strategy = "recently added"
-
-        # Existing-album repairs should only fall back to the known album row.
-        if existing_album_id and not album_ids and not item_ids:
-            try:
-                with _db() as con:
-                    cnt = int(con.execute(
-                        "SELECT COUNT(*) FROM items WHERE album_id=?",
-                        (existing_album_id,),
-                    ).fetchone()[0] or 0)
-                if cnt:
-                    album_ids.append(existing_album_id)
-                    strategy = "existing album"
-            except Exception as ex:
-                log.append(f"  DB warning (existing album): {ex}")
-
-        # C: album name search
-        if not album_ids and not item_ids:
-            album_guess = _guess_album or _restore_time_colon_title(
-                re.sub(r'\s*[\(\[]\d{4}[\)\]]\s*$', '', Path(aldir).name).strip()
-            )
+        if not import_timed_out and atomic_res.get("ok"):
+            aid = atomic_res.get("album_id")
+            if aid and atomic_res.get("album_id_verified") and not atomic_res.get("album_lookup_failed"):
+                album_ids = [int(aid)]
+                strategy = "engine-verified mb_albumid"
+            else:
+                raise RuntimeError(
+                    "Beets import completed but the engine could not deterministically "
+                    "verify the resulting album; refusing to guess which library row it "
+                    "created."
+                )
+        else:
+            # Soft-timeout recovery: the mutation call itself reported a
+            # timeout, so fall back to a direct, deterministic DB lookup by
+            # mb_albumid (the same authoritative key the engine's own
+            # atomic endpoint uses), never a heuristic path/name guess.
+            time.sleep(1)
             try:
                 with _db(row_factory=sqlite3.Row) as con:
-                    rows = con.execute(
-                        "SELECT id, album_id FROM items WHERE album = ? LIMIT 200",
-                        (album_guess,)).fetchall()
-                for row in rows:
-                    if row["album_id"] and row["album_id"] not in album_ids:
-                        album_ids.append(row["album_id"])
-                    elif not row["album_id"] and row["id"] not in item_ids:
-                        item_ids.append(row["id"])
-                if album_ids or item_ids:
-                    strategy = f"album name ({album_guess!r})"
+                    row = con.execute(
+                        "SELECT id FROM albums WHERE mb_albumid = ?", (mb_albumid,)
+                    ).fetchone()
+                    if row:
+                        cnt = int(con.execute(
+                            "SELECT COUNT(*) FROM items WHERE album_id=?", (row["id"],)
+                        ).fetchone()[0] or 0)
+                        if cnt:
+                            album_ids = [int(row["id"])]
+                            strategy = "post-timeout mb_albumid lookup"
             except Exception as ex:
-                log.append(f"  DB warning (name): {ex}")
-
-        if not album_ids and not item_ids:
-            if import_timed_out:
+                log.append(f"  DB warning (post-timeout lookup): {ex}")
+            if not album_ids:
                 raise RuntimeError("import timed out and album was not found in the Beets DB")
-            raise RuntimeError("album was not found in the Beets DB after import")
-        else:
-            if album_ids:
-                log.append(f"Found {len(album_ids)} album(s) via {strategy}: {album_ids}")
-            else:
-                log.append(f"Found {len(item_ids)} item(s) via {strategy}")
+
+        log.append(f"Found {len(album_ids)} album(s) via {strategy}: {album_ids}")
 
         # ── Retag + rename ────────────────────────────────────────────────────
         log.append("[3/3] Matching tracks, writing tags, renaming files…")
@@ -23350,7 +23548,7 @@ def reimport_disk():
             # names, etc.) from MusicBrainz. beet import already stamped mb_albumid,
             # so no separate modify step is needed.
             r2 = _beet_run(base_std + ["mbsync", f"album_id:{aid}"], log,
-                           timeout=120, env=env, cancel=cancel_event)
+                           timeout=120, env=env, cancel=cancel_event, config_override=temp_cfg_content)
             out2 = _ANSI_RE.sub('', (r2.stdout + r2.stderr).strip())
             if out2:
                 log.append(f"  [mbsync] {out2[:300]}")
@@ -23383,7 +23581,8 @@ def reimport_disk():
                 ("write",   ["write",  f"album_id:{aid}"], 120),
                 ("rename",  ["move",   f"album_id:{aid}"], 120),
             ]:
-                r2 = _beet_run(base_std + args, log, timeout=tmo, env=env, cancel=cancel_event)
+                r2 = _beet_run(base_std + args, log, timeout=tmo, env=env, cancel=cancel_event,
+                               config_override=temp_cfg_content)
                 out2 = _ANSI_RE.sub('', (r2.stdout + r2.stderr).strip())
                 if out2:
                     log.append(f"  [{cmd_label}] {out2[:300]}")
@@ -23440,7 +23639,8 @@ def reimport_disk():
                 ("write",   ["write",  f"id:{iid}"], 30),
                 ("rename",  ["move",   f"id:{iid}"], 30),
             ]:
-                r2 = _beet_run(base_std + args, log, timeout=tmo, env=env, cancel=cancel_event)
+                r2 = _beet_run(base_std + args, log, timeout=tmo, env=env, cancel=cancel_event,
+                               config_override=temp_cfg_content)
                 out2 = _ANSI_RE.sub('', (r2.stdout + r2.stderr).strip())
                 if out2:
                     log.append(f"  [{cmd_label}] {out2[:200]}")
@@ -23464,7 +23664,8 @@ def reimport_disk():
                 ("embedart", ["embedart", "-y", f"album_id:{_art_aid}"], 60),
             ]:
                 try:
-                    _r_art = _beet_run(base_std + _art_args, log, timeout=_art_tmo, env=env, cancel=cancel_event)
+                    _r_art = _beet_run(base_std + _art_args, log, timeout=_art_tmo, env=env, cancel=cancel_event,
+                                       config_override=temp_cfg_content)
                     _art_out = _ANSI_RE.sub('', (_r_art.stdout + _r_art.stderr).strip())
                     if _art_out:
                         log.append(f"  [{_art_cmd}] {_art_out[:200]}")
@@ -24795,10 +24996,23 @@ def _ai_batch_initial_state(batch_job_id: str, source_path: str, job_id: str = "
 
 def _ai_batch_find_audio_dirs(root: str) -> List[str]:
     result: List[str] = []
-    for dirpath, _dirnames, filenames in os.walk(root):
-        if any(Path(f).suffix.lower() in _AI_BATCH_AUDIO_EXTS for f in filenames):
-            result.append(dirpath)
-    return sorted(result)
+    cursor = None
+    try:
+        while True:
+            res = beets_client.discover_import_sources(root, operation="ai_batch_discovery", cursor=cursor)
+            if not res.get("ok"):
+                raise RuntimeError(f"Engine discovery failed for {root}: {res.get('error_code', 'unknown_error')}")
+            candidates = res.get("candidates") or []
+            for cand in candidates:
+                cpath = cand.get("canonical_path")
+                if cpath and cpath not in result:
+                    result.append(cpath)
+            if res.get("complete") or not res.get("continuation"):
+                break
+            cursor = res.get("continuation")
+        return sorted(result)
+    except (BeetsError, BeetsUnavailableError, BeetsAuthError) as exc:
+        raise RuntimeError(f"Engine discovery failed for {root}: {exc}") from exc
 
 
 def _ai_batch_already_in_library(folder_path: str) -> bool:
@@ -25523,6 +25737,21 @@ def _ai_batch_reconnect_response(batch_job_id: str):
 
 
 def _start_ai_batch_job(scan_path: str, recover_batch_job_id: str = "", *, retry_failed: bool = False):
+    # Authoritative gate, not merely a route-level convenience: scan_path
+    # reaches an unbounded recursive filesystem walk
+    # (_ai_batch_find_audio_dirs) that queues every discovered folder for
+    # AI-driven import review. Both callers of this function (a fresh
+    # /api/ai-batch-import request and /api/ai-batch-import/recover, which
+    # can source scan_path from a stored job-state file rather than the
+    # current request) must go through this check -- stored state is
+    # untrusted at execution time just like a fresh request body.
+    trusted_scan_path, scan_path_error = _resolve_import_review_source_path(
+        scan_path, allow_music=True, expected_type="dir",
+    )
+    if scan_path_error or trusted_scan_path is None:
+        return jsonify({"ok": False, "error": scan_path_error or f"Path not found: {scan_path}"}), 400
+    scan_path = str(trusted_scan_path)
+
     batch_job_id = recover_batch_job_id or uuid.uuid4().hex
 
     # Atomic check-then-start protection: _ai_batch_reserve_worker is the
@@ -26161,14 +26390,26 @@ def start_ai_batch_import():
         state = _ai_batch_find_state(recover_batch_job_id)
         if not state:
             return jsonify({"ok": False, "error": "AI batch state not found"}), 404
+        # Stored job state is untrusted at execution time (it can be old,
+        # or a recover/retry call can race a state file edited between
+        # requests) -- revalidate exactly like a fresh caller-supplied path,
+        # not "already validated when queued".
         scan_path = _s(state.get("source_path") or payload.get("path") or "/data/torrents/music").strip()
     else:
         scan_path = _s(payload.get("path") or "/data/torrents/music").strip()
 
     if not scan_path:
         return jsonify({"ok": False, "error": "Import source path is required"}), 400
-    if not Path(scan_path).exists():
-        return jsonify({"ok": False, "error": f"Path not found: {scan_path}"}), 400
+    # scan_path feeds an unbounded recursive os.walk() (_ai_batch_find_audio_dirs)
+    # that queues every discovered folder for AI-driven import review -- it
+    # must be confined to the same trusted import-source roots as the rest
+    # of the import-review/AI-suggest flow, not merely checked for existence.
+    trusted_scan_path, scan_path_error = _resolve_import_review_source_path(
+        scan_path, allow_music=True, expected_type="dir",
+    )
+    if scan_path_error or trusted_scan_path is None:
+        return jsonify({"ok": False, "error": scan_path_error or f"Path not found: {scan_path}"}), 400
+    scan_path = str(trusted_scan_path)
     if not os.environ.get("OPENAI_API_KEY", ""):
         return jsonify({"ok": False, "error": "OPENAI_API_KEY not configured"}), 400
 
@@ -26618,19 +26859,56 @@ def library_sync_deleted():
     return jsonify({"ok": True, "job_id": job.job_id})
 
 
+_UNMATCHED_DRAFT_TRACK_FIELDS = ("title", "duration")
+
+
+def _redact_unmatched_draft_tracks(tracks: Any) -> List[Dict[str, str]]:
+    """Project client-supplied track entries down to a fixed, known-safe
+    field set before they can reach persisted draft.json/submission text.
+
+    tracks is client-controlled free-form JSON; without this, an extra
+    field (or a title string itself) could carry a stray
+    Authorization/api_key/password/URL-credential value straight into a
+    file. Only title/duration are ever meaningful for a submission draft,
+    so this also drops anything else outright rather than merely
+    redacting it in place.
+    """
+    if not isinstance(tracks, list):
+        return []
+    result: List[Dict[str, str]] = []
+    for entry in tracks:
+        if not isinstance(entry, dict):
+            continue
+        result.append({
+            field: _redact_security_text(entry.get(field) or "")
+            for field in _UNMATCHED_DRAFT_TRACK_FIELDS
+        })
+    return result
+
+
 @app.post("/api/library/unmatched-draft")
 def create_unmatched_draft():
-    """Create a local album draft for releases not found in MusicBrainz/Discogs.
+    """Create a local review draft for releases not found in MusicBrainz/Discogs.
 
     Writes a musicbrainz_submission.txt and draft.json into a clean
-    Artist/Album (Year) [unmatched-<id>]/ folder under the music root.
+    Artist/Album (Year) [unmatched-<id>]/ folder under UNMATCHED_DRAFT_ROOT.
+
+    This is web-manager orchestration/review state, not authoritative media:
+    no audio file is placed or referenced here, and nothing downstream reads
+    these files back to drive an import. Per SEC-002 Wave 8's architecture
+    review, it must not be written under MUSIC_ROOT -- the web manager does
+    not own that root and, in the shipped Compose topology, does not even
+    have it mounted. If a draft is later actually imported into the
+    library, that import goes through the normal reimport_disk()/Beets
+    engine path, which owns MUSIC_ROOT and validates its own identity
+    evidence at that time; this route only ever prepares review metadata.
     """
     payload = request.get_json(silent=True) or {}
     artist = _s(payload.get("artist") or "").strip()
     album = _s(payload.get("album") or "").strip()
     year = _s(payload.get("year") or "").strip()
-    source_url = _s(payload.get("source_url") or "").strip()
-    tracks = payload.get("tracks") or []
+    source_url = _redact_security_text(payload.get("source_url") or "").strip()
+    tracks = _redact_unmatched_draft_tracks(payload.get("tracks") or [])
 
     if not artist:
         return jsonify({"ok": False, "error": "artist is required"}), 400
@@ -26643,8 +26921,50 @@ def create_unmatched_draft():
     slug_album = re.sub(r"[\s_]+", "-", re.sub(r"[^\w\s-]", "", album.lower())).strip("-")
     local_id = f"{slug_artist}-{slug_album}"[:60].strip("-") or "unmatched"
 
-    album_folder = f"{album} ({year}) [unmatched-{local_id}]" if year else f"{album} [unmatched-{local_id}]"
-    draft_path = MUSIC_ROOT / artist / album_folder
+    # artist/album/year are client-supplied free text with no validation
+    # above other than non-empty; sanitize each into a single safe path
+    # component BEFORE building the folder name, so an embedded "/" or a
+    # pure ".."/"." value can never smuggle a path separator or traversal
+    # segment into draft_path (Path's / operator re-parses embedded
+    # separators as additional components -- concatenating first and
+    # sanitizing the combined string after the fact would not catch that).
+    safe_artist = _safe_path_component(artist, "Unknown Artist")
+    safe_album = _safe_path_component(album, "Unknown Album")
+    safe_year = _safe_path_component(year, "") if year else ""
+
+    album_folder = f"{safe_album} ({safe_year}) [unmatched-{local_id}]" if safe_year else f"{safe_album} [unmatched-{local_id}]"
+    draft_path = UNMATCHED_DRAFT_ROOT / safe_artist / album_folder
+
+    try:
+        draft_root_resolved = UNMATCHED_DRAFT_ROOT.resolve(strict=False)
+        draft_path_resolved = draft_path.resolve(strict=False)
+    except Exception:
+        return jsonify({"ok": False, "error": "Could not resolve draft folder path."}), 400
+    if not _path_is_under(draft_path_resolved, draft_root_resolved):
+        # Defense-in-depth: sanitization above should already make this
+        # unreachable, but the destructive mkdir/write below must never
+        # run against an unverified path regardless.
+        return jsonify({"ok": False, "error": "Draft folder is outside the allowed draft root."}), 400
+    draft_path = draft_path_resolved
+
+    # Collision policy: two different raw (artist, album) pairs can sanitize
+    # to the same folder (e.g. "A/B" and "A\B" both become "A_B"). Silently
+    # overwriting a previous, unrelated draft would lose it without warning.
+    # Re-submitting the SAME (artist, album) is treated as an idempotent
+    # update; a different pair mapping to the same sanitized folder is a
+    # genuine collision and must not silently overwrite the existing draft.
+    existing_draft_json = draft_path / "draft.json"
+    if existing_draft_json.exists():
+        try:
+            existing_data = json.loads(existing_draft_json.read_text(encoding="utf-8"))
+        except Exception:
+            existing_data = {}
+        if existing_data.get("artist") != artist or existing_data.get("album") != album:
+            return jsonify({
+                "ok": False,
+                "error": "A different draft already maps to this folder name.",
+                "local_id": local_id,
+            }), 409
 
     try:
         draft_path.mkdir(parents=True, exist_ok=True)
@@ -26663,7 +26983,7 @@ def create_unmatched_draft():
         f"Year: {year}\n"
         f"Source URL: {source_url}\n"
         f"\nTracklist:\n{tracklist_lines}\n"
-        f"\nLocal path: {draft_path}\n"
+        f"\nLocal draft path: {draft_path}\n"
         f"Status: unmatched — not found in MusicBrainz/Discogs\n"
         f"Notes: Local release. Submit at https://musicbrainz.org/release/add\n"
     )
@@ -34160,9 +34480,17 @@ def _clean_malformed_release_group_stamps(value: str) -> str:
 
 
 def _safe_path_component(value: Any, fallback: str = "untitled") -> str:
+    import unicodedata
     text = _s(value).strip() or fallback
     text = text.replace("/", "_").replace("\\", "_")
     text = re.sub(r'[\x00-\x1f<>:"?*|]', "_", text)
+    # Unicode format/control characters (bidi overrides such as U+202E, zero-
+    # width joiners/spaces, BOM, etc.) aren't covered by the ASCII-only class
+    # above but can still make a folder name render deceptively even though
+    # it's already fully contained under the trusted root -- strip them too
+    # rather than merely relying on path containment for what is ultimately
+    # a display-spoofing concern, not a traversal one.
+    text = "".join("_" if unicodedata.category(ch) in ("Cf", "Cc") else ch for ch in text)
     text = re.sub(r"\s+", " ", text).strip()
     text = text.rstrip(". ")
     return text or fallback
