@@ -1141,6 +1141,7 @@ def verify_deterministic_identity(
                 con.row_factory = sqlite3.Row
                 cur = con.cursor()
                 row = cur.execute("SELECT id, mb_albumid FROM albums WHERE id = ?", (target_existing_album_id,)).fetchone()
+                item_rows = cur.execute("SELECT path FROM items WHERE album_id = ?", (target_existing_album_id,)).fetchall()
         except Exception:
             # A verification query that failed to run is not proof the
             # target is valid -- treat it exactly like "could not confirm",
@@ -1152,6 +1153,34 @@ def verify_deterministic_identity(
         db_mb_albumid = str(row["mb_albumid"] or "").strip().lower()
         if db_mb_albumid and source_album_mbids and db_mb_albumid not in source_album_mbids:
             return {"ok": False, "error_code": "identity_mismatch", "message": "Source audio MBID conflicts with library album"}
+        if not source_album_mbids:
+            # existing_album_id alone only proves that DB row exists -- it
+            # says nothing about whether THIS source folder's content is
+            # that album's content. Without embedded tags to cross-check
+            # (the branch above), the only other legitimate proof is that
+            # this source folder is where the album's own library items
+            # already live: an unrelated trusted folder plus an arbitrary
+            # existing_album_id must never be treated as authorized just
+            # because the row happens to exist (found via adversarial
+            # testing during Claude's final review of this exact code path
+            # -- the original version returned ok: True here for any
+            # trusted-but-unrelated, untagged source).
+            source_canonical = str(source_inspect.get("canonical_path") or "")
+            bound = False
+            for item_row in item_rows:
+                raw_path = str(item_row["path"] or "")
+                if not raw_path:
+                    continue
+                item_abs = raw_path if raw_path.startswith("/") else os.path.join(MUSIC_LIBRARY_PATH, raw_path)
+                if source_canonical and _path_is_within(item_abs, source_canonical):
+                    bound = True
+                    break
+            if not bound:
+                return {
+                    "ok": False,
+                    "error_code": "review_required",
+                    "message": "Could not verify this source folder is the existing album's own library location, and the source has no embedded tags to cross-check",
+                }
 
     if not target_mb_albumid and not target_mb_rgid and not target_existing_album_id:
         # A caller that supplied expected_identity but none of its actual
@@ -1252,7 +1281,10 @@ def reimport_source_atomic(
         # Beets' path template for no reason; only the preserved-staging
         # branch (a disposable protected copy made specifically to be
         # organized into the library) should ever move/copy anything.
-        config_override = "import:\n  copy: no\n  move: no\n"
+        # duplicate_action has no CLI flag (see below) so it must be
+        # included here too, or this default-config path would silently
+        # drop it.
+        config_override = f"import:\n  copy: no\n  move: no\n  duplicate_action: {duplicate_action}\n"
 
     lock_file = acquire_os_lock(read_only=False)
     tmp_cfg_path = None
@@ -1265,15 +1297,26 @@ def reimport_source_atomic(
             os.chmod(tmp_cfg_path, 0o600)
             full_cmd.extend(["-c", tmp_cfg_path])
 
-        cmd_args = ["import", "-q", "--noincremental", "asis"]
+        # Beets' `import` has no `-D`/`--duplicate-action` CLI flag at all
+        # (confirmed against real `beet import --help`) -- duplicate
+        # handling is config-only (`import.duplicate_action` in YAML).
+        # The validated duplicate_action value above is applied via
+        # config_override (either the caller's own, which reimport_disk()
+        # already sets correctly, or the default block just above), never
+        # a CLI flag. `--quiet-fallback` must directly precede its `asis`
+        # value -- a bare trailing "asis" is parsed as an extra positional
+        # PATH argument, which does not exist and aborts the whole import
+        # before it ever reaches the real target (found and proven against
+        # a real beet binary during Claude's final review of this exact
+        # code path; the previous version of this command could never
+        # succeed against a live engine).
+        cmd_args = ["import", "-q", "--noincremental", "--quiet-fallback", "asis"]
         if preserved_path:
             # The preserved copy is disposable and exists specifically so
             # Beets can safely relocate/organize it -- copy (not move) it
             # into the library so the preserved staging copy is left intact
             # for the caller to clean up only after confirming success.
             cmd_args.append("--copy")
-        if duplicate_action:
-            cmd_args.extend(["-D", duplicate_action])
         if mb_albumid:
             cmd_args.extend(["--search-id", mb_albumid])
         cmd_args.append(import_target_path)

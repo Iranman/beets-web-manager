@@ -505,20 +505,53 @@ class VerifyDeterministicIdentityFailClosedTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["error_code"], "identity_verification_failed")
 
-    def test_existing_album_id_alone_with_no_embedded_source_tags_succeeds(self):
-        # reimport_disk()'s existing-album-repair branch deliberately passes
-        # ONLY existing_album_id (never mb_albumid alongside it) as expected
-        # identity: the DB row is real, already-authoritative evidence, and
-        # the whole point of a repair is often to retag audio that has no
-        # embedded MusicBrainz tags yet. Requiring embedded tags here (as
-        # the mb_albumid check does) would make the repair path unusable
-        # for its most common case.
-        source_inspect = {"audio_files": [{"properties": {}}, {"properties": {}}]}
+    def test_existing_album_id_alone_with_no_corroborating_evidence_requires_review(self):
+        # existing_album_id alone only proves that DB row exists -- it says
+        # nothing about whether THIS source folder's content is that
+        # album's content. An earlier version of this check returned
+        # ok: True here on the strength of the DB row alone, which Claude's
+        # adversarial testing during final review proved lets an
+        # authenticated caller attach any trusted-but-unrelated, untagged
+        # staging folder to any existing album ID and have it imported with
+        # zero content verification. See
+        # test_unrelated_source_with_existing_album_id_is_never_authorized
+        # for the full end-to-end proof.
+        source_inspect = {
+            "audio_files": [{"properties": {}}, {"properties": {}}],
+            "canonical_path": "/data/torrents/unrelated_folder",
+        }
         with mock.patch("sqlite3.connect") as mock_connect:
             mock_con = mock_connect.return_value.__enter__.return_value
             mock_con.row_factory = None
             mock_cur = mock_con.cursor.return_value
             mock_cur.execute.return_value.fetchone.return_value = {"id": 42, "mb_albumid": ""}
+            mock_cur.execute.return_value.fetchall.return_value = [
+                {"path": "/data/media/music/Some/Other/Album/01.flac"},
+            ]
+            result = CONTROL_AGENT.verify_deterministic_identity(
+                source_inspect, {"existing_album_id": 42},
+            )
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["error_code"], "review_required")
+
+    def test_existing_album_id_with_source_matching_its_own_library_path_succeeds(self):
+        # The legitimate case existing_album_id-alone evidence exists for:
+        # repairing an album's own already-organized library folder, which
+        # requires no embedded tags because the source path itself, cross-
+        # checked against that album's own current item paths in the
+        # library DB, is real, deterministic, content-independent proof.
+        source_inspect = {
+            "audio_files": [{"properties": {}}, {"properties": {}}],
+            "canonical_path": "/data/media/music/Real Artist/Real Album",
+        }
+        with mock.patch("sqlite3.connect") as mock_connect:
+            mock_con = mock_connect.return_value.__enter__.return_value
+            mock_con.row_factory = None
+            mock_cur = mock_con.cursor.return_value
+            mock_cur.execute.return_value.fetchone.return_value = {"id": 42, "mb_albumid": ""}
+            mock_cur.execute.return_value.fetchall.return_value = [
+                {"path": "/data/media/music/Real Artist/Real Album/01.flac"},
+            ]
             result = CONTROL_AGENT.verify_deterministic_identity(
                 source_inspect, {"existing_album_id": 42},
             )
@@ -682,15 +715,27 @@ class ReimportSourceAtomicProductionPathTests(unittest.TestCase):
         # behave exactly as they do against the real engine, without having
         # to reconcile two mocks' row shapes by hand.
         import sqlite3 as _sqlite3
+        self._sqlite3 = _sqlite3
         self.lib_path = str(self.tmp_root / "musiclibrary.blb")
         con = _sqlite3.connect(self.lib_path)
         con.execute("CREATE TABLE albums (id INTEGER PRIMARY KEY, mb_albumid TEXT)")
+        con.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, album_id INTEGER, path TEXT)")
         con.execute("INSERT INTO albums (id, mb_albumid) VALUES (42, '')")
         con.commit()
         con.close()
         self._lib_patcher = mock.patch.object(CONTROL_AGENT, "LIB_PATH", self.lib_path)
         self._lib_patcher.start()
         self.addCleanup(self._lib_patcher.stop)
+
+    def _add_item_for_album_42(self, item_path):
+        # verify_deterministic_identity()'s existing_album_id check requires
+        # this album's own item paths (when it has no embedded-tag evidence
+        # to cross-check) to actually be located under the source path --
+        # see the adversarial test in VerifyDeterministicIdentityFailClosedTests.
+        con = self._sqlite3.connect(self.lib_path)
+        con.execute("INSERT INTO items (album_id, path) VALUES (42, ?)", (str(item_path),))
+        con.commit()
+        con.close()
 
     def _fake_subprocess_run(self, returncode=0, stdout="", stderr=""):
         class _Res:
@@ -720,6 +765,7 @@ class ReimportSourceAtomicProductionPathTests(unittest.TestCase):
         album = self.music_root / "Artist" / "Album"
         album.mkdir(parents=True)
         (album / "01.flac").write_bytes(b"not-real-audio")
+        self._add_item_for_album_42(album / "01.flac")
         # The temp config file is written just before the beet subprocess
         # call and unlinked in reimport_source_atomic()'s own finally block
         # -- it no longer exists by the time this test function regains
@@ -741,11 +787,60 @@ class ReimportSourceAtomicProductionPathTests(unittest.TestCase):
         self.assertNotIn("--move", cmd)
         self.assertIn("copy: no", cfg_content)
         self.assertIn("move: no", cfg_content)
+        # CRITICAL command-shape regression guard, found live during
+        # Claude's final review: "asis" is only meaningful as
+        # --quiet-fallback's VALUE. A bare trailing "asis" not immediately
+        # preceded by --quiet-fallback is parsed by real beets as an extra
+        # positional PATH argument that does not exist, aborting the whole
+        # import with "error: no such file or directory: asis" before it
+        # ever reaches the real target -- confirmed against a real `beet`
+        # binary. "-D" is not a real beet import flag at all (confirmed
+        # against `beet import --help`); duplicate_action must only be
+        # conveyed via config_override's import.duplicate_action YAML key.
+        self.assertIn("--quiet-fallback", cmd)
+        self.assertEqual(cmd[cmd.index("--quiet-fallback") + 1], "asis")
+        self.assertNotIn("-D", cmd)
+        self.assertIn("duplicate_action:", cfg_content)
+
+    @unittest.skipUnless(shutil.which("beet"), "requires a real beet binary on PATH")
+    def test_beet_import_command_is_syntactically_valid_against_real_beets(self):
+        # The mocked-subprocess tests above cannot catch a malformed
+        # command line (they never invoke a real parser) -- this is the
+        # test that actually would have caught the --quiet-fallback/-D bug.
+        # Skipped when no real beet binary is available (e.g. the
+        # web-manager's own CI job), but exercised whenever one is -- as it
+        # was during this review, which is how the bug was actually found.
+        album = self.music_root / "Artist" / "RealBeetsCheck"
+        album.mkdir(parents=True)
+        (album / "01.flac").write_bytes(b"not-real-audio")
+        self._add_item_for_album_42(album / "01.flac")
+        beets_config_dir = self.tmp_root / "beets_config"
+        beets_config_dir.mkdir()
+        with mock.patch.dict(os.environ, {"BEETSDIR": str(beets_config_dir)}), \
+             mock.patch.object(CONTROL_AGENT, "BEETSDIR", str(beets_config_dir)), \
+             mock.patch.object(CONTROL_AGENT, "BEET_BIN", shutil.which("beet")):
+            result = CONTROL_AGENT.reimport_source_atomic(
+                str(album),
+                expected_deterministic_identity={"existing_album_id": 42},
+                beets_options={"mb_albumid": "11111111-1111-1111-1111-111111111111"},
+            )
+        # A real, syntactically-invalid command returns import_failed here.
+        # A non-audio fake file correctly produces "No files imported" but
+        # is still ok: True with returncode 0 -- the point of this test is
+        # that the command PARSES, not that a fake file gets tagged.
+        self.assertTrue(result["ok"], result)
 
     def test_torrent_staged_source_is_preserved_exactly_once(self):
+        # This test exercises preservation mechanics (exactly-once,
+        # --copy), not identity-verification policy -- the item row below
+        # is deliberately artificial (a real production existing_album_id
+        # would never have its own item paths under a staging root) purely
+        # to get the identity gate out of the way so preservation can be
+        # observed in isolation.
         album = self.staging_root / "Torrent Album"
         album.mkdir(parents=True)
         (album / "01.flac").write_bytes(b"not-real-audio")
+        self._add_item_for_album_42(album / "01.flac")
         with self._fake_subprocess_run() as mock_run, \
              mock.patch.object(CONTROL_AGENT, "preserve_import_source",
                                 wraps=CONTROL_AGENT.preserve_import_source) as mock_preserve:
@@ -766,6 +861,7 @@ class ReimportSourceAtomicProductionPathTests(unittest.TestCase):
         album.mkdir(parents=True)
         for i in range(20):
             (album / f"{i:02d}.flac").write_bytes(b"not-real-audio")
+        self._add_item_for_album_42(album / "00.flac")
         with self._fake_subprocess_run() as mock_run:
             result = CONTROL_AGENT.reimport_source_atomic(
                 str(album),
@@ -776,6 +872,42 @@ class ReimportSourceAtomicProductionPathTests(unittest.TestCase):
         kwargs = self._find_beet_import_call(mock_run).kwargs
         self.assertEqual(kwargs["timeout"], CONTROL_AGENT._reimport_timeout_for_count(20))
         self.assertGreater(kwargs["timeout"], 180)
+
+    def test_unrelated_source_with_existing_album_id_is_never_authorized(self):
+        # CRITICAL regression test: found live during Claude's final review
+        # of this exact production wiring. An authenticated caller can
+        # supply ANY trusted source_path alongside ANY existing_album_id --
+        # both are ordinary request parameters. existing_album_id alone
+        # (an earlier version of verify_deterministic_identity()) only
+        # proved the DB row existed, not that the supplied source belonged
+        # to it: an unrelated, untagged staging folder was silently
+        # authorized and a real `beet import` subprocess was actually
+        # launched against it. This must never happen again.
+        real_album_dir = self.music_root / "Real Artist" / "Real Album"
+        real_album_dir.mkdir(parents=True)
+        (real_album_dir / "01.flac").write_bytes(b"real-album-audio")
+        self._add_item_for_album_42(real_album_dir / "01.flac")
+
+        unrelated_folder = self.staging_root / "Totally Unrelated Folder"
+        unrelated_folder.mkdir(parents=True)
+        (unrelated_folder / "01.mp3").write_bytes(b"unrelated-audio-content")
+
+        with self._fake_subprocess_run() as mock_run:
+            result = CONTROL_AGENT.reimport_source_atomic(
+                str(unrelated_folder),
+                expected_deterministic_identity={"existing_album_id": 42},
+                beets_options={"mb_albumid": "22222222-2222-2222-2222-222222222222"},
+            )
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["error_code"], "review_required")
+        beet_import_calls = [
+            c for c in mock_run.call_args_list
+            if c.args and isinstance(c.args[0], list) and "import" in c.args[0]
+        ]
+        self.assertEqual(
+            beet_import_calls, [],
+            "beet import must never execute for an unverified source/existing_album_id pairing",
+        )
 
 
 if __name__ == "__main__":
