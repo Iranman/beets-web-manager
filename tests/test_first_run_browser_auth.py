@@ -141,7 +141,7 @@ class FirstRunBrowserAuthTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"BEETS_WEB_PASSWORD": "weak_password"}):
             self.assertFalse(app_module._auth_secret_is_usable(app_module._security_auth_password()))
             cred = base64.b64encode(b"admin:weak_password").decode("utf-8")
-            resp = self.client.get("/api/setup/status", headers={"Authorization": f"Basic {cred}"})
+            resp = self.client.get("/api/setup/env", headers={"Authorization": f"Basic {cred}"})
             self.assertEqual(resp.status_code, 401)
 
     def test_password_replacement_cleans_up_initial_password_file(self):
@@ -188,12 +188,12 @@ class FirstRunBrowserAuthTests(unittest.TestCase):
         browser_pwd = self.initial_pwd_file.read_text(encoding="utf-8").strip()
 
         # 1. Bearer token works for API requests
-        resp_bearer = self.client.get("/api/setup/status", headers={"Authorization": f"Bearer {bearer_token}"})
+        resp_bearer = self.client.get("/api/setup/env", headers={"Authorization": f"Bearer {bearer_token}"})
         self.assertEqual(resp_bearer.status_code, 200)
 
         # 2. Bearer token CANNOT be used as Basic Auth password
         bad_basic = base64.b64encode(f"admin:{bearer_token}".encode("utf-8")).decode("utf-8")
-        resp_bad_basic = self.client.get("/api/setup/status", headers={"Authorization": f"Basic {bad_basic}"})
+        resp_bad_basic = self.client.get("/api/setup/env", headers={"Authorization": f"Basic {bad_basic}"})
         self.assertEqual(resp_bad_basic.status_code, 401)
 
         # 3. Browser Basic Auth password works for Basic Auth
@@ -204,7 +204,7 @@ class FirstRunBrowserAuthTests(unittest.TestCase):
         # 4. Engine API token (BEETS_API_TOKEN) cannot authenticate Web Manager API
         engine_token = "beets_engine_internal_token_32_chars_min"
         with mock.patch.dict(os.environ, {"BEETS_API_TOKEN": engine_token}):
-            engine_bearer = self.client.get("/api/setup/status", headers={"Authorization": f"Bearer {engine_token}"})
+            engine_bearer = self.client.get("/api/setup/env", headers={"Authorization": f"Bearer {engine_token}"})
             self.assertEqual(engine_bearer.status_code, 401)
 
 

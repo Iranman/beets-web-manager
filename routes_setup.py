@@ -1216,6 +1216,7 @@ def _build_setup_status_payload() -> Dict[str, Any]:
             _security_auth_token,
             _security_auth_password,
             _security_auth_username,
+            _first_run_setup_required,
             _GENERATED_AUTH_TOKEN_FILE,
             _INITIAL_BROWSER_PASSWORD_FILE,
         )
@@ -1224,6 +1225,7 @@ def _build_setup_status_payload() -> Dict[str, Any]:
         token_auto_generated = token_configured and _GENERATED_AUTH_TOKEN_FILE.exists()
         password_auto_generated = password_configured and _INITIAL_BROWSER_PASSWORD_FILE.exists()
         username = _security_auth_username()
+        first_run_req = _first_run_setup_required()
     except ImportError:
         token_configured = _fallback_auth_secret_usable(
             os.environ.get("BEETS_WEB_AUTH_TOKEN", "") or os.environ.get("BEETS_WEB_TOKEN", "")
@@ -1232,12 +1234,14 @@ def _build_setup_status_payload() -> Dict[str, Any]:
         token_auto_generated = token_configured and _FALLBACK_AUTH_TOKEN_FILE.exists()
         password_auto_generated = False
         username = os.environ.get("BEETS_WEB_USERNAME", "admin").strip() or "admin"
+        first_run_req = not password_configured
     auth_status = {
         "token_configured": token_configured,
         "token_auto_generated": token_auto_generated,
         "password_configured": password_configured,
         "password_auto_generated": password_auto_generated,
         "username": username,
+        "first_run_required": first_run_req,
     }
     return {
         "ok": True,
@@ -1245,6 +1249,9 @@ def _build_setup_status_payload() -> Dict[str, Any]:
         "version": _APP_VERSION,
         "demo_mode": demo_mode,
         "setup_complete": _SETUP_COMPLETE_MARKER.exists(),
+        "first_run": {
+            "required": first_run_req,
+        },
         "blocking_reasons": blocking,
         "paths": {
             "config": config_check,
@@ -1573,6 +1580,67 @@ def setup_regenerate_auth_token():
         "warning": "Save this token now — it will not be shown again.",
         "backup_path": backup_path,
     })
+
+
+_FIRST_RUN_LOCK = threading.Lock()
+
+
+@app.post("/api/setup/first-run")
+def setup_first_run():
+    """Narrow bootstrap endpoint for initial browser credentials during first-run setup."""
+    from app import (
+        _first_run_setup_required,
+        _password_requirements_unmet,
+        _auth_secret_is_usable,
+        _persist_file_atomically,
+        _cleanup_initial_browser_password_if_replaced,
+        _PERSISTED_BROWSER_USERNAME_FILE,
+        _PERSISTED_BROWSER_PASSWORD_FILE,
+        _csrf_request_allowed,
+        _json_security_error,
+    )
+
+    if not _csrf_request_allowed():
+        return _json_security_error(403, "CSRF check failed")
+
+    with _FIRST_RUN_LOCK:
+        if not _first_run_setup_required():
+            return jsonify({"ok": False, "error": "Setup already completed"}), 409
+
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"ok": False, "error": "Invalid request body"}), 400
+
+        allowed_keys = {"username", "password"}
+        if any(k not in allowed_keys for k in payload.keys()):
+            return jsonify({"ok": False, "error": "Only username and password may be provided"}), 400
+
+        raw_user = payload.get("username", "")
+        raw_pass = payload.get("password", "")
+
+        if not isinstance(raw_user, str) or not isinstance(raw_pass, str):
+            return jsonify({"ok": False, "error": "Username and password must be strings"}), 400
+
+        username = raw_user.strip() or "admin"
+        if len(username) > 64 or re.search(r"[\r\n\x00-\x1f]", username):
+            return jsonify({"ok": False, "error": "Invalid username format"}), 400
+
+        password = raw_pass.strip()
+        unmet = _password_requirements_unmet(password)
+        if unmet or not _auth_secret_is_usable(password):
+            msg = "Password does not meet complexity rules: " + ", ".join(unmet) if unmet else "Password is not usable"
+            return jsonify({"ok": False, "error": msg, "unmet_requirements": unmet}), 400
+
+        user_ok = _persist_file_atomically(_PERSISTED_BROWSER_USERNAME_FILE, username)
+        pass_ok = _persist_file_atomically(_PERSISTED_BROWSER_PASSWORD_FILE, password)
+
+        if not (user_ok and pass_ok):
+            return jsonify({"ok": False, "error": "Failed to persist credentials to storage"}), 500
+
+        _cleanup_initial_browser_password_if_replaced()
+        _invalidate_setup_status_cache()
+
+        return jsonify({"ok": True, "message": "First-run setup complete"})
 
 
 @app.post("/api/setup/complete")

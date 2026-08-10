@@ -143,7 +143,7 @@ The app provides separate authentication boundaries for human browser operators 
 
 | Purpose | Credential | Where to find / set | Details |
 |---|---|---|---|
-| **Browser Login** | Username: `admin` (or `BEETS_WEB_USERNAME`) <br>Password: Configured in `.env` or auto-generated | Prompted during `setup.sh`/`setup.ps1`, or generated to `/web-manager-data/.initial_admin_password` | Native browser Basic Auth prompt (`http://localhost:8337`) |
+| **Browser Login** | Username: `admin` (or `BEETS_WEB_USERNAME`) <br>Password: Created in browser or set in `.env` | Created at `http://<server-ip>:8337` on first run, or prompted during `setup.sh`/`setup.ps1` | Web browser setup & Basic Auth prompt (`http://<server-ip>:8337`) |
 | **API / Scripts** | `BEETS_WEB_AUTH_TOKEN` (Bearer token) | Persisted to `/web-manager-data/.auth_token` | Used via header `Authorization: Bearer <token>`. **NOT** your browser password! |
 | **Beets Engine** | `BEETS_API_TOKEN` | Configured in `.env` | Internal service token between Web Manager and Beets control agent |
 
@@ -152,16 +152,20 @@ The app provides separate authentication boundaries for human browser operators 
 
 **You never have to invent `BEETS_WEB_AUTH_TOKEN` yourself.** Same as the browser password, if it's left blank the app generates a cryptographically secure 256-bit token on first boot and persists it to `/web-manager-data/.auth_token` (`0600` permissions) — the two are generated and persisted independently of each other.
 
-### First-Run Browser Credentials
+### First-Run Browser Setup
 
-1. **Interactive Setup (`setup.sh` / `setup.ps1`):**  
-   Prompt you to create your browser username and browser password during first-run setup.
-2. **Direct Docker Startup (`docker compose up -d`):**  
-   If no browser password is set in `.env` or environment variables, a cryptographically secure initial browser password is generated automatically on first boot and persisted to:
+1. **Browser First-Run Setup (Default):**  
+   Start Beets Web Manager (`docker compose up -d`) and open `http://<server-ip>:8337` in your browser. You will see the **Finish Beets Web Manager Setup** page where you can create your administrator username and password directly. Once setup completes, sign in with your credentials.
+
+2. **Guided Interactive CLI Setup (`setup.sh` / `setup.ps1`):**  
+   Prompts you to create your administrator username and password in your terminal before starting the containers.
+
+3. **Recovery / Headless Fallback:**  
+   If no browser password was configured before startup, an initial fallback password is also generated at:
    ```text
    /web-manager-data/.initial_admin_password
    ```
-   Retrieve it using:
+   If needed for headless or recovery scenarios, retrieve it using:
    ```bash
    docker exec beets-web-manager cat /web-manager-data/.initial_admin_password
    ```

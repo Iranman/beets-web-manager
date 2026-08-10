@@ -430,12 +430,27 @@ export interface SetupPathCheck {
   error?: string;
 }
 
+export interface SetupFirstRunRequest {
+  username?: string;
+  password?: string;
+}
+
+export interface SetupFirstRunResponse {
+  ok: boolean;
+  message?: string;
+  error?: string;
+  unmet_requirements?: string[];
+}
+
 export interface SetupStatusResponse {
   ok: boolean;
   status: 'ready' | 'warning' | string;
   version: string;
   demo_mode: boolean;
   setup_complete: boolean;
+  first_run?: {
+    required: boolean;
+  };
   blocking_reasons: string[];
   paths: {
     config: SetupPathCheck;
@@ -473,6 +488,7 @@ export interface SetupStatusResponse {
     password_configured: boolean;
     password_auto_generated?: boolean;
     username?: string;
+    first_run_required?: boolean;
   };
   integrations: Record<string, {
     configured: boolean;

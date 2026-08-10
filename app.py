@@ -1744,6 +1744,30 @@ _AUTH_PUBLIC_ENDPOINTS = {
     ("HEAD", "health_ready"),
     ("GET", "health_root"),
     ("HEAD", "health_root"),
+    ("POST", "setup_first_run"),
+}
+_FIRST_RUN_PUBLIC_ENDPOINTS = {
+    ("GET", "health"),
+    ("HEAD", "health"),
+    ("GET", "health_live"),
+    ("HEAD", "health_live"),
+    ("GET", "health_ready"),
+    ("HEAD", "health_ready"),
+    ("GET", "health_root"),
+    ("HEAD", "health_root"),
+    ("GET", "react_assets"),
+    ("HEAD", "react_assets"),
+    ("GET", "react_next_static"),
+    ("HEAD", "react_next_static"),
+    ("GET", "favicon"),
+    ("HEAD", "favicon"),
+    ("GET", "index"),
+    ("HEAD", "index"),
+    ("GET", "react_spa_fallback"),
+    ("HEAD", "react_spa_fallback"),
+    ("GET", "setup_status"),
+    ("HEAD", "setup_status"),
+    ("POST", "setup_first_run"),
 }
 _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)\b(api[_-]?key|token|password|secret|authorization|cookie|client[_-]?secret)"
@@ -2097,6 +2121,34 @@ def _auth_secret_is_usable(value: str) -> bool:
     return True
 
 
+def _has_explicit_browser_password() -> bool:
+    value = _first_config_secret("BEETS_WEB_PASSWORD")
+    if value and _auth_secret_is_usable(value):
+        return True
+    path = os.environ.get("BEETS_WEB_PASSWORD_FILE", "").strip()
+    if path:
+        try:
+            val = Path(path).read_text(encoding="utf-8", errors="ignore").splitlines()[0].strip()
+            if val and _auth_secret_is_usable(val):
+                return True
+        except Exception:
+            pass
+    try:
+        if _PERSISTED_BROWSER_PASSWORD_FILE.exists():
+            val = _PERSISTED_BROWSER_PASSWORD_FILE.read_text(encoding="utf-8", errors="ignore").splitlines()[0].strip()
+            if val and _auth_secret_is_usable(val):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _first_run_setup_required() -> bool:
+    if _security_auth_disabled():
+        return False
+    return not _has_explicit_browser_password()
+
+
 def _security_auth_configured() -> bool:
     return _auth_secret_is_usable(_security_auth_token()) or _auth_secret_is_usable(_security_auth_password())
 
@@ -2198,13 +2250,13 @@ def _bootstrap_browser_password_if_missing() -> None:
     print(
         "\n" + "=" * 72 +
         "\nNo browser password was configured."
-        "\nA secure initial browser password has been generated."
-        f"\n\nBrowser username: {username}"
-        "\n\nRetrieve the password from:"
+        "\nBeets Web Manager is in Browser First-Run Setup mode."
+        "\n\nOpen http://<server-ip>:8337 in your browser to finish setup."
+        "\n\nIf needed for headless/recovery access, an initial password has"
+        "\nalso been generated at:"
         f"\n  {_INITIAL_BROWSER_PASSWORD_FILE}"
         "\n\nExample:"
         f"\n  docker exec beets-web-manager cat {_INITIAL_BROWSER_PASSWORD_FILE}"
-        "\n\nChange this password after signing in."
         "\n" + "=" * 72 + "\n",
         flush=True,
     )
@@ -2520,7 +2572,7 @@ def _csrf_request_allowed() -> bool:
     if _explicit_authorization_header_present():
         return True
 
-    return browser_same_origin and request.headers.get("X-Beets-CSRF") == "1"
+    return request.headers.get("X-Beets-CSRF") == "1"
 
 def _json_security_error(status: int, message: str):
     response = jsonify({"ok": False, "error": message})
@@ -2587,6 +2639,12 @@ def _is_public_endpoint() -> bool:
     return (method, endpoint) in _AUTH_PUBLIC_ENDPOINTS
 
 
+def _is_first_run_public_endpoint() -> bool:
+    endpoint = request.endpoint or ""
+    method = request.method
+    return (method, endpoint) in _FIRST_RUN_PUBLIC_ENDPOINTS
+
+
 def _auth_failure_rate_limit_response():
     auth_limited, auth_retry = _rate_limited(
         "auth",
@@ -2601,19 +2659,35 @@ def _auth_failure_rate_limit_response():
 
 @app.before_request
 def _enforce_security_boundary():
-    if _is_public_endpoint() or _security_auth_disabled():
+    if _security_auth_disabled():
         return None
 
-    if not _security_auth_configured():
-        return _json_security_error(
-            503,
-            "Authentication is required. Set a strong BEETS_WEB_AUTH_TOKEN or BEETS_WEB_PASSWORD.",
-        )
-    if not _request_authorized():
-        limited = _auth_failure_rate_limit_response()
-        if limited is not None:
-            return limited
-        return _json_security_error(401, "Authentication required")
+    if _first_run_setup_required():
+        if _is_first_run_public_endpoint():
+            return None
+        if not _request_authorized():
+            limited = _auth_failure_rate_limit_response()
+            if limited is not None:
+                return limited
+            return _json_security_error(
+                401,
+                "First-run setup in progress. Authentication required for this endpoint.",
+            )
+    else:
+        if _is_public_endpoint():
+            return None
+
+        if not _security_auth_configured():
+            return _json_security_error(
+                503,
+                "Authentication is required. Set a strong BEETS_WEB_AUTH_TOKEN or BEETS_WEB_PASSWORD.",
+            )
+        if not _request_authorized():
+            limited = _auth_failure_rate_limit_response()
+            if limited is not None:
+                return limited
+            return _json_security_error(401, "Authentication required")
+
     if not _csrf_request_allowed():
         return _json_security_error(403, "CSRF check failed")
 
