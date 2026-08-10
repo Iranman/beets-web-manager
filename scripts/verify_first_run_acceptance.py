@@ -93,7 +93,7 @@ def run_acceptance_test():
             setup_resp = client.post(
                 "/api/setup/first-run",
                 json={"username": "myadmin", "password": _USER_PASSWORD},
-                headers={"X-Beets-CSRF": "1"},
+                headers={"X-Beets-CSRF": "1", "Origin": "http://localhost"},
             )
             assert setup_resp.status_code == 200, f"First-run setup POST failed: {setup_resp.status_code}"
             assert setup_resp.get_json().get("ok") is True
@@ -104,10 +104,10 @@ def run_acceptance_test():
             second_resp = client.post(
                 "/api/setup/first-run",
                 json={"username": "hacker", "password": _USER_PASSWORD},
-                headers={"X-Beets-CSRF": "1"},
+                headers={"X-Beets-CSRF": "1", "Origin": "http://localhost"},
             )
-            assert second_resp.status_code == 409, f"Expected 409 for repeated setup, got {second_resp.status_code}"
-            print("  [OK] 5. First-run setup mode atomically closes and rejects subsequent bootstrap attempts (409 Conflict).")
+            assert second_resp.status_code == 401, f"Expected 401 for repeated setup (endpoint is no longer public once claimed), got {second_resp.status_code}"
+            print("  [OK] 5. First-run setup mode atomically closes; the endpoint stops being anonymously reachable at all (401).")
 
             # 6. Basic Auth with user-created credentials succeeds
             valid_auth = base64.b64encode(f"myadmin:{_USER_PASSWORD}".encode("utf-8")).decode("utf-8")
@@ -133,12 +133,15 @@ def run_acceptance_test():
             del_setup_resp = client.post(
                 "/api/setup/first-run",
                 json={"username": "attacker", "password": _USER_PASSWORD},
-                headers={"X-Beets-CSRF": "1"},
+                headers={"X-Beets-CSRF": "1", "Origin": "http://localhost"},
             )
-            assert del_setup_resp.status_code == 409, f"Expected 409 for setup on deleted creds, got {del_setup_resp.status_code}"
+            assert del_setup_resp.status_code == 401, f"Expected 401 for setup on deleted creds (not public anymore), got {del_setup_resp.status_code}"
             print("  [OK] 9. Credential deletion fails closed (setup mode NEVER reopens anonymously).")
 
-            # Restore password for remaining checks
+            # Restore password for remaining checks. _USER_PASSWORD is a
+            # hardcoded dummy constant written to a disposable tempfile that
+            # this script deletes on exit -- not a real secret.
+            # codeql[py/clear-text-storage-sensitive-data]
             persisted_pwd_file.write_text(_USER_PASSWORD, encoding="utf-8")
 
             # 10. Secrets do not appear in logs
@@ -159,6 +162,9 @@ def run_acceptance_test():
         data_dir_upg.mkdir()
 
         initial_pwd_file_upg = data_dir_upg / ".initial_admin_password"
+        # Dummy constant seeded into a disposable tempfile to simulate a
+        # pre-existing v0.1.8 install; not a real secret.
+        # codeql[py/clear-text-storage-sensitive-data]
         initial_pwd_file_upg.write_text(_USER_PASSWORD, encoding="utf-8")
         persisted_pwd_file_upg = data_dir_upg / ".browser_password"
         persisted_user_file_upg = data_dir_upg / ".browser_username"
@@ -185,9 +191,9 @@ def run_acceptance_test():
             upg_setup_resp = client_upg.post(
                 "/api/setup/first-run",
                 json={"username": "attacker", "password": _USER_PASSWORD},
-                headers={"X-Beets-CSRF": "1"},
+                headers={"X-Beets-CSRF": "1", "Origin": "http://localhost"},
             )
-            assert upg_setup_resp.status_code == 409, f"Expected 409 for first-run POST on v0.1.8 upgrade, got {upg_setup_resp.status_code}"
+            assert upg_setup_resp.status_code == 401, f"Expected 401 for first-run POST on v0.1.8 upgrade (not public), got {upg_setup_resp.status_code}"
 
             # Existing initial password continues working for Basic Auth
             valid_auth_upg = base64.b64encode(f"admin:{_USER_PASSWORD}".encode("utf-8")).decode("utf-8")

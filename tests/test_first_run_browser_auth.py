@@ -83,6 +83,9 @@ class FirstRunBrowserAuthTests(unittest.TestCase):
     def test_legacy_initial_browser_password_authentication(self):
         """Legacy v0.1.8 .initial_admin_password authenticates Basic Auth requests."""
         pwd = app_module.generate_secure_browser_password(36)
+        # Freshly generated, thrown away with the TemporaryDirectory on
+        # tearDown -- not a persisted or real secret.
+        # codeql[py/clear-text-storage-sensitive-data]
         self.initial_pwd_file.write_text(pwd, encoding="utf-8")
         app_module._migrate_or_initialize_setup_state()
 
@@ -105,6 +108,8 @@ class FirstRunBrowserAuthTests(unittest.TestCase):
     def test_restart_reuses_same_initial_password(self):
         """Restarting authentication reuses existing initial password without generating a new one."""
         pwd1 = "InitialGeneratedPassword123!Aa456"
+        # Hardcoded dummy constant, disposable tempfile -- not a real secret.
+        # codeql[py/clear-text-storage-sensitive-data]
         self.initial_pwd_file.write_text(pwd1, encoding="utf-8")
         app_module._migrate_or_initialize_setup_state()
         app_module._bootstrap_browser_password_if_missing()

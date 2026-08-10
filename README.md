@@ -160,15 +160,8 @@ The app provides separate authentication boundaries for human browser operators 
 2. **Guided Interactive CLI Setup (`setup.sh` / `setup.ps1`):**  
    Prompts you to create your administrator username and password in your terminal before starting the containers.
 
-3. **Recovery / Headless Fallback:**  
-   If no browser password was configured before startup, an initial fallback password is also generated at:
-   ```text
-   /web-manager-data/.initial_admin_password
-   ```
-   If needed for headless or recovery scenarios, retrieve it using:
-   ```bash
-   docker exec beets-web-manager cat /web-manager-data/.initial_admin_password
-   ```
+> [!NOTE]
+> No password is auto-generated for a fresh install — you always choose it, via the browser or the CLI setup script. This is intentional: once an installation is claimed (or migrated from an existing v0.1.8 install), the app fails closed if its credential file is ever lost or corrupted rather than silently minting a new one. If that happens, restore the credential file from backup or set `BEETS_WEB_PASSWORD` explicitly — there is no automatic recovery password.
 3. **Changing Your Browser Password:**  
    Sign in to the web UI, go to **System → Environment Variables**, enter a new password for `BEETS_WEB_PASSWORD`, and click **Save environment**. Once the new password is verified, `.initial_admin_password` is automatically removed.
 

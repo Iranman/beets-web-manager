@@ -1744,7 +1744,19 @@ _AUTH_PUBLIC_ENDPOINTS = {
     ("HEAD", "health_ready"),
     ("GET", "health_root"),
     ("HEAD", "health_root"),
-    ("POST", "setup_first_run"),
+    # The frontend's App shell calls GET /api/setup/status unauthenticated on
+    # every load, in EVERY installation state, to decide whether to render
+    # the first-run claim UI or the normal (login-gated) app -- that check is
+    # inherently pre-auth and would be circular otherwise. The payload itself
+    # only exposes non-secret status booleans/paths (see
+    # test_config_and_status_responses_are_redacted), never credentials.
+    ("GET", "setup_status"),
+    ("HEAD", "setup_status"),
+    # NOTE: setup_first_run is deliberately NOT listed here. It must only be
+    # anonymously reachable while _first_run_setup_required() is true (see
+    # _FIRST_RUN_PUBLIC_ENDPOINTS below and _enforce_security_boundary). Once
+    # an installation is claimed/legacy_established, this endpoint must
+    # require the same authentication as any other mutating API.
 }
 _FIRST_RUN_PUBLIC_ENDPOINTS = {
     ("GET", "health"),
@@ -2136,14 +2148,19 @@ def _read_browser_setup_state() -> str:
     return ""
 
 
-def _set_browser_setup_state(state: str) -> None:
-    try:
-        _persist_file_atomically(_BROWSER_SETUP_STATE_FILE, state)
-    except Exception as ex:
+def _set_browser_setup_state(state: str) -> bool:
+    """Persist the durable setup-state marker. Returns True only on a
+    confirmed durable write. Callers that gate a security-relevant response
+    (e.g. "setup complete") on this MUST check the return value -- silently
+    swallowing a failed write here previously let the endpoint claim success
+    when the durable state was never actually committed."""
+    ok = _persist_file_atomically(_BROWSER_SETUP_STATE_FILE, state)
+    if not ok:
         try:
-            app.logger.warning("Could not persist browser setup state %s: %s", state, ex)
+            app.logger.error("Could not persist browser setup state %r", state)
         except Exception:
             pass
+    return ok
 
 
 def _migrate_or_initialize_setup_state() -> None:
@@ -2295,47 +2312,37 @@ def _bootstrap_auth_token_if_missing() -> None:
 
 
 def _bootstrap_browser_password_if_missing() -> None:
-    """Enforce browser credential availability & persistence for fallback paths."""
+    """Fail-closed guard for an established install whose resolved browser
+    password is missing/corrupt/unusable at boot.
+
+    Fresh, not-yet-claimed installs never reach this function's generation
+    logic -- they short-circuit above and wait for the user to claim
+    credentials via the first-run UI. The ONLY way to reach this point with
+    an unusable current_pwd is an install already marked claimed/
+    legacy_established whose credential file is now missing or corrupt.
+    Per the fail-closed requirement, that must NOT silently mint a fresh,
+    working password (that would turn credential deletion into an anonymous
+    account-takeover / privilege-recovery path via container logs) -- it
+    must refuse to authenticate anyone until an operator restores the
+    credential file or sets BEETS_WEB_PASSWORD explicitly.
+    """
     if _security_auth_disabled() or _first_run_setup_required():
         return
     current_pwd = _security_auth_password()
     if _auth_secret_is_usable(current_pwd):
         return
 
-    pwd = generate_secure_browser_password(36)
     try:
-        _persist_file_atomically(_INITIAL_BROWSER_PASSWORD_FILE, pwd)
-    except Exception as ex:
-        try:
-            app.logger.error("Failed to persist generated initial browser password to %s: %s", _INITIAL_BROWSER_PASSWORD_FILE, ex)
-        except Exception:
-            pass
-    try:
-        persisted_ok = _INITIAL_BROWSER_PASSWORD_FILE.read_text(encoding="utf-8").strip() == pwd
-    except Exception:
-        persisted_ok = False
-
-    if not persisted_ok:
-        raise RuntimeError(
-            "Startup refused: no browser password was configured, and a newly generated "
-            f"initial password could not be persisted to {_INITIAL_BROWSER_PASSWORD_FILE}. "
-            "Fix permissions on /web-manager-data and restart, or set BEETS_WEB_PASSWORD explicitly."
+        app.logger.error(
+            "Browser credential is missing, unreadable, or unusable on an "
+            "installation already marked established. Refusing to "
+            "auto-generate a replacement (fail-closed): Basic Auth will "
+            "reject all requests until the credential file is restored or "
+            "BEETS_WEB_PASSWORD is set explicitly."
         )
-
-    username = _security_auth_username()
-    print(
-        "\n" + "=" * 72 +
-        "\nNo browser password was configured."
-        "\nBeets Web Manager is in Browser First-Run Setup mode."
-        "\n\nOpen http://<server-ip>:8337 in your browser to finish setup."
-        "\n\nIf needed for headless/recovery access, an initial password has"
-        "\nalso been generated at:"
-        f"\n  {_INITIAL_BROWSER_PASSWORD_FILE}"
-        "\n\nExample:"
-        f"\n  docker exec beets-web-manager cat {_INITIAL_BROWSER_PASSWORD_FILE}"
-        "\n" + "=" * 72 + "\n",
-        flush=True,
-    )
+    except Exception:
+        pass
+    return
 
 
 def _cleanup_initial_browser_password_if_replaced() -> None:
@@ -2649,7 +2656,7 @@ def _csrf_request_allowed() -> bool:
     if _explicit_authorization_header_present():
         return True
 
-    return request.headers.get("X-Beets-CSRF") == "1"
+    return browser_same_origin and request.headers.get("X-Beets-CSRF") == "1"
 
 def _json_security_error(status: int, message: str):
     response = jsonify({"ok": False, "error": message})

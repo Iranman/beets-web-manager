@@ -1594,6 +1594,7 @@ def setup_first_run():
         _auth_secret_is_usable,
         _persist_file_atomically,
         _cleanup_initial_browser_password_if_replaced,
+        _set_browser_setup_state,
         _PERSISTED_BROWSER_USERNAME_FILE,
         _PERSISTED_BROWSER_PASSWORD_FILE,
         _csrf_request_allowed,
@@ -1637,8 +1638,19 @@ def setup_first_run():
         if not (user_ok and pass_ok):
             return jsonify({"ok": False, "error": "Failed to persist credentials to storage"}), 500
 
-        from app import _set_browser_setup_state
-        _set_browser_setup_state("claimed")
+        # Credentials are already durable at this point. Persisting the
+        # "claimed" marker must also succeed before we can report success --
+        # if it fails, do NOT return 200 (an ambiguous/partial write must
+        # never be reported as complete). The system stays safe either way:
+        # _first_run_setup_required() also treats a persisted browser
+        # password as claimed, so anonymous bootstrap will not reopen even
+        # if this specific write failed -- but the caller must be told the
+        # truth so an operator can investigate storage health.
+        if not _set_browser_setup_state("claimed"):
+            return jsonify({
+                "ok": False,
+                "error": "Credentials were saved but setup state could not be finalized. Retry, or check storage permissions.",
+            }), 500
 
         _cleanup_initial_browser_password_if_replaced()
         _invalidate_setup_status_cache()

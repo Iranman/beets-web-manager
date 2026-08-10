@@ -9,8 +9,14 @@ a fresh directory tree (state must not bleed between them):
      Auth, credential persistence across restart and force-recreate.
   2. v018_upgrade    -- pre-seeded .initial_admin_password (simulating a real
      v0.1.8 installation). Expect: setup mode remains CLOSED, anonymous bootstrap
-     returns 409 Conflict, existing Basic Auth password works, state survives
-     restart & force-recreate.
+     returns 401 (endpoint is not a public API once established), existing
+     Basic Auth password works, state survives restart & force-recreate.
+  3c. credential_deletion -- claimed install has its persisted password
+     deleted, then the container is restarted. Expect: anonymous setup does
+     NOT reopen, no new credential is auto-generated, auth fails closed.
+  3d. concurrent_claim -- two simultaneous real HTTP POSTs to a fresh
+     install's /api/setup/first-run. Expect: exactly one 200, exactly one
+     non-200, state becomes claimed exactly once, winning credentials work.
   3. upgrade_no_password -- pre-seeded .auth_token (simulating an existing
      v0.1.7 install), no browser password configured. Expect: .auth_token
      unchanged, first-run browser setup mode is active, engine auth works.
@@ -286,7 +292,7 @@ def scenario_fresh_install():
             "/api/setup/first-run",
             method="POST",
             body=json.dumps({"username": new_user, "password": new_pwd}),
-            headers_dict={"X-Beets-CSRF": "1"},
+            headers_dict={"X-Beets-CSRF": "1", "Origin": "http://127.0.0.1:8337"},
         )
         if code == 200:
             ok("POST /api/setup/first-run -> 200 OK (administrator login created)")
@@ -298,12 +304,12 @@ def scenario_fresh_install():
             "/api/setup/first-run",
             method="POST",
             body=json.dumps({"username": "hacker", "password": new_pwd}),
-            headers_dict={"X-Beets-CSRF": "1"},
+            headers_dict={"X-Beets-CSRF": "1", "Origin": "http://127.0.0.1:8337"},
         )
-        if code == 409:
-            ok("subsequent POST /api/setup/first-run -> 409 Conflict (setup closed)")
+        if code == 401:
+            ok("subsequent POST /api/setup/first-run -> 401 (endpoint no longer public once claimed)")
         else:
-            fail(f"subsequent setup call -> {code}, expected 409")
+            fail(f"subsequent setup call -> {code}, expected 401")
 
         # 6. Basic Auth with newly created user credentials succeeds
         code, _, _ = stack.request("/api/setup/env", auth_header=basic_header(new_user, new_pwd))
@@ -428,12 +434,12 @@ def scenario_v018_upgrade():
             "/api/setup/first-run",
             method="POST",
             body=json.dumps({"username": "attacker", "password": "AttackerPassword123!Aa4567890"}),
-            headers_dict={"X-Beets-CSRF": "1"},
+            headers_dict={"X-Beets-CSRF": "1", "Origin": "http://127.0.0.1:8337"},
         )
-        if code == 409:
-            ok("anonymous POST /api/setup/first-run returns 409 Conflict (setup closed on upgrade)")
+        if code == 401:
+            ok("anonymous POST /api/setup/first-run returns 401 (not public on established/upgraded install)")
         else:
-            fail(f"anonymous bootstrap call on v0.1.8 upgrade -> {code}, expected 409")
+            fail(f"anonymous bootstrap call on v0.1.8 upgrade -> {code}, expected 401")
 
         # Basic Auth with existing initial password succeeds
         code, _, _ = stack.request("/api/setup/env", auth_header=basic_header("admin", initial_pwd))
@@ -458,6 +464,169 @@ def scenario_v018_upgrade():
         print(stack.ps())
         stack.down()
         ok("scenario 2 containers/volumes torn down")
+
+
+# ---------------------------------------------------------------------------
+# Scenario C: credential deletion on a claimed install fails closed
+# ---------------------------------------------------------------------------
+def scenario_credential_deletion():
+    print("\n########## SCENARIO C: credential deletion fails closed ##########")
+    stack = Stack("cred-del")
+    try:
+        stack.up()
+        print(stack.ps())
+        if not (stack.wait_healthy("beets") and stack.wait_healthy("beets-web-manager")):
+            fail("scenario C stack did not become healthy")
+            return
+
+        user, pwd = "dockeradmin", "CredentialDeletionTestPwd123!Aa4567"
+        code, _, body = stack.request(
+            "/api/setup/first-run",
+            method="POST",
+            body=json.dumps({"username": user, "password": pwd}),
+            headers_dict={"X-Beets-CSRF": "1", "Origin": "http://127.0.0.1:8337"},
+        )
+        if code != 200:
+            fail(f"scenario C: initial claim failed ({code}: {body})")
+            return
+        ok("scenario C: install claimed successfully")
+
+        # Delete the persisted credential file directly in the container.
+        _, rc = stack.exec_py(
+            "beets-web-manager",
+            "import os; os.remove('/web-manager-data/.browser_password')",
+        )
+        if rc == 0:
+            ok("scenario C: persisted .browser_password deleted")
+        else:
+            fail("scenario C: could not delete .browser_password in container")
+            return
+
+        # Before restart: middleware-level check must already fail closed.
+        code, _, _ = stack.request("/api/setup/env", auth_header=basic_header(user, pwd))
+        if code == 401:
+            ok("scenario C: deleted credential no longer authenticates (401)")
+        else:
+            fail(f"scenario C: deleted credential still authenticates ({code})")
+
+        code, _, _ = stack.request(
+            "/api/setup/first-run",
+            method="POST",
+            body=json.dumps({"username": "attacker", "password": "AttackerPassword123!Aa4567890"}),
+            headers_dict={"X-Beets-CSRF": "1", "Origin": "http://127.0.0.1:8337"},
+        )
+        if code == 401:
+            ok("scenario C: anonymous setup does not reopen before restart (401)")
+        else:
+            fail(f"scenario C: anonymous setup reachable before restart ({code}) -- must be 401")
+
+        # Restart: this is where the vulnerable code path (auto-regenerating
+        # an initial password at boot) would fire if it were still present.
+        run(["docker", "restart", "beets-web-manager"])
+        if not stack.wait_healthy("beets-web-manager"):
+            fail("scenario C: beets-web-manager did not become healthy after restart")
+            return
+        ok("scenario C: beets-web-manager healthy again after restart")
+
+        if file_exists(stack, "beets-web-manager", "/web-manager-data/.initial_admin_password"):
+            fail("scenario C: a NEW .initial_admin_password was auto-generated after restart -- "
+                 "credential deletion became an anonymous recovery path")
+        else:
+            ok("scenario C: no new .initial_admin_password was auto-generated after restart")
+
+        code, _, _ = stack.request("/api/setup/status")
+        code2, _, _ = stack.request(
+            "/api/setup/first-run",
+            method="POST",
+            body=json.dumps({"username": "attacker2", "password": "AttackerPassword123!Aa4567890"}),
+            headers_dict={"X-Beets-CSRF": "1", "Origin": "http://127.0.0.1:8337"},
+        )
+        if code2 == 401:
+            ok("scenario C: anonymous setup still closed after restart (401)")
+        else:
+            fail(f"scenario C: anonymous setup reopened after restart ({code2}) -- account-takeover path")
+
+        code, _, _ = stack.request("/api/library")
+        if code in (401, 503):
+            ok(f"scenario C: protected API fails closed after restart ({code})")
+        else:
+            fail(f"scenario C: protected API returned {code} after credential loss -- expected 401/503")
+
+    finally:
+        print(stack.ps())
+        stack.down()
+        ok("scenario C containers/volumes torn down")
+
+
+# ---------------------------------------------------------------------------
+# Scenario D: two simultaneous claims against a fresh install
+# ---------------------------------------------------------------------------
+def scenario_concurrent_claim():
+    print("\n########## SCENARIO D: concurrent claim race ##########")
+    import threading as _threading
+
+    stack = Stack("concurrent")
+    try:
+        stack.up()
+        print(stack.ps())
+        if not (stack.wait_healthy("beets") and stack.wait_healthy("beets-web-manager")):
+            fail("scenario D stack did not become healthy")
+            return
+
+        pwd1 = "ConcurrentClaimPasswordOne123!Aa4567"
+        pwd2 = "ConcurrentClaimPasswordTwo456!Aa4567"
+        results = []
+        lock = _threading.Lock()
+
+        def claim(username, password):
+            code, _, body = stack.request(
+                "/api/setup/first-run",
+                method="POST",
+                body=json.dumps({"username": username, "password": password}),
+                headers_dict={"X-Beets-CSRF": "1", "Origin": "http://127.0.0.1:8337"},
+            )
+            with lock:
+                results.append((username, password, code))
+
+        t1 = _threading.Thread(target=claim, args=("racer1", pwd1))
+        t2 = _threading.Thread(target=claim, args=("racer2", pwd2))
+        t1.start()
+        t2.start()
+        t1.join(timeout=30)
+        t2.join(timeout=30)
+
+        codes = sorted(c for (_, _, c) in results)
+        if codes == [200] or (len(results) == 2 and codes.count(200) == 1):
+            ok(f"scenario D: exactly one winner among concurrent claims (codes={codes})")
+        else:
+            fail(f"scenario D: expected exactly one 200 among two concurrent claims, got {codes}")
+
+        winners = [(u, p) for (u, p, c) in results if c == 200]
+        if len(winners) == 1:
+            win_user, win_pwd = winners[0]
+            code, _, _ = stack.request("/api/setup/env", auth_header=basic_header(win_user, win_pwd))
+            if code == 200:
+                ok(f"scenario D: winning credentials ({win_user}) are authoritative and authenticate")
+            else:
+                fail(f"scenario D: winning credentials do not authenticate ({code})")
+        else:
+            fail(f"scenario D: expected exactly one winner, found {len(winners)}")
+
+        code, _, body = stack.request("/api/setup/status")
+        try:
+            status_data = json.loads(body)
+            first_run_req = status_data.get("first_run", {}).get("required")
+        except Exception:
+            first_run_req = True
+        if first_run_req is False:
+            ok("scenario D: setup state is claimed exactly once after the race")
+        else:
+            fail("scenario D: setup still reports first_run.required=true after a winning claim")
+
+    finally:
+        print(stack.ps())
+        stack.down()
+        ok("scenario D containers/volumes torn down")
 
 
 # ---------------------------------------------------------------------------
@@ -548,6 +717,8 @@ def main():
     build_image()
     scenario_fresh_install()
     scenario_v018_upgrade()
+    scenario_credential_deletion()
+    scenario_concurrent_claim()
     scenario_upgrade_no_password()
     scenario_upgrade_with_password()
 
@@ -559,7 +730,9 @@ def main():
         print("=" * 72)
         sys.exit(1)
     else:
-        print("DOCKER ACCEPTANCE TEST PASSED -- all 4 scenarios confirmed against real containers.")
+        print("DOCKER ACCEPTANCE TEST PASSED -- all 6 scenarios confirmed against real containers "
+              "(fresh install, v0.1.8 upgrade, credential deletion, concurrent claim, "
+              "upgrade w/o password, upgrade w/ password).")
         print("=" * 72)
 
 
