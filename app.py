@@ -1982,6 +1982,10 @@ _PERSISTED_BROWSER_USERNAME_FILE = Path(
     os.environ.get("BEETS_WEB_PERSISTED_USERNAME_FILE", "/web-manager-data/.browser_username")
 )
 
+_BROWSER_SETUP_STATE_FILE = Path(
+    os.environ.get("BEETS_WEB_SETUP_STATE_FILE", "/web-manager-data/.browser_setup_state")
+)
+
 
 def _security_auth_password() -> str:
     value = _first_config_secret("BEETS_WEB_PASSWORD")
@@ -2121,6 +2125,78 @@ def _auth_secret_is_usable(value: str) -> bool:
     return True
 
 
+def _read_browser_setup_state() -> str:
+    try:
+        if _BROWSER_SETUP_STATE_FILE.exists():
+            val = _BROWSER_SETUP_STATE_FILE.read_text(encoding="utf-8", errors="ignore").splitlines()[0].strip()
+            if val in {"claimed", "legacy_established", "fresh"}:
+                return val
+    except Exception:
+        pass
+    return ""
+
+
+def _set_browser_setup_state(state: str) -> None:
+    try:
+        _persist_file_atomically(_BROWSER_SETUP_STATE_FILE, state)
+    except Exception as ex:
+        try:
+            app.logger.warning("Could not persist browser setup state %s: %s", state, ex)
+        except Exception:
+            pass
+
+
+def _migrate_or_initialize_setup_state() -> None:
+    """Initialize or migrate durable browser setup state on application boot.
+
+    Prevents existing v0.1.8 upgrades with .initial_admin_password from being
+    mistaken for unclaimed fresh installations, and ensures established installs
+    cannot re-open anonymous setup if credentials are missing or corrupted.
+    """
+    if _security_auth_disabled():
+        return
+
+    current_state = _read_browser_setup_state()
+    if current_state in {"claimed", "legacy_established"}:
+        return
+
+    env_pwd = _first_config_secret("BEETS_WEB_PASSWORD")
+    file_pwd_path = os.environ.get("BEETS_WEB_PASSWORD_FILE", "").strip()
+
+    has_env_pwd = bool(env_pwd and _auth_secret_is_usable(env_pwd))
+    has_file_pwd = False
+    if file_pwd_path:
+        try:
+            val = Path(file_pwd_path).read_text(encoding="utf-8", errors="ignore").splitlines()[0].strip()
+            has_file_pwd = bool(val and _auth_secret_is_usable(val))
+        except Exception:
+            pass
+
+    has_persisted_pwd = False
+    try:
+        if _PERSISTED_BROWSER_PASSWORD_FILE.exists():
+            val = _PERSISTED_BROWSER_PASSWORD_FILE.read_text(encoding="utf-8", errors="ignore").splitlines()[0].strip()
+            has_persisted_pwd = bool(val and _auth_secret_is_usable(val))
+    except Exception:
+        pass
+
+    has_legacy_initial = False
+    try:
+        if _INITIAL_BROWSER_PASSWORD_FILE.exists():
+            val = _INITIAL_BROWSER_PASSWORD_FILE.read_text(encoding="utf-8", errors="ignore").splitlines()[0].strip()
+            has_legacy_initial = bool(val and _auth_secret_is_usable(val))
+    except Exception:
+        pass
+
+    if has_env_pwd or has_file_pwd or has_persisted_pwd:
+        _set_browser_setup_state("claimed")
+    elif has_legacy_initial:
+        _set_browser_setup_state("legacy_established")
+    else:
+        if current_state != "fresh":
+            _set_browser_setup_state("fresh")
+
+
 def _has_explicit_browser_password() -> bool:
     value = _first_config_secret("BEETS_WEB_PASSWORD")
     if value and _auth_secret_is_usable(value):
@@ -2145,6 +2221,9 @@ def _has_explicit_browser_password() -> bool:
 
 def _first_run_setup_required() -> bool:
     if _security_auth_disabled():
+        return False
+    state = _read_browser_setup_state()
+    if state in {"claimed", "legacy_established"}:
         return False
     return not _has_explicit_browser_password()
 
@@ -2216,11 +2295,8 @@ def _bootstrap_auth_token_if_missing() -> None:
 
 
 def _bootstrap_browser_password_if_missing() -> None:
-    """Enforce browser credential availability & persistence.
-    If no usable browser password exists, generate a cryptographically secure initial
-    password, persist it to /web-manager-data/.initial_admin_password (0600), and print a
-    secret-free banner announcing where to retrieve it."""
-    if _security_auth_disabled():
+    """Enforce browser credential availability & persistence for fallback paths."""
+    if _security_auth_disabled() or _first_run_setup_required():
         return
     current_pwd = _security_auth_password()
     if _auth_secret_is_usable(current_pwd):
@@ -2293,6 +2369,7 @@ def _cleanup_initial_browser_password_if_replaced() -> None:
 
 
 _bootstrap_auth_token_if_missing()
+_migrate_or_initialize_setup_state()
 _bootstrap_browser_password_if_missing()
 
 

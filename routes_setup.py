@@ -1637,6 +1637,9 @@ def setup_first_run():
         if not (user_ok and pass_ok):
             return jsonify({"ok": False, "error": "Failed to persist credentials to storage"}), 500
 
+        from app import _set_browser_setup_state
+        _set_browser_setup_state("claimed")
+
         _cleanup_initial_browser_password_if_replaced()
         _invalidate_setup_status_cache()
 

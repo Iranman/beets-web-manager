@@ -1,16 +1,20 @@
 """Real Docker acceptance test for first-run browser authentication.
 
-Three independently-booted scenarios, each its own compose project against
+Four independently-booted scenarios, each its own compose project against
 a fresh directory tree (state must not bleed between them):
 
   1. fresh_install   -- empty persistent dirs, no password configured.
      Covers browser first-run setup mode, initial credential submission via
      POST /api/setup/first-run, race condition handling, transition to Basic
      Auth, credential persistence across restart and force-recreate.
-  2. upgrade_no_password -- pre-seeded .auth_token (simulating an existing
+  2. v018_upgrade    -- pre-seeded .initial_admin_password (simulating a real
+     v0.1.8 installation). Expect: setup mode remains CLOSED, anonymous bootstrap
+     returns 409 Conflict, existing Basic Auth password works, state survives
+     restart & force-recreate.
+  3. upgrade_no_password -- pre-seeded .auth_token (simulating an existing
      v0.1.7 install), no browser password configured. Expect: .auth_token
      unchanged, first-run browser setup mode is active, engine auth works.
-  3. upgrade_with_password -- pre-seeded .auth_token AND BEETS_WEB_PASSWORD
+  4. upgrade_with_password -- pre-seeded .auth_token AND BEETS_WEB_PASSWORD
      set. Expect: no browser setup required; explicit password remains authoritative.
 
 Requires Docker. If Docker is unavailable, this script prints a clear error
@@ -96,7 +100,7 @@ def _write_secure_env_file(path: Path, env: dict) -> None:
 class Stack:
     """One disposable docker-compose.full.yml project against a fresh temp dir tree."""
 
-    def __init__(self, name, *, preseed_auth_token=None, web_password="", extra_env=None):
+    def __init__(self, name, *, preseed_auth_token=None, preseed_initial_pwd=None, web_password="", extra_env=None):
         self.name = name
         self.project = f"firstrunacct-{name}"
         self.port = 8337
@@ -111,6 +115,10 @@ class Stack:
         if preseed_auth_token is not None:
             token_path = self.webdata_dir / ".auth_token"
             token_path.write_text(preseed_auth_token, encoding="utf-8")
+
+        if preseed_initial_pwd is not None:
+            initial_path = self.webdata_dir / ".initial_admin_password"
+            initial_path.write_text(preseed_initial_pwd, encoding="utf-8")
 
         env = {
             "BEETS_API_TOKEN": "firstrun-test-engine-token-not-real-0000",
@@ -390,17 +398,80 @@ def scenario_fresh_install():
 
 
 # ---------------------------------------------------------------------------
-# Scenario 2: upgrade compatibility -- existing .auth_token, no password
+# Scenario 2: upgrade from v0.1.8 .initial_admin_password installation
+# ---------------------------------------------------------------------------
+def scenario_v018_upgrade():
+    print("\n########## SCENARIO 2: upgrade from v0.1.8 .initial_admin_password ##########")
+    initial_pwd = "V018InitialPassword123!Aa4567890"
+    stack = Stack("v018-upg", preseed_initial_pwd=initial_pwd)
+    try:
+        stack.up()
+        print(stack.ps())
+        if not (stack.wait_healthy("beets") and stack.wait_healthy("beets-web-manager")):
+            fail("scenario 2 stack did not become healthy")
+            return
+
+        code, _, body = stack.request("/api/setup/status")
+        try:
+            status_data = json.loads(body)
+            first_run_req = status_data.get("first_run", {}).get("required")
+        except Exception:
+            first_run_req = True
+
+        if first_run_req is False:
+            ok("first-run browser setup mode is NOT active on v0.1.8 upgrade with .initial_admin_password")
+        else:
+            fail(f"first-run setup was unexpectedly active on v0.1.8 upgrade (code={code}, required={first_run_req})")
+
+        # Anonymous POST /api/setup/first-run must be DENIED (409 Conflict)
+        code, _, _ = stack.request(
+            "/api/setup/first-run",
+            method="POST",
+            body=json.dumps({"username": "attacker", "password": "AttackerPassword123!Aa4567890"}),
+            headers_dict={"X-Beets-CSRF": "1"},
+        )
+        if code == 409:
+            ok("anonymous POST /api/setup/first-run returns 409 Conflict (setup closed on upgrade)")
+        else:
+            fail(f"anonymous bootstrap call on v0.1.8 upgrade -> {code}, expected 409")
+
+        # Basic Auth with existing initial password succeeds
+        code, _, _ = stack.request("/api/setup/env", auth_header=basic_header("admin", initial_pwd))
+        if code == 200:
+            ok("Basic Auth with pre-existing v0.1.8 .initial_admin_password -> 200 OK")
+        else:
+            fail(f"Basic Auth with pre-existing v0.1.8 password -> {code}")
+
+        # Restart preserves legacy established state
+        run(["docker", "restart", "beets-web-manager"])
+        if stack.wait_healthy("beets-web-manager"):
+            ok("beets-web-manager healthy again after restart")
+        else:
+            fail("beets-web-manager did not become healthy after restart")
+        code, _, _ = stack.request("/api/setup/env", auth_header=basic_header("admin", initial_pwd))
+        if code == 200:
+            ok("v0.1.8 password still authenticates after container RESTART")
+        else:
+            fail(f"v0.1.8 password broken after restart ({code})")
+
+    finally:
+        print(stack.ps())
+        stack.down()
+        ok("scenario 2 containers/volumes torn down")
+
+
+# ---------------------------------------------------------------------------
+# Scenario 3: upgrade compatibility -- existing .auth_token, no password
 # ---------------------------------------------------------------------------
 def scenario_upgrade_no_password():
-    print("\n########## SCENARIO 2: upgrade compatibility (existing .auth_token, no password) ##########")
+    print("\n########## SCENARIO 3: upgrade compatibility (existing .auth_token, no password) ##########")
     preseed_token = "preexisting-v017-auth-token-simulated-0000000000"
     stack = Stack("upg-nopass", preseed_auth_token=preseed_token)
     try:
         stack.up()
         print(stack.ps())
         if not (stack.wait_healthy("beets") and stack.wait_healthy("beets-web-manager")):
-            fail("scenario 2 stack did not become healthy")
+            fail("scenario 3 stack did not become healthy")
             return
 
         current_token = read_container_file(stack, "beets-web-manager", "/web-manager-data/.auth_token")
@@ -430,14 +501,14 @@ def scenario_upgrade_no_password():
     finally:
         print(stack.ps())
         stack.down()
-        ok("scenario 2 containers/volumes torn down")
+        ok("scenario 3 containers/volumes torn down")
 
 
 # ---------------------------------------------------------------------------
-# Scenario 3: upgrade compatibility -- existing .auth_token AND existing password
+# Scenario 4: upgrade compatibility -- existing .auth_token AND existing password
 # ---------------------------------------------------------------------------
 def scenario_upgrade_with_password():
-    print("\n########## SCENARIO 3: upgrade compatibility (existing .auth_token + BEETS_WEB_PASSWORD) ##########")
+    print("\n########## SCENARIO 4: upgrade compatibility (existing .auth_token + BEETS_WEB_PASSWORD) ##########")
     preseed_token = "preexisting-v017-auth-token-simulated-1111111111"
     existing_pwd = "PreExistingConfiguredPassword!2026#Secure"
     stack = Stack("upg-pass", preseed_auth_token=preseed_token, web_password=existing_pwd)
@@ -445,7 +516,7 @@ def scenario_upgrade_with_password():
         stack.up()
         print(stack.ps())
         if not (stack.wait_healthy("beets") and stack.wait_healthy("beets-web-manager")):
-            fail("scenario 3 stack did not become healthy")
+            fail("scenario 4 stack did not become healthy")
             return
 
         code, _, body = stack.request("/api/setup/status")
@@ -469,13 +540,14 @@ def scenario_upgrade_with_password():
     finally:
         print(stack.ps())
         stack.down()
-        ok("scenario 3 containers/volumes torn down")
+        ok("scenario 4 containers/volumes torn down")
 
 
 def main():
     require_docker()
     build_image()
     scenario_fresh_install()
+    scenario_v018_upgrade()
     scenario_upgrade_no_password()
     scenario_upgrade_with_password()
 
@@ -487,7 +559,7 @@ def main():
         print("=" * 72)
         sys.exit(1)
     else:
-        print("DOCKER ACCEPTANCE TEST PASSED -- all checks confirmed against real containers.")
+        print("DOCKER ACCEPTANCE TEST PASSED -- all 4 scenarios confirmed against real containers.")
         print("=" * 72)
 
 

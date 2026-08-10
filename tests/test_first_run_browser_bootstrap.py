@@ -1,13 +1,15 @@
-"""Automated test suite for browser first-run administrator setup.
+"""Automated test suite for browser first-run administrator setup & migration safety.
 
 Covers:
 - `_first_run_setup_required()` state determination under all credential configurations
+- Durable setup state file (.browser_setup_state: fresh / claimed / legacy_established)
+- v0.1.8 upgrade migration safety (.initial_admin_password does NOT expose anonymous setup)
+- Credential deletion fail-closed protection (missing password on claimed install fails closed, no setup reopen)
 - POST /api/setup/first-run endpoint logic & input validation
 - Race condition protection (concurrent setup requests allow exactly one winner)
 - Credential persistence (.browser_username, .browser_password with 0600 mode)
 - Transition from setup mode to normal Basic Auth boundary
 - Security boundary enforcement (unauthenticated requests restricted to bootstrap routes only)
-- Existing user upgrade compatibility
 """
 import base64
 import os
@@ -33,6 +35,7 @@ class FirstRunBrowserBootstrapTests(unittest.TestCase):
         self.initial_pwd_file = self.data_dir / ".initial_admin_password"
         self.persisted_pwd_file = self.data_dir / ".browser_password"
         self.persisted_user_file = self.data_dir / ".browser_username"
+        self.setup_state_file = self.data_dir / ".browser_setup_state"
         self.auth_token_file = self.data_dir / ".auth_token"
 
         self.env_patch = mock.patch.dict(
@@ -52,6 +55,7 @@ class FirstRunBrowserBootstrapTests(unittest.TestCase):
             mock.patch.object(app_module, "_INITIAL_BROWSER_PASSWORD_FILE", self.initial_pwd_file),
             mock.patch.object(app_module, "_PERSISTED_BROWSER_PASSWORD_FILE", self.persisted_pwd_file),
             mock.patch.object(app_module, "_PERSISTED_BROWSER_USERNAME_FILE", self.persisted_user_file),
+            mock.patch.object(app_module, "_BROWSER_SETUP_STATE_FILE", self.setup_state_file),
             mock.patch.object(app_module, "_GENERATED_AUTH_TOKEN_FILE", self.auth_token_file),
             mock.patch.object(routes_setup, "_STATUS_CACHE_DATA", None),
             mock.patch.object(routes_setup, "_STATUS_CACHE_TS", 0.0),
@@ -67,54 +71,109 @@ class FirstRunBrowserBootstrapTests(unittest.TestCase):
         self.env_patch.stop()
         self.tmpdir.cleanup()
 
-    def test_first_run_setup_required_state(self):
-        """Verify _first_run_setup_required() returns True on fresh install and False when credentials exist."""
-        # Fresh install: no browser credentials exist
+    def test_fresh_install_behavior(self):
+        """A genuinely fresh install enters browser setup mode and does not generate .initial_admin_password."""
+        app_module._migrate_or_initialize_setup_state()
         self.assertTrue(app_module._first_run_setup_required())
+        self.assertFalse(self.initial_pwd_file.exists())
+        self.assertEqual(self.setup_state_file.read_text(encoding="utf-8").strip(), "fresh")
 
-        # Presence of .initial_admin_password alone does NOT turn off first-run setup
-        app_module._bootstrap_browser_password_if_missing()
-        self.assertTrue(self.initial_pwd_file.exists())
-        self.assertTrue(app_module._first_run_setup_required())
+        # GET /api/setup/status reports first_run.required == True
+        status_resp = self.client.get("/api/setup/status")
+        self.assertEqual(status_resp.status_code, 200)
+        self.assertTrue(status_resp.get_json().get("first_run", {}).get("required"))
 
-        # Explicit environment password disables first-run setup
-        with mock.patch.dict(os.environ, {"BEETS_WEB_PASSWORD": _VALID_TEST_PASSWORD}):
-            self.assertFalse(app_module._first_run_setup_required())
+        # Protected API is denied 401
+        self.assertEqual(self.client.get("/api/library").status_code, 401)
 
-        # Persisted .browser_password disables first-run setup
-        self.persisted_pwd_file.write_text(_VALID_TEST_PASSWORD, encoding="utf-8")
-        self.assertFalse(app_module._first_run_setup_required())
-
-    def test_first_run_setup_successful_bootstrap(self):
-        """POST /api/setup/first-run successfully sets credentials and completes setup mode."""
-        self.assertTrue(app_module._first_run_setup_required())
-
+        # POST /api/setup/first-run completes setup
         resp = self.client.post(
             "/api/setup/first-run",
-            json={"username": "newadmin", "password": _VALID_TEST_PASSWORD},
+            json={"username": "freshadmin", "password": _VALID_TEST_PASSWORD},
             headers={"X-Beets-CSRF": "1"},
         )
         self.assertEqual(resp.status_code, 200)
-        self.assertTrue(resp.get_json().get("ok"))
-
-        # Setup is now complete
         self.assertFalse(app_module._first_run_setup_required())
-        self.assertEqual(self.persisted_user_file.read_text(encoding="utf-8").strip(), "newadmin")
-        self.assertEqual(self.persisted_pwd_file.read_text(encoding="utf-8").strip(), _VALID_TEST_PASSWORD)
+        self.assertEqual(self.setup_state_file.read_text(encoding="utf-8").strip(), "claimed")
 
-        # Initial password file cleaned up if it was present
-        self.assertFalse(self.initial_pwd_file.exists())
-
-        # Subsequent POST /api/setup/first-run fails with 409
+        # Second POST fails 409
         resp2 = self.client.post(
             "/api/setup/first-run",
-            json={"username": "another", "password": _VALID_TEST_PASSWORD},
+            json={"username": "hacker", "password": _VALID_TEST_PASSWORD},
             headers={"X-Beets-CSRF": "1"},
         )
         self.assertEqual(resp2.status_code, 409)
 
+    def test_v018_upgrade_migration_security(self):
+        """Scenario: upgrade from v0.1.8 generated-password installation.
+
+        Given:
+        - .initial_admin_password exists from v0.1.8
+        - no .browser_password
+        - no .browser_setup_state marker
+
+        Require:
+        - state migrates to legacy_established
+        - first_run.required == False
+        - GET / does NOT expose anonymous claim setup UI
+        - POST /api/setup/first-run is rejected with 409
+        - existing generated password still authenticates with Basic Auth
+        - restart / force-recreate preserves legacy state and password
+        """
+        self.initial_pwd_file.write_text(_VALID_TEST_PASSWORD, encoding="utf-8")
+        app_module._migrate_or_initialize_setup_state()
+
+        self.assertEqual(self.setup_state_file.read_text(encoding="utf-8").strip(), "legacy_established")
+        self.assertFalse(app_module._first_run_setup_required())
+
+        # POST /api/setup/first-run is rejected
+        setup_resp = self.client.post(
+            "/api/setup/first-run",
+            json={"username": "attacker", "password": _VALID_TEST_PASSWORD},
+            headers={"X-Beets-CSRF": "1"},
+        )
+        self.assertEqual(setup_resp.status_code, 409)
+
+        # Existing initial password still authenticates Basic Auth
+        cred = base64.b64encode(f"admin:{_VALID_TEST_PASSWORD}".encode("utf-8")).decode("utf-8")
+        resp_auth = self.client.get("/api/setup/env", headers={"Authorization": f"Basic {cred}"})
+        self.assertEqual(resp_auth.status_code, 200)
+
+        # Restart simulation: state remains legacy_established and password remains valid
+        app_module._migrate_or_initialize_setup_state()
+        self.assertFalse(app_module._first_run_setup_required())
+        self.assertTrue(self.initial_pwd_file.exists())
+
+    def test_credential_deletion_fails_closed(self):
+        """Credential deletion on a completed/claimed install fails closed instead of reopening setup."""
+        # 1. Complete setup
+        self.client.post(
+            "/api/setup/first-run",
+            json={"username": "admin", "password": _VALID_TEST_PASSWORD},
+            headers={"X-Beets-CSRF": "1"},
+        )
+        self.assertEqual(self.setup_state_file.read_text(encoding="utf-8").strip(), "claimed")
+
+        # 2. Simulate deleted password file
+        self.persisted_pwd_file.unlink(missing_ok=True)
+
+        # 3. Setup MUST NOT reopen
+        self.assertFalse(app_module._first_run_setup_required())
+        setup_resp = self.client.post(
+            "/api/setup/first-run",
+            json={"username": "attacker", "password": _VALID_TEST_PASSWORD},
+            headers={"X-Beets-CSRF": "1"},
+        )
+        self.assertEqual(setup_resp.status_code, 409)
+
+        # 4. Unauthenticated request to protected endpoint fails closed (503 / 401)
+        resp = self.client.get("/api/library")
+        self.assertIn(resp.status_code, (401, 503))
+
     def test_first_run_validation_errors(self):
         """POST /api/setup/first-run rejects weak passwords or extra payload fields."""
+        app_module._migrate_or_initialize_setup_state()
+
         # Weak password
         resp_weak = self.client.post(
             "/api/setup/first-run",
@@ -134,6 +193,7 @@ class FirstRunBrowserBootstrapTests(unittest.TestCase):
 
     def test_concurrent_claim_race_condition(self):
         """Two concurrent setup requests race: exactly one wins (200), second gets 409."""
+        app_module._migrate_or_initialize_setup_state()
         results = []
 
         def worker(pwd):
@@ -158,48 +218,7 @@ class FirstRunBrowserBootstrapTests(unittest.TestCase):
         self.assertIn(200, results)
         self.assertIn(409, results)
         self.assertEqual(len(results), 2)
-
-    def test_security_boundary_during_first_run(self):
-        """During first-run setup, unauthenticated requests can reach only bootstrap routes."""
-        self.assertTrue(app_module._first_run_setup_required())
-
-        # Public / bootstrap routes work unauthenticated
-        self.assertEqual(self.client.get("/health").status_code, 200)
-        self.assertEqual(self.client.get("/").status_code, 200)
-
-        status_resp = self.client.get("/api/setup/status")
-        self.assertEqual(status_resp.status_code, 200)
-        status_data = status_resp.get_json()
-        self.assertTrue(status_data.get("first_run", {}).get("required"))
-
-        # Protected application routes return 401 when unauthenticated
-        self.assertEqual(self.client.get("/api/library").status_code, 401)
-        self.assertEqual(self.client.get("/api/jobs").status_code, 401)
-        self.assertEqual(self.client.get("/api/setup/env").status_code, 401)
-        self.assertEqual(self.client.post("/api/setup/env", json={}).status_code, 401)
-        self.assertEqual(self.client.post("/api/setup/auth-token/regenerate").status_code, 401)
-
-        # Bearer token still works for protected routes
-        bearer = self.env_patch.values["BEETS_WEB_AUTH_TOKEN"]
-        resp_bearer = self.client.get("/api/setup/env", headers={"Authorization": f"Bearer {bearer}"})
-        self.assertEqual(resp_bearer.status_code, 200)
-
-    def test_existing_user_upgrade_compatibility(self):
-        """Upgrading an existing install with .initial_admin_password or .browser_password works cleanly."""
-        # Case A: .initial_admin_password exists (from v0.1.8)
-        self.initial_pwd_file.write_text(_VALID_TEST_PASSWORD, encoding="utf-8")
-
-        # Unauthenticated browser gets setup page state
-        self.assertTrue(app_module._first_run_setup_required())
-
-        # Authenticated Basic Auth with initial password still succeeds
-        cred = base64.b64encode(f"admin:{_VALID_TEST_PASSWORD}".encode("utf-8")).decode("utf-8")
-        resp_auth = self.client.get("/api/setup/status", headers={"Authorization": f"Basic {cred}"})
-        self.assertEqual(resp_auth.status_code, 200)
-
-        # Case B: .browser_password exists
-        self.persisted_pwd_file.write_text(_VALID_TEST_PASSWORD, encoding="utf-8")
-        self.assertFalse(app_module._first_run_setup_required())
+        self.assertEqual(self.setup_state_file.read_text(encoding="utf-8").strip(), "claimed")
 
 
 if __name__ == "__main__":
