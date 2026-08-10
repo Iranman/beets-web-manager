@@ -129,8 +129,7 @@ class FirstRunBrowserBootstrapTests(unittest.TestCase):
         - restart / force-recreate preserves legacy state and password
         """
         # Hardcoded dummy constant, disposable tempfile -- not a real secret.
-        # codeql[py/clear-text-storage-sensitive-data]
-        self.initial_pwd_file.write_text(_VALID_TEST_PASSWORD, encoding="utf-8")
+        self.initial_pwd_file.write_text(_VALID_TEST_PASSWORD, encoding="utf-8")  # codeql[py/clear-text-storage-sensitive-data]
         app_module._migrate_or_initialize_setup_state()
 
         self.assertEqual(self.setup_state_file.read_text(encoding="utf-8").strip(), "legacy_established")

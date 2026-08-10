@@ -141,8 +141,7 @@ def run_acceptance_test():
             # Restore password for remaining checks. _USER_PASSWORD is a
             # hardcoded dummy constant written to a disposable tempfile that
             # this script deletes on exit -- not a real secret.
-            # codeql[py/clear-text-storage-sensitive-data]
-            persisted_pwd_file.write_text(_USER_PASSWORD, encoding="utf-8")
+            persisted_pwd_file.write_text(_USER_PASSWORD, encoding="utf-8")  # codeql[py/clear-text-storage-sensitive-data]
 
             # 10. Secrets do not appear in logs
             logs_content = log_capture.getvalue()
@@ -164,8 +163,7 @@ def run_acceptance_test():
         initial_pwd_file_upg = data_dir_upg / ".initial_admin_password"
         # Dummy constant seeded into a disposable tempfile to simulate a
         # pre-existing v0.1.8 install; not a real secret.
-        # codeql[py/clear-text-storage-sensitive-data]
-        initial_pwd_file_upg.write_text(_USER_PASSWORD, encoding="utf-8")
+        initial_pwd_file_upg.write_text(_USER_PASSWORD, encoding="utf-8")  # codeql[py/clear-text-storage-sensitive-data]
         persisted_pwd_file_upg = data_dir_upg / ".browser_password"
         persisted_user_file_upg = data_dir_upg / ".browser_username"
         setup_state_file_upg = data_dir_upg / ".browser_setup_state"
