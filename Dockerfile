@@ -14,7 +14,7 @@ FROM python:3.12-slim-bookworm AS runtime
 # Immutable image provenance. Required, not optional: a blank/missing
 # VCS_REF fails the build rather than silently producing an unlabeled image.
 ARG VCS_REF
-ARG VERSION=0.1.0
+ARG VERSION=0.1.10
 ARG BUILD_DATE
 RUN test -n "${VCS_REF}" || (echo "ERROR: VCS_REF build-arg is required and must not be blank" >&2 && exit 1)
 LABEL org.opencontainers.image.title="Beets Web Manager" \

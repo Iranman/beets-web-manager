@@ -481,6 +481,19 @@ export interface SetupStatusResponse {
     replaygain_command?: string;
     discogs_token_configured?: boolean;
     listenbrainz_token_configured?: boolean;
+    engine_release?: string;
+    engine_revision?: string;
+    control_api_version?: number | null;
+    engine_compatibility?: {
+      compatible: boolean;
+      state: string;
+      engine_release?: string;
+      engine_revision?: string;
+      control_api_version?: number | null;
+      expected_release?: string;
+      expected_api_version?: number;
+      message?: string;
+    };
   };
   auth: {
     token_configured: boolean;
