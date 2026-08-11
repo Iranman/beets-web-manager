@@ -8,6 +8,7 @@ Covers:
 """
 import base64
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -19,6 +20,10 @@ import routes_setup
 
 class V0110UpgradeAndMatchedStackTests(unittest.TestCase):
     def setUp(self):
+        global app_module, routes_setup
+        app_module = sys.modules.get("app", app_module)
+        routes_setup = sys.modules.get("routes_setup", routes_setup)
+
         self.tmpdir = tempfile.TemporaryDirectory()
         self.data_dir = Path(self.tmpdir.name)
 
