@@ -196,15 +196,20 @@ class V0110UpgradeAndMatchedStackTests(unittest.TestCase):
     # Existing User Upgrade & Database Preservation Tests
     # -------------------------------------------------------------------------
     def test_existing_v018_upgrade_preserves_credentials_and_state(self):
-        """Upgrading v0.1.8 installation preserves credentials and setup_complete status."""
+        """Upgrading v0.1.8 preserves credentials without creating the setup-complete marker."""
         self.initial_pwd_file.write_text("MyExistingAdminPassword123!Aa456", encoding="utf-8")
         app_module._migrate_or_initialize_setup_state()
 
         remote = self._sample_remote_status()
         with mock.patch("routes_setup.beets_client.get_status", return_value=remote):
             status_payload = routes_setup._build_setup_status_payload()
-            self.assertTrue(status_payload["setup_complete"])
+            self.assertFalse(status_payload["setup_complete"])
             self.assertFalse(status_payload["first_run"]["required"])
+            self.assertEqual(self.setup_state_file.read_text(encoding="utf-8"), "legacy_established")
+            self.assertEqual(
+                self.initial_pwd_file.read_text(encoding="utf-8"),
+                "MyExistingAdminPassword123!Aa456",
+            )
 
             # Basic Auth with existing password works
             cred = base64.b64encode(b"admin:MyExistingAdminPassword123!Aa456").decode("utf-8")

@@ -1360,7 +1360,7 @@ def _build_setup_status_payload() -> Dict[str, Any]:
         "status": "ready" if ready else "warning",
         "version": _APP_VERSION,
         "demo_mode": demo_mode,
-        "setup_complete": _SETUP_COMPLETE_MARKER.exists() or not first_run_req,
+        "setup_complete": _SETUP_COMPLETE_MARKER.exists(),
         "first_run": {
             "required": first_run_req,
         },

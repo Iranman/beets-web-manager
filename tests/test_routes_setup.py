@@ -360,10 +360,40 @@ class RoutesSetupRemoteBeetsDiagnosticsTests(unittest.TestCase):
 
     def test_replaygain_backend_readiness_uses_remote_backend_tools(self):
         status = self._remote_status(ffmpeg_available=False, ffmpeg_path="")
+        status["capabilities"]["replaygain"] = {
+            "configured": True,
+            "loaded": True,
+            "available": False,
+            "backend": "ffmpeg",
+            "command": "",
+            "ffmpeg_available": False,
+        }
         response, _ = self._status_response(status)
 
         body = response.get_json()
         self.assertEqual(body["integrations"]["replaygain"]["state"], "dependency_plugin_missing")
+
+    def test_replaygain_authoritative_command_capability_reports_configured(self):
+        status = self._remote_status(
+            replaygain_backend="command",
+            replaygain_command="/usr/bin/mp3gain",
+            ffmpeg_available=False,
+            ffmpeg_path="",
+        )
+        status["capabilities"]["replaygain"] = {
+            "configured": True,
+            "loaded": True,
+            "available": True,
+            "backend": "command",
+            "command": "/usr/bin/mp3gain",
+            "ffmpeg_available": False,
+        }
+        response, _ = self._status_response(status)
+
+        body = response.get_json()
+        replaygain = body["integrations"]["replaygain"]
+        self.assertEqual(replaygain["state"], "configured")
+        self.assertIn("command backend (/usr/bin/mp3gain)", replaygain["note"])
 
     def test_discpath_custom_plugin_readiness_requires_remote_loaded_plugin(self):
         loaded = [p for p in self._remote_status()["loaded_plugins"] if p != "discpath"]
