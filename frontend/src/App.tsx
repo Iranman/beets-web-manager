@@ -1,6 +1,9 @@
 import CssBaseline from '@mui/material/CssBaseline';
 import { ThemeProvider } from '@mui/material/styles';
+import { useEffect, useState } from 'react';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router';
+import { getSetupStatus } from './api/client';
+import FirstRunSetup from './components/FirstRunSetup';
 import Shell from './components/layout/Shell';
 import Config from './views/Config';
 import Import from './views/Import';
@@ -8,8 +11,8 @@ import Jobs from './views/Jobs';
 import Library from './views/Library';
 import LibraryChanges from './views/LibraryChanges';
 import Playlists from './views/Playlists';
-import System from './views/System';
 import Submissions from './views/Submissions';
+import System from './views/System';
 import { theme } from './theme';
 
 // Extracted from App so tests can mount the same route tree under a
@@ -36,6 +39,33 @@ export function AppRoutes() {
 }
 
 export default function App() {
+  const [firstRunRequired, setFirstRunRequired] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    getSetupStatus()
+      .then((data) => {
+        if (!active) return;
+        setFirstRunRequired(data.first_run?.required === true || data.auth?.first_run_required === true);
+      })
+      .catch(() => {
+        if (!active) return;
+        setFirstRunRequired(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  if (firstRunRequired === true) {
+    return (
+      <ThemeProvider theme={theme}>
+        <CssBaseline />
+        <FirstRunSetup />
+      </ThemeProvider>
+    );
+  }
+
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline />

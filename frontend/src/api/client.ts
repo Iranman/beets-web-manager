@@ -86,6 +86,8 @@ import type {
   SetupAuthTokenRegenerateResponse,
   SetupEnvResponse,
   SetupEnvSavePayload,
+  SetupFirstRunRequest,
+  SetupFirstRunResponse,
   SetupIntegrationTestResponse,
   SetupStatusResponse,
   WantedResponse,
@@ -244,6 +246,10 @@ export function transactionExportUrl(transactionId: string, format: 'json' | 'cs
 
 export function getSetupStatus(): Promise<SetupStatusResponse> {
   return apiJson<SetupStatusResponse>('/api/setup/status');
+}
+
+export function submitFirstRunSetup(payload: SetupFirstRunRequest): Promise<SetupFirstRunResponse> {
+  return apiJson<SetupFirstRunResponse>('/api/setup/first-run', jsonRequest('POST', payload));
 }
 
 export function getSetupEnv(): Promise<SetupEnvResponse> {

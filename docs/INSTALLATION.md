@@ -47,6 +47,13 @@ docker compose up -d
 docker compose ps
 ```
 
+### 4. First-Run Setup
+Open `http://<server-ip>:8337` in your browser. On a fresh installation with no configured browser password:
+1. You will see the **Finish Beets Web Manager Setup** page.
+2. Enter your preferred administrator username (default: `admin`) and password.
+3. Click **Create Login & Complete Setup**.
+4. Sign in with your created login when prompted.
+
 ---
 
 ## Existing Stack Installation (TrueNAS / Portainer / Multi-App Stacks)

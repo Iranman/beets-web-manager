@@ -1760,6 +1760,42 @@ _AUTH_PUBLIC_ENDPOINTS = {
     ("HEAD", "health_ready"),
     ("GET", "health_root"),
     ("HEAD", "health_root"),
+    # The frontend's App shell calls GET /api/setup/status unauthenticated on
+    # every load, in EVERY installation state, to decide whether to render
+    # the first-run claim UI or the normal (login-gated) app -- that check is
+    # inherently pre-auth and would be circular otherwise. The payload itself
+    # only exposes non-secret status booleans/paths (see
+    # test_config_and_status_responses_are_redacted), never credentials.
+    ("GET", "setup_status"),
+    ("HEAD", "setup_status"),
+    # NOTE: setup_first_run is deliberately NOT listed here. It must only be
+    # anonymously reachable while _first_run_setup_required() is true (see
+    # _FIRST_RUN_PUBLIC_ENDPOINTS below and _enforce_security_boundary). Once
+    # an installation is claimed/legacy_established, this endpoint must
+    # require the same authentication as any other mutating API.
+}
+_FIRST_RUN_PUBLIC_ENDPOINTS = {
+    ("GET", "health"),
+    ("HEAD", "health"),
+    ("GET", "health_live"),
+    ("HEAD", "health_live"),
+    ("GET", "health_ready"),
+    ("HEAD", "health_ready"),
+    ("GET", "health_root"),
+    ("HEAD", "health_root"),
+    ("GET", "react_assets"),
+    ("HEAD", "react_assets"),
+    ("GET", "react_next_static"),
+    ("HEAD", "react_next_static"),
+    ("GET", "favicon"),
+    ("HEAD", "favicon"),
+    ("GET", "index"),
+    ("HEAD", "index"),
+    ("GET", "react_spa_fallback"),
+    ("HEAD", "react_spa_fallback"),
+    ("GET", "setup_status"),
+    ("HEAD", "setup_status"),
+    ("POST", "setup_first_run"),
 }
 _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)\b(api[_-]?key|token|password|secret|authorization|cookie|client[_-]?secret)"
@@ -1974,6 +2010,10 @@ _PERSISTED_BROWSER_USERNAME_FILE = Path(
     os.environ.get("BEETS_WEB_PERSISTED_USERNAME_FILE", "/web-manager-data/.browser_username")
 )
 
+_BROWSER_SETUP_STATE_FILE = Path(
+    os.environ.get("BEETS_WEB_SETUP_STATE_FILE", "/web-manager-data/.browser_setup_state")
+)
+
 
 def _security_auth_password() -> str:
     value = _first_config_secret("BEETS_WEB_PASSWORD")
@@ -2113,6 +2153,114 @@ def _auth_secret_is_usable(value: str) -> bool:
     return True
 
 
+def _read_browser_setup_state() -> str:
+    try:
+        if _BROWSER_SETUP_STATE_FILE.exists():
+            val = _BROWSER_SETUP_STATE_FILE.read_text(encoding="utf-8", errors="ignore").splitlines()[0].strip()
+            if val in {"claimed", "legacy_established", "fresh"}:
+                return val
+    except Exception:
+        pass
+    return ""
+
+
+def _set_browser_setup_state(state: str) -> bool:
+    """Persist the durable setup-state marker. Returns True only on a
+    confirmed durable write. Callers that gate a security-relevant response
+    (e.g. "setup complete") on this MUST check the return value -- silently
+    swallowing a failed write here previously let the endpoint claim success
+    when the durable state was never actually committed."""
+    ok = _persist_file_atomically(_BROWSER_SETUP_STATE_FILE, state)
+    if not ok:
+        try:
+            app.logger.error("Could not persist browser setup state %r", state)
+        except Exception:
+            pass
+    return ok
+
+
+def _migrate_or_initialize_setup_state() -> None:
+    """Initialize or migrate durable browser setup state on application boot.
+
+    Prevents existing v0.1.8 upgrades with .initial_admin_password from being
+    mistaken for unclaimed fresh installations, and ensures established installs
+    cannot re-open anonymous setup if credentials are missing or corrupted.
+    """
+    if _security_auth_disabled():
+        return
+
+    current_state = _read_browser_setup_state()
+    if current_state in {"claimed", "legacy_established"}:
+        return
+
+    env_pwd = _first_config_secret("BEETS_WEB_PASSWORD")
+    file_pwd_path = os.environ.get("BEETS_WEB_PASSWORD_FILE", "").strip()
+
+    has_env_pwd = bool(env_pwd and _auth_secret_is_usable(env_pwd))
+    has_file_pwd = False
+    if file_pwd_path:
+        try:
+            val = Path(file_pwd_path).read_text(encoding="utf-8", errors="ignore").splitlines()[0].strip()
+            has_file_pwd = bool(val and _auth_secret_is_usable(val))
+        except Exception:
+            pass
+
+    has_persisted_pwd = False
+    try:
+        if _PERSISTED_BROWSER_PASSWORD_FILE.exists():
+            val = _PERSISTED_BROWSER_PASSWORD_FILE.read_text(encoding="utf-8", errors="ignore").splitlines()[0].strip()
+            has_persisted_pwd = bool(val and _auth_secret_is_usable(val))
+    except Exception:
+        pass
+
+    has_legacy_initial = False
+    try:
+        if _INITIAL_BROWSER_PASSWORD_FILE.exists():
+            val = _INITIAL_BROWSER_PASSWORD_FILE.read_text(encoding="utf-8", errors="ignore").splitlines()[0].strip()
+            has_legacy_initial = bool(val and _auth_secret_is_usable(val))
+    except Exception:
+        pass
+
+    if has_env_pwd or has_file_pwd or has_persisted_pwd:
+        _set_browser_setup_state("claimed")
+    elif has_legacy_initial:
+        _set_browser_setup_state("legacy_established")
+    else:
+        if current_state != "fresh":
+            _set_browser_setup_state("fresh")
+
+
+def _has_explicit_browser_password() -> bool:
+    value = _first_config_secret("BEETS_WEB_PASSWORD")
+    if value and _auth_secret_is_usable(value):
+        return True
+    path = os.environ.get("BEETS_WEB_PASSWORD_FILE", "").strip()
+    if path:
+        try:
+            val = Path(path).read_text(encoding="utf-8", errors="ignore").splitlines()[0].strip()
+            if val and _auth_secret_is_usable(val):
+                return True
+        except Exception:
+            pass
+    try:
+        if _PERSISTED_BROWSER_PASSWORD_FILE.exists():
+            val = _PERSISTED_BROWSER_PASSWORD_FILE.read_text(encoding="utf-8", errors="ignore").splitlines()[0].strip()
+            if val and _auth_secret_is_usable(val):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _first_run_setup_required() -> bool:
+    if _security_auth_disabled():
+        return False
+    state = _read_browser_setup_state()
+    if state in {"claimed", "legacy_established"}:
+        return False
+    return not _has_explicit_browser_password()
+
+
 def _security_auth_configured() -> bool:
     return _auth_secret_is_usable(_security_auth_token()) or _auth_secret_is_usable(_security_auth_password())
 
@@ -2180,50 +2328,37 @@ def _bootstrap_auth_token_if_missing() -> None:
 
 
 def _bootstrap_browser_password_if_missing() -> None:
-    """Enforce browser credential availability & persistence.
-    If no usable browser password exists, generate a cryptographically secure initial
-    password, persist it to /web-manager-data/.initial_admin_password (0600), and print a
-    secret-free banner announcing where to retrieve it."""
-    if _security_auth_disabled():
+    """Fail-closed guard for an established install whose resolved browser
+    password is missing/corrupt/unusable at boot.
+
+    Fresh, not-yet-claimed installs never reach this function's generation
+    logic -- they short-circuit above and wait for the user to claim
+    credentials via the first-run UI. The ONLY way to reach this point with
+    an unusable current_pwd is an install already marked claimed/
+    legacy_established whose credential file is now missing or corrupt.
+    Per the fail-closed requirement, that must NOT silently mint a fresh,
+    working password (that would turn credential deletion into an anonymous
+    account-takeover / privilege-recovery path via container logs) -- it
+    must refuse to authenticate anyone until an operator restores the
+    credential file or sets BEETS_WEB_PASSWORD explicitly.
+    """
+    if _security_auth_disabled() or _first_run_setup_required():
         return
     current_pwd = _security_auth_password()
     if _auth_secret_is_usable(current_pwd):
         return
 
-    pwd = generate_secure_browser_password(36)
     try:
-        _persist_file_atomically(_INITIAL_BROWSER_PASSWORD_FILE, pwd)
-    except Exception as ex:
-        try:
-            app.logger.error("Failed to persist generated initial browser password to %s: %s", _INITIAL_BROWSER_PASSWORD_FILE, ex)
-        except Exception:
-            pass
-    try:
-        persisted_ok = _INITIAL_BROWSER_PASSWORD_FILE.read_text(encoding="utf-8").strip() == pwd
-    except Exception:
-        persisted_ok = False
-
-    if not persisted_ok:
-        raise RuntimeError(
-            "Startup refused: no browser password was configured, and a newly generated "
-            f"initial password could not be persisted to {_INITIAL_BROWSER_PASSWORD_FILE}. "
-            "Fix permissions on /web-manager-data and restart, or set BEETS_WEB_PASSWORD explicitly."
+        app.logger.error(
+            "Browser credential is missing, unreadable, or unusable on an "
+            "installation already marked established. Refusing to "
+            "auto-generate a replacement (fail-closed): Basic Auth will "
+            "reject all requests until the credential file is restored or "
+            "BEETS_WEB_PASSWORD is set explicitly."
         )
-
-    username = _security_auth_username()
-    print(
-        "\n" + "=" * 72 +
-        "\nNo browser password was configured."
-        "\nA secure initial browser password has been generated."
-        f"\n\nBrowser username: {username}"
-        "\n\nRetrieve the password from:"
-        f"\n  {_INITIAL_BROWSER_PASSWORD_FILE}"
-        "\n\nExample:"
-        f"\n  docker exec beets-web-manager cat {_INITIAL_BROWSER_PASSWORD_FILE}"
-        "\n\nChange this password after signing in."
-        "\n" + "=" * 72 + "\n",
-        flush=True,
-    )
+    except Exception:
+        pass
+    return
 
 
 def _cleanup_initial_browser_password_if_replaced() -> None:
@@ -2257,6 +2392,7 @@ def _cleanup_initial_browser_password_if_replaced() -> None:
 
 
 _bootstrap_auth_token_if_missing()
+_migrate_or_initialize_setup_state()
 _bootstrap_browser_password_if_missing()
 
 
@@ -2603,6 +2739,12 @@ def _is_public_endpoint() -> bool:
     return (method, endpoint) in _AUTH_PUBLIC_ENDPOINTS
 
 
+def _is_first_run_public_endpoint() -> bool:
+    endpoint = request.endpoint or ""
+    method = request.method
+    return (method, endpoint) in _FIRST_RUN_PUBLIC_ENDPOINTS
+
+
 def _auth_failure_rate_limit_response():
     auth_limited, auth_retry = _rate_limited(
         "auth",
@@ -2617,19 +2759,35 @@ def _auth_failure_rate_limit_response():
 
 @app.before_request
 def _enforce_security_boundary():
-    if _is_public_endpoint() or _security_auth_disabled():
+    if _security_auth_disabled():
         return None
 
-    if not _security_auth_configured():
-        return _json_security_error(
-            503,
-            "Authentication is required. Set a strong BEETS_WEB_AUTH_TOKEN or BEETS_WEB_PASSWORD.",
-        )
-    if not _request_authorized():
-        limited = _auth_failure_rate_limit_response()
-        if limited is not None:
-            return limited
-        return _json_security_error(401, "Authentication required")
+    if _first_run_setup_required():
+        if _is_first_run_public_endpoint():
+            return None
+        if not _request_authorized():
+            limited = _auth_failure_rate_limit_response()
+            if limited is not None:
+                return limited
+            return _json_security_error(
+                401,
+                "First-run setup in progress. Authentication required for this endpoint.",
+            )
+    else:
+        if _is_public_endpoint():
+            return None
+
+        if not _security_auth_configured():
+            return _json_security_error(
+                503,
+                "Authentication is required. Set a strong BEETS_WEB_AUTH_TOKEN or BEETS_WEB_PASSWORD.",
+            )
+        if not _request_authorized():
+            limited = _auth_failure_rate_limit_response()
+            if limited is not None:
+                return limited
+            return _json_security_error(401, "Authentication required")
+
     if not _csrf_request_allowed():
         return _json_security_error(403, "CSRF check failed")
 
