@@ -1760,12 +1760,6 @@ _AUTH_PUBLIC_ENDPOINTS = {
     ("HEAD", "health_ready"),
     ("GET", "health_root"),
     ("HEAD", "health_root"),
-    # The frontend's App shell calls GET /api/setup/status unauthenticated on
-    # every load, in EVERY installation state, to decide whether to render
-    # the first-run claim UI or the normal (login-gated) app -- that check is
-    # inherently pre-auth and would be circular otherwise. The payload itself
-    # only exposes non-secret status booleans/paths (see
-    # test_config_and_status_responses_are_redacted), never credentials.
     ("GET", "setup_status"),
     ("HEAD", "setup_status"),
     # NOTE: setup_first_run is deliberately NOT listed here. It must only be
@@ -2045,9 +2039,6 @@ def _security_auth_password() -> str:
 
 
 def _security_auth_username() -> str:
-    val = os.environ.get("BEETS_WEB_USERNAME", "").strip()
-    if val:
-        return val
     try:
         if _PERSISTED_BROWSER_USERNAME_FILE.exists():
             p_user = _PERSISTED_BROWSER_USERNAME_FILE.read_text(encoding="utf-8", errors="ignore").splitlines()[0].strip()
@@ -2055,6 +2046,9 @@ def _security_auth_username() -> str:
                 return p_user
     except Exception:
         pass
+    val = os.environ.get("BEETS_WEB_USERNAME", "").strip()
+    if val:
+        return val
     return "admin"
 
 
@@ -43734,11 +43728,12 @@ def _playlist_path_keys(path_value: str) -> set:
 
     add(raw)
     try:
-        p = Path(raw)
-        if p.is_absolute():
-            add(str(p.resolve(strict=False)))
+        clean_raw = os.path.normpath(raw).replace("\\", "/")
+        if os.path.isabs(clean_raw):
+            add(clean_raw)
         else:
-            add(str((MUSIC_ROOT / raw).resolve(strict=False)))
+            joined = os.path.normpath(os.path.join(str(MUSIC_ROOT), clean_raw.lstrip("/"))).replace("\\", "/")
+            add(joined)
     except Exception:
         pass
 

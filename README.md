@@ -26,7 +26,11 @@ See [SCREENSHOTS.md](SCREENSHOTS.md) for a tour of the app (Library, Import, Pla
 
 ## Installation & Deployment
 
-Beets Web Manager is packaged as a container image published to GitHub Container Registry (`ghcr.io/iranman/beets-web-manager`). End users do not need Node.js, Python, or build tools on the host system.
+Beets Web Manager consists of two coordinated, pre-built containers published to GitHub Container Registry:
+- **`beets`** (`ghcr.io/iranman/beets-engine`): Authoritative Beets engine, plugins, database, and control agent.
+- **`beets-web-manager`** (`ghcr.io/iranman/beets-web-manager`): Web UI, API, import workflows, and background job engine.
+
+End users do not need Node.js, Python, or build tools on the host system.
 
 ### Quick Start (Production)
 
@@ -38,14 +42,7 @@ cd beets-web-manager
 cp .env.example .env
 ```
 
-Configure your Beets control agent credentials in `.env`:
-
-```env
-BEETS_API_URL=http://beets:8338
-BEETS_API_TOKEN=your-beets-api-token
-```
-
-Pull the published image and start the container:
+Configure your shared internal `BEETS_API_TOKEN` in `.env`, then pull the matched release pair and start the stack:
 
 ```bash
 docker compose pull

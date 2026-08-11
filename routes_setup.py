@@ -621,6 +621,16 @@ def _remote_beets_diagnostics_failure(
         "remote_reachable": False,
         "remote_error": remote_error,
         "paths": {},
+        "engine_compatibility": {
+            "compatible": False,
+            "state": remote_error,
+            "engine_release": "",
+            "engine_revision": "",
+            "control_api_version": None,
+            "expected_release": os.environ.get("BEETS_WEB_MANAGER_VERSION", "0.1.10"),
+            "expected_api_version": 1,
+            "message": diagnostic_error,
+        },
     }
 
 
@@ -714,6 +724,8 @@ def _beets_plugin_diagnostics(config_path: Path) -> Dict[str, Any]:
     if not loader_ok and not loader_error:
         loader_error = "Beets plugin loader did not complete successfully."
 
+    engine_compat = _check_engine_compatibility(remote_status)
+
     return {
         "available": bool(remote_status.get("beet_available", True)),
         "path": str(remote_status.get("beetsdir") or os.environ.get("BEETS_API_URL", "http://beets:8338")),
@@ -743,6 +755,73 @@ def _beets_plugin_diagnostics(config_path: Path) -> Dict[str, Any]:
         "remote_reachable": True,
         "remote_error": "",
         "paths": remote_status.get("paths") if isinstance(remote_status.get("paths"), dict) else {},
+        "engine_compatibility": engine_compat,
+    }
+
+
+_MIN_CONTROL_API_VERSION = 1
+
+
+def _is_version_mismatch(remote_ver: str, expected_ver: str) -> bool:
+    if not remote_ver or not expected_ver:
+        return False
+    r_clean = remote_ver.lstrip("v").strip().lower()
+    e_clean = expected_ver.lstrip("v").strip().lower()
+    ignored = {"stable", "latest", "edge", "test-firstrun", "test-local-firstrun-auth", "local-build"}
+    if r_clean in ignored or e_clean in ignored:
+        return False
+    if r_clean == e_clean:
+        return False
+
+    def parse_semver(v: str) -> Tuple[int, ...]:
+        parts = re.findall(r"\d+", v)
+        return tuple(int(p) for p in parts[:3]) if parts else (0,)
+
+    r_parts = parse_semver(r_clean)
+    e_parts = parse_semver(e_clean)
+    if r_parts and e_parts and r_parts < e_parts:
+        return True
+    return False
+
+
+def _check_engine_compatibility(remote_status: Dict[str, Any]) -> Dict[str, Any]:
+    engine_release = str(remote_status.get("engine_release") or "").strip()
+    engine_revision = str(remote_status.get("engine_revision") or "").strip()
+    control_api_ver = remote_status.get("control_api_version")
+
+    expected_release = os.environ.get("BEETS_WEB_MANAGER_VERSION", "0.1.10").strip() or "0.1.10"
+    min_api_version = _MIN_CONTROL_API_VERSION
+
+    is_compatible = True
+    state = "compatible"
+    message = ""
+
+    if control_api_ver is not None and isinstance(control_api_ver, int):
+        if control_api_ver < min_api_version:
+            is_compatible = False
+            state = "compatibility_mismatch"
+            message = (
+                f"Beets engine control API version ({control_api_ver}) is outdated. "
+                f"Web Manager requires control API version {min_api_version} or higher. "
+                "Please upgrade the Beets engine container."
+            )
+    elif engine_release and _is_version_mismatch(engine_release, expected_release):
+        is_compatible = False
+        state = "compatibility_mismatch"
+        message = (
+            f"Beets engine release ({engine_release}) does not match Web Manager ({expected_release}). "
+            "Please upgrade the Beets engine container to match."
+        )
+
+    return {
+        "compatible": is_compatible,
+        "state": state,
+        "engine_release": engine_release,
+        "engine_revision": engine_revision,
+        "control_api_version": control_api_ver if isinstance(control_api_ver, int) else None,
+        "expected_release": expected_release,
+        "expected_api_version": min_api_version,
+        "message": message,
     }
 
 def _plugin_failure_for(failures: List[str], plugin: str) -> str:
@@ -929,12 +1008,40 @@ def _replaygain_integration_status(diagnostics: Dict[str, Any], ffmpeg_path: str
             state="dependency_plugin_missing",
             note="ReplayGain is enabled but was not loaded by the Beets engine.",
         )
-    if replaygain_backend == "ffmpeg" and ffmpeg_path and not replaygain_command:
+    # Consume remote engine capability if available
+    capabilities = diagnostics.get("capabilities")
+    rg_cap = capabilities.get("replaygain") if isinstance(capabilities, dict) else None
+
+    if isinstance(rg_cap, dict) and rg_cap.get("available"):
+        note_text = "ReplayGain is loaded and available."
+        if replaygain_backend == "command":
+            cmd_info = f" ({replaygain_command})" if replaygain_command else ""
+            note_text = f"ReplayGain uses command backend{cmd_info}."
+        elif replaygain_backend == "ffmpeg":
+            note_text = "ReplayGain uses the installed ffmpeg backend."
+        elif replaygain_backend:
+            note_text = f"ReplayGain uses the {replaygain_backend} backend."
+
+        return _integration_status(
+            configured=True,
+            state="configured",
+            note=note_text,
+        )
+
+    if replaygain_backend == "ffmpeg" and (ffmpeg_path or diagnostics.get("ffmpeg_available")) and not replaygain_command:
         return _integration_status(
             configured=True,
             state="configured",
             note="ReplayGain uses the installed ffmpeg backend.",
         )
+
+    if replaygain_backend == "command" or replaygain_command:
+        return _integration_status(
+            configured=True,
+            state="configured",
+            note=f"ReplayGain uses command backend ({replaygain_command or 'configured'}).",
+        )
+
     return _integration_status(
         configured=False,
         state="dependency_plugin_missing",
@@ -1207,6 +1314,11 @@ def _build_setup_status_payload() -> Dict[str, Any]:
         blocking.append(
             "Beets plugin loader did not complete successfully — see beets.plugin_loader_error for details."
         )
+
+    engine_compat = diagnostics.get("engine_compatibility") if isinstance(diagnostics.get("engine_compatibility"), dict) else {}
+    if engine_compat and not engine_compat.get("compatible", True):
+        compat_msg = engine_compat.get("message") or "Beets engine compatibility mismatch."
+        blocking.append(f"Beets engine compatibility mismatch: {compat_msg}")
 
     ready = not blocking
     demo_mode = os.environ.get("DEMO_MODE", "0").strip().lower() in ("1", "true", "yes", "on")

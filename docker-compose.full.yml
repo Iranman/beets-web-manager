@@ -23,7 +23,7 @@ services:
       args:
         BEETS_BASE_IMAGE: ${BEETS_BASE_IMAGE:-lscr.io/linuxserver/beets:2.13.1}
         VCS_REF: ${VCS_REF:-local-build}
-    image: beets-engine:local
+    image: ghcr.io/iranman/beets-engine:${BEETS_WEB_MANAGER_VERSION:-stable}
     container_name: beets
     restart: unless-stopped
     environment:

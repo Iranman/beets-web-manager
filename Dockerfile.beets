@@ -12,8 +12,12 @@ FROM ${BEETS_BASE_IMAGE}
 # image, and a later rebuild with new fixes must never be able to keep
 # an earlier commit's label by omission.
 ARG VCS_REF
+ARG VERSION=0.1.10
 RUN test -n "${VCS_REF}" || (echo "ERROR: VCS_REF build-arg is required and must not be blank" >&2 && exit 1)
-LABEL org.opencontainers.image.revision="${VCS_REF}" \
+LABEL org.opencontainers.image.title="Beets Engine for Beets Web Manager" \
+      org.opencontainers.image.description="Authoritative Beets engine and control agent" \
+      org.opencontainers.image.revision="${VCS_REF}" \
+      org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.source="https://github.com/Iranman/beets-web-manager"
 
 # Version-aware compatibility patch: applies the narrow Beets 2.4.0
@@ -59,7 +63,10 @@ RUN rm -f /etc/s6-overlay/s6-rc.d/user/contents.d/svc-beets \
 ENV BEETS_AGENT_PORT=8338 \
     BEETSDIR=/config \
     PYTHONUNBUFFERED=1 \
-    BEETS_EXPECT_EXISTING_LIBRARY=1
+    BEETS_EXPECT_EXISTING_LIBRARY=1 \
+    BEETS_WEB_MANAGER_VERSION="${VERSION}" \
+    BEETS_ENGINE_RELEASE="${VERSION}" \
+    BEETS_ENGINE_REVISION="${VCS_REF}"
 
 EXPOSE 8338
 

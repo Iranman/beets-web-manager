@@ -1,8 +1,10 @@
 # Installation & Deployment Guide
 
-Beets Web Manager is packaged as a lightweight, pre-built runtime image published to GitHub Container Registry (`ghcr.io/iranman/beets-web-manager`).
+Beets Web Manager is packaged as a matched two-container release pair published to GitHub Container Registry:
+- **`beets`** (`ghcr.io/iranman/beets-engine:0.1.10`): Authoritative Beets engine, plugins, SQLite library, and control agent.
+- **`beets-web-manager`** (`ghcr.io/iranman/beets-web-manager:0.1.10`): Web UI, API backend, import queue, and job engine.
 
-It communicates with an existing Beets engine control agent via `BEETS_API_URL` and `BEETS_API_TOKEN`.
+Setting `BEETS_WEB_MANAGER_VERSION=0.1.10` in `.env` pulls matching pre-built release images for both containers automatically.
 
 ---
 
