@@ -47,6 +47,8 @@ class V0110UpgradeAndMatchedStackTests(unittest.TestCase):
             mock.patch.object(app_module, "_PERSISTED_BROWSER_USERNAME_FILE", self.persisted_user_file),
             mock.patch.object(app_module, "_BROWSER_SETUP_STATE_FILE", self.setup_state_file),
             mock.patch.object(app_module, "_GENERATED_AUTH_TOKEN_FILE", self.auth_token_file),
+            mock.patch.object(routes_setup, "_SETUP_COMPLETE_MARKER", self.data_dir / ".setup_complete"),
+            mock.patch.object(routes_setup, "_FALLBACK_AUTH_TOKEN_FILE", self.auth_token_file),
             mock.patch.object(routes_setup, "_STATUS_CACHE_DATA", None),
             mock.patch.object(routes_setup, "_STATUS_CACHE_TS", 0.0),
         ]
