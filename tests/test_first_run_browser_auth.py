@@ -86,6 +86,7 @@ class FirstRunBrowserAuthTests(unittest.TestCase):
         # Freshly generated, thrown away with the TemporaryDirectory on
         # tearDown -- not a persisted or real secret.
         self.initial_pwd_file.write_text(pwd, encoding="utf-8")  # codeql[py/clear-text-storage-sensitive-data]
+        os.chmod(self.initial_pwd_file, 0o600)
         app_module._migrate_or_initialize_setup_state()
 
         self.assertEqual(self.setup_state_file.read_text(encoding="utf-8").strip(), "legacy_established")
@@ -109,6 +110,7 @@ class FirstRunBrowserAuthTests(unittest.TestCase):
         pwd1 = "InitialGeneratedPassword123!Aa456"
         # Hardcoded dummy constant, disposable tempfile -- not a real secret.
         self.initial_pwd_file.write_text(pwd1, encoding="utf-8")
+        os.chmod(self.initial_pwd_file, 0o600)
         app_module._migrate_or_initialize_setup_state()
         app_module._bootstrap_browser_password_if_missing()
 

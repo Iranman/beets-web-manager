@@ -130,6 +130,7 @@ class FirstRunBrowserBootstrapTests(unittest.TestCase):
         """
         # Hardcoded dummy constant, disposable tempfile -- not a real secret.
         self.initial_pwd_file.write_text(_VALID_TEST_PASSWORD, encoding="utf-8")  # codeql[py/clear-text-storage-sensitive-data]
+        os.chmod(self.initial_pwd_file, 0o600)
         app_module._migrate_or_initialize_setup_state()
 
         self.assertEqual(self.setup_state_file.read_text(encoding="utf-8").strip(), "legacy_established")
@@ -277,8 +278,15 @@ class FirstRunBrowserBootstrapTests(unittest.TestCase):
             )
 
         self.assertNotEqual(resp.status_code, 200)
+        self.assertEqual(resp.status_code, 500)
         body = resp.get_data(as_text=True)
         self.assertNotIn(_VALID_TEST_PASSWORD, body)
+        # The error text must not imply an anonymous retry is possible --
+        # the persisted password already closes anonymous bootstrap -- and
+        # should point the operator at signing in, not "retry".
+        error_text = resp.get_json().get("error", "")
+        self.assertIn("sign in", error_text.lower())
+        self.assertNotIn("retry", error_text.lower())
 
     def test_setup_status_stays_public_after_claim(self):
         """GET /api/setup/status must remain anonymously reachable even after

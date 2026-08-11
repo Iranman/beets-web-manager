@@ -1647,9 +1647,14 @@ def setup_first_run():
         # if this specific write failed -- but the caller must be told the
         # truth so an operator can investigate storage health.
         if not _set_browser_setup_state("claimed"):
+            # Anonymous retry is generally NOT available here: the persisted
+            # browser password already makes _first_run_setup_required()
+            # false, so don't imply "retry" as an anonymous bootstrap path.
             return jsonify({
                 "ok": False,
-                "error": "Credentials were saved but setup state could not be finalized. Retry, or check storage permissions.",
+                "error": "Credentials were saved, but setup state could not be finalized. "
+                         "Sign in with the credentials you just created, and check Web "
+                         "Manager storage permissions.",
             }), 500
 
         _cleanup_initial_browser_password_if_replaced()

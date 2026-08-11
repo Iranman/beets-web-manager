@@ -142,6 +142,7 @@ def run_acceptance_test():
             # hardcoded dummy constant written to a disposable tempfile that
             # this script deletes on exit -- not a real secret.
             persisted_pwd_file.write_text(_USER_PASSWORD, encoding="utf-8")  # codeql[py/clear-text-storage-sensitive-data]
+            os.chmod(persisted_pwd_file, 0o600)
 
             # 10. Secrets do not appear in logs
             logs_content = log_capture.getvalue()
@@ -164,6 +165,7 @@ def run_acceptance_test():
         # Dummy constant seeded into a disposable tempfile to simulate a
         # pre-existing v0.1.8 install; not a real secret.
         initial_pwd_file_upg.write_text(_USER_PASSWORD, encoding="utf-8")  # codeql[py/clear-text-storage-sensitive-data]
+        os.chmod(initial_pwd_file_upg, 0o600)
         persisted_pwd_file_upg = data_dir_upg / ".browser_password"
         persisted_user_file_upg = data_dir_upg / ".browser_username"
         setup_state_file_upg = data_dir_upg / ".browser_setup_state"

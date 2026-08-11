@@ -579,14 +579,18 @@ def scenario_concurrent_claim():
         lock = _threading.Lock()
 
         def claim(username, password):
-            code, _, body = stack.request(
-                "/api/setup/first-run",
-                method="POST",
-                body=json.dumps({"username": username, "password": password}),
-                headers_dict={"X-Beets-CSRF": "1", "Origin": "http://127.0.0.1:8337"},
-            )
+            try:
+                code, _, body = stack.request(
+                    "/api/setup/first-run",
+                    method="POST",
+                    body=json.dumps({"username": username, "password": password}),
+                    headers_dict={"X-Beets-CSRF": "1", "Origin": "http://127.0.0.1:8337"},
+                )
+            except Exception as ex:
+                code = None
+                body = f"thread raised: {ex}"
             with lock:
-                results.append((username, password, code))
+                results.append((username, password, code, body))
 
         t1 = _threading.Thread(target=claim, args=("racer1", pwd1))
         t2 = _threading.Thread(target=claim, args=("racer2", pwd2))
@@ -595,13 +599,26 @@ def scenario_concurrent_claim():
         t1.join(timeout=30)
         t2.join(timeout=30)
 
-        codes = sorted(c for (_, _, c) in results)
-        if codes == [200] or (len(results) == 2 and codes.count(200) == 1):
-            ok(f"scenario D: exactly one winner among concurrent claims (codes={codes})")
-        else:
-            fail(f"scenario D: expected exactly one 200 among two concurrent claims, got {codes}")
+        if t1.is_alive() or t2.is_alive():
+            fail("scenario D: a claim request thread did not complete within the 30s timeout (hung)")
+            return
 
-        winners = [(u, p) for (u, p, c) in results if c == 200]
+        if len(results) != 2:
+            fail(f"scenario D: expected 2 recorded results, got {len(results)} (a thread likely raised before recording)")
+            return
+
+        if any(c is None for (_, _, c, _) in results):
+            bodies = [b for (_, _, c, b) in results if c is None]
+            fail(f"scenario D: a claim request failed before completing: {bodies}")
+            return
+
+        codes = sorted(c for (_, _, c, _) in results)
+        if codes == [200, 409]:
+            ok(f"scenario D: exactly one 200 and exactly one 409 among two concurrent claims (codes={codes})")
+        else:
+            fail(f"scenario D: expected exactly [200, 409] among two concurrent claims, got {codes}")
+
+        winners = [(u, p) for (u, p, c, _b) in results if c == 200]
         if len(winners) == 1:
             win_user, win_pwd = winners[0]
             code, _, _ = stack.request("/api/setup/env", auth_header=basic_header(win_user, win_pwd))
