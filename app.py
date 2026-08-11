@@ -43728,11 +43728,12 @@ def _playlist_path_keys(path_value: str) -> set:
 
     add(raw)
     try:
-        p = Path(raw)
-        if p.is_absolute():
-            add(str(p.resolve(strict=False)))
+        clean_raw = os.path.normpath(raw).replace("\\", "/")
+        if os.path.isabs(clean_raw):
+            add(clean_raw)
         else:
-            add(str((MUSIC_ROOT / raw).resolve(strict=False)))
+            joined = os.path.normpath(os.path.join(str(MUSIC_ROOT), clean_raw.lstrip("/"))).replace("\\", "/")
+            add(joined)
     except Exception:
         pass
 
