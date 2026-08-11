@@ -17,12 +17,20 @@ from unittest import mock
 import app as app_module
 import routes_setup
 
+_APP_MODULE = app_module
+_ROUTES_SETUP_MODULE = routes_setup
+
 
 class V0110UpgradeAndMatchedStackTests(unittest.TestCase):
     def setUp(self):
         global app_module, routes_setup
-        app_module = sys.modules.get("app", app_module)
-        routes_setup = sys.modules.get("routes_setup", routes_setup)
+        app_module = _APP_MODULE
+        routes_setup = _ROUTES_SETUP_MODULE
+        self.module_patch = mock.patch.dict(
+            sys.modules,
+            {"app": app_module, "routes_setup": routes_setup},
+        )
+        self.module_patch.start()
 
         self.tmpdir = tempfile.TemporaryDirectory()
         self.data_dir = Path(self.tmpdir.name)
@@ -65,6 +73,7 @@ class V0110UpgradeAndMatchedStackTests(unittest.TestCase):
     def tearDown(self):
         for p in reversed(self.patches):
             p.stop()
+        self.module_patch.stop()
         self.env_patch.stop()
         self.tmpdir.cleanup()
 
