@@ -426,6 +426,7 @@ export interface TransactionSettingsResponse {
 export interface SetupPathCheck {
   path: string;
   exists: boolean;
+  readable?: boolean;
   writable?: boolean;
   error?: string;
 }
@@ -440,6 +441,44 @@ export interface SetupFirstRunResponse {
   message?: string;
   error?: string;
   unmet_requirements?: string[];
+}
+
+export interface AuthMeResponse {
+  ok: boolean;
+  authenticated: boolean;
+  username: string;
+  first_run_required?: boolean;
+  setup_complete?: boolean;
+  auth_disabled?: boolean;
+}
+
+export interface LoginRequest {
+  username?: string;
+  password?: string;
+  remember?: boolean;
+}
+
+export interface LoginResponse {
+  ok: boolean;
+  username?: string;
+  message?: string;
+  error?: string;
+}
+
+export interface LogoutResponse {
+  ok: boolean;
+  message?: string;
+  error?: string;
+}
+
+export interface SetupTestBeetsResponse {
+  ok: boolean;
+  status: 'connected' | 'failed' | string;
+  version?: string;
+  beets_version?: string;
+  beetsdir?: string;
+  message?: string;
+  error?: string;
 }
 
 export interface SetupStatusResponse {
@@ -506,9 +545,14 @@ export interface SetupStatusResponse {
   integrations: Record<string, {
     configured: boolean;
     required: boolean;
-    state?: 'configured' | 'not_configured' | 'installed_but_disabled' | 'dependency_plugin_missing' | 'plugin_loader_failed' | 'connection_test_failed' | 'connected' | string;
+    state?: 'configured' | 'not_configured' | 'installed_but_disabled' | 'dependency_plugin_missing' | 'plugin_loader_failed' | 'connection_test_failed' | 'connected' | 'unavailable' | string;
     note?: string;
     detail?: string;
+    /** "service" (MusicBrainz, AcoustID, AI, Plex, ...) vs "beets_plugin"
+     * (fetchart, embedart, mbsync, ...) -- lets the UI render external
+     * services and togglable Beets plugins as visually distinct groups
+     * instead of one flat list. */
+    category?: 'service' | 'beets_plugin' | string;
   }>;
   settings: Record<string, unknown>;
 }

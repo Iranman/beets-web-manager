@@ -3,7 +3,7 @@
 Beets Web Control — standalone Flask app.
 Opens the beets library directly. No plugin system, no S6, no beet web.
 """
-import base64, copy, difflib, errno, functools, gzip, hashlib, hmac, importlib, io, json, math, mimetypes, os, platform, re, secrets, shlex, shutil, socket, sqlite3, string, subprocess, sys, threading, time, unicodedata, uuid
+import base64, copy, datetime, difflib, errno, functools, gzip, hashlib, hmac, importlib, io, json, math, mimetypes, os, platform, re, secrets, shlex, shutil, socket, sqlite3, string, subprocess, sys, threading, time, unicodedata, uuid
 import importlib.metadata
 import urllib.error, urllib.parse, urllib.request
 from backend.security import (OutboundPolicyError, bounded_rate_key_store_sweep, direct_peer_is_trusted, install_secure_urllib, validate_outbound_url)
@@ -28,6 +28,53 @@ _up = urllib.parse
 def _s(v: Any) -> str:
     return str(v or "") if v is not None else ""
 
+
+_BOOT_ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+_BOOT_ENV_BLOCKED_NAMES = {"SETUP_ENV_FILE", "SETUP_ENV_EXAMPLE_FILE", "SETUP_SETTINGS_FILE", "SETUP_COMPLETE_FILE"}
+
+
+def _decode_boot_env_value(raw: str) -> str:
+    value = (raw or "").strip()
+    if len(value) >= 2 and value[0] == value[-1] == '"':
+        inner = value[1:-1]
+        return (
+            inner.replace(r"\n", "\n")
+            .replace(r"\r", "\r")
+            .replace(r"\"", '"')
+            .replace(r"\\", "\\")
+        )
+    if len(value) >= 2 and value[0] == value[-1] == "'":
+        return value[1:-1]
+    return value
+
+
+def _load_persisted_setup_env_at_boot() -> None:
+    """Load setup-managed persisted environment before clients read os.environ."""
+    env_file = Path(os.environ.get("SETUP_ENV_FILE", "/web-manager-data/.env"))
+    try:
+        text = env_file.read_text(encoding="utf-8")
+    except Exception:
+        return
+    for raw_line in text.splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        candidate = stripped[7:].strip() if stripped.startswith("export ") else stripped
+        if "=" not in candidate:
+            continue
+        key, raw_value = candidate.split("=", 1)
+        key = key.strip()
+        if key in _BOOT_ENV_BLOCKED_NAMES or not _BOOT_ENV_NAME_RE.match(key):
+            continue
+        if os.environ.get(key, "").strip():
+            continue
+        value = _decode_boot_env_value(raw_value)
+        if "\n" in value or "\r" in value or len(value) > 4096:
+            continue
+        os.environ[key] = value
+
+
+_load_persisted_setup_env_at_boot()
 
 os.environ.setdefault("BEETSDIR", "/config")
 
@@ -1736,7 +1783,66 @@ APP_ROOT = Path(__file__).parent
 REACT_DIST_DIR = APP_ROOT / "frontend" / "dist"
 LEGACY_STATIC_DIR = APP_ROOT / "static"
 _DEFAULT_MAX_CONTENT_LENGTH = 64 * 1024 * 1024
+
+_FLASK_SECRET_KEY_FILE = Path(os.environ.get("BEETS_WEB_SECRET_KEY_FILE", "/web-manager-data/.flask_secret_key"))
+
+
+def _persist_bootstrap_secret_file(target_file: Path, content: str) -> bool:
+    temp_file = target_file.with_name(f".{target_file.name}.tmp.{secrets.token_hex(4)}")
+    try:
+        target_file.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(temp_file), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(content)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(temp_file, 0o600)
+        temp_file.replace(target_file)
+        try:
+            os.chmod(target_file, 0o600)
+        except Exception:
+            pass
+        try:
+            dir_fd = os.open(str(target_file.parent), os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except Exception:
+            pass
+        return True
+    except Exception:
+        try:
+            temp_file.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return False
+
+
+def _get_or_create_flask_secret_key() -> str:
+    env_key = os.environ.get("BEETS_WEB_SECRET_KEY", "").strip()
+    if env_key:
+        return env_key
+    try:
+        if _FLASK_SECRET_KEY_FILE.exists():
+            k = _FLASK_SECRET_KEY_FILE.read_text(encoding="utf-8").strip()
+            if len(k) >= 32:
+                return k
+    except Exception:
+        pass
+    new_key = secrets.token_hex(32)
+    try:
+        _persist_bootstrap_secret_file(_FLASK_SECRET_KEY_FILE, new_key)
+    except Exception:
+        pass
+    return new_key
+
 app.config.update(
+    SECRET_KEY=_get_or_create_flask_secret_key(),
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=os.environ.get("BEETS_WEB_SESSION_COOKIE_SECURE", "0").strip().lower() in ("1", "true", "yes", "on"),
+    PERMANENT_SESSION_LIFETIME=datetime.timedelta(hours=_env_int("BEETS_WEB_SESSION_HOURS", 168, minimum=1, maximum=8760)),
     MAX_CONTENT_LENGTH=_env_int("BEETS_WEB_MAX_CONTENT_LENGTH", _DEFAULT_MAX_CONTENT_LENGTH, minimum=1024 * 1024),
     MAX_FORM_MEMORY_SIZE=_env_int("BEETS_WEB_MAX_FORM_MEMORY_SIZE", 1024 * 1024, minimum=64 * 1024),
     MAX_FORM_PARTS=_env_int("BEETS_WEB_MAX_FORM_PARTS", 100, minimum=1, maximum=500),
@@ -1751,9 +1857,10 @@ _AUTH_PUBLIC_ENDPOINTS = {
     ("HEAD", "react_next_static"),
     ("GET", "favicon"),
     ("HEAD", "favicon"),
-    # routes_setup.py's Docker/k8s-style unprefixed probes — these must stay
-    # public or every orchestrator health check gets 401'd and the container
-    # gets killed/restarted for "failing" a check that never actually ran.
+    ("GET", "index"),
+    ("HEAD", "index"),
+    ("GET", "react_spa_fallback"),
+    ("HEAD", "react_spa_fallback"),
     ("GET", "health_live"),
     ("HEAD", "health_live"),
     ("GET", "health_ready"),
@@ -1762,11 +1869,10 @@ _AUTH_PUBLIC_ENDPOINTS = {
     ("HEAD", "health_root"),
     ("GET", "setup_status"),
     ("HEAD", "setup_status"),
-    # NOTE: setup_first_run is deliberately NOT listed here. It must only be
-    # anonymously reachable while _first_run_setup_required() is true (see
-    # _FIRST_RUN_PUBLIC_ENDPOINTS below and _enforce_security_boundary). Once
-    # an installation is claimed/legacy_established, this endpoint must
-    # require the same authentication as any other mutating API.
+    ("POST", "api_login"),
+    ("POST", "api_logout"),
+    ("GET", "api_auth_me"),
+    ("HEAD", "api_auth_me"),
 }
 _FIRST_RUN_PUBLIC_ENDPOINTS = {
     ("GET", "health"),
@@ -1790,6 +1896,15 @@ _FIRST_RUN_PUBLIC_ENDPOINTS = {
     ("GET", "setup_status"),
     ("HEAD", "setup_status"),
     ("POST", "setup_first_run"),
+    ("POST", "setup_test_ai"),
+    ("POST", "setup_test_musicbrainz"),
+    ("POST", "setup_test_acoustid"),
+    ("POST", "setup_test_plex"),
+    ("POST", "setup_test_beets"),
+    ("POST", "api_login"),
+    ("POST", "api_logout"),
+    ("GET", "api_auth_me"),
+    ("HEAD", "api_auth_me"),
 }
 _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)\b(api[_-]?key|token|password|secret|authorization|cookie|client[_-]?secret)"
@@ -2052,30 +2167,45 @@ def _security_auth_username() -> str:
     return "admin"
 
 
-_PASSWORD_UPPER_RE = re.compile(r"[A-Z]")
-_PASSWORD_LOWER_RE = re.compile(r"[a-z]")
-_PASSWORD_DIGIT_RE = re.compile(r"[0-9]")
-_PASSWORD_SPECIAL_RE = re.compile(r"[^A-Za-z0-9]")
+_HASHED_PASSWORD_PREFIXES = ("scrypt:", "pbkdf2:", "argon2:")
+
+
+def _browser_password_min_length() -> int:
+    return _env_int("BEETS_WEB_PASSWORD_MIN_LENGTH", 16, minimum=12, maximum=256)
+
+
+def _password_looks_placeholder(value: str) -> bool:
+    secret = (value or "").strip()
+    lowered = secret.lower()
+    compact = re.sub(r"[^a-z0-9]+", "", lowered)
+    if "${" in secret or "?" in secret:
+        return True
+    if compact in _PLACEHOLDER_AUTH_SECRETS:
+        return True
+    if compact.count("password") >= 2:
+        return True
+    return any(marker in compact for marker in ("changeme", "placeholder", "example", "setinenv"))
+
+
+def _browser_password_is_usable(value: str) -> bool:
+    secret = (value or "").strip()
+    if not secret:
+        return False
+    if secret.startswith(_HASHED_PASSWORD_PREFIXES):
+        return len(secret) >= _MIN_AUTH_SECRET_LENGTH
+    if len(secret) < _browser_password_min_length():
+        return False
+    return not _password_looks_placeholder(secret)
 
 
 def _password_requirements_unmet(password: str) -> List[str]:
     """Returns unmet BEETS_WEB_PASSWORD requirements (empty list = passes)."""
     unmet: List[str] = []
-    try:
-        configured = int(os.environ.get("BEETS_WEB_AUTH_MIN_LENGTH", "32"))
-    except ValueError:
-        configured = 32
-    min_length = max(24, min(256, configured))
+    min_length = _browser_password_min_length()
     if len(password) < min_length:
         unmet.append(f"at least {min_length} characters")
-    if not _PASSWORD_UPPER_RE.search(password):
-        unmet.append("an uppercase letter")
-    if not _PASSWORD_LOWER_RE.search(password):
-        unmet.append("a lowercase letter")
-    if not _PASSWORD_DIGIT_RE.search(password):
-        unmet.append("a number")
-    if not _PASSWORD_SPECIAL_RE.search(password):
-        unmet.append("a special character")
+    if _password_looks_placeholder(password):
+        unmet.append("not a placeholder password")
     return unmet
 
 
@@ -2091,7 +2221,7 @@ def generate_secure_browser_password(length: int = 36) -> str:
         chars = [upper, lower, digit, special] + rest
         secrets.SystemRandom().shuffle(chars)
         pwd = "".join(chars)
-        if not _password_requirements_unmet(pwd) and _auth_secret_is_usable(pwd):
+        if not _password_requirements_unmet(pwd) and _browser_password_is_usable(pwd):
             return pwd
 
 
@@ -2190,12 +2320,12 @@ def _migrate_or_initialize_setup_state() -> None:
     env_pwd = _first_config_secret("BEETS_WEB_PASSWORD")
     file_pwd_path = os.environ.get("BEETS_WEB_PASSWORD_FILE", "").strip()
 
-    has_env_pwd = bool(env_pwd and _auth_secret_is_usable(env_pwd))
+    has_env_pwd = bool(env_pwd and _browser_password_is_usable(env_pwd))
     has_file_pwd = False
     if file_pwd_path:
         try:
             val = Path(file_pwd_path).read_text(encoding="utf-8", errors="ignore").splitlines()[0].strip()
-            has_file_pwd = bool(val and _auth_secret_is_usable(val))
+            has_file_pwd = bool(val and _browser_password_is_usable(val))
         except Exception:
             pass
 
@@ -2203,7 +2333,7 @@ def _migrate_or_initialize_setup_state() -> None:
     try:
         if _PERSISTED_BROWSER_PASSWORD_FILE.exists():
             val = _PERSISTED_BROWSER_PASSWORD_FILE.read_text(encoding="utf-8", errors="ignore").splitlines()[0].strip()
-            has_persisted_pwd = bool(val and _auth_secret_is_usable(val))
+            has_persisted_pwd = bool(val and _browser_password_is_usable(val))
     except Exception:
         pass
 
@@ -2211,7 +2341,7 @@ def _migrate_or_initialize_setup_state() -> None:
     try:
         if _INITIAL_BROWSER_PASSWORD_FILE.exists():
             val = _INITIAL_BROWSER_PASSWORD_FILE.read_text(encoding="utf-8", errors="ignore").splitlines()[0].strip()
-            has_legacy_initial = bool(val and _auth_secret_is_usable(val))
+            has_legacy_initial = bool(val and _browser_password_is_usable(val))
     except Exception:
         pass
 
@@ -2226,20 +2356,20 @@ def _migrate_or_initialize_setup_state() -> None:
 
 def _has_explicit_browser_password() -> bool:
     value = _first_config_secret("BEETS_WEB_PASSWORD")
-    if value and _auth_secret_is_usable(value):
+    if value and _browser_password_is_usable(value):
         return True
     path = os.environ.get("BEETS_WEB_PASSWORD_FILE", "").strip()
     if path:
         try:
             val = Path(path).read_text(encoding="utf-8", errors="ignore").splitlines()[0].strip()
-            if val and _auth_secret_is_usable(val):
+            if val and _browser_password_is_usable(val):
                 return True
         except Exception:
             pass
     try:
         if _PERSISTED_BROWSER_PASSWORD_FILE.exists():
             val = _PERSISTED_BROWSER_PASSWORD_FILE.read_text(encoding="utf-8", errors="ignore").splitlines()[0].strip()
-            if val and _auth_secret_is_usable(val):
+            if val and _browser_password_is_usable(val):
                 return True
     except Exception:
         pass
@@ -2256,7 +2386,7 @@ def _first_run_setup_required() -> bool:
 
 
 def _security_auth_configured() -> bool:
-    return _auth_secret_is_usable(_security_auth_token()) or _auth_secret_is_usable(_security_auth_password())
+    return _auth_secret_is_usable(_security_auth_token()) or _browser_password_is_usable(_security_auth_password())
 
 
 def _security_auth_disabled() -> bool:
@@ -2339,7 +2469,7 @@ def _bootstrap_browser_password_if_missing() -> None:
     if _security_auth_disabled() or _first_run_setup_required():
         return
     current_pwd = _security_auth_password()
-    if _auth_secret_is_usable(current_pwd):
+    if _browser_password_is_usable(current_pwd):
         return
 
     try:
@@ -2375,8 +2505,8 @@ def _cleanup_initial_browser_password_if_replaced() -> None:
             except Exception:
                 pass
 
-        if (env_pwd and env_pwd != initial_content and _auth_secret_is_usable(env_pwd)) or \
-           (persisted_pwd and persisted_pwd != initial_content and _auth_secret_is_usable(persisted_pwd)):
+        if (env_pwd and env_pwd != initial_content and _browser_password_is_usable(env_pwd)) or \
+           (persisted_pwd and persisted_pwd != initial_content and _browser_password_is_usable(persisted_pwd)):
             _INITIAL_BROWSER_PASSWORD_FILE.unlink(missing_ok=True)
     except Exception as ex:
         try:
@@ -2500,6 +2630,19 @@ def _constant_time_equal(left: str, right: str) -> bool:
     return hmac.compare_digest((left or "").encode("utf-8"), (right or "").encode("utf-8"))
 
 
+def _verify_password(supplied: str) -> bool:
+    expected = _security_auth_password()
+    if not _browser_password_is_usable(expected) or not supplied:
+        return False
+    if expected.startswith(("scrypt:", "pbkdf2:", "argon2:")):
+        try:
+            from werkzeug.security import check_password_hash
+            return check_password_hash(expected, supplied)
+        except Exception:
+            return False
+    return _constant_time_equal(supplied, expected)
+
+
 def _bearer_authorized(header: str) -> bool:
     token = _security_auth_token()
     if not _auth_secret_is_usable(token) or not header.lower().startswith("bearer "):
@@ -2509,7 +2652,7 @@ def _bearer_authorized(header: str) -> bool:
 
 def _basic_authorized(header: str) -> bool:
     password = _security_auth_password()
-    if not _auth_secret_is_usable(password) or not header.lower().startswith("basic "):
+    if not _browser_password_is_usable(password) or not header.lower().startswith("basic "):
         return False
     try:
         raw = base64.b64decode(header.split(" ", 1)[1].strip(), validate=True).decode("utf-8")
@@ -2520,13 +2663,95 @@ def _basic_authorized(header: str) -> bool:
         return False
     return (
         _constant_time_equal(username, _security_auth_username())
-        and _constant_time_equal(supplied_password, password)
+        and _verify_password(supplied_password)
     )
+
+
+def _session_authorized() -> bool:
+    try:
+        from flask import session
+        return bool(session.get("authenticated") is True and session.get("user"))
+    except Exception:
+        return False
 
 
 def _request_authorized() -> bool:
     header = request.headers.get("Authorization", "")
-    return _bearer_authorized(header) or _basic_authorized(header)
+    return _bearer_authorized(header) or _basic_authorized(header) or _session_authorized()
+
+
+@app.post("/api/login")
+@app.post("/login")
+def api_login():
+    if _security_auth_disabled():
+        return jsonify({"ok": True, "message": "Auth is disabled", "username": "admin"})
+
+    if not _csrf_request_allowed():
+        return _json_security_error(403, "CSRF check failed")
+
+    payload = request.get_json(silent=True) or {}
+    username = str(payload.get("username") or "").strip()
+    password = str(payload.get("password") or "").strip()
+    remember = payload.get("remember") is True
+
+    if not username or not password:
+        return jsonify({"ok": False, "error": "Username and password are required."}), 400
+
+    expected_user = _security_auth_username()
+    user_match = _constant_time_equal(username, expected_user)
+    pass_match = _verify_password(password)
+
+    if not (user_match and pass_match):
+        limited = _auth_failure_rate_limit_response()
+        if limited is not None:
+            return limited
+        return jsonify({"ok": False, "error": "Incorrect username or password."}), 401
+
+    from flask import session
+    session.clear()
+    session.permanent = remember
+    session["authenticated"] = True
+    session["user"] = expected_user
+
+    return jsonify({"ok": True, "username": expected_user, "message": "Sign-in successful"})
+
+
+@app.post("/api/logout")
+@app.post("/logout")
+def api_logout():
+    if not _csrf_request_allowed():
+        return _json_security_error(403, "CSRF check failed")
+    try:
+        from flask import session
+        session.clear()
+    except Exception:
+        pass
+    return jsonify({"ok": True, "message": "Logged out"})
+
+
+@app.get("/api/auth/me")
+def api_auth_me():
+    if _security_auth_disabled():
+        return jsonify({
+            "ok": True,
+            "authenticated": True,
+            "username": "admin",
+            "auth_disabled": True,
+            "first_run_required": False,
+            "setup_complete": True,
+        })
+    auth_ok = _request_authorized()
+    first_run_req = _first_run_setup_required()
+    from routes_setup import _SETUP_COMPLETE_MARKER
+    setup_complete = _SETUP_COMPLETE_MARKER.exists() and not first_run_req
+    username = _security_auth_username() if auth_ok else ""
+    return jsonify({
+        "ok": True,
+        "authenticated": auth_ok,
+        "username": username,
+        "first_run_required": first_run_req,
+        "setup_complete": setup_complete,
+    })
 
 
 def _trusted_proxy_cidrs() -> List[str]:

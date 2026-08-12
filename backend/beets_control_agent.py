@@ -369,9 +369,18 @@ def _agent_status_payload() -> dict[str, Any]:
         or os.path.exists(os.path.join(BEETSDIR, "beetsplug", "discpath.py"))
     )
 
+    # NOTE: "musicbrainz" is deliberately excluded from this set. Unlike
+    # every other name here, it is not a togglable Beets plugin -- Beets has
+    # no "musicbrainz" entry in its `plugins:` enable list, since MusicBrainz
+    # autotagging is core, always-on Beets functionality (configured only
+    # via the `musicbrainz:` config section, not plugin enable/disable).
+    # `name in loaded_plugins` would always be False for it in a real
+    # deployment, permanently misreporting a working MusicBrainz connection
+    # as an unloaded/disabled plugin. See plugin_flags["musicbrainz"] below
+    # for its actual (loader-health-based, not membership-based) status.
     plugin_names = {
         "chroma", "discogs", "discpath", "fetchart", "lastgenre", "listenbrainz",
-        "mbsubmit", "mbsync", "musicbrainz", "replaygain",
+        "mbsubmit", "mbsync", "replaygain",
     }
     plugin_flags = {name: name in loaded_plugins for name in sorted(plugin_names)}
 
@@ -435,6 +444,9 @@ def _agent_status_payload() -> dict[str, Any]:
         and not snapshot.get("timed_out")
         and not snapshot.get("plugin_failures")
     )
+    # Core capability, not plugin membership: MusicBrainz is available
+    # whenever `beet` itself runs and the plugin loader completed cleanly.
+    plugin_flags["musicbrainz"] = bool(snapshot.get("available")) and plugin_loader_ok
 
     return {
         "status": "ok",

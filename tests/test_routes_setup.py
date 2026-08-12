@@ -257,7 +257,12 @@ class RoutesSetupRemoteBeetsDiagnosticsTests(unittest.TestCase):
         self.assertFalse(body["beets"]["capabilities"]["acoustid_submission"]["available"])
         self.assertTrue(body["beets"]["commands"]["submit"]["available"])
         self.assertTrue(body["beets"]["commands"]["mbsubmit"]["available"])
-        self.assertEqual(body["integrations"]["musicbrainz"]["state"], "configured")
+        # MusicBrainz is core Beets metadata capability, not a togglable
+        # plugin -- "connected" reflects control-agent/plugin-loader health,
+        # never plugins: list membership (see _musicbrainz_integration_status).
+        self.assertEqual(body["integrations"]["musicbrainz"]["state"], "connected")
+        self.assertEqual(body["integrations"]["musicbrainz"]["category"], "service")
+        self.assertEqual(body["integrations"]["fetchart"]["category"], "beets_plugin")
         self.assertEqual(body["integrations"]["acoustid"]["state"], "configured")
         self.assertEqual(body["integrations"]["fetchart"]["state"], "configured")
         self.assertTrue(body["integrations"]["fetchart"]["operational"])
@@ -280,7 +285,11 @@ class RoutesSetupRemoteBeetsDiagnosticsTests(unittest.TestCase):
         self.assertFalse(body["beets"]["available"])
         self.assertFalse(body["beets"]["plugin_loader_ok"])
         self.assertEqual(body["beets"]["remote_error"], "unavailable")
-        self.assertEqual(body["integrations"]["musicbrainz"]["state"], "plugin_loader_failed")
+        # remote_reachable is False here (control agent itself unreachable),
+        # which _musicbrainz_integration_status reports as "unavailable" --
+        # a more accurate state than "plugin_loader_failed" (that state
+        # means the agent WAS reached but its plugin loader failed).
+        self.assertEqual(body["integrations"]["musicbrainz"]["state"], "unavailable")
         self.assertNotIn("super-secret-key", response.get_data(as_text=True))
 
     def test_remote_authentication_failure_fails_closed(self):
@@ -497,6 +506,79 @@ class RoutesSetupTestConnectionTests(unittest.TestCase):
         self.assertFalse(body["ok"])
         self.assertEqual(body["status"], "not_configured")
 
+    def test_ai_test_invalid_key_reports_failed_auth(self):
+        exc = self.module.urllib.error.HTTPError(
+            "https://api.openai.com/v1/models/gpt-4o-mini",
+            401,
+            "Unauthorized",
+            {},
+            None,
+        )
+        with mock.patch.object(self.module.urllib.request, "urlopen", side_effect=exc):
+            r = self.client.post(
+                "/api/setup/test/ai",
+                json={"api_key": "sk-invalid-test-key", "model": "gpt-4o-mini"},
+            )
+        self.assertEqual(r.status_code, 200)
+        body = r.get_json()
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["status"], "failed")
+        self.assertIn("rejected the API key", body["error"])
+        self.assertNotIn("sk-invalid-test-key", repr(body))
+
+    def test_plex_test_invalid_token_reports_failed_auth(self):
+        exc = self.module.urllib.error.HTTPError(
+            "http://plex.example/library/sections",
+            401,
+            "Unauthorized",
+            {},
+            None,
+        )
+        with mock.patch.object(self.module.urllib.request, "urlopen", side_effect=exc):
+            r = self.client.post(
+                "/api/setup/test/plex",
+                json={"url": "http://plex.example", "token": "invalid-plex-token"},
+            )
+        self.assertEqual(r.status_code, 200)
+        body = r.get_json()
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["status"], "failed")
+        self.assertIn("invalid or expired", body["error"])
+        self.assertNotIn("invalid-plex-token", repr(body))
+
+    def test_acoustid_test_invalid_key_reports_failed_auth(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return b'{"status":"error","error":{"message":"invalid API key"}}'
+
+        diagnostics = {
+            "remote_reachable": True,
+            "loaded_plugins": ["chroma"],
+            "fpcalc_path": "/usr/bin/fpcalc",
+            "capabilities": {
+                "acoustid_lookup": {
+                    "fpcalc_available": True,
+                    "chroma_loaded": True,
+                    "pyacoustid_available": True,
+                }
+            },
+        }
+        with mock.patch.object(self.module, "_beets_plugin_diagnostics", return_value=diagnostics), \
+             mock.patch.object(self.module.urllib.request, "urlopen", return_value=Response()):
+            r = self.client.post("/api/setup/test/acoustid", json={"api_key": "invalid-acoustid-key"})
+        self.assertEqual(r.status_code, 200)
+        body = r.get_json()
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["status"], "failed")
+        self.assertIn("invalid API key", body["error"])
+        self.assertNotIn("invalid-acoustid-key", repr(body))
+
     def test_plex_test_without_credentials_reports_not_configured(self):
         r = self.client.post("/api/setup/test/plex", json={})
         self.assertEqual(r.status_code, 200)
@@ -542,11 +624,12 @@ class RoutesSetupSettingsPersistenceTests(unittest.TestCase):
         r = self.client.post("/api/setup/settings", json=["not", "an", "object"])
         self.assertEqual(r.status_code, 400)
 
-    def test_complete_marker_is_idempotent(self):
+    def test_complete_marker_allows_only_one_success(self):
         r1 = self.client.post("/api/setup/complete")
         r2 = self.client.post("/api/setup/complete")
         self.assertTrue(r1.get_json()["ok"])
-        self.assertTrue(r2.get_json()["ok"])
+        self.assertEqual(r2.status_code, 409)
+        self.assertFalse(r2.get_json()["ok"])
         self.assertTrue(self.module._SETUP_COMPLETE_MARKER.exists())
 
 

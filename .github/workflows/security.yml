@@ -17,6 +17,14 @@ jobs:
       - name: Secret scan
         run: python3 scripts/security_secret_scan.py
 
+      - name: Endpoint security inventory is up to date
+        # Regenerate-and-diff, not a second hand-maintained guess: catches
+        # the exact failure mode that let security/endpoint_inventory.json
+        # go stale for 11 months (routes_setup.py, routes_lidarr.py,
+        # routes_submissions.py, and dozens of app.py routes were never
+        # added to the audit trail -- see docs/TECHNICAL_DEBT.md ARCH-013).
+        run: python3 scripts/generate_endpoint_inventory.py --check
+
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 

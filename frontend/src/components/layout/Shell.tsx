@@ -1,12 +1,17 @@
 import { Menu, MenuButton, MenuItem, MenuItems } from '@headlessui/react';
 import { useState } from 'react';
 import { NavLink, Outlet, useNavigate } from 'react-router';
-import { getHealth, restartApp } from '../../api/client';
+import { getHealth, logout, restartApp } from '../../api/client';
 import { useGlobalJobs } from '../../lib/hooks';
 
 interface Tab {
   to: string;
   label: string;
+}
+
+interface ShellProps {
+  username?: string;
+  onLogout?: () => void;
 }
 
 const TABS: Tab[] = [
@@ -47,7 +52,7 @@ function JobsBadge({ running, failed }: { running: number; failed: number }) {
   return null;
 }
 
-export default function Shell() {
+export default function Shell({ username, onLogout }: ShellProps) {
   const { running, failed } = useGlobalJobs();
   const [restarting, setRestarting] = useState(false);
   const [restartMsg, setRestartMsg] = useState('');
@@ -76,6 +81,19 @@ export default function Shell() {
     setRestarting(false);
     setRestartMsg(back ? 'Back online' : 'Restarted');
     setTimeout(() => setRestartMsg(''), 4000);
+  };
+
+  const handleLogoutClick = async () => {
+    if (onLogout) {
+      onLogout();
+    } else {
+      try {
+        await logout();
+      } catch {
+        // Ignore
+      }
+      window.location.href = '/login';
+    }
   };
 
   return (
@@ -134,8 +152,11 @@ export default function Shell() {
                 </MenuButton>
                 <MenuItems
                   anchor="bottom end"
-                  className="z-50 mt-1 min-w-[10rem] rounded-md border border-red-900/50 bg-graphite-850 py-1 shadow-xl shadow-red-950/25"
+                  className="z-50 mt-1 min-w-[11rem] rounded-md border border-red-900/50 bg-graphite-850 py-1 shadow-xl shadow-red-950/25"
                 >
+                  <div className="px-3 py-1.5 text-xs text-zinc-400 border-b border-zinc-800">
+                    Signed in as <span className="font-semibold text-white">{username || 'admin'}</span>
+                  </div>
                   <MenuItem>
                     <button
                       className="flex w-full items-center gap-2 px-3 py-2 text-sm text-zinc-300 hover:bg-graphite-800 hover:text-white"
@@ -167,6 +188,14 @@ export default function Shell() {
                       onClick={() => void handleRestart()}
                     >
                       {restarting ? 'Restarting...' : 'Restart app'}
+                    </button>
+                  </MenuItem>
+                  <MenuItem>
+                    <button
+                      className="flex w-full items-center gap-2 px-3 py-2 text-sm text-zinc-400 hover:bg-zinc-800 hover:text-white border-t border-zinc-800/80"
+                      onClick={() => void handleLogoutClick()}
+                    >
+                      Sign Out
                     </button>
                   </MenuItem>
                 </MenuItems>

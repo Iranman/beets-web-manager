@@ -51,7 +51,10 @@ python -m py_compile app.py helpers_mb.py job_engine.py routes_jobs.py routes_li
 python -m unittest discover -s tests -p "test_*.py"
 python scripts/security_secret_scan.py
 python scripts/validate_compose_security.py
+python scripts/generate_endpoint_inventory.py --check
 ```
+
+`generate_endpoint_inventory.py --check` fails if `security/endpoint_inventory.json` is stale relative to the actual route decorators in `app.py`/`routes_jobs.py`/`routes_lidarr.py`/`routes_setup.py`/`routes_submissions.py`. Run it without `--check` to regenerate after adding/removing a route, then fill in any new `"NEEDS_REVIEW"` judgment fields by hand before committing.
 
 Deployment configuration validation, when checking a configured deployment environment:
 

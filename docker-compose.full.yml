@@ -38,7 +38,7 @@ services:
       # /config must override it: set BEETS_EXPECT_EXISTING_LIBRARY=0 in .env.
       - BEETS_EXPECT_EXISTING_LIBRARY=${BEETS_EXPECT_EXISTING_LIBRARY:-1}
     volumes:
-      - ./config:/config
+      - ${BEETS_CONFIG_PATH:-./config}:/config
       - ${MUSIC_LIBRARY_PATH:-./data/music}:/data/media/music
       - ${DOWNLOAD_PATH:-./data/downloads}:/data/torrents
     expose:
@@ -71,7 +71,7 @@ services:
 
     environment:
       TZ: ${TZ:-UTC}
-      WEBCONTROL_PORT: ${WEBCONTROL_PORT:-8337}
+      WEBCONTROL_PORT: 8337
 
       BEETS_API_URL: ${BEETS_API_URL:-http://beets:8338}
       BEETS_API_TOKEN: ${BEETS_API_TOKEN:?set BEETS_API_TOKEN in .env}

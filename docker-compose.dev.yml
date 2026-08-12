@@ -24,7 +24,7 @@ services:
       - BEETS_API_TOKEN=${BEETS_API_TOKEN:?set BEETS_API_TOKEN in .env}
       - BEETS_AGENT_PORT=8338
     volumes:
-      - ./config:/config
+      - ${BEETS_CONFIG_PATH:-./config}:/config
       - ${MUSIC_LIBRARY_PATH:-./data/music}:/data/media/music
       - ${DOWNLOAD_PATH:-./data/downloads}:/data/torrents
     expose:
@@ -52,7 +52,7 @@ services:
 
     environment:
       TZ: ${TZ:-UTC}
-      WEBCONTROL_PORT: ${WEBCONTROL_PORT:-8337}
+      WEBCONTROL_PORT: 8337
 
       BEETS_API_URL: ${BEETS_API_URL:-http://beets:8338}
       BEETS_API_TOKEN: ${BEETS_API_TOKEN:?set BEETS_API_TOKEN in .env}

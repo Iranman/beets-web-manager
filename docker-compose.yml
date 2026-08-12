@@ -13,7 +13,7 @@ services:
 
     environment:
       TZ: ${TZ:-UTC}
-      WEBCONTROL_PORT: ${WEBCONTROL_PORT:-8337}
+      WEBCONTROL_PORT: 8337
 
       BEETS_API_URL: ${BEETS_API_URL:?set BEETS_API_URL in .env}
       BEETS_API_TOKEN: ${BEETS_API_TOKEN:?set BEETS_API_TOKEN in .env}
