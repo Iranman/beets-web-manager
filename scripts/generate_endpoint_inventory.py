@@ -17,7 +17,7 @@ source file, line) and classifies `auth_required`/`changes_state` from
 ground truth: the actual _AUTH_PUBLIC_ENDPOINTS/_FIRST_RUN_PUBLIC_ENDPOINTS
 allowlists parsed out of app.py (not a second hand-maintained guess) and
 HTTP method. Richer judgment fields that need a human/AI reader to actually
-understand what a route does (purpose, destructive_or_high_impact,
+understand what a route does (security_classification, purpose, destructive_or_high_impact,
 rate_limit_required, existing_security_tests, ...) are carried forward
 unchanged from the previous inventory entry for any route that already
 existed there (matched by method+endpoint), and left as explicit
@@ -129,7 +129,7 @@ def _load_previous_entries() -> Dict[Tuple[str, str], Dict[str, Any]]:
 
 
 _CARRY_FORWARD_FIELDS = [
-    "purpose", "required_role_or_privilege", "handles_secrets", "accesses_files",
+    "security_classification", "purpose", "required_role_or_privilege", "handles_secrets", "accesses_files",
     "creates_background_job", "invokes_external_services_or_subprocesses",
     "destructive_or_high_impact", "rate_limit_required", "rate_limit_implemented",
     "existing_security_tests",
@@ -185,7 +185,7 @@ def build_inventory() -> Dict[str, Any]:
             "Mechanically derived from decorators via AST parsing, cross-referenced against the "
             "real allowlist constants in app.py -- auth_required/csrf_required/changes_state are "
             "ground truth, not estimates.",
-            "purpose/destructive_or_high_impact/rate_limit_required/existing_security_tests are "
+            "security_classification/purpose/destructive_or_high_impact/rate_limit_required/existing_security_tests are "
             "carried forward from the previous manual review for routes that already existed there; "
             "routes new since the last review are marked 'NEEDS_REVIEW' in those fields rather than "
             "guessed -- see needs_review_route_count below.",

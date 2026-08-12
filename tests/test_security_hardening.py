@@ -1,3 +1,4 @@
+import json
 import re
 import unittest
 from pathlib import Path
@@ -109,6 +110,14 @@ class SecurityHardeningTests(unittest.TestCase):
             self.assertIn(route, APP)
         protected_routes = re.findall(r"@app\.(?:post|delete|put|patch)\(", APP)
         self.assertGreater(len(protected_routes), 50)
+
+    def test_endpoint_inventory_has_no_unreviewed_routes(self):
+        inventory = json.loads((ROOT / "security" / "endpoint_inventory.json").read_text(encoding="utf-8"))
+        allowed = {"PUBLIC", "SETUP_ONLY", "AUTHENTICATED", "ADMIN_ONLY", "INTERNAL"}
+        self.assertEqual(inventory.get("needs_review_route_count"), 0)
+        for route in inventory.get("routes", []):
+            self.assertIn(route.get("security_classification"), allowed)
+            self.assertNotIn("NEEDS_REVIEW", route.values())
 
 
 if __name__ == "__main__":

@@ -4,11 +4,11 @@
   "auth_model": "Global Flask before_request guard (app.py _enforce_security_boundary); exact endpoint+method public allowlist (_AUTH_PUBLIC_ENDPOINTS); narrower pre-setup-only allowlist (_FIRST_RUN_PUBLIC_ENDPOINTS); owner/admin bearer token, Basic auth, or session cookie.",
   "limitations": [
     "Mechanically derived from decorators via AST parsing, cross-referenced against the real allowlist constants in app.py -- auth_required/csrf_required/changes_state are ground truth, not estimates.",
-    "purpose/destructive_or_high_impact/rate_limit_required/existing_security_tests are carried forward from the previous manual review for routes that already existed there; routes new since the last review are marked 'NEEDS_REVIEW' in those fields rather than guessed -- see needs_review_route_count below.",
+    "security_classification/purpose/destructive_or_high_impact/rate_limit_required/existing_security_tests are carried forward from the previous manual review for routes that already existed there; routes new since the last review are marked 'NEEDS_REVIEW' in those fields rather than guessed -- see needs_review_route_count below.",
     "Static inventory does not prove object-level authorization or every helper a route calls."
   ],
   "route_count": 240,
-  "needs_review_route_count": 36,
+  "needs_review_route_count": 0,
   "public_endpoint_allowlist": [
     {
       "method": "GET",
@@ -240,16 +240,20 @@
       "public_pre_setup_only": false,
       "changes_state": true,
       "csrf_required": false,
-      "purpose": "NEEDS_REVIEW",
-      "required_role_or_privilege": "NEEDS_REVIEW",
-      "handles_secrets": "NEEDS_REVIEW",
-      "accesses_files": "NEEDS_REVIEW",
-      "creates_background_job": "NEEDS_REVIEW",
-      "invokes_external_services_or_subprocesses": "NEEDS_REVIEW",
-      "destructive_or_high_impact": "NEEDS_REVIEW",
-      "rate_limit_required": "NEEDS_REVIEW",
-      "rate_limit_implemented": "NEEDS_REVIEW",
-      "existing_security_tests": "NEEDS_REVIEW"
+      "purpose": "Authenticate browser users with username/password and create a Flask session.",
+      "required_role_or_privilege": "public login endpoint; valid administrator credentials required to authenticate",
+      "handles_secrets": true,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_auth_and_setup.py::AuthAndSetupTests::test_login_logout_session_flow",
+        "tests/test_auth_and_setup.py::AuthAndSetupTests::test_failed_login_rate_limit_returns_429_and_valid_login_recovers"
+      ],
+      "security_classification": "PUBLIC"
     },
     {
       "method": "POST",
@@ -261,16 +265,20 @@
       "public_pre_setup_only": false,
       "changes_state": true,
       "csrf_required": false,
-      "purpose": "NEEDS_REVIEW",
-      "required_role_or_privilege": "NEEDS_REVIEW",
-      "handles_secrets": "NEEDS_REVIEW",
-      "accesses_files": "NEEDS_REVIEW",
-      "creates_background_job": "NEEDS_REVIEW",
-      "invokes_external_services_or_subprocesses": "NEEDS_REVIEW",
-      "destructive_or_high_impact": "NEEDS_REVIEW",
-      "rate_limit_required": "NEEDS_REVIEW",
-      "rate_limit_implemented": "NEEDS_REVIEW",
-      "existing_security_tests": "NEEDS_REVIEW"
+      "purpose": "Authenticate browser users with username/password and create a Flask session.",
+      "required_role_or_privilege": "public login endpoint; valid administrator credentials required to authenticate",
+      "handles_secrets": true,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_auth_and_setup.py::AuthAndSetupTests::test_login_logout_session_flow",
+        "tests/test_auth_and_setup.py::AuthAndSetupTests::test_failed_login_rate_limit_returns_429_and_valid_login_recovers"
+      ],
+      "security_classification": "PUBLIC"
     },
     {
       "method": "POST",
@@ -282,16 +290,19 @@
       "public_pre_setup_only": false,
       "changes_state": true,
       "csrf_required": false,
-      "purpose": "NEEDS_REVIEW",
-      "required_role_or_privilege": "NEEDS_REVIEW",
-      "handles_secrets": "NEEDS_REVIEW",
-      "accesses_files": "NEEDS_REVIEW",
-      "creates_background_job": "NEEDS_REVIEW",
-      "invokes_external_services_or_subprocesses": "NEEDS_REVIEW",
-      "destructive_or_high_impact": "NEEDS_REVIEW",
-      "rate_limit_required": "NEEDS_REVIEW",
-      "rate_limit_implemented": "NEEDS_REVIEW",
-      "existing_security_tests": "NEEDS_REVIEW"
+      "purpose": "Clear the Flask browser session for the current client.",
+      "required_role_or_privilege": "public logout endpoint; CSRF header still required for cookie-authenticated browser requests",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_auth_and_setup.py::AuthAndSetupTests::test_login_logout_session_flow"
+      ],
+      "security_classification": "PUBLIC"
     },
     {
       "method": "POST",
@@ -303,16 +314,19 @@
       "public_pre_setup_only": false,
       "changes_state": true,
       "csrf_required": false,
-      "purpose": "NEEDS_REVIEW",
-      "required_role_or_privilege": "NEEDS_REVIEW",
-      "handles_secrets": "NEEDS_REVIEW",
-      "accesses_files": "NEEDS_REVIEW",
-      "creates_background_job": "NEEDS_REVIEW",
-      "invokes_external_services_or_subprocesses": "NEEDS_REVIEW",
-      "destructive_or_high_impact": "NEEDS_REVIEW",
-      "rate_limit_required": "NEEDS_REVIEW",
-      "rate_limit_implemented": "NEEDS_REVIEW",
-      "existing_security_tests": "NEEDS_REVIEW"
+      "purpose": "Clear the Flask browser session for the current client.",
+      "required_role_or_privilege": "public logout endpoint; CSRF header still required for cookie-authenticated browser requests",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_auth_and_setup.py::AuthAndSetupTests::test_login_logout_session_flow"
+      ],
+      "security_classification": "PUBLIC"
     },
     {
       "method": "GET",
@@ -324,16 +338,19 @@
       "public_pre_setup_only": false,
       "changes_state": false,
       "csrf_required": false,
-      "purpose": "NEEDS_REVIEW",
-      "required_role_or_privilege": "NEEDS_REVIEW",
-      "handles_secrets": "NEEDS_REVIEW",
-      "accesses_files": "NEEDS_REVIEW",
-      "creates_background_job": "NEEDS_REVIEW",
-      "invokes_external_services_or_subprocesses": "NEEDS_REVIEW",
-      "destructive_or_high_impact": "NEEDS_REVIEW",
-      "rate_limit_required": "NEEDS_REVIEW",
-      "rate_limit_implemented": "NEEDS_REVIEW",
-      "existing_security_tests": "NEEDS_REVIEW"
+      "purpose": "Return current authentication and first-run setup state without exposing credentials.",
+      "required_role_or_privilege": "public status endpoint; username returned only when the request is authenticated",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_auth_and_setup.py::AuthAndSetupTests::test_login_logout_session_flow"
+      ],
+      "security_classification": "PUBLIC"
     },
     {
       "method": "GET",
@@ -356,7 +373,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "PUBLIC"
     },
     {
       "method": "GET",
@@ -379,7 +397,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_public_static_routes_cannot_traverse"
-      ]
+      ],
+      "security_classification": "PUBLIC"
     },
     {
       "method": "GET",
@@ -402,7 +421,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_public_static_routes_cannot_traverse"
-      ]
+      ],
+      "security_classification": "PUBLIC"
     },
     {
       "method": "GET",
@@ -414,16 +434,19 @@
       "public_pre_setup_only": false,
       "changes_state": false,
       "csrf_required": false,
-      "purpose": "NEEDS_REVIEW",
-      "required_role_or_privilege": "NEEDS_REVIEW",
-      "handles_secrets": "NEEDS_REVIEW",
-      "accesses_files": "NEEDS_REVIEW",
-      "creates_background_job": "NEEDS_REVIEW",
-      "invokes_external_services_or_subprocesses": "NEEDS_REVIEW",
-      "destructive_or_high_impact": "NEEDS_REVIEW",
-      "rate_limit_required": "NEEDS_REVIEW",
-      "rate_limit_implemented": "NEEDS_REVIEW",
-      "existing_security_tests": "NEEDS_REVIEW"
+      "purpose": "Serve favicon from fixed application static locations, or 204 when absent.",
+      "required_role_or_privilege": "public static asset",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::SecurityHardeningTests::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ],
+      "security_classification": "PUBLIC"
     },
     {
       "method": "GET",
@@ -447,7 +470,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_config_and_status_responses_are_redacted"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -472,7 +496,8 @@
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced",
         "tests/test_security_hardening.py::test_config_and_status_responses_are_redacted"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -493,7 +518,8 @@
       "destructive_or_high_impact": false,
       "rate_limit_required": false,
       "rate_limit_implemented": false,
-      "existing_security_tests": []
+      "existing_security_tests": [],
+      "security_classification": "PUBLIC"
     },
     {
       "method": "GET",
@@ -505,16 +531,19 @@
       "public_pre_setup_only": false,
       "changes_state": false,
       "csrf_required": false,
-      "purpose": "NEEDS_REVIEW",
-      "required_role_or_privilege": "NEEDS_REVIEW",
-      "handles_secrets": "NEEDS_REVIEW",
-      "accesses_files": "NEEDS_REVIEW",
-      "creates_background_job": "NEEDS_REVIEW",
-      "invokes_external_services_or_subprocesses": "NEEDS_REVIEW",
-      "destructive_or_high_impact": "NEEDS_REVIEW",
-      "rate_limit_required": "NEEDS_REVIEW",
-      "rate_limit_implemented": "NEEDS_REVIEW",
-      "existing_security_tests": "NEEDS_REVIEW"
+      "purpose": "Return authenticated dependency diagnostics, including configured/not-configured booleans for integrations.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::SecurityHardeningTests::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -538,7 +567,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -561,7 +591,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -584,7 +615,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -607,7 +639,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -631,7 +664,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -655,7 +689,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -679,7 +714,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -703,7 +739,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -727,7 +764,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -739,16 +777,20 @@
       "public_pre_setup_only": false,
       "changes_state": true,
       "csrf_required": true,
-      "purpose": "NEEDS_REVIEW",
-      "required_role_or_privilege": "NEEDS_REVIEW",
-      "handles_secrets": "NEEDS_REVIEW",
-      "accesses_files": "NEEDS_REVIEW",
-      "creates_background_job": "NEEDS_REVIEW",
-      "invokes_external_services_or_subprocesses": "NEEDS_REVIEW",
-      "destructive_or_high_impact": "NEEDS_REVIEW",
-      "rate_limit_required": "NEEDS_REVIEW",
-      "rate_limit_implemented": "NEEDS_REVIEW",
-      "existing_security_tests": "NEEDS_REVIEW"
+      "purpose": "Attach a backend-validated MusicBrainz Recording ID to one item, then run Beets modify/mbsync/write/move in a background job.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_import_review_attach_enforcement.py",
+        "tests/test_import_review_attach_integrity.py"
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -772,7 +814,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -795,7 +838,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -818,7 +862,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -842,7 +887,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -865,7 +911,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -889,7 +936,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_config_and_status_responses_are_redacted"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -913,7 +961,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_config_and_status_responses_are_redacted"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -925,16 +974,19 @@
       "public_pre_setup_only": false,
       "changes_state": false,
       "csrf_required": false,
-      "purpose": "NEEDS_REVIEW",
-      "required_role_or_privilege": "NEEDS_REVIEW",
-      "handles_secrets": "NEEDS_REVIEW",
-      "accesses_files": "NEEDS_REVIEW",
-      "creates_background_job": "NEEDS_REVIEW",
-      "invokes_external_services_or_subprocesses": "NEEDS_REVIEW",
-      "destructive_or_high_impact": "NEEDS_REVIEW",
-      "rate_limit_required": "NEEDS_REVIEW",
-      "rate_limit_implemented": "NEEDS_REVIEW",
-      "existing_security_tests": "NEEDS_REVIEW"
+      "purpose": "Serve a locally cached release-art image for a validated MusicBrainz release-group MBID.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::SecurityHardeningTests::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -946,16 +998,19 @@
       "public_pre_setup_only": false,
       "changes_state": false,
       "csrf_required": false,
-      "purpose": "NEEDS_REVIEW",
-      "required_role_or_privilege": "NEEDS_REVIEW",
-      "handles_secrets": "NEEDS_REVIEW",
-      "accesses_files": "NEEDS_REVIEW",
-      "creates_background_job": "NEEDS_REVIEW",
-      "invokes_external_services_or_subprocesses": "NEEDS_REVIEW",
-      "destructive_or_high_impact": "NEEDS_REVIEW",
-      "rate_limit_required": "NEEDS_REVIEW",
-      "rate_limit_implemented": "NEEDS_REVIEW",
-      "existing_security_tests": "NEEDS_REVIEW"
+      "purpose": "Fetch/cache release-group cover art from fixed Cover Art Archive or Discogs endpoints, then return the local cache URL.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": true,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_discogs_fallback.py"
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -978,7 +1033,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -1001,7 +1057,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -1024,7 +1081,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -1047,7 +1105,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -1071,7 +1130,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -1095,7 +1155,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -1119,7 +1180,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "DELETE",
@@ -1143,7 +1205,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -1167,7 +1230,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -1191,7 +1255,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -1215,7 +1280,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -1239,7 +1305,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -1263,7 +1330,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -1286,7 +1354,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -1309,7 +1378,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -1333,7 +1403,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -1345,16 +1416,19 @@
       "public_pre_setup_only": false,
       "changes_state": false,
       "csrf_required": false,
-      "purpose": "NEEDS_REVIEW",
-      "required_role_or_privilege": "NEEDS_REVIEW",
-      "handles_secrets": "NEEDS_REVIEW",
-      "accesses_files": "NEEDS_REVIEW",
-      "creates_background_job": "NEEDS_REVIEW",
-      "invokes_external_services_or_subprocesses": "NEEDS_REVIEW",
-      "destructive_or_high_impact": "NEEDS_REVIEW",
-      "rate_limit_required": "NEEDS_REVIEW",
-      "rate_limit_implemented": "NEEDS_REVIEW",
-      "existing_security_tests": "NEEDS_REVIEW"
+      "purpose": "Count audio/art/other files below a validated import-review folder before a destructive delete confirmation.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_sec002_app_path_import_review_cleanup.py"
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -1378,7 +1452,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -1402,7 +1477,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -1425,7 +1501,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -1449,7 +1526,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -1473,7 +1551,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -1497,7 +1576,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -1520,7 +1600,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -1543,7 +1624,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -1567,7 +1649,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -1590,7 +1673,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -1614,7 +1698,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -1638,7 +1723,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -1661,7 +1747,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -1684,7 +1771,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -1708,7 +1796,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -1731,7 +1820,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -1754,7 +1844,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -1777,7 +1868,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -1801,7 +1893,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -1824,7 +1917,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -1847,7 +1941,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -1870,7 +1965,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -1893,7 +1989,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -1916,7 +2013,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -1940,7 +2038,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -1963,7 +2062,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -1975,16 +2075,20 @@
       "public_pre_setup_only": false,
       "changes_state": true,
       "csrf_required": true,
-      "purpose": "NEEDS_REVIEW",
-      "required_role_or_privilege": "NEEDS_REVIEW",
-      "handles_secrets": "NEEDS_REVIEW",
-      "accesses_files": "NEEDS_REVIEW",
-      "creates_background_job": "NEEDS_REVIEW",
-      "invokes_external_services_or_subprocesses": "NEEDS_REVIEW",
-      "destructive_or_high_impact": "NEEDS_REVIEW",
-      "rate_limit_required": "NEEDS_REVIEW",
-      "rate_limit_implemented": "NEEDS_REVIEW",
-      "existing_security_tests": "NEEDS_REVIEW"
+      "purpose": "Validate a user-entered MusicBrainz UUID/URL and compare it with the selected import-review target.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_import_review_manual_id_workflow.py",
+        "tests/test_import_review_attach_enforcement.py"
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -2008,7 +2112,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -2032,7 +2137,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -2056,7 +2162,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -2080,7 +2187,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -2104,7 +2212,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -2128,7 +2237,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -2152,7 +2262,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -2176,7 +2287,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -2200,7 +2312,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -2224,7 +2337,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -2248,7 +2362,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -2271,7 +2386,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -2295,7 +2411,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -2318,7 +2435,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -2341,7 +2459,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -2364,7 +2483,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -2388,7 +2508,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "DELETE",
@@ -2412,7 +2533,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -2424,16 +2546,19 @@
       "public_pre_setup_only": false,
       "changes_state": true,
       "csrf_required": true,
-      "purpose": "NEEDS_REVIEW",
-      "required_role_or_privilege": "NEEDS_REVIEW",
-      "handles_secrets": "NEEDS_REVIEW",
-      "accesses_files": "NEEDS_REVIEW",
-      "creates_background_job": "NEEDS_REVIEW",
-      "invokes_external_services_or_subprocesses": "NEEDS_REVIEW",
-      "destructive_or_high_impact": "NEEDS_REVIEW",
-      "rate_limit_required": "NEEDS_REVIEW",
-      "rate_limit_implemented": "NEEDS_REVIEW",
-      "existing_security_tests": "NEEDS_REVIEW"
+      "purpose": "Re-read an AI-batch folder and completed artwork job, then reconcile persisted artwork state with actual album art status.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_artwork_retry_reconciliation.py"
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -2457,7 +2582,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -2481,7 +2607,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -2505,7 +2632,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -2528,7 +2656,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -2552,7 +2681,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -2576,7 +2706,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -2600,7 +2731,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -2623,7 +2755,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -2647,7 +2780,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -2671,7 +2805,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -2695,7 +2830,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -2719,7 +2855,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -2743,7 +2880,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -2766,7 +2904,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -2790,7 +2929,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -2814,7 +2954,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -2838,7 +2979,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -2861,7 +3003,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -2885,7 +3028,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -2909,7 +3053,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -2933,7 +3078,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -2957,7 +3103,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -2981,7 +3128,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -3004,7 +3152,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -3028,7 +3177,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -3051,7 +3201,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -3075,7 +3226,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -3099,7 +3251,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -3123,7 +3276,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -3147,7 +3301,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -3170,7 +3325,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -3194,7 +3350,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -3218,7 +3375,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -3241,7 +3399,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -3265,7 +3424,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -3289,7 +3449,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -3313,7 +3474,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -3337,7 +3499,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -3361,7 +3524,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -3385,7 +3549,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -3409,7 +3574,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -3433,7 +3599,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -3456,7 +3623,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -3480,7 +3648,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -3503,7 +3672,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -3527,7 +3697,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -3551,7 +3722,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -3575,7 +3747,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -3599,7 +3772,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -3623,7 +3797,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -3647,7 +3822,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -3670,7 +3846,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -3694,7 +3871,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -3719,7 +3897,8 @@
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced",
         "tests/test_security_hardening.py::test_config_and_status_responses_are_redacted"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -3743,7 +3922,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -3767,7 +3947,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -3791,7 +3972,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -3814,7 +3996,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -3838,7 +4021,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -3861,7 +4045,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -3885,7 +4070,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -3909,7 +4095,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -3933,7 +4120,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -3956,7 +4144,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -3980,7 +4169,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -4004,7 +4194,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -4016,16 +4207,19 @@
       "public_pre_setup_only": false,
       "changes_state": false,
       "csrf_required": false,
-      "purpose": "NEEDS_REVIEW",
-      "required_role_or_privilege": "NEEDS_REVIEW",
-      "handles_secrets": "NEEDS_REVIEW",
-      "accesses_files": "NEEDS_REVIEW",
-      "creates_background_job": "NEEDS_REVIEW",
-      "invokes_external_services_or_subprocesses": "NEEDS_REVIEW",
-      "destructive_or_high_impact": "NEEDS_REVIEW",
-      "rate_limit_required": "NEEDS_REVIEW",
-      "rate_limit_implemented": "NEEDS_REVIEW",
-      "existing_security_tests": "NEEDS_REVIEW"
+      "purpose": "Return the last persisted root-folder cleanup report from application metadata cache.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_root_folder_repair.py"
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -4037,16 +4231,19 @@
       "public_pre_setup_only": false,
       "changes_state": true,
       "csrf_required": true,
-      "purpose": "NEEDS_REVIEW",
-      "required_role_or_privilege": "NEEDS_REVIEW",
-      "handles_secrets": "NEEDS_REVIEW",
-      "accesses_files": "NEEDS_REVIEW",
-      "creates_background_job": "NEEDS_REVIEW",
-      "invokes_external_services_or_subprocesses": "NEEDS_REVIEW",
-      "destructive_or_high_impact": "NEEDS_REVIEW",
-      "rate_limit_required": "NEEDS_REVIEW",
-      "rate_limit_implemented": "NEEDS_REVIEW",
-      "existing_security_tests": "NEEDS_REVIEW"
+      "purpose": "Start a background scan for misplaced root-level music-library folders and save a report.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_root_folder_repair.py"
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -4058,16 +4255,19 @@
       "public_pre_setup_only": false,
       "changes_state": true,
       "csrf_required": true,
-      "purpose": "NEEDS_REVIEW",
-      "required_role_or_privilege": "NEEDS_REVIEW",
-      "handles_secrets": "NEEDS_REVIEW",
-      "accesses_files": "NEEDS_REVIEW",
-      "creates_background_job": "NEEDS_REVIEW",
-      "invokes_external_services_or_subprocesses": "NEEDS_REVIEW",
-      "destructive_or_high_impact": "NEEDS_REVIEW",
-      "rate_limit_required": "NEEDS_REVIEW",
-      "rate_limit_implemented": "NEEDS_REVIEW",
-      "existing_security_tests": "NEEDS_REVIEW"
+      "purpose": "Start a background repair that removes empty root folders, queues orphaned folders for review, and re-homes known Beets items.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_root_folder_repair.py"
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -4091,7 +4291,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -4115,7 +4316,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -4139,7 +4341,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -4163,7 +4366,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -4187,7 +4391,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_config_and_status_responses_are_redacted"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -4212,7 +4417,8 @@
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced",
         "tests/test_security_hardening.py::test_config_and_status_responses_are_redacted"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -4236,7 +4442,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -4260,7 +4467,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -4284,7 +4492,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -4307,7 +4516,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -4331,7 +4541,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -4355,7 +4566,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -4378,7 +4590,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "DELETE",
@@ -4402,7 +4615,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -4426,7 +4640,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -4450,7 +4665,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -4473,7 +4689,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -4497,7 +4714,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -4520,7 +4738,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -4544,7 +4763,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -4567,7 +4787,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -4591,7 +4812,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -4615,7 +4837,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_config_and_status_responses_are_redacted"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -4640,7 +4863,8 @@
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced",
         "tests/test_security_hardening.py::test_config_and_status_responses_are_redacted"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -4663,7 +4887,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -4687,7 +4912,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -4711,7 +4937,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -4735,7 +4962,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_config_and_status_responses_are_redacted"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -4760,7 +4988,8 @@
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced",
         "tests/test_security_hardening.py::test_config_and_status_responses_are_redacted"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -4785,7 +5014,8 @@
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced",
         "tests/test_security_hardening.py::test_config_and_status_responses_are_redacted"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -4797,16 +5027,20 @@
       "public_pre_setup_only": false,
       "changes_state": false,
       "csrf_required": false,
-      "purpose": "NEEDS_REVIEW",
-      "required_role_or_privilege": "NEEDS_REVIEW",
-      "handles_secrets": "NEEDS_REVIEW",
-      "accesses_files": "NEEDS_REVIEW",
-      "creates_background_job": "NEEDS_REVIEW",
-      "invokes_external_services_or_subprocesses": "NEEDS_REVIEW",
-      "destructive_or_high_impact": "NEEDS_REVIEW",
-      "rate_limit_required": "NEEDS_REVIEW",
-      "rate_limit_implemented": "NEEDS_REVIEW",
-      "existing_security_tests": "NEEDS_REVIEW"
+      "purpose": "Return transaction/audit workflow settings.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_transaction_engine.py",
+        "tests/test_transaction_integration.py"
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -4818,16 +5052,19 @@
       "public_pre_setup_only": false,
       "changes_state": true,
       "csrf_required": true,
-      "purpose": "NEEDS_REVIEW",
-      "required_role_or_privilege": "NEEDS_REVIEW",
-      "handles_secrets": "NEEDS_REVIEW",
-      "accesses_files": "NEEDS_REVIEW",
-      "creates_background_job": "NEEDS_REVIEW",
-      "invokes_external_services_or_subprocesses": "NEEDS_REVIEW",
-      "destructive_or_high_impact": "NEEDS_REVIEW",
-      "rate_limit_required": "NEEDS_REVIEW",
-      "rate_limit_implemented": "NEEDS_REVIEW",
-      "existing_security_tests": "NEEDS_REVIEW"
+      "purpose": "Persist transaction/audit workflow settings with type coercion and bounds clamping.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_transaction_engine.py"
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -4839,16 +5076,20 @@
       "public_pre_setup_only": false,
       "changes_state": false,
       "csrf_required": false,
-      "purpose": "NEEDS_REVIEW",
-      "required_role_or_privilege": "NEEDS_REVIEW",
-      "handles_secrets": "NEEDS_REVIEW",
-      "accesses_files": "NEEDS_REVIEW",
-      "creates_background_job": "NEEDS_REVIEW",
-      "invokes_external_services_or_subprocesses": "NEEDS_REVIEW",
-      "destructive_or_high_impact": "NEEDS_REVIEW",
-      "rate_limit_required": "NEEDS_REVIEW",
-      "rate_limit_implemented": "NEEDS_REVIEW",
-      "existing_security_tests": "NEEDS_REVIEW"
+      "purpose": "List transaction/audit summaries from the transaction store with bounded pagination.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_transaction_engine.py",
+        "tests/test_transaction_integration.py"
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -4860,16 +5101,20 @@
       "public_pre_setup_only": false,
       "changes_state": false,
       "csrf_required": false,
-      "purpose": "NEEDS_REVIEW",
-      "required_role_or_privilege": "NEEDS_REVIEW",
-      "handles_secrets": "NEEDS_REVIEW",
-      "accesses_files": "NEEDS_REVIEW",
-      "creates_background_job": "NEEDS_REVIEW",
-      "invokes_external_services_or_subprocesses": "NEEDS_REVIEW",
-      "destructive_or_high_impact": "NEEDS_REVIEW",
-      "rate_limit_required": "NEEDS_REVIEW",
-      "rate_limit_implemented": "NEEDS_REVIEW",
-      "existing_security_tests": "NEEDS_REVIEW"
+      "purpose": "Read one transaction/audit record by generated transaction ID with bounded change pagination.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_transaction_engine.py",
+        "tests/test_sec002_nonapp_backend.py::TransactionStoreIdContainmentTests"
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -4881,16 +5126,19 @@
       "public_pre_setup_only": false,
       "changes_state": true,
       "csrf_required": true,
-      "purpose": "NEEDS_REVIEW",
-      "required_role_or_privilege": "NEEDS_REVIEW",
-      "handles_secrets": "NEEDS_REVIEW",
-      "accesses_files": "NEEDS_REVIEW",
-      "creates_background_job": "NEEDS_REVIEW",
-      "invokes_external_services_or_subprocesses": "NEEDS_REVIEW",
-      "destructive_or_high_impact": "NEEDS_REVIEW",
-      "rate_limit_required": "NEEDS_REVIEW",
-      "rate_limit_implemented": "NEEDS_REVIEW",
-      "existing_security_tests": "NEEDS_REVIEW"
+      "purpose": "Mark a transaction/audit record approved before apply.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_transaction_integration.py"
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -4902,16 +5150,19 @@
       "public_pre_setup_only": false,
       "changes_state": true,
       "csrf_required": true,
-      "purpose": "NEEDS_REVIEW",
-      "required_role_or_privilege": "NEEDS_REVIEW",
-      "handles_secrets": "NEEDS_REVIEW",
-      "accesses_files": "NEEDS_REVIEW",
-      "creates_background_job": "NEEDS_REVIEW",
-      "invokes_external_services_or_subprocesses": "NEEDS_REVIEW",
-      "destructive_or_high_impact": "NEEDS_REVIEW",
-      "rate_limit_required": "NEEDS_REVIEW",
-      "rate_limit_implemented": "NEEDS_REVIEW",
-      "existing_security_tests": "NEEDS_REVIEW"
+      "purpose": "Mark a transaction/audit record cancelled.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_transaction_integration.py"
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -4923,16 +5174,20 @@
       "public_pre_setup_only": false,
       "changes_state": true,
       "csrf_required": true,
-      "purpose": "NEEDS_REVIEW",
-      "required_role_or_privilege": "NEEDS_REVIEW",
-      "handles_secrets": "NEEDS_REVIEW",
-      "accesses_files": "NEEDS_REVIEW",
-      "creates_background_job": "NEEDS_REVIEW",
-      "invokes_external_services_or_subprocesses": "NEEDS_REVIEW",
-      "destructive_or_high_impact": "NEEDS_REVIEW",
-      "rate_limit_required": "NEEDS_REVIEW",
-      "rate_limit_implemented": "NEEDS_REVIEW",
-      "existing_security_tests": "NEEDS_REVIEW"
+      "purpose": "Apply an approved metadata transaction through the existing Beets mutation workflow.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_transaction_integration.py",
+        "tests/test_import_review_attach_enforcement.py"
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -4944,16 +5199,20 @@
       "public_pre_setup_only": false,
       "changes_state": true,
       "csrf_required": true,
-      "purpose": "NEEDS_REVIEW",
-      "required_role_or_privilege": "NEEDS_REVIEW",
-      "handles_secrets": "NEEDS_REVIEW",
-      "accesses_files": "NEEDS_REVIEW",
-      "creates_background_job": "NEEDS_REVIEW",
-      "invokes_external_services_or_subprocesses": "NEEDS_REVIEW",
-      "destructive_or_high_impact": "NEEDS_REVIEW",
-      "rate_limit_required": "NEEDS_REVIEW",
-      "rate_limit_implemented": "NEEDS_REVIEW",
-      "existing_security_tests": "NEEDS_REVIEW"
+      "purpose": "Rollback supported transaction operations through recorded rollback executors and background jobs.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_import_review_attach_enforcement.py",
+        "tests/test_import_review_attach_integrity.py"
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -4965,16 +5224,20 @@
       "public_pre_setup_only": false,
       "changes_state": false,
       "csrf_required": false,
-      "purpose": "NEEDS_REVIEW",
-      "required_role_or_privilege": "NEEDS_REVIEW",
-      "handles_secrets": "NEEDS_REVIEW",
-      "accesses_files": "NEEDS_REVIEW",
-      "creates_background_job": "NEEDS_REVIEW",
-      "invokes_external_services_or_subprocesses": "NEEDS_REVIEW",
-      "destructive_or_high_impact": "NEEDS_REVIEW",
-      "rate_limit_required": "NEEDS_REVIEW",
-      "rate_limit_implemented": "NEEDS_REVIEW",
-      "existing_security_tests": "NEEDS_REVIEW"
+      "purpose": "Export one transaction/audit record as JSON, Markdown, or CSV.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_transaction_engine.py",
+        "tests/test_sec002_nonapp_backend.py::TransactionStoreIdContainmentTests"
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -4997,7 +5260,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "PUBLIC"
     },
     {
       "method": "POST",
@@ -5021,7 +5285,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -5044,7 +5309,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -5067,7 +5333,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -5090,7 +5357,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -5113,7 +5381,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -5136,7 +5405,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -5160,7 +5430,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "DELETE",
@@ -5184,7 +5455,8 @@
       "existing_security_tests": [
         "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -5196,16 +5468,20 @@
       "public_pre_setup_only": false,
       "changes_state": false,
       "csrf_required": false,
-      "purpose": "NEEDS_REVIEW",
-      "required_role_or_privilege": "NEEDS_REVIEW",
-      "handles_secrets": "NEEDS_REVIEW",
-      "accesses_files": "NEEDS_REVIEW",
-      "creates_background_job": "NEEDS_REVIEW",
-      "invokes_external_services_or_subprocesses": "NEEDS_REVIEW",
-      "destructive_or_high_impact": "NEEDS_REVIEW",
-      "rate_limit_required": "NEEDS_REVIEW",
-      "rate_limit_implemented": "NEEDS_REVIEW",
-      "existing_security_tests": "NEEDS_REVIEW"
+      "purpose": "Fetch the configured Lidarr wanted list through a specific integration helper; not a generic proxy.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": true,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_routes_lidarr.py",
+        "tests/test_sec002_nonapp_backend.py::LidarrErrorSanitizationTests"
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -5217,16 +5493,19 @@
       "public_pre_setup_only": false,
       "changes_state": false,
       "csrf_required": false,
-      "purpose": "NEEDS_REVIEW",
-      "required_role_or_privilege": "NEEDS_REVIEW",
-      "handles_secrets": "NEEDS_REVIEW",
-      "accesses_files": "NEEDS_REVIEW",
-      "creates_background_job": "NEEDS_REVIEW",
-      "invokes_external_services_or_subprocesses": "NEEDS_REVIEW",
-      "destructive_or_high_impact": "NEEDS_REVIEW",
-      "rate_limit_required": "NEEDS_REVIEW",
-      "rate_limit_implemented": "NEEDS_REVIEW",
-      "existing_security_tests": "NEEDS_REVIEW"
+      "purpose": "Fetch configured Lidarr artist/album data and locally match by artist name; not a generic proxy.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": true,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_routes_lidarr.py"
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -5238,16 +5517,19 @@
       "public_pre_setup_only": false,
       "changes_state": true,
       "csrf_required": true,
-      "purpose": "NEEDS_REVIEW",
-      "required_role_or_privilege": "NEEDS_REVIEW",
-      "handles_secrets": "NEEDS_REVIEW",
-      "accesses_files": "NEEDS_REVIEW",
-      "creates_background_job": "NEEDS_REVIEW",
-      "invokes_external_services_or_subprocesses": "NEEDS_REVIEW",
-      "destructive_or_high_impact": "NEEDS_REVIEW",
-      "rate_limit_required": "NEEDS_REVIEW",
-      "rate_limit_implemented": "NEEDS_REVIEW",
-      "existing_security_tests": "NEEDS_REVIEW"
+      "purpose": "Submit the allowlisted Lidarr AlbumSearch command for positive integer album IDs only.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": true,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_routes_lidarr.py"
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -5271,7 +5553,8 @@
       "existing_security_tests": [
         "tests/test_routes_setup.py",
         "tests/test_library_pagination_and_status_cache.py"
-      ]
+      ],
+      "security_classification": "PUBLIC"
     },
     {
       "method": "GET",
@@ -5294,7 +5577,8 @@
       "rate_limit_implemented": true,
       "existing_security_tests": [
         "tests/test_routes_setup.py"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -5318,7 +5602,8 @@
       "existing_security_tests": [
         "tests/test_routes_setup.py",
         "tests/test_auth_and_setup.py"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -5342,7 +5627,8 @@
       "existing_security_tests": [
         "tests/test_routes_setup.py",
         "tests/test_auth_and_setup.py"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -5365,7 +5651,8 @@
       "rate_limit_implemented": true,
       "existing_security_tests": [
         "tests/test_routes_setup.py"
-      ]
+      ],
+      "security_classification": "SETUP_ONLY"
     },
     {
       "method": "POST",
@@ -5388,7 +5675,8 @@
       "rate_limit_implemented": true,
       "existing_security_tests": [
         "tests/test_routes_setup.py"
-      ]
+      ],
+      "security_classification": "SETUP_ONLY"
     },
     {
       "method": "POST",
@@ -5411,7 +5699,8 @@
       "rate_limit_implemented": true,
       "existing_security_tests": [
         "tests/test_routes_setup.py"
-      ]
+      ],
+      "security_classification": "SETUP_ONLY"
     },
     {
       "method": "POST",
@@ -5434,7 +5723,8 @@
       "rate_limit_implemented": true,
       "existing_security_tests": [
         "tests/test_routes_setup.py"
-      ]
+      ],
+      "security_classification": "SETUP_ONLY"
     },
     {
       "method": "GET",
@@ -5457,7 +5747,8 @@
       "rate_limit_implemented": true,
       "existing_security_tests": [
         "tests/test_routes_setup.py"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -5480,7 +5771,8 @@
       "rate_limit_implemented": true,
       "existing_security_tests": [
         "tests/test_routes_setup.py"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -5503,7 +5795,8 @@
       "rate_limit_implemented": true,
       "existing_security_tests": [
         "tests/test_routes_setup.py"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -5529,7 +5822,8 @@
         "tests/test_auth_and_setup.py",
         "tests/test_first_run_browser_auth.py",
         "tests/test_first_run_browser_bootstrap.py"
-      ]
+      ],
+      "security_classification": "SETUP_ONLY"
     },
     {
       "method": "POST",
@@ -5552,7 +5846,8 @@
       "rate_limit_implemented": true,
       "existing_security_tests": [
         "tests/test_routes_setup.py"
-      ]
+      ],
+      "security_classification": "SETUP_ONLY"
     },
     {
       "method": "POST",
@@ -5577,7 +5872,8 @@
         "tests/test_routes_setup.py",
         "tests/test_auth_and_setup.py",
         "tests/test_v0110_upgrade_and_matched_stack.py"
-      ]
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -5600,7 +5896,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_routes_setup.py"
-      ]
+      ],
+      "security_classification": "PUBLIC"
     },
     {
       "method": "GET",
@@ -5623,7 +5920,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_routes_setup.py"
-      ]
+      ],
+      "security_classification": "PUBLIC"
     },
     {
       "method": "GET",
@@ -5646,7 +5944,8 @@
       "rate_limit_implemented": false,
       "existing_security_tests": [
         "tests/test_routes_setup.py"
-      ]
+      ],
+      "security_classification": "PUBLIC"
     },
     {
       "method": "POST",
@@ -5658,16 +5957,20 @@
       "public_pre_setup_only": false,
       "changes_state": true,
       "csrf_required": true,
-      "purpose": "NEEDS_REVIEW",
-      "required_role_or_privilege": "NEEDS_REVIEW",
-      "handles_secrets": "NEEDS_REVIEW",
-      "accesses_files": "NEEDS_REVIEW",
-      "creates_background_job": "NEEDS_REVIEW",
-      "invokes_external_services_or_subprocesses": "NEEDS_REVIEW",
-      "destructive_or_high_impact": "NEEDS_REVIEW",
-      "rate_limit_required": "NEEDS_REVIEW",
-      "rate_limit_implemented": "NEEDS_REVIEW",
-      "existing_security_tests": "NEEDS_REVIEW"
+      "purpose": "Start a Beets chroma/acoustid submission job for one album after readiness and MBID preflight checks.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": true,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_external_beets_architecture.py",
+        "tests/test_submissions_page.py"
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -5679,16 +5982,20 @@
       "public_pre_setup_only": false,
       "changes_state": true,
       "csrf_required": true,
-      "purpose": "NEEDS_REVIEW",
-      "required_role_or_privilege": "NEEDS_REVIEW",
-      "handles_secrets": "NEEDS_REVIEW",
-      "accesses_files": "NEEDS_REVIEW",
-      "creates_background_job": "NEEDS_REVIEW",
-      "invokes_external_services_or_subprocesses": "NEEDS_REVIEW",
-      "destructive_or_high_impact": "NEEDS_REVIEW",
-      "rate_limit_required": "NEEDS_REVIEW",
-      "rate_limit_implemented": "NEEDS_REVIEW",
-      "existing_security_tests": "NEEDS_REVIEW"
+      "purpose": "Start a Beets chroma/acoustid submission job for one item or its album after readiness and MBID preflight checks.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": true,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_external_beets_architecture.py",
+        "tests/test_submissions_page.py"
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "GET",
@@ -5700,16 +6007,20 @@
       "public_pre_setup_only": false,
       "changes_state": false,
       "csrf_required": false,
-      "purpose": "NEEDS_REVIEW",
-      "required_role_or_privilege": "NEEDS_REVIEW",
-      "handles_secrets": "NEEDS_REVIEW",
-      "accesses_files": "NEEDS_REVIEW",
-      "creates_background_job": "NEEDS_REVIEW",
-      "invokes_external_services_or_subprocesses": "NEEDS_REVIEW",
-      "destructive_or_high_impact": "NEEDS_REVIEW",
-      "rate_limit_required": "NEEDS_REVIEW",
-      "rate_limit_implemented": "NEEDS_REVIEW",
-      "existing_security_tests": "NEEDS_REVIEW"
+      "purpose": "Resolve an album/item/allowed-folder submission target and return readiness/preflight data.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_sec002_nonapp_backend.py::SubmissionFolderPathContainmentTests",
+        "tests/test_sec002_nonapp_backend.py::SubmissionExceptionSanitizationTests"
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -5721,16 +6032,19 @@
       "public_pre_setup_only": false,
       "changes_state": true,
       "csrf_required": true,
-      "purpose": "NEEDS_REVIEW",
-      "required_role_or_privilege": "NEEDS_REVIEW",
-      "handles_secrets": "NEEDS_REVIEW",
-      "accesses_files": "NEEDS_REVIEW",
-      "creates_background_job": "NEEDS_REVIEW",
-      "invokes_external_services_or_subprocesses": "NEEDS_REVIEW",
-      "destructive_or_high_impact": "NEEDS_REVIEW",
-      "rate_limit_required": "NEEDS_REVIEW",
-      "rate_limit_implemented": "NEEDS_REVIEW",
-      "existing_security_tests": "NEEDS_REVIEW"
+      "purpose": "Persist bounded submission draft metadata for an album, item, or allowed folder target.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_submissions_page.py"
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "DELETE",
@@ -5742,16 +6056,19 @@
       "public_pre_setup_only": false,
       "changes_state": true,
       "csrf_required": true,
-      "purpose": "NEEDS_REVIEW",
-      "required_role_or_privilege": "NEEDS_REVIEW",
-      "handles_secrets": "NEEDS_REVIEW",
-      "accesses_files": "NEEDS_REVIEW",
-      "creates_background_job": "NEEDS_REVIEW",
-      "invokes_external_services_or_subprocesses": "NEEDS_REVIEW",
-      "destructive_or_high_impact": "NEEDS_REVIEW",
-      "rate_limit_required": "NEEDS_REVIEW",
-      "rate_limit_implemented": "NEEDS_REVIEW",
-      "existing_security_tests": "NEEDS_REVIEW"
+      "purpose": "Delete persisted submission draft metadata for an album, item, or allowed folder target.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_submissions_page.py"
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -5763,16 +6080,20 @@
       "public_pre_setup_only": false,
       "changes_state": true,
       "csrf_required": true,
-      "purpose": "NEEDS_REVIEW",
-      "required_role_or_privilege": "NEEDS_REVIEW",
-      "handles_secrets": "NEEDS_REVIEW",
-      "accesses_files": "NEEDS_REVIEW",
-      "creates_background_job": "NEEDS_REVIEW",
-      "invokes_external_services_or_subprocesses": "NEEDS_REVIEW",
-      "destructive_or_high_impact": "NEEDS_REVIEW",
-      "rate_limit_required": "NEEDS_REVIEW",
-      "rate_limit_implemented": "NEEDS_REVIEW",
-      "existing_security_tests": "NEEDS_REVIEW"
+      "purpose": "Validate and fetch metadata for a user-supplied reference URL under the global outbound SSRF policy, then save it to the submission draft.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": true,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_sec002_nonapp_backend.py::SubmissionExceptionSanitizationTests",
+        "tests/test_submissions_page.py"
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -5784,16 +6105,19 @@
       "public_pre_setup_only": false,
       "changes_state": true,
       "csrf_required": true,
-      "purpose": "NEEDS_REVIEW",
-      "required_role_or_privilege": "NEEDS_REVIEW",
-      "handles_secrets": "NEEDS_REVIEW",
-      "accesses_files": "NEEDS_REVIEW",
-      "creates_background_job": "NEEDS_REVIEW",
-      "invokes_external_services_or_subprocesses": "NEEDS_REVIEW",
-      "destructive_or_high_impact": "NEEDS_REVIEW",
-      "rate_limit_required": "NEEDS_REVIEW",
-      "rate_limit_implemented": "NEEDS_REVIEW",
-      "existing_security_tests": "NEEDS_REVIEW"
+      "purpose": "Validate a MusicBrainz release MBID/URL and compare remote tracklist to the local submission target.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_submissions_page.py"
+      ],
+      "security_classification": "ADMIN_ONLY"
     },
     {
       "method": "POST",
@@ -5805,16 +6129,19 @@
       "public_pre_setup_only": false,
       "changes_state": true,
       "csrf_required": true,
-      "purpose": "NEEDS_REVIEW",
-      "required_role_or_privilege": "NEEDS_REVIEW",
-      "handles_secrets": "NEEDS_REVIEW",
-      "accesses_files": "NEEDS_REVIEW",
-      "creates_background_job": "NEEDS_REVIEW",
-      "invokes_external_services_or_subprocesses": "NEEDS_REVIEW",
-      "destructive_or_high_impact": "NEEDS_REVIEW",
-      "rate_limit_required": "NEEDS_REVIEW",
-      "rate_limit_implemented": "NEEDS_REVIEW",
-      "existing_security_tests": "NEEDS_REVIEW"
+      "purpose": "Start a Beets modify/write/move job to attach validated MusicBrainz album and recording IDs.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_submissions_page.py"
+      ],
+      "security_classification": "ADMIN_ONLY"
     }
   ],
   "generated_at": "2026-08-12"

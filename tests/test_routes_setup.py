@@ -17,39 +17,47 @@ import unittest.mock as mock
 from pathlib import Path
 
 
-def _load_routes_setup_against_stub_app():
+_MISSING_MODULE = object()
+_STUBBED_MODULES = ("app", "routes_setup", "routes_submissions", "routes_jobs", "routes_lidarr")
+
+
+def _snapshot_stubbed_modules():
+    return {name: sys.modules.get(name, _MISSING_MODULE) for name in _STUBBED_MODULES}
+
+
+def _restore_stubbed_modules(snapshot):
+    for name, module in snapshot.items():
+        if module is _MISSING_MODULE:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = module
+
+
+def _load_routes_setup_against_stub_app(test_case=None):
     """(Re)import routes_setup against a fresh stub `app` module so each test
     gets independent route registration state."""
     from flask import Flask
+    snapshot = _snapshot_stubbed_modules()
     stub = types.ModuleType("app")
     stub.__routes_setup_test_stub__ = True
     stub.app = Flask(__name__)
     sys.modules["app"] = stub
     sys.modules.pop("routes_setup", None)
     module = importlib.import_module("routes_setup")
+    if test_case is not None:
+        test_case.addCleanup(_restore_stubbed_modules, snapshot)
     return stub.app, module
 
 
 
 def tearDownModule():
-    """Undo the stub-`app` swap from _load_routes_setup_against_stub_app().
-
-    Popping only "app" (leaving "routes_setup"/"routes_submissions"/
-    "routes_jobs"/"routes_lidarr" cached from whatever app instance they were
-    originally bound to) would let a later test file's fresh `from app import
-    app` re-execute app.py's module body into a brand-new Flask instance
-    while those already-cached route modules keep their `@app.route(...)`
-    registrations on the *old* instance -- the new one silently ends up
-    missing routes (observed as spurious 405s in tests/
-    test_external_beets_architecture.py when it runs after this module).
-    Clearing all of them together forces the next `import app` anywhere to
-    do one complete, internally-consistent rebuild instead of a partial one.
-    """
-    for name in ("app", "routes_setup", "routes_submissions", "routes_jobs", "routes_lidarr"):
-        sys.modules.pop(name, None)
+    """Best-effort guard for interrupted tests; normal cleanup is per-test."""
+    if getattr(sys.modules.get("app"), "__routes_setup_test_stub__", False):
+        for name in _STUBBED_MODULES:
+            sys.modules.pop(name, None)
 class RoutesSetupHealthTests(unittest.TestCase):
     def setUp(self):
-        self.flask_app, self.module = _load_routes_setup_against_stub_app()
+        self.flask_app, self.module = _load_routes_setup_against_stub_app(self)
         self.client = self.flask_app.test_client()
 
     def test_health_live_reports_alive_and_version(self):
@@ -111,7 +119,7 @@ class RoutesSetupHealthTests(unittest.TestCase):
 
 class RoutesSetupStatusTests(unittest.TestCase):
     def setUp(self):
-        self.flask_app, self.module = _load_routes_setup_against_stub_app()
+        self.flask_app, self.module = _load_routes_setup_against_stub_app(self)
         self.client = self.flask_app.test_client()
 
     def test_status_never_crashes_on_missing_paths(self):
@@ -167,7 +175,7 @@ class RoutesSetupRemoteBeetsDiagnosticsTests(unittest.TestCase):
     manager container."""
 
     def setUp(self):
-        self.flask_app, self.module = _load_routes_setup_against_stub_app()
+        self.flask_app, self.module = _load_routes_setup_against_stub_app(self)
         self.client = self.flask_app.test_client()
 
     def _paths(self):
@@ -496,7 +504,7 @@ class RoutesSetupTestConnectionTests(unittest.TestCase):
     than crashing or reporting false success."""
 
     def setUp(self):
-        self.flask_app, self.module = _load_routes_setup_against_stub_app()
+        self.flask_app, self.module = _load_routes_setup_against_stub_app(self)
         self.client = self.flask_app.test_client()
 
     def test_ai_test_without_key_reports_not_configured(self):
@@ -595,7 +603,7 @@ class RoutesSetupTestConnectionTests(unittest.TestCase):
 
 class RoutesSetupSettingsPersistenceTests(unittest.TestCase):
     def setUp(self):
-        self.flask_app, self.module = _load_routes_setup_against_stub_app()
+        self.flask_app, self.module = _load_routes_setup_against_stub_app(self)
         self.client = self.flask_app.test_client()
         # Module defaults point at /config/*, which isn't writable (or may
         # not even exist) outside the real container — isolate to a temp
@@ -635,7 +643,7 @@ class RoutesSetupSettingsPersistenceTests(unittest.TestCase):
 
 class RoutesSetupEnvironmentTests(unittest.TestCase):
     def setUp(self):
-        self.flask_app, self.module = _load_routes_setup_against_stub_app()
+        self.flask_app, self.module = _load_routes_setup_against_stub_app(self)
         self.client = self.flask_app.test_client()
         self.tempdir = tempfile.TemporaryDirectory()
         root = Path(self.tempdir.name)
@@ -709,7 +717,7 @@ class RoutesSetupEnvironmentTests(unittest.TestCase):
 
 class RoutesSetupHelperTests(unittest.TestCase):
     def setUp(self):
-        _, self.module = _load_routes_setup_against_stub_app()
+        _, self.module = _load_routes_setup_against_stub_app(self)
 
     def test_mask_short_value(self):
         self.assertEqual(self.module._mask("ab"), "**")

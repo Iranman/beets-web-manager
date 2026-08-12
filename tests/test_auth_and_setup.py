@@ -288,6 +288,34 @@ class AuthAndSetupTests(unittest.TestCase):
         res = self.client.get("/api/library")
         self.assertEqual(res.status_code, 401)
 
+    def test_sensitive_api_families_reject_direct_unauthenticated_requests(self):
+        """Representative backend-only sensitive routes return JSON 401 without auth."""
+        from werkzeug.security import generate_password_hash
+
+        self.persisted_user_file.write_text("admin", encoding="utf-8")
+        self.persisted_pwd_file.write_text(generate_password_hash("correct horse battery staple"), encoding="utf-8")
+        self.setup_state_file.write_text("claimed", encoding="utf-8")
+        self.setup_complete_file.write_text("complete", encoding="utf-8")
+        self.assertFalse(app_module._first_run_setup_required())
+
+        unauth = app_module.app.test_client()
+        representative_routes = [
+            ("get", "/api/jobs", None),
+            ("get", "/api/config", None),
+            ("get", "/api/wanted/lidarr", None),
+            ("get", "/api/submissions/target?path=/tmp/review", None),
+            ("post", "/api/submissions/reference-url", {"url": "https://example.com", "path": "/tmp/review"}),
+            ("post", "/api/import/review-folder/delete", {"path": "/tmp/review"}),
+            ("post", "/api/plugins/run", {"plugin": "fetchart"}),
+            ("post", "/api/transactions/settings", {"enabled": True}),
+        ]
+        for method, route, body in representative_routes:
+            with self.subTest(route=route):
+                request_fn = getattr(unauth, method)
+                response = request_fn(route, json=body) if body is not None else request_fn(route)
+                self.assertEqual(response.status_code, 401)
+                self.assertEqual(response.content_type.split(";", 1)[0], "application/json")
+                self.assertEqual(response.get_json()["error"], "Authentication required")
     def test_setup_env_password_mirror_is_hashed(self):
         """Saving BEETS_WEB_PASSWORD mirrors a hash to .browser_password, not plaintext."""
         headers = {"X-Beets-CSRF": "1", "Origin": "http://localhost"}
