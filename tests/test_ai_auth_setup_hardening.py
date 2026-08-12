@@ -229,14 +229,6 @@ class PasswordRequirementsBehaviorTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        # _password_min_length() and _password_requirements_unmet() together
-        # -- min-length must be extracted too, not hardcoded here, because
-        # its whole job is to never be weaker than app.py's real auth-secret
-        # usability floor (BEETS_WEB_AUTH_MIN_LENGTH, default 32). A prior
-        # version of this test hardcoded 12, matching this file's original
-        # (buggy) hardcoded _PASSWORD_MIN_LENGTH -- that bug let an
-        # 18-character password save successfully via the setup UI and then
-        # 401 on every subsequent request, live, in production.
         fn_src = _function_source(
             SETUP_SOURCE,
             "def _password_min_length() -> int:",
@@ -248,10 +240,11 @@ class PasswordRequirementsBehaviorTests(unittest.TestCase):
             import re
             from typing import List
             _PASSWORD_MIN_LENGTH_FLOOR = 12
-            _PASSWORD_SPECIAL_RE = re.compile(r"[^A-Za-z0-9]")
-            _PASSWORD_UPPER_RE = re.compile(r"[A-Z]")
-            _PASSWORD_LOWER_RE = re.compile(r"[a-z]")
-            _PASSWORD_DIGIT_RE = re.compile(r"[0-9]")
+            _PASSWORD_MIN_LENGTH_DEFAULT = 16
+            _FALLBACK_PLACEHOLDER_AUTH_SECRETS = {
+                "admin", "password", "password1", "changeme", "changeit", "secret", "token",
+                "default", "example", "letmein", "beets", "beetsweb", "setinenv", "setastrongownertoken",
+            }
             """
         )
         namespace: dict = {}
@@ -259,51 +252,25 @@ class PasswordRequirementsBehaviorTests(unittest.TestCase):
         cls._unmet = staticmethod(namespace["_password_requirements_unmet"])
         cls._min_length = staticmethod(namespace["_password_min_length"])
 
-    def test_default_minimum_matches_auth_secret_usability_floor(self):
-        # Must never resolve below 32 by default -- that's app.py's real
-        # _MIN_AUTH_SECRET_LENGTH default, the actual enforcement gate.
-        self.assertEqual(self._min_length(), 32)
+    def test_default_minimum_is_passphrase_friendly(self):
+        self.assertEqual(self._min_length(), 16)
 
-    def test_strong_password_passes(self):
-        password = "Correct-Horse-Battery-Staple-99!"
-        self.assertGreaterEqual(len(password), 32)
+    def test_long_passphrase_without_character_classes_passes(self):
+        password = "correct horse battery staple"
         self.assertEqual(self._unmet(password), [])
 
     def test_too_short_is_rejected(self):
-        self.assertIn("at least 32 characters", self._unmet("Ab1!"))
+        self.assertIn("at least 16 characters", self._unmet("short phrase"))
 
-    def test_a_password_that_passes_is_never_shorter_than_the_real_auth_floor(self):
-        # The exact regression: a password one character short of the real
-        # minimum, but otherwise meeting every composition rule, must still
-        # be rejected on length -- "passes here" must always imply "long
-        # enough to actually authenticate."
-        min_length = self._min_length()
-        password = "Aa1!" + ("x" * (min_length - 5))
-        self.assertEqual(len(password), min_length - 1)
-        self.assertTrue(any("characters" in reason for reason in self._unmet(password)))
+    def test_placeholder_like_weak_password_is_rejected(self):
+        self.assertIn("not a placeholder password", self._unmet("passwordpasswordpassword"))
 
-    def test_missing_uppercase_is_rejected(self):
-        self.assertIn("an uppercase letter", self._unmet("lowercase123!!!!" * 3))
-
-    def test_missing_lowercase_is_rejected(self):
-        self.assertIn("a lowercase letter", self._unmet("UPPERCASE123!!!!" * 3))
-
-    def test_missing_number_is_rejected(self):
-        self.assertIn("a number", self._unmet("NoNumbersHereAtAll!!!!!!!!!!!!!" * 2))
-
-    def test_missing_special_char_is_rejected(self):
-        self.assertIn("a special character", self._unmet("NoSpecialCharsHereAtAll1234567890" * 2))
-
-    def test_placeholder_like_weak_password_fails_multiple_checks(self):
-        unmet = self._unmet("password")
-        self.assertGreaterEqual(len(unmet), 3)
-
-    def test_min_length_respects_custom_env_but_never_below_floor(self):
-        os.environ["BEETS_WEB_AUTH_MIN_LENGTH"] = "40"
+    def test_min_length_respects_custom_browser_password_env(self):
+        os.environ["BEETS_WEB_PASSWORD_MIN_LENGTH"] = "20"
         try:
-            self.assertEqual(self._min_length(), 40)
+            self.assertEqual(self._min_length(), 20)
         finally:
-            os.environ.pop("BEETS_WEB_AUTH_MIN_LENGTH", None)
+            os.environ.pop("BEETS_WEB_PASSWORD_MIN_LENGTH", None)
 
 
 class PasswordValidationWiringTests(unittest.TestCase):
@@ -315,11 +282,10 @@ class PasswordValidationWiringTests(unittest.TestCase):
 
     def test_frontend_shows_password_requirements_and_strength_meter(self):
         self.assertIn("PASSWORD_REQUIREMENTS", SYSTEM_SOURCE)
-        self.assertIn("PASSWORD_MIN_LENGTH = 32", SYSTEM_SOURCE)
-        self.assertIn("An uppercase letter", SYSTEM_SOURCE)
-        self.assertIn("A lowercase letter", SYSTEM_SOURCE)
-        self.assertIn("A number", SYSTEM_SOURCE)
-        self.assertIn("A special character", SYSTEM_SOURCE)
+        self.assertIn("PASSWORD_MIN_LENGTH = 16", SYSTEM_SOURCE)
+        self.assertIn("At least ${PASSWORD_MIN_LENGTH} characters", SYSTEM_SOURCE)
+        self.assertNotIn("An uppercase letter", SYSTEM_SOURCE)
+        self.assertNotIn("A special character", SYSTEM_SOURCE)
         self.assertIn("function PasswordStrengthMeter", SYSTEM_SOURCE)
         self.assertIn("variable.name === 'BEETS_WEB_PASSWORD'", SYSTEM_SOURCE)
 
@@ -454,10 +420,10 @@ class IndependentIntegrationTestEndpointsTests(unittest.TestCase):
 
 class FrontendIntegrationStatusUiTests(unittest.TestCase):
     def test_client_wrappers_for_all_four_tests_exist(self):
-        self.assertIn("export function testSetupAi()", CLIENT_SOURCE)
+        self.assertIn("export function testSetupAi(payload?:", CLIENT_SOURCE)
         self.assertIn("export function testSetupMusicBrainz()", CLIENT_SOURCE)
-        self.assertIn("export function testSetupAcoustid()", CLIENT_SOURCE)
-        self.assertIn("export function testSetupPlex()", CLIENT_SOURCE)
+        self.assertIn("export function testSetupAcoustid(payload?:", CLIENT_SOURCE)
+        self.assertIn("export function testSetupPlex(payload?:", CLIENT_SOURCE)
         self.assertIn("export function regenerateAuthToken()", CLIENT_SOURCE)
 
     def test_types_declare_integration_test_response(self):
@@ -491,9 +457,9 @@ class ReadmeDocumentationTests(unittest.TestCase):
         self.assertIn("Matched using MusicBrainz and AcoustID (AI unavailable:", README_SOURCE)
 
     def test_documents_password_requirements(self):
-        self.assertIn("At least 32 characters", README_SOURCE)
-        self.assertIn("At least one uppercase letter", README_SOURCE)
-        self.assertIn("At least one special (non-alphanumeric) character", README_SOURCE)
+        self.assertIn("At least 16 characters", README_SOURCE)
+        self.assertIn("Long passphrases are supported", README_SOURCE)
+        self.assertIn("not mandatory", README_SOURCE)
 
     def test_documents_auth_token_auto_generation(self):
         self.assertIn("You never have to invent `BEETS_WEB_AUTH_TOKEN` yourself", README_SOURCE)

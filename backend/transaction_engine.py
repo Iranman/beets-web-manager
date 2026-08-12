@@ -9,6 +9,7 @@ import csv
 import io
 import json
 import os
+import re
 import threading
 import time
 import uuid
@@ -59,6 +60,8 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "maximum_undo_history": 250,
     "dry_run_by_default": False,
 }
+
+_TRANSACTION_ID_RE = re.compile(r"^txn_\d+_[0-9a-f]{12}$")
 
 
 def _now() -> float:
@@ -178,7 +181,7 @@ class TransactionStore:
 
     def _path(self, transaction_id: str) -> Path:
         safe = str(transaction_id or "").strip()
-        if not safe.startswith("txn_") or any(ch in safe for ch in "/\\\0"):
+        if not _TRANSACTION_ID_RE.fullmatch(safe):
             raise KeyError("Invalid transaction id")
         return self.root / f"{safe}.json"
 

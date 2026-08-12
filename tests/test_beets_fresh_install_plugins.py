@@ -64,6 +64,14 @@ class BeetsFreshInstallPackagingTests(unittest.TestCase):
             "BEETS_EXPECT_EXISTING_LIBRARY=${BEETS_EXPECT_EXISTING_LIBRARY:-1}",
             beets_block,
         )
+    def test_compose_host_port_does_not_change_container_listener(self):
+        combined = "\n".join(
+            (ROOT / name).read_text(encoding="utf-8")
+            for name in ("docker-compose.yml", "docker-compose.full.yml", "docker-compose.dev.yml")
+        )
+        self.assertIn("${WEBCONTROL_PORT:-8337}:8337", combined)
+        self.assertNotIn("WEBCONTROL_PORT: ${WEBCONTROL_PORT:-8337}", combined)
+        self.assertGreaterEqual(combined.count("WEBCONTROL_PORT: 8337"), 3)
 
     def test_beetsplug_has_no_package_initializer(self):
         # A beetsplug/__init__.py makes /app/beetsplug a regular package,

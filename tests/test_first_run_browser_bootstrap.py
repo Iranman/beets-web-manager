@@ -102,10 +102,11 @@ class FirstRunBrowserBootstrapTests(unittest.TestCase):
         self.assertFalse(app_module._first_run_setup_required())
         self.assertEqual(self.setup_state_file.read_text(encoding="utf-8").strip(), "claimed")
 
-        # Second (unauthenticated) POST is stopped at the auth boundary: once
-        # claimed, first-run is no longer a public endpoint at all, so an
+        # A different unauthenticated browser is stopped at the auth boundary:
+        # once claimed, first-run is no longer a public endpoint at all, so an
         # anonymous caller gets 401, never reaching the route's own 409 check.
-        resp2 = self.client.post(
+        anon_client = app_module.app.test_client()
+        resp2 = anon_client.post(
             "/api/setup/first-run",
             json={"username": "hacker", "password": _VALID_TEST_PASSWORD},
             headers=_SAME_ORIGIN_CSRF_HEADERS,
@@ -168,9 +169,11 @@ class FirstRunBrowserBootstrapTests(unittest.TestCase):
         # 2. Simulate deleted password file
         self.persisted_pwd_file.unlink(missing_ok=True)
 
-        # 3. Setup MUST NOT reopen (claimed -> not a public endpoint -> 401)
+        # 3. Setup MUST NOT reopen for a different unauthenticated browser
+        # (claimed -> not a public endpoint -> 401)
         self.assertFalse(app_module._first_run_setup_required())
-        setup_resp = self.client.post(
+        anon_client = app_module.app.test_client()
+        setup_resp = anon_client.post(
             "/api/setup/first-run",
             json={"username": "attacker", "password": _VALID_TEST_PASSWORD},
             headers=_SAME_ORIGIN_CSRF_HEADERS,
@@ -178,7 +181,7 @@ class FirstRunBrowserBootstrapTests(unittest.TestCase):
         self.assertEqual(setup_resp.status_code, 401)
 
         # 4. Unauthenticated request to protected endpoint fails closed (503 / 401)
-        resp = self.client.get("/api/library")
+        resp = anon_client.get("/api/library")
         self.assertIn(resp.status_code, (401, 503))
 
     def test_credential_deletion_does_not_regenerate_on_restart(self):

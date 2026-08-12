@@ -37,7 +37,94 @@ FAKE_DOCKER = ROOT / "tests" / "deploy" / "fake_docker.py"
 FAKE_CURL = ROOT / "tests" / "deploy" / "fake_curl.py"
 SCRIPT_SOURCE = SCRIPT.read_text(encoding="utf-8")
 
-BASH = os.environ.get("ROLLOUT_TEST_BASH", "bash")
+
+def _bash_survives_nested_subprocess(bash_path: str) -> bool:
+    """The real harness has bash launch python3 as a child process (the
+    fake docker/curl/lsof shims), not just run a builtin. Some bash
+    installs answer a plain `-c "echo"` fine but hang on that
+    nested-subprocess shape (observed with Git-for-Windows' MSYS bash
+    spawning python3.exe on this codebase's Windows dev box) -- probe the
+    actual pattern with a hard, tree-killed timeout so a bad bash is
+    treated as "unusable here", never as a wedged test run.
+    """
+    probe_dir = tempfile.mkdtemp(prefix="bash-probe-")
+    try:
+        script = os.path.join(probe_dir, "probe.sh")
+        with open(script, "w", newline="\n") as f:
+            f.write('#!/usr/bin/env bash\n"$1" -c "print(\'nested-ok\')"\n')
+        proc = subprocess.Popen(
+            [bash_path, script, sys.executable],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        try:
+            out, _err = proc.communicate(timeout=15)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            if os.name == "nt":
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                    capture_output=True, timeout=10,
+                )
+            try:
+                proc.communicate(timeout=5)
+            except Exception:
+                pass
+            return False
+        return proc.returncode == 0 and "nested-ok" in out
+    except Exception:
+        return False
+    finally:
+        import shutil as _shutil
+        _shutil.rmtree(probe_dir, ignore_errors=True)
+
+
+def _detect_working_bash() -> str:
+    """Return the path to a bash that can actually execute this test
+    file's real script-plus-subprocess pattern, or "" if none is
+    available/trustworthy.
+
+    On Windows, `bash` on PATH commonly resolves to the WSL launcher stub
+    (`%SystemRoot%\\system32\\bash.exe`), which prints a WSL relay error
+    and exits nonzero when no Linux distro is registered -- that's a
+    broken *launcher*, not proof no usable bash exists on the box. An
+    explicit `ROLLOUT_TEST_BASH` is trusted directly (operator has already
+    verified it works) and always wins, including on CI/Linux/macOS. With
+    nothing explicit set, only a non-Windows PATH `bash` is auto-trusted;
+    Git-for-Windows' bundled bash is not auto-selected because its
+    nested-subprocess handling has been observed to hang indefinitely on
+    this exact fake-docker/fake-curl-subprocess harness, which would wedge
+    the whole test run rather than fail it -- a Windows contributor who has
+    verified a specific bash.exe works can still opt in via
+    ROLLOUT_TEST_BASH.
+    """
+    import shutil
+
+    explicit = os.environ.get("ROLLOUT_TEST_BASH", "").strip()
+    if explicit:
+        resolved = explicit if (os.path.isabs(explicit) and os.path.exists(explicit)) else shutil.which(explicit)
+        if resolved and _bash_survives_nested_subprocess(resolved):
+            return resolved
+        return ""
+
+    if os.name == "nt":
+        return ""
+
+    resolved = shutil.which("bash") or ""
+    if resolved and _bash_survives_nested_subprocess(resolved):
+        return resolved
+    return ""
+
+
+BASH = _detect_working_bash()
+_NO_BASH_REASON = (
+    "No working POSIX bash interpreter found for this platform (checked "
+    "ROLLOUT_TEST_BASH and, on non-Windows, PATH) -- "
+    "deploy_truenas_web_manager.sh is a bash script and these tests "
+    "execute it for real, including nested subprocess calls that are known "
+    "to hang under Windows' bundled bash implementations. Run on Linux/"
+    "macOS/a working WSL distro, or set ROLLOUT_TEST_BASH to a bash.exe "
+    "you have verified handles nested subprocesses correctly."
+)
 
 
 def make_sqlite_db(path, items=10, albums=2):
@@ -61,6 +148,7 @@ def corrupt_db_keep_openable(path):
         f.write(b"\xff" * max(1, size - start))
 
 
+@unittest.skipUnless(BASH, _NO_BASH_REASON)
 class RolloutScriptTestBase(unittest.TestCase):
     """Shared fixture: a fakebin dir (docker/curl/lsof shims) always on
     PATH, plus a scratch dir for real temp files/DBs."""
@@ -757,6 +845,7 @@ class ScriptSourceSafetyInvariantTests(unittest.TestCase):
         self.assertIn("/bin/bash", SCRIPT_SOURCE)
 
 
+@unittest.skipUnless(BASH, _NO_BASH_REASON)
 class EndToEndFixture(unittest.TestCase):
     """Full-script tests against a fake Docker/Compose world."""
 
@@ -1025,6 +1114,7 @@ class RollbackTests(EndToEndFixture):
         self.assertNotIn("set VERSION", res.stderr)
 
 
+@unittest.skipUnless(BASH, _NO_BASH_REASON)
 class HelpAndCliLifecycleTests(unittest.TestCase):
     """--help must work standalone: no STACK_DIR, no VERSION, nothing else
     configured. It exits inside argument parsing, before any of the

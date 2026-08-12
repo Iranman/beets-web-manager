@@ -153,7 +153,9 @@ class FirstRunBrowserAuthTests(unittest.TestCase):
             routes_setup._write_env_file({"BEETS_WEB_PASSWORD": new_pwd}, [])
 
         self.assertFalse(self.initial_pwd_file.exists())
-        self.assertEqual(app_module._security_auth_password(), new_pwd)
+        stored_pwd = app_module._security_auth_password()
+        self.assertNotEqual(stored_pwd, new_pwd)
+        self.assertTrue(stored_pwd.startswith(("scrypt:", "pbkdf2:", "argon2:")))
 
         # New password works for Basic Auth
         new_cred = base64.b64encode(f"admin:{new_pwd}".encode("utf-8")).decode("utf-8")

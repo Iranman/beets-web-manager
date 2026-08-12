@@ -57,6 +57,22 @@ Or run the automated setup script:
 .\setup.ps1         # Windows PowerShell
 ```
 
+### First-Run Setup & Web Sign-In
+
+1. Open `http://localhost:8337` in your browser.
+2. If deploying for the first time, you will automatically be guided through the multi-step **First-Run Setup Wizard**:
+   - **Step 1: Welcome & Architecture**: Overview of `Browser → beets-web-manager → Beets` architecture.
+   - **Step 2: Administrator Account**: Set your primary username and secure password (stored with `scrypt` hashing).
+   - **Step 3: Beets Engine Connection**: Verify live connectivity to the background Beets engine container.
+   - **Step 4: Library Paths**: Check configuration, database, music library, and import staging directory permissions.
+   - **Step 5: MusicBrainz Metadata**: Test connection to MusicBrainz (authoritative metadata source, no AI required).
+   - **Step 6: AcoustID Fingerprinting** *(Optional)*: Test AcoustID API key and `fpcalc`.
+   - **Step 7: AI Supplemental Provider** *(Optional)*: Test OpenAI / OpenRouter / Custom provider credentials.
+   - **Step 8: Beets Plugins**: View installed and enabled plugins.
+   - **Step 9: Plex Synchronization** *(Optional)*: Test Plex Media Server integration.
+   - **Step 10: Review & Complete**: Finalize setup and launch the dashboard.
+3. On subsequent visits, sign in securely via the **Sign-In Page** (`/login`).
+
 ### Existing Stack Integration (TrueNAS / Portainer / Multi-App Stacks)
 
 To add `beets-web-manager` to an existing Docker Compose stack (e.g., `/srv/media-stack/docker-compose.yml`), copy the service block from [docs/EXAMPLES.md](docs/EXAMPLES.md).
@@ -164,13 +180,11 @@ The app provides separate authentication boundaries for human browser operators 
 
 ### Password Requirements
 
-Browser passwords must satisfy these complexity rules (enforced server-side when saving, and shown live as a strength meter in System settings):
+Browser passwords must satisfy these rules (enforced server-side when saving, and shown live as a strength meter in System settings):
 
-- At least 32 characters (matches `BEETS_WEB_AUTH_MIN_LENGTH`)
-- At least one uppercase letter (`A-Z`)
-- At least one lowercase letter (`a-z`)
-- At least one number (`0-9`)
-- At least one special (non-alphanumeric) character
+- At least 16 characters by default (`BEETS_WEB_PASSWORD_MIN_LENGTH`, minimum configurable floor 12)
+- Long passphrases are supported
+- Uppercase letters, numbers, and symbols are allowed but not mandatory
 
 Set `BEETS_WEB_AUTH_DISABLED=1` only for isolated local development with no network exposure.
 
@@ -282,7 +296,7 @@ This means neither `BEETS_WEB_AUTH_TOKEN` nor `BEETS_WEB_PASSWORD` resolved to a
 Yes. AI is optional everywhere it's used for matching. A missing/invalid AI key, an HTTP 401/403 from the provider, a timeout, or a rate limit never stops MusicBrainz or AcoustID matching — those run unconditionally and are what actually identify releases and recordings.
 
 **I set `BEETS_WEB_PASSWORD` but saving it was rejected.**
-Passwords must be at least 32 characters (the same floor `_MIN_AUTH_SECRET_LENGTH`/`BEETS_WEB_AUTH_MIN_LENGTH` uses to decide whether a secret is usable at all) and include an uppercase letter, a lowercase letter, a number, and a special character.
+Passwords must be at least 16 characters by default (`BEETS_WEB_PASSWORD_MIN_LENGTH`) and must not be obvious placeholders. Long passphrases are supported; uppercase letters, numbers, and symbols are allowed but not mandatory.
 
 **Where do I check whether MusicBrainz, AcoustID, AI, and Plex are actually reachable right now?**
 `GET /api/setup/status` queries the internal Beets control agent for readiness. Use `POST /api/setup/test/{ai,musicbrainz,acoustid,plex}` or the System page connection tests for live provider connectivity.

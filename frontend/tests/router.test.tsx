@@ -43,11 +43,25 @@ vi.mock('../src/views/Jobs', () => ({ default: () => <div>JOBS_PAGE</div> }));
 vi.mock('../src/views/Config', () => ({ default: () => <div>CONFIG_PAGE</div> }));
 vi.mock('../src/views/System', () => ({ default: () => <div>SYSTEM_PAGE</div> }));
 vi.mock('../src/views/Submissions', () => ({ default: () => <div>SUBMISSIONS_PAGE</div> }));
+vi.mock('../src/views/Login', () => ({ default: () => <div>LOGIN_PAGE</div> }));
+vi.mock('../src/components/FirstRunSetup', () => ({ default: () => <div>SETUP_WIZARD_PAGE</div> }));
 
-function renderAt(path: string) {
+// AppRoutes is auth-gated: every route decision depends on these three
+// booleans (see src/App.tsx). Route-matching/navigation-destination tests
+// below want the "normal" authenticated, setup-complete state so they
+// exercise the same routing behavior they did before auth gating existed;
+// the dedicated AppRoutes auth-gating describe block further down overrides
+// them individually to cover the gating logic itself.
+const AUTHENTICATED_PROPS = {
+  authenticated: true,
+  setupComplete: true,
+  firstRunRequired: false,
+};
+
+function renderAt(path: string, props: Partial<typeof AUTHENTICATED_PROPS> = {}) {
   return render(
     <MemoryRouter initialEntries={[path]}>
-      <AppRoutes />
+      <AppRoutes {...AUTHENTICATED_PROPS} {...props} />
     </MemoryRouter>,
   );
 }
@@ -82,15 +96,9 @@ describe('AppRoutes (react-router v8)', () => {
     await waitFor(() => expect(screen.getByText(expectedText)).toBeTruthy());
   });
 
-  it('renders nothing for an unknown route (existing, real fallback behavior: there is no catch-all/wildcard route, so <Routes> renders null -- not even the Shell layout)', async () => {
-    const { container } = renderAt('/this-route-does-not-exist');
-    await waitFor(() => expect(container.textContent).toBe(''));
-    for (const marker of [
-      'LIBRARY_PAGE', 'CHANGES_PAGE', 'IMPORT_PAGE', 'PLAYLISTS_PAGE',
-      'JOBS_PAGE', 'CONFIG_PAGE', 'SYSTEM_PAGE', 'SUBMISSIONS_PAGE',
-    ]) {
-      expect(screen.queryByText(new RegExp(marker))).toBeNull();
-    }
+  it('sends an unknown route to /library for an authenticated, set-up visitor (catch-all deep-link fallback, not a blank page)', async () => {
+    renderAt('/this-route-does-not-exist');
+    await waitFor(() => expect(screen.getByText('LIBRARY_PAGE')).toBeTruthy());
   });
 
   it('keeps query parameters available to the rendered route (dynamic/detail state in this app is query-param-based, not path-param-based)', async () => {
@@ -122,5 +130,47 @@ describe('AppRoutes (react-router v8)', () => {
     expect(jobsLink.className).toMatch(/border-red-500/);
     const libraryLink = screen.getByRole('link', { name: /^Library/ });
     expect(libraryLink.className).not.toMatch(/border-red-500/);
+  });
+});
+
+describe('AppRoutes auth/setup gating', () => {
+  it('sends an unauthenticated, setup-complete visitor to /login for a protected deep link', async () => {
+    renderAt('/jobs', { authenticated: false, setupComplete: true, firstRunRequired: false });
+    await waitFor(() => expect(screen.getByText('LOGIN_PAGE')).toBeTruthy());
+  });
+
+  it('sends a not-yet-set-up visitor to the setup wizard for any deep link, not /login', async () => {
+    renderAt('/jobs', { authenticated: false, setupComplete: false, firstRunRequired: true });
+    await waitFor(() => expect(screen.getByText('SETUP_WIZARD_PAGE')).toBeTruthy());
+  });
+
+  it('does not send an authenticated visitor whose setup is incomplete to /login', async () => {
+    renderAt('/jobs', { authenticated: true, setupComplete: false, firstRunRequired: false });
+    await waitFor(() => expect(screen.getByText('SETUP_WIZARD_PAGE')).toBeTruthy());
+  });
+
+  it('redirects an authenticated, setup-complete visitor away from /login to /library', async () => {
+    renderAt('/login', { authenticated: true, setupComplete: true, firstRunRequired: false });
+    await waitFor(() => expect(screen.getByText('LIBRARY_PAGE')).toBeTruthy());
+  });
+
+  it('redirects an authenticated visitor away from /login to /setup when setup is incomplete', async () => {
+    renderAt('/login', { authenticated: true, setupComplete: false, firstRunRequired: false });
+    await waitFor(() => expect(screen.getByText('SETUP_WIZARD_PAGE')).toBeTruthy());
+  });
+
+  it('shows the login form itself for an unauthenticated visitor at /login', async () => {
+    renderAt('/login', { authenticated: false, setupComplete: true, firstRunRequired: false });
+    await waitFor(() => expect(screen.getByText('LOGIN_PAGE')).toBeTruthy());
+  });
+
+  it('sends an authenticated, setup-complete visitor away from /setup to /system, not back into the wizard', async () => {
+    renderAt('/setup', { authenticated: true, setupComplete: true, firstRunRequired: false });
+    await waitFor(() => expect(screen.getByText('SYSTEM_PAGE')).toBeTruthy());
+  });
+
+  it('an unknown deep link during first-run setup still resolves to the setup wizard, not /login', async () => {
+    renderAt('/this-route-does-not-exist', { authenticated: false, setupComplete: false, firstRunRequired: true });
+    await waitFor(() => expect(screen.getByText('SETUP_WIZARD_PAGE')).toBeTruthy());
   });
 });

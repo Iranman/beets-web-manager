@@ -57,6 +57,7 @@ function integrationBadge(
   if (state === 'dependency_plugin_missing') return { icon: '⚠', label: 'Dependency/plugin missing', tone: 'warn' };
   if (state === 'plugin_loader_failed') return { icon: '⚠', label: 'Plugin loader failed', tone: 'warn' };
   if (state === 'connection_test_failed') return { icon: '⚠', label: 'Connection test failed', tone: 'warn' };
+  if (state === 'unavailable') return { icon: '⚠', label: 'Beets engine unreachable', tone: integration.required ? 'warn' : 'neutral' };
   return { icon: '✗', label: 'Not configured', tone: integration.required ? 'warn' : 'neutral' };
 }
 
@@ -184,28 +185,19 @@ function ConfigActionDialog({
   );
 }
 
-// 32, not the naive 12-char password-policy minimum: it must match app.py's
-// real BEETS_WEB_AUTH_MIN_LENGTH default (also enforced server-side by
-// _password_min_length() in routes_setup.py), or a password can pass this
-// UI check, save successfully, and still 401 on the very next request. If
-// you deploy with a customized BEETS_WEB_AUTH_MIN_LENGTH, update this too.
-const PASSWORD_MIN_LENGTH = 32;
+// Browser passwords are passphrase-friendly and separate from the API bearer
+// token length floor. Keep this in sync with app.py/routes_setup.py.
+const PASSWORD_MIN_LENGTH = 16;
 const PASSWORD_REQUIREMENTS: Array<{ label: string; test: (v: string) => boolean }> = [
   { label: `At least ${PASSWORD_MIN_LENGTH} characters`, test: (v) => v.length >= PASSWORD_MIN_LENGTH },
-  { label: 'An uppercase letter', test: (v) => /[A-Z]/.test(v) },
-  { label: 'A lowercase letter', test: (v) => /[a-z]/.test(v) },
-  { label: 'A number', test: (v) => /[0-9]/.test(v) },
-  { label: 'A special character', test: (v) => /[^A-Za-z0-9]/.test(v) },
 ];
 
 function passwordStrength(value: string): { met: number; total: number; label: string; tone: 'ok' | 'warn' | 'bad' } {
   const met = PASSWORD_REQUIREMENTS.filter((req) => req.test(value)).length;
   const total = PASSWORD_REQUIREMENTS.length;
   if (!value) return { met: 0, total, label: '', tone: 'bad' };
-  if (met === total) return { met, total, label: 'Strong', tone: 'ok' };
-  if (met >= total - 1) return { met, total, label: 'Good', tone: 'ok' };
-  if (met >= total - 2) return { met, total, label: 'Fair', tone: 'warn' };
-  return { met, total, label: 'Weak', tone: 'bad' };
+  if (met === total) return { met, total, label: 'Ready', tone: 'ok' };
+  return { met, total, label: 'Too short', tone: 'bad' };
 }
 
 function PasswordStrengthMeter({ value }: { value: string }) {

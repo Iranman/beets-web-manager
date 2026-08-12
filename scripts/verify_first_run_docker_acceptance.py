@@ -128,6 +128,7 @@ class Stack:
 
         env = {
             "BEETS_API_TOKEN": "firstrun-test-engine-token-not-real-0000",
+            "BEETS_CONFIG_PATH": str(self.config_dir),
             "MUSIC_LIBRARY_PATH": str(self.music_dir),
             "DOWNLOAD_PATH": str(self.downloads_dir),
             "BEETS_WEB_MANAGER_DATA_PATH": str(self.webdata_dir),

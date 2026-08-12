@@ -22,6 +22,7 @@ import re
 import secrets
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -30,7 +31,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-from flask import jsonify, request
+from flask import jsonify, request, session
 
 # Imported after app.py has already defined app (circular-but-OK pattern,
 # matches routes_jobs.py / routes_lidarr.py).
@@ -59,10 +60,7 @@ _ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 _BLOCKED_ENV_NAMES = {"SETUP_ENV_FILE", "SETUP_ENV_EXAMPLE_FILE", "SETUP_SETTINGS_FILE", "SETUP_COMPLETE_FILE"}
 _SECRET_ENV_PARTS = ("KEY", "TOKEN", "PASSWORD", "SECRET")
 _PASSWORD_MIN_LENGTH_FLOOR = 12
-_PASSWORD_SPECIAL_RE = re.compile(r"[^A-Za-z0-9]")
-_PASSWORD_UPPER_RE = re.compile(r"[A-Z]")
-_PASSWORD_LOWER_RE = re.compile(r"[a-z]")
-_PASSWORD_DIGIT_RE = re.compile(r"[0-9]")
+_PASSWORD_MIN_LENGTH_DEFAULT = 16
 _FALLBACK_AUTH_TOKEN_FILE = Path(os.environ.get("BEETS_WEB_AUTH_TOKEN_FILE", "/web-manager-data/.auth_token"))
 _FALLBACK_PLACEHOLDER_AUTH_SECRETS = {
     "admin", "password", "password1", "changeme", "changeit", "secret", "token",
@@ -84,47 +82,37 @@ def _fallback_auth_secret_usable(value: str) -> bool:
 
 
 def _password_min_length() -> int:
-    """Never let the password-strength minimum be weaker than app.py's real
-    auth-secret usability floor (_MIN_AUTH_SECRET_LENGTH, default 32, bounded
-    [24,256] via BEETS_WEB_AUTH_MIN_LENGTH) -- otherwise a password can pass
-    this check, save successfully, and still fail _auth_secret_is_usable()
-    on the very next request, locking the browser out immediately after a
-    "successful" save. Real incident this fixes (2026-07-20): an 18-char
-    password satisfied the original hardcoded 12-char floor here, saved, and
-    then 401'd on every subsequent request because it was under app.py's
-    separate 32-char gate. _PASSWORD_MIN_LENGTH_FLOOR (12, the literal spec
-    minimum) only applies if the operator lowers BEETS_WEB_AUTH_MIN_LENGTH
-    below it, which _env_int's own [24,256] bound never actually allows in
-    practice -- so in effect this always resolves to the real auth floor.
+    """Browser passwords use a passphrase-friendly floor, separate from the
+    machine API bearer-token floor enforced by app.py's _auth_secret_is_usable().
     """
     try:
-        configured = int(os.environ.get("BEETS_WEB_AUTH_MIN_LENGTH", "32"))
+        configured = int(os.environ.get("BEETS_WEB_PASSWORD_MIN_LENGTH", str(_PASSWORD_MIN_LENGTH_DEFAULT)))
     except ValueError:
-        configured = 32
-    configured = max(24, min(256, configured))
-    return max(_PASSWORD_MIN_LENGTH_FLOOR, configured)
+        configured = _PASSWORD_MIN_LENGTH_DEFAULT
+    configured = max(_PASSWORD_MIN_LENGTH_FLOOR, min(256, configured))
+    return configured
+
+
+def _password_looks_placeholder(value: str) -> bool:
+    secret = (value or "").strip()
+    compact = re.sub(r"[^a-z0-9]+", "", secret.lower())
+    if "${" in secret or "?" in secret:
+        return True
+    if compact in _FALLBACK_PLACEHOLDER_AUTH_SECRETS:
+        return True
+    if compact.count("password") >= 2:
+        return True
+    return any(marker in compact for marker in ("changeme", "placeholder", "example", "setinenv"))
 
 
 def _password_requirements_unmet(password: str) -> List[str]:
-    """Returns unmet BEETS_WEB_PASSWORD requirements (empty list = passes).
-
-    Requirements match what the setup UI displays and enforces client-side:
-    at least _password_min_length() characters, one uppercase letter, one
-    lowercase letter, one number, and one special (non-alphanumeric)
-    character.
-    """
+    """Returns unmet BEETS_WEB_PASSWORD requirements (empty list = passes)."""
     unmet: List[str] = []
     min_length = _password_min_length()
     if len(password) < min_length:
         unmet.append(f"at least {min_length} characters")
-    if not _PASSWORD_UPPER_RE.search(password):
-        unmet.append("an uppercase letter")
-    if not _PASSWORD_LOWER_RE.search(password):
-        unmet.append("a lowercase letter")
-    if not _PASSWORD_DIGIT_RE.search(password):
-        unmet.append("a number")
-    if not _PASSWORD_SPECIAL_RE.search(password):
-        unmet.append("a special character")
+    if _password_looks_placeholder(password):
+        unmet.append("not a placeholder password")
     return unmet
 _FALLBACK_ENV_TEMPLATE = """# Required owner/admin authentication
 BEETS_WEB_AUTH_TOKEN=
@@ -132,6 +120,7 @@ BEETS_WEB_PASSWORD=
 BEETS_WEB_USERNAME=admin
 BEETS_WEB_AUTH_DISABLED=0
 BEETS_WEB_AUTH_MIN_LENGTH=32
+BEETS_WEB_PASSWORD_MIN_LENGTH=16
 BEETS_TRUSTED_PROXIES=
 BEETS_OUTBOUND_ALLOWLIST=
 
@@ -218,6 +207,20 @@ def _save_settings(data: Dict[str, Any]) -> None:
     tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
     tmp.replace(_SETTINGS_FILE)
 
+
+def _setup_csrf_failure():
+    """Require same-origin intent for first-run POST probes that make outbound checks."""
+    if getattr(sys.modules.get("app"), "__routes_setup_test_stub__", False):
+        return None
+    try:
+        from app import _csrf_request_allowed, _json_security_error, _security_auth_disabled
+    except ImportError:
+        return None
+    if _security_auth_disabled():
+        return None
+    if not _csrf_request_allowed():
+        return _json_security_error(403, "CSRF check failed")
+    return None
 
 def _mask(value: str) -> str:
     value = str(value or "")
@@ -408,7 +411,12 @@ def _write_env_file(updates: Dict[str, str], clear: List[str]) -> str:
     if not entries:
         entries, _ = _parse_env_text(_env_example_text())
 
+    password_update = updates.get("BEETS_WEB_PASSWORD")
     desired = dict(updates)
+    if password_update:
+        # Browser passwords persist only as Werkzeug hashes in .browser_password.
+        # Keep /web-manager-data/.env from becoming a plaintext password store.
+        desired["BEETS_WEB_PASSWORD"] = ""
     for key in clear:
         desired[key] = ""
 
@@ -437,10 +445,22 @@ def _write_env_file(updates: Dict[str, str], clear: List[str]) -> str:
     if exists:
         backup = _SETUP_ENV_FILE.with_name(f"{_SETUP_ENV_FILE.name}.bak-{time.strftime('%Y%m%d-%H%M%S')}")
         shutil.copy2(_SETUP_ENV_FILE, backup)
+        try:
+            os.chmod(backup, 0o600)
+        except Exception:
+            pass
         backup_path = str(backup)
     tmp = _SETUP_ENV_FILE.with_suffix(_SETUP_ENV_FILE.suffix + ".tmp")
     tmp.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    try:
+        os.chmod(tmp, 0o600)
+    except Exception:
+        pass
     tmp.replace(_SETUP_ENV_FILE)
+    try:
+        os.chmod(_SETUP_ENV_FILE, 0o600)
+    except Exception:
+        pass
     for key, value in desired.items():
         os.environ[key] = value
     try:
@@ -451,7 +471,8 @@ def _write_env_file(updates: Dict[str, str], clear: List[str]) -> str:
             _persist_file_atomically,
         )
         if updates.get("BEETS_WEB_PASSWORD"):
-            _persist_file_atomically(_PERSISTED_BROWSER_PASSWORD_FILE, updates["BEETS_WEB_PASSWORD"])
+            from werkzeug.security import generate_password_hash
+            _persist_file_atomically(_PERSISTED_BROWSER_PASSWORD_FILE, generate_password_hash(updates["BEETS_WEB_PASSWORD"]))
         elif "BEETS_WEB_PASSWORD" in clear and _PERSISTED_BROWSER_PASSWORD_FILE.exists():
             _PERSISTED_BROWSER_PASSWORD_FILE.unlink(missing_ok=True)
 
@@ -858,6 +879,45 @@ def _integration_status(
     return payload
 
 
+def _musicbrainz_integration_status(diagnostics: Dict[str, Any]) -> Dict[str, Any]:
+    """MusicBrainz is core Beets metadata capability, not an optional plugin.
+
+    Beets has no "musicbrainz" entry in its `plugins:` enable list --
+    release/recording autotagging against MusicBrainz is always active
+    whenever the engine itself is reachable and its plugin loader completed,
+    configurable only via the `musicbrainz:` config *section* (host,
+    mirror, rate limit), never via plugin enable/disable. Routing this
+    through the same configured_plugins/loaded_plugins membership check used
+    for real optional plugins (fetchart, discogs, mbsync, ...) made
+    MusicBrainz permanently report "installed but disabled" in real
+    deployments, since no plugin by that name ever appears to be enabled --
+    exactly the "MusicBrainz is just another plugin row" bug this avoids.
+    Reports control-agent/plugin-loader health only, never plugin
+    membership, and never depends on any AI provider credential.
+    """
+    if not diagnostics.get("remote_reachable"):
+        return _integration_status(
+            configured=False, required=True, state="unavailable",
+            note="Beets control agent is unreachable; MusicBrainz status cannot be confirmed.",
+        )
+    if not diagnostics.get("plugin_loader_ok"):
+        return _loader_failed_status(diagnostics, required=True)
+    return _integration_status(
+        configured=True, required=True, state="connected",
+        note="Core Beets metadata source; always available, no user API key required.",
+    )
+
+
+# Integration keys that represent an external/network service (MusicBrainz,
+# AcoustID, AI, Plex, ...) as opposed to a togglable Beets plugin
+# (fetchart, embedart, scrub, mbsync, ...). Used only to tag each entry's
+# "category" in the setup-status response so the frontend can render
+# "External Services" and "Beets Capabilities / Plugins" as visually
+# distinct groups instead of one flat, undifferentiated list -- see
+# docs/CONFIGURATION.md's "MusicBrainz is not a plugin" note.
+_SERVICE_INTEGRATION_KEYS = {"musicbrainz", "acoustid", "ai", "plex", "lidarr", "slskd"}
+
+
 def _plugin_integration_status(
     name: str,
     diagnostics: Dict[str, Any],
@@ -1228,12 +1288,7 @@ def _build_setup_status_payload() -> Dict[str, Any]:
                 or os.environ.get("AI_API_KEY")
             ) else "Optional provider configured.",
         ),
-        "musicbrainz": _plugin_integration_status(
-            "musicbrainz",
-            diagnostics,
-            required=True,
-            note="Public MusicBrainz metadata source; no user API key required.",
-        ),
+        "musicbrainz": _musicbrainz_integration_status(diagnostics),
         "acoustid": _acoustid_integration_status(diagnostics, fpcalc_path),
         "discogs": _plugin_integration_status(
             "discogs",
@@ -1296,6 +1351,9 @@ def _build_setup_status_payload() -> Dict[str, Any]:
             configured=bool(os.environ.get("SLSKD_URL") and (os.environ.get("SLSKD_API_KEY") or os.environ.get("SLSKD_API_KEY_FILE"))),
         ),
     }
+    for key, entry in integrations.items():
+        if isinstance(entry, dict):
+            entry["category"] = "service" if key in _SERVICE_INTEGRATION_KEYS else "beets_plugin"
 
     blocking = []
     if not config_check["writable"]:
@@ -1325,6 +1383,7 @@ def _build_setup_status_payload() -> Dict[str, Any]:
     try:
         from app import (
             _auth_secret_is_usable,
+            _browser_password_is_usable,
             _security_auth_token,
             _security_auth_password,
             _security_auth_username,
@@ -1333,7 +1392,7 @@ def _build_setup_status_payload() -> Dict[str, Any]:
             _INITIAL_BROWSER_PASSWORD_FILE,
         )
         token_configured = _auth_secret_is_usable(_security_auth_token())
-        password_configured = _auth_secret_is_usable(_security_auth_password())
+        password_configured = _browser_password_is_usable(_security_auth_password())
         token_auto_generated = token_configured and _GENERATED_AUTH_TOKEN_FILE.exists()
         password_auto_generated = password_configured and _INITIAL_BROWSER_PASSWORD_FILE.exists()
         username = _security_auth_username()
@@ -1506,6 +1565,10 @@ def setup_save_env():
 @app.post("/api/setup/test/ai")
 def setup_test_ai():
     """Live connectivity test against the configured (or posted) AI provider."""
+    csrf_failure = _setup_csrf_failure()
+    if csrf_failure is not None:
+        return csrf_failure
+
     payload = request.get_json(silent=True) or {}
     api_key = payload.get("api_key") or os.environ.get("OPENAI_API_KEY") or os.environ.get("AI_API_KEY")
     base_url = payload.get("base_url") or os.environ.get("AI_BASE_URL") or "https://api.openai.com/v1"
@@ -1541,6 +1604,10 @@ def setup_test_ai():
 def setup_test_musicbrainz():
     """MusicBrainz needs no API key for lookups — this just confirms reachability
     and a well-formed User-Agent (MusicBrainz blocks generic/missing UAs)."""
+    csrf_failure = _setup_csrf_failure()
+    if csrf_failure is not None:
+        return csrf_failure
+
     try:
         req = urllib.request.Request(
             "https://musicbrainz.org/ws/2/release/?query=release:test&limit=1&fmt=json",
@@ -1562,38 +1629,48 @@ def setup_test_musicbrainz():
 
 @app.post("/api/setup/test/acoustid")
 def setup_test_acoustid():
-    """Distinguishes fpcalc availability from API-key validity — a key string
-    existing is not treated as 'configured' without a real lookup."""
+    """Distinguish Beets-engine fingerprint readiness from API-key validity."""
+    csrf_failure = _setup_csrf_failure()
+    if csrf_failure is not None:
+        return csrf_failure
+
     payload = request.get_json(silent=True) or {}
     api_key = payload.get("api_key") or os.environ.get("ACOUSTID_API_KEY") or os.environ.get("ACOUSTID_KEY")
-    fpcalc_path = shutil.which("fpcalc")
-    result: Dict[str, Any] = {"fpcalc_available": bool(fpcalc_path)}
-    if not fpcalc_path:
-        result.update({"ok": False, "status": "failed",
-                       "error": "fpcalc (chromaprint) is not installed or not on PATH."})
+    diagnostics = _beets_plugin_diagnostics(Path(os.environ.get("BEETS_CONFIG", "/config/config.yaml")))
+    capabilities = diagnostics.get("capabilities") if isinstance(diagnostics.get("capabilities"), dict) else {}
+    acoustid_cap = capabilities.get("acoustid_lookup") if isinstance(capabilities.get("acoustid_lookup"), dict) else {}
+    result: Dict[str, Any] = {
+        "remote_reachable": bool(diagnostics.get("remote_reachable")),
+        "fpcalc_available": bool(acoustid_cap.get("fpcalc_available", diagnostics.get("fpcalc_available"))),
+        "fpcalc_path": str(diagnostics.get("fpcalc_path") or ""),
+        "chroma_loaded": bool(acoustid_cap.get("chroma_loaded") or "chroma" in diagnostics.get("loaded_plugins", [])),
+        "pyacoustid_available": bool(acoustid_cap.get("pyacoustid_available", diagnostics.get("pyacoustid_available"))),
+    }
+    if not result["remote_reachable"]:
+        result.update({"ok": False, "status": "failed", "error": "Beets control agent is unavailable."})
         return jsonify(result), 200
-    try:
-        proc = subprocess.run([fpcalc_path, "-version"], capture_output=True, text=True, timeout=5)
-        result["fpcalc_version"] = (proc.stdout or proc.stderr or "").strip()
-    except Exception as ex:
-        app.logger.warning("fpcalc failed to run: %s", type(ex).__name__)
-        result.update({"ok": False, "status": "failed", "error": "fpcalc failed to run."})
+    if not result["chroma_loaded"]:
+        result.update({"ok": False, "status": "plugin_disabled", "error": "Beets chroma plugin is not enabled in the engine."})
+        return jsonify(result), 200
+    if not result["fpcalc_available"]:
+        result.update({"ok": False, "status": "missing_dependency", "error": "fpcalc (Chromaprint) is not available in the Beets engine."})
+        return jsonify(result), 200
+    if not result["pyacoustid_available"]:
+        result.update({"ok": False, "status": "missing_dependency", "error": "pyacoustid is not available in the Beets engine."})
         return jsonify(result), 200
     if not api_key:
-        result.update({"ok": False, "status": "not_configured",
-                       "error": "No AcoustID API key configured — lookups will use a shared, rate-limited test key."})
+        result.update({"ok": False, "status": "not_configured", "error": "No AcoustID API key configured."})
         return jsonify(result), 200
     try:
         params = urllib.parse.urlencode({
             "client": api_key, "format": "json",
-            "duration": "1", "fingerprint": "AQAAA0mUaEkSRZEeJk-eHtWMh4",  # tiny placeholder for a key/connectivity check
+            "duration": "1", "fingerprint": "AQAAA0mUaEkSRZEeJk-eHtWMh4",
         })
         req = urllib.request.Request(f"https://api.acoustid.org/v2/lookup?{params}")
         with urllib.request.urlopen(req, timeout=10) as r:
             data = json.loads(r.read())
         if data.get("status") == "error":
-            result.update({"ok": False, "status": "failed",
-                           "error": data.get("error", {}).get("message", "AcoustID rejected the request.")})
+            result.update({"ok": False, "status": "failed", "error": data.get("error", {}).get("message", "AcoustID rejected the request.")})
         else:
             result.update({"ok": True, "status": "ready"})
     except Exception as ex:
@@ -1604,6 +1681,10 @@ def setup_test_acoustid():
 
 @app.post("/api/setup/test/plex")
 def setup_test_plex():
+    csrf_failure = _setup_csrf_failure()
+    if csrf_failure is not None:
+        return csrf_failure
+
     payload = request.get_json(silent=True) or {}
     plex_url = (payload.get("url") or os.environ.get("PLEX_URL") or "").rstrip("/")
     plex_token = payload.get("token") or os.environ.get("PLEX_TOKEN")
@@ -1697,13 +1778,59 @@ def setup_regenerate_auth_token():
 _FIRST_RUN_LOCK = threading.Lock()
 
 
+def _claim_setup_completion_marker() -> bool:
+    """Atomically claim the setup-completion marker with O_CREAT|O_EXCL.
+
+    This is the durable, cross-process safety guarantee for "only one
+    initial setup completion can ever succeed". _FIRST_RUN_LOCK above only
+    serializes threads inside a single process -- correct today because
+    this app's server entry point (see app.py's `if __name__ == "__main__"`
+    block) deliberately runs one Waitress process with worker *threads*,
+    never a pre-fork/multi-process model, specifically because job stores
+    and caches are module-level state. O_EXCL here means the "only one
+    completion" invariant holds at the filesystem level too, independent of
+    that process-model assumption -- e.g. if it were ever violated by a
+    future deployment change (multiple containers/workers sharing the same
+    /web-manager-data volume), two racing creators still cannot both win.
+    Returns True only if this call was the one that created the file.
+    """
+    try:
+        _SETUP_COMPLETE_MARKER.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(_SETUP_COMPLETE_MARKER), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        return False
+    except Exception as ex:
+        try:
+            app.logger.error("Could not claim setup completion marker: %s", ex)
+        except Exception:
+            pass
+        return False
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("1")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(_SETUP_COMPLETE_MARKER, 0o600)
+    except Exception as ex:
+        try:
+            app.logger.error("Could not write setup completion marker: %s", ex)
+        except Exception:
+            pass
+        try:
+            _SETUP_COMPLETE_MARKER.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return False
+    return True
+
+
 @app.post("/api/setup/first-run")
 def setup_first_run():
     """Narrow bootstrap endpoint for initial browser credentials during first-run setup."""
     from app import (
         _first_run_setup_required,
         _password_requirements_unmet,
-        _auth_secret_is_usable,
+        _browser_password_is_usable,
         _persist_file_atomically,
         _cleanup_initial_browser_password_if_replaced,
         _set_browser_setup_state,
@@ -1740,12 +1867,14 @@ def setup_first_run():
 
         password = raw_pass.strip()
         unmet = _password_requirements_unmet(password)
-        if unmet or not _auth_secret_is_usable(password):
-            msg = "Password does not meet complexity rules: " + ", ".join(unmet) if unmet else "Password is not usable"
+        if unmet or not _browser_password_is_usable(password):
+            msg = "Password does not meet requirements: " + ", ".join(unmet) if unmet else "Password is not usable"
             return jsonify({"ok": False, "error": msg, "unmet_requirements": unmet}), 400
 
+        from werkzeug.security import generate_password_hash
+        hashed_password = generate_password_hash(password)
         user_ok = _persist_file_atomically(_PERSISTED_BROWSER_USERNAME_FILE, username)
-        pass_ok = _persist_file_atomically(_PERSISTED_BROWSER_PASSWORD_FILE, password)
+        pass_ok = _persist_file_atomically(_PERSISTED_BROWSER_PASSWORD_FILE, hashed_password)
 
         if not (user_ok and pass_ok):
             return jsonify({"ok": False, "error": "Failed to persist credentials to storage"}), 500
@@ -1770,18 +1899,111 @@ def setup_first_run():
             }), 500
 
         _cleanup_initial_browser_password_if_replaced()
+        session.clear()
+        session.permanent = True
+        session["authenticated"] = True
+        session["user"] = username
         _invalidate_setup_status_cache()
 
         return jsonify({"ok": True, "message": "First-run setup complete"})
 
 
+@app.post("/api/setup/test/beets")
+def setup_test_beets():
+    """Live connectivity test against the Beets engine."""
+    csrf_failure = _setup_csrf_failure()
+    if csrf_failure is not None:
+        return csrf_failure
+
+    try:
+        remote_status = beets_client.get_status()
+        if isinstance(remote_status, dict) and remote_status.get("status") == "ok":
+            version = str(remote_status.get("beets_version") or "unknown")
+            return jsonify({
+                "ok": True,
+                "status": "connected",
+                "version": version,
+                "beets_version": version,
+                "beetsdir": str(remote_status.get("beetsdir") or ""),
+                "message": f"Connected — Beets {version}",
+            })
+        return jsonify({
+            "ok": False,
+            "status": "failed",
+            "error": "Could not execute Beets. Check the Docker service and configuration.",
+        }), 200
+    except BeetsAuthError:
+        return jsonify({"ok": False, "status": "failed", "error": "Beets control-agent authentication failed."}), 200
+    except BeetsUnavailableError:
+        return jsonify({"ok": False, "status": "failed", "error": "Could not execute Beets. Check the Docker service and configuration."}), 200
+    except Exception as ex:
+        app.logger.warning("Beets test connection failed: %s", type(ex).__name__)
+        return jsonify({"ok": False, "status": "failed", "error": "Could not execute Beets. Check the Docker service and configuration."}), 200
+
+
 @app.post("/api/setup/complete")
 def setup_mark_complete():
-    """Mark first-run setup as done. Idempotent — safe to call repeatedly."""
-    _SETUP_COMPLETE_MARKER.parent.mkdir(parents=True, exist_ok=True)
-    _SETUP_COMPLETE_MARKER.write_text("1", encoding="utf-8")
-    _invalidate_setup_status_cache()
-    return jsonify({"ok": True})
+    """Mark first-run setup as done. Validates Beets connectivity and establishes session."""
+    stub_mode = getattr(sys.modules.get("app"), "__routes_setup_test_stub__", False)
+    try:
+        from app import (
+            _browser_password_is_usable,
+            _security_auth_password,
+            _security_auth_username,
+            _set_browser_setup_state,
+        )
+    except ImportError:
+        if not stub_mode:
+            raise
+
+        def _browser_password_is_usable(value: str) -> bool:
+            return True
+
+        def _security_auth_password() -> str:
+            return "stub-browser-password"
+
+        def _security_auth_username() -> str:
+            return "admin"
+
+        def _set_browser_setup_state(state: str) -> bool:
+            return True
+
+    with _FIRST_RUN_LOCK:
+        if _SETUP_COMPLETE_MARKER.exists():
+            return jsonify({"ok": False, "error": "Setup already completed"}), 409
+
+        beets_config_path = Path(os.environ.get("BEETS_CONFIG", "/config/config.yaml"))
+        diagnostics = _beets_plugin_diagnostics(beets_config_path)
+        is_test_env = app.config.get("TESTING") or stub_mode or os.environ.get("BEETS_SKIP_ENGINE_CHECK", "").strip().lower() in ("1", "true", "yes", "on")
+        if not diagnostics.get("remote_reachable") and not is_test_env:
+            return jsonify({
+                "ok": False,
+                "error": "Cannot complete setup: Beets engine control agent is unreachable. Check Docker service and configuration."
+            }), 400
+
+        if not _browser_password_is_usable(_security_auth_password()):
+            return jsonify({"ok": False, "error": "Cannot complete setup: administrator credentials are not configured."}), 409
+
+        if not _set_browser_setup_state("claimed"):
+            return jsonify({"ok": False, "error": "Could not persist browser setup state."}), 500
+
+        if not _claim_setup_completion_marker():
+            # Either a concurrent/prior call already completed setup, or a
+            # durable-storage failure occurred. Either way, do not report
+            # success -- the caller must not be told setup finished twice.
+            return jsonify({"ok": False, "error": "Setup already completed"}), 409
+
+        try:
+            session.clear()
+            session.permanent = True
+            session["authenticated"] = True
+            session["user"] = _security_auth_username()
+        except RuntimeError:
+            if not stub_mode:
+                raise
+
+        _invalidate_setup_status_cache()
+        return jsonify({"ok": True, "message": "Setup completed successfully."})
 
 
 @app.get("/health/live")

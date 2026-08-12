@@ -69,6 +69,11 @@ _codex_backups/
 .playwright-cli/
 frontend/.playwright-cli/
 
+
+# Local Compose bind-mount defaults
+/config/
+/data/
+/web-manager-data/
 # Docker local state
 .docker/
 docker-data/

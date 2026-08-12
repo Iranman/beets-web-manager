@@ -17,39 +17,47 @@ import unittest.mock as mock
 from pathlib import Path
 
 
-def _load_routes_setup_against_stub_app():
+_MISSING_MODULE = object()
+_STUBBED_MODULES = ("app", "routes_setup", "routes_submissions", "routes_jobs", "routes_lidarr")
+
+
+def _snapshot_stubbed_modules():
+    return {name: sys.modules.get(name, _MISSING_MODULE) for name in _STUBBED_MODULES}
+
+
+def _restore_stubbed_modules(snapshot):
+    for name, module in snapshot.items():
+        if module is _MISSING_MODULE:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = module
+
+
+def _load_routes_setup_against_stub_app(test_case=None):
     """(Re)import routes_setup against a fresh stub `app` module so each test
     gets independent route registration state."""
     from flask import Flask
+    snapshot = _snapshot_stubbed_modules()
     stub = types.ModuleType("app")
     stub.__routes_setup_test_stub__ = True
     stub.app = Flask(__name__)
     sys.modules["app"] = stub
     sys.modules.pop("routes_setup", None)
     module = importlib.import_module("routes_setup")
+    if test_case is not None:
+        test_case.addCleanup(_restore_stubbed_modules, snapshot)
     return stub.app, module
 
 
 
 def tearDownModule():
-    """Undo the stub-`app` swap from _load_routes_setup_against_stub_app().
-
-    Popping only "app" (leaving "routes_setup"/"routes_submissions"/
-    "routes_jobs"/"routes_lidarr" cached from whatever app instance they were
-    originally bound to) would let a later test file's fresh `from app import
-    app` re-execute app.py's module body into a brand-new Flask instance
-    while those already-cached route modules keep their `@app.route(...)`
-    registrations on the *old* instance -- the new one silently ends up
-    missing routes (observed as spurious 405s in tests/
-    test_external_beets_architecture.py when it runs after this module).
-    Clearing all of them together forces the next `import app` anywhere to
-    do one complete, internally-consistent rebuild instead of a partial one.
-    """
-    for name in ("app", "routes_setup", "routes_submissions", "routes_jobs", "routes_lidarr"):
-        sys.modules.pop(name, None)
+    """Best-effort guard for interrupted tests; normal cleanup is per-test."""
+    if getattr(sys.modules.get("app"), "__routes_setup_test_stub__", False):
+        for name in _STUBBED_MODULES:
+            sys.modules.pop(name, None)
 class RoutesSetupHealthTests(unittest.TestCase):
     def setUp(self):
-        self.flask_app, self.module = _load_routes_setup_against_stub_app()
+        self.flask_app, self.module = _load_routes_setup_against_stub_app(self)
         self.client = self.flask_app.test_client()
 
     def test_health_live_reports_alive_and_version(self):
@@ -111,7 +119,7 @@ class RoutesSetupHealthTests(unittest.TestCase):
 
 class RoutesSetupStatusTests(unittest.TestCase):
     def setUp(self):
-        self.flask_app, self.module = _load_routes_setup_against_stub_app()
+        self.flask_app, self.module = _load_routes_setup_against_stub_app(self)
         self.client = self.flask_app.test_client()
 
     def test_status_never_crashes_on_missing_paths(self):
@@ -167,7 +175,7 @@ class RoutesSetupRemoteBeetsDiagnosticsTests(unittest.TestCase):
     manager container."""
 
     def setUp(self):
-        self.flask_app, self.module = _load_routes_setup_against_stub_app()
+        self.flask_app, self.module = _load_routes_setup_against_stub_app(self)
         self.client = self.flask_app.test_client()
 
     def _paths(self):
@@ -257,7 +265,12 @@ class RoutesSetupRemoteBeetsDiagnosticsTests(unittest.TestCase):
         self.assertFalse(body["beets"]["capabilities"]["acoustid_submission"]["available"])
         self.assertTrue(body["beets"]["commands"]["submit"]["available"])
         self.assertTrue(body["beets"]["commands"]["mbsubmit"]["available"])
-        self.assertEqual(body["integrations"]["musicbrainz"]["state"], "configured")
+        # MusicBrainz is core Beets metadata capability, not a togglable
+        # plugin -- "connected" reflects control-agent/plugin-loader health,
+        # never plugins: list membership (see _musicbrainz_integration_status).
+        self.assertEqual(body["integrations"]["musicbrainz"]["state"], "connected")
+        self.assertEqual(body["integrations"]["musicbrainz"]["category"], "service")
+        self.assertEqual(body["integrations"]["fetchart"]["category"], "beets_plugin")
         self.assertEqual(body["integrations"]["acoustid"]["state"], "configured")
         self.assertEqual(body["integrations"]["fetchart"]["state"], "configured")
         self.assertTrue(body["integrations"]["fetchart"]["operational"])
@@ -280,7 +293,11 @@ class RoutesSetupRemoteBeetsDiagnosticsTests(unittest.TestCase):
         self.assertFalse(body["beets"]["available"])
         self.assertFalse(body["beets"]["plugin_loader_ok"])
         self.assertEqual(body["beets"]["remote_error"], "unavailable")
-        self.assertEqual(body["integrations"]["musicbrainz"]["state"], "plugin_loader_failed")
+        # remote_reachable is False here (control agent itself unreachable),
+        # which _musicbrainz_integration_status reports as "unavailable" --
+        # a more accurate state than "plugin_loader_failed" (that state
+        # means the agent WAS reached but its plugin loader failed).
+        self.assertEqual(body["integrations"]["musicbrainz"]["state"], "unavailable")
         self.assertNotIn("super-secret-key", response.get_data(as_text=True))
 
     def test_remote_authentication_failure_fails_closed(self):
@@ -487,7 +504,7 @@ class RoutesSetupTestConnectionTests(unittest.TestCase):
     than crashing or reporting false success."""
 
     def setUp(self):
-        self.flask_app, self.module = _load_routes_setup_against_stub_app()
+        self.flask_app, self.module = _load_routes_setup_against_stub_app(self)
         self.client = self.flask_app.test_client()
 
     def test_ai_test_without_key_reports_not_configured(self):
@@ -496,6 +513,79 @@ class RoutesSetupTestConnectionTests(unittest.TestCase):
         body = r.get_json()
         self.assertFalse(body["ok"])
         self.assertEqual(body["status"], "not_configured")
+
+    def test_ai_test_invalid_key_reports_failed_auth(self):
+        exc = self.module.urllib.error.HTTPError(
+            "https://api.openai.com/v1/models/gpt-4o-mini",
+            401,
+            "Unauthorized",
+            {},
+            None,
+        )
+        with mock.patch.object(self.module.urllib.request, "urlopen", side_effect=exc):
+            r = self.client.post(
+                "/api/setup/test/ai",
+                json={"api_key": "sk-invalid-test-key", "model": "gpt-4o-mini"},
+            )
+        self.assertEqual(r.status_code, 200)
+        body = r.get_json()
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["status"], "failed")
+        self.assertIn("rejected the API key", body["error"])
+        self.assertNotIn("sk-invalid-test-key", repr(body))
+
+    def test_plex_test_invalid_token_reports_failed_auth(self):
+        exc = self.module.urllib.error.HTTPError(
+            "http://plex.example/library/sections",
+            401,
+            "Unauthorized",
+            {},
+            None,
+        )
+        with mock.patch.object(self.module.urllib.request, "urlopen", side_effect=exc):
+            r = self.client.post(
+                "/api/setup/test/plex",
+                json={"url": "http://plex.example", "token": "invalid-plex-token"},
+            )
+        self.assertEqual(r.status_code, 200)
+        body = r.get_json()
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["status"], "failed")
+        self.assertIn("invalid or expired", body["error"])
+        self.assertNotIn("invalid-plex-token", repr(body))
+
+    def test_acoustid_test_invalid_key_reports_failed_auth(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return b'{"status":"error","error":{"message":"invalid API key"}}'
+
+        diagnostics = {
+            "remote_reachable": True,
+            "loaded_plugins": ["chroma"],
+            "fpcalc_path": "/usr/bin/fpcalc",
+            "capabilities": {
+                "acoustid_lookup": {
+                    "fpcalc_available": True,
+                    "chroma_loaded": True,
+                    "pyacoustid_available": True,
+                }
+            },
+        }
+        with mock.patch.object(self.module, "_beets_plugin_diagnostics", return_value=diagnostics), \
+             mock.patch.object(self.module.urllib.request, "urlopen", return_value=Response()):
+            r = self.client.post("/api/setup/test/acoustid", json={"api_key": "invalid-acoustid-key"})
+        self.assertEqual(r.status_code, 200)
+        body = r.get_json()
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["status"], "failed")
+        self.assertIn("invalid API key", body["error"])
+        self.assertNotIn("invalid-acoustid-key", repr(body))
 
     def test_plex_test_without_credentials_reports_not_configured(self):
         r = self.client.post("/api/setup/test/plex", json={})
@@ -513,7 +603,7 @@ class RoutesSetupTestConnectionTests(unittest.TestCase):
 
 class RoutesSetupSettingsPersistenceTests(unittest.TestCase):
     def setUp(self):
-        self.flask_app, self.module = _load_routes_setup_against_stub_app()
+        self.flask_app, self.module = _load_routes_setup_against_stub_app(self)
         self.client = self.flask_app.test_client()
         # Module defaults point at /config/*, which isn't writable (or may
         # not even exist) outside the real container — isolate to a temp
@@ -542,17 +632,18 @@ class RoutesSetupSettingsPersistenceTests(unittest.TestCase):
         r = self.client.post("/api/setup/settings", json=["not", "an", "object"])
         self.assertEqual(r.status_code, 400)
 
-    def test_complete_marker_is_idempotent(self):
+    def test_complete_marker_allows_only_one_success(self):
         r1 = self.client.post("/api/setup/complete")
         r2 = self.client.post("/api/setup/complete")
         self.assertTrue(r1.get_json()["ok"])
-        self.assertTrue(r2.get_json()["ok"])
+        self.assertEqual(r2.status_code, 409)
+        self.assertFalse(r2.get_json()["ok"])
         self.assertTrue(self.module._SETUP_COMPLETE_MARKER.exists())
 
 
 class RoutesSetupEnvironmentTests(unittest.TestCase):
     def setUp(self):
-        self.flask_app, self.module = _load_routes_setup_against_stub_app()
+        self.flask_app, self.module = _load_routes_setup_against_stub_app(self)
         self.client = self.flask_app.test_client()
         self.tempdir = tempfile.TemporaryDirectory()
         root = Path(self.tempdir.name)
@@ -626,7 +717,7 @@ class RoutesSetupEnvironmentTests(unittest.TestCase):
 
 class RoutesSetupHelperTests(unittest.TestCase):
     def setUp(self):
-        _, self.module = _load_routes_setup_against_stub_app()
+        _, self.module = _load_routes_setup_against_stub_app(self)
 
     def test_mask_short_value(self):
         self.assertEqual(self.module._mask("ab"), "**")

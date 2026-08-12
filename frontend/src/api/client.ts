@@ -90,6 +90,11 @@ import type {
   SetupFirstRunResponse,
   SetupIntegrationTestResponse,
   SetupStatusResponse,
+  SetupTestBeetsResponse,
+  AuthMeResponse,
+  LoginRequest,
+  LoginResponse,
+  LogoutResponse,
   WantedResponse,
   YtdlpStatusResponse,
   TransactionDetailResponse,
@@ -248,6 +253,18 @@ export function getSetupStatus(): Promise<SetupStatusResponse> {
   return apiJson<SetupStatusResponse>('/api/setup/status');
 }
 
+export function getAuthMe(): Promise<AuthMeResponse> {
+  return apiJson<AuthMeResponse>('/api/auth/me');
+}
+
+export function login(payload: LoginRequest): Promise<LoginResponse> {
+  return apiJson<LoginResponse>('/api/login', jsonRequest('POST', payload));
+}
+
+export function logout(): Promise<LogoutResponse> {
+  return apiJson<LogoutResponse>('/api/logout', jsonRequest('POST'));
+}
+
 export function submitFirstRunSetup(payload: SetupFirstRunRequest): Promise<SetupFirstRunResponse> {
   return apiJson<SetupFirstRunResponse>('/api/setup/first-run', jsonRequest('POST', payload));
 }
@@ -264,20 +281,24 @@ export function completeSetup(): Promise<ApiOkResponse> {
   return apiJson<ApiOkResponse>('/api/setup/complete', jsonRequest('POST'));
 }
 
-export function testSetupAi(): Promise<SetupIntegrationTestResponse> {
-  return apiJson<SetupIntegrationTestResponse>('/api/setup/test/ai', jsonRequest('POST'));
+export function testSetupBeets(): Promise<SetupTestBeetsResponse> {
+  return apiJson<SetupTestBeetsResponse>('/api/setup/test/beets', jsonRequest('POST'));
+}
+
+export function testSetupAi(payload?: { api_key?: string; base_url?: string; model?: string }): Promise<SetupIntegrationTestResponse> {
+  return apiJson<SetupIntegrationTestResponse>('/api/setup/test/ai', jsonRequest('POST', payload));
 }
 
 export function testSetupMusicBrainz(): Promise<SetupIntegrationTestResponse> {
   return apiJson<SetupIntegrationTestResponse>('/api/setup/test/musicbrainz', jsonRequest('POST'));
 }
 
-export function testSetupAcoustid(): Promise<SetupIntegrationTestResponse> {
-  return apiJson<SetupIntegrationTestResponse>('/api/setup/test/acoustid', jsonRequest('POST'));
+export function testSetupAcoustid(payload?: { api_key?: string }): Promise<SetupIntegrationTestResponse> {
+  return apiJson<SetupIntegrationTestResponse>('/api/setup/test/acoustid', jsonRequest('POST', payload));
 }
 
-export function testSetupPlex(): Promise<SetupIntegrationTestResponse> {
-  return apiJson<SetupIntegrationTestResponse>('/api/setup/test/plex', jsonRequest('POST'));
+export function testSetupPlex(payload?: { url?: string; token?: string }): Promise<SetupIntegrationTestResponse> {
+  return apiJson<SetupIntegrationTestResponse>('/api/setup/test/plex', jsonRequest('POST', payload));
 }
 
 export function regenerateAuthToken(): Promise<SetupAuthTokenRegenerateResponse> {

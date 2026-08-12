@@ -18,11 +18,15 @@ import routes_submissions
 from backend.transaction_engine import TransactionStore
 
 
+_CSRF_HEADERS = {"Origin": "http://localhost", "X-Beets-CSRF": "1"}
+
+
 class TransactionStoreIdContainmentTests(unittest.TestCase):
     """Alerts #129/#130/#131/#132/#133 (py/path-injection, TransactionStore's
     _read/_write os.replace/write_text/read_text sinks): TransactionStore._path()
-    requires a 'txn_' prefix and rejects '/', '\\', and NUL before any path is
-    built, so no transaction_id can escape TransactionStore.root."""
+    requires the exact generated transaction ID format before any path is
+    built, so no transaction_id can escape TransactionStore.root or flow into
+    export headers with control/special characters."""
 
     def test_adversarial_transaction_ids_are_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -33,6 +37,10 @@ class TransactionStoreIdContainmentTests(unittest.TestCase):
                 "txn_../../etc/passwd",
                 "txn_\\..\\..\\windows",
                 "txn_\x00hidden",
+                "txn_1234_bad",
+                "txn_1234_abcdef12345g",
+                "txn_1234_abcdef123456\r\nContent-Length: 0",
+                "txn_1234_abcdef123456\".csv",
                 "not_prefixed_txn_1",
                 "",
             ]:
@@ -169,6 +177,7 @@ class SetupExceptionSanitizationTests(unittest.TestCase):
         with app_module.app.test_request_context(
             "/api/setup/test/ai", method="POST",
             data=json.dumps({"api_key": "sk-test"}), content_type="application/json",
+            headers=_CSRF_HEADERS,
         ), mock.patch("urllib.request.urlopen", side_effect=OSError(leak)):
             response = routes_setup.setup_test_ai()
         data = response.get_json() if hasattr(response, "get_json") else response[0].get_json()
@@ -178,7 +187,7 @@ class SetupExceptionSanitizationTests(unittest.TestCase):
 
     def test_musicbrainz_connectivity_test_unexpected_exception_is_sanitized(self):
         leak = "LEAK_MARKER /internal/path token=abc123"
-        with app_module.app.test_request_context("/api/setup/test/musicbrainz", method="POST"), \
+        with app_module.app.test_request_context("/api/setup/test/musicbrainz", method="POST", headers=_CSRF_HEADERS), \
              mock.patch("urllib.request.urlopen", side_effect=OSError(leak)):
             response = routes_setup.setup_test_musicbrainz()
         data = response.get_json() if hasattr(response, "get_json") else response[0].get_json()
@@ -190,6 +199,7 @@ class SetupExceptionSanitizationTests(unittest.TestCase):
             "/api/setup/test/plex", method="POST",
             data=json.dumps({"url": "http://plex.internal.example:32400", "token": "plex-secret"}),
             content_type="application/json",
+            headers=_CSRF_HEADERS,
         ), mock.patch("urllib.request.urlopen", side_effect=OSError(leak)):
             response = routes_setup.setup_test_plex()
         data = response.get_json() if hasattr(response, "get_json") else response[0].get_json()
@@ -198,7 +208,7 @@ class SetupExceptionSanitizationTests(unittest.TestCase):
 
     def test_acoustid_fpcalc_unexpected_exception_is_sanitized(self):
         leak = "LEAK_MARKER /internal/path token=abc123"
-        with app_module.app.test_request_context("/api/setup/test/acoustid", method="POST"), \
+        with app_module.app.test_request_context("/api/setup/test/acoustid", method="POST", headers=_CSRF_HEADERS), \
              mock.patch.object(routes_setup.shutil, "which", return_value="/usr/bin/fpcalc"), \
              mock.patch.object(routes_setup.subprocess, "run", side_effect=OSError(leak)):
             response = routes_setup.setup_test_acoustid()
@@ -214,6 +224,7 @@ class SetupExceptionSanitizationTests(unittest.TestCase):
             "/api/setup/test/ai", method="POST",
             data=json.dumps({"api_key": "sk-test", "base_url": "https://evil.example.test/openai.com", "model": "gpt-4o"}),
             content_type="application/json",
+            headers=_CSRF_HEADERS,
         ), mock.patch("urllib.request.urlopen") as mock_urlopen:
             mock_urlopen.side_effect = OSError("unreachable")
             routes_setup.setup_test_ai()
