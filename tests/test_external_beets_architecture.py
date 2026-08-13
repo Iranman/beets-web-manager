@@ -1379,6 +1379,21 @@ class TestJobCancellation(unittest.TestCase):
 class TestAcoustIDChromaCapability(unittest.TestCase):
     """Tests for AcoustID submit and Chroma plugin capability detection."""
 
+    def setUp(self):
+        # BUG-3 (v0.1.12): _agent_status_payload()/get_loaded_beet_plugins()
+        # now read a module-level single-flight cache instead of always
+        # launching a fresh `beet version` subprocess -- reset it before
+        # each test so a prior test's mocked subprocess.run() result can
+        # never leak into this one via a still-"fresh" cache entry.
+        import backend.beets_control_agent as control_agent_module
+        self._cache_patches = [
+            mock.patch.object(control_agent_module, "_BEET_VERSION_CACHE", None),
+            mock.patch.object(control_agent_module, "_BEET_VERSION_CACHE_TS", 0.0),
+        ]
+        for p in self._cache_patches:
+            p.start()
+            self.addCleanup(p.stop)
+
     @mock.patch("routes_submissions._read_beets_plugin_list", return_value=["chroma", "mbsubmit"])
     @mock.patch("backend.beets_client.beets_client.get_status")
     def test_submission_readiness_queries_remote_capabilities(self, mock_status, mock_plugins):
@@ -1573,6 +1588,21 @@ class TestAcoustIDChromaCapability(unittest.TestCase):
 class TestControlAgentCapabilityEnforcement(unittest.TestCase):
     """Real handler tests proving the control agent itself blocks capability-gated
     commands, independent of whatever the web-manager route already checks."""
+
+    def setUp(self):
+        # BUG-3 (v0.1.12): see TestAcoustIDChromaCapability.setUp() -- same
+        # single-flight cache reset, needed here because several tests below
+        # mock get_loaded_beet_plugins()/subprocess.run() directly and
+        # expect each call to reflect that test's own mock, not a cached
+        # result from whichever test happened to run first.
+        import backend.beets_control_agent as control_agent_module
+        self._cache_patches = [
+            mock.patch.object(control_agent_module, "_BEET_VERSION_CACHE", None),
+            mock.patch.object(control_agent_module, "_BEET_VERSION_CACHE_TS", 0.0),
+        ]
+        for p in self._cache_patches:
+            p.start()
+            self.addCleanup(p.stop)
 
     def _post(self, path, body, headers=None):
         handler = ControlAgentHandler.__new__(ControlAgentHandler)

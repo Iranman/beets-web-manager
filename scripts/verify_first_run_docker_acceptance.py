@@ -333,6 +333,33 @@ def scenario_fresh_install():
         else:
             fail(f"Bearer token auth -> {code}, expected 200")
 
+        # 8b. BUG-3 (v0.1.12): the setup-status beets diagnostics payload
+        # carries the new diagnostics_fresh/diagnostics_cache_age_seconds
+        # fields end to end from the control agent's cached probe, through
+        # _beets_plugin_diagnostics(), into the browser-facing response --
+        # and a second call shortly after the first is fast (cache hit),
+        # not a repeat multi-second `beet version` subprocess launch.
+        t0 = time.monotonic()
+        code, _, body = stack.request("/api/setup/status?refresh=1", auth_header=bearer_header("firstrun-test-bearer-token-not-real-0000"))
+        first_call_seconds = time.monotonic() - t0
+        try:
+            beets_diag = json.loads(body).get("beets", {})
+            has_freshness_field = "diagnostics_fresh" in beets_diag
+        except Exception:
+            has_freshness_field = False
+        if code == 200 and has_freshness_field:
+            ok(f"BUG-3: /api/setup/status beets diagnostics include diagnostics_fresh (first call {first_call_seconds:.2f}s)")
+        else:
+            fail(f"BUG-3: /api/setup/status beets diagnostics missing diagnostics_fresh field (code={code})")
+
+        t0 = time.monotonic()
+        code, _, _ = stack.request("/api/setup/status", auth_header=bearer_header("firstrun-test-bearer-token-not-real-0000"))
+        second_call_seconds = time.monotonic() - t0
+        if code == 200 and second_call_seconds < 3.0:
+            ok(f"BUG-3: cached /api/setup/status call is fast ({second_call_seconds:.2f}s, no repeat subprocess launch)")
+        else:
+            fail(f"BUG-3: cached /api/setup/status call took {second_call_seconds:.2f}s (code={code}), expected <3s")
+
         # 9. BEETS_API_TOKEN (engine token) cannot authenticate Web Manager API
         code, _, _ = stack.request("/api/setup/env", auth_header=bearer_header("firstrun-test-engine-token-not-real-0000"))
         if code == 401:
@@ -430,6 +457,24 @@ def scenario_v018_upgrade():
         else:
             fail(f"first-run setup was unexpectedly active on v0.1.8 upgrade (code={code}, required={first_run_req})")
 
+        # BUG-2 (v0.1.12): a legacy-established install (exactly this
+        # scenario -- valid credential, first_run_required=false) must
+        # automatically get setup_complete=true without any user action.
+        # This was the real production bug: it stayed false forever
+        # because nothing in this install's history ever called
+        # POST /api/setup/complete, and the frontend's route guard sends
+        # an authenticated-but-not-setup_complete visitor to the setup
+        # wizard instead of their dashboard on every visit.
+        try:
+            setup_complete = status_data.get("setup_complete")
+        except Exception:
+            setup_complete = None
+        if setup_complete is True:
+            ok("BUG-2: legacy-established install automatically reports setup_complete=true (no manual fix needed)")
+        else:
+            fail(f"BUG-2: legacy-established install reports setup_complete={setup_complete!r}, expected true -- "
+                 "an authenticated admin would be sent to the setup wizard instead of their dashboard")
+
         # Anonymous POST /api/setup/first-run must be DENIED (409 Conflict)
         code, _, _ = stack.request(
             "/api/setup/first-run",
@@ -448,6 +493,23 @@ def scenario_v018_upgrade():
             ok("Basic Auth with pre-existing v0.1.8 .initial_admin_password -> 200 OK")
         else:
             fail(f"Basic Auth with pre-existing v0.1.8 password -> {code}")
+
+        # BUG-1 (v0.1.12): /api/config used to 500 unconditionally in this
+        # real two-container topology -- it read a local
+        # /config/config.yaml path that only ever exists on the Beets
+        # *engine* container, never the web-manager container. A 500 here
+        # (regardless of whether the fixture engine has a config.yaml, in
+        # which case 200; or genuinely doesn't, in which case a structured
+        # 404/503 through the same beets_client path) proves the old bug is
+        # back; any other status proves the request actually reached the
+        # engine through the control-agent architecture instead of crashing
+        # on a local path that was never mounted.
+        code, _, body = stack.request("/api/config", auth_header=basic_header("admin", initial_pwd))
+        if code == 500:
+            fail(f"BUG-1: GET /api/config returned 500 -- likely reading a local filesystem path again "
+                 f"instead of proxying through beets_client to the engine's own /config mount (body={body[:200]!r})")
+        else:
+            ok(f"BUG-1: GET /api/config does not 500 in the real two-container topology (code={code})")
 
         # Restart preserves legacy established state
         run(["docker", "restart", "beets-web-manager"])

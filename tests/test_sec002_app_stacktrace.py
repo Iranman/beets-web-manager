@@ -110,15 +110,19 @@ class ConfigYamlExceptionSanitizationTests(unittest.TestCase):
     and /api/config/revert returned raw filesystem exception text for
     the beets config.yaml file -- the most sensitive file in the
     container, since it can hold provider credentials. All three now
-    return a fixed message with the real exception logged server-side."""
+    proxy through beets_client to the control agent (BUG-1 -- config.yaml
+    lives on the engine's own /config mount, not the web manager's, in the
+    real two-service topology) and still return a fixed message, never the
+    engine's raw detail text, to the browser."""
 
     def test_get_config_read_failure_is_sanitized(self):
         with app_module.app.test_request_context("/api/config"), \
-             mock.patch.object(app_module.Path, "read_text", side_effect=OSError("LEAK_MARKER /data/config.yaml")):
+             mock.patch.object(app_module.beets_client, "get_config",
+                                side_effect=app_module.BeetsError("LEAK_MARKER /data/config.yaml", error_code="config_read_failed", status_code=500)):
             response = app_module.get_config()
         status = response[1]
         data = response[0].get_json()
-        self.assertEqual(status, 500)
+        self.assertEqual(status, 502)
         self.assertNotIn("LEAK_MARKER", json.dumps(data))
 
     def test_save_config_write_failure_is_sanitized(self):
@@ -126,21 +130,22 @@ class ConfigYamlExceptionSanitizationTests(unittest.TestCase):
             "/api/config", method="POST",
             data=json.dumps({"content": "beets:\n  library: /config/musiclibrary.blb\n"}),
             content_type="application/json",
-        ), mock.patch.object(app_module.Path, "write_text", side_effect=OSError("LEAK_MARKER /data/config.yaml")):
+        ), mock.patch.object(app_module.beets_client, "save_config",
+                              side_effect=app_module.BeetsError("LEAK_MARKER /data/config.yaml", error_code="config_write_failed", status_code=500)):
             response = app_module.save_config()
         status = response[1]
         data = response[0].get_json()
-        self.assertEqual(status, 500)
+        self.assertEqual(status, 502)
         self.assertNotIn("LEAK_MARKER", json.dumps(data))
 
     def test_revert_config_failure_is_sanitized(self):
         with app_module.app.test_request_context("/api/config/revert", method="POST"), \
-             mock.patch.object(app_module.Path, "exists", return_value=True), \
-             mock.patch.object(app_module.shutil, "copy2", side_effect=OSError("LEAK_MARKER /data/config.yaml.bak")):
+             mock.patch.object(app_module.beets_client, "revert_config",
+                                side_effect=app_module.BeetsError("LEAK_MARKER /data/config.yaml.bak", error_code="config_revert_failed", status_code=500)):
             response = app_module.revert_config()
         status = response[1]
         data = response[0].get_json()
-        self.assertEqual(status, 500)
+        self.assertEqual(status, 502)
         self.assertNotIn("LEAK_MARKER", json.dumps(data))
 
 

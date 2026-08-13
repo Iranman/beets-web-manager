@@ -757,6 +757,15 @@ def _beets_plugin_diagnostics(config_path: Path) -> Dict[str, Any]:
         "plugin_loader_ok": loader_ok,
         "plugin_loader_timed_out": bool(remote_status.get("plugin_loader_timed_out")),
         "plugin_loader_error": _redact_diagnostic_text(loader_error),
+        # BUG-3 (v0.1.12): whether plugin_loader_ok/loaded_plugins above
+        # reflect a fresh engine-side probe or a still-recent cached one
+        # served because the most recent refresh attempt failed/timed out.
+        # A transient timeout no longer overwrites known-good plugin data
+        # with an empty/failed result -- this tells the UI which case it's
+        # looking at instead of hiding the distinction.
+        "diagnostics_fresh": bool(remote_status.get("diagnostics_fresh", True)),
+        "diagnostics_cache_age_seconds": remote_status.get("diagnostics_cache_age_seconds"),
+        "diagnostics_refresh_error": _redact_diagnostic_text(str(remote_status.get("diagnostics_refresh_error") or "")),
         "configured_plugins": list(dict.fromkeys(str(p) for p in configured_plugins if str(p).strip())),
         "loaded_plugins": list(dict.fromkeys(str(p) for p in loaded_plugins if str(p).strip())),
         "installed_plugins": remote_status.get("installed_plugins") if isinstance(remote_status.get("installed_plugins"), dict) else {},
@@ -1822,6 +1831,68 @@ def _claim_setup_completion_marker() -> bool:
             pass
         return False
     return True
+
+
+def _migrate_legacy_setup_complete_if_established() -> None:
+    """BUG-2 (v0.1.12): back-fill .setup_complete for installs that were
+    established (a real admin credential exists and first-run is not
+    required) before the two-step setup_first_run -> setup_complete flow
+    existed, or that otherwise reached "claimed"/"legacy_established"
+    browser-setup state without ever calling POST /api/setup/complete.
+
+    _first_run_setup_required() already treats such installs as fully set
+    up and never reopens first-run for them -- but the frontend's route
+    guard (frontend/src/App.tsx) additionally gates on setup_complete
+    specifically, so a real logged-in administrator on such an install was
+    shown the First-Run Setup wizard instead of their dashboard on every
+    visit. Confirmed live on the v0.1.11 TrueNAS production rollout (state
+    was "legacy_established", .setup_complete had never been created) and
+    corrected there by hand; this is the automatic version of that fix so
+    it isn't a manual, one-off correction on every future affected install.
+
+    Fail-closed: only acts when _has_explicit_browser_password() -- the
+    same authoritative, freshly-reverified signal _first_run_setup_required()
+    itself relies on, not merely a cached state-file string -- confirms a
+    real, currently-usable credential exists right now. A fresh install,
+    or an install whose credential has since been deleted/corrupted, is
+    correctly left alone; first-run setup remains required for it. Uses
+    the same O_CREAT|O_EXCL claim as setup_mark_complete() itself, so this
+    is safe under concurrent worker/startup races and a no-op (not an
+    error) on every later restart once the marker exists. Never touches
+    username/password/token/Flask-secret/browser-setup-state files -- this
+    only ever creates the completion marker, and only that.
+    """
+    if getattr(sys.modules.get("app"), "__routes_setup_test_stub__", False):
+        return
+    if _SETUP_COMPLETE_MARKER.exists():
+        return
+    try:
+        from app import _browser_password_is_usable, _first_run_setup_required, _security_auth_password
+    except ImportError:
+        return
+    try:
+        if _first_run_setup_required():
+            return
+        # _has_explicit_browser_password() is deliberately NOT used here: it
+        # checks the env var / file / persisted-hash paths but not the
+        # legacy .initial_admin_password fallback, so it would wrongly
+        # fail-closed on exactly the "legacy_established" installs this
+        # migration exists for. _security_auth_password() resolves the
+        # same full priority chain _first_run_setup_required()'s own
+        # "claimed"/"legacy_established" state was originally derived
+        # from (see _migrate_or_initialize_setup_state()), including that
+        # fallback -- the complete, currently-effective credential.
+        if not _browser_password_is_usable(_security_auth_password()):
+            return
+    except Exception:
+        # Any failure evaluating the fail-closed evidence must not create
+        # the marker -- an established install just retries this migration
+        # on its next restart instead.
+        return
+    _claim_setup_completion_marker()
+
+
+_migrate_legacy_setup_complete_if_established()
 
 
 @app.post("/api/setup/first-run")

@@ -26,7 +26,7 @@ import threading
 import time
 import urllib.parse
 import uuid
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import parse_qs, urlparse
@@ -208,6 +208,57 @@ def _diagnostic_failure_lines(text: str) -> list[str]:
     return failures[:12]
 
 
+# ---------------------------------------------------------------------------
+# config.yaml access (BUG-1 fix)
+#
+# Beets' config.yaml lives on the *engine* container's own /config mount
+# (BEETSDIR) -- the web-manager container has never had this file since the
+# two-service architecture cutover (2026-07-28); it has its own, separate
+# /config volume for its own app_settings.json/env state. app.py's
+# /api/config route used to read/write BEETSDIR-relative paths directly off
+# its own (wrong) local filesystem, which always 500'd in the real deployed
+# topology. These agent-side endpoints are the authoritative access point;
+# app.py now proxies through BeetsClient instead of touching the file
+# itself. Redaction of secret-looking lines happens in app.py (existing,
+# already-reviewed _redact_config_content()) once the raw content crosses
+# the trusted agent/web-manager boundary -- not duplicated here.
+# ---------------------------------------------------------------------------
+_AGENT_CONFIG_PATH = os.path.join(BEETSDIR, "config.yaml")
+_AGENT_CONFIG_BAK_PATH = os.path.join(BEETSDIR, "config.yaml.bak")
+
+
+def _read_agent_config_file() -> dict[str, Any]:
+    """Read config.yaml from BEETSDIR. Raises OSError on any I/O failure --
+    callers translate that into a structured, stable-coded HTTP response
+    rather than leaking a raw traceback."""
+    with open(_AGENT_CONFIG_PATH, "r", encoding="utf-8") as fh:
+        content = fh.read()
+    has_backup = os.path.exists(_AGENT_CONFIG_BAK_PATH)
+    backup_ts = os.path.getmtime(_AGENT_CONFIG_BAK_PATH) if has_backup else None
+    return {"content": content, "has_backup": has_backup, "backup_ts": backup_ts}
+
+
+def _write_agent_config_file(content: str) -> dict[str, Any]:
+    """Back up the existing config.yaml (if any), then overwrite it.
+    Raises OSError on failure; callers translate to a structured response."""
+    if os.path.exists(_AGENT_CONFIG_PATH):
+        shutil.copy2(_AGENT_CONFIG_PATH, _AGENT_CONFIG_BAK_PATH)
+    tmp_path = _AGENT_CONFIG_PATH + f".tmp.{uuid.uuid4().hex}"
+    with open(tmp_path, "w", encoding="utf-8") as fh:
+        fh.write(content)
+    os.replace(tmp_path, _AGENT_CONFIG_PATH)
+    return {"ok": True, "backed_up": os.path.exists(_AGENT_CONFIG_BAK_PATH)}
+
+
+def _revert_agent_config_file() -> dict[str, Any]:
+    """Restore config.yaml from its most recent backup. Raises
+    FileNotFoundError if no backup exists, OSError on other I/O failure."""
+    if not os.path.exists(_AGENT_CONFIG_BAK_PATH):
+        raise FileNotFoundError(_AGENT_CONFIG_BAK_PATH)
+    shutil.copy2(_AGENT_CONFIG_BAK_PATH, _AGENT_CONFIG_PATH)
+    return {"ok": True}
+
+
 def _simple_yaml_scalar(raw: str) -> str:
     value = str(raw or "").strip()
     if "#" in value:
@@ -319,6 +370,93 @@ def _beet_version_snapshot(timeout: int = 5) -> dict[str, Any]:
     return snapshot
 
 
+_BEET_VERSION_CACHE_LOCK = threading.Lock()
+_BEET_VERSION_CACHE: Optional[dict[str, Any]] = None
+_BEET_VERSION_CACHE_TS: float = 0.0
+_BEET_VERSION_CACHE_TTL_SECONDS = float(os.environ.get("BEETS_VERSION_CACHE_TTL_SECONDS", "30"))
+# How long a previously-good snapshot may still be served (diagnostics_fresh
+# =False) after a refresh attempt times out/fails, e.g. transient host load.
+# Bounded so a genuinely, permanently broken `beet` binary is eventually
+# correctly reported as failed rather than "good" forever.
+_BEET_VERSION_CACHE_MAX_STALE_SECONDS = float(os.environ.get("BEETS_VERSION_CACHE_MAX_STALE_SECONDS", "300"))
+# Per-probe subprocess timeout. Was hardcoded to 5s; production evidence
+# (v0.1.11 TrueNAS rollout) showed `beet version` taking up to ~29s under
+# real host memory pressure vs. ~0.5s warm. Widened modestly -- caching
+# below is what actually bounds how often this cost is paid, not a larger
+# timeout alone -- to reduce false-timeout probes without letting one
+# uncached cold request block for the full production worst case.
+_BEET_VERSION_PROBE_TIMEOUT_SECONDS = int(os.environ.get("BEETS_VERSION_PROBE_TIMEOUT_SECONDS", "12"))
+
+
+def _cached_beet_version_snapshot(*, force: bool = False) -> dict[str, Any]:
+    """Single-flight cached wrapper around _beet_version_snapshot() (BUG-3,
+    v0.1.12).
+
+    `beet version` used to run fresh on *every* /status request and every
+    capability-gated /commands/execute or /jobs/create call
+    (get_loaded_beet_plugins() -> require_command_capability()). Combined
+    with the control agent's previous single-threaded HTTPServer, a single
+    slow probe blocked every other request behind it, including Docker's
+    own cheap /health liveness check -- see run_agent()'s
+    ThreadingHTTPServer comment for that half of BUG-3's fix. This wrapper
+    caches the last snapshot for _BEET_VERSION_CACHE_TTL_SECONDS and
+    single-flights concurrent refreshes under one lock (the whole
+    check-build-store sequence runs under the same lock, mirroring
+    routes_setup.py's /api/setup/status cache design) so N simultaneous
+    callers past the TTL trigger exactly one subprocess launch, not N.
+
+    Only a genuine probe failure (subprocess timeout, or `beet` not
+    launchable at all) is treated as "the probe failed" -- a completed run
+    that reports plugin_failures or a non-zero returncode is still real,
+    current ground truth and is always cached/returned directly, never
+    discarded in favor of stale data. On an actual failure, a still-recent
+    known-good cached snapshot is returned again (annotated
+    diagnostics_fresh=False) instead of being replaced by an empty/failed
+    result -- this was BUG-3's actual observed symptom: plugin_loader_ok
+    =false and "0 plugins loaded" reported during a transient slow probe,
+    despite ~20/20 plugins genuinely loading against a warm probe moments
+    later. Adds diagnostics_fresh / diagnostics_cache_age_seconds /
+    diagnostics_refresh_error to the snapshot dict; callers that only read
+    the pre-existing keys (available/version/loaded_plugins/...) are
+    unaffected.
+    """
+    global _BEET_VERSION_CACHE, _BEET_VERSION_CACHE_TS
+    with _BEET_VERSION_CACHE_LOCK:
+        now = time.monotonic()
+        if not force and _BEET_VERSION_CACHE is not None and (now - _BEET_VERSION_CACHE_TS) < _BEET_VERSION_CACHE_TTL_SECONDS:
+            result = dict(_BEET_VERSION_CACHE)
+            result["diagnostics_fresh"] = True
+            result["diagnostics_cache_age_seconds"] = round(now - _BEET_VERSION_CACHE_TS, 2)
+            result["diagnostics_refresh_error"] = ""
+            return result
+
+        fresh = _beet_version_snapshot(timeout=_BEET_VERSION_PROBE_TIMEOUT_SECONDS)
+        probe_failed = bool(fresh.get("timed_out")) or not fresh.get("available")
+
+        if not probe_failed:
+            _BEET_VERSION_CACHE = fresh
+            _BEET_VERSION_CACHE_TS = now
+            result = dict(fresh)
+            result["diagnostics_fresh"] = True
+            result["diagnostics_cache_age_seconds"] = 0.0
+            result["diagnostics_refresh_error"] = ""
+            return result
+
+        refresh_error = fresh.get("error") or ("Beets version probe timed out." if fresh.get("timed_out") else "Beets version probe failed.")
+        if _BEET_VERSION_CACHE is not None and (now - _BEET_VERSION_CACHE_TS) < _BEET_VERSION_CACHE_MAX_STALE_SECONDS:
+            result = dict(_BEET_VERSION_CACHE)
+            result["diagnostics_fresh"] = False
+            result["diagnostics_cache_age_seconds"] = round(now - _BEET_VERSION_CACHE_TS, 2)
+            result["diagnostics_refresh_error"] = refresh_error
+            return result
+
+        result = dict(fresh)
+        result["diagnostics_fresh"] = False
+        result["diagnostics_cache_age_seconds"] = None
+        result["diagnostics_refresh_error"] = refresh_error
+        return result
+
+
 def get_loaded_beet_plugins() -> set:
     """Return the set of plugins Beets actually finished loading, parsed from
     `beet version`'s own "plugins: a, b, c" line.
@@ -326,13 +464,17 @@ def get_loaded_beet_plugins() -> set:
     Unlike a Python import check (e.g. importlib.util.find_spec), this only
     includes plugins that survived Beets' own load() step, so a plugin that is
     importable on disk but silently fails to initialize (as beetsplug.chroma
-    can, even with fpcalc/pyacoustid present) is correctly excluded.
+    can, even with fpcalc/pyacoustid present) is correctly excluded. Reads
+    the cached snapshot (BUG-3) rather than launching its own subprocess --
+    this is called on every capability-gated /commands/execute and
+    /jobs/create request, which used to mean a fresh `beet version` launch
+    per command dispatch.
     """
-    return set(_beet_version_snapshot().get("loaded_plugins") or [])
+    return set(_cached_beet_version_snapshot().get("loaded_plugins") or [])
 
 
-def _agent_status_payload() -> dict[str, Any]:
-    snapshot = _beet_version_snapshot()
+def _agent_status_payload(*, force_refresh: bool = False) -> dict[str, Any]:
+    snapshot = _cached_beet_version_snapshot(force=force_refresh)
     config_summary = _parse_beets_config_summary()
     loaded_plugins = set(snapshot.get("loaded_plugins") or [])
     configured_plugins = set(config_summary.get("plugins") or [])
@@ -474,6 +616,13 @@ def _agent_status_payload() -> dict[str, Any]:
         "plugin_loader_returncode": snapshot.get("returncode"),
         "plugin_loader_timed_out": bool(snapshot.get("timed_out")),
         "plugin_loader_error": _redact_agent_status_text(str(snapshot.get("error") or "")),
+        # BUG-3 (v0.1.12): whether the fields above came from a fresh probe
+        # this call, or a still-recent cached one (diagnostics_fresh=False)
+        # served because the most recent refresh attempt itself failed/timed
+        # out -- never because the cache degrades known-good data on its own.
+        "diagnostics_fresh": bool(snapshot.get("diagnostics_fresh", True)),
+        "diagnostics_cache_age_seconds": snapshot.get("diagnostics_cache_age_seconds"),
+        "diagnostics_refresh_error": _redact_agent_status_text(str(snapshot.get("diagnostics_refresh_error") or "")),
         "capabilities": capabilities,
         "commands": commands,
         "paths": remote_paths,
@@ -2210,7 +2359,8 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/status":
-            self._send_json(200, _agent_status_payload())
+            force_refresh = params.get("refresh", ["0"])[0] == "1" or params.get("force", ["0"])[0] == "1"
+            self._send_json(200, _agent_status_payload(force_refresh=force_refresh))
             return
 
         if path == "/version":
@@ -2225,6 +2375,17 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 "strict_path_validation": True,
                 "read_only_raw_query": False,
             })
+            return
+
+        if path == "/config":
+            try:
+                self._send_json(200, _read_agent_config_file())
+            except FileNotFoundError:
+                self._send_json(404, {"error": "config.yaml not found", "error_code": "config_not_found"})
+            except PermissionError:
+                self._send_json(403, {"error": "config.yaml is not readable", "error_code": "config_permission_denied"})
+            except OSError as exc:
+                self._send_json(500, {"error": "Could not read config.yaml", "error_code": "config_read_failed", "detail": _redact_agent_status_text(str(exc))})
             return
 
         if path == "/items":
@@ -2514,6 +2675,30 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
 
         if path == "/library/raw_query":
             self._send_json(403, {"error": "Raw SQL queries are not permitted"})
+            return
+
+        if path == "/config":
+            content = body.get("content") if isinstance(body, dict) else None
+            if not isinstance(content, str) or not content.strip():
+                self._send_json(400, {"error": "content must be a non-empty string", "error_code": "config_empty"})
+                return
+            try:
+                self._send_json(200, _write_agent_config_file(content))
+            except PermissionError:
+                self._send_json(403, {"error": "config.yaml is not writable", "error_code": "config_permission_denied"})
+            except OSError as exc:
+                self._send_json(500, {"error": "Could not save config.yaml", "error_code": "config_write_failed", "detail": _redact_agent_status_text(str(exc))})
+            return
+
+        if path == "/config/revert":
+            try:
+                self._send_json(200, _revert_agent_config_file())
+            except FileNotFoundError:
+                self._send_json(404, {"error": "No backup found", "error_code": "config_backup_not_found"})
+            except PermissionError:
+                self._send_json(403, {"error": "config.yaml is not writable", "error_code": "config_permission_denied"})
+            except OSError as exc:
+                self._send_json(500, {"error": "Could not revert config.yaml", "error_code": "config_revert_failed", "detail": _redact_agent_status_text(str(exc))})
             return
 
         if path.startswith("/albums/") and path.endswith("/art"):
@@ -3446,7 +3631,22 @@ def run_agent():
             f"non-placeholder value of at least {BEETS_API_TOKEN_MIN_LENGTH} characters"
         )
     server_address = ("0.0.0.0", PORT)
-    httpd = HTTPServer(server_address, ControlAgentHandler)
+    # ThreadingHTTPServer, not the plain single-threaded HTTPServer (BUG-3,
+    # v0.1.12): the previous plain HTTPServer handles exactly one request at
+    # a time, so a slow /status call (launching `beet version`, which can
+    # take up to ~29s under real host load -- confirmed on the v0.1.11
+    # TrueNAS production rollout) blocked EVERY other request behind it,
+    # including Docker's own /health liveness check (already cheap -- a
+    # hardcoded dict, no subprocess) and even a concurrent /health call from
+    # a different client -- both were observed timing out with
+    # BrokenPipeError in production logs purely from queuing behind an
+    # in-flight /status call, not from their own cost. This is the root
+    # cause the rest of BUG-3's fix (caching, below) reduces the *frequency*
+    # of, but threading is what stops one slow request from starving every
+    # other endpoint regardless of frequency. daemon_threads=True so
+    # in-flight request threads don't block process shutdown.
+    httpd = ThreadingHTTPServer(server_address, ControlAgentHandler)
+    httpd.daemon_threads = True
     print(f"[BeetsControlAgent] Listening on 0.0.0.0:{PORT} (LOCK={LOCK_PATH})")
     try:
         httpd.serve_forever()
