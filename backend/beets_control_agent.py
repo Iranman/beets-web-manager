@@ -225,37 +225,58 @@ def _diagnostic_failure_lines(text: str) -> list[str]:
 # ---------------------------------------------------------------------------
 _AGENT_CONFIG_PATH = os.path.join(BEETSDIR, "config.yaml")
 _AGENT_CONFIG_BAK_PATH = os.path.join(BEETSDIR, "config.yaml.bak")
+_AGENT_CONFIG_CONTENT_MAX_BYTES = _env_int_clamped(
+    "BEETS_CONFIG_CONTENT_MAX_BYTES",
+    1024 * 1024,
+    minimum=1024,
+    maximum=8 * 1024 * 1024,
+)
+_AGENT_CONFIG_REQUEST_MAX_BYTES = _AGENT_CONFIG_CONTENT_MAX_BYTES + 4096
+_AGENT_CONFIG_LOCK = threading.Lock()
 
 
 def _read_agent_config_file() -> dict[str, Any]:
     """Read config.yaml from BEETSDIR. Raises OSError on any I/O failure --
     callers translate that into a structured, stable-coded HTTP response
     rather than leaking a raw traceback."""
-    with open(_AGENT_CONFIG_PATH, "r", encoding="utf-8") as fh:
-        content = fh.read()
-    has_backup = os.path.exists(_AGENT_CONFIG_BAK_PATH)
-    backup_ts = os.path.getmtime(_AGENT_CONFIG_BAK_PATH) if has_backup else None
+    with _AGENT_CONFIG_LOCK:
+        with open(_AGENT_CONFIG_PATH, "r", encoding="utf-8") as fh:
+            content = fh.read()
+        has_backup = os.path.exists(_AGENT_CONFIG_BAK_PATH)
+        backup_ts = os.path.getmtime(_AGENT_CONFIG_BAK_PATH) if has_backup else None
     return {"content": content, "has_backup": has_backup, "backup_ts": backup_ts}
 
 
 def _write_agent_config_file(content: str) -> dict[str, Any]:
     """Back up the existing config.yaml (if any), then overwrite it.
     Raises OSError on failure; callers translate to a structured response."""
-    if os.path.exists(_AGENT_CONFIG_PATH):
-        shutil.copy2(_AGENT_CONFIG_PATH, _AGENT_CONFIG_BAK_PATH)
-    tmp_path = _AGENT_CONFIG_PATH + f".tmp.{uuid.uuid4().hex}"
-    with open(tmp_path, "w", encoding="utf-8") as fh:
-        fh.write(content)
-    os.replace(tmp_path, _AGENT_CONFIG_PATH)
-    return {"ok": True, "backed_up": os.path.exists(_AGENT_CONFIG_BAK_PATH)}
+    if len(content.encode("utf-8")) > _AGENT_CONFIG_CONTENT_MAX_BYTES:
+        raise ValueError("config content is too large")
+    with _AGENT_CONFIG_LOCK:
+        if os.path.exists(_AGENT_CONFIG_PATH):
+            shutil.copy2(_AGENT_CONFIG_PATH, _AGENT_CONFIG_BAK_PATH)
+        tmp_path = _AGENT_CONFIG_PATH + f".tmp.{uuid.uuid4().hex}"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as fh:
+                fh.write(content)
+            os.replace(tmp_path, _AGENT_CONFIG_PATH)
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+        backed_up = os.path.exists(_AGENT_CONFIG_BAK_PATH)
+    return {"ok": True, "backed_up": backed_up}
 
 
 def _revert_agent_config_file() -> dict[str, Any]:
     """Restore config.yaml from its most recent backup. Raises
     FileNotFoundError if no backup exists, OSError on other I/O failure."""
-    if not os.path.exists(_AGENT_CONFIG_BAK_PATH):
-        raise FileNotFoundError(_AGENT_CONFIG_BAK_PATH)
-    shutil.copy2(_AGENT_CONFIG_BAK_PATH, _AGENT_CONFIG_PATH)
+    with _AGENT_CONFIG_LOCK:
+        if not os.path.exists(_AGENT_CONFIG_BAK_PATH):
+            raise FileNotFoundError(_AGENT_CONFIG_BAK_PATH)
+        shutil.copy2(_AGENT_CONFIG_BAK_PATH, _AGENT_CONFIG_PATH)
     return {"ok": True}
 
 
@@ -2664,7 +2685,17 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/")
 
-        content_len = int(self.headers.get("Content-Length", 0))
+        try:
+            content_len = int(self.headers.get("Content-Length", 0))
+        except (TypeError, ValueError):
+            self._send_json(400, {"error": "Invalid Content-Length"})
+            return
+        if content_len < 0:
+            self._send_json(400, {"error": "Invalid Content-Length"})
+            return
+        if path == "/config" and content_len > _AGENT_CONFIG_REQUEST_MAX_BYTES:
+            self._send_json(413, {"error": "config content is too large", "error_code": "config_too_large"})
+            return
         post_data = self.rfile.read(content_len) if content_len > 0 else b"{}"
 
         try:
@@ -2684,6 +2715,8 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 return
             try:
                 self._send_json(200, _write_agent_config_file(content))
+            except ValueError:
+                self._send_json(413, {"error": "config content is too large", "error_code": "config_too_large"})
             except PermissionError:
                 self._send_json(403, {"error": "config.yaml is not writable", "error_code": "config_permission_denied"})
             except OSError as exc:

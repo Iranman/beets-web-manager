@@ -43,6 +43,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 IMAGE_TAG = "ghcr.io/iranman/beets-web-manager:test-firstrun"
+ENGINE_IMAGE_TAG = "ghcr.io/iranman/beets-engine:test-firstrun"
 COMPOSE_FILE = str(ROOT / "docker-compose.full.yml")
 
 _FAILURES = []
@@ -80,6 +81,17 @@ def require_docker():
 
 
 def build_image():
+    print("==> Building Beets engine image from current source (control agent is code under test)...")
+    res = run([
+        "docker", "build", "-f", str(ROOT / "Dockerfile.beets"), "-t", ENGINE_IMAGE_TAG,
+        "--build-arg", "VCS_REF=test-local-firstrun-auth",
+        "--build-arg", "VERSION=test-firstrun",
+        str(ROOT),
+    ], capture_output=False)
+    if res is not None and getattr(res, "returncode", 0) != 0:
+        print("FATAL: Beets engine image build failed.")
+        sys.exit(2)
+
     print("==> Building web-manager image from current source (this is the code under test)...")
     res = run([
         "docker", "build", "-f", str(ROOT / "Dockerfile"), "-t", IMAGE_TAG,
@@ -88,7 +100,7 @@ def build_image():
         str(ROOT),
     ], capture_output=False)
     if res is not None and getattr(res, "returncode", 0) != 0:
-        print("FATAL: image build failed.")
+        print("FATAL: web-manager image build failed.")
         sys.exit(2)
 
 
@@ -117,6 +129,18 @@ class Stack:
         self.webdata_dir = self.tmp / "webdata"
         for d in (self.config_dir, self.music_dir, self.downloads_dir, self.webdata_dir):
             d.mkdir(parents=True, exist_ok=True)
+
+        # BUG-1 fixture: config.yaml is intentionally seeded only in the
+        # Beets engine config mount. docker-compose.full.yml does not mount
+        # this path into beets-web-manager, so /api/config must cross the
+        # beets_client -> control-agent boundary to read it successfully.
+        self.engine_config_content = (
+            "directory: /data/media/music\n"
+            "library: /config/musiclibrary.blb\n"
+            "chroma:\n"
+            "  apikey: acoustid-redaction-fixture\n"
+        )
+        (self.config_dir / "config.yaml").write_text(self.engine_config_content, encoding="utf-8")
 
         if preseed_auth_token is not None:
             token_path = self.webdata_dir / ".auth_token"
@@ -494,22 +518,22 @@ def scenario_v018_upgrade():
         else:
             fail(f"Basic Auth with pre-existing v0.1.8 password -> {code}")
 
-        # BUG-1 (v0.1.12): /api/config used to 500 unconditionally in this
-        # real two-container topology -- it read a local
-        # /config/config.yaml path that only ever exists on the Beets
-        # *engine* container, never the web-manager container. A 500 here
-        # (regardless of whether the fixture engine has a config.yaml, in
-        # which case 200; or genuinely doesn't, in which case a structured
-        # 404/503 through the same beets_client path) proves the old bug is
-        # back; any other status proves the request actually reached the
-        # engine through the control-agent architecture instead of crashing
-        # on a local path that was never mounted.
-        code, _, body = stack.request("/api/config", auth_header=basic_header("admin", initial_pwd))
-        if code == 500:
-            fail(f"BUG-1: GET /api/config returned 500 -- likely reading a local filesystem path again "
-                 f"instead of proxying through beets_client to the engine's own /config mount (body={body[:200]!r})")
+        # BUG-1 (v0.1.12): /api/config must read the Beets engine-owned
+        # config.yaml through beets_client -> control agent. The web-manager
+        # container deliberately has no direct /config/config.yaml access in
+        # this topology, while the engine fixture config above always exists.
+        out, _ = stack.exec_py("beets-web-manager", "import os; print(os.path.exists('/config/config.yaml'))")
+        if out.strip() == "False":
+            ok("BUG-1: beets-web-manager has no direct /config/config.yaml mount")
         else:
-            ok(f"BUG-1: GET /api/config does not 500 in the real two-container topology (code={code})")
+            fail(f"BUG-1: beets-web-manager unexpectedly sees /config/config.yaml directly: {out.strip()!r}")
+
+        code, _, body = stack.request("/api/config", auth_header=basic_header("admin", initial_pwd))
+        if code == 200 and "directory: /data/media/music" in body and "[REDACTED]" in body and "acoustid-redaction-fixture" not in body:
+            ok("BUG-1: GET /api/config succeeds through the engine boundary and redacts engine config secrets")
+        else:
+            fail(f"BUG-1: GET /api/config did not prove engine-side config access/redaction "
+                 f"(code={code}, body={body[:300]!r})")
 
         # Restart preserves legacy established state
         run(["docker", "restart", "beets-web-manager"])

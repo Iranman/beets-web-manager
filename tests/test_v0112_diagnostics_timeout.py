@@ -14,6 +14,7 @@ concurrent callers, and that a timed-out subprocess is actually reaped
 (subprocess.run(..., timeout=...) already guarantees this; asserted here
 rather than assumed).
 """
+import http.client
 import subprocess
 import threading
 import time
@@ -228,6 +229,61 @@ class ThreadedControlAgentServerTests(unittest.TestCase):
             "run_agent() must construct a ThreadingHTTPServer, not the single-threaded HTTPServer, "
             "or a slow /status probe can starve every other endpoint (including /health) behind it",
         )
+
+    def test_health_responds_while_status_handler_is_slow(self):
+        started = threading.Event()
+
+        def slow_status(*, force_refresh=False):
+            started.set()
+            time.sleep(0.75)
+            return {"status": "ok", "service": "beets-control-agent"}
+
+        token = "threaded-health-test-token-000000000000"
+        httpd = control_agent_module.ThreadingHTTPServer(("127.0.0.1", 0), control_agent_module.ControlAgentHandler)
+        httpd.daemon_threads = True
+        server_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        server_thread.start()
+        port = httpd.server_address[1]
+        status_errors = []
+
+        def call_status():
+            try:
+                conn = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+                try:
+                    conn.request("GET", "/status", headers={"Authorization": f"Bearer {token}"})
+                    resp = conn.getresponse()
+                    resp.read()
+                finally:
+                    conn.close()
+            except Exception as exc:  # pragma: no cover - failure path only
+                status_errors.append(exc)
+
+        try:
+            with mock.patch.object(control_agent_module, "BEETS_API_TOKEN", token), \
+                 mock.patch.object(control_agent_module, "_agent_status_payload", side_effect=slow_status):
+                status_thread = threading.Thread(target=call_status)
+                status_thread.start()
+                self.assertTrue(started.wait(1), "slow /status request did not start")
+
+                t0 = time.monotonic()
+                conn = http.client.HTTPConnection("127.0.0.1", port, timeout=1)
+                try:
+                    conn.request("GET", "/health")
+                    resp = conn.getresponse()
+                    body = resp.read().decode("utf-8")
+                finally:
+                    conn.close()
+                elapsed = time.monotonic() - t0
+
+                status_thread.join(timeout=3)
+
+            self.assertIn("beets-control-agent", body)
+            self.assertLess(elapsed, 0.5, "/health should not queue behind a slow /status request")
+            self.assertEqual(status_errors, [])
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+            server_thread.join(timeout=3)
 
 
 if __name__ == "__main__":

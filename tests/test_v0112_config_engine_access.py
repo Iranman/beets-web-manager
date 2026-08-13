@@ -12,6 +12,8 @@ redaction still happens before content reaches the browser.
 """
 import json
 import tempfile
+import threading
+import time
 import unittest
 from io import BytesIO
 from pathlib import Path
@@ -35,7 +37,15 @@ def _split(response):
 
 class ConfigReadableTests(unittest.TestCase):
     def test_get_config_success_returns_redacted_content(self):
-        raw = "musicbrainz:\n  ratelimit: 5\ndiscogs:\n  user_token: super-secret-value\n"
+        raw = (
+            "musicbrainz:\n"
+            "  ratelimit: 5\n"
+            "  pass: mb-password-secret\n"
+            "chroma:\n"
+            "  apikey: acoustid-secret-value\n"
+            "discogs:\n"
+            "  user_token: super-secret-value\n"
+        )
         with app_module.app.test_request_context("/api/config"), \
              mock.patch.object(app_module.beets_client, "get_config",
                                 return_value={"content": raw, "has_backup": True, "backup_ts": 12345.0}):
@@ -44,6 +54,8 @@ class ConfigReadableTests(unittest.TestCase):
         body = response.get_json()
         self.assertTrue(body["ok"])
         self.assertNotIn("super-secret-value", body["content"])
+        self.assertNotIn("mb-password-secret", body["content"])
+        self.assertNotIn("acoustid-secret-value", body["content"])
         self.assertIn("[REDACTED]", body["content"])
         self.assertTrue(body["redacted"])
         self.assertTrue(body["has_backup"])
@@ -91,6 +103,22 @@ class ConfigUnavailableTests(unittest.TestCase):
             status, body = _split(app_module.get_config())
         self.assertEqual(status, 502)
         self.assertEqual(body["code"], "beets_auth_failed")
+
+    def test_structured_agent_50x_preserves_config_error_code(self):
+        with app_module.app.test_request_context("/api/config"), \
+             mock.patch.object(
+                 app_module.beets_client,
+                 "get_config",
+                 side_effect=BeetsUnavailableError(
+                     "Beets Control Agent error: Could not read config.yaml",
+                     error_code="config_read_failed",
+                     status_code=500,
+                 ),
+             ):
+            status, body = _split(app_module.get_config())
+        self.assertEqual(status, 502)
+        self.assertEqual(body["code"], "config_read_failed")
+        self.assertNotEqual(body["code"], "beets_unavailable")
 
 
 class ConfigPermissionDeniedTests(unittest.TestCase):
@@ -141,6 +169,38 @@ class ConfigSaveValidationTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(body["code"], "config_empty")
 
+    def test_save_config_rejects_malformed_json_before_engine_call(self):
+        with app_module.app.test_request_context(
+            "/api/config", method="POST", data="{not-json", content_type="application/json"
+        ), mock.patch.object(app_module.beets_client, "save_config") as mock_save:
+            status, body = _split(app_module.save_config())
+        self.assertEqual(status, 400)
+        self.assertEqual(body["code"], "config_invalid_json")
+        mock_save.assert_not_called()
+
+    def test_save_config_rejects_non_string_content_before_engine_call(self):
+        with app_module.app.test_request_context(
+            "/api/config", method="POST",
+            data=json.dumps({"content": {"path": "not-allowed"}}),
+            content_type="application/json",
+        ), mock.patch.object(app_module.beets_client, "save_config") as mock_save:
+            status, body = _split(app_module.save_config())
+        self.assertEqual(status, 400)
+        self.assertEqual(body["code"], "config_invalid_content")
+        mock_save.assert_not_called()
+
+    def test_save_config_rejects_oversized_content_before_engine_call(self):
+        with app_module.app.test_request_context(
+            "/api/config", method="POST",
+            data=json.dumps({"content": "x" * 9}),
+            content_type="application/json",
+        ), mock.patch.object(app_module, "_CONFIG_CONTENT_MAX_CHARS", 8), \
+             mock.patch.object(app_module.beets_client, "save_config") as mock_save:
+            status, body = _split(app_module.save_config())
+        self.assertEqual(status, 413)
+        self.assertEqual(body["code"], "config_too_large")
+        mock_save.assert_not_called()
+
     def test_save_config_rejects_redacted_placeholder_roundtrip(self):
         placeholder = 'discogs:\n  user_token: "[REDACTED]"\n'
         with app_module.app.test_request_context(
@@ -151,6 +211,20 @@ class ConfigSaveValidationTests(unittest.TestCase):
             status, body = _split(app_module.save_config())
         self.assertEqual(status, 400)
         self.assertEqual(body["code"], "config_redacted_placeholder")
+
+    def test_save_config_engine_too_large_preserves_413(self):
+        with app_module.app.test_request_context(
+            "/api/config", method="POST",
+            data=json.dumps({"content": "musicbrainz:\n  ratelimit: 5\n"}),
+            content_type="application/json",
+        ), mock.patch.object(
+            app_module.beets_client,
+            "save_config",
+            side_effect=BeetsError("too large", error_code="config_too_large", status_code=413),
+        ):
+            status, body = _split(app_module.save_config())
+        self.assertEqual(status, 413)
+        self.assertEqual(body["code"], "config_too_large")
 
     def test_save_config_success(self):
         with app_module.app.test_request_context(
@@ -216,13 +290,16 @@ class ControlAgentConfigEndpointTests(unittest.TestCase):
         return responses[0]
 
     def _post(self, path, body):
+        payload = json.dumps(body).encode("utf-8")
+        return self._post_raw(path, payload)
+
+    def _post_raw(self, path, payload, *, content_length=None):
         handler = ControlAgentHandler.__new__(ControlAgentHandler)
         handler.headers = {"Authorization": "Bearer test-token"}
         handler._authenticate = lambda: True
         handler.path = path
-        payload = json.dumps(body).encode("utf-8")
         handler.rfile = BytesIO(payload)
-        handler.headers["Content-Length"] = str(len(payload))
+        handler.headers["Content-Length"] = str(len(payload) if content_length is None else content_length)
         responses = []
         handler._send_json = lambda code, data: responses.append((code, data))
         handler.do_POST()
@@ -276,6 +353,64 @@ class ControlAgentConfigEndpointTests(unittest.TestCase):
         code, data = self._post("/config", {})
         self.assertEqual(code, 400)
         self.assertEqual(data["error_code"], "config_empty")
+
+    def test_post_config_rejects_invalid_content_length(self):
+        code, data = self._post_raw("/config", b"{}", content_length="not-an-int")
+        self.assertEqual(code, 400)
+        self.assertEqual(data["error"], "Invalid Content-Length")
+
+    def test_post_config_rejects_oversized_request_before_reading_file(self):
+        with mock.patch.object(control_agent_module, "_AGENT_CONFIG_REQUEST_MAX_BYTES", 10):
+            code, data = self._post_raw("/config", b"{" + (b"x" * 64) + b"}")
+        self.assertEqual(code, 413)
+        self.assertEqual(data["error_code"], "config_too_large")
+        self.assertFalse(self.config_path.exists())
+
+    def test_post_config_rejects_oversized_content(self):
+        with mock.patch.object(control_agent_module, "_AGENT_CONFIG_CONTENT_MAX_BYTES", 8), \
+             mock.patch.object(control_agent_module, "_AGENT_CONFIG_REQUEST_MAX_BYTES", 1024):
+            code, data = self._post("/config", {"content": "x" * 9})
+        self.assertEqual(code, 413)
+        self.assertEqual(data["error_code"], "config_too_large")
+        self.assertFalse(self.config_path.exists())
+
+    def test_concurrent_config_writes_are_serialized(self):
+        self.config_path.write_text("version: 0\n", encoding="utf-8")
+        active_copy = 0
+        max_active_copy = 0
+        counter_lock = threading.Lock()
+        errors = []
+        real_copy2 = control_agent_module.shutil.copy2
+
+        def slow_copy2(src, dst, *args, **kwargs):
+            nonlocal active_copy, max_active_copy
+            with counter_lock:
+                active_copy += 1
+                max_active_copy = max(max_active_copy, active_copy)
+            try:
+                time.sleep(0.02)
+                return real_copy2(src, dst, *args, **kwargs)
+            finally:
+                with counter_lock:
+                    active_copy -= 1
+
+        def worker(i):
+            try:
+                control_agent_module._write_agent_config_file(f"version: {i}\n")
+            except Exception as exc:  # pragma: no cover - failure path only
+                errors.append(exc)
+
+        with mock.patch.object(control_agent_module.shutil, "copy2", side_effect=slow_copy2):
+            threads = [threading.Thread(target=worker, args=(i,)) for i in range(1, 8)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=10)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(max_active_copy, 1, "config backup/write operations must not overlap under ThreadingHTTPServer")
+        self.assertIn(self.config_path.read_text(encoding="utf-8"), {f"version: {i}\n" for i in range(1, 8)})
+        self.assertEqual(list(self.config_path.parent.glob("config.yaml.tmp.*")), [])
 
     def test_get_config_permission_denied_is_translated(self):
         with mock.patch.object(control_agent_module, "_read_agent_config_file",

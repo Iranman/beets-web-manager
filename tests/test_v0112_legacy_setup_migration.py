@@ -11,6 +11,7 @@ automatic migration (_migrate_legacy_setup_complete_if_established() in
 routes_setup.py) that now does it on its own.
 """
 import importlib
+import os
 import sys
 import tempfile
 import types
@@ -85,6 +86,18 @@ class LegacySetupCompleteMigrationTests(unittest.TestCase):
 
         self._run_migration()
         self.assertTrue(self.marker.exists())
+
+    def test_environment_password_install_gets_marker_created(self):
+        with mock.patch.dict(os.environ, {"BEETS_WEB_PASSWORD": "EnvConfiguredPassword123!Aa4567890"}, clear=False):
+            self.assertFalse(self.app_module._first_run_setup_required())
+            self._run_migration()
+        self.assertTrue(self.marker.exists())
+
+    def test_token_only_claimed_state_does_not_create_marker(self):
+        self.setup_state_file.write_text("claimed", encoding="utf-8")
+        with mock.patch.dict(os.environ, {"BEETS_WEB_AUTH_TOKEN": "token-only-upgrade-value-000000000000"}, clear=False):
+            self._run_migration()
+        self.assertFalse(self.marker.exists())
 
     # -- already migrated ------------------------------------------------
 

@@ -51052,7 +51052,13 @@ def start_music_format_replacement_retry():
 # content; the browser-facing boundary is where secrets must never cross.
 
 _CONFIG_SECRET_LINE_RE = re.compile(
-    r"(?im)^(\s*(?:api_key|token|user_token|password|secret|client_secret|access_token|refresh_token)\s*:\s*)(.+)$"
+    r"(?im)^(\s*(?:apikey|api_key|api_token|auth_token|token|user_token|pass|password|secret|client_secret|access_token|refresh_token)\s*:\s*)(.+)$"
+)
+_CONFIG_CONTENT_MAX_CHARS = _env_int(
+    "BEETS_CONFIG_CONTENT_MAX_CHARS",
+    1024 * 1024,
+    minimum=1024,
+    maximum=8 * 1024 * 1024,
 )
 
 
@@ -51074,6 +51080,9 @@ _CONFIG_ERROR_RESPONSES = {
     "config_permission_denied": (403, "Beets config.yaml is not accessible (permission denied)."),
     "config_backup_not_found":  (404, "No config.yaml backup found."),
     "config_empty":             (400, "Empty config rejected."),
+    "config_invalid_json":      (400, "Invalid config request body."),
+    "config_invalid_content":   (400, "Config content must be a string."),
+    "config_too_large":         (413, "Config content is too large."),
     "config_read_failed":       (502, "Could not read config.yaml from the Beets engine."),
     "config_write_failed":      (502, "Could not save config.yaml on the Beets engine."),
     "config_revert_failed":     (502, "Could not revert config.yaml on the Beets engine."),
@@ -51092,7 +51101,9 @@ def get_config():
         result = beets_client.get_config()
     except BeetsAuthError:
         return jsonify({"ok": False, "error": "Beets engine authentication failed.", "code": "beets_auth_failed"}), 502
-    except BeetsUnavailableError:
+    except BeetsUnavailableError as exc:
+        if exc.error_code:
+            return _config_error_response(exc)
         return jsonify({"ok": False, "error": "Beets engine is unavailable.", "code": "beets_unavailable"}), 503
     except BeetsError as exc:
         return _config_error_response(exc)
@@ -51108,7 +51119,14 @@ def get_config():
 
 @app.post("/api/config")
 def save_config():
-    content = (request.json or {}).get("content", "")
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "Invalid JSON body", "code": "config_invalid_json"}), 400
+    content = payload.get("content", "")
+    if not isinstance(content, str):
+        return jsonify({"ok": False, "error": "content must be a string", "code": "config_invalid_content"}), 400
+    if len(content) > _CONFIG_CONTENT_MAX_CHARS:
+        return jsonify({"ok": False, "error": "Config content is too large", "code": "config_too_large"}), 413
     if not content.strip():
         return jsonify({"ok": False, "error": "Empty config rejected", "code": "config_empty"}), 400
     if _contains_redacted_config_secret(content):
@@ -51117,7 +51135,9 @@ def save_config():
         result = beets_client.save_config(content)
     except BeetsAuthError:
         return jsonify({"ok": False, "error": "Beets engine authentication failed.", "code": "beets_auth_failed"}), 502
-    except BeetsUnavailableError:
+    except BeetsUnavailableError as exc:
+        if exc.error_code:
+            return _config_error_response(exc)
         return jsonify({"ok": False, "error": "Beets engine is unavailable.", "code": "beets_unavailable"}), 503
     except BeetsError as exc:
         return _config_error_response(exc)
@@ -51130,7 +51150,9 @@ def revert_config():
         beets_client.revert_config()
     except BeetsAuthError:
         return jsonify({"ok": False, "error": "Beets engine authentication failed.", "code": "beets_auth_failed"}), 502
-    except BeetsUnavailableError:
+    except BeetsUnavailableError as exc:
+        if exc.error_code:
+            return _config_error_response(exc)
         return jsonify({"ok": False, "error": "Beets engine is unavailable.", "code": "beets_unavailable"}), 503
     except BeetsError as exc:
         return _config_error_response(exc)
