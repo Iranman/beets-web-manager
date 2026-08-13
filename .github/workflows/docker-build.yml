@@ -171,7 +171,7 @@ jobs:
         run: echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
       - name: Build and push Beets Web Manager image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: Dockerfile
@@ -186,7 +186,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Build and push Beets Engine image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: Dockerfile.beets
