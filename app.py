@@ -43318,6 +43318,18 @@ def _playlist_atomic_json_replace(path: Path,
         PLAYLIST_DIR.resolve(strict=False),
         MUSIC_ROOT.resolve(strict=False),
     ]
+    tf = globals().get("tempfile")
+    if tf:
+        try:
+            allowed_roots.append(Path(tf.gettempdir()).resolve(strict=False))
+        except Exception:
+            pass
+    web_data = globals().get("WEB_MANAGER_DATA_DIR")
+    if web_data:
+        try:
+            allowed_roots.append(Path(web_data).resolve(strict=False))
+        except Exception:
+            pass
     safe = False
     for root in allowed_roots:
         try:
