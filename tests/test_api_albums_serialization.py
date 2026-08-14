@@ -5,12 +5,11 @@ album.item_dir() on RemoteAlbum instances where item_dir is a string attribute
 rather than a bound method.
 """
 
-import json
 import unittest
 from unittest import mock
 
 import app as app_module
-from backend.beets_client import RemoteAlbum, RemoteLibrary
+from backend.beets_client import RemoteAlbum
 
 
 class FakeBeetsAlbumMethod:
@@ -103,10 +102,68 @@ class AlbumDictSerializationTests(unittest.TestCase):
         self.assertEqual(d["album"], "Homework")
         self.assertEqual(d["path"], "/data/media/music/Daft Punk/Homework")
 
+    def test_album_dict_with_remote_album_bytes_item_dir(self):
+        remote_album = RemoteAlbum({
+            "id": 4,
+            "album": "Cliche",
+            "albumartist": "Artiste Accent",
+            "year": 2024,
+            "genre": "Electronic",
+            "mb_albumid": "bytes-mbid",
+            "item_dir": "/data/media/music/Artiste Accent/Cliche".encode("utf-8"),
+            "path": "/data/media/music/Artiste Accent/Cliche",
+        })
+        d = app_module.album_dict(remote_album)
+
+        self.assertEqual(d["path"], "/data/media/music/Artiste Accent/Cliche")
+
+    def test_album_dict_with_non_ascii_path(self):
+        album_path = "/data/media/music/Artiste/Caf\u00e9 del Mar"
+        remote_album = RemoteAlbum({
+            "id": 5,
+            "album": "Cafe del Mar",
+            "albumartist": "Artiste",
+            "item_dir": album_path,
+        })
+        d = app_module.album_dict(remote_album)
+
+        self.assertEqual(d["path"], album_path)
+
+    def test_empty_item_dir_falls_back_to_album_path(self):
+        remote_album = RemoteAlbum({
+            "id": 6,
+            "album": "Fallback",
+            "albumartist": "Artist",
+            "item_dir": "",
+            "path": "/data/media/music/Artist/Fallback",
+        })
+
+        self.assertEqual(app_module._get_album_item_dir(remote_album), "/data/media/music/Artist/Fallback")
+
+    def test_item_dir_takes_precedence_over_path(self):
+        remote_album = RemoteAlbum({
+            "id": 7,
+            "album": "Precedence",
+            "albumartist": "Artist",
+            "item_dir": "/data/media/music/Artist/Precedence",
+            "path": "/data/media/music/Artist/Other",
+        })
+
+        self.assertEqual(app_module._get_album_item_dir(remote_album), "/data/media/music/Artist/Precedence")
+
+    def test_callable_item_dir_programming_errors_propagate(self):
+        class BrokenAlbum(FakeBeetsAlbumMethod):
+            def item_dir(self):
+                raise TypeError("programming error")
+
+        with self.assertRaises(TypeError):
+            app_module._get_album_item_dir(BrokenAlbum())
+
     def test_get_album_item_dir_helper_safety(self):
         self.assertEqual(app_module._get_album_item_dir(None), "")
         self.assertEqual(app_module._get_album_item_dir({"item_dir": "/path/a"}), "/path/a")
         self.assertEqual(app_module._get_album_item_dir({"path": "/path/b"}), "/path/b")
+        self.assertEqual(app_module._get_album_item_dir({"item_dir": None, "path": "/path/fallback"}), "/path/fallback")
         self.assertEqual(app_module._get_album_item_dir(RemoteAlbum({"item_dir": "/path/c"})), "/path/c")
         self.assertEqual(app_module._get_album_item_dir(FakeBeetsAlbumMethod()), "/data/media/music/Daft Punk/Discovery")
 

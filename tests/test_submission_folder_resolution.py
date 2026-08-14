@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 from urllib.parse import urlparse
 
+import app as app_module
+from backend.beets_client import RemoteAlbum
 
 ROOT = Path(__file__).resolve().parents[1]
 ROUTES_SOURCE = ROOT / "routes_submissions.py"
@@ -110,7 +112,7 @@ def _load_namespace(lib: _FakeLib):
         "lib": lib,
         "AUDIO_EXT": frozenset({".flac", ".mp3", ".m4a", ".ogg", ".opus", ".wav"}),
         "_s": lambda value: (value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value or "")),
-        "_get_album_item_dir": lambda album: (album.item_dir() if callable(getattr(album, "item_dir", None)) else (getattr(album, "item_dir", None) or getattr(album, "path", ""))),
+        "_get_album_item_dir": app_module._get_album_item_dir,
         "_build_folder_evidence": _stub_build_folder_evidence,
         "_path_is_under": lambda path, root: True,
         "_SUBMISSION_ALLOWED_ROOTS": (Path("/data/media/music"), Path("/data/torrents/music")),
@@ -138,6 +140,11 @@ def _load_namespace(lib: _FakeLib):
 
 
 class FolderResolutionStateTests(unittest.TestCase):
+    def test_production_module_imports_album_dir_helper(self):
+        import routes_submissions
+
+        self.assertIs(routes_submissions._get_album_item_dir, app_module._get_album_item_dir)
+
     def test_inaccessible_path_is_detected(self):
         ns = _load_namespace(_FakeLib())
         target_type, target_ref, summary, tracks = ns["_resolve_folder_submission_target"]("/definitely/not/a/real/path")
@@ -177,6 +184,28 @@ class FolderResolutionStateTests(unittest.TestCase):
             target_type, target_ref, summary, tracks = ns["_resolve_folder_submission_target"](str(folder))
             self.assertEqual(target_type, "album")
             self.assertEqual(target_ref, 42)
+            self.assertEqual(summary["resolved_state"], "imported_album")
+
+    def test_folder_matching_remote_album_string_item_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            (folder / "01 - Track One.mp3").write_bytes(b"not real audio data")
+            album = RemoteAlbum({"id": 43, "item_dir": str(folder), "album": "Remote Album"})
+            ns = _load_namespace(_FakeLib(albums=[album]))
+            target_type, target_ref, summary, tracks = ns["_resolve_folder_submission_target"](str(folder))
+            self.assertEqual(target_type, "album")
+            self.assertEqual(target_ref, 43)
+            self.assertEqual(summary["resolved_state"], "imported_album")
+
+    def test_folder_matching_remote_album_bytes_item_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            (folder / "01 - Track One.mp3").write_bytes(b"not real audio data")
+            album = RemoteAlbum({"id": 44, "item_dir": str(folder).encode("utf-8"), "album": "Remote Album"})
+            ns = _load_namespace(_FakeLib(albums=[album]))
+            target_type, target_ref, summary, tracks = ns["_resolve_folder_submission_target"](str(folder))
+            self.assertEqual(target_type, "album")
+            self.assertEqual(target_ref, 44)
             self.assertEqual(summary["resolved_state"], "imported_album")
 
     def test_folder_matching_existing_singleton_items_is_detected(self):

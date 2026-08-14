@@ -34,6 +34,7 @@ from app import (  # noqa: E402
     _build_folder_evidence,
     _extract_mb_uuid,
     _fetch_mb_release_tracklist,
+    _get_album_item_dir,
     _invalidate_lib_cache,
     _mb_artist_search_one,
     _path_is_under,

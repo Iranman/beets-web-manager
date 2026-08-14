@@ -51234,11 +51234,15 @@ def _get_album_item_dir(album: Any) -> str:
     val = getattr(album, "item_dir", None) if not isinstance(album, dict) else album.get("item_dir")
     if callable(val):
         try:
-            return _s(val())
-        except Exception:
-            return _s(getattr(album, "path", "") if not isinstance(album, dict) else album.get("path", ""))
-    if val is not None:
-        return _s(val)
+            text = _s(val())
+        except ValueError:
+            text = ""
+        if text:
+            return text
+    elif val is not None:
+        text = _s(val)
+        if text:
+            return text
     if isinstance(album, dict):
         return _s(album.get("path", ""))
     return _s(getattr(album, "path", ""))
