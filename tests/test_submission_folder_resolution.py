@@ -70,6 +70,7 @@ def _load_namespace(lib: _FakeLib):
     tree = ast.parse(ROUTES_SOURCE.read_text(encoding="utf-8"))
     names = {
         "_abs_resolved",
+        "_get_album_item_dir",
         "_find_beets_album_for_folder",
         "_find_beets_items_for_folder",
         "_media_tag_track_payload",
@@ -109,6 +110,7 @@ def _load_namespace(lib: _FakeLib):
         "lib": lib,
         "AUDIO_EXT": frozenset({".flac", ".mp3", ".m4a", ".ogg", ".opus", ".wav"}),
         "_s": lambda value: (value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value or "")),
+        "_get_album_item_dir": lambda album: (album.item_dir() if callable(getattr(album, "item_dir", None)) else (getattr(album, "item_dir", None) or getattr(album, "path", ""))),
         "_build_folder_evidence": _stub_build_folder_evidence,
         "_path_is_under": lambda path, root: True,
         "_SUBMISSION_ALLOWED_ROOTS": (Path("/data/media/music"), Path("/data/torrents/music")),
