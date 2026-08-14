@@ -35,6 +35,144 @@ def _split(response):
     return response.status_code, response.get_json()
 
 
+class ConfigSecretRedactionLinearTimeTests(unittest.TestCase):
+    """Regression tests for the CodeQL py/polynomial-redos fix on PR #80:
+    _CONFIG_SECRET_LINE_RE (a regex run against untrusted, browser-supplied
+    config content) was replaced with a deterministic, linear-time,
+    regex-free line scan (_redact_config_line / _redact_config_content /
+    _contains_redacted_config_secret). These tests prove behavior parity
+    with the old regex-based redaction for all currently supported keys,
+    plus that pathological inputs that would have stressed a backtracking
+    regex complete in effectively constant time."""
+
+    ALL_SECRET_KEYS = (
+        "apikey", "api_key", "api_token", "auth_token", "token", "user_token",
+        "pass", "password", "secret", "client_secret", "access_token",
+        "refresh_token",
+    )
+
+    def test_every_supported_secret_key_is_redacted(self):
+        for key in self.ALL_SECRET_KEYS:
+            raw = f"{key}: super-secret-value-for-{key}\n"
+            out = app_module._redact_config_content(raw)
+            self.assertNotIn(f"super-secret-value-for-{key}", out, key)
+            self.assertIn(f'{key}: "[REDACTED]"', out, key)
+
+    def test_matching_is_case_insensitive(self):
+        raw = "API_TOKEN: MixedCaseSecretValue\nAuth_Token: AnotherSecretValue\n"
+        out = app_module._redact_config_content(raw)
+        self.assertNotIn("MixedCaseSecretValue", out)
+        self.assertNotIn("AnotherSecretValue", out)
+        # Original key spelling/case is preserved in the output line.
+        self.assertIn('API_TOKEN: "[REDACTED]"', out)
+        self.assertIn('Auth_Token: "[REDACTED]"', out)
+
+    def test_indentation_is_preserved(self):
+        raw = "discogs:\n    user_token: nested-secret\n"
+        out = app_module._redact_config_content(raw)
+        self.assertNotIn("nested-secret", out)
+        self.assertIn('    user_token: "[REDACTED]"\n', out)
+
+    def test_harmless_keys_are_untouched(self):
+        raw = "directory: /data/media/music\nratelimit: 5\nlibrary: /config/musiclibrary.blb\n"
+        out = app_module._redact_config_content(raw)
+        self.assertEqual(out, raw)
+
+    def test_normal_config_text_is_unchanged_besides_secrets(self):
+        raw = (
+            "musicbrainz:\n"
+            "  ratelimit: 5\n"
+            "  pass: mb-password-secret\n"
+            "chroma:\n"
+            "  apikey: acoustid-secret-value\n"
+        )
+        out = app_module._redact_config_content(raw)
+        self.assertIn("musicbrainz:\n", out)
+        self.assertIn("  ratelimit: 5\n", out)
+        self.assertIn("chroma:\n", out)
+        self.assertNotIn("mb-password-secret", out)
+        self.assertNotIn("acoustid-secret-value", out)
+
+    def test_lf_and_crlf_both_preserved(self):
+        lf = "pass: secret-lf\nharmless: keep\n"
+        crlf = "pass: secret-crlf\r\nharmless: keep\r\n"
+        out_lf = app_module._redact_config_content(lf)
+        out_crlf = app_module._redact_config_content(crlf)
+        self.assertNotIn("\r", out_lf)
+        self.assertIn('pass: "[REDACTED]"\n', out_lf)
+        self.assertIn("\r\n", out_crlf)
+        self.assertIn('pass: "[REDACTED]"\r\n', out_crlf)
+        self.assertIn("harmless: keep\r\n", out_crlf)
+
+    def test_very_long_whitespace_heavy_input_completes_quickly(self):
+        raw = (" " * 500_000) + "x: y\n" + ("\t" * 200_000) + "\n"
+        start = time.monotonic()
+        app_module._redact_config_content(raw)
+        elapsed = time.monotonic() - start
+        self.assertLess(elapsed, 2.0, "whitespace-heavy input must not exhibit pathological runtime")
+
+    def test_long_non_matching_line_completes_quickly(self):
+        raw = ("not_a_secret_key" * 100_000) + ": some_value\n"
+        start = time.monotonic()
+        app_module._redact_config_content(raw)
+        elapsed = time.monotonic() - start
+        self.assertLess(elapsed, 2.0, "a long non-matching key must not exhibit pathological runtime")
+
+    def test_secret_key_with_very_long_value_completes_quickly_and_is_redacted(self):
+        raw = "password: " + ("y" * 1_000_000) + "\n"
+        start = time.monotonic()
+        out = app_module._redact_config_content(raw)
+        elapsed = time.monotonic() - start
+        self.assertLess(elapsed, 2.0, "a very long secret value must not exhibit pathological runtime")
+        self.assertNotIn("y" * 1000, out)
+        self.assertIn('password: "[REDACTED]"', out)
+
+    def test_text_with_no_colon_is_returned_unchanged(self):
+        raw = "just some prose with no colon at all\nanother plain line\n"
+        self.assertEqual(app_module._redact_config_content(raw), raw)
+
+    def test_text_with_many_colons_completes_quickly(self):
+        raw = (":" * 100_000) + "\n"
+        start = time.monotonic()
+        app_module._redact_config_content(raw)
+        elapsed = time.monotonic() - start
+        self.assertLess(elapsed, 2.0, "many colons on one line must not exhibit pathological runtime")
+
+    def test_actual_secret_values_are_absent_from_redacted_output(self):
+        raw = (
+            "musicbrainz:\n  pass: mb-password-secret\n"
+            "chroma:\n  apikey: acoustid-secret-value\n"
+            "discogs:\n  user_token: super-secret-value\n"
+        )
+        out = app_module._redact_config_content(raw)
+        for secret in ("mb-password-secret", "acoustid-secret-value", "super-secret-value"):
+            self.assertNotIn(secret, out)
+
+    def test_contains_redacted_config_secret_true_for_matching_secret_line(self):
+        placeholder = 'discogs:\n  user_token: "[REDACTED]"\n'
+        self.assertTrue(app_module._contains_redacted_config_secret(placeholder))
+
+    def test_contains_redacted_config_secret_false_for_normal_config(self):
+        raw = "musicbrainz:\n  ratelimit: 5\n"
+        self.assertFalse(app_module._contains_redacted_config_secret(raw))
+
+    def test_contains_redacted_config_secret_false_when_placeholder_text_is_not_a_secret_value(self):
+        """The literal string "[REDACTED]" appearing somewhere that is not
+        the value of a secret key (e.g. free-text notes, or a real secret
+        line elsewhere with a real value) must not trip the save-guard --
+        only a secret key whose own value carries the placeholder should.
+        This is a deliberate precision improvement over the old regex-based
+        check, which only tested for the placeholder string's presence
+        anywhere in the whole document alongside an unrelated secret-key
+        line match."""
+        raw = 'pass: a-real-current-password\nnotes: "[REDACTED]" appeared in an old export, unrelated\n'
+        self.assertFalse(app_module._contains_redacted_config_secret(raw))
+
+    def test_contains_redacted_config_secret_handles_empty_and_none_input(self):
+        self.assertFalse(app_module._contains_redacted_config_secret(""))
+        self.assertFalse(app_module._contains_redacted_config_secret(None))
+
+
 class ConfigReadableTests(unittest.TestCase):
     def test_get_config_success_returns_redacted_content(self):
         raw = (

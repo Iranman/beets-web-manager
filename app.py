@@ -51051,9 +51051,19 @@ def start_music_format_replacement_retry():
 # to the agent: the agent is the trusted internal boundary and returns raw
 # content; the browser-facing boundary is where secrets must never cross.
 
-_CONFIG_SECRET_LINE_RE = re.compile(
-    r"(?im)^(\s*(?:apikey|api_key|api_token|auth_token|token|user_token|pass|password|secret|client_secret|access_token|refresh_token)\s*:\s*)(.+)$"
-)
+# Secret-key line matching used to be a regex
+# (r"(?im)^(\s*(?:apikey|...)\s*:\s*)(.+)$") -- CodeQL (py/polynomial-redos)
+# correctly flagged it as a polynomial-time expression run against
+# uncontrolled (user-supplied) config content, e.g. a line with hundreds of
+# thousands of spaces before a colon. Config text is untrusted input (it
+# round-trips through the browser on every save), so it is replaced with a
+# deterministic, single-pass, O(len(text)) line scan below: no regex,
+# no backtracking, no pathological input.
+_CONFIG_SECRET_KEYS = frozenset({
+    "apikey", "api_key", "api_token", "auth_token", "token", "user_token",
+    "pass", "password", "secret", "client_secret", "access_token",
+    "refresh_token",
+})
 _CONFIG_CONTENT_MAX_CHARS = _env_int(
     "BEETS_CONFIG_CONTENT_MAX_CHARS",
     1024 * 1024,
@@ -51062,12 +51072,44 @@ _CONFIG_CONTENT_MAX_CHARS = _env_int(
 )
 
 
+def _redact_config_line(line: str) -> str:
+    """Redact a single YAML-style "key: value" line if its key is a known
+    secret key, preserving indentation, original key spelling/case, and
+    the line's own ending (LF/CRLF/none). No regex: leading indentation is
+    stripped with a fixed-charset lstrip(), the key is isolated with a
+    single partition() on the first colon, and the key is matched against
+    a fixed set -- every step is O(len(line)), so a single call is
+    O(len(line)) and a full-document scan is O(len(text)) overall."""
+    body = line.rstrip("\r\n")
+    ending = line[len(body):]
+    stripped = body.lstrip(" \t")
+    indent = body[:len(body) - len(stripped)]
+    key_part, sep, _value = stripped.partition(":")
+    if not sep or key_part.strip().lower() not in _CONFIG_SECRET_KEYS:
+        return line
+    return f'{indent}{key_part.rstrip(" \t")}: "{_REDACTED_SECRET}"{ending}'
+
+
 def _redact_config_content(text: str) -> str:
-    return _CONFIG_SECRET_LINE_RE.sub(lambda m: f"{m.group(1)}\"{_REDACTED_SECRET}\"", text or "")
+    if not text:
+        return text or ""
+    return "".join(_redact_config_line(line) for line in text.splitlines(keepends=True))
 
 
 def _contains_redacted_config_secret(text: str) -> bool:
-    return bool(_CONFIG_SECRET_LINE_RE.search(text or "") and _REDACTED_SECRET in (text or ""))
+    """True if a secret-key line's value carries the literal [REDACTED]
+    placeholder -- guards against the browser round-tripping a previously
+    redacted GET response straight back into a POST without supplying a
+    real secret. The cheap substring check short-circuits the common case
+    (no placeholder anywhere) before the linear line scan runs at all."""
+    if not text or _REDACTED_SECRET not in text:
+        return False
+    for line in text.splitlines():
+        stripped = line.lstrip(" \t")
+        key_part, sep, value = stripped.partition(":")
+        if sep and key_part.strip().lower() in _CONFIG_SECRET_KEYS and _REDACTED_SECRET in value:
+            return True
+    return False
 
 
 # Stable (error_code, http_status, message) mapping shared by all three
