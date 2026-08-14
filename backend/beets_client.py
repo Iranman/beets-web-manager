@@ -12,8 +12,19 @@ from typing import Any, Dict, List, Optional
 
 
 class BeetsError(Exception):
-    """Base exception for Beets API client errors."""
-    pass
+    """Base exception for Beets API client errors.
+
+    error_code/status_code carry the agent's own structured error_code
+    field and original HTTP status when available (e.g. "config_not_found"
+    / 404), so callers can build a specific, stable response instead of
+    string-matching the free-text message. Both default to "" / 0 for
+    transport-level failures (BeetsUnavailableError, BeetsAuthError) that
+    never got a structured agent response to read them from.
+    """
+    def __init__(self, message: str, error_code: str = "", status_code: int = 0):
+        super().__init__(message)
+        self.error_code = error_code
+        self.status_code = status_code
 
 
 class BeetsUnavailableError(BeetsError):
@@ -128,15 +139,17 @@ class BeetsClient:
             if exc.code == 401:
                 raise BeetsAuthError("Authentication with Beets Control Agent failed: 401 Unauthorized") from exc
             err_body = ""
+            err_code = ""
             try:
                 err_body = exc.read().decode("utf-8")
                 err_json = json.loads(err_body)
                 msg = err_json.get("error", f"HTTP {exc.code}")
+                err_code = str(err_json.get("error_code") or "")
             except Exception:
                 msg = f"HTTP {exc.code}: {err_body[:200]}"
             if exc.code >= 500:
-                raise BeetsUnavailableError(f"Beets Control Agent error: {msg}") from exc
-            raise BeetsError(f"Beets API request error: {msg}") from exc
+                raise BeetsUnavailableError(f"Beets Control Agent error: {msg}", error_code=err_code, status_code=exc.code) from exc
+            raise BeetsError(f"Beets API request error: {msg}", error_code=err_code, status_code=exc.code) from exc
         except urllib.error.URLError as exc:
             raise BeetsUnavailableError(f"Beets Control Agent is unavailable at {self.base_url}: {exc.reason}") from exc
         except json.JSONDecodeError as exc:
@@ -165,6 +178,26 @@ class BeetsClient:
     def config_status(self) -> Dict[str, Any]:
         """Fetch configuration and database existence status."""
         return self._request("GET", "/config/status", timeout=5.0)
+
+    def get_config(self) -> Dict[str, Any]:
+        """Fetch raw config.yaml content (plus backup metadata) from the
+        engine's own BEETSDIR. The web manager has no local mount of this
+        file in the two-service topology; this is the only access path.
+        Returns {"content": str, "has_backup": bool, "backup_ts": float|None}.
+        Raises BeetsError (with a stable .args[0] message sourced from the
+        agent's own error_code-bearing response) on a caller-facing
+        rejection such as a missing/unreadable file, BeetsUnavailableError
+        on a transport failure."""
+        return self._request("GET", "/config", timeout=10.0)
+
+    def save_config(self, content: str) -> Dict[str, Any]:
+        """Write config.yaml on the engine, backing up the previous version
+        first. Returns {"ok": True, "backed_up": bool}."""
+        return self._request("POST", "/config", {"content": content}, timeout=10.0)
+
+    def revert_config(self) -> Dict[str, Any]:
+        """Restore config.yaml from its most recent engine-side backup."""
+        return self._request("POST", "/config/revert", timeout=10.0)
 
     def raw_sqlite_query(self, sql: str, params: tuple = (), offset: int = 0, limit: int = 1000) -> List[Dict[str, Any]]:
         """Raw SQL is intentionally unavailable; use structured query helpers."""

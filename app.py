@@ -51038,58 +51038,166 @@ def start_music_format_replacement_retry():
     return jsonify({"ok": True, "job_id": job.job_id})
 
 # ── Config editor ─────────────────────────────────────────────────────────────
+#
+# config.yaml lives on the Beets *engine* container's own /config mount, not
+# the web manager's -- the two-service architecture cutover (2026-07-28)
+# gave each its own separate /config volume. This used to read/write a
+# local /config/config.yaml path that never existed in the web-manager
+# container in the real deployed topology, so every call 500'd (BUG-1,
+# found during the v0.1.11 TrueNAS rollout). Routes now proxy through
+# beets_client -> the control agent's /config endpoints (BEETSDIR-relative
+# on the engine side), matching the same architecture already used for
+# library reads/writes. Redaction stays here (unchanged) rather than moving
+# to the agent: the agent is the trusted internal boundary and returns raw
+# content; the browser-facing boundary is where secrets must never cross.
 
-_CONFIG_PATH = Path("/config/config.yaml")
-_CONFIG_BAK  = Path("/config/config.yaml.bak")
-_CONFIG_SECRET_LINE_RE = re.compile(
-    r"(?im)^(\s*(?:api_key|token|user_token|password|secret|client_secret|access_token|refresh_token)\s*:\s*)(.+)$"
+# Secret-key line matching used to be a regex
+# (r"(?im)^(\s*(?:apikey|...)\s*:\s*)(.+)$") -- CodeQL (py/polynomial-redos)
+# correctly flagged it as a polynomial-time expression run against
+# uncontrolled (user-supplied) config content, e.g. a line with hundreds of
+# thousands of spaces before a colon. Config text is untrusted input (it
+# round-trips through the browser on every save), so it is replaced with a
+# deterministic, single-pass, O(len(text)) line scan below: no regex,
+# no backtracking, no pathological input.
+_CONFIG_SECRET_KEYS = frozenset({
+    "apikey", "api_key", "api_token", "auth_token", "token", "user_token",
+    "pass", "password", "secret", "client_secret", "access_token",
+    "refresh_token",
+})
+_CONFIG_CONTENT_MAX_CHARS = _env_int(
+    "BEETS_CONFIG_CONTENT_MAX_CHARS",
+    1024 * 1024,
+    minimum=1024,
+    maximum=8 * 1024 * 1024,
 )
 
 
+def _redact_config_line(line: str) -> str:
+    """Redact a single YAML-style "key: value" line if its key is a known
+    secret key, preserving indentation, original key spelling/case, and
+    the line's own ending (LF/CRLF/none). No regex: leading indentation is
+    stripped with a fixed-charset lstrip(), the key is isolated with a
+    single partition() on the first colon, and the key is matched against
+    a fixed set -- every step is O(len(line)), so a single call is
+    O(len(line)) and a full-document scan is O(len(text)) overall."""
+    body = line.rstrip("\r\n")
+    ending = line[len(body):]
+    stripped = body.lstrip(" \t")
+    indent = body[:len(body) - len(stripped)]
+    key_part, sep, _value = stripped.partition(":")
+    if not sep or key_part.strip().lower() not in _CONFIG_SECRET_KEYS:
+        return line
+    return f'{indent}{key_part.rstrip(" \t")}: "{_REDACTED_SECRET}"{ending}'
+
+
 def _redact_config_content(text: str) -> str:
-    return _CONFIG_SECRET_LINE_RE.sub(lambda m: f"{m.group(1)}\"{_REDACTED_SECRET}\"", text or "")
+    if not text:
+        return text or ""
+    return "".join(_redact_config_line(line) for line in text.splitlines(keepends=True))
 
 
 def _contains_redacted_config_secret(text: str) -> bool:
-    return bool(_CONFIG_SECRET_LINE_RE.search(text or "") and _REDACTED_SECRET in (text or ""))
+    """True if a secret-key line's value carries the literal [REDACTED]
+    placeholder -- guards against the browser round-tripping a previously
+    redacted GET response straight back into a POST without supplying a
+    real secret. The cheap substring check short-circuits the common case
+    (no placeholder anywhere) before the linear line scan runs at all."""
+    if not text or _REDACTED_SECRET not in text:
+        return False
+    for line in text.splitlines():
+        stripped = line.lstrip(" \t")
+        key_part, sep, value = stripped.partition(":")
+        if sep and key_part.strip().lower() in _CONFIG_SECRET_KEYS and _REDACTED_SECRET in value:
+            return True
+    return False
+
+
+# Stable (error_code, http_status, message) mapping shared by all three
+# routes below -- keeps status codes/messages consistent without
+# interpolating raw exception text (which may embed up to 200 characters of
+# an unrecognized upstream error body; see beets_client._request()) into
+# any browser-facing response.
+_CONFIG_ERROR_RESPONSES = {
+    "config_not_found":         (404, "Beets config.yaml not found on the engine."),
+    "config_permission_denied": (403, "Beets config.yaml is not accessible (permission denied)."),
+    "config_backup_not_found":  (404, "No config.yaml backup found."),
+    "config_empty":             (400, "Empty config rejected."),
+    "config_invalid_json":      (400, "Invalid config request body."),
+    "config_invalid_content":   (400, "Config content must be a string."),
+    "config_too_large":         (413, "Config content is too large."),
+    "config_read_failed":       (502, "Could not read config.yaml from the Beets engine."),
+    "config_write_failed":      (502, "Could not save config.yaml on the Beets engine."),
+    "config_revert_failed":     (502, "Could not revert config.yaml on the Beets engine."),
+}
+_CONFIG_ERROR_DEFAULT = (502, "Beets engine returned an unexpected error.")
+
+
+def _config_error_response(exc: "BeetsError"):
+    status, message = _CONFIG_ERROR_RESPONSES.get(exc.error_code, _CONFIG_ERROR_DEFAULT)
+    return jsonify({"ok": False, "error": message, "code": exc.error_code or "config_engine_error"}), status
+
 
 @app.get("/api/config")
 def get_config():
     try:
-        text = _CONFIG_PATH.read_text(encoding="utf-8")
-    except Exception as ex:
-        app.logger.warning("Could not read config.yaml: %s", type(ex).__name__)
-        return jsonify({"ok": False, "error": "Could not read config."}), 500
-    has_bak = _CONFIG_BAK.exists()
-    bak_ts  = _CONFIG_BAK.stat().st_mtime if has_bak else None
-    return jsonify({"ok": True, "content": _redact_config_content(text), "redacted": True, "has_backup": has_bak, "backup_ts": bak_ts})
+        result = beets_client.get_config()
+    except BeetsAuthError:
+        return jsonify({"ok": False, "error": "Beets engine authentication failed.", "code": "beets_auth_failed"}), 502
+    except BeetsUnavailableError as exc:
+        if exc.error_code:
+            return _config_error_response(exc)
+        return jsonify({"ok": False, "error": "Beets engine is unavailable.", "code": "beets_unavailable"}), 503
+    except BeetsError as exc:
+        return _config_error_response(exc)
+    text = str(result.get("content") or "")
+    return jsonify({
+        "ok": True,
+        "content": _redact_config_content(text),
+        "redacted": True,
+        "has_backup": bool(result.get("has_backup")),
+        "backup_ts": result.get("backup_ts"),
+    })
+
 
 @app.post("/api/config")
 def save_config():
-    content = (request.json or {}).get("content", "")
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "Invalid JSON body", "code": "config_invalid_json"}), 400
+    content = payload.get("content", "")
+    if not isinstance(content, str):
+        return jsonify({"ok": False, "error": "content must be a string", "code": "config_invalid_content"}), 400
+    if len(content) > _CONFIG_CONTENT_MAX_CHARS:
+        return jsonify({"ok": False, "error": "Config content is too large", "code": "config_too_large"}), 413
     if not content.strip():
-        return jsonify({"ok": False, "error": "Empty config rejected"}), 400
+        return jsonify({"ok": False, "error": "Empty config rejected", "code": "config_empty"}), 400
     if _contains_redacted_config_secret(content):
-        return jsonify({"ok": False, "error": "Refusing to save redacted secret placeholders"}), 400
+        return jsonify({"ok": False, "error": "Refusing to save redacted secret placeholders", "code": "config_redacted_placeholder"}), 400
     try:
-        # backup current before overwriting
-        if _CONFIG_PATH.exists():
-            shutil.copy2(str(_CONFIG_PATH), str(_CONFIG_BAK))
-        _CONFIG_PATH.write_text(content, encoding="utf-8")
-    except Exception as ex:
-        app.logger.warning("Could not save config.yaml: %s", type(ex).__name__)
-        return jsonify({"ok": False, "error": "Could not save config."}), 500
-    return jsonify({"ok": True, "backed_up": _CONFIG_BAK.exists()})
+        result = beets_client.save_config(content)
+    except BeetsAuthError:
+        return jsonify({"ok": False, "error": "Beets engine authentication failed.", "code": "beets_auth_failed"}), 502
+    except BeetsUnavailableError as exc:
+        if exc.error_code:
+            return _config_error_response(exc)
+        return jsonify({"ok": False, "error": "Beets engine is unavailable.", "code": "beets_unavailable"}), 503
+    except BeetsError as exc:
+        return _config_error_response(exc)
+    return jsonify({"ok": True, "backed_up": bool(result.get("backed_up"))})
+
 
 @app.post("/api/config/revert")
 def revert_config():
-    if not _CONFIG_BAK.exists():
-        return jsonify({"ok": False, "error": "No backup found"}), 404
     try:
-        shutil.copy2(str(_CONFIG_BAK), str(_CONFIG_PATH))
-    except Exception as ex:
-        app.logger.warning("Could not revert config.yaml: %s", type(ex).__name__)
-        return jsonify({"ok": False, "error": "Could not revert config."}), 500
+        beets_client.revert_config()
+    except BeetsAuthError:
+        return jsonify({"ok": False, "error": "Beets engine authentication failed.", "code": "beets_auth_failed"}), 502
+    except BeetsUnavailableError as exc:
+        if exc.error_code:
+            return _config_error_response(exc)
+        return jsonify({"ok": False, "error": "Beets engine is unavailable.", "code": "beets_unavailable"}), 503
+    except BeetsError as exc:
+        return _config_error_response(exc)
     return jsonify({"ok": True})
 
 # ── Data helpers ──────────────────────────────────────────────────────────────

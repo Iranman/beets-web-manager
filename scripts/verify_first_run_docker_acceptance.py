@@ -43,6 +43,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 IMAGE_TAG = "ghcr.io/iranman/beets-web-manager:test-firstrun"
+ENGINE_IMAGE_TAG = "ghcr.io/iranman/beets-engine:test-firstrun"
 COMPOSE_FILE = str(ROOT / "docker-compose.full.yml")
 
 _FAILURES = []
@@ -80,6 +81,17 @@ def require_docker():
 
 
 def build_image():
+    print("==> Building Beets engine image from current source (control agent is code under test)...")
+    res = run([
+        "docker", "build", "-f", str(ROOT / "Dockerfile.beets"), "-t", ENGINE_IMAGE_TAG,
+        "--build-arg", "VCS_REF=test-local-firstrun-auth",
+        "--build-arg", "VERSION=test-firstrun",
+        str(ROOT),
+    ], capture_output=False)
+    if res is not None and getattr(res, "returncode", 0) != 0:
+        print("FATAL: Beets engine image build failed.")
+        sys.exit(2)
+
     print("==> Building web-manager image from current source (this is the code under test)...")
     res = run([
         "docker", "build", "-f", str(ROOT / "Dockerfile"), "-t", IMAGE_TAG,
@@ -88,7 +100,7 @@ def build_image():
         str(ROOT),
     ], capture_output=False)
     if res is not None and getattr(res, "returncode", 0) != 0:
-        print("FATAL: image build failed.")
+        print("FATAL: web-manager image build failed.")
         sys.exit(2)
 
 
@@ -117,6 +129,18 @@ class Stack:
         self.webdata_dir = self.tmp / "webdata"
         for d in (self.config_dir, self.music_dir, self.downloads_dir, self.webdata_dir):
             d.mkdir(parents=True, exist_ok=True)
+
+        # BUG-1 fixture: config.yaml is intentionally seeded only in the
+        # Beets engine config mount. docker-compose.full.yml does not mount
+        # this path into beets-web-manager, so /api/config must cross the
+        # beets_client -> control-agent boundary to read it successfully.
+        self.engine_config_content = (
+            "directory: /data/media/music\n"
+            "library: /config/musiclibrary.blb\n"
+            "chroma:\n"
+            "  apikey: acoustid-redaction-fixture\n"
+        )
+        (self.config_dir / "config.yaml").write_text(self.engine_config_content, encoding="utf-8")
 
         if preseed_auth_token is not None:
             token_path = self.webdata_dir / ".auth_token"
@@ -333,6 +357,33 @@ def scenario_fresh_install():
         else:
             fail(f"Bearer token auth -> {code}, expected 200")
 
+        # 8b. BUG-3 (v0.1.12): the setup-status beets diagnostics payload
+        # carries the new diagnostics_fresh/diagnostics_cache_age_seconds
+        # fields end to end from the control agent's cached probe, through
+        # _beets_plugin_diagnostics(), into the browser-facing response --
+        # and a second call shortly after the first is fast (cache hit),
+        # not a repeat multi-second `beet version` subprocess launch.
+        t0 = time.monotonic()
+        code, _, body = stack.request("/api/setup/status?refresh=1", auth_header=bearer_header("firstrun-test-bearer-token-not-real-0000"))
+        first_call_seconds = time.monotonic() - t0
+        try:
+            beets_diag = json.loads(body).get("beets", {})
+            has_freshness_field = "diagnostics_fresh" in beets_diag
+        except Exception:
+            has_freshness_field = False
+        if code == 200 and has_freshness_field:
+            ok(f"BUG-3: /api/setup/status beets diagnostics include diagnostics_fresh (first call {first_call_seconds:.2f}s)")
+        else:
+            fail(f"BUG-3: /api/setup/status beets diagnostics missing diagnostics_fresh field (code={code})")
+
+        t0 = time.monotonic()
+        code, _, _ = stack.request("/api/setup/status", auth_header=bearer_header("firstrun-test-bearer-token-not-real-0000"))
+        second_call_seconds = time.monotonic() - t0
+        if code == 200 and second_call_seconds < 3.0:
+            ok(f"BUG-3: cached /api/setup/status call is fast ({second_call_seconds:.2f}s, no repeat subprocess launch)")
+        else:
+            fail(f"BUG-3: cached /api/setup/status call took {second_call_seconds:.2f}s (code={code}), expected <3s")
+
         # 9. BEETS_API_TOKEN (engine token) cannot authenticate Web Manager API
         code, _, _ = stack.request("/api/setup/env", auth_header=bearer_header("firstrun-test-engine-token-not-real-0000"))
         if code == 401:
@@ -430,6 +481,24 @@ def scenario_v018_upgrade():
         else:
             fail(f"first-run setup was unexpectedly active on v0.1.8 upgrade (code={code}, required={first_run_req})")
 
+        # BUG-2 (v0.1.12): a legacy-established install (exactly this
+        # scenario -- valid credential, first_run_required=false) must
+        # automatically get setup_complete=true without any user action.
+        # This was the real production bug: it stayed false forever
+        # because nothing in this install's history ever called
+        # POST /api/setup/complete, and the frontend's route guard sends
+        # an authenticated-but-not-setup_complete visitor to the setup
+        # wizard instead of their dashboard on every visit.
+        try:
+            setup_complete = status_data.get("setup_complete")
+        except Exception:
+            setup_complete = None
+        if setup_complete is True:
+            ok("BUG-2: legacy-established install automatically reports setup_complete=true (no manual fix needed)")
+        else:
+            fail(f"BUG-2: legacy-established install reports setup_complete={setup_complete!r}, expected true -- "
+                 "an authenticated admin would be sent to the setup wizard instead of their dashboard")
+
         # Anonymous POST /api/setup/first-run must be DENIED (409 Conflict)
         code, _, _ = stack.request(
             "/api/setup/first-run",
@@ -448,6 +517,23 @@ def scenario_v018_upgrade():
             ok("Basic Auth with pre-existing v0.1.8 .initial_admin_password -> 200 OK")
         else:
             fail(f"Basic Auth with pre-existing v0.1.8 password -> {code}")
+
+        # BUG-1 (v0.1.12): /api/config must read the Beets engine-owned
+        # config.yaml through beets_client -> control agent. The web-manager
+        # container deliberately has no direct /config/config.yaml access in
+        # this topology, while the engine fixture config above always exists.
+        out, _ = stack.exec_py("beets-web-manager", "import os; print(os.path.exists('/config/config.yaml'))")
+        if out.strip() == "False":
+            ok("BUG-1: beets-web-manager has no direct /config/config.yaml mount")
+        else:
+            fail(f"BUG-1: beets-web-manager unexpectedly sees /config/config.yaml directly: {out.strip()!r}")
+
+        code, _, body = stack.request("/api/config", auth_header=basic_header("admin", initial_pwd))
+        if code == 200 and "directory: /data/media/music" in body and "[REDACTED]" in body and "acoustid-redaction-fixture" not in body:
+            ok("BUG-1: GET /api/config succeeds through the engine boundary and redacts engine config secrets")
+        else:
+            fail(f"BUG-1: GET /api/config did not prove engine-side config access/redaction "
+                 f"(code={code}, body={body[:300]!r})")
 
         # Restart preserves legacy established state
         run(["docker", "restart", "beets-web-manager"])

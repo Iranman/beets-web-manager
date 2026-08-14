@@ -84,11 +84,13 @@ If this ambiguity trips you up, that's expected -- treat "Deployment setting" (C
 
 ## Beets config
 
-The authoritative Beets config is `/config/config.yaml` in the `beets` engine container. The web manager does not own a second Beets config.
+The authoritative Beets config is `/config/config.yaml` in the `beets` engine container. The web manager does not own a second Beets config, and -- since the two-service architecture cutover (2026-07-28) -- has no local mount of this file at all; its own `/config` volume is a separate, unrelated directory for its own app state.
+
+The Settings page's config editor (`GET/POST /api/config`, `POST /api/config/revert`) therefore does not touch a local filesystem path. It proxies through `beets_client` to dedicated control-agent endpoints (`GET/POST /config`, `POST /config/revert` on the agent, BEETSDIR-relative, never a client-supplied path) that read/write the engine's own `config.yaml`. Secret-line redaction (API keys, tokens, passwords) still happens in the web manager, at the boundary before content reaches the browser -- the agent returns raw content across the trusted internal network only. An earlier version of these routes read/wrote a local `/config/config.yaml` path directly, which never existed in the real deployed topology and made the config editor unconditionally return 500 (fixed in v0.1.12; see `docs/TECHNICAL_DEBT.md`).
 
 The engine image includes the bundled `discpath` plugin under `/opt/beets-web-manager-agent/beetsplug`; user plugins can be mounted under `/config/beetsplug`. Configure `pluginpath` so `/config/beetsplug` is searched before the bundled path.
 
-`/api/health` is a web-manager liveness check. `/health/ready` and `/api/setup/status` query the remote control agent for Beets readiness and fail closed when the engine is unreachable or rejects authentication.
+`/api/health` is a web-manager liveness check. `/health/ready` and `/api/setup/status` query the remote control agent for Beets readiness and fail closed when the engine is unreachable or rejects authentication. The control agent's own `/status` (deep plugin/version diagnostics) is single-flight cached for `BEETS_VERSION_CACHE_TTL_SECONDS` (default 30s) and, on a transient probe failure, keeps serving the last known-good plugin list (marked `diagnostics_fresh: false`) rather than reporting a false `0 plugins loaded` -- see v0.1.12's BUG-3 fix in `docs/TECHNICAL_DEBT.md`. Its own `/health` liveness check is a hardcoded, dependency-free response, served by a threaded HTTP server so a slow `/status` probe elsewhere can never block it.
 
 ## Authentication and sessions
 
