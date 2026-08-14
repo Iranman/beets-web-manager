@@ -41602,26 +41602,17 @@ def _match_track(artist, title):
     return item, round(float(payload.get("score") or 0), 3)
 
 
-def _get_app_config_root(name: str, fallback: Path) -> Path:
-    val = globals().get(name, fallback)
-    if val:
-        return Path(val)
-    return fallback
-
-
 def _playlist_resolve_item_path(path_value: Any) -> Path:
     raw = _s(path_value).strip()
-    music_root = _get_app_config_root("MUSIC_ROOT", MUSIC_ROOT)
-    dl_root = _get_app_config_root("PLAYLIST_DOWNLOAD_ROOT", PLAYLIST_DOWNLOAD_ROOT)
     if not raw:
-        return music_root
+        return MUSIC_ROOT
     path = Path(raw)
     if path.is_absolute():
         try:
             resolved = path.resolve(strict=False)
             allowed_roots = [
-                music_root.resolve(strict=False),
-                dl_root.resolve(strict=False),
+                MUSIC_ROOT.resolve(strict=False),
+                PLAYLIST_DOWNLOAD_ROOT.resolve(strict=False),
                 DOWNLOADS_ROOT.resolve(strict=False),
             ]
             for alias in PLAYLIST_PATH_ROOT_ALIASES:
@@ -41637,8 +41628,8 @@ def _playlist_resolve_item_path(path_value: Any) -> Path:
                     pass
         except Exception:
             pass
-        return music_root / path.name
-    return music_root / raw
+        return MUSIC_ROOT / path.name
+    return MUSIC_ROOT / raw
 
 
 def _playlist_source_guess(item, path_text: str) -> str:
@@ -41834,8 +41825,7 @@ def get_playlist_staging_root(playlist: Any) -> Path:
         name = playlist.get("name") or playlist.get("playlist_name") or playlist.get("playlist") or "Playlist"
     else:
         name = playlist
-    download_root = _get_app_config_root("PLAYLIST_DOWNLOAD_ROOT", PLAYLIST_DOWNLOAD_ROOT)
-    return download_root / _playlist_slug(_clean_playlist_name(_s(name)))
+    return PLAYLIST_DOWNLOAD_ROOT / _playlist_slug(_clean_playlist_name(_s(name)))
 
 
 def _playlist_staging_dir(name: str) -> Path:
@@ -41857,8 +41847,7 @@ def _playlist_staging_manifest_path(name: str) -> Path:
 def _playlist_ensure_staging_dirs(name: str) -> None:
     clean_name = _clean_playlist_name(name)
     root = get_playlist_staging_root(clean_name)
-    download_root = _get_app_config_root("PLAYLIST_DOWNLOAD_ROOT", PLAYLIST_DOWNLOAD_ROOT)
-    staging_base = download_root.resolve(strict=False)
+    staging_base = PLAYLIST_DOWNLOAD_ROOT.resolve(strict=False)
     resolved_root = root.resolve(strict=False)
     try:
         resolved_root.relative_to(staging_base)
@@ -41878,12 +41867,11 @@ def _playlist_ensure_staging_dirs(name: str) -> None:
 def _playlist_legacy_staging_dirs(name: str) -> List[Path]:
     clean_name = _clean_playlist_name(name)
     stable_root = get_playlist_staging_root(clean_name).resolve(strict=False)
-    download_root = _get_app_config_root("PLAYLIST_DOWNLOAD_ROOT", PLAYLIST_DOWNLOAD_ROOT)
-    if not download_root.exists():
+    if not PLAYLIST_DOWNLOAD_ROOT.exists():
         return []
     prefixes = {f"{clean_name} - "}
     dirs: List[Path] = []
-    for path in download_root.iterdir():
+    for path in PLAYLIST_DOWNLOAD_ROOT.iterdir():
         if not path.is_dir():
             continue
         try:
@@ -43298,8 +43286,7 @@ def _plex_track_keys_for_items(section_key, items, log=None, wait_seconds=0, *,
 
 
 def _playlist_manifest_path(name: str) -> Path:
-    playlist_dir = _get_app_config_root("PLAYLIST_DIR", PLAYLIST_DIR)
-    return playlist_dir / f"{_clean_playlist_name(name)}.playlist.json"
+    return PLAYLIST_DIR / f"{_clean_playlist_name(name)}.playlist.json"
 
 
 _PLAYLIST_MANIFEST_LOCKS: Dict[str, Any] = {}
@@ -43326,15 +43313,17 @@ def _playlist_atomic_json_replace(path: Path,
                                   sort_keys: bool = False) -> None:
     path = Path(path)
     resolved_path = path.resolve(strict=False)
-    dl_root = Path(globals().get("PLAYLIST_DOWNLOAD_ROOT", PLAYLIST_DOWNLOAD_ROOT) or PLAYLIST_DOWNLOAD_ROOT)
-    pl_dir = Path(globals().get("PLAYLIST_DIR", PLAYLIST_DIR) or PLAYLIST_DIR)
-    music_root = Path(globals().get("MUSIC_ROOT", MUSIC_ROOT) or MUSIC_ROOT)
     allowed_roots = [
-        dl_root.resolve(strict=False),
-        pl_dir.resolve(strict=False),
-        music_root.resolve(strict=False),
+        PLAYLIST_DOWNLOAD_ROOT.resolve(strict=False),
+        PLAYLIST_DIR.resolve(strict=False),
+        MUSIC_ROOT.resolve(strict=False),
     ]
-
+    tf = globals().get("tempfile")
+    if tf:
+        try:
+            allowed_roots.append(Path(tf.gettempdir()).resolve(strict=False))
+        except Exception:
+            pass
     web_data = globals().get("WEB_MANAGER_DATA_DIR")
     if web_data:
         try:
@@ -43771,11 +43760,10 @@ def _create_playlist_outputs(name, items, *, log=None, replace_plex=True,
     if not items:
         raise RuntimeError("No tracks to add")
 
-    playlist_dir = _get_app_config_root("PLAYLIST_DIR", PLAYLIST_DIR)
-    playlist_dir.mkdir(parents=True, exist_ok=True)
-    m3u = playlist_dir / f"{name}.m3u"
+    PLAYLIST_DIR.mkdir(parents=True, exist_ok=True)
+    m3u = PLAYLIST_DIR / f"{name}.m3u"
     resolved_m3u = m3u.resolve(strict=False)
-    if not _path_is_under(resolved_m3u, playlist_dir.resolve(strict=False)):
+    if not _path_is_under(resolved_m3u, PLAYLIST_DIR.resolve(strict=False)):
         raise ValueError(f"M3U playlist path '{m3u}' is outside playlists directory")
 
     lines = ["#EXTM3U"]
@@ -48967,10 +48955,8 @@ def _playlist_delete_staged_track_file(name: str,
         raise RuntimeError("No staged download is recorded for this track")
     path = Path(raw_path)
     resolved_path = path.resolve(strict=False)
-    dl_root = Path(globals().get("PLAYLIST_DOWNLOAD_ROOT", PLAYLIST_DOWNLOAD_ROOT) or PLAYLIST_DOWNLOAD_ROOT)
-    music_root = Path(globals().get("MUSIC_ROOT", MUSIC_ROOT) or MUSIC_ROOT)
-    staging_root = dl_root.resolve(strict=False)
-    library_root = music_root.resolve(strict=False)
+    staging_root = PLAYLIST_DOWNLOAD_ROOT.resolve(strict=False)
+    library_root = MUSIC_ROOT.resolve(strict=False)
     playlist_staging = get_playlist_staging_root(clean_name).resolve(strict=False)
 
     is_in_library = False
