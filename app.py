@@ -41602,24 +41602,37 @@ def _match_track(artist, title):
     return item, round(float(payload.get("score") or 0), 3)
 
 
+# Deliberately absolute, deliberately never a real filesystem location in
+# any supported deployment: the safe "could not resolve to an authorized
+# path" return value for _playlist_resolve_item_path(). Every call site
+# treats it as any other Path (SEC-002 Wave 9 final review found 11 call
+# sites; changing the return type to Optional[Path] would ripple across
+# all of them), but since it is guaranteed to never .exists() and is
+# guaranteed to fail containment under MUSIC_ROOT/any allowed root, every
+# caller's own existence/containment check already fails closed on it --
+# without inventing a plausible-looking library path from attacker input
+# the way the previous MUSIC_ROOT / path.name fallback did.
+_PLAYLIST_UNRESOLVED_PATH = Path("/nonexistent/beets-web-manager-unresolved-playlist-path")
+
+
 def _playlist_resolve_item_path(path_value: Any) -> Path:
     raw = _s(path_value).strip()
     if not raw:
-        return MUSIC_ROOT
+        return _PLAYLIST_UNRESOLVED_PATH
     path = Path(raw)
+    allowed_roots = [
+        MUSIC_ROOT.resolve(strict=False),
+        PLAYLIST_DOWNLOAD_ROOT.resolve(strict=False),
+        DOWNLOADS_ROOT.resolve(strict=False),
+    ]
+    for alias in PLAYLIST_PATH_ROOT_ALIASES:
+        try:
+            allowed_roots.append(Path(alias).resolve(strict=False))
+        except Exception:
+            pass
     if path.is_absolute():
         try:
             resolved = path.resolve(strict=False)
-            allowed_roots = [
-                MUSIC_ROOT.resolve(strict=False),
-                PLAYLIST_DOWNLOAD_ROOT.resolve(strict=False),
-                DOWNLOADS_ROOT.resolve(strict=False),
-            ]
-            for alias in PLAYLIST_PATH_ROOT_ALIASES:
-                try:
-                    allowed_roots.append(Path(alias).resolve(strict=False))
-                except Exception:
-                    pass
             for root in allowed_roots:
                 try:
                     resolved.relative_to(root)
@@ -41628,8 +41641,24 @@ def _playlist_resolve_item_path(path_value: Any) -> Path:
                     pass
         except Exception:
             pass
-        return MUSIC_ROOT / path.name
-    return MUSIC_ROOT / raw
+        # Unauthorized absolute input (e.g. /etc/passwd, or a real file
+        # under an unrelated root such as /data/media/music2) must not be
+        # silently reinterpreted as MUSIC_ROOT / path.name -- that invents
+        # a new, different, plausible-looking library path from attacker
+        # input instead of rejecting it (SEC-002 Wave 9 final review).
+        return _PLAYLIST_UNRESOLVED_PATH
+    # Relative input: join under MUSIC_ROOT (the historical, intended
+    # behavior for a library-relative path), but verify the *resolved*
+    # result still lands under MUSIC_ROOT before returning it -- a
+    # relative traversal string such as "../../../etc/passwd" would
+    # otherwise resolve outside MUSIC_ROOT the moment any caller calls
+    # .resolve()/.exists() on the returned path.
+    candidate = MUSIC_ROOT / raw
+    try:
+        candidate.resolve(strict=False).relative_to(MUSIC_ROOT.resolve(strict=False))
+    except Exception:
+        return _PLAYLIST_UNRESOLVED_PATH
+    return candidate
 
 
 def _playlist_source_guess(item, path_text: str) -> str:
@@ -43313,17 +43342,39 @@ def _playlist_atomic_json_replace(path: Path,
                                   sort_keys: bool = False) -> None:
     path = Path(path)
     resolved_path = path.resolve(strict=False)
+    # Narrowly scoped to the roots real callers actually write under (all
+    # 4 production call sites verified: staging manifest under
+    # PLAYLIST_DOWNLOAD_ROOT, playlist manifests under PLAYLIST_DIR, job
+    # checkpoints under PLAYLIST_JOB_STATE_DIR). MUSIC_ROOT and the whole
+    # system temp directory were previously included with no production
+    # caller ever targeting either -- MUSIC_ROOT is Beets-engine-owned
+    # media, not web-manager state, and a process-wide /tmp is not an
+    # application-owned root; both were removed (SEC-002 Wave 9 final
+    # review). PLAYLIST_JOB_STATE_DIR was previously *missing* from this
+    # list entirely, which meant _playlist_save_job_state() always raised
+    # ValueError in every environment -- added here as a genuine fix, not
+    # a widening (it is the one real caller this helper was missing).
     allowed_roots = [
         PLAYLIST_DOWNLOAD_ROOT.resolve(strict=False),
         PLAYLIST_DIR.resolve(strict=False),
-        MUSIC_ROOT.resolve(strict=False),
     ]
-    tf = globals().get("tempfile")
-    if tf:
+    # globals().get(...), not a direct name reference, for both of these:
+    # some test harnesses exec just this function's AST in a narrower
+    # namespace (see tests/test_playlist_pipeline.py's load_function) that
+    # does not define every module-level root, and this must degrade
+    # gracefully rather than NameError in that context, matching the
+    # existing style already used here.
+    job_state_dir = globals().get("PLAYLIST_JOB_STATE_DIR")
+    if job_state_dir:
         try:
-            allowed_roots.append(Path(tf.gettempdir()).resolve(strict=False))
+            allowed_roots.append(Path(job_state_dir).resolve(strict=False))
         except Exception:
             pass
+    # Test-only injection point: allows tests to add an isolated temporary
+    # root without monkeypatching every real root above. Never populated
+    # in production -- WEB_MANAGER_DATA_DIR is not a module-level name in
+    # app.py itself (it is only ever added to app_module's namespace by a
+    # test's mock.patch.object).
     web_data = globals().get("WEB_MANAGER_DATA_DIR")
     if web_data:
         try:
@@ -48955,8 +49006,16 @@ def _playlist_delete_staged_track_file(name: str,
         raise RuntimeError("No staged download is recorded for this track")
     path = Path(raw_path)
     resolved_path = path.resolve(strict=False)
-    staging_root = PLAYLIST_DOWNLOAD_ROOT.resolve(strict=False)
+    # Deliberately NOT the broad, shared PLAYLIST_DOWNLOAD_ROOT here: every
+    # playlist's staged files live under its own get_playlist_staging_root()
+    # subdirectory, and containment against the *shared* parent would let a
+    # browser-supplied requested_path (or a stale/tampered manifest entry)
+    # for playlist A authorize deleting a staged file that actually belongs
+    # to playlist B, since both are nested under the same shared root
+    # (SEC-002 Wave 9 final review: cross-playlist staged-deletion gap).
+    # Authorization is scoped to this playlist's own staging root only.
     library_root = MUSIC_ROOT.resolve(strict=False)
+    staging_root = PLAYLIST_DOWNLOAD_ROOT.resolve(strict=False)
     playlist_staging = get_playlist_staging_root(clean_name).resolve(strict=False)
 
     is_in_library = False
@@ -48968,16 +49027,13 @@ def _playlist_delete_staged_track_file(name: str,
     if is_in_library:
         raise RuntimeError("Refusing to delete a Beets library file; this action only deletes playlist staging")
 
-    is_in_staging = False
-    for st_root in (staging_root, playlist_staging):
-        try:
-            resolved_path.relative_to(st_root)
-            is_in_staging = True
-            break
-        except ValueError:
-            pass
+    try:
+        resolved_path.relative_to(playlist_staging)
+        is_in_staging = True
+    except ValueError:
+        is_in_staging = False
     if not is_in_staging:
-        raise RuntimeError("Refusing to delete a file outside playlist download staging")
+        raise RuntimeError("Refusing to delete a file outside this playlist's own staging directory")
 
     if resolved_path in (staging_root, playlist_staging, library_root):
         raise RuntimeError("Refusing to delete staging root directory")
@@ -48989,14 +49045,11 @@ def _playlist_delete_staged_track_file(name: str,
         if not resolved_path.is_file():
             raise RuntimeError("The staged path is not a file")
         current_resolved = path.resolve(strict=True)
-        current_in_staging = False
-        for st_root in (staging_root, playlist_staging):
-            try:
-                current_resolved.relative_to(st_root)
-                current_in_staging = True
-                break
-            except ValueError:
-                pass
+        try:
+            current_resolved.relative_to(playlist_staging)
+            current_in_staging = True
+        except ValueError:
+            current_in_staging = False
         if not current_in_staging:
             raise RuntimeError("Path resolved outside staging directory during deletion")
         if current_resolved.suffix.lower() not in AUDIO_EXT:

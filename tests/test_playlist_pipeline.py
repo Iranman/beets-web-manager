@@ -218,7 +218,18 @@ class PlaylistPipelineTests(unittest.TestCase):
             library = root_path / "library"
             staging.mkdir()
             library.mkdir()
-            staged_file = staging / "song.mp3"
+            # Nested under this playlist's own staging subfolder, matching
+            # real production layout (_playlist_downloads_dir/_imports_dir
+            # are always get_playlist_staging_root(name) / "downloads" or
+            # "/imports" -- never a bare file directly under the shared
+            # PLAYLIST_DOWNLOAD_ROOT). SEC-002 Wave 9 final review narrowed
+            # staged-deletion containment to this playlist's own staging
+            # root specifically (not the shared parent all playlists sit
+            # under), to close a cross-playlist deletion gap -- so the
+            # fixture must reflect where a real staged file actually lives.
+            playlist_staging = staging / "Road Trip"
+            playlist_staging.mkdir()
+            staged_file = playlist_staging / "song.mp3"
             library_file = library / "song.mp3"
             staged_file.write_bytes(b"audio")
             library_file.write_bytes(b"audio")
