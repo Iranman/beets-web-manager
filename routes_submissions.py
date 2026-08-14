@@ -34,6 +34,7 @@ from app import (  # noqa: E402
     _build_folder_evidence,
     _extract_mb_uuid,
     _fetch_mb_release_tracklist,
+    _get_album_item_dir,
     _invalidate_lib_cache,
     _mb_artist_search_one,
     _path_is_under,
@@ -371,7 +372,7 @@ def _summary_for_album(album, tracks: List[Dict[str, Any]]) -> Dict[str, Any]:
         "track_count": len(tracks),
         "runtime": runtime,
         "runtime_display": _duration_label(runtime),
-        "source_path": _s(album.item_dir()) if hasattr(album, "item_dir") else _s(first.get("file_path") or ""),
+        "source_path": _get_album_item_dir(album) or _s(first.get("file_path") or ""),
         "mb_albumartistid": _s(getattr(album, "mb_albumartistid", "") or "").strip().lower(),
         "mb_albumartistids": _s(getattr(album, "mb_albumartistids", "") or "").strip(),
         "mb_releasegroupid": _s(getattr(album, "mb_releasegroupid", "") or "").strip().lower(),
@@ -425,7 +426,7 @@ def _find_beets_album_for_folder(folder: Path):
     target = str(folder)
     for album in lib.albums():
         try:
-            album_dir = str(Path(album.item_dir()).resolve(strict=False))
+            album_dir = str(Path(_get_album_item_dir(album)).resolve(strict=False))
         except Exception:
             continue
         if album_dir == target:

@@ -10591,10 +10591,7 @@ def _preserve_torrent_source_path(path_value: str | Path) -> bool:
 
 def _album_dir_for_art(album) -> Optional[Path]:
     """Return the album directory under MUSIC_ROOT, if it can be resolved."""
-    try:
-        raw = _s(album.item_dir()) if hasattr(album, "item_dir") else ""
-    except Exception:
-        raw = ""
+    raw = _get_album_item_dir(album)
     if raw:
         aldir = Path(raw)
         if not aldir.is_absolute():
@@ -17820,7 +17817,7 @@ def _apply_ai_preflight_to_suggestion(suggestion: Dict[str, Any],
 
 def _album_preflight_folder(album, tracks: List[Any]) -> str:
     try:
-        album_dir = _s(album.item_dir()).strip()
+        album_dir = _get_album_item_dir(album).strip()
         if album_dir:
             album_path = Path(album_dir)
             if not album_path.is_absolute():
@@ -51230,15 +51227,35 @@ def item_dict_full(item) -> Dict[str, Any]:
     d["format"]  = _s(getattr(item, "format", ""))
     return d
 
+def _get_album_item_dir(album: Any) -> str:
+    """Safely extract directory path from native Beets Album, RemoteAlbum, or dict."""
+    if album is None:
+        return ""
+    val = getattr(album, "item_dir", None) if not isinstance(album, dict) else album.get("item_dir")
+    if callable(val):
+        try:
+            text = _s(val())
+        except ValueError:
+            text = ""
+        if text:
+            return text
+    elif val is not None:
+        text = _s(val)
+        if text:
+            return text
+    if isinstance(album, dict):
+        return _s(album.get("path", ""))
+    return _s(getattr(album, "path", ""))
+
 def album_dict(album) -> Dict[str, Any]:
     return {
-        "id":          album.id,
-        "album":       album.album,
-        "albumartist": album.albumartist,
-        "year":        album.year,
-        "genre":       _s(getattr(album, "genre", "")),
-        "mb_albumid":  album.mb_albumid,
-        "path":        _s(album.item_dir()),
+        "id":          getattr(album, "id", None) if not isinstance(album, dict) else album.get("id"),
+        "album":       _s(getattr(album, "album", "") if not isinstance(album, dict) else album.get("album", "")),
+        "albumartist": _s(getattr(album, "albumartist", "") if not isinstance(album, dict) else album.get("albumartist", "")),
+        "year":        getattr(album, "year", 0) if not isinstance(album, dict) else album.get("year", 0),
+        "genre":       _s(getattr(album, "genre", "") if not isinstance(album, dict) else album.get("genre", "")),
+        "mb_albumid":  _s(getattr(album, "mb_albumid", "") if not isinstance(album, dict) else album.get("mb_albumid", "")),
+        "path":        _get_album_item_dir(album),
     }
 
 
