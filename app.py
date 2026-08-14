@@ -41604,8 +41604,28 @@ def _match_track(artist, title):
 
 def _playlist_resolve_item_path(path_value: Any) -> Path:
     raw = _s(path_value).strip()
+    if not raw:
+        return MUSIC_ROOT
     path = Path(raw)
-    return path if path.is_absolute() else MUSIC_ROOT / raw
+    if path.is_absolute():
+        try:
+            resolved = path.resolve(strict=False)
+            allowed_roots = [
+                MUSIC_ROOT.resolve(strict=False),
+                PLAYLIST_DOWNLOAD_ROOT.resolve(strict=False),
+                DOWNLOADS_ROOT.resolve(strict=False),
+            ]
+            for alias in PLAYLIST_PATH_ROOT_ALIASES:
+                try:
+                    allowed_roots.append(Path(alias).resolve(strict=False))
+                except Exception:
+                    pass
+            if any(_path_is_under(resolved, root) for root in allowed_roots):
+                return path
+        except Exception:
+            pass
+        return MUSIC_ROOT / path.name
+    return MUSIC_ROOT / raw
 
 
 def _playlist_source_guess(item, path_text: str) -> str:
@@ -41770,8 +41790,15 @@ def _match_playlist_tracks(tracks, verify_acoustid: bool = False):
 
 
 def _clean_playlist_name(name):
-    cleaned = re.sub(r'[<>:"/\\|?*]', "_", (name or "Playlist").strip())
-    return cleaned or "Playlist"
+    raw = _s(name).strip()
+    raw = re.sub(r"[\x00-\x1f\x7f-\x9f\u200e\u200f\u202a-\u202e\u2066-\u2069]", "", raw)
+    cleaned = re.sub(r'[<>:"/\\|?*\0]', "_", raw).strip()
+    while ".." in cleaned:
+        cleaned = cleaned.replace("..", "_")
+    cleaned = cleaned.strip("._ ")
+    if not cleaned or cleaned in {".", ".."}:
+        cleaned = "Playlist"
+    return cleaned[:120]
 
 
 def _playlist_slug(value: Any) -> str:
@@ -41814,8 +41841,16 @@ def _playlist_staging_manifest_path(name: str) -> Path:
 
 
 def _playlist_ensure_staging_dirs(name: str) -> None:
-    root = get_playlist_staging_root(name)
+    clean_name = _clean_playlist_name(name)
+    root = get_playlist_staging_root(clean_name)
+    staging_base = PLAYLIST_DOWNLOAD_ROOT.resolve(strict=False)
+    resolved_root = root.resolve(strict=False)
+    if not _path_is_under(resolved_root, staging_base):
+        raise ValueError("Playlist staging root is outside allowed staging directory")
     for path in (root, root / "downloads", root / "imports"):
+        resolved_path = path.resolve(strict=False)
+        if not _path_is_under(resolved_path, staging_base):
+            raise ValueError("Staging sub-path is outside allowed staging directory")
         path.mkdir(parents=True, exist_ok=True)
         try:
             os.chmod(path, 0o775)
@@ -43271,11 +43306,25 @@ def _playlist_atomic_json_replace(path: Path,
                                   indent: Optional[int] = 2,
                                   sort_keys: bool = False) -> None:
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    resolved_path = path.resolve(strict=False)
+    allowed_roots = [
+        PLAYLIST_DOWNLOAD_ROOT.resolve(strict=False),
+        PLAYLIST_DIR.resolve(strict=False),
+        MUSIC_ROOT.resolve(strict=False),
+    ]
+    if not any(_path_is_under(resolved_path, root) for root in allowed_roots):
+        raise ValueError(f"Refusing atomic write to unsafe path outside state roots: {path}")
+
+    parent = path.parent
+    parent.mkdir(parents=True, exist_ok=True)
     safe_key = re.sub(r"[^a-zA-Z0-9_.-]+", "_", _s(save_key).strip())[:80]
     if not safe_key:
         safe_key = str(threading.get_ident())
-    tmp = path.parent / f"{path.stem}.{safe_key}.{int(time.time() * 1000)}.{uuid.uuid4().hex[:8]}.tmp"
+    tmp = parent / f"{path.stem}.{safe_key}.{int(time.time() * 1000)}.{uuid.uuid4().hex[:8]}.tmp"
+    resolved_tmp = tmp.resolve(strict=False)
+    if not any(_path_is_under(resolved_tmp, root) for root in allowed_roots):
+        raise ValueError(f"Refusing atomic write with temporary file outside state roots: {tmp}")
+
     try:
         with tmp.open("w", encoding="utf-8") as handle:
             json.dump(payload, handle, ensure_ascii=False, indent=indent, sort_keys=sort_keys, default=str)
@@ -43679,11 +43728,18 @@ def _create_playlist_outputs(name, items, *, log=None, replace_plex=True,
 
     PLAYLIST_DIR.mkdir(parents=True, exist_ok=True)
     m3u = PLAYLIST_DIR / f"{name}.m3u"
+    resolved_m3u = m3u.resolve(strict=False)
+    if not _path_is_under(resolved_m3u, PLAYLIST_DIR.resolve(strict=False)):
+        raise ValueError(f"M3U playlist path '{m3u}' is outside playlists directory")
+
     lines = ["#EXTM3U"]
     for it in items:
-        lines.append(f"#EXTINF:-1,{it.get('artist','')} - {it.get('title','')}")
-        lines.append(it.get("path", ""))
-    m3u.write_text("\n".join(lines), encoding="utf-8")
+        artist_clean = re.sub(r"[\r\n]+", " ", _s(it.get('artist',''))).strip()
+        title_clean = re.sub(r"[\r\n]+", " ", _s(it.get('title',''))).strip()
+        path_clean = re.sub(r"[\r\n]+", "", _s(it.get('path',''))).strip()
+        lines.append(f"#EXTINF:-1,{artist_clean} - {title_clean}")
+        lines.append(path_clean)
+    m3u.write_text("\n".join(lines) + "\n", encoding="utf-8")
     if log is not None:
         log.append(f"  [playlist] M3U saved: {m3u}")
 
@@ -48857,28 +48913,41 @@ def _playlist_write_local_membership(name: str,
 def _playlist_delete_staged_track_file(name: str,
                                        track: Dict[str, Any],
                                        requested_path: str = "") -> Dict[str, Any]:
-    states = _playlist_manifest_track_states(name)
+    clean_name = _clean_playlist_name(name)
+    states = _playlist_manifest_track_states(clean_name)
     state_row = states.get(_playlist_status_id(track)) or {}
     raw_path = _s(requested_path or state_row.get("staged_path") or state_row.get("path") or "").strip()
     if not raw_path:
         raise RuntimeError("No staged download is recorded for this track")
-    path = Path(raw_path).resolve(strict=False)
+    path = Path(raw_path)
+    resolved_path = path.resolve(strict=False)
     staging_root = PLAYLIST_DOWNLOAD_ROOT.resolve(strict=False)
     library_root = MUSIC_ROOT.resolve(strict=False)
-    if _path_is_under(path, library_root):
+    playlist_staging = get_playlist_staging_root(clean_name).resolve(strict=False)
+
+    if _path_is_under(resolved_path, library_root):
         raise RuntimeError("Refusing to delete a Beets library file; this action only deletes playlist staging")
-    if not _path_is_under(path, staging_root):
+    if not (_path_is_under(resolved_path, staging_root) or _path_is_under(resolved_path, playlist_staging)):
         raise RuntimeError("Refusing to delete a file outside playlist download staging")
+    if resolved_path in (staging_root, playlist_staging, library_root):
+        raise RuntimeError("Refusing to delete staging root directory")
     if path.suffix.lower() not in AUDIO_EXT:
         raise RuntimeError("Refusing to delete a non-audio staging file")
+
     deleted = False
-    if path.exists():
-        if not path.is_file():
+    if resolved_path.exists():
+        if not resolved_path.is_file():
             raise RuntimeError("The staged path is not a file")
+        current_resolved = path.resolve(strict=True)
+        if not (_path_is_under(current_resolved, staging_root) or _path_is_under(current_resolved, playlist_staging)):
+            raise RuntimeError("Path resolved outside staging directory during deletion")
+        if current_resolved.suffix.lower() not in AUDIO_EXT:
+            raise RuntimeError("Resolved target is not a valid audio file")
         path.unlink()
         deleted = True
+
     _playlist_store_track_state(
-        name,
+        clean_name,
         track,
         "removed",
         message="downloaded staging file deleted by user",
@@ -48886,7 +48955,7 @@ def _playlist_delete_staged_track_file(name: str,
         staged_path="",
         path="",
     )
-    return {"deleted": deleted, "path": str(path)}
+    return {"deleted": deleted, "path": str(resolved_path)}
 
 
 def _playlist_apply_track_action(name: str,
