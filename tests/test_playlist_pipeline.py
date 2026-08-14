@@ -31,19 +31,23 @@ def load_function(name, namespace):
 
 
 class PlaylistPipelineTests(unittest.TestCase):
-    def _atomic_save_fn(self, json_module=json):
+    def _atomic_save_fn(self, json_mod=None):
         namespace = {
-            "Any": Any,
             "Dict": Dict,
+            "Any": Any,
             "Optional": Optional,
             "Path": Path,
-            "json": json_module,
-            "os": __import__("os"),
-            "re": re,
-            "threading": threading,
             "time": time,
             "uuid": uuid,
+            "os": os,
+            "json": json_mod or json,
+            "threading": threading,
+            "re": re,
             "_s": lambda value: str(value or ""),
+            "PLAYLIST_DOWNLOAD_ROOT": Path("/data/torrents/music/Playlist Downloads"),
+            "PLAYLIST_DIR": Path("/data/media/music/playlists"),
+            "MUSIC_ROOT": Path("/data/media/music"),
+            "_path_is_under": lambda path, root: True,
         }
         return load_function("_playlist_atomic_json_replace", namespace)
 
@@ -235,6 +239,8 @@ class PlaylistPipelineTests(unittest.TestCase):
                 "AUDIO_EXT": {".mp3"},
                 "_s": lambda value: str(value or ""),
                 "_path_is_under": is_under,
+                "_clean_playlist_name": lambda name: str(name),
+                "get_playlist_staging_root": lambda name: staging / name,
                 "_playlist_manifest_track_states": lambda _name: {
                     "artist|song": {"staged_path": str(staged_file)}
                 },
