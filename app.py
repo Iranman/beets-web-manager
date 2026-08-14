@@ -41620,8 +41620,12 @@ def _playlist_resolve_item_path(path_value: Any) -> Path:
                     allowed_roots.append(Path(alias).resolve(strict=False))
                 except Exception:
                     pass
-            if any(_path_is_under(resolved, root) for root in allowed_roots):
-                return path
+            for root in allowed_roots:
+                try:
+                    resolved.relative_to(root)
+                    return path
+                except ValueError:
+                    pass
         except Exception:
             pass
         return MUSIC_ROOT / path.name
@@ -41845,7 +41849,9 @@ def _playlist_ensure_staging_dirs(name: str) -> None:
     root = get_playlist_staging_root(clean_name)
     staging_base = PLAYLIST_DOWNLOAD_ROOT.resolve(strict=False)
     resolved_root = root.resolve(strict=False)
-    if not _path_is_under(resolved_root, staging_base):
+    try:
+        resolved_root.relative_to(staging_base)
+    except ValueError:
         raise ValueError("Playlist staging root is outside allowed staging directory")
     for path in (root, root / "downloads", root / "imports"):
         resolved_path = path.resolve(strict=False)
@@ -43312,7 +43318,15 @@ def _playlist_atomic_json_replace(path: Path,
         PLAYLIST_DIR.resolve(strict=False),
         MUSIC_ROOT.resolve(strict=False),
     ]
-    if _path_is_under and not any(_path_is_under(resolved_path, root) for root in allowed_roots):
+    safe = False
+    for root in allowed_roots:
+        try:
+            resolved_path.relative_to(root)
+            safe = True
+            break
+        except ValueError:
+            pass
+    if not safe:
         raise ValueError(f"Refusing atomic write to unsafe path outside state roots: {path}")
 
     parent = path.parent
@@ -43322,7 +43336,15 @@ def _playlist_atomic_json_replace(path: Path,
         safe_key = str(threading.get_ident())
     tmp = parent / f"{path.stem}.{safe_key}.{int(time.time() * 1000)}.{uuid.uuid4().hex[:8]}.tmp"
     resolved_tmp = tmp.resolve(strict=False)
-    if _path_is_under and not any(_path_is_under(resolved_tmp, root) for root in allowed_roots):
+    tmp_safe = False
+    for root in allowed_roots:
+        try:
+            resolved_tmp.relative_to(root)
+            tmp_safe = True
+            break
+        except ValueError:
+            pass
+    if not tmp_safe:
         raise ValueError(f"Refusing atomic write with temporary file outside state roots: {tmp}")
 
     try:
@@ -48925,10 +48947,26 @@ def _playlist_delete_staged_track_file(name: str,
     library_root = MUSIC_ROOT.resolve(strict=False)
     playlist_staging = get_playlist_staging_root(clean_name).resolve(strict=False)
 
-    if _path_is_under(resolved_path, library_root):
+    is_in_library = False
+    try:
+        resolved_path.relative_to(library_root)
+        is_in_library = True
+    except ValueError:
+        pass
+    if is_in_library:
         raise RuntimeError("Refusing to delete a Beets library file; this action only deletes playlist staging")
-    if not (_path_is_under(resolved_path, staging_root) or _path_is_under(resolved_path, playlist_staging)):
+
+    is_in_staging = False
+    for st_root in (staging_root, playlist_staging):
+        try:
+            resolved_path.relative_to(st_root)
+            is_in_staging = True
+            break
+        except ValueError:
+            pass
+    if not is_in_staging:
         raise RuntimeError("Refusing to delete a file outside playlist download staging")
+
     if resolved_path in (staging_root, playlist_staging, library_root):
         raise RuntimeError("Refusing to delete staging root directory")
     if path.suffix.lower() not in AUDIO_EXT:
@@ -48939,7 +48977,15 @@ def _playlist_delete_staged_track_file(name: str,
         if not resolved_path.is_file():
             raise RuntimeError("The staged path is not a file")
         current_resolved = path.resolve(strict=True)
-        if not (_path_is_under(current_resolved, staging_root) or _path_is_under(current_resolved, playlist_staging)):
+        current_in_staging = False
+        for st_root in (staging_root, playlist_staging):
+            try:
+                current_resolved.relative_to(st_root)
+                current_in_staging = True
+                break
+            except ValueError:
+                pass
+        if not current_in_staging:
             raise RuntimeError("Path resolved outside staging directory during deletion")
         if current_resolved.suffix.lower() not in AUDIO_EXT:
             raise RuntimeError("Resolved target is not a valid audio file")
