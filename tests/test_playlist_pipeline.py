@@ -31,7 +31,7 @@ def load_function(name, namespace):
 
 
 class PlaylistPipelineTests(unittest.TestCase):
-    def _atomic_save_fn(self, json_mod=None):
+    def _atomic_save_fn(self, json_mod=None, playlist_dir=None):
         namespace = {
             "Dict": Dict,
             "Any": Any,
@@ -46,7 +46,7 @@ class PlaylistPipelineTests(unittest.TestCase):
             "tempfile": __import__("tempfile"),
             "_s": lambda value: str(value or ""),
             "PLAYLIST_DOWNLOAD_ROOT": Path("/data/torrents/music/Playlist Downloads"),
-            "PLAYLIST_DIR": Path("/data/media/music/playlists"),
+            "PLAYLIST_DIR": Path(playlist_dir) if playlist_dir is not None else Path("/data/media/music/playlists"),
             "MUSIC_ROOT": Path("/data/media/music"),
             "_path_is_under": lambda path, root: True,
         }
@@ -101,9 +101,9 @@ class PlaylistPipelineTests(unittest.TestCase):
         self.assertIn("!hasResumablePipeline", PAGE_SOURCE)
 
     def test_atomic_playlist_save_creates_directory_and_replaces_json(self):
-        save_json = self._atomic_save_fn()
         with tempfile.TemporaryDirectory() as root:
             final = Path(root) / "missing" / "Baby Makin.playlist.json"
+            save_json = self._atomic_save_fn(playlist_dir=final.parent)
             save_json(final, {"name": "Baby Makin", "version": 1}, save_key="job-1")
             self.assertTrue(final.exists())
             self.assertEqual(json.loads(final.read_text(encoding="utf-8"))["name"], "Baby Makin")
@@ -117,9 +117,9 @@ class PlaylistPipelineTests(unittest.TestCase):
             def dump(*_args, **_kwargs):
                 raise OSError("write failed")
 
-        save_json = self._atomic_save_fn(FailingJson)
         with tempfile.TemporaryDirectory() as root:
             final = Path(root) / "playlists" / "Baby Makin.playlist.json"
+            save_json = self._atomic_save_fn(FailingJson, playlist_dir=final.parent)
             final.parent.mkdir()
             final.write_text('{"name": "Baby Makin", "version": 1}', encoding="utf-8")
             with self.assertRaises(OSError):
@@ -127,9 +127,9 @@ class PlaylistPipelineTests(unittest.TestCase):
             self.assertEqual(json.loads(final.read_text(encoding="utf-8"))["version"], 1)
 
     def test_concurrent_atomic_playlist_saves_leave_valid_json(self):
-        save_json = self._atomic_save_fn()
         with tempfile.TemporaryDirectory() as root:
             final = Path(root) / "playlists" / "Baby Makin.playlist.json"
+            save_json = self._atomic_save_fn(playlist_dir=final.parent)
 
             def write_version(version: int) -> None:
                 save_json(final, {"name": "Baby Makin", "version": version}, save_key=f"job-{version}")

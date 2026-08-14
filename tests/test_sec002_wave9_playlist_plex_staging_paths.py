@@ -48,7 +48,7 @@ class Wave9PlaylistPathSanitizationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_root = Path(tmp) / "staging"
             tmp_root.mkdir()
-            with mock.patch("app.PLAYLIST_DOWNLOAD_ROOT", tmp_root):
+            with mock.patch.object(app_module, "PLAYLIST_DOWNLOAD_ROOT", tmp_root):
                 app_module._playlist_ensure_staging_dirs("../../../outside")
                 created_root = app_module.get_playlist_staging_root("../../../outside").resolve(strict=False)
                 self.assertTrue(app_module._path_is_under(created_root, tmp_root.resolve(strict=False)))
@@ -82,8 +82,8 @@ class Wave9AtomicJsonReplaceSecurityTests(unittest.TestCase):
             state_dir.mkdir()
             target_file = state_dir / "my_playlist.playlist.json"
 
-            with mock.patch("app.PLAYLIST_DIR", state_dir), \
-                 mock.patch("app.PLAYLIST_DOWNLOAD_ROOT", state_dir):
+            with mock.patch.object(app_module, "PLAYLIST_DIR", state_dir), \
+                 mock.patch.object(app_module, "PLAYLIST_DOWNLOAD_ROOT", state_dir):
                 app_module._playlist_atomic_json_replace(
                     target_file,
                     {"name": "my_playlist", "version": 2},
@@ -108,7 +108,7 @@ class Wave9StagedTrackDeletionSecurityTests(unittest.TestCase):
             outside_mp3 = outside_dir / "secret.mp3"
             outside_mp3.write_bytes(b"audio data")
 
-            with mock.patch("app.PLAYLIST_DOWNLOAD_ROOT", staging_root):
+            with mock.patch.object(app_module, "PLAYLIST_DOWNLOAD_ROOT", staging_root):
                 with self.assertRaises(RuntimeError) as cm:
                     app_module._playlist_delete_staged_track_file(
                         "MyPlaylist",
@@ -125,7 +125,7 @@ class Wave9StagedTrackDeletionSecurityTests(unittest.TestCase):
             script_file = staging_root / "payload.py"
             script_file.write_text("import os; os.system('echo pwned')")
 
-            with mock.patch("app.PLAYLIST_DOWNLOAD_ROOT", staging_root):
+            with mock.patch.object(app_module, "PLAYLIST_DOWNLOAD_ROOT", staging_root):
                 with self.assertRaises(RuntimeError) as cm:
                     app_module._playlist_delete_staged_track_file(
                         "MyPlaylist",
@@ -145,8 +145,8 @@ class Wave9StagedTrackDeletionSecurityTests(unittest.TestCase):
             library_track.parent.mkdir(parents=True)
             library_track.write_bytes(b"library track")
 
-            with mock.patch("app.PLAYLIST_DOWNLOAD_ROOT", staging_root), \
-                 mock.patch("app.MUSIC_ROOT", music_root):
+            with mock.patch.object(app_module, "PLAYLIST_DOWNLOAD_ROOT", staging_root), \
+                 mock.patch.object(app_module, "MUSIC_ROOT", music_root):
                 with self.assertRaises(RuntimeError) as cm:
                     app_module._playlist_delete_staged_track_file(
                         "MyPlaylist",
@@ -159,14 +159,18 @@ class Wave9StagedTrackDeletionSecurityTests(unittest.TestCase):
     def test_delete_staged_track_deletes_valid_staged_mp3(self):
         with tempfile.TemporaryDirectory() as tmp:
             staging_root = Path(tmp) / "playlist-staging"
+            playlist_state_dir = Path(tmp) / "playlists"
             staging_root.mkdir()
-            playlist_dir = app_module.get_playlist_staging_root("MyPlaylist")
-            playlist_downloads = staging_root / playlist_dir.name / "downloads"
-            playlist_downloads.mkdir(parents=True)
-            staged_mp3 = playlist_downloads / "01 - Track One.mp3"
-            staged_mp3.write_bytes(b"audio data")
+            playlist_state_dir.mkdir()
 
-            with mock.patch("app.PLAYLIST_DOWNLOAD_ROOT", staging_root):
+            with mock.patch.object(app_module, "PLAYLIST_DOWNLOAD_ROOT", staging_root), \
+                 mock.patch.object(app_module, "PLAYLIST_DIR", playlist_state_dir):
+                playlist_dir = app_module.get_playlist_staging_root("MyPlaylist")
+                playlist_downloads = playlist_dir / "downloads"
+                playlist_downloads.mkdir(parents=True)
+                staged_mp3 = playlist_downloads / "01 - Track One.mp3"
+                staged_mp3.write_bytes(b"audio data")
+
                 res = app_module._playlist_delete_staged_track_file(
                     "MyPlaylist",
                     {"id": "tr4"},
@@ -174,6 +178,7 @@ class Wave9StagedTrackDeletionSecurityTests(unittest.TestCase):
                 )
                 self.assertTrue(res["deleted"])
                 self.assertFalse(staged_mp3.exists())
+                self.assertTrue((playlist_state_dir / "MyPlaylist.playlist.json").exists())
 
 
 class Wave9M3UAndPlexTranslationSecurityTests(unittest.TestCase):
@@ -192,9 +197,9 @@ class Wave9M3UAndPlexTranslationSecurityTests(unittest.TestCase):
                 }
             ]
 
-            with mock.patch("app.PLAYLIST_DIR", playlist_dir), \
-                 mock.patch("app.PLAYLIST_DOWNLOAD_ROOT", playlist_dir), \
-                 mock.patch("app._plex_settings", return_value={"token": ""}):
+            with mock.patch.object(app_module, "PLAYLIST_DIR", playlist_dir), \
+                 mock.patch.object(app_module, "PLAYLIST_DOWNLOAD_ROOT", playlist_dir), \
+                 mock.patch.object(app_module, "_plex_settings", return_value={"token": ""}):
                 app_module._create_playlist_outputs("CleanPlaylist", items, sync_plex=False)
 
             m3u_file = playlist_dir / "CleanPlaylist.m3u"
@@ -208,7 +213,7 @@ class Wave9M3UAndPlexTranslationSecurityTests(unittest.TestCase):
             self.assertIn("Artist Injected Header - Title Injected Track", extinf_lines[0])
 
     def test_plex_path_containment_rejects_prefix_collision(self):
-        with mock.patch("app.MUSIC_ROOT", Path("/data/media/music")):
+        with mock.patch.object(app_module, "MUSIC_ROOT", Path("/data/media/music")):
             # /data/media/music2 must NOT be considered inside /data/media/music
             self.assertFalse(app_module._plex_path_is_under("/data/media/music2/song.mp3", "/data/media/music"))
             self.assertTrue(app_module._plex_path_is_under("/data/media/music/Artist/Album/01.mp3", "/data/media/music"))
