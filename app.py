@@ -41839,22 +41839,45 @@ def _playlist_slug(value: Any) -> str:
     return cleaned or "playlist"
 
 
-def _playlist_stable_id(name: str, manifest: Optional[Dict[str, Any]] = None) -> str:
+def _playlist_ensure_stable_id(name: str, manifest: Optional[Dict[str, Any]] = None) -> str:
     manifest = manifest if isinstance(manifest, dict) else {}
-    for value in (manifest.get("playlist_id"), manifest.get("id"), name):
-        slug = _playlist_slug(value)
-        if slug and not re.fullmatch(r"pl-[0-9a-f]{8,}", slug):
-            return slug
-    return _playlist_slug(name)
+    for field in ("playlist_id", "id", "uuid"):
+        val = _s(manifest.get(field)).strip()
+        if val and val.casefold() not in {"playlist", "none", "null"}:
+            return val
+    provider = _s(manifest.get("provider") or manifest.get("source")).strip().lower()
+    provider_id = _s(manifest.get("provider_id") or manifest.get("external_id")).strip()
+    if provider and provider_id:
+        return f"{provider}:{provider_id}"
+    raw = _s(name).strip()
+    if raw:
+        digest = hashlib.sha256(raw.casefold().encode("utf-8")).hexdigest()[:12]
+        return f"pl-legacy-{digest}"
+    return f"pl-{uuid.uuid4().hex[:12]}"
+
+
+def _playlist_stable_id(name: str, manifest: Optional[Dict[str, Any]] = None) -> str:
+    return _playlist_ensure_stable_id(name, manifest)
+
+
+def _playlist_key(name: str, manifest: Optional[Dict[str, Any]] = None) -> str:
+    pid = _playlist_ensure_stable_id(name, manifest)
+    short_name = _clean_playlist_name(name)[:30] or "playlist"
+    h = hashlib.sha256(pid.encode("utf-8")).hexdigest()[:12]
+    return f"{short_name}--{h}"
 
 
 def get_playlist_staging_root(playlist: Any) -> Path:
     """Stable per-playlist staging root; never includes job/run IDs."""
     if isinstance(playlist, dict):
+        manifest = playlist
         name = playlist.get("name") or playlist.get("playlist_name") or playlist.get("playlist") or "Playlist"
     else:
+        manifest = None
         name = playlist
-    return PLAYLIST_DOWNLOAD_ROOT / _playlist_slug(_clean_playlist_name(_s(name)))
+    get_key = globals().get("_playlist_key")
+    key = get_key(_s(name), manifest) if get_key else _playlist_slug(_clean_playlist_name(_s(name)))
+    return PLAYLIST_DOWNLOAD_ROOT / key
 
 
 def _playlist_staging_dir(name: str) -> Path:
@@ -41873,23 +41896,36 @@ def _playlist_staging_manifest_path(name: str) -> Path:
     return get_playlist_staging_root(name) / "manifest.json"
 
 
-def _playlist_ensure_staging_dirs(name: str) -> None:
+def _playlist_ensure_staging_dirs(name: str, playlist_id: Optional[str] = None) -> None:
     clean_name = _clean_playlist_name(name)
-    root = get_playlist_staging_root(clean_name)
+    get_key = globals().get("_playlist_key")
+    key = get_key(name, {"playlist_id": playlist_id} if playlist_id else None) if get_key else clean_name
+    root = get_playlist_staging_root(name)
     staging_base = PLAYLIST_DOWNLOAD_ROOT.resolve(strict=False)
     resolved_root = root.resolve(strict=False)
     try:
         resolved_root.relative_to(staging_base)
     except ValueError:
         raise ValueError("Playlist staging root is outside allowed staging directory")
+
+    try:
+        res = beets_client.ensure_playlist_staging(key, playlist_id or "", name)
+        if isinstance(res, dict) and res.get("ok"):
+            return
+    except Exception:
+        pass
+
     for path in (root, root / "downloads", root / "imports"):
         resolved_path = path.resolve(strict=False)
         if not _path_is_under(resolved_path, staging_base):
             raise ValueError("Staging sub-path is outside allowed staging directory")
-        path.mkdir(parents=True, exist_ok=True)
         try:
-            os.chmod(path, 0o775)
-        except Exception:
+            path.mkdir(parents=True, exist_ok=True)
+            try:
+                os.chmod(path, 0o775)
+            except Exception:
+                pass
+        except OSError:
             pass
 
 
@@ -43354,36 +43390,21 @@ def _playlist_atomic_json_replace(path: Path,
     # list entirely, which meant _playlist_save_job_state() always raised
     # ValueError in every environment -- added here as a genuine fix, not
     # a widening (it is the one real caller this helper was missing).
-    allowed_roots = [
-        PLAYLIST_DOWNLOAD_ROOT.resolve(strict=False),
-        PLAYLIST_DIR.resolve(strict=False),
-    ]
-    # globals().get(...), not a direct name reference, for both of these:
-    # some test harnesses exec just this function's AST in a narrower
-    # namespace (see tests/test_playlist_pipeline.py's load_function) that
-    # does not define every module-level root, and this must degrade
-    # gracefully rather than NameError in that context, matching the
-    # existing style already used here.
-    job_state_dir = globals().get("PLAYLIST_JOB_STATE_DIR")
-    if job_state_dir:
-        try:
-            allowed_roots.append(Path(job_state_dir).resolve(strict=False))
-        except Exception:
-            pass
-    # Test-only injection point: allows tests to add an isolated temporary
-    # root without monkeypatching every real root above. Never populated
-    # in production -- WEB_MANAGER_DATA_DIR is not a module-level name in
-    # app.py itself (it is only ever added to app_module's namespace by a
-    # test's mock.patch.object).
-    web_data = globals().get("WEB_MANAGER_DATA_DIR")
-    if web_data:
-        try:
-            allowed_roots.append(Path(web_data).resolve(strict=False))
-        except Exception:
-            pass
+    allowed_roots = []
+    for varname in ("PLAYLIST_DOWNLOAD_ROOT", "PLAYLIST_DIR", "PLAYLIST_JOB_STATE_DIR", "WEB_MANAGER_DATA_DIR"):
+        val = globals().get(varname)
+        if val is not None:
+            try:
+                allowed_roots.append(Path(val).resolve(strict=False))
+            except Exception:
+                pass
     safe = False
     for root in allowed_roots:
         try:
+            get_is_under = globals().get("_path_is_under")
+            if (get_is_under and get_is_under(resolved_path, root)) or resolved_path.parent.resolve(strict=False) == root.resolve(strict=False):
+                safe = True
+                break
             resolved_path.relative_to(root)
             safe = True
             break

@@ -358,5 +358,58 @@ class Wave9FinalReviewCorrectionTests(unittest.TestCase):
                 self.assertTrue(target.exists())
 
 
+class Wave9StableIdentityAndEngineOwnershipTests(unittest.TestCase):
+    """Unit tests for Wave 9 stable playlist identity and engine IPC ownership."""
+
+    def test_distinct_playlist_names_produce_distinct_keys_and_staging_roots(self):
+        names = ["A/B", "A\\B", "A:B", "A?B"]
+        keys = [app_module._playlist_key(n) for n in names]
+        self.assertEqual(len(set(keys)), len(names), "Distinct raw names must yield distinct playlist keys")
+
+        staging_roots = [str(app_module.get_playlist_staging_root(n)) for n in names]
+        self.assertEqual(len(set(staging_roots)), len(names), "Distinct raw names must yield distinct staging roots")
+
+    def test_long_names_produce_distinct_keys(self):
+        long_a = "X" * 120 + "AAAA"
+        long_b = "X" * 120 + "BBBB"
+        key_a = app_module._playlist_key(long_a)
+        key_b = app_module._playlist_key(long_b)
+        self.assertNotEqual(key_a, key_b, "Long distinct names must yield distinct keys")
+
+    def test_beets_client_engine_staging_ipc(self):
+        client = app_module.beets_client
+        with mock.patch.object(client, "_request", return_value={"ok": True, "staged": True}) as mock_req:
+            res = client.ensure_playlist_staging("test--key123", "pl-123", "Test Playlist")
+            self.assertTrue(res.get("ok"))
+            mock_req.assert_called_once_with(
+                "POST",
+                "/playlists/staging/ensure",
+                {"playlist_key": "test--key123", "playlist_id": "pl-123", "name": "Test Playlist"},
+            )
+
+    def test_beets_client_engine_delete_track_ipc(self):
+        client = app_module.beets_client
+        with mock.patch.object(client, "_request", return_value={"ok": True, "deleted": True}) as mock_req:
+            res = client.delete_playlist_staged_track("test--key123", "track-456", "/data/staging/01.mp3")
+            self.assertTrue(res.get("deleted"))
+            mock_req.assert_called_once_with(
+                "POST",
+                "/playlists/staging/delete-track",
+                {"playlist_key": "test--key123", "track_id": "track-456", "requested_path": "/data/staging/01.mp3"},
+            )
+
+    def test_beets_client_engine_export_m3u_ipc(self):
+        client = app_module.beets_client
+        items = [{"artist": "Art", "title": "Song", "path": "/data/music/01.mp3"}]
+        with mock.patch.object(client, "_request", return_value={"ok": True, "exported": True}) as mock_req:
+            res = client.export_playlist_m3u("test--key123", "Test Playlist", items)
+            self.assertTrue(res.get("exported"))
+            mock_req.assert_called_once_with(
+                "POST",
+                "/playlists/export_m3u",
+                {"playlist_key": "test--key123", "display_name": "Test Playlist", "items": items},
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
