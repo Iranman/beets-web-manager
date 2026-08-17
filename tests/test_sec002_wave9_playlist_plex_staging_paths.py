@@ -489,6 +489,8 @@ class ControlAgentDeleteTrackEndpointTests(unittest.TestCase):
         handler._send_json = lambda code, data: responses.append((code, data))
         with mock.patch.object(self.agent_module, "PLAYLIST_DOWNLOAD_ROOT", self.staging_root), \
              mock.patch.object(self.agent_module, "MUSIC_ROOT", self.music_root), \
+             mock.patch.object(self.agent_module, "DOWNLOAD_PATH", str(self.staging_root)), \
+             mock.patch.object(self.agent_module, "MUSIC_LIBRARY_PATH", str(self.music_root)), \
              mock.patch.object(self.agent_module, "acquire_os_lock", return_value=None), \
              mock.patch.object(self.agent_module, "release_os_lock"):
             handler.do_POST()
