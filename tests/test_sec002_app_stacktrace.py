@@ -193,24 +193,31 @@ class PlaylistDeleteExceptionSanitizationTests(unittest.TestCase):
     exception text. Now sanitized, matching the same HTTPError
     classification pattern used elsewhere for Plex."""
 
-    def test_file_delete_failure_is_sanitized(self):
+    def test_engine_m3u_delete_failure_is_sanitized(self):
         with app_module.app.test_request_context("/api/playlists/Test%20Playlist", method="DELETE"), \
-             mock.patch.object(app_module.Path, "exists", return_value=True), \
-             mock.patch.object(app_module.Path, "unlink", side_effect=OSError("LEAK_MARKER /data/playlists")):
+             mock.patch.object(app_module, "_playlist_ensure_state_dirs"), \
+             mock.patch.object(app_module, "_playlist_resolve_stable_id", return_value="pl_11111111111111111111111111111111"), \
+             mock.patch.object(app_module, "_playlist_key", return_value="pl_test_playlist"), \
+             mock.patch.object(app_module.beets_client, "delete_playlist_m3u", side_effect=OSError("LEAK_MARKER /data/playlists")):
             response = app_module.playlist_delete("Test Playlist")
-        data = response[0].get_json()
-        self.assertEqual(response[1], 500)
+        data = response.get_json() if hasattr(response, "get_json") else response[0].get_json()
+        status_code = response.status_code if hasattr(response, "status_code") else response[1]
+        self.assertEqual(status_code, 503)
+        self.assertEqual(data.get("error_code"), "engine_unavailable")
         self.assertNotIn("LEAK_MARKER", json.dumps(data))
 
     def test_plex_delete_failure_is_sanitized(self):
         with app_module.app.test_request_context(
             "/api/playlists/Test%20Playlist", method="DELETE",
             data=json.dumps({"delete_plex": True}), content_type="application/json",
-        ), mock.patch.object(app_module.Path, "exists", return_value=False), \
+        ), mock.patch.object(app_module, "_playlist_ensure_state_dirs"), \
+           mock.patch.object(app_module, "_playlist_resolve_stable_id", return_value="pl_11111111111111111111111111111111"), \
+           mock.patch.object(app_module, "_playlist_key", return_value="pl_test_playlist"), \
+           mock.patch.object(app_module.beets_client, "delete_playlist_m3u", return_value={"ok": True, "deleted": True}), \
            mock.patch.object(app_module, "_plex_settings", return_value={"token": "secret"}), \
            mock.patch.object(app_module, "_plex_delete_playlist_by_title", side_effect=OSError("LEAK_MARKER plex.internal.example")):
             response = app_module.playlist_delete("Test Playlist")
-        data = response.get_json()
+        data = response.get_json() if hasattr(response, "get_json") else response[0].get_json()
         self.assertNotIn("LEAK_MARKER", json.dumps(data))
         self.assertIn("plex_error", data)
 

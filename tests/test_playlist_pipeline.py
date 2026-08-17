@@ -47,6 +47,11 @@ class PlaylistPipelineTests(unittest.TestCase):
             "_s": lambda value: str(value or ""),
             "PLAYLIST_DOWNLOAD_ROOT": Path("/data/torrents/music/Playlist Downloads"),
             "PLAYLIST_DIR": Path(playlist_dir) if playlist_dir is not None else Path("/data/media/music/playlists"),
+            "WEB_MANAGER_DATA_DIR": Path(playlist_dir).parent if playlist_dir is not None else Path("/web-manager-data"),
+            "PLAYLIST_STATE_ROOT": Path(playlist_dir) if playlist_dir is not None else Path("/web-manager-data/playlists"),
+            "PLAYLIST_MANIFESTS_DIR": Path(playlist_dir) if playlist_dir is not None else Path("/web-manager-data/playlists/manifests"),
+            "PLAYLIST_JOB_STATE_DIR": Path(playlist_dir) if playlist_dir is not None else Path("/web-manager-data/playlists/jobs"),
+            "PLAYLIST_MEMBERSHIP_DIR": Path(playlist_dir) if playlist_dir is not None else Path("/web-manager-data/playlists/membership"),
             "MUSIC_ROOT": Path("/data/media/music"),
             "_path_is_under": lambda path, root: True,
         }
@@ -266,6 +271,7 @@ class PlaylistPipelineTests(unittest.TestCase):
                 "AUDIO_EXT": {".mp3"},
                 "beets_client": _FakeBeetsClient(),
                 "_playlist_key": lambda name, manifest=None: str(name),
+                "_playlist_existing_key": lambda name: str(name),
                 "_playlist_slug": lambda name: str(name),
                 "_s": lambda value: str(value or ""),
                 "_path_is_under": is_under,
@@ -423,7 +429,7 @@ class PlaylistPipelineTests(unittest.TestCase):
         create_end = APP_SOURCE.index("_PLAYLIST_SYNC_LOCK", create_start)
         create_source = APP_SOURCE[create_start:create_end]
         self.assertLess(
-            create_source.index("_plex_delete_playlist_by_title"),
+            create_source.index("_plex_replace_playlist_safely"),
             create_source.index("_plex_create_audio_playlist"),
         )
         self.assertIn('plex["tracks_unmatched"]', create_source)
@@ -538,8 +544,8 @@ class PlaylistPipelineTests(unittest.TestCase):
         create_source = APP_SOURCE[create_start:create_end]
         self.assertIn("mapping_failed", create_source)
         self.assertIn("Plex cannot see Beets library paths.", create_source)
-        self.assertLess(create_source.index("mapping_failed"), create_source.index("_plex_delete_playlist_by_title"))
-        self.assertLess(create_source.index("_plex_delete_playlist_by_title"), create_source.index("_plex_create_audio_playlist"))
+        self.assertLess(create_source.index("mapping_failed"), create_source.index("_plex_replace_playlist_safely"))
+        self.assertLess(create_source.index("_plex_replace_playlist_safely"), create_source.index("_plex_create_audio_playlist"))
         self.assertIn("_plex_playlist_rating_keys_by_title", create_source)
         self.assertIn("Verified Plex playlist count", APP_SOURCE)
 

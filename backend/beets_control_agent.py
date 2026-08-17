@@ -99,6 +99,21 @@ def _env_int_clamped(name: str, default: int, *, minimum: int, maximum: int) -> 
     return max(minimum, min(maximum, value))
 
 
+PLAYLIST_M3U_MAX_BYTES = _env_int_clamped(
+    "BEETS_PLAYLIST_M3U_MAX_BYTES", 2 * 1024 * 1024, minimum=1024, maximum=50 * 1024 * 1024
+)
+PLAYLIST_M3U_MAX_LINES = _env_int_clamped(
+    "BEETS_PLAYLIST_M3U_MAX_LINES", 20000, minimum=1, maximum=500000
+)
+PLAYLIST_M3U_MAX_LINE_LENGTH = _env_int_clamped(
+    "BEETS_PLAYLIST_M3U_MAX_LINE_LENGTH", 4096, minimum=256, maximum=65536
+)
+PLAYLIST_M3U_MAX_ITEMS = _env_int_clamped(
+    "BEETS_PLAYLIST_M3U_MAX_ITEMS", 10000, minimum=1, maximum=200000
+)
+PLAYLIST_M3U_LIST_MAX_FILES = _env_int_clamped(
+    "BEETS_PLAYLIST_M3U_LIST_MAX_FILES", 1000, minimum=1, maximum=50000
+)
 # Bounds are deliberately generous (real-world cover art is almost always
 # well under these) but finite: an unbounded ALBUM_ART_MAX_PIXELS/BYTES
 # combined with a highly compressible crafted image is a decompression-bomb
@@ -1605,6 +1620,121 @@ def _path_has_symlink_component(path: Path, root: Path, *, include_leaf: bool = 
         except Exception:
             return True
     return False
+
+
+def _clean_playlist_name(value: object) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"[\\/]+", "_", text)
+    text = re.sub(r"[^A-Za-z0-9._ -]+", "_", text).strip(" .")
+    return text[:160] or "Playlist"
+
+
+def _valid_playlist_m3u_key(value: object) -> str:
+    key = str(value or "").strip()
+    if not key or not re.match(r"^[A-Za-z0-9_.-]{1,180}$", key) or ".." in key:
+        raise UnsafePathError("invalid playlist key")
+    return key
+
+
+def _playlist_m3u_path_for_key(key: str) -> Path:
+    safe_key = _valid_playlist_m3u_key(key)
+    root = PLAYLIST_DIR.resolve(strict=False)
+    target = (root / f"{safe_key}.m3u").resolve(strict=False)
+    if target == root or not _path_is_within(str(target), str(root)):
+        raise UnsafePathError("playlist M3U path escapes PLAYLIST_DIR")
+    if _path_has_symlink_component(target, root, include_leaf=False):
+        raise UnsafePathError("playlist M3U path contains a symlinked parent")
+    return target
+
+
+def _playlist_m3u_target(playlist_key: str, fallback_name: str = "") -> tuple[Path, str]:
+    key = str(playlist_key or "").strip()
+    if key:
+        return _playlist_m3u_path_for_key(key), key
+    if fallback_name:
+        legacy_key = _clean_playlist_name(fallback_name)
+        return _playlist_m3u_path_for_key(legacy_key), legacy_key
+    raise UnsafePathError("missing playlist key")
+
+
+def _playlist_m3u_response_row(path: Path) -> dict:
+    st = path.stat()
+    return {
+        "playlist_key": path.stem,
+        "key": path.stem,
+        "name": path.name,
+        "display_name": path.stem,
+        "size": st.st_size,
+        "mtime": st.st_mtime,
+        "exists": True,
+    }
+
+
+def _create_exclusive_temp_file(path: Path, content: str) -> None:
+    """Create `path` as a brand-new file and write `content` to it,
+    refusing to follow a pre-existing symlink or silently overwrite an
+    existing file at that exact path. Path.write_text() uses a plain
+    'w'-mode open, which has neither property -- it happily follows a
+    pre-existing symlink planted at the predicted tempfile name (SEC-002
+    Wave 10 second final review)."""
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(str(path), flags, 0o644)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+    except BaseException:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _bounded_read_text(path: Path, max_bytes: int) -> str:
+    """Read at most max_bytes+1 bytes and raise if that bound is exceeded,
+    rather than trusting a stat() taken before the read -- the file can
+    grow between the size check and the read otherwise (SEC-002 Wave 10
+    second final review: M3U read growth-race)."""
+    with open(path, "rb") as handle:
+        data = handle.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise ValueError("m3u_too_large")
+    return data.decode("utf-8", errors="replace")
+
+
+def _parse_m3u_content(content: str) -> list[dict]:
+    items = []
+    last_extinf = ""
+    lines = content.splitlines()
+    if len(lines) > PLAYLIST_M3U_MAX_LINES:
+        raise ValueError("m3u_too_large")
+    for line in lines:
+        if len(line) > PLAYLIST_M3U_MAX_LINE_LENGTH:
+            raise ValueError("m3u_malformed")
+        sline = line.strip()
+        if not sline:
+            continue
+        if sline.startswith("#EXTINF"):
+            last_extinf = sline
+            continue
+        if sline.startswith("#"):
+            continue
+        artist, title = "", ""
+        if last_extinf and "," in last_extinf:
+            label = last_extinf.split(",", 1)[1].strip()
+            if " - " in label:
+                artist, title = label.split(" - ", 1)
+            else:
+                title = label
+        if not title:
+            title = Path(sline.replace("\\", "/")).stem
+        items.append({"artist": artist.strip(), "title": title.strip(), "path": sline})
+        if len(items) > PLAYLIST_M3U_MAX_ITEMS:
+            raise ValueError("m3u_too_large")
+        last_extinf = ""
+    return items
 
 
 def _library_rewrite_path(raw: object, *, require_exists: bool, expected_type: str | None) -> Path:
@@ -3607,20 +3737,14 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             display_name = str(body.get("display_name") or "").strip()
             raw_items = body.get("items") or []
 
-            if not playlist_key or not re.match(r"^[a-zA-Z0-9_.-]{1,160}$", playlist_key) or ".." in playlist_key:
-                self._send_json(400, {"error": "Invalid or missing playlist_key"})
-                return
-
-            playlist_dir = PLAYLIST_DIR.resolve(strict=False)
-            m3u_file = playlist_dir / f"{playlist_key}.m3u"
             try:
-                safe_m3u = resolve_safe_path(str(m3u_file), ["music", "staging"])
+                safe_m3u = _playlist_m3u_path_for_key(playlist_key)
             except UnsafePathError:
-                self._send_json(403, {"error": "Access denied for M3U export path outside allowed roots"})
+                self._send_json(400, {"error": "Invalid or missing playlist_key", "error_code": "invalid_playlist_key"})
                 return
 
             lines = ["#EXTM3U\n"]
-
+            item_count = 0
             for item in raw_items:
                 if not isinstance(item, dict):
                     continue
@@ -3631,23 +3755,175 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                     safe_item_path = resolve_safe_path(item_path, ["music", "staging"])
                 except UnsafePathError:
                     continue
+                # "staging" is a broad, shared role covering every
+                # playlist's download directory (and the wider torrents
+                # root) -- an entry that resolves under this playlist's own
+                # staging subtree is fine, but one under a *different*
+                # playlist's subtree (or elsewhere in staging) must not
+                # silently become an authorized entry in this playlist's
+                # M3U just because it satisfies the broad role check
+                # (SEC-002 Wave 10 second final review: same containment
+                # class as Wave 9's cross-playlist staged-deletion fix).
+                staging_base = PLAYLIST_DOWNLOAD_ROOT.resolve(strict=False)
+                if _path_is_within(str(safe_item_path), str(staging_base)):
+                    own_staging = (staging_base / playlist_key).resolve(strict=False)
+                    if not _path_is_within(str(safe_item_path), str(own_staging)):
+                        continue
                 artist = re.sub(r"[\r\n]+", " ", str(item.get("artist") or "").strip())
                 title = re.sub(r"[\r\n]+", " ", str(item.get("title") or "").strip())
                 label = f"{artist} - {title}".strip(" -") or safe_item_path.name
+                if len(label) > PLAYLIST_M3U_MAX_LINE_LENGTH:
+                    label = label[:PLAYLIST_M3U_MAX_LINE_LENGTH]
                 lines.append(f"#EXTINF:-1,{label}\n")
                 lines.append(f"{safe_item_path}\n")
+                item_count += 1
+                if item_count > PLAYLIST_M3U_MAX_ITEMS:
+                    self._send_json(413, {"error": "M3U has too many entries", "error_code": "m3u_too_large"})
+                    return
 
             content = "".join(lines)
+            if len(content.encode("utf-8")) > PLAYLIST_M3U_MAX_BYTES:
+                self._send_json(413, {"error": "M3U is too large", "error_code": "m3u_too_large"})
+                return
 
             lock_file = acquire_os_lock(read_only=False)
             try:
+                # Re-resolve/revalidate under the lock, immediately before
+                # mutation -- the earlier _playlist_m3u_path_for_key() call
+                # happened before the lock was held (SEC-002 Wave 10 second
+                # final review: the app-level lock only serializes
+                # cooperating application operations against each other; it
+                # is not a filesystem-level guarantee against a parent path
+                # changing between that check and this mutation).
+                try:
+                    safe_m3u = _playlist_m3u_path_for_key(playlist_key)
+                except UnsafePathError:
+                    self._send_json(403, {"error": "Access denied for M3U export path outside allowed roots", "error_code": "m3u_forbidden"})
+                    return
                 safe_m3u.parent.mkdir(parents=True, exist_ok=True)
-                tmp_m3u = safe_m3u.parent / f"{safe_m3u.stem}.{uuid.uuid4().hex[:8]}.tmp"
-                tmp_m3u.write_text(content, encoding="utf-8")
+                tmp_m3u = None
+                for _attempt in range(5):
+                    candidate = safe_m3u.parent / f"{safe_m3u.stem}.{uuid.uuid4().hex[:8]}.tmp"
+                    try:
+                        _create_exclusive_temp_file(candidate, content)
+                        tmp_m3u = candidate
+                        break
+                    except FileExistsError:
+                        continue
+                if tmp_m3u is None:
+                    self._send_json(500, {"error": "Failed to export M3U file", "error_code": "m3u_export_failed"})
+                    return
                 tmp_m3u.replace(safe_m3u)
-                self._send_json(200, {"ok": True, "m3u_path": str(safe_m3u)})
+                self._send_json(200, {"ok": True, "playlist_key": playlist_key, "display_name": display_name, "size": safe_m3u.stat().st_size})
             except Exception:
-                self._send_json(500, {"error": "Failed to export M3U file"})
+                self._send_json(500, {"error": "Failed to export M3U file", "error_code": "m3u_export_failed"})
+            finally:
+                release_os_lock(lock_file)
+            return
+
+        if path == "/playlists/m3u/read":
+            playlist_key = str(body.get("playlist_key") or "").strip()
+            fallback_name = str(body.get("fallback_name") or "").strip()
+            try:
+                safe_m3u, resolved_key = _playlist_m3u_target(playlist_key, fallback_name)
+            except UnsafePathError:
+                self._send_json(400, {"error": "Invalid or missing playlist_key", "error_code": "invalid_playlist_key"})
+                return
+
+            if not safe_m3u.exists():
+                self._send_json(200, {"ok": True, "items": [], "playlist_key": resolved_key, "exists": False})
+                return
+
+            # Symlink check, size bound, and the read itself all happen
+            # under the lock, re-resolving immediately beforehand -- a
+            # pre-lock check (the previous shape here) validates a
+            # filesystem object that can still be swapped out before the
+            # lock is acquired (SEC-002 Wave 10 second final review). The
+            # size bound is enforced via a bounded read (_bounded_read_text),
+            # not a stat() taken before the read, since the file can grow
+            # between a pre-read stat and the read itself.
+            lock_file = acquire_os_lock(read_only=True)
+            try:
+                try:
+                    safe_m3u, resolved_key = _playlist_m3u_target(playlist_key, fallback_name)
+                except UnsafePathError:
+                    self._send_json(400, {"error": "Invalid or missing playlist_key", "error_code": "invalid_playlist_key"})
+                    return
+                if not safe_m3u.exists():
+                    self._send_json(200, {"ok": True, "items": [], "playlist_key": resolved_key, "exists": False})
+                    return
+                if _path_has_symlink_component(safe_m3u, PLAYLIST_DIR.resolve(strict=False)):
+                    self._send_json(403, {"error": "Refusing to read symlinked M3U path", "error_code": "m3u_forbidden"})
+                    return
+                content = _bounded_read_text(safe_m3u, PLAYLIST_M3U_MAX_BYTES)
+                items = _parse_m3u_content(content)
+                self._send_json(200, {"ok": True, "items": items, "playlist_key": resolved_key, "exists": True, "size": safe_m3u.stat().st_size})
+            except ValueError as exc:
+                code = str(exc) or "m3u_malformed"
+                status = 413 if code == "m3u_too_large" else 400
+                self._send_json(status, {"error": "M3U is too large" if code == "m3u_too_large" else "M3U is malformed", "error_code": code})
+            except Exception:
+                self._send_json(500, {"error": "Failed to read M3U file", "error_code": "m3u_read_failed"})
+            finally:
+                release_os_lock(lock_file)
+            return
+
+        if path == "/playlists/m3u/delete":
+            playlist_key = str(body.get("playlist_key") or "").strip()
+            fallback_name = str(body.get("fallback_name") or "").strip()
+            if not playlist_key and fallback_name:
+                self._send_json(409, {"error": "Legacy M3U delete requires an unambiguous playlist_key", "error_code": "legacy_m3u_ambiguous"})
+                return
+            try:
+                safe_m3u, resolved_key = _playlist_m3u_target(playlist_key, fallback_name)
+            except UnsafePathError:
+                self._send_json(400, {"error": "Invalid or missing playlist_key", "error_code": "invalid_playlist_key"})
+                return
+
+            lock_file = acquire_os_lock(read_only=False)
+            try:
+                try:
+                    safe_m3u, resolved_key = _playlist_m3u_target(playlist_key, fallback_name)
+                except UnsafePathError:
+                    self._send_json(400, {"error": "Invalid or missing playlist_key", "error_code": "invalid_playlist_key"})
+                    return
+                if safe_m3u.exists():
+                    if safe_m3u.is_dir() or _path_has_symlink_component(safe_m3u, PLAYLIST_DIR.resolve(strict=False)):
+                        self._send_json(403, {"error": "Refusing to delete unsafe M3U path", "error_code": "m3u_forbidden"})
+                        return
+                    safe_m3u.unlink()
+                    self._send_json(200, {"ok": True, "deleted": True, "already_absent": False, "playlist_key": resolved_key})
+                else:
+                    self._send_json(200, {"ok": True, "deleted": False, "already_absent": True, "playlist_key": resolved_key})
+            except Exception:
+                self._send_json(500, {"error": "Failed to delete M3U file", "error_code": "m3u_delete_failed"})
+            finally:
+                release_os_lock(lock_file)
+            return
+
+        if path == "/playlists/m3u/list":
+            playlist_dir = PLAYLIST_DIR.resolve(strict=False)
+            if not playlist_dir.exists():
+                self._send_json(200, {"ok": True, "files": [], "playlists": []})
+                return
+
+            lock_file = acquire_os_lock(read_only=True)
+            try:
+                files = []
+                for p in sorted(playlist_dir.glob("*.m3u"), key=lambda x: x.name.lower()):
+                    if len(files) >= PLAYLIST_M3U_LIST_MAX_FILES:
+                        break
+                    try:
+                        safe_p = _playlist_m3u_path_for_key(p.stem)
+                        if safe_p != p.resolve(strict=False):
+                            continue
+                        if safe_p.exists() and safe_p.is_file() and not _path_has_symlink_component(safe_p, playlist_dir):
+                            files.append(_playlist_m3u_response_row(safe_p))
+                    except Exception:
+                        pass
+                self._send_json(200, {"ok": True, "files": files, "playlists": files, "truncated": len(files) >= PLAYLIST_M3U_LIST_MAX_FILES})
+            except Exception:
+                self._send_json(500, {"error": "Failed to list M3U files", "error_code": "m3u_list_failed"})
             finally:
                 release_os_lock(lock_file)
             return

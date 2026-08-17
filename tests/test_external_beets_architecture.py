@@ -353,6 +353,7 @@ class TestBeetsClientRemoteOnly(unittest.TestCase):
 
             with mock.patch("backend.beets_control_agent.LIB_PATH", str(db_path)), \
                  mock.patch("backend.beets_control_agent.MUSIC_LIBRARY_PATH", str(music_path)), \
+                 mock.patch("backend.beets_control_agent.LOCK_PATH", str(Path(tmp_dir) / "agent.lock")), \
                  mock.patch.object(Path, "unlink", side_effect=PermissionError("Permission denied")):
                 code, res = _handle_delete_album(1, delete_files=True)
                 self.assertEqual(code, 200)
@@ -396,6 +397,9 @@ class TestStructuredQueryRouting(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.TemporaryDirectory()
         self.db_path = Path(self.tmp_dir.name) / "musiclibrary.blb"
+        self.lock_patch = mock.patch("backend.beets_control_agent.LOCK_PATH", str(Path(self.tmp_dir.name) / "agent.lock"))
+        self.lock_patch.start()
+        self.addCleanup(self.lock_patch.stop)
 
         con = sqlite3.connect(str(self.db_path))
         con.execute("""
@@ -576,6 +580,9 @@ class TestSingletonQueryRouting(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.TemporaryDirectory()
         self.db_path = Path(self.tmp_dir.name) / "musiclibrary.blb"
+        self.lock_patch = mock.patch("backend.beets_control_agent.LOCK_PATH", str(Path(self.tmp_dir.name) / "agent.lock"))
+        self.lock_patch.start()
+        self.addCleanup(self.lock_patch.stop)
 
         con = sqlite3.connect(str(self.db_path))
         con.execute("""

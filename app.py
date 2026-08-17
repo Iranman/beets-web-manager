@@ -516,6 +516,13 @@ DISCOGS_TOKEN = (
     or os.environ.get("DISCOGS_USER_TOKEN", "").strip()
     or _beets_config_discogs_token()
 )
+WEB_MANAGER_DATA_DIR = Path(os.environ.get("WEB_MANAGER_DATA_DIR", "/web-manager-data"))
+PLAYLIST_STATE_ROOT = WEB_MANAGER_DATA_DIR / "playlists"
+PLAYLIST_MANIFESTS_DIR = PLAYLIST_STATE_ROOT / "manifests"
+PLAYLIST_JOB_STATE_DIR = Path(os.environ.get("PLAYLIST_JOB_STATE_DIR", "")) or (PLAYLIST_STATE_ROOT / "jobs")
+PLAYLIST_EXPORTS_DIR = PLAYLIST_STATE_ROOT / "exports"
+PLAYLIST_MEMBERSHIP_DIR = PLAYLIST_STATE_ROOT / "membership"
+PLAYLIST_INDEX_PATH = PLAYLIST_STATE_ROOT / "index.json"
 PLAYLIST_DIR  = Path(os.environ.get("PLAYLIST_DIR", "/data/media/music/playlists"))
 PLAYLIST_PATH_ROOT_ALIASES = [
     value.strip().replace("\\", "/").rstrip("/")
@@ -535,7 +542,6 @@ PLAYLIST_DOWNLOAD_ROOT = Path(os.environ.get(
     "PLAYLIST_DOWNLOAD_ROOT",
     "/data/torrents/music/Playlist Downloads",
 ))
-PLAYLIST_JOB_STATE_DIR = Path(os.environ.get("PLAYLIST_JOB_STATE_DIR", "/config/playlist_jobs"))
 PLAYLIST_PIPELINE_STATES = {
     "pending", "available", "searching", "downloaded", "waiting_import",
     "importing", "imported", "plex_synced", "failed", "missing",
@@ -41839,32 +41845,345 @@ def _playlist_slug(value: Any) -> str:
     return cleaned or "playlist"
 
 
-def _playlist_ensure_stable_id(name: str, manifest: Optional[Dict[str, Any]] = None) -> str:
+class PlaylistStateError(RuntimeError):
+    """Raised when required persistent playlist identity state is unavailable.
+
+    The .args message is for server logs only. It must never be echoed
+    directly into a client-facing JSON response (SEC-002 Wave 10 second
+    final review) -- use playlist_state_error_response()/
+    _PLAYLIST_STATE_ERROR_MESSAGES instead, which map .code to a fixed,
+    path-free explanation.
+    """
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+
+
+_PLAYLIST_STATE_ERROR_MESSAGES = {
+    "playlist_state_unavailable": "Playlist state storage is currently unavailable.",
+    "playlist_state_corrupt": "Playlist identity state is corrupt; manual review is required.",
+    "manifest_corrupt": "Playlist manifest is corrupt; manual review is required.",
+    "ambiguous_playlist": "Multiple playlists share this display name; specify playlist_id.",
+    "invalid_playlist_id": "The supplied playlist_id is invalid.",
+    "migration_conflict": "This playlist identity conflicts with existing state.",
+}
+
+
+def _playlist_state_error_payload(exc: "PlaylistStateError") -> Dict[str, Any]:
+    """Safe, path-free client-facing body for a PlaylistStateError. Full
+    detail (which may include a concrete state-directory path) goes to the
+    server log at the raise/catch site instead, never into the response."""
+    return {
+        "ok": False,
+        "error": _PLAYLIST_STATE_ERROR_MESSAGES.get(exc.code, "Playlist state is currently unavailable."),
+        "error_code": exc.code,
+    }
+
+
+def _playlist_state_error_status(exc: "PlaylistStateError") -> int:
+    if exc.code == "playlist_state_unavailable":
+        return 503
+    if exc.code == "ambiguous_playlist":
+        return 409
+    if exc.code == "migration_conflict":
+        return 409
+    if exc.code == "invalid_playlist_id":
+        return 404
+    if exc.code in ("playlist_state_corrupt", "manifest_corrupt"):
+        return 409
+    return 500
+
+
+_PLAYLIST_INTERNAL_ID_RE = re.compile(r"^pl_[0-9a-f]{32}$")
+_PLAYLIST_STATE_LOCK = threading.RLock()
+
+
+def _playlist_valid_internal_id(value: Any) -> bool:
+    return bool(_PLAYLIST_INTERNAL_ID_RE.match(_s(value).strip()))
+
+
+def _playlist_new_internal_id() -> str:
+    return f"pl_{uuid.uuid4().hex}"
+
+
+def _playlist_provider_parts(manifest: Optional[Dict[str, Any]] = None,
+                             provider_id: Optional[str] = None) -> Tuple[str, str, str]:
+    provider = ""
+    external_id = ""
+    if provider_id:
+        raw = _s(provider_id).strip()
+        if ":" in raw:
+            provider, external_id = raw.split(":", 1)
+        else:
+            external_id = raw
+    if isinstance(manifest, dict):
+        provider = _s(manifest.get("provider") or manifest.get("source") or provider).strip().lower()
+        external_id = _s(
+            manifest.get("provider_playlist_id")
+            or manifest.get("provider_id")
+            or manifest.get("external_id")
+            or external_id
+        ).strip()
+    provider = _playlist_slug(provider).lower() if provider else ""
+    external_id = external_id.strip()
+    provider_identity = f"{provider}:{external_id}" if provider and external_id else ""
+    return provider, external_id, provider_identity
+
+
+def _playlist_ensure_state_dirs() -> None:
+    for d in (PLAYLIST_STATE_ROOT, PLAYLIST_MANIFESTS_DIR, PLAYLIST_JOB_STATE_DIR, PLAYLIST_EXPORTS_DIR, PLAYLIST_MEMBERSHIP_DIR):
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            # The concrete path belongs in the server log only -- it must
+            # never reach a client-facing response (SEC-002 Wave 10 second
+            # final review); the exception itself carries just the code and
+            # a generic message.
+            app.logger.warning("Playlist state directory is unavailable: %s (%s)", d, type(exc).__name__)
+            raise PlaylistStateError(
+                "playlist_state_unavailable",
+                "Playlist state directory is unavailable.",
+            ) from exc
+
+
+def _playlist_load_index() -> Dict[str, Dict[str, Any]]:
+    _playlist_ensure_state_dirs()
+    index_path = PLAYLIST_STATE_ROOT / "index.json"
+    if not index_path.exists():
+        return {}
+    try:
+        data = json.loads(index_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise PlaylistStateError(
+            "playlist_state_corrupt",
+            "Playlist identity state is corrupt; manual review is required.",
+        ) from exc
+    if not isinstance(data, dict):
+        raise PlaylistStateError(
+            "playlist_state_corrupt",
+            "Playlist identity state has an invalid schema; manual review is required.",
+        )
+
+    seen_provider: Dict[str, str] = {}
+    out: Dict[str, Dict[str, Any]] = {}
+    for raw_pid, raw_entry in data.items():
+        pid = _s(raw_pid).strip()
+        if not _playlist_valid_internal_id(pid):
+            raise PlaylistStateError(
+                "playlist_state_corrupt",
+                "Playlist identity state contains an invalid playlist_id.",
+            )
+        if not isinstance(raw_entry, dict):
+            raise PlaylistStateError(
+                "playlist_state_corrupt",
+                "Playlist identity state has an invalid playlist entry.",
+            )
+        entry = dict(raw_entry)
+        entry_pid = _s(entry.get("playlist_id") or pid).strip()
+        if entry_pid != pid or not _playlist_valid_internal_id(entry_pid):
+            raise PlaylistStateError(
+                "playlist_state_corrupt",
+                "Playlist identity state contains a mismatched playlist_id.",
+            )
+        provider_identity = _s(entry.get("provider_identity") or "").strip()
+        if not provider_identity:
+            provider = _s(entry.get("provider") or "").strip().lower()
+            external_id = _s(entry.get("provider_playlist_id") or "").strip()
+            provider_identity = f"{provider}:{external_id}" if provider and external_id else ""
+        if provider_identity:
+            existing = seen_provider.get(provider_identity)
+            if existing and existing != pid:
+                raise PlaylistStateError(
+                    "playlist_state_corrupt",
+                    "Playlist identity state contains a duplicate provider identity.",
+                )
+            seen_provider[provider_identity] = pid
+            entry["provider_identity"] = provider_identity
+        entry["playlist_id"] = pid
+        out[pid] = entry
+    if len(out) != len(data):
+        raise PlaylistStateError(
+            "playlist_state_corrupt",
+            "Playlist identity state contains duplicate playlist IDs.",
+        )
+    return out
+
+
+def _playlist_save_index(index_data: Dict[str, Dict[str, Any]]) -> None:
+    _playlist_ensure_state_dirs()
+    index_path = PLAYLIST_STATE_ROOT / "index.json"
+    _playlist_atomic_json_replace(index_path, index_data, save_key="playlist-index")
+
+
+def _playlist_entry_matches_name(entry: Dict[str, Any], name: str) -> bool:
+    clean = _clean_playlist_name(name)
+    return (
+        _s(entry.get("name") or "") == name
+        or _s(entry.get("clean_name") or "") == clean
+    )
+
+
+def _playlist_find_id_by_name(index_data: Dict[str, Dict[str, Any]], name: str) -> str:
+    matches = [
+        pid
+        for pid, entry in index_data.items()
+        if isinstance(entry, dict) and _playlist_entry_matches_name(entry, name)
+    ]
+    if len(matches) > 1:
+        raise PlaylistStateError(
+            "ambiguous_playlist",
+            "Multiple playlists share this display name; use playlist_id.",
+        )
+    return matches[0] if matches else ""
+
+
+def _playlist_find_id_by_provider(index_data: Dict[str, Dict[str, Any]],
+                                  provider_identity: str) -> str:
+    if not provider_identity:
+        return ""
+    for pid, entry in index_data.items():
+        if isinstance(entry, dict) and _s(entry.get("provider_identity") or "") == provider_identity:
+            return pid
+    return ""
+
+
+def _playlist_index_entry(name: str,
+                          pid: str,
+                          manifest: Optional[Dict[str, Any]] = None,
+                          provider_id: Optional[str] = None) -> Dict[str, Any]:
+    provider, external_id, provider_identity = _playlist_provider_parts(manifest, provider_id)
+    entry = {
+        "playlist_id": pid,
+        "clean_name": _clean_playlist_name(name),
+        "name": (manifest or {}).get("name") or name,
+        "updated_at": time.time(),
+    }
+    if provider_identity:
+        entry.update({
+            "provider": provider,
+            "provider_playlist_id": external_id,
+            "provider_identity": provider_identity,
+        })
+    return entry
+
+
+def _playlist_resolve_stable_id(name: str,
+                                manifest: Optional[Dict[str, Any]] = None,
+                                provider_id: Optional[str] = None,
+                                playlist_id: Optional[str] = None) -> str:
+    if playlist_id:
+        pid = _s(playlist_id).strip()
+        if _playlist_valid_internal_id(pid):
+            return pid
+        raise PlaylistStateError("invalid_playlist_id", "Invalid playlist_id.")
+
+    if isinstance(manifest, dict):
+        for field in ("playlist_id", "id", "uuid"):
+            val = _s(manifest.get(field)).strip()
+            if _playlist_valid_internal_id(val):
+                return val
+
+    _provider, _external_id, provider_identity = _playlist_provider_parts(manifest, provider_id)
+    with _PLAYLIST_STATE_LOCK:
+        index_data = _playlist_load_index()
+        provider_match = _playlist_find_id_by_provider(index_data, provider_identity)
+        if provider_match:
+            return provider_match
+        return _playlist_find_id_by_name(index_data, name)
+
+
+def _playlist_ensure_stable_id(name: str,
+                               manifest: Optional[Dict[str, Any]] = None,
+                               provider_id: Optional[str] = None,
+                               playlist_id: Optional[str] = None) -> str:
     manifest = manifest if isinstance(manifest, dict) else {}
-    for field in ("playlist_id", "id", "uuid"):
-        val = _s(manifest.get(field)).strip()
-        if val and val.casefold() not in {"playlist", "none", "null"}:
-            return val
-    provider = _s(manifest.get("provider") or manifest.get("source")).strip().lower()
-    provider_id = _s(manifest.get("provider_id") or manifest.get("external_id")).strip()
-    if provider and provider_id:
-        return f"{provider}:{provider_id}"
-    raw = _s(name).strip()
-    if raw:
-        digest = hashlib.sha256(raw.casefold().encode("utf-8")).hexdigest()[:12]
-        return f"pl-legacy-{digest}"
-    return f"pl-{uuid.uuid4().hex[:12]}"
+    with _PLAYLIST_STATE_LOCK:
+        index_data = _playlist_load_index()
+
+        pid = ""
+        if playlist_id:
+            candidate = _s(playlist_id).strip()
+            if not _playlist_valid_internal_id(candidate):
+                raise PlaylistStateError("invalid_playlist_id", "Invalid playlist_id.")
+            pid = candidate
+        else:
+            for field in ("playlist_id", "id", "uuid"):
+                candidate = _s(manifest.get(field)).strip()
+                if _playlist_valid_internal_id(candidate):
+                    pid = candidate
+                    break
+
+        provider, external_id, provider_identity = _playlist_provider_parts(manifest, provider_id)
+        if not pid:
+            pid = _playlist_find_id_by_provider(index_data, provider_identity)
+        if not pid:
+            pid = _playlist_new_internal_id()
+
+        entry = dict(index_data.get(pid) or {})
+        if entry:
+            provider_existing = _s(entry.get("provider_identity") or "")
+            if provider_identity and provider_existing and provider_existing != provider_identity:
+                raise PlaylistStateError(
+                    "migration_conflict",
+                    "Playlist identity provider mapping conflicts with existing state.",
+                )
+            entry.update(_playlist_index_entry(name, pid, manifest, provider_id))
+            entry.setdefault("created_at", time.time())
+        else:
+            entry = _playlist_index_entry(name, pid, manifest, provider_id)
+            entry["created_at"] = time.time()
+        if provider_identity:
+            existing = _playlist_find_id_by_provider(index_data, provider_identity)
+            if existing and existing != pid:
+                raise PlaylistStateError(
+                    "migration_conflict",
+                    "Provider playlist identity is already mapped to another playlist.",
+                )
+        index_data[pid] = entry
+        _playlist_save_index(index_data)
+        manifest["playlist_id"] = pid
+        if provider_identity:
+            manifest["provider"] = provider
+            manifest["provider_playlist_id"] = external_id
+        return pid
 
 
-def _playlist_stable_id(name: str, manifest: Optional[Dict[str, Any]] = None) -> str:
-    return _playlist_ensure_stable_id(name, manifest)
+def _playlist_stable_id(name: str,
+                        manifest: Optional[Dict[str, Any]] = None,
+                        provider_id: Optional[str] = None,
+                        playlist_id: Optional[str] = None) -> str:
+    return _playlist_ensure_stable_id(name, manifest=manifest, provider_id=provider_id, playlist_id=playlist_id)
 
 
-def _playlist_key(name: str, manifest: Optional[Dict[str, Any]] = None) -> str:
-    pid = _playlist_ensure_stable_id(name, manifest)
-    short_name = _clean_playlist_name(name)[:30] or "playlist"
+def _playlist_key(name: str,
+                  manifest: Optional[Dict[str, Any]] = None,
+                  provider_id: Optional[str] = None,
+                  playlist_id: Optional[str] = None,
+                  *,
+                  allocate: bool = True) -> str:
+    if playlist_id:
+        pid = _s(playlist_id).strip()
+    elif allocate:
+        pid = _playlist_resolve_stable_id(name, manifest=manifest, provider_id=provider_id)
+        if not pid:
+            pid = _playlist_ensure_stable_id(name, manifest=manifest, provider_id=provider_id)
+    else:
+        pid = _playlist_resolve_stable_id(name, manifest=manifest, provider_id=provider_id)
+    if not _playlist_valid_internal_id(pid):
+        raise PlaylistStateError("invalid_playlist_id", "Invalid playlist_id.")
+    safe_pid = re.sub(r"[^a-zA-Z0-9_-]", "_", pid)
     h = hashlib.sha256(pid.encode("utf-8")).hexdigest()[:12]
-    return f"{short_name}--{h}"
+    return f"{safe_pid}_{h}"
+
+
+def _playlist_existing_key(name: str,
+                           manifest: Optional[Dict[str, Any]] = None,
+                           playlist_id: Optional[str] = None) -> str:
+    try:
+        return _playlist_key(name, manifest=manifest, playlist_id=playlist_id, allocate=False)
+    except PlaylistStateError:
+        return ""
 
 
 def get_playlist_staging_root(playlist: Any) -> Path:
@@ -42956,13 +43275,19 @@ def _plex_playlist_uri(machine_id: str, keys: List[str]) -> str:
 
 
 def _plex_create_audio_playlist(machine_id: str, title: str, keys: List[str],
-                                log=None) -> int:
+                                log=None) -> Tuple[int, str]:
+    """Create (or append to) a Plex audio playlist. Returns (tracks_added,
+    rating_key) -- the rating key is this Plex playlist's own stable
+    identity and must be persisted by the caller (SEC-002 Wave 10 second
+    final review) so a later same-titled app playlist cannot be confused
+    with this one; discarding it here is what forced every prior delete/
+    replace operation to fall back to title-based matching."""
     chunks = [
         keys[index:index + PLEX_PLAYLIST_CHUNK_SIZE]
         for index in range(0, len(keys), PLEX_PLAYLIST_CHUNK_SIZE)
     ]
     if not chunks:
-        return 0
+        return 0, ""
     created = _plex_request("/playlists", {
         "type": "audio",
         "title": title,
@@ -42984,11 +43309,39 @@ def _plex_create_audio_playlist(machine_id: str, title: str, keys: List[str],
         added += len(chunk)
     if log is not None and len(chunks) > 1:
         log.append(f"  [plex] Added playlist tracks in {len(chunks)} chunks")
-    return added
+    return added, playlist_key
+
+
+def _plex_delete_playlist_by_rating_key(rating_key: str, log=None) -> int:
+    """Delete exactly one Plex playlist by its own stable ratingKey -- the
+    unambiguous, preferred deletion authority (SEC-002 Wave 10 second final
+    review). Unlike title-based matching this cannot collide with another
+    app playlist that happens to share a display name."""
+    key = _s(rating_key).strip()
+    if not key:
+        return 0
+    path = key.split("?", 1)[0] if key.startswith("/playlists/") else f"/playlists/{key}"
+    try:
+        _plex_request(path, method="DELETE", timeout=10)
+    except Exception as exc:
+        if log is not None:
+            log.append(f"  [plex] Could not delete playlist by ratingKey {key!r}: {exc}")
+        return 0
+    if log is not None:
+        log.append(f"  [plex] Deleted playlist by ratingKey: {key}")
+    return 1
 
 
 def _plex_delete_playlist_by_title(title, log=None):
-    """Delete existing Plex audio playlists with this title so sync replaces them."""
+    """Delete existing Plex audio playlists with this title so sync replaces them.
+
+    Legacy/fallback authority only -- deletes every Plex playlist matching
+    the title, with no way to distinguish which app playlist "owns" it.
+    Callers must not use this when a stable ratingKey is available (use
+    _plex_delete_playlist_by_rating_key instead) or when another live app
+    playlist shares this same display name (SEC-002 Wave 10 second final
+    review: same-name app playlists must not let one delete another's
+    Plex playlist)."""
     deleted = 0
     d = _plex_request("/playlists", {"playlistType": "audio"}, timeout=10)
     for pl in d.get("MediaContainer", {}).get("Metadata", []):
@@ -43005,6 +43358,53 @@ def _plex_delete_playlist_by_title(title, log=None):
     if deleted and log is not None:
         log.append(f"  [plex] Replaced {deleted} existing playlist(s) named {title!r}")
     return deleted
+
+
+def _playlist_other_live_pids_with_name(clean_name: str, exclude_pid: str = "") -> List[str]:
+    """Return internal playlist_ids (other than exclude_pid) whose index
+    entry currently resolves to this same cleaned display name. Used to
+    detect same-name ambiguity before falling back to Plex title-based
+    matching (SEC-002 Wave 10 second final review)."""
+    try:
+        index_data = _playlist_load_index()
+    except PlaylistStateError:
+        return []
+    others = []
+    for pid, entry in index_data.items():
+        if pid == exclude_pid or not isinstance(entry, dict):
+            continue
+        if _playlist_entry_matches_name(entry, clean_name):
+            others.append(pid)
+    return others
+
+
+def _plex_replace_playlist_safely(name: str,
+                                  pid: str,
+                                  previous_manifest: Optional[Dict[str, Any]],
+                                  log=None) -> Dict[str, Any]:
+    """Delete/replace this playlist's own existing Plex playlist before a
+    fresh sync, without risking another same-named app playlist's Plex
+    playlist (SEC-002 Wave 10 second final review). Prefers a previously
+    stored ratingKey; only falls back to legacy title-based replacement
+    when no other live app playlist shares this display name."""
+    result = {"replaced": 0, "ambiguous": False}
+    prior_rating_key = ""
+    if isinstance(previous_manifest, dict):
+        prior_rating_key = _s((previous_manifest.get("last_plex") or {}).get("rating_key") or "").strip()
+    if prior_rating_key:
+        result["replaced"] = _plex_delete_playlist_by_rating_key(prior_rating_key, log=log)
+        return result
+    others = _playlist_other_live_pids_with_name(_clean_playlist_name(name), exclude_pid=pid)
+    if others:
+        result["ambiguous"] = True
+        if log is not None:
+            log.append(
+                f"  [plex] Skipping title-based Plex replace for {name!r}: "
+                f"{len(others)} other playlist(s) share this name and have no stored ratingKey"
+            )
+        return result
+    result["replaced"] = _plex_delete_playlist_by_title(name, log=log)
+    return result
 
 
 def _plex_unique_index_value(mapping: Dict[Any, set], key: Any) -> str:
@@ -43354,8 +43754,45 @@ def _plex_track_keys_for_items(section_key, items, log=None, wait_seconds=0, *,
     return keys
 
 
-def _playlist_manifest_path(name: str) -> Path:
-    return PLAYLIST_DIR / f"{_clean_playlist_name(name)}.playlist.json"
+def _playlist_manifest_path(name: str,
+                            manifest: Optional[Dict[str, Any]] = None,
+                            *,
+                            allocate: bool = True) -> Path:
+    clean_name = _clean_playlist_name(name)
+    _playlist_ensure_state_dirs()
+    pid = ""
+    if isinstance(manifest, dict):
+        pid = _s(manifest.get("playlist_id") or manifest.get("id") or manifest.get("uuid") or "").strip()
+    if not _playlist_valid_internal_id(pid):
+        try:
+            pid = _playlist_resolve_stable_id(clean_name, manifest, playlist_id=pid or None)
+        except PlaylistStateError as exc:
+            if exc.code not in {"invalid_playlist_id", "ambiguous_playlist"}:
+                raise
+            pid = ""
+    if _playlist_valid_internal_id(pid):
+        key = _playlist_key(clean_name, playlist_id=pid, allocate=False)
+        for candidate in (
+            PLAYLIST_MANIFESTS_DIR / f"{pid}.playlist.json",
+            PLAYLIST_MANIFESTS_DIR / f"{key}.playlist.json",
+            PLAYLIST_MANIFESTS_DIR / f"{clean_name}.playlist.json",
+        ):
+            if candidate.exists():
+                return candidate
+        return PLAYLIST_MANIFESTS_DIR / f"{key}.playlist.json"
+    legacy = PLAYLIST_MANIFESTS_DIR / f"{clean_name}.playlist.json"
+    if legacy.exists() or not allocate:
+        return legacy
+    pid = _playlist_ensure_stable_id(clean_name, manifest if isinstance(manifest, dict) else {})
+    key = _playlist_key(clean_name, playlist_id=pid, allocate=False)
+    return PLAYLIST_MANIFESTS_DIR / f"{key}.playlist.json"
+
+
+def _playlist_manifest_exists_no_create(name: str, manifest: Optional[Dict[str, Any]] = None) -> bool:
+    try:
+        return _playlist_manifest_path(name, manifest, allocate=False).exists()
+    except PlaylistStateError:
+        return False
 
 
 _PLAYLIST_MANIFEST_LOCKS: Dict[str, Any] = {}
@@ -43382,20 +43819,10 @@ def _playlist_atomic_json_replace(path: Path,
                                   sort_keys: bool = False) -> None:
     path = Path(path)
     resolved_path = path.resolve(strict=False)
-    # Narrowly scoped to the roots real callers actually write under (all
-    # 4 production call sites verified: staging manifest under
-    # PLAYLIST_DOWNLOAD_ROOT, playlist manifests under PLAYLIST_DIR, job
-    # checkpoints under PLAYLIST_JOB_STATE_DIR). MUSIC_ROOT and the whole
-    # system temp directory were previously included with no production
-    # caller ever targeting either -- MUSIC_ROOT is Beets-engine-owned
-    # media, not web-manager state, and a process-wide /tmp is not an
-    # application-owned root; both were removed (SEC-002 Wave 9 final
-    # review). PLAYLIST_JOB_STATE_DIR was previously *missing* from this
-    # list entirely, which meant _playlist_save_job_state() always raised
-    # ValueError in every environment -- added here as a genuine fix, not
-    # a widening (it is the one real caller this helper was missing).
+    # This JSON helper is for web-manager-owned state only. Engine-owned
+    # media/playlist directories are deliberately not allowed here.
     allowed_roots = []
-    for varname in ("PLAYLIST_DOWNLOAD_ROOT", "PLAYLIST_DIR", "PLAYLIST_JOB_STATE_DIR", "WEB_MANAGER_DATA_DIR"):
+    for varname in ("WEB_MANAGER_DATA_DIR", "PLAYLIST_STATE_ROOT", "PLAYLIST_MANIFESTS_DIR", "PLAYLIST_JOB_STATE_DIR", "PLAYLIST_MEMBERSHIP_DIR"):
         val = globals().get(varname)
         if val is not None:
             try:
@@ -43637,12 +44064,45 @@ def _playlist_sanitize_manifest(data: Dict[str, Any]) -> Dict[str, Any]:
     return manifest
 
 
-def _playlist_read_manifest(name: str) -> Dict[str, Any]:
-    path = _playlist_manifest_path(name)
+def _playlist_read_manifest(name: str,
+                            *,
+                            playlist_id: Optional[str] = None,
+                            manifest: Optional[Dict[str, Any]] = None,
+                            raise_on_corrupt: bool = False) -> Dict[str, Any]:
+    """Read this playlist's manifest.
+
+    A manifest file that exists but fails to parse/validate is NOT the same
+    as one that was never created -- conflating "corrupt" with "not found"
+    here previously meant a write that follows a corrupt read (see
+    _playlist_write_manifest) would silently synthesize a brand-new
+    manifest from empty defaults, discarding whatever track/import/Plex-
+    sync state the corrupt file still held (SEC-002 Wave 10 second final
+    review). raise_on_corrupt=True (used by write paths) surfaces that
+    distinction as PlaylistStateError instead of swallowing it; read-only/
+    display callers default to the old lenient behavior (degrade to empty
+    rather than 500 an entire page over one unreadable playlist).
+    """
+    seed = dict(manifest) if isinstance(manifest, dict) else {}
+    if playlist_id:
+        seed["playlist_id"] = playlist_id
+    try:
+        path = _playlist_manifest_path(name, seed or None, allocate=False)
+    except PlaylistStateError:
+        return {}
+    if not path.exists():
+        return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        return _playlist_sanitize_manifest(data) if isinstance(data, dict) else {}
-    except Exception:
+        if isinstance(data, dict):
+            return _playlist_sanitize_manifest(data)
+        raise ValueError("manifest root is not an object")
+    except Exception as exc:
+        if raise_on_corrupt:
+            app.logger.warning("Playlist manifest %s is corrupt: %s", path, type(exc).__name__)
+            raise PlaylistStateError(
+                "manifest_corrupt",
+                "Playlist manifest is corrupt; refusing to overwrite it.",
+            ) from exc
         return {}
 
 
@@ -43653,14 +44113,22 @@ def _playlist_write_manifest(name: str,
                              missing_tracks: Iterable[Dict[str, Any]] = (),
                              source: str = "",
                              content: str = "",
+                             playlist_id: Optional[str] = None,
                              log=None) -> Dict[str, Any]:
     clean_name = _clean_playlist_name(name)
     with _playlist_manifest_lock(clean_name):
-        previous = _playlist_read_manifest(clean_name)
+        # raise_on_corrupt=True: a manifest that fails to parse must not be
+        # silently treated as "doesn't exist yet" here -- this is the write
+        # path, and proceeding would synthesize a fresh manifest over the
+        # corrupt one, discarding whatever state it still held (SEC-002
+        # Wave 10 second final review).
+        previous = _playlist_read_manifest(clean_name, playlist_id=playlist_id, raise_on_corrupt=True)
+        pid = playlist_id or previous.get("playlist_id") or _playlist_ensure_stable_id(clean_name, previous)
         desired = _playlist_merge_desired_tracks(desired_tracks)
         desired = _playlist_apply_tombstones(clean_name, desired, previous)
         manifest = {
             "version": 2,
+            "playlist_id": pid,
             "name": clean_name,
             "updated_at": time.time(),
             "source": _s(source).strip() or _s(previous.get("source") or "").strip(),
@@ -43674,7 +44142,7 @@ def _playlist_write_manifest(name: str,
             "last_pipeline": dict(previous.get("last_pipeline") or {}),
             "last_plex": dict(previous.get("last_plex") or {}),
         }
-        path = _playlist_manifest_path(clean_name)
+        path = _playlist_manifest_path(clean_name, manifest)
         _playlist_atomic_json_replace(
             path,
             manifest,
@@ -43696,7 +44164,7 @@ def _playlist_replace_manifest(name: str, manifest: Dict[str, Any]) -> Dict[str,
             "name": clean_name,
             "updated_at": time.time(),
         })
-        path = _playlist_manifest_path(clean_name)
+        path = _playlist_manifest_path(clean_name, payload)
         _playlist_atomic_json_replace(
             path,
             payload,
@@ -43709,10 +44177,12 @@ def _playlist_replace_manifest(name: str, manifest: Dict[str, Any]) -> Dict[str,
 def _playlist_store_track_state(name: str,
                                 track: Dict[str, Any],
                                 status: str,
+                                *,
+                                playlist_id: Optional[str] = None,
                                 **updates: Any) -> Dict[str, Any]:
     clean_name = _clean_playlist_name(name)
     with _playlist_manifest_lock(clean_name):
-        manifest = _playlist_read_manifest(clean_name)
+        manifest = _playlist_read_manifest(clean_name, playlist_id=playlist_id)
         states = dict(manifest.get("track_states") or {})
         key = _playlist_status_id(track)
         row = dict(states.get(key) or _playlist_track_manifest_payload(track))
@@ -43733,8 +44203,9 @@ def _playlist_store_track_state(name: str,
         return row
 
 
-def _playlist_manifest_track_states(name: str) -> Dict[str, Dict[str, Any]]:
-    manifest = _playlist_read_manifest(name)
+def _playlist_manifest_track_states(name: str,
+                                    playlist_id: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
+    manifest = _playlist_read_manifest(name, playlist_id=playlist_id)
     states = manifest.get("track_states") or {}
     return states if isinstance(states, dict) else {}
 
@@ -43831,27 +44302,33 @@ def _create_playlist_outputs(name, items, *, log=None, replace_plex=True,
                              wait_for_plex_seconds=0, require_full_plex=False,
                              desired_tracks=None, missing_tracks=None,
                              source: str = "", content: str = "",
+                             playlist_id: Optional[str] = None,
                              sync_plex: bool = True):
     name = _clean_playlist_name(name)
     if not items:
         raise RuntimeError("No tracks to add")
 
-    PLAYLIST_DIR.mkdir(parents=True, exist_ok=True)
-    m3u = PLAYLIST_DIR / f"{name}.m3u"
-    resolved_m3u = m3u.resolve(strict=False)
-    if not _path_is_under(resolved_m3u, PLAYLIST_DIR.resolve(strict=False)):
-        raise ValueError(f"M3U playlist path '{m3u}' is outside playlists directory")
+    _playlist_ensure_state_dirs()
+    if playlist_id:
+        pid = _playlist_ensure_stable_id(name, playlist_id=playlist_id)
+    else:
+        existing_pid = _playlist_resolve_stable_id(name)
+        pid = existing_pid or _playlist_ensure_stable_id(name)
+    key = _playlist_key(name, playlist_id=pid, allocate=False)
+    m3u = f"engine:{key}.m3u"
 
-    lines = ["#EXTM3U"]
-    for it in items:
-        artist_clean = re.sub(r"[\r\n]+", " ", _s(it.get('artist',''))).strip()
-        title_clean = re.sub(r"[\r\n]+", " ", _s(it.get('title',''))).strip()
-        path_clean = re.sub(r"[\r\n]+", "", _s(it.get('path',''))).strip()
-        lines.append(f"#EXTINF:-1,{artist_clean} - {title_clean}")
-        lines.append(path_clean)
-    m3u.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    try:
+        export_result = beets_client.export_playlist_m3u(key, name, items)
+    except Exception as ex:
+        if log is not None:
+            log.append(f"  [playlist] Engine M3U export failed: {type(ex).__name__}")
+        raise RuntimeError("m3u_export_failed") from ex
+    if not (isinstance(export_result, dict) and export_result.get("ok")):
+        raise RuntimeError("m3u_export_failed")
     if log is not None:
-        log.append(f"  [playlist] M3U saved: {m3u}")
+        log.append(f"  [playlist] Engine M3U exported: {key}")
+    if export_result.get("playlist_key"):
+        m3u = f"engine:{_s(export_result.get('playlist_key'))}.m3u"
 
     desired = desired_tracks if desired_tracks is not None else items
     manifest = _playlist_write_manifest(
@@ -43861,6 +44338,7 @@ def _create_playlist_outputs(name, items, *, log=None, replace_plex=True,
         missing_tracks=missing_tracks or [],
         source=source,
         content=content,
+        playlist_id=pid,
         log=log,
     )
 
@@ -43876,6 +44354,7 @@ def _create_playlist_outputs(name, items, *, log=None, replace_plex=True,
         "issue_reason": "",
         "action_needed": "",
         "replaced": 0,
+        "rating_key": "",
         "scan_triggered": False,
         "section_key": "",
         "section_title": "",
@@ -43955,10 +44434,18 @@ def _create_playlist_outputs(name, items, *, log=None, replace_plex=True,
                 elif keys:
                     playlist_keys = list(dict.fromkeys(str(key) for key in keys if str(key)))
                     if replace_plex:
-                        plex["replaced"] = _plex_delete_playlist_by_title(name, log=log)
-                    added = _plex_create_audio_playlist(machine_id, name, playlist_keys, log=log)
+                        replace_result = _plex_replace_playlist_safely(name, pid, manifest, log=log)
+                        plex["replaced"] = replace_result["replaced"]
+                        if replace_result.get("ambiguous"):
+                            plex["issue_reason"] = "ambiguous Plex playlist title"
+                            plex["action_needed"] = (
+                                "Another playlist shares this name with no stored Plex ratingKey; "
+                                "sync it once more to safely establish separate Plex identity"
+                            )
+                    added, new_rating_key = _plex_create_audio_playlist(machine_id, name, playlist_keys, log=log)
                     plex["created"] = True
                     plex["tracks_added"] = added
+                    plex["rating_key"] = new_rating_key
                     plex["matched_track_ids"] = list(match_details.get("matched_track_ids") or [])
                     plex["complete"] = pending_count == 0 and len(keys) == len(items)
                     plex["status"] = "success" if plex["complete"] else "partial_success"
@@ -44029,7 +44516,7 @@ def _create_playlist_outputs(name, items, *, log=None, replace_plex=True,
                 plex["verification_error"] = str(exc)
 
     if sync_plex:
-        latest_manifest = _playlist_read_manifest(name)
+        latest_manifest = _playlist_read_manifest(name, playlist_id=pid) or dict(manifest)
         latest_manifest["last_plex"] = {
             **plex,
             "status": _s(plex.get("status") or ("synced" if plex.get("complete") else ("failed" if plex.get("error") else "partial"))),
@@ -44054,13 +44541,14 @@ def _create_playlist_outputs(name, items, *, log=None, replace_plex=True,
         if plex.get("complete") or item_status_id in matched_plex_ids:
             _playlist_store_track_state(
                 name, item, "plex_synced",
+                playlist_id=pid,
                 message="matched to Plex library playlist",
                 path=_s(item.get("path") or ""),
                 plex_issue="",
             )
         elif sync_plex:
             pending_row = pending_plex_by_id.get(item_status_id) or {}
-            current_state = _playlist_manifest_track_states(name).get(item_status_id, {})
+            current_state = _playlist_manifest_track_states(name, playlist_id=pid).get(item_status_id, {})
             current_status = _s(current_state.get("status") or "available")
             if current_status not in {"imported", "available"}:
                 current_status = "available"
@@ -44071,14 +44559,17 @@ def _create_playlist_outputs(name, items, *, log=None, replace_plex=True,
             )
             _playlist_store_track_state(
                 name, item, current_status,
+                playlist_id=pid,
                 message=issue,
                 path=_s(item.get("path") or ""),
                 plex_issue=issue,
             )
 
     return {
-        "m3u": str(m3u),
-        "manifest": str(_playlist_manifest_path(name)),
+        "m3u": m3u,
+        "manifest": str(_playlist_manifest_path(name, manifest)),
+        "playlist_id": pid,
+        "playlist_key": key,
         "plex": plex,
         "tracks_in_m3u": len(items),
         "desired_tracks": len(manifest.get("desired_tracks") or []),
@@ -44255,30 +44746,30 @@ def _playlist_parse_extinf_label(line: str) -> tuple:
 
 
 def _playlist_m3u_items(name: str, index: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], int]:
-    m3u = PLAYLIST_DIR / f"{_clean_playlist_name(name)}.m3u"
-    if not m3u.exists():
-        return [], 0
+    clean_name = _clean_playlist_name(name)
+    key = _playlist_existing_key(clean_name)
+    raw_items = []
+
+    try:
+        res = beets_client.read_playlist_m3u(key, fallback_name=clean_name)
+        if isinstance(res, dict) and res.get("ok") and res.get("exists"):
+            raw_items = res.get("items") or []
+    except Exception:
+        pass
+
     items: List[Dict[str, Any]] = []
     skipped = 0
-    last_extinf = ""
-    for raw in m3u.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        if line.startswith("#EXTINF"):
-            last_extinf = line
-            continue
-        if line.startswith("#"):
-            continue
+    for raw in raw_items:
+        line = _s(raw.get("path") or "").strip()
         item = _playlist_item_from_path(line, index)
-        if not item and last_extinf:
-            artist, title = _playlist_parse_extinf_label(last_extinf)
+        if not item:
+            artist = _s(raw.get("artist") or "").strip()
+            title = _s(raw.get("title") or "").strip()
             item = _playlist_item_from_text(artist, title, index)
         if item:
             items.append(item)
         else:
             skipped += 1
-        last_extinf = ""
     return items, skipped
 
 
@@ -44399,8 +44890,16 @@ def _playlist_sync_all(log: list, names: Optional[List[str]] = None) -> Dict[str
     wanted_names = {_norm(n) for n in (names or []) if _s(n).strip()}
     index = _playlist_library_index()
     local_names = []
-    if PLAYLIST_DIR.exists():
-        local_names = [p.stem for p in PLAYLIST_DIR.glob("*.m3u")]
+    _playlist_ensure_state_dirs()
+    try:
+        res = beets_client.list_playlist_m3u()
+        if isinstance(res, dict) and res.get("ok") and isinstance(res.get("playlists"), list):
+            for pl in res.get("playlists") or []:
+                n = _s(pl.get("name") or pl.get("key") or "").strip()
+                if n and n not in local_names:
+                    local_names.append(n)
+    except Exception:
+        pass
     plex_by_norm: Dict[str, Dict[str, Any]] = {}
     for pl in _plex_audio_playlists():
         plex_by_norm.setdefault(_norm(pl.get("title", "")), pl)
@@ -44662,11 +45161,10 @@ def playlist_parse():
 
     if source == "local_m3u":
         local_name = _clean_playlist_name(content)
-        local_path = PLAYLIST_DIR / f"{local_name}.m3u"
-        if not local_path.exists():
-            return jsonify({"ok": False, "error": f"Local M3U playlist not found: {local_name}"}), 404
         index = _playlist_library_index()
         local_tracks, _matched, _missing = _playlist_m3u_track_rows(local_name, index)
+        if not local_tracks:
+            return jsonify({"ok": False, "error": f"Engine M3U playlist not found: {local_name}"}), 404
         tracks.extend(local_tracks)
     elif source == "text":
         for raw in content.splitlines():
@@ -44803,6 +45301,7 @@ def playlist_create():
     missing_tracks = payload.get("missing_tracks")
     if not isinstance(missing_tracks, list):
         missing_tracks = []
+    requested_playlist_id = _s(payload.get("playlist_id") or "").strip()
     try:
         if items:
             result = _create_playlist_outputs(
@@ -44812,22 +45311,29 @@ def playlist_create():
                 missing_tracks=missing_tracks,
                 source=_s(payload.get("source") or "manual"),
                 content=_s(payload.get("content") or ""),
+                playlist_id=requested_playlist_id or _playlist_new_internal_id(),
             )
         elif desired_tracks:
-            PLAYLIST_DIR.mkdir(parents=True, exist_ok=True)
-            m3u = PLAYLIST_DIR / f"{name}.m3u"
-            m3u.write_text("#EXTM3U\n", encoding="utf-8")
-            _playlist_write_manifest(
+            _playlist_ensure_state_dirs()
+            pid = _playlist_ensure_stable_id(name, playlist_id=requested_playlist_id or _playlist_new_internal_id())
+            key = _playlist_key(name, playlist_id=pid, allocate=False)
+            export_result = beets_client.export_playlist_m3u(key, name, [])
+            if not (isinstance(export_result, dict) and export_result.get("ok")):
+                raise RuntimeError("m3u_export_failed")
+            manifest = _playlist_write_manifest(
                 name,
                 desired_tracks,
                 matched_tracks=[],
                 missing_tracks=missing_tracks or desired_tracks,
                 source=_s(payload.get("source") or "manual"),
                 content=_s(payload.get("content") or ""),
+                playlist_id=pid,
             )
             result = {
-                "m3u": str(m3u),
-                "manifest": str(_playlist_manifest_path(name)),
+                "m3u": f"engine:{key}.m3u",
+                "manifest": str(_playlist_manifest_path(name, manifest)),
+                "playlist_id": pid,
+                "playlist_key": key,
                 "plex": {"created": False, "tracks_added": 0, "error": None},
                 "tracks_in_m3u": 0,
                 "desired_tracks": len(_playlist_clean_track_list(desired_tracks)),
@@ -44837,7 +45343,21 @@ def playlist_create():
             raise RuntimeError("No playlist tracks were provided")
     except Exception as exc:
         app.logger.warning("Playlist M3U generation failed: %s", type(exc).__name__)
-        return jsonify({"ok": False, "error": "Could not generate playlist file."})
+        cause = getattr(exc, "__cause__", None)
+        if isinstance(exc, BeetsUnavailableError) or isinstance(cause, BeetsUnavailableError):
+            return jsonify({
+                "ok": False,
+                "error": "Engine is unavailable; could not export authoritative M3U.",
+                "error_code": "engine_unavailable",
+            }), 503
+        if isinstance(exc, PlaylistStateError):
+            app.logger.warning("Playlist creation state error: %s (%s)", exc.code, _redact_security_text(str(exc)))
+            return jsonify(_playlist_state_error_payload(exc)), _playlist_state_error_status(exc)
+        return jsonify({
+            "ok": False,
+            "error": "Could not generate playlist file.",
+            "error_code": "m3u_export_failed",
+        }), 502
     return jsonify({"ok": True, **result})
 
 # ── Playlist download (direct sources → beet singleton import) ────────────────
@@ -45060,10 +45580,16 @@ def _playlist_saved_playlist_exists(name: str) -> bool:
     clean_name = _clean_playlist_name(name)
     if not clean_name:
         return False
-    if (PLAYLIST_DIR / f"{clean_name}.m3u").exists():
+    if _playlist_manifest_exists_no_create(clean_name):
         return True
-    if _playlist_manifest_path(clean_name).exists():
-        return True
+    key = _playlist_existing_key(clean_name)
+    if key:
+        try:
+            res = beets_client.read_playlist_m3u(key, fallback_name=clean_name)
+            if isinstance(res, dict) and res.get("ok") and res.get("exists"):
+                return True
+        except Exception:
+            pass
     return bool(_playlist_saved_job_states_for_name(clean_name, mark_interrupted=True))
 
 
@@ -48522,24 +49048,26 @@ def _playlist_match_reference_track(track: Dict[str, Any],
 
 
 def _playlist_m3u_track_rows(name: str, index: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
-    m3u = PLAYLIST_DIR / f"{_clean_playlist_name(name)}.m3u"
-    if not m3u.exists():
-        return [], [], []
+    clean_name = _clean_playlist_name(name)
+    key = _playlist_existing_key(clean_name)
+    raw_items = []
+
+    try:
+        res = beets_client.read_playlist_m3u(key, fallback_name=clean_name)
+        if isinstance(res, dict) and res.get("ok") and res.get("exists"):
+            raw_items = res.get("items") or []
+    except Exception:
+        pass
+
     tracks: List[Dict[str, Any]] = []
     matched: List[Dict[str, Any]] = []
     missing: List[Dict[str, Any]] = []
-    last_extinf = ""
-    for raw in m3u.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        if line.startswith("#EXTINF"):
-            last_extinf = line
-            continue
-        if line.startswith("#"):
-            continue
-        artist, title = _playlist_parse_extinf_label(last_extinf) if last_extinf else ("", "")
-        if not title:
+
+    for raw in raw_items:
+        artist = _s(raw.get("artist") or "").strip()
+        title = _s(raw.get("title") or "").strip()
+        line = _s(raw.get("path") or "").strip()
+        if not title and line:
             title = Path(line.replace("\\", "/")).stem
         track_payload, item = _playlist_match_reference_track(
             {"artist": artist, "title": title, "path": line}, index)
@@ -48550,7 +49078,6 @@ def _playlist_m3u_track_rows(name: str, index: Dict[str, Any]) -> Tuple[List[Dic
             matched.append(item)
         else:
             missing.append(track_payload)
-        last_extinf = ""
     return tracks, matched, missing
 
 
@@ -48714,8 +49241,16 @@ def _playlist_apply_checkpoint_summary(summary: Dict[str, Any],
 def _playlist_checkpoint_list_summary(name: str,
                                       checkpoint_states: Optional[List[Dict[str, Any]]] = None) -> Optional[Dict[str, Any]]:
     clean_name = _clean_playlist_name(name)
-    if not clean_name or (PLAYLIST_DIR / f"{clean_name}.m3u").exists():
+    if not clean_name:
         return None
+    key = _playlist_existing_key(clean_name)
+    if key:
+        try:
+            res = beets_client.read_playlist_m3u(key, fallback_name=clean_name)
+            if isinstance(res, dict) and res.get("ok") and res.get("exists"):
+                return None
+        except Exception:
+            pass
     checkpoint = _playlist_latest_job_state_summary(clean_name, checkpoint_states)
     checkpoint_tracks = _playlist_count_value(checkpoint.get("checkpoint_tracks"))
     if checkpoint_tracks <= 0:
@@ -48741,6 +49276,37 @@ def _playlist_checkpoint_list_summary(name: str,
     return summary
 
 
+def _playlist_engine_m3u_count_summary(name: str,
+                                       manifest: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, int]]:
+    clean_name = _clean_playlist_name(name)
+    key = _playlist_existing_key(clean_name, manifest)
+    if not key:
+        return None
+    try:
+        res = beets_client.read_playlist_m3u(key, fallback_name=clean_name)
+    except Exception:
+        return None
+    if not (isinstance(res, dict) and res.get("ok") and res.get("exists")):
+        return None
+    raw_items = res.get("items") if isinstance(res.get("items"), list) else []
+    tracks = sum(1 for row in raw_items if isinstance(row, dict))
+    return {
+        "tracks": tracks,
+        "available": 0,
+        "missing": tracks,
+        "quality_bad": 0,
+        "quality_review": 0,
+        "m3u_tracks": tracks,
+        "desired_source": "m3u",
+        "downloaded": 0,
+        "imported": 0,
+        "failed": 0,
+        "review_required": 0,
+        "removed": 0,
+        "excluded": 0,
+        "plex_synced_count": 0,
+    }
+
 def _playlist_m3u_summary(name: str,
                           index: Optional[Dict[str, Any]],
                           checkpoint_states: Optional[List[Dict[str, Any]]] = None,
@@ -48755,8 +49321,14 @@ def _playlist_m3u_summary(name: str,
     checkpoint_summary = _playlist_checkpoint_list_summary(name, checkpoint_states)
     if checkpoint_summary:
         return checkpoint_summary
-    index = index or _playlist_library_index()
-    rows = _playlist_rows_for_saved_playlist(name, index, checkpoint_states)
+    try:
+        index = index or _playlist_library_index()
+        rows = _playlist_rows_for_saved_playlist(name, index, checkpoint_states)
+    except Exception:
+        fallback = _playlist_engine_m3u_count_summary(name, manifest)
+        if fallback is not None:
+            return fallback
+        raise
     matched = rows.get("matched") or []
     missing = rows.get("missing") or []
     summary = {
@@ -48813,36 +49385,59 @@ def _playlist_saved_playlist_records(checkpoint_states: List[Dict[str, Any]]) ->
     records: Dict[str, Dict[str, Any]] = {}
     diagnostics: List[str] = []
 
-    def record_for(name: str) -> Optional[Dict[str, Any]]:
+    def record_for(name: str,
+                   *,
+                   key: str = "",
+                   manifest: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
         clean_name = _clean_playlist_name(name)
         if not clean_name:
             return None
-        key = _norm(clean_name)
-        row = records.get(key)
+        record_key = _s(key or "").strip()
+        if not record_key:
+            record_key = _playlist_existing_key(clean_name, manifest)
+        if not record_key:
+            record_key = f"legacy_{_playlist_slug(clean_name)}"
+        row = records.get(record_key)
         if row is None:
-            row = {"name": clean_name, "has_m3u": False, "has_manifest": False, "has_checkpoint": False}
-            records[key] = row
+            row = {"name": clean_name, "key": record_key, "has_m3u": False, "has_manifest": False, "has_checkpoint": False}
+            records[record_key] = row
+        elif manifest is not None:
+            row["name"] = clean_name
         return row
 
-    for path in sorted(PLAYLIST_DIR.glob("*.m3u"), key=lambda p: p.name.lower()):
-        row = record_for(path.stem)
-        if row is None:
-            diagnostics.append(f"missing name/id: {path.name}")
-            continue
-        row["has_m3u"] = True
-        row["m3u_path"] = str(path)
+    try:
+        res = beets_client.list_playlist_m3u()
+        files = []
+        if isinstance(res, dict) and res.get("ok"):
+            files = res.get("playlists") if isinstance(res.get("playlists"), list) else res.get("files")
+        if isinstance(files, list):
+            for pl in files:
+                if not isinstance(pl, dict):
+                    continue
+                pl_key = _s(pl.get("playlist_key") or pl.get("key") or "").strip()
+                pl_name = _s(pl.get("display_name") or pl.get("name") or pl_key).strip()
+                if pl_name:
+                    row = record_for(pl_name, key=pl_key)
+                    if row is not None:
+                        row["has_m3u"] = True
+                        row["playlist_key"] = pl_key
+    except Exception as ex:
+        diagnostics.append(f"engine m3u list error: {type(ex).__name__}")
 
-    for path in sorted(PLAYLIST_DIR.glob("*.playlist.json"), key=lambda p: p.name.lower()):
-        clean_name, manifest = _playlist_manifest_name_from_file(path, diagnostics)
-        row = record_for(clean_name)
-        if row is None:
-            diagnostics.append(f"missing name/id: {path.name}")
-            continue
-        if row.get("has_manifest"):
-            diagnostics.append(f"duplicate merged: {path.name}")
-        row["has_manifest"] = True
-        row["manifest_path"] = str(path)
-        row["manifest"] = manifest
+    _playlist_ensure_state_dirs()
+    if PLAYLIST_MANIFESTS_DIR.exists():
+        for path in sorted(PLAYLIST_MANIFESTS_DIR.glob("*.playlist.json"), key=lambda p: p.name.lower()):
+            clean_name, manifest = _playlist_manifest_name_from_file(path, diagnostics)
+            manifest_key = path.name[:-len(".playlist.json")] if path.name.lower().endswith(".playlist.json") else path.stem
+            row = record_for(clean_name, key=manifest_key, manifest=manifest)
+            if row is None:
+                diagnostics.append(f"missing name/id: {path.name}")
+                continue
+            if row.get("has_manifest"):
+                diagnostics.append(f"duplicate merged: {path.name}")
+            row["has_manifest"] = True
+            row["manifest_path"] = str(path)
+            row["manifest"] = manifest
 
     for state in checkpoint_states:
         state_name = _playlist_job_state_name(state)
@@ -48861,8 +49456,7 @@ def _playlist_saved_playlist_records(checkpoint_states: List[Dict[str, Any]]) ->
 @app.get("/api/playlists")
 def list_playlists():
     started = time.perf_counter()
-    if not PLAYLIST_DIR.exists():
-        return jsonify({"playlists": [], "duration_ms": 0})
+    _playlist_ensure_state_dirs()
     out = []
     index: Optional[Dict[str, Any]] = None
     checkpoint_states = _playlist_saved_job_states_for_name("", mark_interrupted=True)
@@ -48925,8 +49519,8 @@ def list_playlists():
             "has_manifest": has_manifest,
             "has_checkpoint": has_checkpoint,
             "playlist_id": _s(manifest.get("id") or manifest.get("playlist_id") or ""),
-            "manifest_path": _s(record.get("manifest_path") or str(_playlist_manifest_path(name)) if has_manifest else ""),
-            "m3u_path": _s(record.get("m3u_path") or str(PLAYLIST_DIR / f"{name}.m3u") if has_m3u else ""),
+            "manifest_path": _s(record.get("manifest_path") or ""),
+            "m3u_path": f"engine:{record.get('playlist_key') or record.get('key')}.m3u" if has_m3u else "",
             "plex_tracks": plex_tracks,
             "plex_synced": plex_synced,
             "last_plex": last_plex,
@@ -48954,26 +49548,89 @@ def list_playlists():
 def playlist_delete(name):
     clean_name = _clean_playlist_name(_s(name))
     payload = request.get_json(silent=True) or {}
+    playlist_id = _s(payload.get("playlist_id") or "").strip()
+    try:
+        _playlist_ensure_state_dirs()
+    except PlaylistStateError as exc:
+        app.logger.warning("Playlist delete state error: %s (%s)", exc.code, _redact_security_text(str(exc)))
+        return jsonify(_playlist_state_error_payload(exc)), _playlist_state_error_status(exc)
+    pid = ""
+    try:
+        pid = _playlist_resolve_stable_id(clean_name, playlist_id=playlist_id or None)
+        key = _playlist_key(clean_name, playlist_id=pid or None, allocate=False)
+    except PlaylistStateError as exc:
+        app.logger.warning("Playlist delete identity error: %s (%s)", exc.code, _redact_security_text(str(exc)))
+        return jsonify(_playlist_state_error_payload(exc)), _playlist_state_error_status(exc)
     delete_plex = bool(payload.get("delete_plex", True))
-    m3u = PLAYLIST_DIR / f"{clean_name}.m3u"
-    manifest = _playlist_manifest_path(clean_name)
+
     deleted_m3u = False
     deleted_manifest = False
     plex_deleted = 0
     plex_error = ""
+
     try:
-        if m3u.exists():
-            m3u.unlink()
-            deleted_m3u = True
-        if manifest.exists():
-            manifest.unlink()
+        res = beets_client.delete_playlist_m3u(key, fallback_name=clean_name)
+        if not (isinstance(res, dict) and res.get("ok")):
+            return jsonify({
+                "ok": False,
+                "error": "Could not delete authoritative engine M3U.",
+                "error_code": "m3u_delete_failed",
+            }), 502
+        deleted_m3u = bool(res.get("deleted"))
+    except Exception as ex:
+        app.logger.warning("Engine M3U delete via IPC failed: %s", type(ex).__name__)
+        return jsonify({
+            "ok": False,
+            "error": "Engine is unavailable; could not delete authoritative M3U.",
+            "error_code": "engine_unavailable",
+        }), 503
+
+    manifest_seed = {"playlist_id": pid} if _playlist_valid_internal_id(pid) else None
+    # Read manifest data (for its stored Plex ratingKey, if any) before
+    # removing it -- the file is the only place that identity is recorded.
+    manifest_data = _playlist_read_manifest(clean_name, playlist_id=pid or None)
+    manifest_path = _playlist_manifest_path(clean_name, manifest_seed, allocate=False)
+    try:
+        if manifest_path.exists():
+            manifest_path.unlink()
             deleted_manifest = True
     except Exception as ex:
-        app.logger.warning("Could not delete playlist file %r: %s", clean_name, type(ex).__name__)
-        return jsonify({"ok": False, "error": "Could not delete playlist file."}), 500
-    if delete_plex and _plex_settings().get("token"):
+        app.logger.warning("Could not delete playlist manifest %r: %s", clean_name, type(ex).__name__)
+
+    job_file = PLAYLIST_JOB_STATE_DIR / f"{key}.json"
+    if job_file.exists():
         try:
-            plex_deleted = _plex_delete_playlist_by_title(clean_name)
+            job_file.unlink()
+        except Exception:
+            pass
+
+    # The engine M3U delete above is this route's one hard-required step
+    # (a failure already returned before this point); once past it, the
+    # playlist's identity record is retired from the index so a later
+    # same-named create doesn't collide with a dead orphan entry that
+    # would otherwise falsely trip ambiguous_playlist detection (SEC-002
+    # Wave 10 second final review).
+    if _playlist_valid_internal_id(pid):
+        try:
+            with _PLAYLIST_STATE_LOCK:
+                index_data = _playlist_load_index()
+                if pid in index_data:
+                    del index_data[pid]
+                    _playlist_save_index(index_data)
+        except PlaylistStateError as exc:
+            app.logger.warning("Could not retire playlist index entry %r: %s", pid, exc.code)
+
+    if delete_plex and _plex_settings().get("token"):
+        stored_rating_key = _s((manifest_data.get("last_plex") or {}).get("rating_key") or "").strip()
+        try:
+            if stored_rating_key:
+                plex_deleted = _plex_delete_playlist_by_rating_key(stored_rating_key)
+            else:
+                others = _playlist_other_live_pids_with_name(clean_name, exclude_pid=pid)
+                if others:
+                    plex_error = "Another playlist shares this name in Plex; delete it manually or sync first to establish a distinct Plex identity."
+                else:
+                    plex_deleted = _plex_delete_playlist_by_title(clean_name)
         except urllib.error.HTTPError as ex:
             plex_error = "Plex token is invalid or expired." if ex.code in (401, 403) else f"Plex returned HTTP {ex.code}."
         except Exception as ex:
@@ -48982,7 +49639,8 @@ def playlist_delete(name):
     return jsonify({
         "ok": True,
         "name": clean_name,
-        "m3u": str(m3u),
+        "key": key,
+        "m3u": f"engine:{key}.m3u",
         "deleted_m3u": deleted_m3u,
         "deleted_manifest": deleted_manifest,
         "plex_deleted": plex_deleted,
@@ -49022,8 +49680,10 @@ def _playlist_write_local_membership(name: str,
             sync_plex=False,
         )
     else:
-        m3u = PLAYLIST_DIR / f"{clean_name}.m3u"
-        m3u.write_text("#EXTM3U\n", encoding="utf-8")
+        key = _playlist_key(clean_name, manifest)
+        export_result = beets_client.export_playlist_m3u(key, clean_name, [])
+        if not (isinstance(export_result, dict) and export_result.get("ok")):
+            raise RuntimeError("m3u_export_failed")
     return _playlist_detail_payload(clean_name, index)
 
 
@@ -49063,7 +49723,10 @@ def _playlist_delete_staged_track_file(name: str,
     # Authorization is scoped to this playlist's own staging root only.
     library_root = MUSIC_ROOT.resolve(strict=False)
     staging_root = PLAYLIST_DOWNLOAD_ROOT.resolve(strict=False)
-    playlist_staging = get_playlist_staging_root(clean_name).resolve(strict=False)
+    playlist_key = _playlist_existing_key(clean_name)
+    if not playlist_key:
+        raise RuntimeError("Playlist identity is unavailable; cannot delete staged track")
+    playlist_staging = (PLAYLIST_DOWNLOAD_ROOT / playlist_key).resolve(strict=False)
 
     is_in_library = False
     try:
@@ -49093,8 +49756,6 @@ def _playlist_delete_staged_track_file(name: str,
     # delegated to the control agent, which re-validates containment,
     # symlinks, and root-self on its own side under an OS lock (SEC-002
     # Wave 9 continuation -- no local Path.unlink() fallback here).
-    get_key = globals().get("_playlist_key")
-    playlist_key = get_key(clean_name, None) if get_key else _playlist_slug(clean_name)
     try:
         res = beets_client.delete_playlist_staged_track(playlist_key, track_key, str(resolved_path))
     except Exception as exc:
@@ -49291,14 +49952,15 @@ def _playlist_detail_summary_payload(clean_name: str) -> Dict[str, Any]:
     available = _playlist_count_value(summary.get("available"))
     if total and available == 0 and missing_count == 0:
         available = max(0, total - missing_count)
-    m3u = PLAYLIST_DIR / f"{clean_name}.m3u"
+    key = _playlist_existing_key(clean_name)
+    m3u = f"engine:{key}.m3u" if key else ""
     last_plex = manifest.get("last_plex") if isinstance(manifest.get("last_plex"), dict) else {}
     last_pipeline = manifest.get("last_pipeline") if isinstance(manifest.get("last_pipeline"), dict) else {}
     return {
         "ok": True,
         "name": clean_name,
         "m3u": str(m3u),
-        "manifest": str(_playlist_manifest_path(clean_name)),
+        "manifest": str(_playlist_manifest_path(clean_name, allocate=False)) if _playlist_manifest_exists_no_create(clean_name) else "",
         "manifest_tracks": len(manifest_tracks),
         "m3u_tracks": _playlist_count_value(summary.get("m3u_tracks")),
         "desired_source": _s(summary.get("desired_source") or manifest.get("source") or "manifest"),
@@ -49322,28 +49984,28 @@ def _playlist_detail_summary_payload(clean_name: str) -> Dict[str, Any]:
 
 
 def _playlist_m3u_reference_track_rows(name: str) -> List[Dict[str, Any]]:
-    m3u = PLAYLIST_DIR / f"{_clean_playlist_name(name)}.m3u"
-    if not m3u.exists():
-        return []
+    clean_name = _clean_playlist_name(name)
+    key = _playlist_existing_key(clean_name)
+    raw_items = []
+
+    try:
+        res = beets_client.read_playlist_m3u(key, fallback_name=clean_name)
+        if isinstance(res, dict) and res.get("ok") and res.get("exists"):
+            raw_items = res.get("items") or []
+    except Exception:
+        pass
+
     tracks: List[Dict[str, Any]] = []
-    last_extinf = ""
-    for raw in m3u.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        if line.startswith("#EXTINF"):
-            last_extinf = line
-            continue
-        if line.startswith("#"):
-            continue
-        artist, title = _playlist_parse_extinf_label(last_extinf) if last_extinf else ("", "")
-        if not title:
+    for it in raw_items:
+        artist = _s(it.get("artist") or "").strip()
+        title = _s(it.get("title") or "").strip()
+        line = _s(it.get("path") or "").strip()
+        if not title and line:
             title = Path(line.replace("\\", "/")).stem
         row = {"artist": artist, "title": title}
         if line:
             row["path"] = line
         tracks.append(row)
-        last_extinf = ""
     return tracks
 
 
@@ -49507,7 +50169,8 @@ def _playlist_rows_page_payload(clean_name: str) -> Dict[str, Any]:
 
 def _playlist_detail_payload(clean_name: str, index: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     index = index or _playlist_library_index()
-    m3u = PLAYLIST_DIR / f"{clean_name}.m3u"
+    key = _playlist_existing_key(clean_name)
+    m3u = f"engine:{key}.m3u" if key else ""
     rows = _playlist_rows_for_saved_playlist(clean_name, index)
     tracks = rows.get("tracks") or []
     state_cache = _playlist_manifest_track_states(clean_name)
@@ -49539,8 +50202,8 @@ def _playlist_detail_payload(clean_name: str, index: Optional[Dict[str, Any]] = 
     return {
         "ok": True,
         "name": clean_name,
-        "m3u": str(m3u),
-        "manifest": str(_playlist_manifest_path(clean_name)),
+        "m3u": m3u,
+        "manifest": str(_playlist_manifest_path(clean_name, allocate=False)) if _playlist_manifest_exists_no_create(clean_name) else "",
         "manifest_tracks": len(manifest_tracks),
         "m3u_tracks": int(rows.get("m3u_tracks") or 0),
         "desired_source": _s(rows.get("desired_source") or "m3u"),
@@ -50249,32 +50912,29 @@ def _playlist_run_import_downloaded(name: str,
 
 
 def _playlist_sync_items_from_m3u(clean_name: str) -> List[Dict[str, Any]]:
-    m3u = PLAYLIST_DIR / f"{_clean_playlist_name(clean_name)}.m3u"
-    if not m3u.exists():
+    key = _playlist_existing_key(clean_name)
+    if not key:
+        return []
+    try:
+        res = beets_client.read_playlist_m3u(key, fallback_name=_clean_playlist_name(clean_name))
+    except Exception:
+        return []
+    if not (isinstance(res, dict) and res.get("ok") and res.get("exists")):
         return []
     out: List[Dict[str, Any]] = []
-    last_extinf = ""
-    for raw in m3u.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = raw.strip()
-        if not line:
+    for item in res.get("items") or []:
+        if not isinstance(item, dict):
             continue
-        if line.startswith("#EXTINF"):
-            last_extinf = line
-            continue
-        if line.startswith("#"):
-            continue
-        artist, title = _playlist_parse_extinf_label(last_extinf) if last_extinf else ("", "")
-        if not _plex_is_final_library_path(line):
-            last_extinf = ""
+        line = _s(item.get("path") or "").strip()
+        if not line or not _plex_is_final_library_path(line):
             continue
         resolved = _playlist_resolve_item_path(line)
         out.append({
-            "artist": artist,
-            "title": title or Path(line).stem,
+            "artist": _s(item.get("artist") or ""),
+            "title": _s(item.get("title") or Path(line).stem),
             "path": str(resolved),
             "source": "m3u",
         })
-        last_extinf = ""
     return out
 
 
