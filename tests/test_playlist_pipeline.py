@@ -242,6 +242,21 @@ class PlaylistPipelineTests(unittest.TestCase):
                 except ValueError:
                     return False
 
+            # Deletion is engine-owned (SEC-002 Wave 9 continuation): the
+            # function delegates the actual unlink to beets_client rather
+            # than touching the filesystem directly. This fake performs the
+            # same containment-agnostic unlink the real control agent would,
+            # so the test still proves the *caller's* pre-validation
+            # (library-file refusal, staging containment) independently of
+            # engine-side enforcement, which has its own dedicated tests.
+            class _FakeBeetsClient:
+                def delete_playlist_staged_track(self, playlist_key, track_id, requested_path):
+                    p = Path(requested_path)
+                    existed = p.exists()
+                    if existed:
+                        p.unlink()
+                    return {"ok": True, "deleted": existed, "already_absent": not existed, "path": requested_path}
+
             namespace = {
                 "Dict": Dict,
                 "Any": Any,
@@ -249,14 +264,20 @@ class PlaylistPipelineTests(unittest.TestCase):
                 "PLAYLIST_DOWNLOAD_ROOT": staging,
                 "MUSIC_ROOT": library,
                 "AUDIO_EXT": {".mp3"},
+                "beets_client": _FakeBeetsClient(),
+                "_playlist_key": lambda name, manifest=None: str(name),
+                "_playlist_slug": lambda name: str(name),
                 "_s": lambda value: str(value or ""),
                 "_path_is_under": is_under,
                 "_clean_playlist_name": lambda name: str(name),
                 "get_playlist_staging_root": lambda name: staging / name,
                 "_playlist_manifest_track_states": lambda _name: {
-                    "artist|song": {"staged_path": str(staged_file)}
+                    "artist|song": {"staged_path": str(staged_file)},
+                    "artist|libsong": {"staged_path": str(library_file)},
                 },
-                "_playlist_status_id": lambda _track: "artist|song",
+                "_playlist_status_id": lambda track: (
+                    "artist|libsong" if track.get("title") == "LibSong" else "artist|song"
+                ),
                 "_playlist_store_track_state": lambda *args, **kwargs: stored.append((args, kwargs)),
             }
             delete_staged = load_function("_playlist_delete_staged_track_file", namespace)
@@ -264,10 +285,13 @@ class PlaylistPipelineTests(unittest.TestCase):
             self.assertTrue(result["deleted"])
             self.assertFalse(staged_file.exists())
             self.assertTrue(library_file.exists())
+            # The manifest's own recorded path (not just a browser-supplied
+            # requested_path) must be revalidated -- a stale/tampered state
+            # row pointing at a library file must still be refused.
             with self.assertRaisesRegex(RuntimeError, "Beets library file"):
                 delete_staged(
                     "Road Trip",
-                    {"artist": "Artist", "title": "Song"},
+                    {"artist": "Artist", "title": "LibSong"},
                     requested_path=str(library_file),
                 )
 

@@ -41896,6 +41896,19 @@ def _playlist_staging_manifest_path(name: str) -> Path:
     return get_playlist_staging_root(name) / "manifest.json"
 
 
+class PlaylistStagingUnavailableError(RuntimeError):
+    """Raised when the Beets engine cannot confirm playlist staging directories exist.
+
+    The web manager owns no writable media/staging filesystem in the supported
+    two-service topology (only /web-manager-data is mounted, and it is not
+    PLAYLIST_DOWNLOAD_ROOT). There is deliberately no local mkdir/chmod fallback
+    here: a fallback that quietly wrote to a path the container cannot actually
+    reach in production is not resilience, it is a false "ok" for an operation
+    that did nothing (SEC-002 Wave 9 final review).
+    """
+    code = "staging_unavailable"
+
+
 def _playlist_ensure_staging_dirs(name: str, playlist_id: Optional[str] = None) -> None:
     clean_name = _clean_playlist_name(name)
     get_key = globals().get("_playlist_key")
@@ -41910,23 +41923,14 @@ def _playlist_ensure_staging_dirs(name: str, playlist_id: Optional[str] = None) 
 
     try:
         res = beets_client.ensure_playlist_staging(key, playlist_id or "", name)
-        if isinstance(res, dict) and res.get("ok"):
-            return
-    except Exception:
-        pass
-
-    for path in (root, root / "downloads", root / "imports"):
-        resolved_path = path.resolve(strict=False)
-        if not _path_is_under(resolved_path, staging_base):
-            raise ValueError("Staging sub-path is outside allowed staging directory")
-        try:
-            path.mkdir(parents=True, exist_ok=True)
-            try:
-                os.chmod(path, 0o775)
-            except Exception:
-                pass
-        except OSError:
-            pass
+    except Exception as exc:
+        raise PlaylistStagingUnavailableError(
+            "Engine is unavailable; cannot ensure playlist staging directories"
+        ) from exc
+    if not (isinstance(res, dict) and res.get("ok")):
+        raise PlaylistStagingUnavailableError(
+            "Engine did not confirm playlist staging directories"
+        )
 
 
 def _playlist_legacy_staging_dirs(name: str) -> List[Path]:
@@ -45913,7 +45917,14 @@ def playlist_download():
             "error": _PLAYLIST_DUPLICATE_JOB_MESSAGE,
             "running_job_id": running_pipeline,
         }), 409
-    _playlist_ensure_staging_dirs(name)
+    try:
+        _playlist_ensure_staging_dirs(name)
+    except PlaylistStagingUnavailableError:
+        return jsonify({
+            "ok": False,
+            "error": "staging_unavailable",
+            "message": "Engine is unavailable; cannot stage playlist downloads right now",
+        }), 503
     dl_dir = _playlist_downloads_dir(name)
     saved_state = _playlist_load_job_state(jid)
     if not tracks:
@@ -49020,11 +49031,26 @@ def _playlist_delete_staged_track_file(name: str,
                                        track: Dict[str, Any],
                                        requested_path: str = "") -> Dict[str, Any]:
     clean_name = _clean_playlist_name(name)
+    track_key = _playlist_status_id(track)
     states = _playlist_manifest_track_states(clean_name)
-    state_row = states.get(_playlist_status_id(track)) or {}
-    raw_path = _s(requested_path or state_row.get("staged_path") or state_row.get("path") or "").strip()
-    if not raw_path:
+    state_row = states.get(track_key) or {}
+    # The server-owned manifest state, not a browser-supplied requested_path,
+    # is the authority for which file gets deleted -- otherwise a caller
+    # could point requested_path at any staged file and use this endpoint's
+    # own containment checks to authorize deleting it (SEC-002 Wave 9 second
+    # final review: requested-path-as-sole-authority gap). requested_path is
+    # accepted only when it canonically matches the path already recorded
+    # here for this track; a mismatching value is rejected outright rather
+    # than silently ignored.
+    authoritative_raw = _s(state_row.get("staged_path") or state_row.get("path") or "").strip()
+    if not authoritative_raw:
         raise RuntimeError("No staged download is recorded for this track")
+    if requested_path:
+        req_resolved = Path(_s(requested_path).strip()).resolve(strict=False)
+        auth_resolved = Path(authoritative_raw).resolve(strict=False)
+        if req_resolved != auth_resolved:
+            raise RuntimeError("requested_path does not match the server-recorded staged path for this track")
+    raw_path = authoritative_raw
     path = Path(raw_path)
     resolved_path = path.resolve(strict=False)
     # Deliberately NOT the broad, shared PLAYLIST_DOWNLOAD_ROOT here: every
@@ -49061,22 +49087,22 @@ def _playlist_delete_staged_track_file(name: str,
     if path.suffix.lower() not in AUDIO_EXT:
         raise RuntimeError("Refusing to delete a non-audio staging file")
 
-    deleted = False
-    if resolved_path.exists():
-        if not resolved_path.is_file():
-            raise RuntimeError("The staged path is not a file")
-        current_resolved = path.resolve(strict=True)
-        try:
-            current_resolved.relative_to(playlist_staging)
-            current_in_staging = True
-        except ValueError:
-            current_in_staging = False
-        if not current_in_staging:
-            raise RuntimeError("Path resolved outside staging directory during deletion")
-        if current_resolved.suffix.lower() not in AUDIO_EXT:
-            raise RuntimeError("Resolved target is not a valid audio file")
-        path.unlink()
-        deleted = True
+    # Local checks above are defense-in-depth, fast-fail validation only.
+    # The actual mutation is engine-owned: the web manager has no writable
+    # media/staging filesystem in the supported topology, so deletion is
+    # delegated to the control agent, which re-validates containment,
+    # symlinks, and root-self on its own side under an OS lock (SEC-002
+    # Wave 9 continuation -- no local Path.unlink() fallback here).
+    get_key = globals().get("_playlist_key")
+    playlist_key = get_key(clean_name, None) if get_key else _playlist_slug(clean_name)
+    try:
+        res = beets_client.delete_playlist_staged_track(playlist_key, track_key, str(resolved_path))
+    except Exception as exc:
+        raise RuntimeError("Engine is unavailable; cannot delete staged track file") from exc
+    if not (isinstance(res, dict) and res.get("ok")):
+        err = _s(res.get("error")) if isinstance(res, dict) else ""
+        raise RuntimeError(err or "Engine refused to delete staged track file")
+    deleted = bool(res.get("deleted"))
 
     _playlist_store_track_state(
         clean_name,

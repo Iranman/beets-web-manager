@@ -3518,8 +3518,19 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 self._send_json(403, {"error": "Refusing to delete a Beets library file"})
                 return
 
-            if not (_path_is_within(str(safe_target), str(playlist_staging)) or _path_is_within(str(safe_target), str(staging_root))):
-                self._send_json(403, {"error": "Refusing to delete a file outside playlist download staging"})
+            # Containment MUST be scoped to this playlist's own staging subtree,
+            # not the shared staging_root every playlist lives under -- an "OR
+            # staging_root" clause here is meaningless (every playlist's files
+            # are also "under staging_root"), and would let a caller for
+            # playlist A delete a file that actually belongs to playlist B
+            # (SEC-002 Wave 9 second final review: engine cross-playlist
+            # deletion gap). track_id is not independently authoritative here
+            # either -- the engine has no manifest/track-state access, so the
+            # web-manager layer is required to resolve track_id to the
+            # server-owned staged path and pass that (not a raw browser value)
+            # as requested_path before calling this endpoint.
+            if not _path_is_within(str(safe_target), str(playlist_staging)):
+                self._send_json(403, {"error": "Refusing to delete a file outside this playlist's own staging directory"})
                 return
 
             if str(safe_target) in (str(staging_root), str(playlist_staging), str(music_root)) or safe_target.is_dir():
@@ -3548,6 +3559,9 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                     return
                 if _path_is_within(str(safe_target), str(music_root)):
                     self._send_json(403, {"error": "Refusing to delete a Beets library file"})
+                    return
+                if not _path_is_within(str(safe_target), str(playlist_staging)):
+                    self._send_json(403, {"error": "Refusing to delete a file outside this playlist's own staging directory"})
                     return
                 if safe_target.is_dir() or str(safe_target) in (str(staging_root), str(playlist_staging)):
                     self._send_json(403, {"error": "Refusing to delete staging root directory"})
