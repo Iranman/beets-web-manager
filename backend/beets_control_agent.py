@@ -60,6 +60,27 @@ _PLACEHOLDER_API_TOKENS = {
 BEETSDIR = os.environ.get("BEETSDIR", "/config")
 MUSIC_LIBRARY_PATH = os.environ.get("MUSIC_LIBRARY_PATH", "/data/media/music")
 DOWNLOAD_PATH = os.environ.get("DOWNLOAD_PATH", "/data/torrents")
+# Path objects for the playlist-specific engine endpoints below
+# (/playlists/staging/ensure, /playlists/staging/delete-track,
+# /playlists/export_m3u), which do their own narrow per-playlist
+# containment checks in addition to (not instead of) the broader
+# resolve_safe_path()/_allowed_root_paths() role-based containment above.
+# MUSIC_ROOT intentionally aliases MUSIC_LIBRARY_PATH rather than reading a
+# second, independently-settable env var for the same real directory -- two
+# names for one path is how they drift apart. PLAYLIST_DIR/
+# PLAYLIST_DOWNLOAD_ROOT use the same env var names and defaults as app.py's
+# module-level constants of the same name so one operator-set value governs
+# both containers (SEC-002 Wave 9 second final review: these three names
+# were referenced by the endpoint code below but never defined anywhere in
+# this module, which meant every call to any of the three endpoints raised
+# an uncaught NameError in production -- not just a security gap, the
+# feature could never have worked at all).
+MUSIC_ROOT = Path(MUSIC_LIBRARY_PATH)
+PLAYLIST_DIR = Path(os.environ.get("PLAYLIST_DIR", "/data/media/music/playlists"))
+PLAYLIST_DOWNLOAD_ROOT = Path(os.environ.get(
+    "PLAYLIST_DOWNLOAD_ROOT",
+    "/data/torrents/music/Playlist Downloads",
+))
 LOCK_PATH = os.environ.get("BEETS_LOCK_PATH", os.path.join(BEETSDIR, ".beet_db.lock"))
 LIB_PATH = os.path.join(BEETSDIR, "musiclibrary.blb")
 BEET_BIN = os.environ.get("BEET_BIN", "beet")
