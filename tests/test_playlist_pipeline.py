@@ -429,7 +429,7 @@ class PlaylistPipelineTests(unittest.TestCase):
         create_end = APP_SOURCE.index("_PLAYLIST_SYNC_LOCK", create_start)
         create_source = APP_SOURCE[create_start:create_end]
         self.assertLess(
-            create_source.index("_plex_delete_playlist_by_title"),
+            create_source.index("_plex_replace_playlist_safely"),
             create_source.index("_plex_create_audio_playlist"),
         )
         self.assertIn('plex["tracks_unmatched"]', create_source)
@@ -544,8 +544,8 @@ class PlaylistPipelineTests(unittest.TestCase):
         create_source = APP_SOURCE[create_start:create_end]
         self.assertIn("mapping_failed", create_source)
         self.assertIn("Plex cannot see Beets library paths.", create_source)
-        self.assertLess(create_source.index("mapping_failed"), create_source.index("_plex_delete_playlist_by_title"))
-        self.assertLess(create_source.index("_plex_delete_playlist_by_title"), create_source.index("_plex_create_audio_playlist"))
+        self.assertLess(create_source.index("mapping_failed"), create_source.index("_plex_replace_playlist_safely"))
+        self.assertLess(create_source.index("_plex_replace_playlist_safely"), create_source.index("_plex_create_audio_playlist"))
         self.assertIn("_plex_playlist_rating_keys_by_title", create_source)
         self.assertIn("Verified Plex playlist count", APP_SOURCE)
 

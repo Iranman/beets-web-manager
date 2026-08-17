@@ -41846,11 +41846,53 @@ def _playlist_slug(value: Any) -> str:
 
 
 class PlaylistStateError(RuntimeError):
-    """Raised when required persistent playlist identity state is unavailable."""
+    """Raised when required persistent playlist identity state is unavailable.
+
+    The .args message is for server logs only. It must never be echoed
+    directly into a client-facing JSON response (SEC-002 Wave 10 second
+    final review) -- use playlist_state_error_response()/
+    _PLAYLIST_STATE_ERROR_MESSAGES instead, which map .code to a fixed,
+    path-free explanation.
+    """
 
     def __init__(self, code: str, message: str):
         super().__init__(message)
         self.code = code
+
+
+_PLAYLIST_STATE_ERROR_MESSAGES = {
+    "playlist_state_unavailable": "Playlist state storage is currently unavailable.",
+    "playlist_state_corrupt": "Playlist identity state is corrupt; manual review is required.",
+    "manifest_corrupt": "Playlist manifest is corrupt; manual review is required.",
+    "ambiguous_playlist": "Multiple playlists share this display name; specify playlist_id.",
+    "invalid_playlist_id": "The supplied playlist_id is invalid.",
+    "migration_conflict": "This playlist identity conflicts with existing state.",
+}
+
+
+def _playlist_state_error_payload(exc: "PlaylistStateError") -> Dict[str, Any]:
+    """Safe, path-free client-facing body for a PlaylistStateError. Full
+    detail (which may include a concrete state-directory path) goes to the
+    server log at the raise/catch site instead, never into the response."""
+    return {
+        "ok": False,
+        "error": _PLAYLIST_STATE_ERROR_MESSAGES.get(exc.code, "Playlist state is currently unavailable."),
+        "error_code": exc.code,
+    }
+
+
+def _playlist_state_error_status(exc: "PlaylistStateError") -> int:
+    if exc.code == "playlist_state_unavailable":
+        return 503
+    if exc.code == "ambiguous_playlist":
+        return 409
+    if exc.code == "migration_conflict":
+        return 409
+    if exc.code == "invalid_playlist_id":
+        return 404
+    if exc.code in ("playlist_state_corrupt", "manifest_corrupt"):
+        return 409
+    return 500
 
 
 _PLAYLIST_INTERNAL_ID_RE = re.compile(r"^pl_[0-9a-f]{32}$")
@@ -41894,9 +41936,14 @@ def _playlist_ensure_state_dirs() -> None:
         try:
             d.mkdir(parents=True, exist_ok=True)
         except Exception as exc:
+            # The concrete path belongs in the server log only -- it must
+            # never reach a client-facing response (SEC-002 Wave 10 second
+            # final review); the exception itself carries just the code and
+            # a generic message.
+            app.logger.warning("Playlist state directory is unavailable: %s (%s)", d, type(exc).__name__)
             raise PlaylistStateError(
                 "playlist_state_unavailable",
-                f"Playlist state directory is unavailable: {d}",
+                "Playlist state directory is unavailable.",
             ) from exc
 
 
@@ -43228,13 +43275,19 @@ def _plex_playlist_uri(machine_id: str, keys: List[str]) -> str:
 
 
 def _plex_create_audio_playlist(machine_id: str, title: str, keys: List[str],
-                                log=None) -> int:
+                                log=None) -> Tuple[int, str]:
+    """Create (or append to) a Plex audio playlist. Returns (tracks_added,
+    rating_key) -- the rating key is this Plex playlist's own stable
+    identity and must be persisted by the caller (SEC-002 Wave 10 second
+    final review) so a later same-titled app playlist cannot be confused
+    with this one; discarding it here is what forced every prior delete/
+    replace operation to fall back to title-based matching."""
     chunks = [
         keys[index:index + PLEX_PLAYLIST_CHUNK_SIZE]
         for index in range(0, len(keys), PLEX_PLAYLIST_CHUNK_SIZE)
     ]
     if not chunks:
-        return 0
+        return 0, ""
     created = _plex_request("/playlists", {
         "type": "audio",
         "title": title,
@@ -43256,11 +43309,39 @@ def _plex_create_audio_playlist(machine_id: str, title: str, keys: List[str],
         added += len(chunk)
     if log is not None and len(chunks) > 1:
         log.append(f"  [plex] Added playlist tracks in {len(chunks)} chunks")
-    return added
+    return added, playlist_key
+
+
+def _plex_delete_playlist_by_rating_key(rating_key: str, log=None) -> int:
+    """Delete exactly one Plex playlist by its own stable ratingKey -- the
+    unambiguous, preferred deletion authority (SEC-002 Wave 10 second final
+    review). Unlike title-based matching this cannot collide with another
+    app playlist that happens to share a display name."""
+    key = _s(rating_key).strip()
+    if not key:
+        return 0
+    path = key.split("?", 1)[0] if key.startswith("/playlists/") else f"/playlists/{key}"
+    try:
+        _plex_request(path, method="DELETE", timeout=10)
+    except Exception as exc:
+        if log is not None:
+            log.append(f"  [plex] Could not delete playlist by ratingKey {key!r}: {exc}")
+        return 0
+    if log is not None:
+        log.append(f"  [plex] Deleted playlist by ratingKey: {key}")
+    return 1
 
 
 def _plex_delete_playlist_by_title(title, log=None):
-    """Delete existing Plex audio playlists with this title so sync replaces them."""
+    """Delete existing Plex audio playlists with this title so sync replaces them.
+
+    Legacy/fallback authority only -- deletes every Plex playlist matching
+    the title, with no way to distinguish which app playlist "owns" it.
+    Callers must not use this when a stable ratingKey is available (use
+    _plex_delete_playlist_by_rating_key instead) or when another live app
+    playlist shares this same display name (SEC-002 Wave 10 second final
+    review: same-name app playlists must not let one delete another's
+    Plex playlist)."""
     deleted = 0
     d = _plex_request("/playlists", {"playlistType": "audio"}, timeout=10)
     for pl in d.get("MediaContainer", {}).get("Metadata", []):
@@ -43277,6 +43358,53 @@ def _plex_delete_playlist_by_title(title, log=None):
     if deleted and log is not None:
         log.append(f"  [plex] Replaced {deleted} existing playlist(s) named {title!r}")
     return deleted
+
+
+def _playlist_other_live_pids_with_name(clean_name: str, exclude_pid: str = "") -> List[str]:
+    """Return internal playlist_ids (other than exclude_pid) whose index
+    entry currently resolves to this same cleaned display name. Used to
+    detect same-name ambiguity before falling back to Plex title-based
+    matching (SEC-002 Wave 10 second final review)."""
+    try:
+        index_data = _playlist_load_index()
+    except PlaylistStateError:
+        return []
+    others = []
+    for pid, entry in index_data.items():
+        if pid == exclude_pid or not isinstance(entry, dict):
+            continue
+        if _playlist_entry_matches_name(entry, clean_name):
+            others.append(pid)
+    return others
+
+
+def _plex_replace_playlist_safely(name: str,
+                                  pid: str,
+                                  previous_manifest: Optional[Dict[str, Any]],
+                                  log=None) -> Dict[str, Any]:
+    """Delete/replace this playlist's own existing Plex playlist before a
+    fresh sync, without risking another same-named app playlist's Plex
+    playlist (SEC-002 Wave 10 second final review). Prefers a previously
+    stored ratingKey; only falls back to legacy title-based replacement
+    when no other live app playlist shares this display name."""
+    result = {"replaced": 0, "ambiguous": False}
+    prior_rating_key = ""
+    if isinstance(previous_manifest, dict):
+        prior_rating_key = _s((previous_manifest.get("last_plex") or {}).get("rating_key") or "").strip()
+    if prior_rating_key:
+        result["replaced"] = _plex_delete_playlist_by_rating_key(prior_rating_key, log=log)
+        return result
+    others = _playlist_other_live_pids_with_name(_clean_playlist_name(name), exclude_pid=pid)
+    if others:
+        result["ambiguous"] = True
+        if log is not None:
+            log.append(
+                f"  [plex] Skipping title-based Plex replace for {name!r}: "
+                f"{len(others)} other playlist(s) share this name and have no stored ratingKey"
+            )
+        return result
+    result["replaced"] = _plex_delete_playlist_by_title(name, log=log)
+    return result
 
 
 def _plex_unique_index_value(mapping: Dict[Any, set], key: Any) -> str:
@@ -43939,7 +44067,21 @@ def _playlist_sanitize_manifest(data: Dict[str, Any]) -> Dict[str, Any]:
 def _playlist_read_manifest(name: str,
                             *,
                             playlist_id: Optional[str] = None,
-                            manifest: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                            manifest: Optional[Dict[str, Any]] = None,
+                            raise_on_corrupt: bool = False) -> Dict[str, Any]:
+    """Read this playlist's manifest.
+
+    A manifest file that exists but fails to parse/validate is NOT the same
+    as one that was never created -- conflating "corrupt" with "not found"
+    here previously meant a write that follows a corrupt read (see
+    _playlist_write_manifest) would silently synthesize a brand-new
+    manifest from empty defaults, discarding whatever track/import/Plex-
+    sync state the corrupt file still held (SEC-002 Wave 10 second final
+    review). raise_on_corrupt=True (used by write paths) surfaces that
+    distinction as PlaylistStateError instead of swallowing it; read-only/
+    display callers default to the old lenient behavior (degrade to empty
+    rather than 500 an entire page over one unreadable playlist).
+    """
     seed = dict(manifest) if isinstance(manifest, dict) else {}
     if playlist_id:
         seed["playlist_id"] = playlist_id
@@ -43953,8 +44095,14 @@ def _playlist_read_manifest(name: str,
         data = json.loads(path.read_text(encoding="utf-8"))
         if isinstance(data, dict):
             return _playlist_sanitize_manifest(data)
-        return {}
-    except Exception:
+        raise ValueError("manifest root is not an object")
+    except Exception as exc:
+        if raise_on_corrupt:
+            app.logger.warning("Playlist manifest %s is corrupt: %s", path, type(exc).__name__)
+            raise PlaylistStateError(
+                "manifest_corrupt",
+                "Playlist manifest is corrupt; refusing to overwrite it.",
+            ) from exc
         return {}
 
 
@@ -43969,7 +44117,12 @@ def _playlist_write_manifest(name: str,
                              log=None) -> Dict[str, Any]:
     clean_name = _clean_playlist_name(name)
     with _playlist_manifest_lock(clean_name):
-        previous = _playlist_read_manifest(clean_name)
+        # raise_on_corrupt=True: a manifest that fails to parse must not be
+        # silently treated as "doesn't exist yet" here -- this is the write
+        # path, and proceeding would synthesize a fresh manifest over the
+        # corrupt one, discarding whatever state it still held (SEC-002
+        # Wave 10 second final review).
+        previous = _playlist_read_manifest(clean_name, playlist_id=playlist_id, raise_on_corrupt=True)
         pid = playlist_id or previous.get("playlist_id") or _playlist_ensure_stable_id(clean_name, previous)
         desired = _playlist_merge_desired_tracks(desired_tracks)
         desired = _playlist_apply_tombstones(clean_name, desired, previous)
@@ -44201,6 +44354,7 @@ def _create_playlist_outputs(name, items, *, log=None, replace_plex=True,
         "issue_reason": "",
         "action_needed": "",
         "replaced": 0,
+        "rating_key": "",
         "scan_triggered": False,
         "section_key": "",
         "section_title": "",
@@ -44280,10 +44434,18 @@ def _create_playlist_outputs(name, items, *, log=None, replace_plex=True,
                 elif keys:
                     playlist_keys = list(dict.fromkeys(str(key) for key in keys if str(key)))
                     if replace_plex:
-                        plex["replaced"] = _plex_delete_playlist_by_title(name, log=log)
-                    added = _plex_create_audio_playlist(machine_id, name, playlist_keys, log=log)
+                        replace_result = _plex_replace_playlist_safely(name, pid, manifest, log=log)
+                        plex["replaced"] = replace_result["replaced"]
+                        if replace_result.get("ambiguous"):
+                            plex["issue_reason"] = "ambiguous Plex playlist title"
+                            plex["action_needed"] = (
+                                "Another playlist shares this name with no stored Plex ratingKey; "
+                                "sync it once more to safely establish separate Plex identity"
+                            )
+                    added, new_rating_key = _plex_create_audio_playlist(machine_id, name, playlist_keys, log=log)
                     plex["created"] = True
                     plex["tracks_added"] = added
+                    plex["rating_key"] = new_rating_key
                     plex["matched_track_ids"] = list(match_details.get("matched_track_ids") or [])
                     plex["complete"] = pending_count == 0 and len(keys) == len(items)
                     plex["status"] = "success" if plex["complete"] else "partial_success"
@@ -45189,8 +45351,8 @@ def playlist_create():
                 "error_code": "engine_unavailable",
             }), 503
         if isinstance(exc, PlaylistStateError):
-            status = 503 if exc.code == "playlist_state_unavailable" else 409
-            return jsonify({"ok": False, "error": str(exc), "error_code": exc.code}), status
+            app.logger.warning("Playlist creation state error: %s (%s)", exc.code, _redact_security_text(str(exc)))
+            return jsonify(_playlist_state_error_payload(exc)), _playlist_state_error_status(exc)
         return jsonify({
             "ok": False,
             "error": "Could not generate playlist file.",
@@ -49390,14 +49552,15 @@ def playlist_delete(name):
     try:
         _playlist_ensure_state_dirs()
     except PlaylistStateError as exc:
-        return jsonify({"ok": False, "error": str(exc), "error_code": exc.code}), 503
+        app.logger.warning("Playlist delete state error: %s (%s)", exc.code, _redact_security_text(str(exc)))
+        return jsonify(_playlist_state_error_payload(exc)), _playlist_state_error_status(exc)
     pid = ""
     try:
         pid = _playlist_resolve_stable_id(clean_name, playlist_id=playlist_id or None)
         key = _playlist_key(clean_name, playlist_id=pid or None, allocate=False)
     except PlaylistStateError as exc:
-        status = 503 if exc.code == "playlist_state_unavailable" else 409 if exc.code == "ambiguous_playlist" else 404
-        return jsonify({"ok": False, "error": str(exc), "error_code": exc.code}), status
+        app.logger.warning("Playlist delete identity error: %s (%s)", exc.code, _redact_security_text(str(exc)))
+        return jsonify(_playlist_state_error_payload(exc)), _playlist_state_error_status(exc)
     delete_plex = bool(payload.get("delete_plex", True))
 
     deleted_m3u = False
@@ -49423,10 +49586,13 @@ def playlist_delete(name):
         }), 503
 
     manifest_seed = {"playlist_id": pid} if _playlist_valid_internal_id(pid) else None
-    manifest = _playlist_manifest_path(clean_name, manifest_seed, allocate=False)
+    # Read manifest data (for its stored Plex ratingKey, if any) before
+    # removing it -- the file is the only place that identity is recorded.
+    manifest_data = _playlist_read_manifest(clean_name, playlist_id=pid or None)
+    manifest_path = _playlist_manifest_path(clean_name, manifest_seed, allocate=False)
     try:
-        if manifest.exists():
-            manifest.unlink()
+        if manifest_path.exists():
+            manifest_path.unlink()
             deleted_manifest = True
     except Exception as ex:
         app.logger.warning("Could not delete playlist manifest %r: %s", clean_name, type(ex).__name__)
@@ -49438,9 +49604,33 @@ def playlist_delete(name):
         except Exception:
             pass
 
-    if delete_plex and _plex_settings().get("token"):
+    # The engine M3U delete above is this route's one hard-required step
+    # (a failure already returned before this point); once past it, the
+    # playlist's identity record is retired from the index so a later
+    # same-named create doesn't collide with a dead orphan entry that
+    # would otherwise falsely trip ambiguous_playlist detection (SEC-002
+    # Wave 10 second final review).
+    if _playlist_valid_internal_id(pid):
         try:
-            plex_deleted = _plex_delete_playlist_by_title(clean_name)
+            with _PLAYLIST_STATE_LOCK:
+                index_data = _playlist_load_index()
+                if pid in index_data:
+                    del index_data[pid]
+                    _playlist_save_index(index_data)
+        except PlaylistStateError as exc:
+            app.logger.warning("Could not retire playlist index entry %r: %s", pid, exc.code)
+
+    if delete_plex and _plex_settings().get("token"):
+        stored_rating_key = _s((manifest_data.get("last_plex") or {}).get("rating_key") or "").strip()
+        try:
+            if stored_rating_key:
+                plex_deleted = _plex_delete_playlist_by_rating_key(stored_rating_key)
+            else:
+                others = _playlist_other_live_pids_with_name(clean_name, exclude_pid=pid)
+                if others:
+                    plex_error = "Another playlist shares this name in Plex; delete it manually or sync first to establish a distinct Plex identity."
+                else:
+                    plex_deleted = _plex_delete_playlist_by_title(clean_name)
         except urllib.error.HTTPError as ex:
             plex_error = "Plex token is invalid or expired." if ex.code in (401, 403) else f"Plex returned HTTP {ex.code}."
         except Exception as ex:

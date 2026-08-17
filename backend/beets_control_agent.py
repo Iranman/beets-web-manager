@@ -1670,6 +1670,40 @@ def _playlist_m3u_response_row(path: Path) -> dict:
     }
 
 
+def _create_exclusive_temp_file(path: Path, content: str) -> None:
+    """Create `path` as a brand-new file and write `content` to it,
+    refusing to follow a pre-existing symlink or silently overwrite an
+    existing file at that exact path. Path.write_text() uses a plain
+    'w'-mode open, which has neither property -- it happily follows a
+    pre-existing symlink planted at the predicted tempfile name (SEC-002
+    Wave 10 second final review)."""
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(str(path), flags, 0o644)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+    except BaseException:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _bounded_read_text(path: Path, max_bytes: int) -> str:
+    """Read at most max_bytes+1 bytes and raise if that bound is exceeded,
+    rather than trusting a stat() taken before the read -- the file can
+    grow between the size check and the read otherwise (SEC-002 Wave 10
+    second final review: M3U read growth-race)."""
+    with open(path, "rb") as handle:
+        data = handle.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise ValueError("m3u_too_large")
+    return data.decode("utf-8", errors="replace")
+
+
 def _parse_m3u_content(content: str) -> list[dict]:
     items = []
     last_extinf = ""
@@ -3721,6 +3755,20 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                     safe_item_path = resolve_safe_path(item_path, ["music", "staging"])
                 except UnsafePathError:
                     continue
+                # "staging" is a broad, shared role covering every
+                # playlist's download directory (and the wider torrents
+                # root) -- an entry that resolves under this playlist's own
+                # staging subtree is fine, but one under a *different*
+                # playlist's subtree (or elsewhere in staging) must not
+                # silently become an authorized entry in this playlist's
+                # M3U just because it satisfies the broad role check
+                # (SEC-002 Wave 10 second final review: same containment
+                # class as Wave 9's cross-playlist staged-deletion fix).
+                staging_base = PLAYLIST_DOWNLOAD_ROOT.resolve(strict=False)
+                if _path_is_within(str(safe_item_path), str(staging_base)):
+                    own_staging = (staging_base / playlist_key).resolve(strict=False)
+                    if not _path_is_within(str(safe_item_path), str(own_staging)):
+                        continue
                 artist = re.sub(r"[\r\n]+", " ", str(item.get("artist") or "").strip())
                 title = re.sub(r"[\r\n]+", " ", str(item.get("title") or "").strip())
                 label = f"{artist} - {title}".strip(" -") or safe_item_path.name
@@ -3740,9 +3788,31 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
 
             lock_file = acquire_os_lock(read_only=False)
             try:
+                # Re-resolve/revalidate under the lock, immediately before
+                # mutation -- the earlier _playlist_m3u_path_for_key() call
+                # happened before the lock was held (SEC-002 Wave 10 second
+                # final review: the app-level lock only serializes
+                # cooperating application operations against each other; it
+                # is not a filesystem-level guarantee against a parent path
+                # changing between that check and this mutation).
+                try:
+                    safe_m3u = _playlist_m3u_path_for_key(playlist_key)
+                except UnsafePathError:
+                    self._send_json(403, {"error": "Access denied for M3U export path outside allowed roots", "error_code": "m3u_forbidden"})
+                    return
                 safe_m3u.parent.mkdir(parents=True, exist_ok=True)
-                tmp_m3u = safe_m3u.parent / f"{safe_m3u.stem}.{uuid.uuid4().hex[:8]}.tmp"
-                tmp_m3u.write_text(content, encoding="utf-8")
+                tmp_m3u = None
+                for _attempt in range(5):
+                    candidate = safe_m3u.parent / f"{safe_m3u.stem}.{uuid.uuid4().hex[:8]}.tmp"
+                    try:
+                        _create_exclusive_temp_file(candidate, content)
+                        tmp_m3u = candidate
+                        break
+                    except FileExistsError:
+                        continue
+                if tmp_m3u is None:
+                    self._send_json(500, {"error": "Failed to export M3U file", "error_code": "m3u_export_failed"})
+                    return
                 tmp_m3u.replace(safe_m3u)
                 self._send_json(200, {"ok": True, "playlist_key": playlist_key, "display_name": display_name, "size": safe_m3u.stat().st_size})
             except Exception:
@@ -3764,20 +3834,28 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 self._send_json(200, {"ok": True, "items": [], "playlist_key": resolved_key, "exists": False})
                 return
 
+            # Symlink check, size bound, and the read itself all happen
+            # under the lock, re-resolving immediately beforehand -- a
+            # pre-lock check (the previous shape here) validates a
+            # filesystem object that can still be swapped out before the
+            # lock is acquired (SEC-002 Wave 10 second final review). The
+            # size bound is enforced via a bounded read (_bounded_read_text),
+            # not a stat() taken before the read, since the file can grow
+            # between a pre-read stat and the read itself.
+            lock_file = acquire_os_lock(read_only=True)
             try:
+                try:
+                    safe_m3u, resolved_key = _playlist_m3u_target(playlist_key, fallback_name)
+                except UnsafePathError:
+                    self._send_json(400, {"error": "Invalid or missing playlist_key", "error_code": "invalid_playlist_key"})
+                    return
+                if not safe_m3u.exists():
+                    self._send_json(200, {"ok": True, "items": [], "playlist_key": resolved_key, "exists": False})
+                    return
                 if _path_has_symlink_component(safe_m3u, PLAYLIST_DIR.resolve(strict=False)):
                     self._send_json(403, {"error": "Refusing to read symlinked M3U path", "error_code": "m3u_forbidden"})
                     return
-                if safe_m3u.stat().st_size > PLAYLIST_M3U_MAX_BYTES:
-                    self._send_json(413, {"error": "M3U is too large", "error_code": "m3u_too_large"})
-                    return
-            except Exception:
-                self._send_json(500, {"error": "Failed to inspect M3U file", "error_code": "m3u_read_failed"})
-                return
-
-            lock_file = acquire_os_lock(read_only=True)
-            try:
-                content = safe_m3u.read_text(encoding="utf-8", errors="replace")
+                content = _bounded_read_text(safe_m3u, PLAYLIST_M3U_MAX_BYTES)
                 items = _parse_m3u_content(content)
                 self._send_json(200, {"ok": True, "items": items, "playlist_key": resolved_key, "exists": True, "size": safe_m3u.stat().st_size})
             except ValueError as exc:
@@ -3804,6 +3882,11 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
 
             lock_file = acquire_os_lock(read_only=False)
             try:
+                try:
+                    safe_m3u, resolved_key = _playlist_m3u_target(playlist_key, fallback_name)
+                except UnsafePathError:
+                    self._send_json(400, {"error": "Invalid or missing playlist_key", "error_code": "invalid_playlist_key"})
+                    return
                 if safe_m3u.exists():
                     if safe_m3u.is_dir() or _path_has_symlink_component(safe_m3u, PLAYLIST_DIR.resolve(strict=False)):
                         self._send_json(403, {"error": "Refusing to delete unsafe M3U path", "error_code": "m3u_forbidden"})
