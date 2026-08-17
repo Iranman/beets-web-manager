@@ -4,6 +4,7 @@ Comprehensive regression tests for playlist staging, manifest generation,
 M3U security, Plex path translation, and staged track deletion safety.
 """
 
+from contextlib import contextmanager
 import json
 import os
 import shutil
@@ -22,6 +23,33 @@ def _record_staged_path(name, track, staged_path):
     matches this recorded state."""
     app_module._playlist_store_track_state(
         name, track, "downloaded", staged_path=str(staged_path), path=str(staged_path))
+
+
+@contextmanager
+def _patched_playlist_state(base_dir):
+    base = Path(base_dir)
+    state_root = base / "state"
+    manifests = state_root / "manifests"
+    exports = state_root / "exports"
+    jobs = state_root / "jobs"
+    membership = state_root / "membership"
+    for d in (base, state_root, manifests, exports, jobs, membership):
+        d.mkdir(parents=True, exist_ok=True)
+    patches = [
+        mock.patch.object(app_module, "WEB_MANAGER_DATA_DIR", base),
+        mock.patch.object(app_module, "PLAYLIST_STATE_ROOT", state_root),
+        mock.patch.object(app_module, "PLAYLIST_MANIFESTS_DIR", manifests),
+        mock.patch.object(app_module, "PLAYLIST_EXPORTS_DIR", exports),
+        mock.patch.object(app_module, "PLAYLIST_JOB_STATE_DIR", jobs),
+        mock.patch.object(app_module, "PLAYLIST_MEMBERSHIP_DIR", membership),
+    ]
+    for patcher in patches:
+        patcher.start()
+    try:
+        yield {"base": base, "state": state_root, "manifests": manifests, "exports": exports, "jobs": jobs, "membership": membership}
+    finally:
+        for patcher in reversed(patches):
+            patcher.stop()
 
 
 class Wave9PlaylistPathSanitizationTests(unittest.TestCase):
@@ -48,16 +76,19 @@ class Wave9PlaylistPathSanitizationTests(unittest.TestCase):
             self.assertEqual(cleaned, expected)
 
     def test_get_playlist_staging_root_containment(self):
-        root = app_module.get_playlist_staging_root("../../../outside")
-        staging_dir = app_module.PLAYLIST_DOWNLOAD_ROOT.resolve(strict=False)
-        self.assertTrue(app_module._path_is_under(root.resolve(strict=False), staging_dir))
-        self.assertNotIn("..", root.name)
+        with tempfile.TemporaryDirectory() as tmp:
+            with _patched_playlist_state(Path(tmp) / "state"):
+                root = app_module.get_playlist_staging_root("../../../outside")
+                staging_dir = app_module.PLAYLIST_DOWNLOAD_ROOT.resolve(strict=False)
+                self.assertTrue(app_module._path_is_under(root.resolve(strict=False), staging_dir))
+                self.assertNotIn("..", root.name)
 
     def test_playlist_ensure_staging_dirs_rejects_outside_traversal(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_root = Path(tmp) / "staging"
             tmp_root.mkdir()
             with mock.patch.object(app_module, "PLAYLIST_DOWNLOAD_ROOT", tmp_root), \
+                 _patched_playlist_state(Path(tmp) / "state"), \
                  mock.patch.object(app_module.beets_client, "ensure_playlist_staging",
                                     return_value={"ok": True}) as mock_ensure:
                 app_module._playlist_ensure_staging_dirs("../../../outside")
@@ -74,24 +105,26 @@ class Wave9PlaylistPathSanitizationTests(unittest.TestCase):
             tmp_root = Path(tmp) / "staging"
             tmp_root.mkdir()
             with mock.patch.object(app_module, "PLAYLIST_DOWNLOAD_ROOT", tmp_root), \
+                 _patched_playlist_state(Path(tmp) / "state"), \
                  mock.patch.object(app_module.beets_client, "ensure_playlist_staging",
                                     side_effect=ConnectionError("engine unreachable")):
                 with self.assertRaises(app_module.PlaylistStagingUnavailableError):
                     app_module._playlist_ensure_staging_dirs("Some Playlist")
-            created_root = app_module.get_playlist_staging_root("Some Playlist")
-            self.assertFalse(created_root.exists(), "no local directory may be created when the engine is unavailable")
+                created_root = app_module.get_playlist_staging_root("Some Playlist")
+                self.assertFalse(created_root.exists(), "no local directory may be created when the engine is unavailable")
 
     def test_playlist_ensure_staging_dirs_fails_truthfully_when_engine_says_not_ok(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_root = Path(tmp) / "staging"
             tmp_root.mkdir()
             with mock.patch.object(app_module, "PLAYLIST_DOWNLOAD_ROOT", tmp_root), \
+                 _patched_playlist_state(Path(tmp) / "state"), \
                  mock.patch.object(app_module.beets_client, "ensure_playlist_staging",
                                     return_value={"ok": False, "error": "staging_unavailable"}):
                 with self.assertRaises(app_module.PlaylistStagingUnavailableError):
                     app_module._playlist_ensure_staging_dirs("Some Playlist")
-            created_root = app_module.get_playlist_staging_root("Some Playlist")
-            self.assertFalse(created_root.exists())
+                created_root = app_module.get_playlist_staging_root("Some Playlist")
+                self.assertFalse(created_root.exists())
 
 
 class Wave9AtomicJsonReplaceSecurityTests(unittest.TestCase):
@@ -122,8 +155,7 @@ class Wave9AtomicJsonReplaceSecurityTests(unittest.TestCase):
             state_dir.mkdir()
             target_file = state_dir / "my_playlist.playlist.json"
 
-            with mock.patch.object(app_module, "PLAYLIST_DIR", state_dir), \
-                 mock.patch.object(app_module, "PLAYLIST_DOWNLOAD_ROOT", state_dir):
+            with _patched_playlist_state(state_dir):
                 app_module._playlist_atomic_json_replace(
                     target_file,
                     {"name": "my_playlist", "version": 2},
@@ -151,7 +183,7 @@ class Wave9StagedTrackDeletionSecurityTests(unittest.TestCase):
             outside_mp3.write_bytes(b"audio data")
 
             with mock.patch.object(app_module, "PLAYLIST_DOWNLOAD_ROOT", staging_root), \
-                 mock.patch.object(app_module, "PLAYLIST_DIR", playlist_state_dir):
+                 _patched_playlist_state(playlist_state_dir):
                 track = {"id": "tr1"}
                 _record_staged_path("MyPlaylist", track, outside_mp3)
                 with self.assertRaises(RuntimeError) as cm:
@@ -170,7 +202,7 @@ class Wave9StagedTrackDeletionSecurityTests(unittest.TestCase):
             staging_root.mkdir()
             playlist_state_dir.mkdir()
             with mock.patch.object(app_module, "PLAYLIST_DOWNLOAD_ROOT", staging_root), \
-                 mock.patch.object(app_module, "PLAYLIST_DIR", playlist_state_dir):
+                 _patched_playlist_state(playlist_state_dir):
                 # Nested under this playlist's own staging subfolder --
                 # real staged files always live there, never directly
                 # under the shared PLAYLIST_DOWNLOAD_ROOT (see the
@@ -203,7 +235,7 @@ class Wave9StagedTrackDeletionSecurityTests(unittest.TestCase):
             library_track.write_bytes(b"library track")
 
             with mock.patch.object(app_module, "PLAYLIST_DOWNLOAD_ROOT", staging_root), \
-                 mock.patch.object(app_module, "PLAYLIST_DIR", playlist_state_dir), \
+                 _patched_playlist_state(playlist_state_dir), \
                  mock.patch.object(app_module, "MUSIC_ROOT", music_root):
                 track = {"id": "tr3"}
                 _record_staged_path("MyPlaylist", track, library_track)
@@ -228,7 +260,7 @@ class Wave9StagedTrackDeletionSecurityTests(unittest.TestCase):
             playlist_state_dir.mkdir()
 
             with mock.patch.object(app_module, "PLAYLIST_DOWNLOAD_ROOT", staging_root), \
-                 mock.patch.object(app_module, "PLAYLIST_DIR", playlist_state_dir):
+                 _patched_playlist_state(playlist_state_dir) as _patched:
                 playlist_dir = app_module.get_playlist_staging_root("MyPlaylist")
                 downloads = playlist_dir / "downloads"
                 downloads.mkdir(parents=True)
@@ -258,7 +290,7 @@ class Wave9StagedTrackDeletionSecurityTests(unittest.TestCase):
             playlist_state_dir.mkdir()
 
             with mock.patch.object(app_module, "PLAYLIST_DOWNLOAD_ROOT", staging_root), \
-                 mock.patch.object(app_module, "PLAYLIST_DIR", playlist_state_dir):
+                 _patched_playlist_state(playlist_state_dir) as _patched:
                 playlist_dir = app_module.get_playlist_staging_root("MyPlaylist")
                 playlist_downloads = playlist_dir / "downloads"
                 playlist_downloads.mkdir(parents=True)
@@ -283,7 +315,7 @@ class Wave9StagedTrackDeletionSecurityTests(unittest.TestCase):
                     )
                 mock_delete.assert_called_once()
                 self.assertTrue(res["deleted"])
-                self.assertTrue((playlist_state_dir / "MyPlaylist.playlist.json").exists())
+                self.assertTrue(any((_patched["manifests"]).glob("*.playlist.json")))
 
     def test_delete_staged_track_fails_truthfully_when_engine_unavailable(self):
         """No local Path.unlink() fallback: if the engine call fails, the
@@ -296,7 +328,7 @@ class Wave9StagedTrackDeletionSecurityTests(unittest.TestCase):
             playlist_state_dir.mkdir()
 
             with mock.patch.object(app_module, "PLAYLIST_DOWNLOAD_ROOT", staging_root), \
-                 mock.patch.object(app_module, "PLAYLIST_DIR", playlist_state_dir):
+                 _patched_playlist_state(playlist_state_dir):
                 playlist_dir = app_module.get_playlist_staging_root("MyPlaylist")
                 playlist_downloads = playlist_dir / "downloads"
                 playlist_downloads.mkdir(parents=True)
@@ -333,20 +365,17 @@ class Wave9M3UAndPlexTranslationSecurityTests(unittest.TestCase):
                 }
             ]
 
-            with mock.patch.object(app_module, "PLAYLIST_DIR", playlist_dir), \
+            with _patched_playlist_state(Path(tmp) / "state"), \
                  mock.patch.object(app_module, "PLAYLIST_DOWNLOAD_ROOT", playlist_dir), \
-                 mock.patch.object(app_module, "_plex_settings", return_value={"token": ""}):
-                app_module._create_playlist_outputs("CleanPlaylist", items, sync_plex=False)
+                 mock.patch.object(app_module, "_plex_settings", return_value={"token": ""}), \
+                 mock.patch.object(app_module.beets_client, "export_playlist_m3u", return_value={"ok": True, "playlist_key": "engine_key"}) as mock_export:
+                result = app_module._create_playlist_outputs("CleanPlaylist", items, sync_plex=False)
 
-            m3u_file = playlist_dir / "CleanPlaylist.m3u"
-            self.assertTrue(m3u_file.exists())
-            content = m3u_file.read_text(encoding="utf-8")
-            lines = content.splitlines()
-
-            # Ensure header lines don't break into extra EXTINF entries
-            extinf_lines = [l for l in lines if l.startswith("#EXTINF")]
-            self.assertEqual(len(extinf_lines), 1)
-            self.assertIn("Artist Injected Header - Title Injected Track", extinf_lines[0])
+            mock_export.assert_called_once()
+            exported_items = mock_export.call_args.args[2]
+            self.assertEqual(exported_items[0]["artist"], "Artist\nInjected Header")
+            self.assertTrue(str(result.get("m3u", "")).startswith("engine:"))
+            self.assertFalse((playlist_dir / "CleanPlaylist.m3u").exists())
 
     def test_plex_path_containment_rejects_prefix_collision(self):
         with mock.patch.object(app_module, "MUSIC_ROOT", Path("/data/media/music")):
@@ -442,7 +471,7 @@ class Wave9FinalReviewCorrectionTests(unittest.TestCase):
             playlist_state_dir = Path(tmp) / "playlists"
             playlist_state_dir.mkdir()
             with mock.patch.object(app_module, "PLAYLIST_DOWNLOAD_ROOT", shared_root), \
-                 mock.patch.object(app_module, "PLAYLIST_DIR", playlist_state_dir):
+                 _patched_playlist_state(playlist_state_dir):
                 playlist_b_dir = app_module.get_playlist_staging_root("Playlist B") / "downloads"
                 playlist_b_dir.mkdir(parents=True)
                 victim_track = playlist_b_dir / "01 - Victim Track.mp3"
@@ -577,19 +606,26 @@ class Wave9StableIdentityAndEngineOwnershipTests(unittest.TestCase):
     """Unit tests for Wave 9 stable playlist identity and engine IPC ownership."""
 
     def test_distinct_playlist_names_produce_distinct_keys_and_staging_roots(self):
-        names = ["A/B", "A\\B", "A:B", "A?B"]
-        keys = [app_module._playlist_key(n) for n in names]
-        self.assertEqual(len(set(keys)), len(names), "Distinct raw names must yield distinct playlist keys")
+        with tempfile.TemporaryDirectory() as tmp:
+            with _patched_playlist_state(Path(tmp) / "state"):
+                names = ["A/B", "A\\B", "A:B", "A?B"]
+                ids = [app_module._playlist_ensure_stable_id(n) for n in names]
+                keys = [app_module._playlist_key(n, playlist_id=pid) for n, pid in zip(names, ids)]
+                self.assertEqual(len(set(keys)), len(names), "Distinct raw names must yield distinct playlist keys")
 
-        staging_roots = [str(app_module.get_playlist_staging_root(n)) for n in names]
-        self.assertEqual(len(set(staging_roots)), len(names), "Distinct raw names must yield distinct staging roots")
+                staging_roots = [str(app_module.get_playlist_staging_root({"name": n, "playlist_id": pid})) for n, pid in zip(names, ids)]
+                self.assertEqual(len(set(staging_roots)), len(names), "Distinct raw names must yield distinct staging roots")
 
     def test_long_names_produce_distinct_keys(self):
-        long_a = "X" * 120 + "AAAA"
-        long_b = "X" * 120 + "BBBB"
-        key_a = app_module._playlist_key(long_a)
-        key_b = app_module._playlist_key(long_b)
-        self.assertNotEqual(key_a, key_b, "Long distinct names must yield distinct keys")
+        with tempfile.TemporaryDirectory() as tmp:
+            with _patched_playlist_state(Path(tmp) / "state"):
+                long_a = "X" * 120 + "AAAA"
+                long_b = "X" * 120 + "BBBB"
+                id_a = app_module._playlist_ensure_stable_id(long_a)
+                id_b = app_module._playlist_ensure_stable_id(long_b)
+                key_a = app_module._playlist_key(long_a, playlist_id=id_a)
+                key_b = app_module._playlist_key(long_b, playlist_id=id_b)
+                self.assertNotEqual(key_a, key_b, "Long distinct names must yield distinct keys")
 
     def test_beets_client_engine_staging_ipc(self):
         client = app_module.beets_client

@@ -11,8 +11,8 @@ TYPES_SOURCE = (ROOT / "frontend" / "src" / "api" / "types.ts").read_text(encodi
 class PlaylistSavedDiscoveryTests(unittest.TestCase):
     def test_manifest_only_playlists_are_discovered(self):
         self.assertIn('def _playlist_saved_playlist_records', APP_SOURCE)
-        self.assertIn('dir_path.glob("*.playlist.json")', APP_SOURCE)
-        self.assertIn('dir_path.glob("*.m3u")', APP_SOURCE)
+        self.assertIn('res = beets_client.list_playlist_m3u()', APP_SOURCE)
+        self.assertIn('PLAYLIST_MANIFESTS_DIR.glob("*.playlist.json")', APP_SOURCE)
         self.assertIn('"has_manifest": False', APP_SOURCE)
         self.assertIn('"has_manifest"', APP_SOURCE)
         self.assertIn("'Manifest only'", PAGE_SOURCE)
@@ -20,7 +20,9 @@ class PlaylistSavedDiscoveryTests(unittest.TestCase):
 
     def test_m3u_and_manifest_merge_into_one_saved_row(self):
         self.assertIn('records: Dict[str, Dict[str, Any]] = {}', APP_SOURCE)
-        self.assertIn('key = _playlist_key(clean_name)', APP_SOURCE)
+        self.assertIn('row = record_for(pl_name, key=pl_key)', APP_SOURCE)
+        self.assertIn('record_key = _playlist_existing_key(clean_name, manifest)', APP_SOURCE)
+        self.assertNotIn('key = _playlist_key(clean_name)', APP_SOURCE)
         self.assertIn('duplicate merged', APP_SOURCE)
         self.assertIn('has_m3u?: boolean', TYPES_SOURCE)
         self.assertIn('playlistFileBadge(playlist)', PAGE_SOURCE)
