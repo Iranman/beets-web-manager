@@ -484,10 +484,10 @@ class TestWave10SecondFinalReviewCorrectionTests(unittest.TestCase):
         only playlist with this name): legacy title-based replace remains
         the safe fallback."""
         with patch.object(flask_app, "_plex_delete_playlist_by_rating_key") as mock_by_key, \
-             patch.object(flask_app, "_plex_delete_playlist_by_title", return_value=1) as mock_by_title:
+             patch.object(flask_app, "_plex_delete_playlist_by_title_unambiguous", return_value=(1, "")) as mock_by_title:
             result = flask_app._plex_replace_playlist_safely("Solo Playlist", "pl_" + "c" * 32, {})
         mock_by_key.assert_not_called()
-        mock_by_title.assert_called_once()
+        mock_by_title.assert_called_once_with("Solo Playlist", log=None)
         self.assertEqual(result["replaced"], 1)
 
     def test_other_live_pids_with_name_excludes_self_and_unrelated(self):

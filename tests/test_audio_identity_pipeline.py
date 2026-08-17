@@ -196,11 +196,12 @@ class AudioIdentityPipelineStaticTests(unittest.TestCase):
         self.assertIn("accepted fingerprint-verified download", body)
         self.assertIn("rejected mismatched download", body)
 
-    def test_resume_reconciliation_uses_cached_acoustid_once_per_file(self):
+    def test_resume_reconciliation_uses_engine_staging_validation(self):
         body = self.function_source("_playlist_reconcile_staged_files")
-        self.assertIn("_acoustid_lookup_cached(audio_path)", body)
-        self.assertIn("_audio_identity_decision", body)
-        self.assertIn("_playlist_identity_status_fields", body)
+        self.assertIn("_is_safe_playlist_staged_file", body)
+        self.assertIn("PlaylistStagingUnavailableError", body)
+        self.assertNotIn("_acoustid_lookup_cached(audio_path)", body)
+        self.assertNotIn("Path(staged_str)", body)
 
     def test_import_downloaded_uses_same_identity_gate(self):
         body = self.function_source("_playlist_run_import_downloaded")

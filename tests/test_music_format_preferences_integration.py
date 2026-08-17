@@ -40,8 +40,8 @@ class MusicFormatPreferenceIntegrationTests(unittest.TestCase):
         self.assertIn('def _validate_import_source_evidence(', APP_SOURCE)
         self.assertIn('_validate_import_source_evidence(import_source_evidence, log, reject_downloads=True)', APP_SOURCE)
         self.assertIn('_validate_audio_properties(entry.get("properties")', APP_SOURCE)
-        self.assertIn('_playlist_run_import_downloaded(name, state["log"], cancel_event=cancel_event)', APP_SOURCE)
-        self.assertIn('batch_dir = _playlist_imports_dir(clean_name)', APP_SOURCE)
+        self.assertIn('_playlist_run_import_downloaded(name, state["log"], cancel_event=cancel_event, playlist_id=playlist_id)', APP_SOURCE)
+        self.assertIn('batch_dir = _playlist_imports_dir(clean_name, playlist_id=playlist_id)', APP_SOURCE)
         self.assertNotIn('_validate_import_source_audio(str(round_dl_dir), state["log"], reject_downloads=True)', APP_SOURCE)
 
     def test_partial_import_subset_validates_selected_files_before_staging(self):

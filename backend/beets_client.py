@@ -327,6 +327,14 @@ class BeetsClient:
             "requested_path": requested_path,
         })
 
+    def inspect_playlist_staged_track(self, playlist_key: str, track_id: str, requested_path: str = "") -> Dict[str, Any]:
+        """Inspect a staged playlist track via the engine-owned filesystem boundary."""
+        return self._request("POST", "/playlists/staging/inspect-track", {
+            "playlist_key": playlist_key,
+            "track_id": track_id,
+            "requested_path": requested_path,
+        })
+
     def export_playlist_m3u(self, playlist_key: str, display_name: str, items: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Export an M3U playlist file engine-side under PLAYLIST_DIR."""
         return self._request("POST", "/playlists/export_m3u", {

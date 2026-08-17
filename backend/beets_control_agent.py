@@ -3732,6 +3732,72 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 release_os_lock(lock_file)
             return
 
+        if path == "/playlists/staging/inspect-track":
+            playlist_key = str(body.get("playlist_key") or "").strip()
+            track_id = str(body.get("track_id") or "").strip()
+            requested_path = str(body.get("requested_path") or "").strip()
+
+            if not playlist_key or not re.match(r"^[a-zA-Z0-9_.-]{1,160}$", playlist_key) or ".." in playlist_key:
+                self._send_json(400, {"error": "Invalid or missing playlist_key", "error_code": "invalid_playlist_key"})
+                return
+            if not requested_path:
+                self._send_json(400, {"error": "Missing requested_path", "error_code": "missing_requested_path"})
+                return
+
+            staging_root = PLAYLIST_DOWNLOAD_ROOT.resolve(strict=False)
+            playlist_staging = (staging_root / playlist_key).resolve(strict=False)
+            music_root = MUSIC_ROOT.resolve(strict=False)
+
+            try:
+                safe_target = resolve_safe_path(requested_path, ["staging"])
+            except UnsafePathError:
+                self._send_json(200, {
+                    "ok": True,
+                    "exists": False,
+                    "authorized": False,
+                    "playlist_key": playlist_key,
+                    "track_id": track_id,
+                    "status": "invalid_path",
+                })
+                return
+
+            def _inspect_result(*, exists: bool, authorized: bool, status: str) -> None:
+                self._send_json(200, {
+                    "ok": True,
+                    "exists": bool(exists),
+                    "authorized": bool(authorized),
+                    "playlist_key": playlist_key,
+                    "track_id": track_id,
+                    "status": status,
+                })
+
+            if _path_is_within(str(safe_target), str(music_root)):
+                _inspect_result(exists=False, authorized=False, status="library_path")
+                return
+            if not _path_is_within(str(safe_target), str(playlist_staging)):
+                _inspect_result(exists=False, authorized=False, status="outside_playlist_staging")
+                return
+            if str(safe_target) in (str(staging_root), str(playlist_staging), str(music_root)):
+                _inspect_result(exists=False, authorized=False, status="root_or_directory")
+                return
+            if _path_has_symlink_component(safe_target, staging_root):
+                _inspect_result(exists=False, authorized=False, status="symlink_path")
+                return
+            if safe_target.is_dir():
+                _inspect_result(exists=True, authorized=False, status="root_or_directory")
+                return
+            if not safe_target.exists():
+                _inspect_result(exists=False, authorized=False, status="missing")
+                return
+            if not safe_target.is_file():
+                _inspect_result(exists=True, authorized=False, status="not_file")
+                return
+            if safe_target.suffix.lower() not in _import_source_audio_extensions():
+                _inspect_result(exists=True, authorized=False, status="non_audio")
+                return
+
+            _inspect_result(exists=True, authorized=True, status="ok")
+            return
         if path == "/playlists/export_m3u":
             playlist_key = str(body.get("playlist_key") or "").strip()
             display_name = str(body.get("display_name") or "").strip()
