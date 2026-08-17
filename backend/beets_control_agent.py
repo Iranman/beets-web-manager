@@ -60,6 +60,27 @@ _PLACEHOLDER_API_TOKENS = {
 BEETSDIR = os.environ.get("BEETSDIR", "/config")
 MUSIC_LIBRARY_PATH = os.environ.get("MUSIC_LIBRARY_PATH", "/data/media/music")
 DOWNLOAD_PATH = os.environ.get("DOWNLOAD_PATH", "/data/torrents")
+# Path objects for the playlist-specific engine endpoints below
+# (/playlists/staging/ensure, /playlists/staging/delete-track,
+# /playlists/export_m3u), which do their own narrow per-playlist
+# containment checks in addition to (not instead of) the broader
+# resolve_safe_path()/_allowed_root_paths() role-based containment above.
+# MUSIC_ROOT intentionally aliases MUSIC_LIBRARY_PATH rather than reading a
+# second, independently-settable env var for the same real directory -- two
+# names for one path is how they drift apart. PLAYLIST_DIR/
+# PLAYLIST_DOWNLOAD_ROOT use the same env var names and defaults as app.py's
+# module-level constants of the same name so one operator-set value governs
+# both containers (SEC-002 Wave 9 second final review: these three names
+# were referenced by the endpoint code below but never defined anywhere in
+# this module, which meant every call to any of the three endpoints raised
+# an uncaught NameError in production -- not just a security gap, the
+# feature could never have worked at all).
+MUSIC_ROOT = Path(MUSIC_LIBRARY_PATH)
+PLAYLIST_DIR = Path(os.environ.get("PLAYLIST_DIR", "/data/media/music/playlists"))
+PLAYLIST_DOWNLOAD_ROOT = Path(os.environ.get(
+    "PLAYLIST_DOWNLOAD_ROOT",
+    "/data/torrents/music/Playlist Downloads",
+))
 LOCK_PATH = os.environ.get("BEETS_LOCK_PATH", os.path.join(BEETSDIR, ".beet_db.lock"))
 LIB_PATH = os.path.join(BEETSDIR, "musiclibrary.blb")
 BEET_BIN = os.environ.get("BEET_BIN", "beet")
@@ -3449,6 +3470,184 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 self._send_json(200, {"ok": True, "linked": True})
             except Exception:
                 self._send_json(500, {"error": "Failed to create hardlink"})
+            finally:
+                release_os_lock(lock_file)
+            return
+
+        if path == "/playlists/staging/ensure":
+            playlist_key = str(body.get("playlist_key") or "").strip()
+            if not playlist_key or not re.match(r"^[a-zA-Z0-9_.-]{1,160}$", playlist_key) or ".." in playlist_key:
+                self._send_json(400, {"error": "Invalid or missing playlist_key"})
+                return
+
+            staging_root = PLAYLIST_DOWNLOAD_ROOT.resolve(strict=False)
+            playlist_dir = staging_root / playlist_key
+            try:
+                safe_playlist_dir = resolve_safe_path(str(playlist_dir), ["staging"])
+            except UnsafePathError:
+                self._send_json(403, {"error": "Access denied for staging path outside allowed roots"})
+                return
+
+            lock_file = acquire_os_lock(read_only=False)
+            try:
+                try:
+                    safe_playlist_dir = resolve_safe_path(str(playlist_dir), ["staging"])
+                except UnsafePathError:
+                    self._send_json(403, {"error": "Access denied for staging path outside allowed roots"})
+                    return
+                safe_playlist_dir.mkdir(parents=True, exist_ok=True)
+                downloads_dir = safe_playlist_dir / "downloads"
+                imports_dir = safe_playlist_dir / "imports"
+                downloads_dir.mkdir(parents=True, exist_ok=True)
+                imports_dir.mkdir(parents=True, exist_ok=True)
+                self._send_json(200, {
+                    "ok": True,
+                    "staging_root": str(safe_playlist_dir),
+                    "downloads_dir": str(downloads_dir),
+                    "imports_dir": str(imports_dir),
+                })
+            except Exception:
+                self._send_json(500, {"error": "Failed to ensure playlist staging directory"})
+            finally:
+                release_os_lock(lock_file)
+            return
+
+        if path == "/playlists/staging/delete-track":
+            playlist_key = str(body.get("playlist_key") or "").strip()
+            track_id = str(body.get("track_id") or "").strip()
+            requested_path = str(body.get("requested_path") or "").strip()
+
+            if not playlist_key or not re.match(r"^[a-zA-Z0-9_.-]{1,160}$", playlist_key) or ".." in playlist_key:
+                self._send_json(400, {"error": "Invalid or missing playlist_key"})
+                return
+
+            staging_root = PLAYLIST_DOWNLOAD_ROOT.resolve(strict=False)
+            playlist_staging = (staging_root / playlist_key).resolve(strict=False)
+            music_root = MUSIC_ROOT.resolve(strict=False)
+
+            if not requested_path:
+                self._send_json(400, {"error": "Missing requested_path"})
+                return
+
+            try:
+                safe_target = resolve_safe_path(requested_path, ["staging"])
+            except UnsafePathError:
+                self._send_json(403, {"error": "Access denied for path outside allowed roots"})
+                return
+
+            if _path_is_within(str(safe_target), str(music_root)):
+                self._send_json(403, {"error": "Refusing to delete a Beets library file"})
+                return
+
+            # Containment MUST be scoped to this playlist's own staging subtree,
+            # not the shared staging_root every playlist lives under -- an "OR
+            # staging_root" clause here is meaningless (every playlist's files
+            # are also "under staging_root"), and would let a caller for
+            # playlist A delete a file that actually belongs to playlist B
+            # (SEC-002 Wave 9 second final review: engine cross-playlist
+            # deletion gap). track_id is not independently authoritative here
+            # either -- the engine has no manifest/track-state access, so the
+            # web-manager layer is required to resolve track_id to the
+            # server-owned staged path and pass that (not a raw browser value)
+            # as requested_path before calling this endpoint.
+            if not _path_is_within(str(safe_target), str(playlist_staging)):
+                self._send_json(403, {"error": "Refusing to delete a file outside this playlist's own staging directory"})
+                return
+
+            if str(safe_target) in (str(staging_root), str(playlist_staging), str(music_root)) or safe_target.is_dir():
+                self._send_json(403, {"error": "Refusing to delete staging root directory"})
+                return
+
+            ext = safe_target.suffix.lower()
+            if ext not in _import_source_audio_extensions():
+                self._send_json(403, {"error": "Refusing to delete a non-audio staging file"})
+                return
+
+            if _path_has_symlink_component(safe_target, staging_root):
+                self._send_json(403, {"error": "Refusing to delete a symlinked path"})
+                return
+
+            if not safe_target.exists():
+                self._send_json(200, {"ok": True, "deleted": False, "already_absent": True, "path": str(safe_target)})
+                return
+
+            lock_file = acquire_os_lock(read_only=False)
+            try:
+                try:
+                    safe_target = resolve_safe_path(requested_path, ["staging"])
+                except UnsafePathError:
+                    self._send_json(403, {"error": "Access denied for path outside allowed roots"})
+                    return
+                if _path_is_within(str(safe_target), str(music_root)):
+                    self._send_json(403, {"error": "Refusing to delete a Beets library file"})
+                    return
+                if not _path_is_within(str(safe_target), str(playlist_staging)):
+                    self._send_json(403, {"error": "Refusing to delete a file outside this playlist's own staging directory"})
+                    return
+                if safe_target.is_dir() or str(safe_target) in (str(staging_root), str(playlist_staging)):
+                    self._send_json(403, {"error": "Refusing to delete staging root directory"})
+                    return
+                if _path_has_symlink_component(safe_target, staging_root):
+                    self._send_json(403, {"error": "Refusing to delete a symlinked path"})
+                    return
+
+                if safe_target.exists():
+                    safe_target.unlink()
+                    self._send_json(200, {"ok": True, "deleted": True, "already_absent": False, "path": str(safe_target)})
+                else:
+                    self._send_json(200, {"ok": True, "deleted": False, "already_absent": True, "path": str(safe_target)})
+            except Exception:
+                self._send_json(500, {"error": "Failed to delete staged track file"})
+            finally:
+                release_os_lock(lock_file)
+            return
+
+        if path == "/playlists/export_m3u":
+            playlist_key = str(body.get("playlist_key") or "").strip()
+            display_name = str(body.get("display_name") or "").strip()
+            raw_items = body.get("items") or []
+
+            if not playlist_key or not re.match(r"^[a-zA-Z0-9_.-]{1,160}$", playlist_key) or ".." in playlist_key:
+                self._send_json(400, {"error": "Invalid or missing playlist_key"})
+                return
+
+            playlist_dir = PLAYLIST_DIR.resolve(strict=False)
+            m3u_file = playlist_dir / f"{playlist_key}.m3u"
+            try:
+                safe_m3u = resolve_safe_path(str(m3u_file), ["music", "staging"])
+            except UnsafePathError:
+                self._send_json(403, {"error": "Access denied for M3U export path outside allowed roots"})
+                return
+
+            lines = ["#EXTM3U\n"]
+
+            for item in raw_items:
+                if not isinstance(item, dict):
+                    continue
+                item_path = str(item.get("path") or "").strip()
+                if not item_path:
+                    continue
+                try:
+                    safe_item_path = resolve_safe_path(item_path, ["music", "staging"])
+                except UnsafePathError:
+                    continue
+                artist = re.sub(r"[\r\n]+", " ", str(item.get("artist") or "").strip())
+                title = re.sub(r"[\r\n]+", " ", str(item.get("title") or "").strip())
+                label = f"{artist} - {title}".strip(" -") or safe_item_path.name
+                lines.append(f"#EXTINF:-1,{label}\n")
+                lines.append(f"{safe_item_path}\n")
+
+            content = "".join(lines)
+
+            lock_file = acquire_os_lock(read_only=False)
+            try:
+                safe_m3u.parent.mkdir(parents=True, exist_ok=True)
+                tmp_m3u = safe_m3u.parent / f"{safe_m3u.stem}.{uuid.uuid4().hex[:8]}.tmp"
+                tmp_m3u.write_text(content, encoding="utf-8")
+                tmp_m3u.replace(safe_m3u)
+                self._send_json(200, {"ok": True, "m3u_path": str(safe_m3u)})
+            except Exception:
+                self._send_json(500, {"error": "Failed to export M3U file"})
             finally:
                 release_os_lock(lock_file)
             return

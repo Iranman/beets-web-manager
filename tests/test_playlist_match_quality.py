@@ -23,6 +23,9 @@ class PlaylistMatchQualityTests(unittest.TestCase):
             "Path": Path,
             "PLAYLIST_MIN_DOWNLOAD_SECONDS": 45,
             "MUSIC_ROOT": Path("/tmp/music"),
+            "PLAYLIST_DOWNLOAD_ROOT": Path("/tmp/playlist-downloads"),
+            "DOWNLOADS_ROOT": Path("/tmp/downloads"),
+            "PLAYLIST_PATH_ROOT_ALIASES": [],
             "_s": lambda v: "" if v is None else str(v),
             "_normalize_name": lambda s: str(s or ""),
             "_normalize_albumartist": lambda s: re.sub(

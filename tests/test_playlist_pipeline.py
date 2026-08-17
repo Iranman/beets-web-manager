@@ -31,19 +31,24 @@ def load_function(name, namespace):
 
 
 class PlaylistPipelineTests(unittest.TestCase):
-    def _atomic_save_fn(self, json_module=json):
+    def _atomic_save_fn(self, json_mod=None, playlist_dir=None):
         namespace = {
-            "Any": Any,
             "Dict": Dict,
+            "Any": Any,
             "Optional": Optional,
             "Path": Path,
-            "json": json_module,
-            "os": __import__("os"),
-            "re": re,
-            "threading": threading,
             "time": time,
             "uuid": uuid,
+            "os": __import__("os"),
+            "json": json_mod or json,
+            "threading": threading,
+            "re": re,
+            "tempfile": __import__("tempfile"),
             "_s": lambda value: str(value or ""),
+            "PLAYLIST_DOWNLOAD_ROOT": Path("/data/torrents/music/Playlist Downloads"),
+            "PLAYLIST_DIR": Path(playlist_dir) if playlist_dir is not None else Path("/data/media/music/playlists"),
+            "MUSIC_ROOT": Path("/data/media/music"),
+            "_path_is_under": lambda path, root: True,
         }
         return load_function("_playlist_atomic_json_replace", namespace)
 
@@ -96,9 +101,9 @@ class PlaylistPipelineTests(unittest.TestCase):
         self.assertIn("!hasResumablePipeline", PAGE_SOURCE)
 
     def test_atomic_playlist_save_creates_directory_and_replaces_json(self):
-        save_json = self._atomic_save_fn()
         with tempfile.TemporaryDirectory() as root:
             final = Path(root) / "missing" / "Baby Makin.playlist.json"
+            save_json = self._atomic_save_fn(playlist_dir=final.parent)
             save_json(final, {"name": "Baby Makin", "version": 1}, save_key="job-1")
             self.assertTrue(final.exists())
             self.assertEqual(json.loads(final.read_text(encoding="utf-8"))["name"], "Baby Makin")
@@ -112,9 +117,9 @@ class PlaylistPipelineTests(unittest.TestCase):
             def dump(*_args, **_kwargs):
                 raise OSError("write failed")
 
-        save_json = self._atomic_save_fn(FailingJson)
         with tempfile.TemporaryDirectory() as root:
             final = Path(root) / "playlists" / "Baby Makin.playlist.json"
+            save_json = self._atomic_save_fn(FailingJson, playlist_dir=final.parent)
             final.parent.mkdir()
             final.write_text('{"name": "Baby Makin", "version": 1}', encoding="utf-8")
             with self.assertRaises(OSError):
@@ -122,9 +127,9 @@ class PlaylistPipelineTests(unittest.TestCase):
             self.assertEqual(json.loads(final.read_text(encoding="utf-8"))["version"], 1)
 
     def test_concurrent_atomic_playlist_saves_leave_valid_json(self):
-        save_json = self._atomic_save_fn()
         with tempfile.TemporaryDirectory() as root:
             final = Path(root) / "playlists" / "Baby Makin.playlist.json"
+            save_json = self._atomic_save_fn(playlist_dir=final.parent)
 
             def write_version(version: int) -> None:
                 save_json(final, {"name": "Baby Makin", "version": version}, save_key=f"job-{version}")
@@ -213,7 +218,18 @@ class PlaylistPipelineTests(unittest.TestCase):
             library = root_path / "library"
             staging.mkdir()
             library.mkdir()
-            staged_file = staging / "song.mp3"
+            # Nested under this playlist's own staging subfolder, matching
+            # real production layout (_playlist_downloads_dir/_imports_dir
+            # are always get_playlist_staging_root(name) / "downloads" or
+            # "/imports" -- never a bare file directly under the shared
+            # PLAYLIST_DOWNLOAD_ROOT). SEC-002 Wave 9 final review narrowed
+            # staged-deletion containment to this playlist's own staging
+            # root specifically (not the shared parent all playlists sit
+            # under), to close a cross-playlist deletion gap -- so the
+            # fixture must reflect where a real staged file actually lives.
+            playlist_staging = staging / "Road Trip"
+            playlist_staging.mkdir()
+            staged_file = playlist_staging / "song.mp3"
             library_file = library / "song.mp3"
             staged_file.write_bytes(b"audio")
             library_file.write_bytes(b"audio")
@@ -226,6 +242,21 @@ class PlaylistPipelineTests(unittest.TestCase):
                 except ValueError:
                     return False
 
+            # Deletion is engine-owned (SEC-002 Wave 9 continuation): the
+            # function delegates the actual unlink to beets_client rather
+            # than touching the filesystem directly. This fake performs the
+            # same containment-agnostic unlink the real control agent would,
+            # so the test still proves the *caller's* pre-validation
+            # (library-file refusal, staging containment) independently of
+            # engine-side enforcement, which has its own dedicated tests.
+            class _FakeBeetsClient:
+                def delete_playlist_staged_track(self, playlist_key, track_id, requested_path):
+                    p = Path(requested_path)
+                    existed = p.exists()
+                    if existed:
+                        p.unlink()
+                    return {"ok": True, "deleted": existed, "already_absent": not existed, "path": requested_path}
+
             namespace = {
                 "Dict": Dict,
                 "Any": Any,
@@ -233,12 +264,20 @@ class PlaylistPipelineTests(unittest.TestCase):
                 "PLAYLIST_DOWNLOAD_ROOT": staging,
                 "MUSIC_ROOT": library,
                 "AUDIO_EXT": {".mp3"},
+                "beets_client": _FakeBeetsClient(),
+                "_playlist_key": lambda name, manifest=None: str(name),
+                "_playlist_slug": lambda name: str(name),
                 "_s": lambda value: str(value or ""),
                 "_path_is_under": is_under,
+                "_clean_playlist_name": lambda name: str(name),
+                "get_playlist_staging_root": lambda name: staging / name,
                 "_playlist_manifest_track_states": lambda _name: {
-                    "artist|song": {"staged_path": str(staged_file)}
+                    "artist|song": {"staged_path": str(staged_file)},
+                    "artist|libsong": {"staged_path": str(library_file)},
                 },
-                "_playlist_status_id": lambda _track: "artist|song",
+                "_playlist_status_id": lambda track: (
+                    "artist|libsong" if track.get("title") == "LibSong" else "artist|song"
+                ),
                 "_playlist_store_track_state": lambda *args, **kwargs: stored.append((args, kwargs)),
             }
             delete_staged = load_function("_playlist_delete_staged_track_file", namespace)
@@ -246,10 +285,13 @@ class PlaylistPipelineTests(unittest.TestCase):
             self.assertTrue(result["deleted"])
             self.assertFalse(staged_file.exists())
             self.assertTrue(library_file.exists())
+            # The manifest's own recorded path (not just a browser-supplied
+            # requested_path) must be revalidated -- a stale/tampered state
+            # row pointing at a library file must still be refused.
             with self.assertRaisesRegex(RuntimeError, "Beets library file"):
                 delete_staged(
                     "Road Trip",
-                    {"artist": "Artist", "title": "Song"},
+                    {"artist": "Artist", "title": "LibSong"},
                     requested_path=str(library_file),
                 )
 

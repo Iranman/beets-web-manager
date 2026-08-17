@@ -41602,10 +41602,63 @@ def _match_track(artist, title):
     return item, round(float(payload.get("score") or 0), 3)
 
 
+# Deliberately absolute, deliberately never a real filesystem location in
+# any supported deployment: the safe "could not resolve to an authorized
+# path" return value for _playlist_resolve_item_path(). Every call site
+# treats it as any other Path (SEC-002 Wave 9 final review found 11 call
+# sites; changing the return type to Optional[Path] would ripple across
+# all of them), but since it is guaranteed to never .exists() and is
+# guaranteed to fail containment under MUSIC_ROOT/any allowed root, every
+# caller's own existence/containment check already fails closed on it --
+# without inventing a plausible-looking library path from attacker input
+# the way the previous MUSIC_ROOT / path.name fallback did.
+_PLAYLIST_UNRESOLVED_PATH = Path("/nonexistent/beets-web-manager-unresolved-playlist-path")
+
+
 def _playlist_resolve_item_path(path_value: Any) -> Path:
     raw = _s(path_value).strip()
+    if not raw:
+        return _PLAYLIST_UNRESOLVED_PATH
     path = Path(raw)
-    return path if path.is_absolute() else MUSIC_ROOT / raw
+    allowed_roots = [
+        MUSIC_ROOT.resolve(strict=False),
+        PLAYLIST_DOWNLOAD_ROOT.resolve(strict=False),
+        DOWNLOADS_ROOT.resolve(strict=False),
+    ]
+    for alias in PLAYLIST_PATH_ROOT_ALIASES:
+        try:
+            allowed_roots.append(Path(alias).resolve(strict=False))
+        except Exception:
+            pass
+    if path.is_absolute():
+        try:
+            resolved = path.resolve(strict=False)
+            for root in allowed_roots:
+                try:
+                    resolved.relative_to(root)
+                    return path
+                except ValueError:
+                    pass
+        except Exception:
+            pass
+        # Unauthorized absolute input (e.g. /etc/passwd, or a real file
+        # under an unrelated root such as /data/media/music2) must not be
+        # silently reinterpreted as MUSIC_ROOT / path.name -- that invents
+        # a new, different, plausible-looking library path from attacker
+        # input instead of rejecting it (SEC-002 Wave 9 final review).
+        return _PLAYLIST_UNRESOLVED_PATH
+    # Relative input: join under MUSIC_ROOT (the historical, intended
+    # behavior for a library-relative path), but verify the *resolved*
+    # result still lands under MUSIC_ROOT before returning it -- a
+    # relative traversal string such as "../../../etc/passwd" would
+    # otherwise resolve outside MUSIC_ROOT the moment any caller calls
+    # .resolve()/.exists() on the returned path.
+    candidate = MUSIC_ROOT / raw
+    try:
+        candidate.resolve(strict=False).relative_to(MUSIC_ROOT.resolve(strict=False))
+    except Exception:
+        return _PLAYLIST_UNRESOLVED_PATH
+    return candidate
 
 
 def _playlist_source_guess(item, path_text: str) -> str:
@@ -41770,8 +41823,15 @@ def _match_playlist_tracks(tracks, verify_acoustid: bool = False):
 
 
 def _clean_playlist_name(name):
-    cleaned = re.sub(r'[<>:"/\\|?*]', "_", (name or "Playlist").strip())
-    return cleaned or "Playlist"
+    raw = _s(name).strip()
+    raw = re.sub(r"[\x00-\x1f\x7f-\x9f\u200e\u200f\u202a-\u202e\u2066-\u2069]", "", raw)
+    cleaned = re.sub(r'[<>:"/\\|?*\0]', "_", raw).strip()
+    while ".." in cleaned:
+        cleaned = cleaned.replace("..", "_")
+    cleaned = cleaned.strip("._ ")
+    if not cleaned or cleaned in {".", ".."}:
+        cleaned = "Playlist"
+    return cleaned[:120]
 
 
 def _playlist_slug(value: Any) -> str:
@@ -41779,22 +41839,45 @@ def _playlist_slug(value: Any) -> str:
     return cleaned or "playlist"
 
 
-def _playlist_stable_id(name: str, manifest: Optional[Dict[str, Any]] = None) -> str:
+def _playlist_ensure_stable_id(name: str, manifest: Optional[Dict[str, Any]] = None) -> str:
     manifest = manifest if isinstance(manifest, dict) else {}
-    for value in (manifest.get("playlist_id"), manifest.get("id"), name):
-        slug = _playlist_slug(value)
-        if slug and not re.fullmatch(r"pl-[0-9a-f]{8,}", slug):
-            return slug
-    return _playlist_slug(name)
+    for field in ("playlist_id", "id", "uuid"):
+        val = _s(manifest.get(field)).strip()
+        if val and val.casefold() not in {"playlist", "none", "null"}:
+            return val
+    provider = _s(manifest.get("provider") or manifest.get("source")).strip().lower()
+    provider_id = _s(manifest.get("provider_id") or manifest.get("external_id")).strip()
+    if provider and provider_id:
+        return f"{provider}:{provider_id}"
+    raw = _s(name).strip()
+    if raw:
+        digest = hashlib.sha256(raw.casefold().encode("utf-8")).hexdigest()[:12]
+        return f"pl-legacy-{digest}"
+    return f"pl-{uuid.uuid4().hex[:12]}"
+
+
+def _playlist_stable_id(name: str, manifest: Optional[Dict[str, Any]] = None) -> str:
+    return _playlist_ensure_stable_id(name, manifest)
+
+
+def _playlist_key(name: str, manifest: Optional[Dict[str, Any]] = None) -> str:
+    pid = _playlist_ensure_stable_id(name, manifest)
+    short_name = _clean_playlist_name(name)[:30] or "playlist"
+    h = hashlib.sha256(pid.encode("utf-8")).hexdigest()[:12]
+    return f"{short_name}--{h}"
 
 
 def get_playlist_staging_root(playlist: Any) -> Path:
     """Stable per-playlist staging root; never includes job/run IDs."""
     if isinstance(playlist, dict):
+        manifest = playlist
         name = playlist.get("name") or playlist.get("playlist_name") or playlist.get("playlist") or "Playlist"
     else:
+        manifest = None
         name = playlist
-    return PLAYLIST_DOWNLOAD_ROOT / _playlist_slug(_clean_playlist_name(_s(name)))
+    get_key = globals().get("_playlist_key")
+    key = get_key(_s(name), manifest) if get_key else _playlist_slug(_clean_playlist_name(_s(name)))
+    return PLAYLIST_DOWNLOAD_ROOT / key
 
 
 def _playlist_staging_dir(name: str) -> Path:
@@ -41813,14 +41896,41 @@ def _playlist_staging_manifest_path(name: str) -> Path:
     return get_playlist_staging_root(name) / "manifest.json"
 
 
-def _playlist_ensure_staging_dirs(name: str) -> None:
+class PlaylistStagingUnavailableError(RuntimeError):
+    """Raised when the Beets engine cannot confirm playlist staging directories exist.
+
+    The web manager owns no writable media/staging filesystem in the supported
+    two-service topology (only /web-manager-data is mounted, and it is not
+    PLAYLIST_DOWNLOAD_ROOT). There is deliberately no local mkdir/chmod fallback
+    here: a fallback that quietly wrote to a path the container cannot actually
+    reach in production is not resilience, it is a false "ok" for an operation
+    that did nothing (SEC-002 Wave 9 final review).
+    """
+    code = "staging_unavailable"
+
+
+def _playlist_ensure_staging_dirs(name: str, playlist_id: Optional[str] = None) -> None:
+    clean_name = _clean_playlist_name(name)
+    get_key = globals().get("_playlist_key")
+    key = get_key(name, {"playlist_id": playlist_id} if playlist_id else None) if get_key else clean_name
     root = get_playlist_staging_root(name)
-    for path in (root, root / "downloads", root / "imports"):
-        path.mkdir(parents=True, exist_ok=True)
-        try:
-            os.chmod(path, 0o775)
-        except Exception:
-            pass
+    staging_base = PLAYLIST_DOWNLOAD_ROOT.resolve(strict=False)
+    resolved_root = root.resolve(strict=False)
+    try:
+        resolved_root.relative_to(staging_base)
+    except ValueError:
+        raise ValueError("Playlist staging root is outside allowed staging directory")
+
+    try:
+        res = beets_client.ensure_playlist_staging(key, playlist_id or "", name)
+    except Exception as exc:
+        raise PlaylistStagingUnavailableError(
+            "Engine is unavailable; cannot ensure playlist staging directories"
+        ) from exc
+    if not (isinstance(res, dict) and res.get("ok")):
+        raise PlaylistStagingUnavailableError(
+            "Engine did not confirm playlist staging directories"
+        )
 
 
 def _playlist_legacy_staging_dirs(name: str) -> List[Path]:
@@ -43271,11 +43381,60 @@ def _playlist_atomic_json_replace(path: Path,
                                   indent: Optional[int] = 2,
                                   sort_keys: bool = False) -> None:
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    resolved_path = path.resolve(strict=False)
+    # Narrowly scoped to the roots real callers actually write under (all
+    # 4 production call sites verified: staging manifest under
+    # PLAYLIST_DOWNLOAD_ROOT, playlist manifests under PLAYLIST_DIR, job
+    # checkpoints under PLAYLIST_JOB_STATE_DIR). MUSIC_ROOT and the whole
+    # system temp directory were previously included with no production
+    # caller ever targeting either -- MUSIC_ROOT is Beets-engine-owned
+    # media, not web-manager state, and a process-wide /tmp is not an
+    # application-owned root; both were removed (SEC-002 Wave 9 final
+    # review). PLAYLIST_JOB_STATE_DIR was previously *missing* from this
+    # list entirely, which meant _playlist_save_job_state() always raised
+    # ValueError in every environment -- added here as a genuine fix, not
+    # a widening (it is the one real caller this helper was missing).
+    allowed_roots = []
+    for varname in ("PLAYLIST_DOWNLOAD_ROOT", "PLAYLIST_DIR", "PLAYLIST_JOB_STATE_DIR", "WEB_MANAGER_DATA_DIR"):
+        val = globals().get(varname)
+        if val is not None:
+            try:
+                allowed_roots.append(Path(val).resolve(strict=False))
+            except Exception:
+                pass
+    safe = False
+    for root in allowed_roots:
+        try:
+            get_is_under = globals().get("_path_is_under")
+            if (get_is_under and get_is_under(resolved_path, root)) or resolved_path.parent.resolve(strict=False) == root.resolve(strict=False):
+                safe = True
+                break
+            resolved_path.relative_to(root)
+            safe = True
+            break
+        except ValueError:
+            pass
+    if not safe:
+        raise ValueError(f"Refusing atomic write to unsafe path outside state roots: {path}")
+
+    parent = path.parent
+    parent.mkdir(parents=True, exist_ok=True)
     safe_key = re.sub(r"[^a-zA-Z0-9_.-]+", "_", _s(save_key).strip())[:80]
     if not safe_key:
         safe_key = str(threading.get_ident())
-    tmp = path.parent / f"{path.stem}.{safe_key}.{int(time.time() * 1000)}.{uuid.uuid4().hex[:8]}.tmp"
+    tmp = parent / f"{path.stem}.{safe_key}.{int(time.time() * 1000)}.{uuid.uuid4().hex[:8]}.tmp"
+    resolved_tmp = tmp.resolve(strict=False)
+    tmp_safe = False
+    for root in allowed_roots:
+        try:
+            resolved_tmp.relative_to(root)
+            tmp_safe = True
+            break
+        except ValueError:
+            pass
+    if not tmp_safe:
+        raise ValueError(f"Refusing atomic write with temporary file outside state roots: {tmp}")
+
     try:
         with tmp.open("w", encoding="utf-8") as handle:
             json.dump(payload, handle, ensure_ascii=False, indent=indent, sort_keys=sort_keys, default=str)
@@ -43679,11 +43838,18 @@ def _create_playlist_outputs(name, items, *, log=None, replace_plex=True,
 
     PLAYLIST_DIR.mkdir(parents=True, exist_ok=True)
     m3u = PLAYLIST_DIR / f"{name}.m3u"
+    resolved_m3u = m3u.resolve(strict=False)
+    if not _path_is_under(resolved_m3u, PLAYLIST_DIR.resolve(strict=False)):
+        raise ValueError(f"M3U playlist path '{m3u}' is outside playlists directory")
+
     lines = ["#EXTM3U"]
     for it in items:
-        lines.append(f"#EXTINF:-1,{it.get('artist','')} - {it.get('title','')}")
-        lines.append(it.get("path", ""))
-    m3u.write_text("\n".join(lines), encoding="utf-8")
+        artist_clean = re.sub(r"[\r\n]+", " ", _s(it.get('artist',''))).strip()
+        title_clean = re.sub(r"[\r\n]+", " ", _s(it.get('title',''))).strip()
+        path_clean = re.sub(r"[\r\n]+", "", _s(it.get('path',''))).strip()
+        lines.append(f"#EXTINF:-1,{artist_clean} - {title_clean}")
+        lines.append(path_clean)
+    m3u.write_text("\n".join(lines) + "\n", encoding="utf-8")
     if log is not None:
         log.append(f"  [playlist] M3U saved: {m3u}")
 
@@ -45751,7 +45917,14 @@ def playlist_download():
             "error": _PLAYLIST_DUPLICATE_JOB_MESSAGE,
             "running_job_id": running_pipeline,
         }), 409
-    _playlist_ensure_staging_dirs(name)
+    try:
+        _playlist_ensure_staging_dirs(name)
+    except PlaylistStagingUnavailableError:
+        return jsonify({
+            "ok": False,
+            "error": "staging_unavailable",
+            "message": "Engine is unavailable; cannot stage playlist downloads right now",
+        }), 503
     dl_dir = _playlist_downloads_dir(name)
     saved_state = _playlist_load_job_state(jid)
     if not tracks:
@@ -48857,28 +49030,82 @@ def _playlist_write_local_membership(name: str,
 def _playlist_delete_staged_track_file(name: str,
                                        track: Dict[str, Any],
                                        requested_path: str = "") -> Dict[str, Any]:
-    states = _playlist_manifest_track_states(name)
-    state_row = states.get(_playlist_status_id(track)) or {}
-    raw_path = _s(requested_path or state_row.get("staged_path") or state_row.get("path") or "").strip()
-    if not raw_path:
+    clean_name = _clean_playlist_name(name)
+    track_key = _playlist_status_id(track)
+    states = _playlist_manifest_track_states(clean_name)
+    state_row = states.get(track_key) or {}
+    # The server-owned manifest state, not a browser-supplied requested_path,
+    # is the authority for which file gets deleted -- otherwise a caller
+    # could point requested_path at any staged file and use this endpoint's
+    # own containment checks to authorize deleting it (SEC-002 Wave 9 second
+    # final review: requested-path-as-sole-authority gap). requested_path is
+    # accepted only when it canonically matches the path already recorded
+    # here for this track; a mismatching value is rejected outright rather
+    # than silently ignored.
+    authoritative_raw = _s(state_row.get("staged_path") or state_row.get("path") or "").strip()
+    if not authoritative_raw:
         raise RuntimeError("No staged download is recorded for this track")
-    path = Path(raw_path).resolve(strict=False)
-    staging_root = PLAYLIST_DOWNLOAD_ROOT.resolve(strict=False)
+    if requested_path:
+        req_resolved = Path(_s(requested_path).strip()).resolve(strict=False)
+        auth_resolved = Path(authoritative_raw).resolve(strict=False)
+        if req_resolved != auth_resolved:
+            raise RuntimeError("requested_path does not match the server-recorded staged path for this track")
+    raw_path = authoritative_raw
+    path = Path(raw_path)
+    resolved_path = path.resolve(strict=False)
+    # Deliberately NOT the broad, shared PLAYLIST_DOWNLOAD_ROOT here: every
+    # playlist's staged files live under its own get_playlist_staging_root()
+    # subdirectory, and containment against the *shared* parent would let a
+    # browser-supplied requested_path (or a stale/tampered manifest entry)
+    # for playlist A authorize deleting a staged file that actually belongs
+    # to playlist B, since both are nested under the same shared root
+    # (SEC-002 Wave 9 final review: cross-playlist staged-deletion gap).
+    # Authorization is scoped to this playlist's own staging root only.
     library_root = MUSIC_ROOT.resolve(strict=False)
-    if _path_is_under(path, library_root):
+    staging_root = PLAYLIST_DOWNLOAD_ROOT.resolve(strict=False)
+    playlist_staging = get_playlist_staging_root(clean_name).resolve(strict=False)
+
+    is_in_library = False
+    try:
+        resolved_path.relative_to(library_root)
+        is_in_library = True
+    except ValueError:
+        pass
+    if is_in_library:
         raise RuntimeError("Refusing to delete a Beets library file; this action only deletes playlist staging")
-    if not _path_is_under(path, staging_root):
-        raise RuntimeError("Refusing to delete a file outside playlist download staging")
+
+    try:
+        resolved_path.relative_to(playlist_staging)
+        is_in_staging = True
+    except ValueError:
+        is_in_staging = False
+    if not is_in_staging:
+        raise RuntimeError("Refusing to delete a file outside this playlist's own staging directory")
+
+    if resolved_path in (staging_root, playlist_staging, library_root):
+        raise RuntimeError("Refusing to delete staging root directory")
     if path.suffix.lower() not in AUDIO_EXT:
         raise RuntimeError("Refusing to delete a non-audio staging file")
-    deleted = False
-    if path.exists():
-        if not path.is_file():
-            raise RuntimeError("The staged path is not a file")
-        path.unlink()
-        deleted = True
+
+    # Local checks above are defense-in-depth, fast-fail validation only.
+    # The actual mutation is engine-owned: the web manager has no writable
+    # media/staging filesystem in the supported topology, so deletion is
+    # delegated to the control agent, which re-validates containment,
+    # symlinks, and root-self on its own side under an OS lock (SEC-002
+    # Wave 9 continuation -- no local Path.unlink() fallback here).
+    get_key = globals().get("_playlist_key")
+    playlist_key = get_key(clean_name, None) if get_key else _playlist_slug(clean_name)
+    try:
+        res = beets_client.delete_playlist_staged_track(playlist_key, track_key, str(resolved_path))
+    except Exception as exc:
+        raise RuntimeError("Engine is unavailable; cannot delete staged track file") from exc
+    if not (isinstance(res, dict) and res.get("ok")):
+        err = _s(res.get("error")) if isinstance(res, dict) else ""
+        raise RuntimeError(err or "Engine refused to delete staged track file")
+    deleted = bool(res.get("deleted"))
+
     _playlist_store_track_state(
-        name,
+        clean_name,
         track,
         "removed",
         message="downloaded staging file deleted by user",
@@ -48886,7 +49113,7 @@ def _playlist_delete_staged_track_file(name: str,
         staged_path="",
         path="",
     )
-    return {"deleted": deleted, "path": str(path)}
+    return {"deleted": deleted, "path": str(resolved_path)}
 
 
 def _playlist_apply_track_action(name: str,

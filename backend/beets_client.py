@@ -311,6 +311,30 @@ class BeetsClient:
         """Create a directory via the Beets agent under OS file lock."""
         return self._request("POST", "/files/mkdir", {"path": path})
 
+    def ensure_playlist_staging(self, playlist_key: str, playlist_id: str = "", name: str = "") -> Dict[str, Any]:
+        """Ensure playlist download and import staging directories exist via engine control agent."""
+        return self._request("POST", "/playlists/staging/ensure", {
+            "playlist_key": playlist_key,
+            "playlist_id": playlist_id,
+            "name": name,
+        })
+
+    def delete_playlist_staged_track(self, playlist_key: str, track_id: str, requested_path: str = "") -> Dict[str, Any]:
+        """Delete a staged track file via engine control agent under OS lock and containment checks."""
+        return self._request("POST", "/playlists/staging/delete-track", {
+            "playlist_key": playlist_key,
+            "track_id": track_id,
+            "requested_path": requested_path,
+        })
+
+    def export_playlist_m3u(self, playlist_key: str, display_name: str, items: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Export an M3U playlist file engine-side under PLAYLIST_DIR."""
+        return self._request("POST", "/playlists/export_m3u", {
+            "playlist_key": playlist_key,
+            "display_name": display_name,
+            "items": items,
+        })
+
     # Purpose-built structured library methods
     def get_item(self, item_id: int) -> Optional[Dict[str, Any]]:
         """Fetch single item dict by ID."""
