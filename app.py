@@ -43332,31 +43332,42 @@ def _plex_delete_playlist_by_rating_key(rating_key: str, log=None) -> int:
     return 1
 
 
-def _plex_delete_playlist_by_title(title, log=None):
-    """Delete existing Plex audio playlists with this title so sync replaces them.
-
-    Legacy/fallback authority only -- deletes every Plex playlist matching
-    the title, with no way to distinguish which app playlist "owns" it.
-    Callers must not use this when a stable ratingKey is available (use
-    _plex_delete_playlist_by_rating_key instead) or when another live app
-    playlist shares this same display name (SEC-002 Wave 10 second final
-    review: same-name app playlists must not let one delete another's
-    Plex playlist)."""
-    deleted = 0
-    d = _plex_request("/playlists", {"playlistType": "audio"}, timeout=10)
-    for pl in d.get("MediaContainer", {}).get("Metadata", []):
+def _plex_playlist_candidates_by_title(title: str) -> List[Tuple[Dict[str, Any], str]]:
+    candidates = []
+    for pl in _plex_audio_playlists():
         if _norm(pl.get("title", "")) != _norm(title):
             continue
         if str(pl.get("smart", "0")).strip().lower() in {"1", "true", "yes"}:
             continue
-        key = str(pl.get("ratingKey") or pl.get("key") or "").strip()
-        if not key:
-            continue
-        path = key.split("?", 1)[0] if key.startswith("/playlists/") else f"/playlists/{key}"
-        _plex_request(path, method="DELETE", timeout=10)
-        deleted += 1
-    if deleted and log is not None:
-        log.append(f"  [plex] Replaced {deleted} existing playlist(s) named {title!r}")
+        key = str(pl.get("ratingKey") or pl.get("key") or "").strip().strip("/").split("/")[-1]
+        if key:
+            candidates.append((pl, key))
+    return candidates
+
+
+def _plex_delete_playlist_by_title_unambiguous(title: str, log=None) -> Tuple[int, str]:
+    """Delete a Plex playlist by title only if exactly one candidate exists on Plex.
+    Returns (deleted_count, error_code). If >1 candidate exists, fails closed
+    with (0, 'ambiguous_plex_playlist') to prevent cross-targeting (SEC-002 Wave 11)."""
+    candidates = _plex_playlist_candidates_by_title(title)
+    if not candidates:
+        return 0, ""
+    if len(candidates) > 1:
+        if log is not None:
+            log.append(
+                f"  [plex] Refusing title-based delete for {title!r}: "
+                f"{len(candidates)} matching Plex playlists found (ambiguous_plex_playlist)"
+            )
+        return 0, "ambiguous_plex_playlist"
+
+    pl, key = candidates[0]
+    return _plex_delete_playlist_by_rating_key(key, log=log), ""
+
+
+def _plex_delete_playlist_by_title(title, log=None):
+    """Legacy/fallback authority only -- deletes a single matching Plex playlist by title
+    only if exactly one exists on Plex (SEC-002 Wave 11)."""
+    deleted, _ = _plex_delete_playlist_by_title_unambiguous(title, log=log)
     return deleted
 
 
@@ -43386,7 +43397,8 @@ def _plex_replace_playlist_safely(name: str,
     fresh sync, without risking another same-named app playlist's Plex
     playlist (SEC-002 Wave 10 second final review). Prefers a previously
     stored ratingKey; only falls back to legacy title-based replacement
-    when no other live app playlist shares this display name."""
+    when no other live app playlist shares this display name and exactly
+    one Plex playlist exists with this title (SEC-002 Wave 11)."""
     result = {"replaced": 0, "ambiguous": False}
     prior_rating_key = ""
     if isinstance(previous_manifest, dict):
@@ -44457,7 +44469,11 @@ def _create_playlist_outputs(name, items, *, log=None, replace_plex=True,
                         f"{pending_count} pending Plex match(es)."
                     )
                     try:
-                        verified_keys = _plex_playlist_rating_keys_by_title(name)
+                        target_rkey = _s(plex.get("rating_key") or prior_rating_key).strip()
+                        # Lookup uses rating_key or unambiguous fallback via _plex_playlist_rating_keys_by_title
+                        verified_keys, found_rkey, is_ambig = _plex_playlist_rating_keys_by_key_or_title(rating_key=target_rkey, title=name)
+                        if found_rkey:
+                            plex["rating_key"] = found_rkey
                         verified_unique = {str(key) for key in verified_keys}
                         expected_unique = {str(key) for key in playlist_keys}
                         plex["verified_count"] = len(verified_unique)
@@ -44466,7 +44482,11 @@ def _create_playlist_outputs(name, items, *, log=None, replace_plex=True,
                         if log is not None:
                             log.append(f"  [plex] Created/updated Plex playlist: {name}")
                             log.append(f"  [plex] Verified Plex playlist count: {len(verified_unique)}")
-                        if missing_verified:
+                        if is_ambig:
+                            plex["complete"] = False
+                            plex["status"] = "review_required"
+                            plex["issue_reason"] = "ambiguous_plex_playlist"
+                        elif missing_verified:
                             plex["complete"] = False
                             plex["status"] = "partial_success"
                             plex["issue_reason"] = "playlist verification count was lower than matched tracks"
@@ -44506,7 +44526,12 @@ def _create_playlist_outputs(name, items, *, log=None, replace_plex=True,
 
     if sync_plex and _plex_settings().get("token") and (plex.get("error") or not plex.get("created")):
         try:
-            existing_keys = _plex_playlist_rating_keys_by_title(name)
+            target_rkey = _s(plex.get("rating_key") or prior_rating_key).strip()
+            existing_keys, found_rkey, is_ambig = _plex_playlist_rating_keys_by_key_or_title(rating_key=target_rkey, title=name)
+            if found_rkey:
+                plex["rating_key"] = found_rkey
+            if is_ambig:
+                plex["issue_reason"] = "ambiguous_plex_playlist"
             plex["verified_count"] = len(existing_keys)
             plex["existing_playlist_count"] = len(existing_keys)
             if log is not None:
@@ -44809,11 +44834,38 @@ def _plex_playlist_rating_keys(pl: Dict[str, Any]) -> List[str]:
     return keys
 
 
-def _plex_playlist_rating_keys_by_title(title: str) -> List[str]:
+def _plex_playlist_by_rating_key(rating_key: str) -> Optional[Dict[str, Any]]:
+    key = _s(rating_key).strip()
+    if not key:
+        return None
     for pl in _plex_audio_playlists():
-        if _norm(pl.get("title", "")) == _norm(title):
-            return _plex_playlist_rating_keys(pl)
-    return []
+        pl_key = _s(pl.get("ratingKey") or pl.get("key") or "").strip().strip("/").split("/")[-1]
+        if pl_key == key:
+            return pl
+    return None
+
+
+def _plex_playlist_rating_keys_by_key_or_title(rating_key: str = "", title: str = "") -> Tuple[List[str], str, bool]:
+    """Look up track ratingKeys for verification from a specific Plex ratingKey,
+    or unambiguously by title. Returns (track_keys, target_rating_key, is_ambiguous)."""
+    r_key = _s(rating_key).strip()
+    if r_key:
+        pl = _plex_playlist_by_rating_key(r_key)
+        if pl:
+            return _plex_playlist_rating_keys(pl), r_key, False
+    if title:
+        candidates = _plex_playlist_candidates_by_title(title)
+        if len(candidates) > 1:
+            return [], "", True
+        if len(candidates) == 1:
+            pl, found_key = candidates[0]
+            return _plex_playlist_rating_keys(pl), found_key, False
+    return [], "", False
+
+
+def _plex_playlist_rating_keys_by_title(title: str) -> List[str]:
+    keys, _, _ = _plex_playlist_rating_keys_by_key_or_title(title=title)
+    return keys
 
 
 def _plex_track_file(track: Dict[str, Any]) -> str:
@@ -45414,12 +45466,16 @@ def _playlist_job_track_payload(track: Dict[str, Any]) -> Dict[str, str]:
 
 def _playlist_job_key_payload(name: str, source: str, content: str,
                               tracks: List[Dict[str, Any]],
-                              all_tracks: List[Dict[str, Any]]) -> Dict[str, Any]:
+                              all_tracks: List[Dict[str, Any]],
+                              playlist_id: str = "") -> Dict[str, Any]:
     source_text = _s(source or "").strip().lower()
     content_text = _s(content or "").strip()
     track_basis = all_tracks or tracks or []
+    clean_name = _clean_playlist_name(name)
+    pid = _s(playlist_id).strip() or _playlist_key(clean_name)
     return {
-        "name": _clean_playlist_name(name),
+        "name": clean_name,
+        "playlist_id": pid,
         "source": source_text,
         "content": content_text if content_text else "",
         "requested": [_playlist_job_track_payload(track) for track in (tracks or [])],
@@ -45446,16 +45502,46 @@ def _playlist_load_job_state(jid: str) -> Dict[str, Any]:
         return {}
 
 
+def _playlist_sanitize_job_state_for_persistence(state: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(state, dict):
+        return {}
+    cleaned = copy.deepcopy(state)
+    sensitive_keys = {"token", "api_key", "password", "secret", "authorization", "plex_token", "lidarr_api_key", "slskd_api_key", "control_agent_token"}
+
+    def _redact_dict(d: dict):
+        for k, v in list(d.items()):
+            if any(s in str(k).lower() for s in sensitive_keys):
+                d[k] = "[REDACTED]"
+            elif isinstance(v, dict):
+                _redact_dict(v)
+            elif isinstance(v, list):
+                _redact_list(v)
+
+    def _redact_list(l: list):
+        for idx, item in enumerate(l):
+            if isinstance(item, dict):
+                _redact_dict(item)
+            elif isinstance(item, list):
+                _redact_list(item)
+            elif isinstance(item, str):
+                if any(s in item.lower() for s in ("token=", "bearer ", "api_key=", "secret=")):
+                    l[idx] = _redact_security_text(item)
+
+    _redact_dict(cleaned)
+    return cleaned
+
+
 def _playlist_save_job_state(state: Dict[str, Any]) -> None:
     jid = _s(state.get("job_id") or "")
     if not jid:
         return
+    sanitized_state = _playlist_sanitize_job_state_for_persistence(state)
     try:
         PLAYLIST_JOB_STATE_DIR.mkdir(parents=True, exist_ok=True)
         path = _playlist_job_state_path(jid)
         _playlist_atomic_json_replace(
             path,
-            state,
+            sanitized_state,
             save_key=jid,
             label="playlist checkpoint",
             indent=None,
@@ -45518,10 +45604,16 @@ def _playlist_job_state_name(state: Dict[str, Any]) -> str:
 
 def _playlist_saved_job_states_for_name(name: str,
                                         *,
+                                        playlist_id: str = "",
                                         mark_interrupted: bool = False) -> List[Dict[str, Any]]:
     if not PLAYLIST_JOB_STATE_DIR.exists():
         return []
-    target = _norm(name)
+    clean_name = _clean_playlist_name(name) if name else ""
+    target_pid = _s(playlist_id).strip()
+    if not target_pid and clean_name:
+        target_pid = _playlist_key(clean_name)
+
+    target_norm = _norm(name) if name else ""
     rows: List[Dict[str, Any]] = []
     for path in PLAYLIST_JOB_STATE_DIR.glob("pl-*.json"):
         try:
@@ -45530,9 +45622,22 @@ def _playlist_saved_job_states_for_name(name: str,
                 continue
         except Exception:
             continue
+
+        job_key = data.get("job_key") if isinstance(data.get("job_key"), dict) else {}
+        ckpt_pid = _s(data.get("playlist_id") or job_key.get("playlist_id") or "").strip()
         job_name = _playlist_job_state_name(data)
-        if target and _norm(job_name) != target:
-            continue
+
+        if target_pid:
+            if ckpt_pid:
+                if ckpt_pid != target_pid:
+                    continue
+            else:
+                if target_norm and _norm(job_name) != target_norm:
+                    continue
+        elif target_norm:
+            if _norm(job_name) != target_norm:
+                continue
+
         jid = _s(data.get("job_id") or path.stem)
         data["job_id"] = jid
         try:
@@ -46099,24 +46204,56 @@ def _playlist_slskd_download_track(artist: str, title: str,
     return _playlist_copy_source_files(afiles, dl_dir, artist, title, log)
 
 
+def _is_safe_playlist_staged_file(path_str: str, playlist_name: str) -> bool:
+    if not path_str or "\x00" in path_str or ".." in path_str.replace("\\", "/"):
+        return False
+    try:
+        p = Path(path_str).resolve(strict=False)
+        clean_name = _clean_playlist_name(playlist_name)
+        staging_root = get_playlist_staging_root(clean_name).resolve(strict=False)
+        shared_staging = PLAYLIST_DOWNLOAD_ROOT.resolve(strict=False)
+        music_root = MUSIC_ROOT.resolve(strict=False)
+
+        try:
+            p.relative_to(music_root)
+            return False
+        except ValueError:
+            pass
+
+        is_safe = False
+        try:
+            p.relative_to(staging_root)
+            is_safe = True
+        except ValueError:
+            try:
+                p.relative_to(shared_staging)
+                is_safe = True
+            except ValueError:
+                pass
+
+        return is_safe and p.is_file()
+    except Exception:
+        return False
+
+
 def _playlist_reconcile_staged_files(name: str, dl_dir: Path,
                                       tracks: List[Dict[str, Any]], log) -> int:
-    """On resume: verify staged_path entries still exist; match orphaned audio to missing tracks.
+    """On resume: verify staged_path entries still exist and are safe; match orphaned audio to missing tracks.
 
     Returns the number of entries reconciled (stale resets + new file matches).
     """
     clean_name = _clean_playlist_name(name)
     manifest_states = _playlist_manifest_track_states(clean_name)
 
-    # Step 1 – check existing staged-path entries: reset any whose file is gone
+    # Step 1 – check existing staged-path entries: reset any whose file is gone or unsafe
     stale = 0
     for key, row in list(manifest_states.items()):
         if not isinstance(row, dict):
             continue
         if _s(row.get("status") or "") not in {"downloaded", "waiting_import", "importing", "download_verified"}:
             continue
-        staged = Path(_s(row.get("staged_path") or row.get("path") or ""))
-        if staged.is_file():
+        staged_str = _s(row.get("staged_path") or row.get("path") or "")
+        if _is_safe_playlist_staged_file(staged_str, clean_name):
             continue
         trk: Dict[str, Any] = {
             "artist": _s(row.get("artist") or ""),
@@ -46128,7 +46265,7 @@ def _playlist_reconcile_staged_files(name: str, dl_dir: Path,
             staged_path="")
         stale += 1
     if stale:
-        log(f"  Reconcile: {stale} staged file(s) missing — will re-download")
+        log(f"  Reconcile: {stale} staged file(s) missing on resume — will re-download")
 
     # Step 2 – scan dl_dir for audio files not yet matched to any track in the manifest
     if not dl_dir.is_dir():
@@ -49603,6 +49740,15 @@ def playlist_delete(name):
             job_file.unlink()
         except Exception:
             pass
+    for ckpt in _playlist_saved_job_states_for_name(clean_name, playlist_id=pid):
+        ckpt_jid = _s(ckpt.get("job_id"))
+        if ckpt_jid:
+            cfile = _playlist_job_state_path(ckpt_jid)
+            try:
+                if cfile.exists():
+                    cfile.unlink()
+            except Exception:
+                pass
 
     # The engine M3U delete above is this route's one hard-required step
     # (a failure already returned before this point); once past it, the
