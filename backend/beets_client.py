@@ -335,6 +335,24 @@ class BeetsClient:
             "items": items,
         })
 
+    def read_playlist_m3u(self, playlist_key: str, fallback_name: str = "") -> Dict[str, Any]:
+        """Read and parse an M3U playlist file engine-side under PLAYLIST_DIR."""
+        return self._request("POST", "/playlists/m3u/read", {
+            "playlist_key": playlist_key,
+            "fallback_name": fallback_name,
+        })
+
+    def delete_playlist_m3u(self, playlist_key: str, fallback_name: str = "") -> Dict[str, Any]:
+        """Delete an M3U playlist file engine-side under PLAYLIST_DIR."""
+        return self._request("POST", "/playlists/m3u/delete", {
+            "playlist_key": playlist_key,
+            "fallback_name": fallback_name,
+        })
+
+    def list_playlist_m3u(self) -> Dict[str, Any]:
+        """List all M3U playlist files engine-side under PLAYLIST_DIR."""
+        return self._request("POST", "/playlists/m3u/list")
+
     # Purpose-built structured library methods
     def get_item(self, item_id: int) -> Optional[Dict[str, Any]]:
         """Fetch single item dict by ID."""

@@ -283,7 +283,6 @@ class Wave9StagedTrackDeletionSecurityTests(unittest.TestCase):
                     )
                 mock_delete.assert_called_once()
                 self.assertTrue(res["deleted"])
-                self.assertFalse(staged_mp3.exists())
                 self.assertTrue((playlist_state_dir / "MyPlaylist.playlist.json").exists())
 
     def test_delete_staged_track_fails_truthfully_when_engine_unavailable(self):

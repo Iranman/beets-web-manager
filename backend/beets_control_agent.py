@@ -3651,6 +3651,127 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             finally:
                 release_os_lock(lock_file)
             return
+
+        if path == "/playlists/m3u/read":
+            playlist_key = str(body.get("playlist_key") or "").strip()
+            fallback_name = str(body.get("fallback_name") or "").strip()
+            key = playlist_key or _clean_playlist_name(fallback_name)
+
+            if not key or not re.match(r"^[a-zA-Z0-9_.-]{1,160}$", key) or ".." in key:
+                self._send_json(400, {"error": "Invalid or missing playlist_key"})
+                return
+
+            playlist_dir = PLAYLIST_DIR.resolve(strict=False)
+            target = playlist_dir / f"{key}.m3u"
+            if not target.exists() and fallback_name:
+                alt = playlist_dir / f"{_clean_playlist_name(fallback_name)}.m3u"
+                if alt.exists():
+                    target = alt
+
+            try:
+                safe_m3u = resolve_safe_path(str(target), ["music", "staging"])
+            except UnsafePathError:
+                self._send_json(403, {"error": "Access denied for M3U path outside allowed roots"})
+                return
+
+            if not safe_m3u.exists():
+                self._send_json(200, {"ok": True, "items": [], "m3u_path": str(safe_m3u), "exists": False})
+                return
+
+            lock_file = acquire_os_lock(read_only=True)
+            try:
+                items = []
+                last_extinf = ""
+                raw_lines = safe_m3u.read_text(encoding="utf-8", errors="replace").splitlines()
+                for line in raw_lines:
+                    sline = line.strip()
+                    if not sline:
+                        continue
+                    if sline.startswith("#EXTINF"):
+                        last_extinf = sline
+                        continue
+                    if sline.startswith("#"):
+                        continue
+                    artist, title = "", ""
+                    if last_extinf and "," in last_extinf:
+                        label = last_extinf.split(",", 1)[1].strip()
+                        if " - " in label:
+                            artist, title = label.split(" - ", 1)
+                        else:
+                            title = label
+                    if not title:
+                        title = Path(sline.replace("\\", "/")).stem
+                    item_payload = {"artist": artist.strip(), "title": title.strip(), "path": sline}
+                    items.append(item_payload)
+                    last_extinf = ""
+
+                self._send_json(200, {"ok": True, "items": items, "m3u_path": str(safe_m3u), "exists": True})
+            except Exception:
+                self._send_json(500, {"error": "Failed to read M3U file"})
+            finally:
+                release_os_lock(lock_file)
+            return
+
+        if path == "/playlists/m3u/delete":
+            playlist_key = str(body.get("playlist_key") or "").strip()
+            fallback_name = str(body.get("fallback_name") or "").strip()
+            key = playlist_key or _clean_playlist_name(fallback_name)
+
+            if not key or not re.match(r"^[a-zA-Z0-9_.-]{1,160}$", key) or ".." in key:
+                self._send_json(400, {"error": "Invalid or missing playlist_key"})
+                return
+
+            playlist_dir = PLAYLIST_DIR.resolve(strict=False)
+            targets = [playlist_dir / f"{key}.m3u"]
+            if fallback_name:
+                targets.append(playlist_dir / f"{_clean_playlist_name(fallback_name)}.m3u")
+
+            lock_file = acquire_os_lock(read_only=False)
+            deleted_any = False
+            try:
+                for target in targets:
+                    try:
+                        safe_m3u = resolve_safe_path(str(target), ["music", "staging"])
+                    except UnsafePathError:
+                        continue
+                    if safe_m3u.exists() and not safe_m3u.is_dir():
+                        safe_m3u.unlink()
+                        deleted_any = True
+                self._send_json(200, {"ok": True, "deleted": deleted_any, "already_absent": not deleted_any})
+            except Exception:
+                self._send_json(500, {"error": "Failed to delete M3U file"})
+            finally:
+                release_os_lock(lock_file)
+            return
+
+        if path == "/playlists/m3u/list":
+            playlist_dir = PLAYLIST_DIR.resolve(strict=False)
+            if not playlist_dir.exists():
+                self._send_json(200, {"ok": True, "files": []})
+                return
+
+            lock_file = acquire_os_lock(read_only=True)
+            try:
+                files = []
+                for p in sorted(playlist_dir.glob("*.m3u"), key=lambda x: x.name.lower()):
+                    try:
+                        safe_p = resolve_safe_path(str(p), ["music", "staging"])
+                        st = safe_p.stat()
+                        files.append({
+                            "key": safe_p.stem,
+                            "name": safe_p.name,
+                            "path": str(safe_p),
+                            "size": st.st_size,
+                            "mtime": st.st_mtime,
+                        })
+                    except Exception:
+                        pass
+                self._send_json(200, {"ok": True, "files": files})
+            except Exception:
+                self._send_json(500, {"error": "Failed to list M3U files"})
+            finally:
+                release_os_lock(lock_file)
+            return
         self._send_json(404, {"error": f"Endpoint not found: {path}"})
 
     def do_PATCH(self):
