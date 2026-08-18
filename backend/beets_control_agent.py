@@ -25,6 +25,7 @@ import tempfile
 import threading
 import time
 import urllib.parse
+import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
@@ -848,6 +849,329 @@ IMPORT_INSPECT_MAX_AUDIO_FILES = _env_int_clamped(
 
 def _import_source_audio_extensions() -> set[str]:
     return set(audio_preferences._AUDIO_EXT_TO_FORMAT.keys())
+
+
+PLAYLIST_IMPORT_MAX_REQUEST_BYTES = _env_int_clamped(
+    "BEETS_PLAYLIST_IMPORT_MAX_REQUEST_BYTES", 256_000, minimum=16_384, maximum=2_000_000
+)
+PLAYLIST_IMPORT_MAX_TRACKS = _env_int_clamped(
+    "BEETS_PLAYLIST_IMPORT_MAX_TRACKS", 100, minimum=1, maximum=500
+)
+PLAYLIST_IMPORT_MAX_TIMEOUT_SECONDS = _env_int_clamped(
+    "BEETS_PLAYLIST_IMPORT_MAX_TIMEOUT_SECONDS", 900, minimum=60, maximum=3600
+)
+PLAYLIST_IMPORT_PER_TRACK_TIMEOUT_SECONDS = _env_int_clamped(
+    "BEETS_PLAYLIST_IMPORT_PER_TRACK_TIMEOUT_SECONDS", 120, minimum=10, maximum=300
+)
+_PLAYLIST_ID_RE = re.compile(r"^pl_[0-9a-f]{32}$")
+_PLAYLIST_KEY_RE = re.compile(r"^[a-zA-Z0-9_.-]{1,160}$")
+_PLAYLIST_OPERATION_ID_RE = re.compile(r"^pl-import-[a-zA-Z0-9_.-]{1,180}$")
+_PLAYLIST_TRACK_ID_RE = re.compile(r"^[^\x00/\\]{1,240}$")
+_PLAYLIST_OPERATION_STORAGE_KEY_RE = re.compile(r"^op_[0-9a-f]{32}$")
+_PLAYLIST_IMPORT_OPERATIONS_ROOT_NAME = ".playlist-import-operations"
+_PLAYLIST_IMPORT_INDEX_NAME = "index.json"
+
+
+def _bounded_text(value: object, *, max_len: int) -> str:
+    text = str(value or "").strip()
+    if len(text) > max_len:
+        raise ValueError("too_long")
+    if "\x00" in text:
+        raise ValueError("invalid")
+    return text
+
+
+def _valid_playlist_key(value: str) -> bool:
+    return bool(value and _PLAYLIST_KEY_RE.fullmatch(value) and ".." not in value)
+
+
+def _valid_playlist_id(value: str) -> bool:
+    return bool(value and _PLAYLIST_ID_RE.fullmatch(value))
+
+
+def _valid_playlist_import_operation_id(value: str) -> bool:
+    return bool(value and _PLAYLIST_OPERATION_ID_RE.fullmatch(value) and ".." not in value)
+
+
+def _valid_playlist_import_track_id(value: str) -> bool:
+    return bool(value and _PLAYLIST_TRACK_ID_RE.fullmatch(value))
+
+
+def _playlist_import_new_operation_storage_key() -> str:
+    return f"op_{uuid.uuid4().hex}"
+
+
+def _valid_playlist_import_storage_key(value: str) -> bool:
+    return bool(value and _PLAYLIST_OPERATION_STORAGE_KEY_RE.fullmatch(value))
+
+
+def _safe_playlist_import_error(status: str) -> str:
+    messages = {
+        "invalid_path": "Staged track path is invalid.",
+        "cross_playlist_target": "Staged track is outside this playlist's staging directory.",
+        "staged_track_symlink": "Staged track path contains a symlink.",
+        "staged_track_not_audio": "Staged track is not an allowed audio file.",
+        "staged_track_missing": "Staged track is missing.",
+        "invalid_track_id": "Track identifier is invalid.",
+        "identity_mismatch": "Staged track metadata does not match the expected track.",
+        "review_required": "Staged track identity could not be confirmed by fingerprint; review is required.",
+        "identity_verification_unavailable": "Deterministic audio identity verification is currently unavailable.",
+        "tag_write_failed": "Could not safely prepare staged track metadata for import.",
+        "import_failed": "Beets import failed.",
+        "operation_state_corrupt": "Playlist import operation state is corrupt.",
+    }
+    return messages.get(status, "Playlist import could not continue.")
+
+
+def _playlist_import_operations_root() -> Path:
+    return resolve_safe_path(
+        str(PLAYLIST_DOWNLOAD_ROOT / _PLAYLIST_IMPORT_OPERATIONS_ROOT_NAME),
+        ["staging"],
+    )
+
+
+def _playlist_import_operations_index_path(operations_root: Path) -> Path:
+    return resolve_safe_path(str(operations_root / _PLAYLIST_IMPORT_INDEX_NAME), ["staging"])
+
+
+def _playlist_import_read_state(state_path: Path) -> dict[str, Any]:
+    if not state_path.exists():
+        return {}
+    try:
+        data = json.loads(state_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise UnsafePathError("operation state is corrupt") from exc
+    if not isinstance(data, dict):
+        raise UnsafePathError("operation state is corrupt")
+    return data
+
+
+def _playlist_import_write_state(state_path: Path, state: dict[str, Any]) -> None:
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = state_path.parent / f".{state_path.name}.{uuid.uuid4().hex}.tmp"
+    payload = json.dumps(state, sort_keys=True, indent=2, default=_json_default)
+    with open(tmp_path, "w", encoding="utf-8") as fh:
+        fh.write(payload)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp_path, state_path)
+    try:
+        dir_fd = os.open(str(state_path.parent), os.O_DIRECTORY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except Exception:
+        pass
+
+
+def _read_engine_media_tags(path: Path) -> dict[str, Any]:
+    try:
+        from beets.mediafile import MediaFile
+        mf = MediaFile(path)
+        return {
+            "title": str(getattr(mf, "title", "") or ""),
+            "artist": str(getattr(mf, "artist", "") or ""),
+            "album": str(getattr(mf, "album", "") or ""),
+            "albumartist": str(getattr(mf, "albumartist", "") or ""),
+            "year": int(getattr(mf, "year", 0) or 0),
+            "mb_trackid": str(getattr(mf, "mb_trackid", "") or ""),
+        }
+    except Exception:
+        return {}
+
+
+def _norm_import_text(value: object) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip()).casefold()
+
+
+def _import_text_similarity(expected: str, candidate: str) -> float:
+    """Bounded, conservative text similarity in [0, 1]. Deliberately simple
+    (exact match after normalization, or one containing the other) rather
+    than importing app.py's richer fuzzy scorers -- this module is a
+    standalone engine script with no app.py/Flask coupling (see the
+    audio_preferences import fallback above)."""
+    a, b = _norm_import_text(expected), _norm_import_text(candidate)
+    if not a or not b:
+        return 0.0
+    if a == b:
+        return 1.0
+    if a in b or b in a:
+        return 0.85
+    return 0.0
+
+
+_PLAYLIST_ACOUSTID_LOOKUP_LOCK = threading.Lock()
+_PLAYLIST_ACOUSTID_NEXT_LOOKUP_AT = 0.0
+try:
+    _PLAYLIST_ACOUSTID_MIN_INTERVAL_SECONDS = max(
+        0.0, float(os.environ.get("ACOUSTID_MIN_INTERVAL_SECONDS", "0.35") or "0.35")
+    )
+except Exception:
+    _PLAYLIST_ACOUSTID_MIN_INTERVAL_SECONDS = 0.35
+
+
+def _playlist_import_fpcalc_available() -> bool:
+    return bool(shutil.which("fpcalc") or Path("/usr/bin/fpcalc").exists())
+
+
+def _engine_acoustid_lookup(path: Path) -> Optional[list[dict[str, Any]]]:
+    """Run fpcalc + an AcoustID API lookup entirely engine-side (mirrors
+    helpers_mb.py's _acoustid_lookup() output shape/policy -- AcoustID
+    fingerprint evidence is this project's primary deterministic
+    track-identity verification, tags are supporting evidence only).
+    Returns None on a lookup-level failure (network/API error, distinct
+    from "ran fine, no candidates found" which returns []), so the caller
+    can tell "verification failed to run" apart from "verification ran and
+    found nothing" -- both must fail closed, but for different reasons."""
+    fpcalc = shutil.which("fpcalc") or "/usr/bin/fpcalc"
+    if not Path(fpcalc).exists():
+        return None
+    try:
+        r = subprocess.run([fpcalc, "-json", str(path)], capture_output=True, text=True, timeout=30)
+        if r.returncode != 0 or not r.stdout.strip():
+            return None
+        fp_data = json.loads(r.stdout)
+        duration = int(fp_data.get("duration") or 0)
+        fingerprint = str(fp_data.get("fingerprint") or "").strip()
+        if not fingerprint or duration < 5:
+            return None
+    except Exception:
+        return None
+
+    aid_key = os.environ.get("ACOUSTID_API_KEY") or "8XaBELgH"
+    params = urllib.parse.urlencode({
+        "client": aid_key,
+        "meta": "recordings releases releasegroups",
+        "duration": duration,
+        "fingerprint": fingerprint,
+        "format": "json",
+    })
+    req = urllib.request.Request(
+        f"https://api.acoustid.org/v2/lookup?{params}",
+        headers={"User-Agent": "BeetsWebManager-Engine/1.0"},
+    )
+    data: dict[str, Any] = {}
+    got_response = False
+    for attempt in range(2):
+        try:
+            with _PLAYLIST_ACOUSTID_LOOKUP_LOCK:
+                global _PLAYLIST_ACOUSTID_NEXT_LOOKUP_AT
+                now = time.monotonic()
+                if _PLAYLIST_ACOUSTID_NEXT_LOOKUP_AT > now:
+                    time.sleep(_PLAYLIST_ACOUSTID_NEXT_LOOKUP_AT - now)
+                _PLAYLIST_ACOUSTID_NEXT_LOOKUP_AT = time.monotonic() + _PLAYLIST_ACOUSTID_MIN_INTERVAL_SECONDS
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read())
+            got_response = True
+            break
+        except Exception:
+            if attempt >= 1:
+                return None
+            time.sleep(1.0)
+    if not got_response or data.get("status") != "ok":
+        return None
+
+    out: list[dict[str, Any]] = []
+    seen_mbids: set = set()
+    for result in (data.get("results") or [])[:5]:
+        try:
+            confidence = int(round((result.get("score") or 0) * 100))
+        except Exception:
+            confidence = 0
+        acoustid_id = str(result.get("id") or "")
+        for rec in (result.get("recordings") or [])[:3]:
+            mb_id = str(rec.get("id") or "")
+            if not mb_id or mb_id in seen_mbids:
+                continue
+            seen_mbids.add(mb_id)
+            out.append({
+                "score": confidence,
+                "acoustid_id": acoustid_id,
+                "mb_trackid": mb_id,
+                "title": str(rec.get("title") or ""),
+                "artist": " / ".join(a.get("name", "") for a in (rec.get("artists") or [])),
+            })
+    return out
+
+
+def _playlist_import_identity_ok(path: Path, item: dict[str, Any]) -> tuple[bool, str, dict[str, Any]]:
+    """Deterministic pre-import identity gate. AcoustID fingerprint
+    evidence is required to authorize import; embedded tags are used only
+    as a fast-fail conflict pre-check (tags are mutable, attacker/user-
+    controlled metadata -- matching tags alone never authorizes import,
+    only fingerprint evidence does). This is evaluated on the *original*
+    staged source, before any tag is written onto it, so the evidence is
+    never self-fulfilling: the engine cannot verify a value it wrote
+    itself (SEC-002 Wave 12 second final review)."""
+    expected_mbid = str(item.get("mb_trackid") or "").strip()
+    expected_artist = str(item.get("artist") or "").strip()
+    expected_title = str(item.get("title") or "").strip()
+
+    tags = _read_engine_media_tags(path)
+    actual_mbid = str(tags.get("mb_trackid") or "").strip()
+    if expected_mbid and actual_mbid and actual_mbid != expected_mbid:
+        return False, "identity_mismatch", {"mb_trackid": actual_mbid}
+    if expected_title and tags.get("title"):
+        if _norm_import_text(tags.get("title")) != _norm_import_text(expected_title):
+            return False, "identity_mismatch", {"title": tags.get("title", "")}
+    if expected_artist and tags.get("artist"):
+        if _norm_import_text(tags.get("artist")) != _norm_import_text(expected_artist):
+            return False, "identity_mismatch", {"artist": tags.get("artist", "")}
+
+    if not _playlist_import_fpcalc_available():
+        return False, "identity_verification_unavailable", {"reason": "fpcalc_unavailable"}
+
+    candidates = _engine_acoustid_lookup(path)
+    if candidates is None:
+        return False, "identity_verification_unavailable", {"reason": "acoustid_lookup_failed"}
+    if not candidates:
+        return False, "review_required", {"reason": "no_acoustid_result"}
+
+    confirmed: Optional[dict[str, Any]] = None
+    for cand in candidates:
+        cand_mbid = str(cand.get("mb_trackid") or "").strip().lower()
+        mbid_ok = bool(expected_mbid and cand_mbid and cand_mbid == expected_mbid.lower())
+        title_ok = bool(expected_title and _import_text_similarity(expected_title, cand.get("title", "")) >= 0.78)
+        artist_ok = bool(
+            not expected_artist
+            or _import_text_similarity(expected_artist, cand.get("artist", "")) >= 0.6
+        )
+        if mbid_ok or (title_ok and artist_ok):
+            confirmed = cand
+            break
+
+    if not confirmed:
+        return False, "identity_mismatch", {
+            "reason": "acoustid_no_matching_candidate",
+            "top_candidate_mb_trackid": candidates[0].get("mb_trackid", ""),
+        }
+
+    return True, "verified", {
+        "mb_trackid": confirmed.get("mb_trackid", ""),
+        "acoustid_id": confirmed.get("acoustid_id", ""),
+        "acoustid_score": confirmed.get("score", 0),
+    }
+
+
+def _verify_imported_track_in_library(item: dict[str, Any]) -> bool:
+    mb_trackid = str(item.get("mb_trackid") or "").strip()
+    if not mb_trackid:
+        return False
+    if not os.path.exists(LIB_PATH):
+        return False
+    try:
+        conn = sqlite3.connect(LIB_PATH)
+        try:
+            row = conn.execute(
+                "SELECT id FROM items WHERE mb_trackid = ? LIMIT 1",
+                (mb_trackid,),
+            ).fetchone()
+            return row is not None
+        finally:
+            conn.close()
+    except Exception:
+        return False
 
 
 def _import_source_signature(entries: list[dict[str, Any]]) -> str:
@@ -2847,6 +3171,9 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
         if path == "/config" and content_len > _AGENT_CONFIG_REQUEST_MAX_BYTES:
             self._send_json(413, {"error": "config content is too large", "error_code": "config_too_large"})
             return
+        if path == "/playlists/import-staged" and content_len > PLAYLIST_IMPORT_MAX_REQUEST_BYTES:
+            self._send_json(413, {"error": "playlist import request is too large", "error_code": "request_too_large"})
+            return
         post_data = self.rfile.read(content_len) if content_len > 0 else b"{}"
 
         try:
@@ -3732,6 +4059,496 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 release_os_lock(lock_file)
             return
 
+        if path == "/playlists/staging/inspect-track":
+            playlist_key = str(body.get("playlist_key") or "").strip()
+            track_id = str(body.get("track_id") or "").strip()
+            requested_path = str(body.get("requested_path") or "").strip()
+
+            if not playlist_key or not re.match(r"^[a-zA-Z0-9_.-]{1,160}$", playlist_key) or ".." in playlist_key:
+                self._send_json(400, {"error": "Invalid or missing playlist_key", "error_code": "invalid_playlist_key"})
+                return
+            if not requested_path:
+                self._send_json(400, {"error": "Missing requested_path", "error_code": "missing_requested_path"})
+                return
+
+            staging_root = PLAYLIST_DOWNLOAD_ROOT.resolve(strict=False)
+            music_root = MUSIC_ROOT.resolve(strict=False)
+
+            def _inspect_result(*, exists: bool, authorized: bool, status: str) -> None:
+                self._send_json(200, {
+                    "ok": True,
+                    "exists": bool(exists),
+                    "authorized": bool(authorized),
+                    "playlist_key": playlist_key,
+                    "track_id": track_id,
+                    "status": status,
+                })
+
+            try:
+                safe_target = resolve_safe_path(requested_path, ["staging"])
+            except UnsafePathError:
+                _inspect_result(exists=False, authorized=False, status="invalid_path")
+                return
+
+            if _path_is_within(str(safe_target), str(music_root)):
+                _inspect_result(exists=False, authorized=False, status="library_path")
+                return
+            try:
+                relative_parts = safe_target.relative_to(staging_root).parts
+            except ValueError:
+                _inspect_result(exists=False, authorized=False, status="invalid_path")
+                return
+            if not relative_parts or relative_parts[0] != playlist_key:
+                _inspect_result(exists=False, authorized=False, status="outside_playlist_staging")
+                return
+            if len(relative_parts) == 1:
+                _inspect_result(exists=False, authorized=False, status="root_or_directory")
+                return
+            if _path_has_symlink_component(safe_target, staging_root):
+                _inspect_result(exists=False, authorized=False, status="symlink_path")
+                return
+
+            try:
+                verified_target = resolve_safe_path(requested_path, ["staging"], require_exists=True, expected_type="file")
+            except UnsafePathError as exc:
+                msg = str(exc).lower()
+                if "does not exist" in msg:
+                    _inspect_result(exists=False, authorized=False, status="missing")
+                    return
+                if "not a regular file" in msg or "not a file" in msg:
+                    _inspect_result(exists=True, authorized=False, status="not_file")
+                    return
+                _inspect_result(exists=False, authorized=False, status="invalid_path")
+                return
+            if verified_target.suffix.lower() not in _import_source_audio_extensions():
+                _inspect_result(exists=True, authorized=False, status="non_audio")
+                return
+            _inspect_result(exists=True, authorized=True, status="ok")
+            return
+
+        if path == "/playlists/import-staged":
+            playlist_key = str(body.get("playlist_key") or "").strip()
+            playlist_id = str(body.get("playlist_id") or "").strip()
+            operation_id = str(body.get("operation_id") or "").strip()
+            tracks_payload = body.get("tracks")
+            if not isinstance(tracks_payload, list):
+                tracks_payload = []
+
+            if not _valid_playlist_key(playlist_key):
+                self._send_json(400, {"error": "Invalid or missing playlist_key", "error_code": "invalid_playlist_key"})
+                return
+            if playlist_id and not _valid_playlist_id(playlist_id):
+                self._send_json(400, {"error": "Invalid playlist_id", "error_code": "invalid_playlist_id"})
+                return
+            if not _valid_playlist_import_operation_id(operation_id):
+                self._send_json(400, {"error": "Invalid or missing operation_id", "error_code": "invalid_operation_id"})
+                return
+            if len(tracks_payload) > PLAYLIST_IMPORT_MAX_TRACKS:
+                self._send_json(413, {"error": "Too many playlist import tracks", "error_code": "too_many_tracks"})
+                return
+
+            staging_root = PLAYLIST_DOWNLOAD_ROOT.resolve(strict=False)
+            music_root = MUSIC_ROOT.resolve(strict=False)
+
+            try:
+                safe_playlist_staging = resolve_safe_path(str(PLAYLIST_DOWNLOAD_ROOT / playlist_key), ["staging"])
+                safe_playlist_staging.relative_to(staging_root)
+                operations_root = _playlist_import_operations_root()
+                index_path = _playlist_import_operations_index_path(operations_root)
+            except (ValueError, UnsafePathError):
+                self._send_json(400, {"error": "Invalid playlist staging root", "error_code": "invalid_playlist_key"})
+                return
+
+            lock_file = acquire_os_lock(read_only=False)
+            tmp_cfg_path = ""
+            try:
+                if _path_has_symlink_component(safe_playlist_staging, staging_root):
+                    self._send_json(403, {"error": "Playlist staging path is not safe", "error_code": "playlist_staging_symlink"})
+                    return
+                if operations_root.exists() and _path_has_symlink_component(operations_root, staging_root, include_leaf=True):
+                    self._send_json(403, {"error": "Playlist import operation state is not safe", "error_code": "operation_state_symlink"})
+                    return
+
+                try:
+                    index_state = _playlist_import_read_state(index_path)
+                except UnsafePathError:
+                    self._send_json(409, {
+                        "ok": False,
+                        "status": "review_required",
+                        "error_code": "operation_state_corrupt",
+                        "message": _safe_playlist_import_error("operation_state_corrupt"),
+                    })
+                    return
+                operations = index_state.get("operations") if isinstance(index_state.get("operations"), dict) else {}
+                if index_state and not isinstance(index_state.get("operations"), dict):
+                    self._send_json(409, {
+                        "ok": False,
+                        "status": "review_required",
+                        "error_code": "operation_state_corrupt",
+                        "message": _safe_playlist_import_error("operation_state_corrupt"),
+                    })
+                    return
+                for known_operation_id, known_state in operations.items():
+                    if not _valid_playlist_import_operation_id(str(known_operation_id)):
+                        self._send_json(409, {"ok": False, "status": "review_required", "error_code": "operation_state_corrupt"})
+                        return
+                    if not isinstance(known_state, dict) or not _valid_playlist_import_storage_key(str(known_state.get("storage_key") or "")):
+                        self._send_json(409, {"ok": False, "status": "review_required", "error_code": "operation_state_corrupt"})
+                        return
+
+                operation_state = operations.get(operation_id) if isinstance(operations.get(operation_id), dict) else {}
+                if operation_state.get("playlist_key") and operation_state.get("playlist_key") != playlist_key:
+                    self._send_json(409, {"ok": False, "status": "review_required", "error_code": "operation_playlist_mismatch"})
+                    return
+                if operation_state.get("playlist_id") and playlist_id and operation_state.get("playlist_id") != playlist_id:
+                    self._send_json(409, {"ok": False, "status": "review_required", "error_code": "operation_playlist_mismatch"})
+                    return
+                storage_key = str(operation_state.get("storage_key") or "")
+                if not storage_key:
+                    storage_key = _playlist_import_new_operation_storage_key()
+                if not _valid_playlist_import_storage_key(storage_key):
+                    self._send_json(409, {"ok": False, "status": "review_required", "error_code": "operation_state_corrupt"})
+                    return
+                try:
+                    operation_dir = resolve_safe_path(str(operations_root / storage_key), ["staging"])
+                    operation_dir.relative_to(operations_root.resolve(strict=False))
+                except (ValueError, UnsafePathError):
+                    self._send_json(403, {"error": "Playlist import operation staging is not safe", "error_code": "import_staging_symlink"})
+                    return
+                if operation_dir.exists() and _path_has_symlink_component(operation_dir, operations_root):
+                    self._send_json(403, {"error": "Playlist import operation staging is not safe", "error_code": "import_staging_symlink"})
+                    return
+
+                saved_tracks = operation_state.get("tracks") if isinstance(operation_state.get("tracks"), dict) else {}
+                if operation_state.get("status") == "completed":
+                    completed_tracks = [dict(row) for row in saved_tracks.values() if isinstance(row, dict)]
+                    self._send_json(200, {
+                        "ok": True,
+                        "status": "already_completed",
+                        "operation_id": operation_id,
+                        "playlist_key": playlist_key,
+                        "playlist_id": playlist_id or operation_state.get("playlist_id", ""),
+                        "imported_count": int(operation_state.get("imported_count") or 0),
+                        "tracks": completed_tracks,
+                        "beets": {"returncode": 0, "message": "operation already completed"},
+                    })
+                    return
+
+                operation_state = {
+                    **operation_state,
+                    "operation_id": operation_id,
+                    "playlist_key": playlist_key,
+                    "playlist_id": playlist_id,
+                    "storage_key": storage_key,
+                    "status": operation_state.get("status") or "in_progress",
+                    "updated_at": time.time(),
+                    "tracks": saved_tracks,
+                }
+
+                def _save_operation_state() -> None:
+                    operations[operation_id] = operation_state
+                    index_state["operations"] = operations
+                    _playlist_import_write_state(index_path, index_state)
+
+                _save_operation_state()
+                operation_dir.mkdir(parents=True, exist_ok=True)
+                if _path_has_symlink_component(operation_dir, operations_root):
+                    self._send_json(403, {"error": "Playlist import operation staging is not safe", "error_code": "import_staging_symlink"})
+                    return
+
+                valid_entries = []
+                track_results = []
+                seen_sources = set()
+
+                for index, item in enumerate(tracks_payload, start=1):
+                    if not isinstance(item, dict):
+                        continue
+                    try:
+                        track_id = _bounded_text(item.get("track_id") or item.get("id") or f"tr_{index}", max_len=240)
+                        staged_path_str = _bounded_text(item.get("staged_path") or item.get("path") or "", max_len=1024)
+                        artist = _bounded_text(item.get("artist") or "", max_len=240)
+                        title = _bounded_text(item.get("title") or "", max_len=240)
+                        album = _bounded_text(item.get("album") or "", max_len=240)
+                        albumartist = _bounded_text(item.get("albumartist") or "", max_len=240)
+                        mb_trackid = _bounded_text(item.get("mb_trackid") or "", max_len=120)
+                    except ValueError:
+                        track_results.append({"track_id": "", "status": "invalid_track_id", "error": _safe_playlist_import_error("invalid_track_id")})
+                        continue
+                    if not _valid_playlist_import_track_id(track_id):
+                        track_results.append({"track_id": track_id[:80], "status": "invalid_track_id", "error": _safe_playlist_import_error("invalid_track_id")})
+                        continue
+
+                    saved_row = saved_tracks.get(track_id) if isinstance(saved_tracks.get(track_id), dict) else {}
+                    if saved_row.get("status") in {"imported", "already_imported"}:
+                        result_row = dict(saved_row)
+                        result_row["status"] = "already_imported"
+                        track_results.append(result_row)
+                        continue
+
+                    if not staged_path_str:
+                        track_results.append({"track_id": track_id, "status": "staged_track_missing", "error": _safe_playlist_import_error("staged_track_missing")})
+                        continue
+
+                    safe_source: Optional[Path] = None
+                    saved_import_path = str(saved_row.get("operation_path") or "").strip()
+                    if saved_import_path:
+                        try:
+                            candidate = resolve_safe_path(saved_import_path, ["staging"], require_exists=True, expected_type="file")
+                            candidate.relative_to(operation_dir.resolve(strict=False))
+                            safe_source = candidate
+                        except Exception:
+                            safe_source = None
+
+                    if safe_source is None:
+                        try:
+                            raw_source = Path(os.path.abspath(staged_path_str))
+                            raw_under_staging = os.path.commonpath([str(raw_source), str(staging_root)]) == str(staging_root)
+                            if raw_under_staging and _path_has_symlink_component(raw_source, staging_root):
+                                track_results.append({"track_id": track_id, "status": "staged_track_symlink", "error": _safe_playlist_import_error("staged_track_symlink")})
+                                continue
+                        except Exception:
+                            track_results.append({"track_id": track_id, "status": "invalid_path", "error": _safe_playlist_import_error("invalid_path")})
+                            continue
+                        try:
+                            safe_source = resolve_safe_path(staged_path_str, ["staging"], require_exists=True, expected_type="file")
+                        except UnsafePathError as exc:
+                            try:
+                                resolve_safe_path(staged_path_str, ["music"], require_exists=True, expected_type="file")
+                            except UnsafePathError:
+                                pass
+                            else:
+                                track_results.append({"track_id": track_id, "status": "cross_playlist_target", "error": _safe_playlist_import_error("cross_playlist_target")})
+                                continue
+                            msg = str(exc).lower()
+                            err_code = "staged_track_missing" if "does not exist" in msg else "staged_track_symlink" if "symlink" in msg else "invalid_path"
+                            track_results.append({"track_id": track_id, "status": err_code, "error": _safe_playlist_import_error(err_code)})
+                            continue
+
+                    if _path_is_within(str(safe_source), str(music_root)):
+                        track_results.append({"track_id": track_id, "status": "cross_playlist_target", "error": _safe_playlist_import_error("cross_playlist_target")})
+                        continue
+
+                    try:
+                        relative_parts = safe_source.relative_to(staging_root).parts
+                    except ValueError:
+                        track_results.append({"track_id": track_id, "status": "cross_playlist_target", "error": _safe_playlist_import_error("cross_playlist_target")})
+                        continue
+                    in_operation_dir = False
+                    try:
+                        safe_source.relative_to(operation_dir.resolve(strict=False))
+                        in_operation_dir = True
+                    except Exception:
+                        in_operation_dir = False
+                    if not in_operation_dir and (not relative_parts or relative_parts[0] != playlist_key):
+                        track_results.append({"track_id": track_id, "status": "cross_playlist_target", "error": _safe_playlist_import_error("cross_playlist_target")})
+                        continue
+                    if _path_has_symlink_component(safe_source, staging_root):
+                        track_results.append({"track_id": track_id, "status": "staged_track_symlink", "error": _safe_playlist_import_error("staged_track_symlink")})
+                        continue
+                    source_ext = {ext: ext for ext in _import_source_audio_extensions()}.get(safe_source.suffix.lower())
+                    if not source_ext:
+                        track_results.append({"track_id": track_id, "status": "staged_track_not_audio", "error": _safe_playlist_import_error("staged_track_not_audio")})
+                        continue
+
+                    source_key = str(safe_source).casefold()
+                    if source_key in seen_sources:
+                        continue
+                    seen_sources.add(source_key)
+
+                    identity_ok, identity_status, identity_evidence = _playlist_import_identity_ok(safe_source, {
+                        "artist": artist,
+                        "title": title,
+                        "mb_trackid": mb_trackid,
+                    })
+                    if not identity_ok:
+                        track_results.append({"track_id": track_id, "status": identity_status, "error": _safe_playlist_import_error(identity_status)})
+                        continue
+
+                    dest_file = safe_source
+                    if not in_operation_dir:
+                        dest_file = operation_dir / f"track-{index:04d}{source_ext}"
+                        suffix = 1
+                        while dest_file.exists() or dest_file.is_symlink():
+                            suffix += 1
+                            dest_file = operation_dir / f"track-{index:04d}-{suffix}{source_ext}"
+                        try:
+                            trusted_dest = resolve_safe_path(str(dest_file), ["staging"])
+                            trusted_dest.relative_to(operation_dir.resolve(strict=False))
+                            shutil.move(str(resolve_safe_path(str(safe_source), ["staging"], require_exists=True, expected_type="file")), str(trusted_dest))
+                            dest_file = trusted_dest
+                        except Exception:
+                            track_results.append({"track_id": track_id, "status": "import_failed", "error": _safe_playlist_import_error("import_failed")})
+                            continue
+
+                    tags_to_write = {}
+                    if artist:
+                        tags_to_write["artist"] = artist
+                        tags_to_write["albumartist"] = albumartist or artist
+                    if title:
+                        tags_to_write["title"] = title
+                        tags_to_write["album"] = album or title
+                    if mb_trackid:
+                        tags_to_write["mb_trackid"] = mb_trackid
+                    year_value = item.get("year", 0)
+                    try:
+                        year_int = int(year_value or 0)
+                    except Exception:
+                        year_int = 0
+                    if year_int > 0:
+                        tags_to_write["year"] = year_int
+
+                    if tags_to_write:
+                        try:
+                            from beets.mediafile import MediaFile
+                            mf = MediaFile(dest_file)
+                            for k, v in tags_to_write.items():
+                                if hasattr(mf, k) and k in _TAG_WRITE_FIELDS:
+                                    setattr(mf, k, v)
+                            mf.save()
+                        except Exception:
+                            track_results.append({"track_id": track_id, "status": "tag_write_failed", "error": _safe_playlist_import_error("tag_write_failed")})
+                            saved_tracks[track_id] = {
+                                "track_id": track_id,
+                                "status": "tag_write_failed",
+                                "operation_path": str(dest_file),
+                            }
+                            operation_state["tracks"] = saved_tracks
+                            operation_state["status"] = "partial"
+                            operation_state["updated_at"] = time.time()
+                            _save_operation_state()
+                            continue
+
+                    entry = {
+                        "track_id": track_id,
+                        "staged_path": str(dest_file),
+                        "operation_path": str(dest_file),
+                        "artist": artist,
+                        "title": title,
+                        "mb_trackid": mb_trackid,
+                        "identity_status": identity_status,
+                        "identity_evidence": identity_evidence,
+                    }
+                    saved_tracks[track_id] = {**entry, "status": "moved_to_import_staging"}
+                    operation_state["tracks"] = saved_tracks
+                    operation_state["status"] = "moved_to_import_staging"
+                    operation_state["updated_at"] = time.time()
+                    _save_operation_state()
+                    valid_entries.append(entry)
+
+                if not valid_entries:
+                    completed = [dict(row) for row in saved_tracks.values() if isinstance(row, dict) and row.get("status") in {"imported", "already_imported"}]
+                    if completed and len(completed) == len(saved_tracks):
+                        status = "already_completed"
+                        ok = True
+                    else:
+                        status = "review_required" if track_results else "staged_track_missing"
+                        ok = False
+                    self._send_json(200, {
+                        "ok": ok,
+                        "status": status,
+                        "operation_id": operation_id,
+                        "playlist_key": playlist_key,
+                        "playlist_id": playlist_id,
+                        "imported_count": 0,
+                        "tracks": track_results or completed,
+                        "beets": {"returncode": 0 if ok else 1, "message": "No valid files to import"},
+                    })
+                    return
+
+                cmd = [
+                    BEET_BIN,
+                    "import", "-q", "--singletons", "--noincremental", "--move", "--quiet-fallback", "asis",
+                    str(operation_dir),
+                ]
+
+                env = os.environ.copy()
+                env["BEETSDIR"] = BEETSDIR
+                proc_timeout = min(
+                    PLAYLIST_IMPORT_MAX_TIMEOUT_SECONDS,
+                    max(60, len(valid_entries) * PLAYLIST_IMPORT_PER_TRACK_TIMEOUT_SECONDS),
+                )
+
+                try:
+                    res = subprocess.run(
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=proc_timeout,
+                        env=env,
+                    )
+                except subprocess.TimeoutExpired:
+                    operation_state["status"] = "failed"
+                    operation_state["error_code"] = "import_timeout"
+                    operation_state["updated_at"] = time.time()
+                    _save_operation_state()
+                    self._send_json(504, {"ok": False, "status": "failed", "error_code": "import_timeout", "message": "Beets import timed out."})
+                    return
+                except Exception:
+                    operation_state["status"] = "failed"
+                    operation_state["error_code"] = "import_failed"
+                    operation_state["updated_at"] = time.time()
+                    _save_operation_state()
+                    self._send_json(500, {"ok": False, "status": "failed", "error_code": "import_failed", "message": _safe_playlist_import_error("import_failed")})
+                    return
+
+                imported_count = 0
+                verified_count = 0
+                for entry in valid_entries:
+                    track_id = entry["track_id"]
+                    if res.returncode < 2:
+                        if _verify_imported_track_in_library(entry):
+                            entry["status"] = "imported"
+                            verified_count += 1
+                            imported_count += 1
+                        else:
+                            entry["status"] = "imported_unverified"
+                            entry["error"] = "Imported track could not be verified in the Beets library by MusicBrainz recording ID."
+                    else:
+                        entry["status"] = "failed"
+                        entry["error"] = _safe_playlist_import_error("import_failed")
+                    saved_tracks[track_id] = dict(entry)
+                    track_results.append(entry)
+
+                if res.returncode < 2 and verified_count == len(valid_entries):
+                    top_status = "completed"
+                    ok = True
+                    operation_state["status"] = "completed"
+                elif res.returncode < 2:
+                    top_status = "review_required"
+                    ok = False
+                    operation_state["status"] = "partial"
+                else:
+                    top_status = "failed"
+                    ok = False
+                    operation_state["status"] = "failed"
+
+                operation_state["tracks"] = saved_tracks
+                operation_state["imported_count"] = imported_count
+                operation_state["beets_returncode"] = int(res.returncode)
+                operation_state["updated_at"] = time.time()
+                _save_operation_state()
+
+                self._send_json(200, {
+                    "ok": ok,
+                    "status": top_status,
+                    "operation_id": operation_id,
+                    "playlist_key": playlist_key,
+                    "playlist_id": playlist_id,
+                    "imported_count": imported_count,
+                    "tracks": track_results,
+                    "beets": {
+                        "returncode": res.returncode,
+                        "message": "Beets import completed." if res.returncode < 2 else "Beets import failed.",
+                    },
+                })
+            finally:
+                try:
+                    if tmp_cfg_path and os.path.exists(tmp_cfg_path):
+                        os.remove(tmp_cfg_path)
+                except Exception:
+                    pass
+                release_os_lock(lock_file)
+            return
         if path == "/playlists/export_m3u":
             playlist_key = str(body.get("playlist_key") or "").strip()
             display_name = str(body.get("display_name") or "").strip()

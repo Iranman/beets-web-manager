@@ -70,49 +70,32 @@ class ReconcileFunctionDefinitionTests(unittest.TestCase):
             self._fn,
         )
 
-    def test_reads_manifest_track_states(self):
-        self.assertIn("_playlist_manifest_track_states(clean_name)", self._fn)
+    def test_reads_manifest_track_states_for_specific_playlist_id(self):
+        self.assertIn("_playlist_manifest_track_states(clean_name, playlist_id=playlist_id or None)", self._fn)
 
     def test_resets_stale_staged_paths_to_pending(self):
         self.assertIn('"pending"', self._fn)
         self.assertIn('staged_path=""', self._fn)
         self.assertIn("staged file missing on resume", self._fn)
+        self.assertIn('failure_reason="stale_or_missing"', self._fn)
 
-    def test_scans_dl_dir_with_audio_files_helper(self):
-        self.assertIn("_audio_files_in_dir(str(dl_dir))", self._fn)
+    def test_resume_uses_engine_staging_inspection_not_local_scan(self):
+        self.assertIn("_is_safe_playlist_staged_file(", self._fn)
+        self.assertIn("playlist_id=playlist_id", self._fn)
+        self.assertIn("track_id=key", self._fn)
+        self.assertNotIn("_audio_files_in_dir(str(dl_dir))", self._fn)
+        self.assertNotIn("Path(path_str).resolve", self._fn)
+        self.assertNotIn("is_file()", self._fn)
 
-    def test_fingerprint_verified_match_waits_for_import(self):
-        self.assertIn('"waiting_import"', self._fn)
-        self.assertIn('identity.get("final_action") == "accept"', self._fn)
-        self.assertIn("_playlist_identity_status_fields(best_match)", self._fn)
+    def test_engine_unavailable_leaves_checkpoint_unchanged(self):
+        self.assertIn("except PlaylistStagingUnavailableError", self._fn)
+        self.assertIn("leaving checkpoint state unchanged", self._fn)
+        self.assertIn("return stale", self._fn)
 
-    def test_low_confidence_match_becomes_review_required(self):
-        self.assertIn('"review_required"', self._fn)
-        self.assertIn("score >= 0.50", self._fn)
-        self.assertIn('failure_reason=reason if new_status == "review_required" else ""', self._fn)
-
-    def test_match_uses_shared_acoustid_identity_decision(self):
-        self.assertIn("_playlist_score_download_candidates(", self._fn)
-        self.assertIn("_audio_identity_decision(", self._fn)
-        self.assertIn("_acoustid_lookup_cached(audio_path)", self._fn)
-
-    def test_tag_candidates_extracted_once_per_file_not_per_track(self):
-        # Regression: this loop used to call _playlist_download_match(audio_path, ...)
-        # inside the `for trk in pending_tracks` loop, which re-opened and re-parsed
-        # the SAME audio file's tags once per pending track (O(files * tracks) disk
-        # I/O on every resume). Candidates must now be extracted once per audio_path,
-        # outside the inner track loop, and reused for scoring against every track.
-        outer_pos = self._fn.index("for audio_path in unmatched:")
-        candidates_pos = self._fn.index(
-            "candidates = _playlist_download_text_candidates(audio_path)"
-        )
-        inner_pos = self._fn.index("for trk in pending_tracks:")
-        self.assertLess(outer_pos, candidates_pos)
-        self.assertLess(candidates_pos, inner_pos)
-        # The inner loop must not re-open the file per track.
-        inner_block = self._fn[inner_pos:self._fn.index("if best_trk is None:")]
-        self.assertNotIn("_playlist_download_text_candidates(", inner_block)
-        self.assertIn("_playlist_score_download_candidates(\n                candidates,", inner_block)
+    def test_resume_no_longer_reopens_audio_per_track(self):
+        self.assertNotIn("for audio_path in unmatched:", self._fn)
+        self.assertNotIn("_playlist_download_text_candidates(audio_path)", self._fn)
+        self.assertNotIn("_acoustid_lookup_cached(audio_path)", self._fn)
 
 
 class SetTrackStatusExtraKwargsTests(unittest.TestCase):
@@ -142,10 +125,11 @@ class DownloadAttemptTrackingTests(unittest.TestCase):
         method_loop_pos = self._fn.index("for method in methods:")
         self.assertLess(attempt_pos, method_loop_pos)
 
-    def test_staged_reuse_check_happens_before_pending_write(self):
-        persisted_pos = self._fn.index("persisted = _playlist_state_for_track")
-        queued_pos = self._fn.index('_playlist_set_track_status(state, trk, "queued"')
-        self.assertLess(persisted_pos, queued_pos)
+    def test_historical_staged_paths_are_not_locally_reused(self):
+        self.assertIn("Historical staged paths are untrusted metadata", self._fn)
+        self.assertNotIn("persisted_path.exists()", self._fn)
+        self.assertNotIn("persisted_path.is_file()", self._fn)
+        self.assertNotIn("_path_is_under(persisted_path, PLAYLIST_DOWNLOAD_ROOT", self._fn)
 
     def test_attempt_count_passed_to_searching_status(self):
         searching_block = self._fn[
@@ -228,7 +212,8 @@ class ResumePhaseInRunTests(unittest.TestCase):
         self._fn = _run_fn_source(_app_source())
 
     def test_reconcile_called_when_resumed(self):
-        self.assertIn("_playlist_reconcile_staged_files(name, dl_dir, active_tracks, _log)", self._fn)
+        self.assertIn("_playlist_reconcile_staged_files(", self._fn)
+        self.assertIn("active_tracks, _log, playlist_id=playlist_id", self._fn)
 
     def test_reconcile_only_when_resumed(self):
         reconcile_pos = self._fn.index("_playlist_reconcile_staged_files(")
@@ -243,7 +228,7 @@ class ResumePhaseInRunTests(unittest.TestCase):
     def test_pre_import_accepts_waiting_import_status(self):
         self.assertIn('state["waiting_for_import"] = _playlist_waiting_import_count_from_state(state)', self._fn)
         self.assertIn('_playlist_run_import_downloaded(', self._fn)
-        self.assertIn('name, state["log"], cancel_event=cancel_event', self._fn)
+        self.assertIn('name, state["log"], cancel_event=cancel_event, playlist_id=playlist_id', self._fn)
 
     def test_waiting_for_import_cleared_after_import(self):
         self.assertIn('state["waiting_for_import"] = 0', self._fn)

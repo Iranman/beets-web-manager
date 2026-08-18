@@ -390,7 +390,8 @@ class PlaylistPipelineTests(unittest.TestCase):
 
     def test_download_and_import_are_idempotent_at_their_boundaries(self):
         self.assertIn("Checking requested missing playlist tracks against Beets before download", APP_SOURCE)
-        self.assertIn("persisted.get(\"staged_path\")", APP_SOURCE)
+        self.assertIn("Historical staged paths are untrusted metadata", APP_SOURCE)
+        self.assertNotIn("persisted.get(\"staged_path\")", APP_SOURCE)
         self.assertIn("Resume: found", APP_SOURCE)
         self.assertIn('"waiting_import"', APP_SOURCE)
         self.assertIn("_playlist_staged_entries", APP_SOURCE)

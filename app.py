@@ -41863,9 +41863,12 @@ class PlaylistStateError(RuntimeError):
 _PLAYLIST_STATE_ERROR_MESSAGES = {
     "playlist_state_unavailable": "Playlist state storage is currently unavailable.",
     "playlist_state_corrupt": "Playlist identity state is corrupt; manual review is required.",
+    "checkpoint_corrupt": "Playlist checkpoint state is corrupt; manual review is required.",
     "manifest_corrupt": "Playlist manifest is corrupt; manual review is required.",
     "ambiguous_playlist": "Multiple playlists share this display name; specify playlist_id.",
     "invalid_playlist_id": "The supplied playlist_id is invalid.",
+    "invalid_job_id": "The supplied playlist job id is invalid.",
+    "playlist_identity_unresolved": "A persisted playlist_id is required for this operation.",
     "migration_conflict": "This playlist identity conflicts with existing state.",
 }
 
@@ -41888,9 +41891,10 @@ def _playlist_state_error_status(exc: "PlaylistStateError") -> int:
         return 409
     if exc.code == "migration_conflict":
         return 409
-    if exc.code == "invalid_playlist_id":
+    if exc.code in ("invalid_playlist_id", "invalid_job_id"):
         return 404
-    if exc.code in ("playlist_state_corrupt", "manifest_corrupt"):
+    if exc.code in ("playlist_state_corrupt", "manifest_corrupt", "checkpoint_corrupt",
+                    "playlist_identity_unresolved"):
         return 409
     return 500
 
@@ -42199,20 +42203,24 @@ def get_playlist_staging_root(playlist: Any) -> Path:
     return PLAYLIST_DOWNLOAD_ROOT / key
 
 
-def _playlist_staging_dir(name: str) -> Path:
-    return get_playlist_staging_root(name)
+def _playlist_staging_root_arg(name: str, playlist_id: Optional[str] = None) -> Any:
+    return {"name": name, "playlist_id": playlist_id} if playlist_id else name
 
 
-def _playlist_downloads_dir(name: str) -> Path:
-    return get_playlist_staging_root(name) / "downloads"
+def _playlist_staging_dir(name: str, playlist_id: Optional[str] = None) -> Path:
+    return get_playlist_staging_root(_playlist_staging_root_arg(name, playlist_id))
 
 
-def _playlist_imports_dir(name: str) -> Path:
-    return get_playlist_staging_root(name) / "imports"
+def _playlist_downloads_dir(name: str, playlist_id: Optional[str] = None) -> Path:
+    return get_playlist_staging_root(_playlist_staging_root_arg(name, playlist_id)) / "downloads"
 
 
-def _playlist_staging_manifest_path(name: str) -> Path:
-    return get_playlist_staging_root(name) / "manifest.json"
+def _playlist_imports_dir(name: str, playlist_id: Optional[str] = None) -> Path:
+    return get_playlist_staging_root(_playlist_staging_root_arg(name, playlist_id)) / "imports"
+
+
+def _playlist_staging_manifest_path(name: str, playlist_id: Optional[str] = None) -> Path:
+    return get_playlist_staging_root(_playlist_staging_root_arg(name, playlist_id)) / "manifest.json"
 
 
 class PlaylistStagingUnavailableError(RuntimeError):
@@ -42232,7 +42240,7 @@ def _playlist_ensure_staging_dirs(name: str, playlist_id: Optional[str] = None) 
     clean_name = _clean_playlist_name(name)
     get_key = globals().get("_playlist_key")
     key = get_key(name, {"playlist_id": playlist_id} if playlist_id else None) if get_key else clean_name
-    root = get_playlist_staging_root(name)
+    root = get_playlist_staging_root(_playlist_staging_root_arg(name, playlist_id))
     staging_base = PLAYLIST_DOWNLOAD_ROOT.resolve(strict=False)
     resolved_root = root.resolve(strict=False)
     try:
@@ -43332,31 +43340,42 @@ def _plex_delete_playlist_by_rating_key(rating_key: str, log=None) -> int:
     return 1
 
 
-def _plex_delete_playlist_by_title(title, log=None):
-    """Delete existing Plex audio playlists with this title so sync replaces them.
-
-    Legacy/fallback authority only -- deletes every Plex playlist matching
-    the title, with no way to distinguish which app playlist "owns" it.
-    Callers must not use this when a stable ratingKey is available (use
-    _plex_delete_playlist_by_rating_key instead) or when another live app
-    playlist shares this same display name (SEC-002 Wave 10 second final
-    review: same-name app playlists must not let one delete another's
-    Plex playlist)."""
-    deleted = 0
-    d = _plex_request("/playlists", {"playlistType": "audio"}, timeout=10)
-    for pl in d.get("MediaContainer", {}).get("Metadata", []):
+def _plex_playlist_candidates_by_title(title: str) -> List[Tuple[Dict[str, Any], str]]:
+    candidates = []
+    for pl in _plex_audio_playlists():
         if _norm(pl.get("title", "")) != _norm(title):
             continue
         if str(pl.get("smart", "0")).strip().lower() in {"1", "true", "yes"}:
             continue
-        key = str(pl.get("ratingKey") or pl.get("key") or "").strip()
-        if not key:
-            continue
-        path = key.split("?", 1)[0] if key.startswith("/playlists/") else f"/playlists/{key}"
-        _plex_request(path, method="DELETE", timeout=10)
-        deleted += 1
-    if deleted and log is not None:
-        log.append(f"  [plex] Replaced {deleted} existing playlist(s) named {title!r}")
+        key = str(pl.get("ratingKey") or pl.get("key") or "").strip().strip("/").split("/")[-1]
+        if key:
+            candidates.append((pl, key))
+    return candidates
+
+
+def _plex_delete_playlist_by_title_unambiguous(title: str, log=None) -> Tuple[int, str]:
+    """Delete a Plex playlist by title only if exactly one candidate exists on Plex.
+    Returns (deleted_count, error_code). If >1 candidate exists, fails closed
+    with (0, 'ambiguous_plex_playlist') to prevent cross-targeting (SEC-002 Wave 11)."""
+    candidates = _plex_playlist_candidates_by_title(title)
+    if not candidates:
+        return 0, ""
+    if len(candidates) > 1:
+        if log is not None:
+            log.append(
+                f"  [plex] Refusing title-based delete for {title!r}: "
+                f"{len(candidates)} matching Plex playlists found (ambiguous_plex_playlist)"
+            )
+        return 0, "ambiguous_plex_playlist"
+
+    pl, key = candidates[0]
+    return _plex_delete_playlist_by_rating_key(key, log=log), ""
+
+
+def _plex_delete_playlist_by_title(title, log=None):
+    """Legacy/fallback authority only -- deletes a single matching Plex playlist by title
+    only if exactly one exists on Plex (SEC-002 Wave 11)."""
+    deleted, _ = _plex_delete_playlist_by_title_unambiguous(title, log=log)
     return deleted
 
 
@@ -43386,7 +43405,8 @@ def _plex_replace_playlist_safely(name: str,
     fresh sync, without risking another same-named app playlist's Plex
     playlist (SEC-002 Wave 10 second final review). Prefers a previously
     stored ratingKey; only falls back to legacy title-based replacement
-    when no other live app playlist shares this display name."""
+    when no other live app playlist shares this display name and exactly
+    one Plex playlist exists with this title (SEC-002 Wave 11)."""
     result = {"replaced": 0, "ambiguous": False}
     prior_rating_key = ""
     if isinstance(previous_manifest, dict):
@@ -43403,7 +43423,11 @@ def _plex_replace_playlist_safely(name: str,
                 f"{len(others)} other playlist(s) share this name and have no stored ratingKey"
             )
         return result
-    result["replaced"] = _plex_delete_playlist_by_title(name, log=log)
+    deleted, err = _plex_delete_playlist_by_title_unambiguous(name, log=log)
+    result["replaced"] = deleted
+    if err:
+        result["ambiguous"] = err == "ambiguous_plex_playlist"
+        result["error"] = err
     return result
 
 
@@ -44457,7 +44481,11 @@ def _create_playlist_outputs(name, items, *, log=None, replace_plex=True,
                         f"{pending_count} pending Plex match(es)."
                     )
                     try:
-                        verified_keys = _plex_playlist_rating_keys_by_title(name)
+                        target_rkey = _s(plex.get("rating_key") or prior_rating_key).strip()
+                        # Lookup uses rating_key or unambiguous fallback via _plex_playlist_rating_keys_by_title
+                        verified_keys, found_rkey, is_ambig, is_stale = _plex_playlist_rating_keys_by_key_or_title(rating_key=target_rkey, title=name)
+                        if found_rkey:
+                            plex["rating_key"] = found_rkey
                         verified_unique = {str(key) for key in verified_keys}
                         expected_unique = {str(key) for key in playlist_keys}
                         plex["verified_count"] = len(verified_unique)
@@ -44466,7 +44494,20 @@ def _create_playlist_outputs(name, items, *, log=None, replace_plex=True,
                         if log is not None:
                             log.append(f"  [plex] Created/updated Plex playlist: {name}")
                             log.append(f"  [plex] Verified Plex playlist count: {len(verified_unique)}")
-                        if missing_verified:
+                        if is_stale:
+                            # target_rkey was just-created above (new_rating_key) and
+                            # should always resolve; is_stale here means creation's
+                            # own returned key is already gone (race/API oddity) --
+                            # do not fall back to prior_rating_key/title, surface it.
+                            plex["complete"] = False
+                            plex["status"] = "review_required"
+                            plex["issue_reason"] = "stale_plex_identity"
+                            plex["action_needed"] = "Plex playlist identity could not be re-verified; re-sync to re-establish it"
+                        elif is_ambig:
+                            plex["complete"] = False
+                            plex["status"] = "review_required"
+                            plex["issue_reason"] = "ambiguous_plex_playlist"
+                        elif missing_verified:
                             plex["complete"] = False
                             plex["status"] = "partial_success"
                             plex["issue_reason"] = "playlist verification count was lower than matched tracks"
@@ -44506,7 +44547,18 @@ def _create_playlist_outputs(name, items, *, log=None, replace_plex=True,
 
     if sync_plex and _plex_settings().get("token") and (plex.get("error") or not plex.get("created")):
         try:
-            existing_keys = _plex_playlist_rating_keys_by_title(name)
+            target_rkey = _s(plex.get("rating_key") or prior_rating_key).strip()
+            existing_keys, found_rkey, is_ambig, is_stale = _plex_playlist_rating_keys_by_key_or_title(rating_key=target_rkey, title=name)
+            if found_rkey:
+                plex["rating_key"] = found_rkey
+            if is_stale:
+                # A previously-stored ratingKey no longer resolves in Plex.
+                # Do not silently rebind to whatever else currently shares
+                # this title -- report it and leave the stored identity
+                # alone (SEC-002 Wave 11 second final review).
+                plex["issue_reason"] = "stale_plex_identity"
+            elif is_ambig:
+                plex["issue_reason"] = "ambiguous_plex_playlist"
             plex["verified_count"] = len(existing_keys)
             plex["existing_playlist_count"] = len(existing_keys)
             if log is not None:
@@ -44809,11 +44861,50 @@ def _plex_playlist_rating_keys(pl: Dict[str, Any]) -> List[str]:
     return keys
 
 
-def _plex_playlist_rating_keys_by_title(title: str) -> List[str]:
+def _plex_playlist_by_rating_key(rating_key: str) -> Optional[Dict[str, Any]]:
+    key = _s(rating_key).strip()
+    if not key:
+        return None
     for pl in _plex_audio_playlists():
-        if _norm(pl.get("title", "")) == _norm(title):
-            return _plex_playlist_rating_keys(pl)
-    return []
+        pl_key = _s(pl.get("ratingKey") or pl.get("key") or "").strip().strip("/").split("/")[-1]
+        if pl_key == key:
+            return pl
+    return None
+
+
+def _plex_playlist_rating_keys_by_key_or_title(rating_key: str = "", title: str = "") -> Tuple[List[str], str, bool, bool]:
+    """Look up track ratingKeys for verification from a specific Plex ratingKey,
+    or unambiguously by title. Returns (track_keys, target_rating_key, is_ambiguous, is_stale).
+
+    A supplied rating_key that no longer resolves in Plex is STALE identity,
+    not "no identity yet" -- it must not silently fall through to a
+    same-title match, which could bind to a completely different logical
+    Plex playlist that merely happens to share a title (SEC-002 Wave 11
+    second final review: the exact vulnerability the title-fallback
+    previously reintroduced after Wave 10 fixed the same-name-delete case).
+    Title-based lookup is legacy discovery, used only when the caller has
+    no rating_key at all -- never as a fallback for one that failed to
+    resolve.
+    """
+    r_key = _s(rating_key).strip()
+    if r_key:
+        pl = _plex_playlist_by_rating_key(r_key)
+        if pl:
+            return _plex_playlist_rating_keys(pl), r_key, False, False
+        return [], "", False, True
+    if title:
+        candidates = _plex_playlist_candidates_by_title(title)
+        if len(candidates) > 1:
+            return [], "", True, False
+        if len(candidates) == 1:
+            pl, found_key = candidates[0]
+            return _plex_playlist_rating_keys(pl), found_key, False, False
+    return [], "", False, False
+
+
+def _plex_playlist_rating_keys_by_title(title: str) -> List[str]:
+    keys, _, _, _ = _plex_playlist_rating_keys_by_key_or_title(title=title)
+    return keys
 
 
 def _plex_track_file(track: Dict[str, Any]) -> str:
@@ -45414,12 +45505,24 @@ def _playlist_job_track_payload(track: Dict[str, Any]) -> Dict[str, str]:
 
 def _playlist_job_key_payload(name: str, source: str, content: str,
                               tracks: List[Dict[str, Any]],
-                              all_tracks: List[Dict[str, Any]]) -> Dict[str, Any]:
+                              all_tracks: List[Dict[str, Any]],
+                              playlist_id: str = "") -> Dict[str, Any]:
     source_text = _s(source or "").strip().lower()
     content_text = _s(content or "").strip()
     track_basis = all_tracks or tracks or []
+    clean_name = _clean_playlist_name(name)
+    explicit_pid = _s(playlist_id).strip()
+    pid = _playlist_resolve_stable_id(clean_name, playlist_id=explicit_pid or None)
+    if not _playlist_valid_internal_id(pid):
+        raise PlaylistStateError(
+            "playlist_identity_unresolved",
+            "Persistent playlist_id is required for playlist checkpoint state.",
+        )
+    playlist_key = _playlist_key(clean_name, playlist_id=pid, allocate=False)
     return {
-        "name": _clean_playlist_name(name),
+        "name": clean_name,
+        "playlist_id": pid,
+        "playlist_key": playlist_key,
         "source": source_text,
         "content": content_text if content_text else "",
         "requested": [_playlist_job_track_payload(track) for track in (tracks or [])],
@@ -45432,30 +45535,110 @@ def _playlist_job_id_for_key(key_payload: Dict[str, Any]) -> str:
     return "pl-" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:20]
 
 
+_PLAYLIST_JOB_ID_RE = re.compile(r"^pl-[0-9a-f]{20}$")
+
+
+def _playlist_valid_job_id(value: Any) -> bool:
+    return bool(_PLAYLIST_JOB_ID_RE.match(_s(value).strip()))
+
+
 def _playlist_job_state_path(jid: str) -> Path:
-    safe = re.sub(r"[^a-zA-Z0-9_.-]+", "_", _s(jid))[:80] or "playlist-job"
+    safe = _s(jid).strip()
+    if not _playlist_valid_job_id(safe):
+        raise PlaylistStateError("invalid_job_id", "Invalid playlist job id.")
     return PLAYLIST_JOB_STATE_DIR / f"{safe}.json"
 
 
-def _playlist_load_job_state(jid: str) -> Dict[str, Any]:
-    path = _playlist_job_state_path(jid)
+def _playlist_job_state_safe_read_text(path: Path) -> str:
+    """Read a checkpoint file's text, refusing to follow a symlink leaf.
+
+    glob("pl-*.json") can return a symlink, and plain Path.read_text()
+    follows it -- a surprising/malicious state symlink must not cause
+    reading an arbitrary file outside the job-state root (SEC-002 Wave 11
+    second final review; the write/delete paths already refuse symlinks,
+    this closes the same gap on the read side).
+    """
+    if path.is_symlink():
+        raise ValueError("checkpoint path is a symlink")
+    return path.read_text(encoding="utf-8")
+
+
+def _playlist_load_job_state(jid: str, *, strict: bool = False) -> Dict[str, Any]:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except Exception:
+        path = _playlist_job_state_path(jid)
+        data = json.loads(_playlist_job_state_safe_read_text(path))
+        if isinstance(data, dict):
+            return data
+        raise ValueError("checkpoint root is not an object")
+    except PlaylistStateError:
+        if strict:
+            raise
         return {}
+    except Exception as exc:
+        if strict:
+            raise PlaylistStateError(
+                "checkpoint_corrupt",
+                "Playlist checkpoint is corrupt; manual review is required.",
+            ) from exc
+        return {}
+
+
+def _playlist_sanitize_job_state_for_persistence(state: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(state, dict):
+        return {}
+    cleaned = copy.deepcopy(state)
+    sensitive_keys = {
+        "token", "api_key", "apikey", "api-key", "password", "secret",
+        "authorization", "cookie", "set-cookie", "plex_token",
+        "lidarr_api_key", "slskd_api_key", "control_agent_token",
+        "signed_url", "signed-url",
+    }
+
+    def _redact_string(value: str) -> str:
+        lowered = value.lower()
+        secret_markers = (
+            "token=", "access_token=", "bearer ", "authorization:",
+            "api_key=", "apikey=", "api-key=", "secret=", "password=",
+            "cookie:", "set-cookie:", "x-amz-signature=", "signature=",
+            "sig=",
+        )
+        return _redact_security_text(value) if any(marker in lowered for marker in secret_markers) else value
+
+    def _redact_dict(d: dict):
+        for k, v in list(d.items()):
+            if any(s in str(k).lower() for s in sensitive_keys):
+                d[k] = "[REDACTED]"
+            elif isinstance(v, dict):
+                _redact_dict(v)
+            elif isinstance(v, list):
+                _redact_list(v)
+            elif isinstance(v, str):
+                d[k] = _redact_string(v)
+
+    def _redact_list(l: list):
+        for idx, item in enumerate(l):
+            if isinstance(item, dict):
+                _redact_dict(item)
+            elif isinstance(item, list):
+                _redact_list(item)
+            elif isinstance(item, str):
+                l[idx] = _redact_string(item)
+
+    _redact_dict(cleaned)
+    return cleaned
 
 
 def _playlist_save_job_state(state: Dict[str, Any]) -> None:
     jid = _s(state.get("job_id") or "")
     if not jid:
         return
+    sanitized_state = _playlist_sanitize_job_state_for_persistence(state)
     try:
         PLAYLIST_JOB_STATE_DIR.mkdir(parents=True, exist_ok=True)
         path = _playlist_job_state_path(jid)
         _playlist_atomic_json_replace(
             path,
-            state,
+            sanitized_state,
             save_key=jid,
             label="playlist checkpoint",
             indent=None,
@@ -45467,6 +45650,37 @@ def _playlist_save_job_state(state: Dict[str, Any]) -> None:
             message = f"Checkpoint save failed; previous checkpoint left intact: {exc}"
             if message not in log[-5:]:
                 log.append(message)
+
+
+def _playlist_job_state_path_for_delete(jid: str) -> Path:
+    path = _playlist_job_state_path(jid)
+    root = PLAYLIST_JOB_STATE_DIR
+    if root.exists() and root.is_symlink():
+        raise PlaylistStateError("playlist_state_unavailable", "Playlist job-state directory is unsafe.")
+    resolved_root = root.resolve(strict=False)
+    resolved_parent = path.parent.resolve(strict=False)
+    try:
+        resolved_parent.relative_to(resolved_root)
+    except ValueError as exc:
+        raise PlaylistStateError("invalid_job_id", "Invalid playlist job id.") from exc
+    if path.is_symlink():
+        return path
+    resolved_path = path.resolve(strict=False)
+    try:
+        resolved_path.relative_to(resolved_root)
+    except ValueError as exc:
+        raise PlaylistStateError("invalid_job_id", "Invalid playlist job id.") from exc
+    return path
+
+
+def _playlist_delete_job_state(jid: str) -> bool:
+    path = _playlist_job_state_path_for_delete(jid)
+    if not path.exists() and not path.is_symlink():
+        return False
+    if path.is_dir() and not path.is_symlink():
+        raise PlaylistStateError("invalid_job_id", "Invalid playlist job id.")
+    path.unlink()
+    return True
 
 
 def _playlist_interrupted_saved_job_state(jid: str, saved: Dict[str, Any]) -> Dict[str, Any]:
@@ -45518,22 +45732,84 @@ def _playlist_job_state_name(state: Dict[str, Any]) -> str:
 
 def _playlist_saved_job_states_for_name(name: str,
                                         *,
-                                        mark_interrupted: bool = False) -> List[Dict[str, Any]]:
+                                        playlist_id: str = "",
+                                        mark_interrupted: bool = False,
+                                        strict: bool = False) -> List[Dict[str, Any]]:
     if not PLAYLIST_JOB_STATE_DIR.exists():
         return []
-    target = _norm(name)
+    clean_name = _clean_playlist_name(name) if name else ""
+    target_pid = _s(playlist_id).strip()
+    if target_pid and not _playlist_valid_internal_id(target_pid):
+        if strict:
+            raise PlaylistStateError("invalid_playlist_id", "Invalid playlist_id.")
+        target_pid = ""
+    if not target_pid and clean_name:
+        try:
+            target_pid = _playlist_resolve_stable_id(clean_name)
+        except PlaylistStateError:
+            if strict:
+                raise
+            target_pid = ""
+
+    target_norm = _norm(name) if name else ""
     rows: List[Dict[str, Any]] = []
+    # Ownership of an unparseable checkpoint is unknowable up front. It
+    # must not immediately fail-closed a resume/delete for a *different*
+    # playlist that has its own valid, attributable checkpoint elsewhere
+    # (SEC-002 Wave 11 second final review: cross-playlist checkpoint-
+    # corruption denial of service) -- but if the target ends up with no
+    # discoverable checkpoint of its own at all, an unattributed corrupt
+    # file might BE the one being looked for, so strict mode still raises
+    # in that case rather than silently reporting "nothing to resume".
+    # Nothing is deleted either way; a corrupt file just isn't listed.
+    had_unattributed_corruption = False
     for path in PLAYLIST_JOB_STATE_DIR.glob("pl-*.json"):
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(_playlist_job_state_safe_read_text(path))
             if not isinstance(data, dict):
-                continue
+                raise ValueError("checkpoint root is not an object")
         except Exception:
+            had_unattributed_corruption = True
             continue
+
+        job_key = data.get("job_key") if isinstance(data.get("job_key"), dict) else {}
+        ckpt_pid = _s(data.get("playlist_id") or job_key.get("playlist_id") or "").strip()
         job_name = _playlist_job_state_name(data)
-        if target and _norm(job_name) != target:
+
+        # Ownership match against the caller's target happens BEFORE any
+        # strict format validation below -- a checkpoint that isn't this
+        # playlist's own must be skipped regardless of what's wrong with
+        # it; strict is a promise about the *target* playlist's own
+        # checkpoint state, not about every unrelated file in the directory.
+        if target_pid:
+            owned_by_target = (
+                ckpt_pid == target_pid if ckpt_pid
+                else bool(target_norm) and _norm(job_name) == target_norm
+            )
+        elif target_norm:
+            owned_by_target = _norm(job_name) == target_norm
+        else:
+            owned_by_target = True  # no filter requested: every checkpoint is in scope
+
+        if not owned_by_target:
             continue
+
+        if ckpt_pid and not _playlist_valid_internal_id(ckpt_pid):
+            if strict:
+                raise PlaylistStateError(
+                    "checkpoint_corrupt",
+                    "Playlist checkpoint contains an invalid playlist_id.",
+                )
+            continue
+
         jid = _s(data.get("job_id") or path.stem)
+        if not _playlist_valid_job_id(jid):
+            if strict:
+                raise PlaylistStateError(
+                    "checkpoint_corrupt",
+                    "Playlist checkpoint contains an invalid job_id.",
+                )
+            continue
         data["job_id"] = jid
         try:
             data["_state_mtime"] = path.stat().st_mtime
@@ -45546,6 +45822,12 @@ def _playlist_saved_job_states_for_name(name: str,
         ):
             data = _playlist_interrupted_saved_job_state(jid, data)
         rows.append(data)
+
+    if strict and had_unattributed_corruption and not rows and (target_pid or target_norm):
+        raise PlaylistStateError(
+            "checkpoint_corrupt",
+            "Playlist checkpoint is corrupt; manual review is required.",
+        )
     return rows
 
 
@@ -46099,25 +46381,73 @@ def _playlist_slskd_download_track(artist: str, title: str,
     return _playlist_copy_source_files(afiles, dl_dir, artist, title, log)
 
 
-def _playlist_reconcile_staged_files(name: str, dl_dir: Path,
-                                      tracks: List[Dict[str, Any]], log) -> int:
-    """On resume: verify staged_path entries still exist; match orphaned audio to missing tracks.
+def _playlist_inspect_staged_file(name: str,
+                                  track_id: str,
+                                  path_str: str,
+                                  *,
+                                  playlist_id: str = "") -> Dict[str, Any]:
+    clean_name = _clean_playlist_name(name)
+    staged_path = _s(path_str).strip()
+    if not staged_path or "\x00" in staged_path:
+        return {"ok": True, "exists": False, "authorized": False, "status": "invalid_path"}
+    pid = _playlist_resolve_stable_id(clean_name, playlist_id=playlist_id or None)
+    if not _playlist_valid_internal_id(pid):
+        return {"ok": True, "exists": False, "authorized": False, "status": "missing_playlist_id"}
+    playlist_key = _playlist_key(clean_name, playlist_id=pid, allocate=False)
+    return beets_client.inspect_playlist_staged_track(playlist_key, track_id, staged_path)
 
-    Returns the number of entries reconciled (stale resets + new file matches).
+
+def _is_safe_playlist_staged_file(path_str: str,
+                                  playlist_name: str,
+                                  *,
+                                  playlist_id: str = "",
+                                  track_id: str = "") -> bool:
+    try:
+        result = _playlist_inspect_staged_file(
+            playlist_name, track_id, path_str, playlist_id=playlist_id)
+    except BeetsUnavailableError:
+        raise PlaylistStagingUnavailableError(
+            "Engine is unavailable; cannot verify playlist staging"
+        )
+    except Exception:
+        return False
+    return bool(
+        isinstance(result, dict)
+        and result.get("ok")
+        and result.get("exists")
+        and result.get("authorized")
+    )
+
+
+def _playlist_reconcile_staged_files(name: str, dl_dir: Path,
+                                      tracks: List[Dict[str, Any]], log,
+                                      *,
+                                      playlist_id: str = "") -> int:
+    """On resume, ask the engine whether checkpointed staged files are still usable.
+
+    The web-manager container does not own the staging filesystem in the
+    supported two-service deployment, so this function must not inspect
+    PLAYLIST_DOWNLOAD_ROOT locally. A stored staged_path is historical metadata;
+    the engine re-validates containment, ownership, symlinks, existence, and
+    file type before the checkpoint is trusted.
     """
     clean_name = _clean_playlist_name(name)
-    manifest_states = _playlist_manifest_track_states(clean_name)
+    manifest_states = _playlist_manifest_track_states(clean_name, playlist_id=playlist_id or None)
 
-    # Step 1 – check existing staged-path entries: reset any whose file is gone
     stale = 0
     for key, row in list(manifest_states.items()):
         if not isinstance(row, dict):
             continue
         if _s(row.get("status") or "") not in {"downloaded", "waiting_import", "importing", "download_verified"}:
             continue
-        staged = Path(_s(row.get("staged_path") or row.get("path") or ""))
-        if staged.is_file():
-            continue
+        staged_str = _s(row.get("staged_path") or row.get("path") or "")
+        try:
+            if _is_safe_playlist_staged_file(
+                staged_str, clean_name, playlist_id=playlist_id, track_id=key):
+                continue
+        except PlaylistStagingUnavailableError:
+            log("  Reconcile: engine staging validation unavailable; leaving checkpoint state unchanged")
+            return stale
         trk: Dict[str, Any] = {
             "artist": _s(row.get("artist") or ""),
             "title": _s(row.get("title") or ""),
@@ -46125,106 +46455,13 @@ def _playlist_reconcile_staged_files(name: str, dl_dir: Path,
         _playlist_store_track_state(
             clean_name, trk, "pending",
             message="staged file missing on resume; will re-download",
-            staged_path="")
+            staged_path="",
+            failure_reason="stale_or_missing",
+            playlist_id=playlist_id or None)
         stale += 1
     if stale:
-        log(f"  Reconcile: {stale} staged file(s) missing — will re-download")
-
-    # Step 2 – scan dl_dir for audio files not yet matched to any track in the manifest
-    if not dl_dir.is_dir():
-        return stale
-
-    manifest_states = _playlist_manifest_track_states(clean_name)
-    matched_paths: set = {
-        str(Path(_s(row.get("staged_path") or row.get("path") or "")).resolve(strict=False)).casefold()
-        for row in manifest_states.values()
-        if isinstance(row, dict)
-        and _s(row.get("status") or "") in {"downloaded", "waiting_import", "importing", "download_verified"}
-        and _s(row.get("staged_path") or row.get("path") or "")
-    }
-
-    all_audio = sorted(_audio_files_in_dir(str(dl_dir)))
-    unmatched = [
-        f for f in all_audio
-        if str(Path(f).resolve(strict=False)).casefold() not in matched_paths
-    ]
-    if not unmatched:
-        return stale
-
-    pending_tracks = [
-        t for t in tracks
-        if _s((manifest_states.get(_playlist_status_id(t)) or {}).get("status") or "missing")
-        in {"pending", "missing", ""}
-    ]
-    found = 0
-    for audio_path in unmatched:
-        if not _playlist_download_audio_allowed(audio_path, log):
-            continue
-        # Extract tag/filename candidates once per file (opens the file on
-        # disk) instead of once per (file, track) pair — with many leftover
-        # files and many pending tracks the nested-loop version re-read the
-        # same file over and over, which is very slow on networked storage.
-        candidates = _playlist_download_text_candidates(audio_path)
-        acoustid_candidates: Optional[List[Dict[str, Any]]] = None
-        best_trk: Optional[Dict[str, Any]] = None
-        best_score = 0.0
-        best_match: Dict[str, Any] = {}
-        for trk in pending_tracks:
-            m = _playlist_score_download_candidates(
-                candidates,
-                _s(trk.get("artist") or ""),
-                _s(trk.get("title") or ""))
-            if acoustid_candidates is None:
-                try:
-                    acoustid_candidates = _acoustid_lookup_cached(audio_path)
-                except Exception:
-                    acoustid_candidates = []
-            identity = _audio_identity_decision(
-                audio_path,
-                expected_artist=_s(trk.get("artist") or ""),
-                expected_title=_s(trk.get("title") or ""),
-                expected_mb_trackid=_s(trk.get("mb_trackid") or ""),
-                text_match=m,
-                acoustid_candidates=acoustid_candidates,
-            )
-            m["identity"] = identity
-            m["identity_status"] = identity.get("identity_status", "review_required")
-            m["review_required"] = identity.get("final_action") == "review"
-            m["ok"] = identity.get("final_action") == "accept"
-            if identity.get("final_action") == "reject":
-                continue
-            score = (float(m.get("title_score") or 0) * 0.7
-                     + float(m.get("artist_score") or 0) * 0.3)
-            if identity.get("final_action") == "accept":
-                score = max(score, 1.0)
-            if (m.get("ok") or score >= 0.50) and score > best_score:
-                best_trk = trk
-                best_score = score
-                best_match = m
-        if best_trk is None:
-            continue
-        identity = best_match.get("identity") if isinstance(best_match.get("identity"), dict) else {}
-        new_status = "waiting_import" if identity.get("final_action") == "accept" else "review_required"
-        reason = (
-            f"reconciled fingerprint-verified staged file ({_playlist_identity_log(best_match)})"
-            if new_status == "waiting_import"
-            else _s(identity.get("decision_reason") or f"uncertain staged-file match needs review (confidence {best_score:.0%})")
-        )
-        _playlist_store_track_state(
-            clean_name, best_trk, new_status,
-            message=reason,
-            failure_reason=reason if new_status == "review_required" else "",
-            staged_path=audio_path,
-            **_playlist_identity_status_fields(best_match))
-        pending_tracks.remove(best_trk)
-        found += 1
-        log(
-            f"  Reconcile: matched {Path(audio_path).name} -> "
-            f"{_s(best_trk.get('title') or '?')} ({_playlist_identity_log(best_match)}, {new_status})")
-    if found:
-        log(f"  Reconcile: {found} orphaned staged file(s) matched to playlist tracks")
-    return stale + found
-
+        log(f"  Reconcile: {stale} staged file(s) missing on resume — will re-download")
+    return stale
 
 def _playlist_download_missing_tracks(
     tracks: List[Dict[str, Any]],
@@ -46257,38 +46494,10 @@ def _playlist_download_missing_tracks(
 
         reused_files: List[str] = []
         reused_match: Dict[str, Any] = {}
-        staged_review_required = False
-        playlist_name = _s(state.get("playlist_name") or (state.get("job_key") or {}).get("name") or "")
-        persisted = _playlist_state_for_track(playlist_name, trk) if playlist_name else {}
-        persisted_path = Path(_s(persisted.get("staged_path") or persisted.get("path") or "")).resolve(strict=False)
-        if (
-            persisted_path.exists()
-            and persisted_path.is_file()
-            and _path_is_under(persisted_path, PLAYLIST_DOWNLOAD_ROOT.resolve(strict=False))
-            and not _path_is_under(persisted_path, MUSIC_ROOT.resolve(strict=False))
-        ):
-            match = _playlist_download_match(str(persisted_path), artist, title, _s(trk.get("mb_trackid") or ""))
-            if match.get("ok") and _playlist_download_audio_allowed(str(persisted_path), log):
-                reused_match = match
-                if _path_is_under(persisted_path, dl_dir.resolve(strict=False)):
-                    reused_files = [str(persisted_path)]
-                else:
-                    dl_dir.mkdir(parents=True, exist_ok=True)
-                    destination = dl_dir / persisted_path.name
-                    if destination.exists():
-                        destination = dl_dir / f"{persisted_path.stem}-{uuid.uuid4().hex[:8]}{persisted_path.suffix}"
-                    shutil.move(str(persisted_path), str(destination))
-                    reused_files = [str(destination)]
-            elif match.get("review_required"):
-                staged_review_required = True
-                reason = _s((match.get("identity") or {}).get("decision_reason") or "downloaded audio needs review")
-                _playlist_set_track_status(
-                    state, trk, "review_required", method="resume",
-                    message=reason, path=str(persisted_path),
-                    **_playlist_identity_status_fields(match))
-                log(f"  review required for staged file ({_playlist_identity_log(match)}): {persisted_path.name}")
-        if staged_review_required:
-            continue
+        # Historical staged paths are untrusted metadata. Resume reconciliation
+        # asks the Beets engine whether checkpointed staging rows still belong
+        # to this playlist; this downloader only reuses files created inside the
+        # current operation staging directory.
         if not reused_files:
             reused_files = _playlist_reusable_download_files(trk, dl_dir, dl_dir, log)
         if reused_files:
@@ -46415,7 +46624,20 @@ def playlist_download():
     if not tracks and not sync_after_import and not parse_content and not download_only:
         return jsonify({"ok": False, "error": "No tracks to download"})
 
-    job_key = _playlist_job_key_payload(name, parse_source, parse_content, tracks, all_tracks)
+    requested_playlist_id = _s(payload.get("playlist_id") or "").strip()
+    try:
+        playlist_id = _playlist_resolve_stable_id(name, playlist_id=requested_playlist_id or None)
+        if not _playlist_valid_internal_id(playlist_id):
+            raise PlaylistStateError(
+                "playlist_identity_unresolved",
+                "Persistent playlist_id is required for playlist download checkpoints.",
+            )
+        playlist_key = _playlist_key(name, playlist_id=playlist_id, allocate=False)
+        job_key = _playlist_job_key_payload(
+            name, parse_source, parse_content, tracks, all_tracks, playlist_id=playlist_id)
+    except PlaylistStateError as exc:
+        app.logger.warning("Playlist download identity error: %s (%s)", exc.code, type(exc).__name__)
+        return jsonify(_playlist_state_error_payload(exc)), _playlist_state_error_status(exc)
     job_key["action"] = pipeline_action
     jid = _playlist_job_id_for_key(job_key)
     with _PL_DL_LOCK:
@@ -46444,15 +46666,19 @@ def playlist_download():
             "running_job_id": running_pipeline,
         }), 409
     try:
-        _playlist_ensure_staging_dirs(name)
+        _playlist_ensure_staging_dirs(name, playlist_id=playlist_id)
     except PlaylistStagingUnavailableError:
         return jsonify({
             "ok": False,
             "error": "staging_unavailable",
             "message": "Engine is unavailable; cannot stage playlist downloads right now",
         }), 503
-    dl_dir = _playlist_downloads_dir(name)
-    saved_state = _playlist_load_job_state(jid)
+    dl_dir = _playlist_downloads_dir(name, playlist_id=playlist_id)
+    try:
+        saved_state = _playlist_load_job_state(jid, strict=True) if _playlist_job_state_path(jid).exists() else {}
+    except PlaylistStateError as exc:
+        app.logger.warning("Playlist checkpoint load error: %s (%s)", exc.code, type(exc).__name__)
+        return jsonify(_playlist_state_error_payload(exc)), _playlist_state_error_status(exc)
     if not tracks:
         # No tracks provided in the request — try to recover the track list so the
         # pipeline can resume without requiring the caller to re-supply all tracks.
@@ -46467,7 +46693,7 @@ def playlist_download():
             _recover_tracks = _extract_tracks(saved_state)
         if not _recover_tracks:
             _prior = sorted(
-                _playlist_saved_job_states_for_name(name),
+                _playlist_saved_job_states_for_name(name, playlist_id=playlist_id, strict=True),
                 key=_playlist_job_state_stamp, reverse=True)
             for _ps in _prior:
                 _ps_tracks = _extract_tracks(_ps)
@@ -46495,7 +46721,8 @@ def playlist_download():
         "download_batch_remaining": 0,
         "download_methods": download_methods,
         "track_statuses": {}, "track_status_list": [],
-        "job_id": jid, "job_key": job_key, "created_at": time.time(),
+        "job_id": jid, "job_key": job_key, "playlist_id": playlist_id,
+        "playlist_key": playlist_key, "created_at": time.time(),
         "resumed": False, "playlist_name": name,
         "pipeline_action": pipeline_action,
         "waiting_for_import": 0,
@@ -46727,8 +46954,9 @@ def playlist_download():
                 state["phase"] = "reconcile"
                 state["current"] = "reconciling staged files"
                 _playlist_save_job_state(state)
-                _playlist_reconcile_staged_files(name, dl_dir, active_tracks, _log)
-                staged_entries = _playlist_staged_entries(name)
+                _playlist_reconcile_staged_files(
+                    name, dl_dir, active_tracks, _log, playlist_id=playlist_id)
+                staged_entries = _playlist_staged_entries(name, playlist_id=playlist_id)
                 active_keys = {_playlist_status_id(t) for t in active_tracks}
                 staged_entries = [
                     (t, p) for t, p in staged_entries
@@ -46753,7 +46981,7 @@ def playlist_download():
                         _playlist_record_pipeline(name, status=state["status"], action=pipeline_action)
                         return {"playlist_job_id": jid, "playlist": name, "status": state["status"]}
                     try:
-                        _playlist_run_import_downloaded(name, state["log"], cancel_event=cancel_event)
+                        _playlist_run_import_downloaded(name, state["log"], cancel_event=cancel_event, playlist_id=playlist_id)
                         state["waiting_for_import"] = 0
                         _log(f"Resume: pre-download import of {_n_staged} staged file(s) complete")
                         # Use manifest states to find newly-available tracks instead of
@@ -46920,10 +47148,10 @@ def playlist_download():
                 _playlist_save_job_state(state)
                 _log(
                     "Starting Beets singleton import from stable playlist staging "
-                    f"({_playlist_imports_dir(name)}) ..."
+                    f"({_playlist_imports_dir(name, playlist_id=playlist_id)}) ..."
                 )
                 import_summary = _playlist_run_import_downloaded(
-                    name, state["log"], cancel_event=cancel_event)
+                    name, state["log"], cancel_event=cancel_event, playlist_id=playlist_id)
                 state["waiting_for_import"] = 0
                 state["import_returncode"] = 0
                 placement_summary = import_summary.get("placement") or {}
@@ -49597,12 +49825,13 @@ def playlist_delete(name):
     except Exception as ex:
         app.logger.warning("Could not delete playlist manifest %r: %s", clean_name, type(ex).__name__)
 
-    job_file = PLAYLIST_JOB_STATE_DIR / f"{key}.json"
-    if job_file.exists():
-        try:
-            job_file.unlink()
-        except Exception:
-            pass
+    try:
+        for ckpt in _playlist_saved_job_states_for_name(clean_name, playlist_id=pid, strict=True):
+            ckpt_jid = _s(ckpt.get("job_id"))
+            if ckpt_jid:
+                _playlist_delete_job_state(ckpt_jid)
+    except PlaylistStateError as exc:
+        app.logger.warning("Could not delete playlist checkpoint for %r: %s", clean_name, exc.code)
 
     # The engine M3U delete above is this route's one hard-required step
     # (a failure already returned before this point); once past it, the
@@ -49630,7 +49859,9 @@ def playlist_delete(name):
                 if others:
                     plex_error = "Another playlist shares this name in Plex; delete it manually or sync first to establish a distinct Plex identity."
                 else:
-                    plex_deleted = _plex_delete_playlist_by_title(clean_name)
+                    plex_deleted, plex_err = _plex_delete_playlist_by_title_unambiguous(clean_name)
+                    if plex_err:
+                        plex_error = "Plex title fallback is ambiguous; delete it manually or sync first to establish a distinct Plex identity."
         except urllib.error.HTTPError as ex:
             plex_error = "Plex token is invalid or expired." if ex.code in (401, 403) else f"Plex returned HTTP {ex.code}."
         except Exception as ex:
@@ -50614,25 +50845,11 @@ def _playlist_run_reconcile_state(name: str, log: List[str]) -> Dict[str, Any]:
     clean_name = _clean_playlist_name(name)
     detail = _playlist_detail_payload(clean_name)
     missing_tracks = list(detail.get("missing") or [])
-    checkpoint_dirs: List[Path] = []
-    for state in _playlist_saved_job_states_for_name(clean_name, mark_interrupted=True):
-        dl_dir = _s(state.get("dl_dir") or "").strip()
-        if dl_dir:
-            checkpoint_dirs.append(Path(dl_dir))
-    if PLAYLIST_DOWNLOAD_ROOT.exists():
-        prefix = f"{clean_name} - "
-        for path in PLAYLIST_DOWNLOAD_ROOT.iterdir():
-            if path.is_dir() and path.name.startswith(prefix):
-                checkpoint_dirs.append(path)
-    reconciled = 0
-    seen_dirs = set()
-    for dl_dir in checkpoint_dirs:
-        dir_key = str(dl_dir.resolve(strict=False)).casefold()
-        if dir_key in seen_dirs:
-            continue
-        seen_dirs.add(dir_key)
-        reconciled += _playlist_reconcile_staged_files(clean_name, dl_dir, missing_tracks, log)
-    refreshed = _playlist_write_local_membership(clean_name, _playlist_read_manifest(clean_name))
+    manifest = _playlist_read_manifest(clean_name)
+    playlist_id = _s(manifest.get("playlist_id") or "").strip()
+    reconciled = _playlist_reconcile_staged_files(
+        clean_name, Path(), missing_tracks, log, playlist_id=playlist_id)
+    refreshed = _playlist_write_local_membership(clean_name, manifest)
     log.append(
         f"Reconcile state complete: {reconciled} staged/checkpoint update(s), "
         f"{refreshed.get('available', 0)} available, {refreshed.get('missing_count', 0)} missing"
@@ -50640,13 +50857,15 @@ def _playlist_run_reconcile_state(name: str, log: List[str]) -> Dict[str, Any]:
     return refreshed
 
 
-def _playlist_staged_entries(name: str) -> List[Tuple[Dict[str, Any], Path]]:
+def _playlist_staged_entries(name: str,
+                            *,
+                            playlist_id: str = "") -> List[Tuple[Dict[str, Any], Path]]:
     clean_name = _clean_playlist_name(name)
     detail = _playlist_detail_payload(clean_name)
     tracks = list(detail.get("missing") or []) + list(detail.get("tracks") or [])
     by_key = {_playlist_status_id(track): track for track in tracks}
-    rows: Dict[str, Dict[str, Any]] = dict(_playlist_manifest_track_states(clean_name))
-    for state in _playlist_saved_job_states_for_name(clean_name, mark_interrupted=True):
+    rows: Dict[str, Dict[str, Any]] = dict(_playlist_manifest_track_states(clean_name, playlist_id=playlist_id or None))
+    for state in _playlist_saved_job_states_for_name(clean_name, playlist_id=playlist_id, mark_interrupted=True):
         for key, row in (state.get("track_statuses") or {}).items():
             if isinstance(row, dict) and row.get("path"):
                 rows.setdefault(key, row)
@@ -50661,25 +50880,35 @@ def _playlist_staged_entries(name: str) -> List[Tuple[Dict[str, Any], Path]]:
         raw_path = _s(row.get("staged_path") or row.get("path") or "").strip()
         if not raw_path:
             continue
-        path = Path(raw_path).resolve(strict=False)
-        if not path.exists() or not path.is_file() or path.suffix.lower() not in AUDIO_EXT:
+        try:
+            inspected = _playlist_inspect_staged_file(
+                clean_name, key, raw_path, playlist_id=playlist_id)
+        except BeetsUnavailableError:
             continue
-        if _path_is_under(path, MUSIC_ROOT.resolve(strict=False)):
+        except Exception:
             continue
-        if not _path_is_under(path, PLAYLIST_DOWNLOAD_ROOT.resolve(strict=False)):
+        if not (
+            isinstance(inspected, dict)
+            and inspected.get("ok")
+            and inspected.get("exists")
+            and inspected.get("authorized")
+        ):
             continue
-        path_key = str(path).casefold()
+        path_key = raw_path.replace("\\", "/").casefold()
         if path_key in seen_paths:
             continue
         seen_paths.add(path_key)
         track = by_key.get(key) or {
             "artist": _s(row.get("artist") or ""),
             "title": _s(row.get("title") or ""),
+            "album": _s(row.get("album") or ""),
+            "albumartist": _s(row.get("albumartist") or ""),
+            "year": row.get("year") or 0,
+            "mb_trackid": _s(row.get("mb_trackid") or ""),
+            "id": key,
         }
-        if not _playlist_track_is_tombstoned(track, _playlist_read_manifest(clean_name)):
-            entries.append((track, path))
+        entries.append((track, Path(raw_path)))
     return entries
-
 
 def _enrich_playlist_file_tags(path: Path, track: Dict[str, Any], log: List[str]) -> None:
     """Write safe playlist singleton tags before beet import via control agent API."""
@@ -50721,109 +50950,119 @@ def _enrich_playlist_file_tags(path: Path, track: Dict[str, Any], log: List[str]
         log.append(f"  [tag] Error enriching playlist file tags: {exc}")
         log.append(f"  [tag] Warning: could not enrich tags on {path.name}: {exc}")
 
-
 def _playlist_run_import_downloaded(name: str,
                                     log: List[str],
-                                    cancel_event=None) -> Dict[str, Any]:
+                                    cancel_event=None,
+                                    playlist_id: str = "") -> Dict[str, Any]:
     clean_name = _clean_playlist_name(name)
-    entries = _playlist_staged_entries(clean_name)
+    pid = _playlist_resolve_stable_id(clean_name, playlist_id=playlist_id or None) or playlist_id
+    key = _playlist_key(clean_name, playlist_id=pid or None, allocate=False)
+
+    entries = _playlist_staged_entries(clean_name, playlist_id=pid)
     if not entries:
         raise RuntimeError("No downloaded playlist staging files are ready to import")
-    valid_entries: List[Tuple[Dict[str, Any], Path]] = []
+
+    tracks_payload = []
+    imported_tracks = []
+    operation_material = []
     for track, source_path in entries:
-        if not _playlist_download_audio_allowed(str(source_path), log):
-            _playlist_store_track_state(
-                clean_name, track, "failed",
-                message="downloaded audio does not match Music Format Preferences",
-                failure_reason="downloaded audio does not match Music Format Preferences",
-                staged_path="", path="")
-            continue
-        match = _playlist_download_match(
-            str(source_path),
-            _s(track.get("artist") or ""),
-            _s(track.get("title") or ""),
-            _s(track.get("mb_trackid") or ""),
-        )
-        if not match.get("ok"):
-            identity = match.get("identity") if isinstance(match.get("identity"), dict) else {}
-            reason = _s(identity.get("decision_reason") or "downloaded audio needs review before import")
-            _playlist_store_track_state(
-                clean_name, track, "review_required",
-                message=reason,
-                failure_reason=reason,
-                staged_path=str(source_path), path=str(source_path),
-                **_playlist_identity_status_fields(match))
-            log.append(f"  Review required: unable to verify staged audio ({_playlist_identity_log(match)}): {source_path.name}")
-            continue
-        valid_entries.append((track, source_path))
+        track_id = _playlist_status_id(track)
+        raw_source = str(source_path)
         _playlist_store_track_state(
             clean_name, track, "waiting_import",
-            message="fingerprint verified; waiting for Beets import",
-            staged_path=str(source_path), path=str(source_path),
-            **_playlist_identity_status_fields(match))
-    entries = valid_entries
-    if not entries:
-        raise RuntimeError("No downloaded playlist staging files are fingerprint-verified for import")
-    batch_dir = _playlist_imports_dir(clean_name)
-    batch_dir.mkdir(parents=True, exist_ok=True)
-    imported_tracks: List[Dict[str, Any]] = []
-    for index, (track, source_path) in enumerate(entries, start=1):
-        if cancel_event is not None and cancel_event.is_set():
-            raise RuntimeError("playlist import stopped by user")
-        destination = batch_dir / source_path.name
-        if destination.exists():
-            destination = batch_dir / f"{source_path.stem}-{index}{source_path.suffix}"
-        shutil.move(str(source_path), str(destination))
-        _enrich_playlist_file_tags(destination, track, log)
+            playlist_id=pid,
+            message="waiting for engine-side staged media verification and Beets import",
+            staged_path=raw_source, path=raw_source)
         imported_tracks.append(track)
-        import_match = _playlist_download_match(
-            str(destination),
-            _s(track.get("artist") or ""),
-            _s(track.get("title") or ""),
-            _s(track.get("mb_trackid") or ""),
-        )
-        _playlist_store_track_state(
-            clean_name, track, "importing",
-            message="importing fingerprint-verified staged download into Beets",
-            staged_path=str(destination), path=str(destination),
-            **_playlist_identity_status_fields(import_match))
+        operation_material.append(f"{track_id}:{raw_source}")
+        tracks_payload.append({
+            "track_id": track_id,
+            "staged_path": raw_source,
+            "artist": _s(track.get("artist") or ""),
+            "title": _s(track.get("title") or ""),
+            "album": _s(track.get("album") or track.get("title") or ""),
+            "albumartist": _s(track.get("artist") or ""),
+            "year": track.get("year") or 0,
+            "mb_trackid": _s(track.get("mb_trackid") or ""),
+        })
 
-    import_started_at = time.time()
-    cfg = _write_playlist_import_beets_config(
-        f"/tmp/beets-playlist-import-{uuid.uuid4().hex}.yaml")
-    command = [
-        BEET_BIN, "-c", cfg, "import", "-q", "--singletons",
-        "--noincremental", "--move", "--quiet-fallback", "asis", str(batch_dir),
-    ]
-    _validate_import_source_audio(str(batch_dir), log, reject_downloads=True)
-    log.append("Importing through Beets")
-    result = _beet_run(
-        command,
-        log,
-        timeout=max(1800, min(21600, len(entries) * 240)),
-        env=_beet_env(),
-        cancel=cancel_event,
-    )
-    if result.returncode == -9:
+    if not imported_tracks:
+        raise RuntimeError("No downloaded playlist staging files are ready for engine verification")
+
+    operation_digest = hashlib.sha256(
+        (f"{pid}|{key}|" + "|".join(sorted(operation_material))).encode("utf-8", "surrogatepass")
+    ).hexdigest()[:32]
+    operation_id = f"pl-import-{operation_digest}"
+    for track in imported_tracks:
+        _playlist_store_track_state(
+            clean_name, track, "waiting_import",
+            playlist_id=pid,
+            import_operation_id=operation_id)
+    if cancel_event is not None and cancel_event.is_set():
         raise RuntimeError("playlist import stopped by user")
-    combined = _ANSI_RE.sub("", ((result.stdout or "") + (result.stderr or "")).strip())
-    for line in combined.splitlines()[-120:]:
-        if line.strip():
-            log.append("  " + line)
-    _delete_if_already_in_library(str(batch_dir), combined, log)
-    if result.returncode >= 2:
+
+    log.append(f"Starting engine Beets singleton import for {len(imported_tracks)} track(s)...")
+    import_started_at = time.time()
+    try:
+        res = beets_client.import_playlist_staged(
+            key, pid, tracks_payload, operation_id=operation_id
+        )
+    except Exception as exc:
+        log.append(f"  [playlist] Engine import handoff failed: {exc}")
         for track in imported_tracks:
             _playlist_store_track_state(
                 clean_name, track, "failed",
-                message=f"Beets import failed with rc={result.returncode}",
-                failure_reason="import failed")
-        raise RuntimeError(f"beet import exited with rc={result.returncode}")
+                message=f"Engine import handoff failed: {exc}",
+                failure_reason="import_failed")
+        raise RuntimeError("engine_unavailable") from exc
 
+    if not (isinstance(res, dict) and res.get("ok")):
+        err_msg = res.get("error") or res.get("message") or "Engine playlist import failed"
+        log.append(f"  [playlist] Engine import failed: {err_msg}")
+        for track in imported_tracks:
+            _playlist_store_track_state(
+                clean_name, track, "failed",
+                message=f"Engine import failed: {err_msg}",
+                failure_reason="import_failed")
+        raise RuntimeError(res.get("error_code") or "import_failed")
+
+    beets_res = res.get("beets") if isinstance(res.get("beets"), dict) else {}
+    beets_message = _s(beets_res.get("message") or "")
+    if beets_message:
+        log.append("  " + beets_message)
+
+    engine_imported_tracks = []
+    track_results = res.get("tracks") if isinstance(res.get("tracks"), list) else []
+    for trk_res in track_results:
+        if not isinstance(trk_res, dict):
+            continue
+        tid = _s(trk_res.get("track_id"))
+        status = _s(trk_res.get("status"))
+        matched_trk = next((t for t in imported_tracks if _playlist_status_id(t) == tid), {"id": tid})
+        if status in {"imported", "already_imported"}:
+            engine_imported_tracks.append(matched_trk)
+            _playlist_store_track_state(
+                clean_name, matched_trk, "imported",
+                playlist_id=pid,
+                message="imported into Beets library by engine",
+                failure_reason="",
+                staged_path="")
+        elif status in {"cross_playlist_target", "staged_track_symlink", "staged_track_not_audio", "staged_track_missing"}:
+            _playlist_store_track_state(
+                clean_name, matched_trk, "failed",
+                playlist_id=pid,
+                message=_s(trk_res.get("error") or "engine import refused track"),
+                failure_reason=status)
+
+    placed_tracks = engine_imported_tracks or [
+        track for track in imported_tracks
+        if any(isinstance(row, dict) and _s(row.get("track_id")) == _playlist_status_id(track) and _s(row.get("status")) in {"imported", "already_imported"} for row in track_results)
+    ]
     _invalidate_lib_cache()
     placement = _playlist_place_recent_imports_for_tracks(
-        imported_tracks, import_started_at, log=log, cancel_event=cancel_event)
+        placed_tracks, import_started_at - 10, log=log, cancel_event=cancel_event)
     _invalidate_lib_cache()
-    time.sleep(1)
+
     detail = _playlist_detail_payload(clean_name)
     matched_by_key = {
         _playlist_status_id(track): track
@@ -50842,7 +51081,7 @@ def _playlist_run_import_downloaded(name: str,
         if row.get("playlist_track_id") and not row.get("repaired")
     }
     placement_failed = int(placement.get("failed") or 0) > 0
-    for track in imported_tracks:
+    for track in placed_tracks:
         track_key = _playlist_status_id(track)
         if track_key in matched_keys:
             if track_key in review_keys or (placement_failed and track_key not in placed_keys):
@@ -50903,10 +51142,14 @@ def _playlist_run_import_downloaded(name: str,
                 clean_name, track, "failed",
                 message="Beets import completed but the track was not found in the library",
                 failure_reason="import failed", staged_path="")
-    detail = _playlist_write_local_membership(clean_name, _playlist_read_manifest(clean_name))
+    final_detail = _playlist_write_local_membership(clean_name, _playlist_read_manifest(clean_name))
+    if "imported_count" in res:
+        imported_files = int(res.get("imported_count") or 0)
+    else:
+        imported_files = len(placed_tracks)
     return {
-        "playlist": detail,
-        "imported_files": len(entries),
+        "playlist": final_detail,
+        "imported_files": imported_files,
         "placement": placement,
     }
 
@@ -51017,7 +51260,7 @@ def _playlist_start_direct_action(name: str, action: str) -> Dict[str, Any]:
             elif action == "reconcile_state":
                 result = _playlist_run_reconcile_state(clean_name, log)
             elif action == "import_downloaded":
-                result = _playlist_run_import_downloaded(clean_name, log, cancel_event=cancel_event)
+                result = _playlist_run_import_downloaded(clean_name, log, cancel_event=cancel_event, playlist_id=_s(_playlist_read_manifest(clean_name).get("playlist_id") or ""))
             elif action == "sync_plex":
                 result = _playlist_run_plex_sync(clean_name, log)
             else:
@@ -51068,9 +51311,14 @@ def _playlist_start_download_action(name: str,
     missing = list(retry_tracks or detail.get("missing") or [])
     source = _s(manifest.get("source") or "").strip()
     content = _s(manifest.get("content") or "").strip()
+    playlist_id = _s(manifest.get("playlist_id") or detail.get("playlist_id") or "").strip()
+    if not _playlist_valid_internal_id(playlist_id):
+        playlist_id = _playlist_resolve_stable_id(clean_name)
+    if not _playlist_valid_internal_id(playlist_id):
+        raise PlaylistStateError("playlist_identity_unresolved", "Persistent playlist_id is required for playlist resume.")
     full = action in {"run_full", "resume"}
     if action == "resume":
-        saved_states = _playlist_saved_job_states_for_name(clean_name, mark_interrupted=True)
+        saved_states = _playlist_saved_job_states_for_name(clean_name, playlist_id=playlist_id, mark_interrupted=True, strict=True)
         if saved_states:
             latest = max(saved_states, key=_playlist_job_state_stamp)
             saved_key = latest.get("job_key") if isinstance(latest.get("job_key"), dict) else {}
@@ -51087,6 +51335,7 @@ def _playlist_start_download_action(name: str,
     )
     payload = {
         "name": clean_name,
+        "playlist_id": playlist_id,
         "tracks": missing,
         "all_tracks": all_tracks,
         "source": source if refresh_from_source else "",
@@ -51151,7 +51400,7 @@ def playlist_pipeline_action(name, action):
             playlist_job_id = _s(pipeline.get("playlist_job_id") or "")
             checkpoint_ids = {
                 _s(state.get("job_id") or "")
-                for state in _playlist_saved_job_states_for_name(clean_name)
+                for state in _playlist_saved_job_states_for_name(clean_name, playlist_id=_s(manifest.get("playlist_id") or ""), strict=True)
             }
             if playlist_job_id:
                 checkpoint_ids.add(playlist_job_id)
@@ -51160,9 +51409,7 @@ def playlist_pipeline_action(name, action):
             for checkpoint_id in checkpoint_ids:
                 if not checkpoint_id:
                     continue
-                checkpoint = _playlist_job_state_path(checkpoint_id)
-                if checkpoint.exists():
-                    checkpoint.unlink()
+                _playlist_delete_job_state(checkpoint_id)
                 _pl_dl_jobs.pop(checkpoint_id, None)
             return jsonify({"ok": True, "action": normalized})
     except Exception as ex:
