@@ -445,12 +445,12 @@ class MatchingDecision:
         rel_id = _s(self.identity.get("release_id") or self.identity.get("mb_albumid") or "")
         rec_id = _s(self.identity.get("recording_id") or self.identity.get("resolved_recording_id") or self.identity.get("mb_trackid") or "")
         art_id = _s(self.identity.get("artist_id") or self.identity.get("mb_albumartistid") or self.identity.get("mb_artistid") or "")
-        
+
         conflicts = list(self.decision.get("conflicts") or [])
         warnings = list(self.decision.get("warnings") or [])
         confidence = float(self.decision.get("confidence_score") or self.decision.get("confidence") or 0.0)
         confidence_source = _s(self.decision.get("confidence_source") or "heuristic")
-        
+
         identity_verified = bool(self.decision.get("identity_verified", False))
         review_required = bool(self.decision.get("review_required", True))
         action_allowed = bool(self.decision.get("action_allowed", False))
@@ -586,10 +586,18 @@ def build_recording_matching_decision(
     current = current if isinstance(current, Mapping) else {}
     candidate = candidate if isinstance(candidate, Mapping) else {}
     details = details if isinstance(details, Mapping) else {}
+    # A generic `details` mapping must never itself be treated as a release
+    # object -- `details` typically carries broader match context (recording
+    # ID, AI contribution, source metadata, ...) whose top-level fields are
+    # not release-shaped, even when some of their names happen to collide
+    # (e.g. a top-level "album" describing the candidate track's own album
+    # name, not a nested selected-release title). Only an explicit
+    # selected_release argument or an explicit `selected_release`/
+    # `details["selected_release"]` sub-object is ever consumed here.
     raw_selected_release = (
         selected_release
         if selected_release is not None
-        else (candidate.get("selected_release") or details.get("selected_release") or details)
+        else (candidate.get("selected_release") or details.get("selected_release") or {})
     )
     raw_linked_releases = (
         linked_releases
@@ -1189,8 +1197,14 @@ def build_album_matching_decision(
         conflicts.append("artist_conflict")
 
     # --- Release Group ID canonical requirement ---
+    # A missing/unresolved RGID (Release-ID-only evidence) is INSUFFICIENT
+    # proof, not a contradiction -- it must route to review, not be treated
+    # as a hard conflict alongside genuine contradictory evidence (e.g. a
+    # known local RGID that actively disagrees with the candidate's). Only
+    # an actual RGID mismatch belongs in `conflicts`; missing evidence is a
+    # warning only, and is handled by the "elif not candidate_rg_id" review
+    # branch below.
     if not candidate_rg_id:
-        conflicts.append("release_group_missing")
         warnings.append("release_group_id_missing")
     elif local_rg_id and local_rg_id != candidate_rg_id:
         conflicts.append("release_group_conflict")
@@ -1235,6 +1249,18 @@ def build_album_matching_decision(
                 used_mb_tracks.add(best_idx)
                 matched_count += 1
 
+        # Partial-album policy (explicit, SEC-002 Wave 14): deterministic
+        # track proof requires every LOCAL item to have an exact Recording
+        # ID match against the candidate's tracklist -- it deliberately does
+        # NOT require the candidate's tracklist to be fully covered. A local
+        # folder holding only 2 of an 18-track release is treated as
+        # sufficient deterministic proof of album-family identity as long as
+        # both of those 2 local tracks have real, exact MBID equality with
+        # 2 of the candidate's tracks (never fuzzy/title-similarity matches
+        # -- see the `item_mbid and trk_mbid and item_mbid == trk_mbid`
+        # check above). This is a deliberate design choice to support
+        # incomplete/partial local albums, not an accidental side effect of
+        # the loop bounds; see test_partial_album_full_deterministic_match_is_identity_verified.
         deterministic_track_proof = bool(deterministic_track_matches > 0 and deterministic_track_matches == len(item_list))
 
         if len(item_list) > 0:
