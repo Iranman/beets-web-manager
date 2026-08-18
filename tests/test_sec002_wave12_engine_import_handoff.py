@@ -174,9 +174,22 @@ class Wave12EngineImportHandoffTests(unittest.TestCase):
     def test_import_staged_refuses_operation_dir_symlink(self):
         pid, key = self._playlist()
         staged = self._staged_file(key, "track.mp3", b"audio")
-        imports_root = self.staging_dir / key / "imports"
-        imports_root.mkdir(parents=True)
-        operation_link = imports_root / beets_control_agent._playlist_import_operation_storage_key("pl-import-operation-symlink")
+        operations_root = self.staging_dir / ".playlist-import-operations"
+        operations_root.mkdir(parents=True)
+        storage_key = "op_" + "a" * 32
+        (operations_root / "index.json").write_text(json.dumps({
+            "operations": {
+                "pl-import-operation-symlink": {
+                    "operation_id": "pl-import-operation-symlink",
+                    "playlist_key": key,
+                    "playlist_id": pid,
+                    "storage_key": storage_key,
+                    "status": "in_progress",
+                    "tracks": {},
+                }
+            }
+        }), encoding="utf-8")
+        operation_link = operations_root / storage_key
         operation_link.symlink_to(self.outside_dir, target_is_directory=True)
         code, data = _post_agent("/playlists/import-staged", {
             "playlist_key": key,
@@ -336,7 +349,7 @@ class Wave12EngineImportHandoffTests(unittest.TestCase):
         self.assertEqual(code, 200, data)
         self.assertTrue(data.get("ok"), data)
         import_dir_name = Path(seen_cmds[0][-1]).name
-        self.assertRegex(import_dir_name, r"^op_[0-9a-f]{64}$")
+        self.assertRegex(import_dir_name, r"^op_[0-9a-f]{32}$")
         self.assertNotEqual(import_dir_name, "pl-import-current-operation")
         self.assertTrue(old_file.exists())
 

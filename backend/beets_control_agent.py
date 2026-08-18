@@ -866,6 +866,9 @@ _PLAYLIST_ID_RE = re.compile(r"^pl_[0-9a-f]{32}$")
 _PLAYLIST_KEY_RE = re.compile(r"^[a-zA-Z0-9_.-]{1,160}$")
 _PLAYLIST_OPERATION_ID_RE = re.compile(r"^pl-import-[a-zA-Z0-9_.-]{1,180}$")
 _PLAYLIST_TRACK_ID_RE = re.compile(r"^[^\x00/\\]{1,240}$")
+_PLAYLIST_OPERATION_STORAGE_KEY_RE = re.compile(r"^op_[0-9a-f]{32}$")
+_PLAYLIST_IMPORT_OPERATIONS_ROOT_NAME = ".playlist-import-operations"
+_PLAYLIST_IMPORT_INDEX_NAME = "index.json"
 
 
 def _bounded_text(value: object, *, max_len: int) -> str:
@@ -893,11 +896,12 @@ def _valid_playlist_import_track_id(value: str) -> bool:
     return bool(value and _PLAYLIST_TRACK_ID_RE.fullmatch(value))
 
 
-def _playlist_import_operation_storage_key(operation_id: str) -> str:
-    if not _valid_playlist_import_operation_id(operation_id):
-        raise UnsafePathError("invalid playlist import operation_id")
-    digest = hashlib.sha256(operation_id.encode("utf-8", "surrogatepass")).hexdigest()
-    return f"op_{digest}"
+def _playlist_import_new_operation_storage_key() -> str:
+    return f"op_{uuid.uuid4().hex}"
+
+
+def _valid_playlist_import_storage_key(value: str) -> bool:
+    return bool(value and _PLAYLIST_OPERATION_STORAGE_KEY_RE.fullmatch(value))
 
 
 def _safe_playlist_import_error(status: str) -> str:
@@ -916,9 +920,15 @@ def _safe_playlist_import_error(status: str) -> str:
     return messages.get(status, "Playlist import could not continue.")
 
 
-def _playlist_import_operation_state_path(playlist_staging: Path, operation_id: str) -> Path:
-    operations_dir = playlist_staging / ".operations"
-    return operations_dir / f"{_playlist_import_operation_storage_key(operation_id)}.json"
+def _playlist_import_operations_root() -> Path:
+    return resolve_safe_path(
+        str(PLAYLIST_DOWNLOAD_ROOT / _PLAYLIST_IMPORT_OPERATIONS_ROOT_NAME),
+        ["staging"],
+    )
+
+
+def _playlist_import_operations_index_path(operations_root: Path) -> Path:
+    return resolve_safe_path(str(operations_root / _PLAYLIST_IMPORT_INDEX_NAME), ["staging"])
 
 
 def _playlist_import_read_state(state_path: Path) -> dict[str, Any]:
@@ -3989,9 +3999,11 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             music_root = MUSIC_ROOT.resolve(strict=False)
 
             try:
-                safe_playlist_staging = (PLAYLIST_DOWNLOAD_ROOT / playlist_key).resolve(strict=False)
+                safe_playlist_staging = resolve_safe_path(str(PLAYLIST_DOWNLOAD_ROOT / playlist_key), ["staging"])
                 safe_playlist_staging.relative_to(staging_root)
-            except (ValueError, Exception):
+                operations_root = _playlist_import_operations_root()
+                index_path = _playlist_import_operations_index_path(operations_root)
+            except (ValueError, UnsafePathError):
                 self._send_json(400, {"error": "Invalid playlist staging root", "error_code": "invalid_playlist_key"})
                 return
 
@@ -4001,26 +4013,12 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 if _path_has_symlink_component(safe_playlist_staging, staging_root):
                     self._send_json(403, {"error": "Playlist staging path is not safe", "error_code": "playlist_staging_symlink"})
                     return
-                operation_storage_key = _playlist_import_operation_storage_key(operation_id)
-                try:
-                    imports_root = resolve_safe_path(str(safe_playlist_staging / "imports"), ["staging"])
-                    operation_dir = resolve_safe_path(str(imports_root / operation_storage_key), ["staging"])
-                    state_path = _playlist_import_operation_state_path(safe_playlist_staging, operation_id)
-                except UnsafePathError:
-                    self._send_json(403, {"error": "Playlist import operation staging is not safe", "error_code": "import_staging_symlink"})
-                    return
-                if _path_has_symlink_component(state_path.parent, safe_playlist_staging, include_leaf=True):
+                if operations_root.exists() and _path_has_symlink_component(operations_root, staging_root, include_leaf=True):
                     self._send_json(403, {"error": "Playlist import operation state is not safe", "error_code": "operation_state_symlink"})
-                    return
-                if imports_root.exists() and _path_has_symlink_component(imports_root, safe_playlist_staging):
-                    self._send_json(403, {"error": "Playlist import staging is not safe", "error_code": "import_staging_symlink"})
-                    return
-                if operation_dir.exists() and _path_has_symlink_component(operation_dir, safe_playlist_staging):
-                    self._send_json(403, {"error": "Playlist import operation staging is not safe", "error_code": "import_staging_symlink"})
                     return
 
                 try:
-                    operation_state = _playlist_import_read_state(state_path)
+                    index_state = _playlist_import_read_state(index_path)
                 except UnsafePathError:
                     self._send_json(409, {
                         "ok": False,
@@ -4029,12 +4027,46 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                         "message": _safe_playlist_import_error("operation_state_corrupt"),
                     })
                     return
+                operations = index_state.get("operations") if isinstance(index_state.get("operations"), dict) else {}
+                if index_state and not isinstance(index_state.get("operations"), dict):
+                    self._send_json(409, {
+                        "ok": False,
+                        "status": "review_required",
+                        "error_code": "operation_state_corrupt",
+                        "message": _safe_playlist_import_error("operation_state_corrupt"),
+                    })
+                    return
+                for known_operation_id, known_state in operations.items():
+                    if not _valid_playlist_import_operation_id(str(known_operation_id)):
+                        self._send_json(409, {"ok": False, "status": "review_required", "error_code": "operation_state_corrupt"})
+                        return
+                    if not isinstance(known_state, dict) or not _valid_playlist_import_storage_key(str(known_state.get("storage_key") or "")):
+                        self._send_json(409, {"ok": False, "status": "review_required", "error_code": "operation_state_corrupt"})
+                        return
+
+                operation_state = operations.get(operation_id) if isinstance(operations.get(operation_id), dict) else {}
                 if operation_state.get("playlist_key") and operation_state.get("playlist_key") != playlist_key:
                     self._send_json(409, {"ok": False, "status": "review_required", "error_code": "operation_playlist_mismatch"})
                     return
                 if operation_state.get("playlist_id") and playlist_id and operation_state.get("playlist_id") != playlist_id:
                     self._send_json(409, {"ok": False, "status": "review_required", "error_code": "operation_playlist_mismatch"})
                     return
+                storage_key = str(operation_state.get("storage_key") or "")
+                if not storage_key:
+                    storage_key = _playlist_import_new_operation_storage_key()
+                if not _valid_playlist_import_storage_key(storage_key):
+                    self._send_json(409, {"ok": False, "status": "review_required", "error_code": "operation_state_corrupt"})
+                    return
+                try:
+                    operation_dir = resolve_safe_path(str(operations_root / storage_key), ["staging"])
+                    operation_dir.relative_to(operations_root.resolve(strict=False))
+                except (ValueError, UnsafePathError):
+                    self._send_json(403, {"error": "Playlist import operation staging is not safe", "error_code": "import_staging_symlink"})
+                    return
+                if operation_dir.exists() and _path_has_symlink_component(operation_dir, operations_root):
+                    self._send_json(403, {"error": "Playlist import operation staging is not safe", "error_code": "import_staging_symlink"})
+                    return
+
                 saved_tracks = operation_state.get("tracks") if isinstance(operation_state.get("tracks"), dict) else {}
                 if operation_state.get("status") == "completed":
                     completed_tracks = [dict(row) for row in saved_tracks.values() if isinstance(row, dict)]
@@ -4055,13 +4087,20 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                     "operation_id": operation_id,
                     "playlist_key": playlist_key,
                     "playlist_id": playlist_id,
+                    "storage_key": storage_key,
                     "status": operation_state.get("status") or "in_progress",
                     "updated_at": time.time(),
                     "tracks": saved_tracks,
                 }
-                _playlist_import_write_state(state_path, operation_state)
+
+                def _save_operation_state() -> None:
+                    operations[operation_id] = operation_state
+                    index_state["operations"] = operations
+                    _playlist_import_write_state(index_path, index_state)
+
+                _save_operation_state()
                 operation_dir.mkdir(parents=True, exist_ok=True)
-                if _path_has_symlink_component(operation_dir, safe_playlist_staging):
+                if _path_has_symlink_component(operation_dir, operations_root):
                     self._send_json(403, {"error": "Playlist import operation staging is not safe", "error_code": "import_staging_symlink"})
                     return
 
@@ -4154,7 +4193,8 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                     if _path_has_symlink_component(safe_source, staging_root):
                         track_results.append({"track_id": track_id, "status": "staged_track_symlink", "error": _safe_playlist_import_error("staged_track_symlink")})
                         continue
-                    if safe_source.suffix.lower() not in _import_source_audio_extensions():
+                    source_ext = {ext: ext for ext in _import_source_audio_extensions()}.get(safe_source.suffix.lower())
+                    if not source_ext:
                         track_results.append({"track_id": track_id, "status": "staged_track_not_audio", "error": _safe_playlist_import_error("staged_track_not_audio")})
                         continue
 
@@ -4174,13 +4214,11 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
 
                     dest_file = safe_source
                     if not in_operation_dir:
-                        dest_file = operation_dir / safe_source.name
-                        if dest_file.exists() or dest_file.is_symlink():
-                            dest_file = operation_dir / f"{safe_source.stem}-{index}{safe_source.suffix}"
+                        dest_file = operation_dir / f"track-{index:04d}{source_ext}"
                         suffix = 1
                         while dest_file.exists() or dest_file.is_symlink():
                             suffix += 1
-                            dest_file = operation_dir / f"{safe_source.stem}-{index}-{suffix}{safe_source.suffix}"
+                            dest_file = operation_dir / f"track-{index:04d}-{suffix}{source_ext}"
                         try:
                             trusted_dest = resolve_safe_path(str(dest_file), ["staging"])
                             trusted_dest.relative_to(operation_dir.resolve(strict=False))
@@ -4225,7 +4263,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                             operation_state["tracks"] = saved_tracks
                             operation_state["status"] = "partial"
                             operation_state["updated_at"] = time.time()
-                            _playlist_import_write_state(state_path, operation_state)
+                            _save_operation_state()
                             continue
 
                     entry = {
@@ -4242,7 +4280,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                     operation_state["tracks"] = saved_tracks
                     operation_state["status"] = "moved_to_import_staging"
                     operation_state["updated_at"] = time.time()
-                    _playlist_import_write_state(state_path, operation_state)
+                    _save_operation_state()
                     valid_entries.append(entry)
 
                 if not valid_entries:
@@ -4290,14 +4328,14 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                     operation_state["status"] = "failed"
                     operation_state["error_code"] = "import_timeout"
                     operation_state["updated_at"] = time.time()
-                    _playlist_import_write_state(state_path, operation_state)
+                    _save_operation_state()
                     self._send_json(504, {"ok": False, "status": "failed", "error_code": "import_timeout", "message": "Beets import timed out."})
                     return
                 except Exception:
                     operation_state["status"] = "failed"
                     operation_state["error_code"] = "import_failed"
                     operation_state["updated_at"] = time.time()
-                    _playlist_import_write_state(state_path, operation_state)
+                    _save_operation_state()
                     self._send_json(500, {"ok": False, "status": "failed", "error_code": "import_failed", "message": _safe_playlist_import_error("import_failed")})
                     return
 
@@ -4336,7 +4374,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 operation_state["imported_count"] = imported_count
                 operation_state["beets_returncode"] = int(res.returncode)
                 operation_state["updated_at"] = time.time()
-                _playlist_import_write_state(state_path, operation_state)
+                _save_operation_state()
 
                 self._send_json(200, {
                     "ok": ok,
