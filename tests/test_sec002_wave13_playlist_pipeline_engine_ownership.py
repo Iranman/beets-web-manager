@@ -438,6 +438,14 @@ class TestWave13EnginePlaceImportedAuthorization(unittest.TestCase):
         self._orig_root = bca.PLAYLIST_DOWNLOAD_ROOT
         bca.PLAYLIST_DOWNLOAD_ROOT = self.staging_root
         self.addCleanup(lambda: setattr(bca, "PLAYLIST_DOWNLOAD_ROOT", self._orig_root))
+        # resolve_safe_path()'s "staging" role checks against DOWNLOAD_PATH,
+        # not PLAYLIST_DOWNLOAD_ROOT -- both must be patched or every
+        # resolve_safe_path(..., ["staging"]) call in this test class raises
+        # "path is outside every allowed root" regardless of
+        # PLAYLIST_DOWNLOAD_ROOT.
+        self._orig_download_path = bca.DOWNLOAD_PATH
+        bca.DOWNLOAD_PATH = str(self.staging_root)
+        self.addCleanup(lambda: setattr(bca, "DOWNLOAD_PATH", self._orig_download_path))
 
     def _write_operations_index(self, playlist_key, item_id, status="imported"):
         ops_root = bca._playlist_import_operations_root()

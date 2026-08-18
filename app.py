@@ -49068,8 +49068,11 @@ def playlist_quality_cleanup():
     except PlaylistQualityCandidatesUnavailableError as ex:
         # Never report "0 candidates" for a scan that didn't actually run --
         # that would read as "library is clean" when it is really "engine
-        # unreachable", hiding real quality issues from the operator.
-        return jsonify({"ok": False, "error": str(ex)}), 502
+        # unreachable", hiding real quality issues from the operator. The
+        # underlying exception (which may carry connection/URL detail from
+        # the IPC layer) is logged server-side only, never in the response.
+        app.logger.warning("Playlist quality-cleanup scan failed: %s", ex)
+        return jsonify({"ok": False, "error": "Could not reach the Beets engine to scan for quality issues"}), 502
     summary = {
         "candidates": len(candidates),
         "bad": len([c for c in candidates if c.get("quality") == "bad"]),
@@ -49177,7 +49180,8 @@ def playlist_quality_place():
             filter_mode="repair",
         )
     except PlaylistQualityCandidatesUnavailableError as ex:
-        return jsonify({"ok": False, "error": str(ex)}), 502
+        app.logger.warning("Playlist quality-place candidate lookup failed: %s", ex)
+        return jsonify({"ok": False, "error": "Could not reach the Beets engine to look up this item"}), 502
     candidate = next((c for c in candidates if int(c.get("id") or 0) == item_id), None)
     if not candidate:
         return jsonify({
