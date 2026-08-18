@@ -227,6 +227,43 @@ class Wave12EngineImportHandoffTests(unittest.TestCase):
         self.assertEqual(data["tracks"][0]["status"], "staged_track_not_audio")
         self.assertTrue(note.exists())
 
+    def test_import_staged_revalidates_identity_after_prior_inspect(self):
+        pid, key = self._playlist()
+        staged = self._staged_file(key, "track.mp3", b"audio")
+        code, inspect = _post_agent("/playlists/staging/inspect-track", {
+            "playlist_key": key,
+            "track_id": "tr_1",
+            "requested_path": str(staged),
+        })
+        self.assertEqual(code, 200, inspect)
+        self.assertTrue(inspect.get("authorized"), inspect)
+
+        beets_calls = []
+        payload = {
+            "playlist_key": key,
+            "playlist_id": pid,
+            "operation_id": "pl-import-source-replacement",
+            "tracks": [{
+                "track_id": "tr_1",
+                "staged_path": str(staged),
+                "artist": "Expected Artist",
+                "title": "Expected Title",
+                "mb_trackid": "expected-mbid",
+            }],
+        }
+        with mock.patch.object(beets_control_agent, "_read_engine_media_tags", return_value={
+            "artist": "Different Artist",
+            "title": "Different Title",
+            "mb_trackid": "replacement-mbid",
+        }), mock.patch.object(beets_control_agent.subprocess, "run", side_effect=lambda *a, **k: beets_calls.append(a)):
+            code, data = _post_agent("/playlists/import-staged", payload)
+        self.assertEqual(code, 200, data)
+        self.assertFalse(data.get("ok"), data)
+        self.assertEqual(data.get("status"), "review_required")
+        self.assertEqual(data["tracks"][0]["status"], "identity_mismatch")
+        self.assertEqual(beets_calls, [])
+        self.assertTrue(staged.exists())
+
     def test_missing_source_without_history_is_not_completed(self):
         pid, key = self._playlist()
         missing = self.staging_dir / key / "downloads" / "missing.mp3"
