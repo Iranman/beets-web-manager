@@ -13,6 +13,8 @@ from _app_ast_cache import get_app_ast  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_SOURCE = (ROOT / "app.py").read_text(encoding="utf-8")
+AGENT_SOURCE = (ROOT / "backend" / "beets_control_agent.py").read_text(encoding="utf-8")
+COMBINED_SOURCE = APP_SOURCE + AGENT_SOURCE
 
 
 def load_symbols(names, namespace):
@@ -175,7 +177,7 @@ class PlaylistProviderAlbumGuardTests(unittest.TestCase):
             ns["_playlist_repair_metadata"]({"artist": "1takejay", "title": "hoe phase", "album": "SoundCloud"})["album"],
             "",
         )
-        self.assertIn("provider_album_sql", APP_SOURCE)
+        self.assertIn("provider_album_sql", COMBINED_SOURCE)
 
     def test_musicbrainz_album_hint_rejects_provider_album_before_search(self):
         ns = self._namespace()

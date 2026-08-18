@@ -857,6 +857,15 @@ PLAYLIST_IMPORT_MAX_REQUEST_BYTES = _env_int_clamped(
 PLAYLIST_IMPORT_MAX_TRACKS = _env_int_clamped(
     "BEETS_PLAYLIST_IMPORT_MAX_TRACKS", 100, minimum=1, maximum=500
 )
+PLAYLIST_STAGING_LIST_FILES_MAX = _env_int_clamped(
+    "BEETS_PLAYLIST_STAGING_LIST_FILES_MAX", 500, minimum=1, maximum=5000
+)
+# Matches the web-manager's PLAYLIST_MIN_DOWNLOAD_SECONDS acceptance-gate
+# default (app.py) so a track that is accepted on download is not
+# immediately re-flagged as a too-short "preview" by the quality scanner.
+PLAYLIST_QUALITY_PREVIEW_THRESHOLD_SECONDS = _env_int_clamped(
+    "PLAYLIST_MIN_DOWNLOAD_SECONDS", 45, minimum=0, maximum=3600
+)
 PLAYLIST_IMPORT_MAX_TIMEOUT_SECONDS = _env_int_clamped(
     "BEETS_PLAYLIST_IMPORT_MAX_TIMEOUT_SECONDS", 900, minimum=60, maximum=3600
 )
@@ -963,6 +972,47 @@ def _playlist_import_write_state(state_path: Path, state: dict[str, Any]) -> Non
             os.close(dir_fd)
     except Exception:
         pass
+
+
+def _playlist_item_belongs_to_playlist(playlist_key: str, item_id: int) -> bool:
+    """Authorization gate for /playlists/place-imported: confirm item_id was
+    actually imported as part of a playlist-import operation recorded under
+    this playlist_key, before permitting any mutation or move.
+
+    Without this check, any caller who can reach the engine's HTTP API with
+    a bare item_id could rewrite metadata and move the file for ANY item in
+    the library, not just items that belong to a playlist import -- there
+    was previously no association at all between the item_id in the
+    request body and the playlist_key also in the request body. Reuses the
+    existing playlist-import operation-state index (SEC-002 Wave 12/13)
+    rather than adding a new tracking mechanism.
+    """
+    if not _valid_playlist_key(playlist_key) or item_id <= 0:
+        return False
+    try:
+        operations_root = _playlist_import_operations_root()
+        index_path = _playlist_import_operations_index_path(operations_root)
+        index_state = _playlist_import_read_state(index_path)
+    except (UnsafePathError, OSError, ValueError):
+        return False
+    operations = index_state.get("operations") if isinstance(index_state.get("operations"), dict) else {}
+    for op_state in operations.values():
+        if not isinstance(op_state, dict):
+            continue
+        if str(op_state.get("playlist_key") or "") != playlist_key:
+            continue
+        tracks = op_state.get("tracks") if isinstance(op_state.get("tracks"), dict) else {}
+        for track_row in tracks.values():
+            if not isinstance(track_row, dict):
+                continue
+            if track_row.get("status") not in ("imported", "already_imported"):
+                continue
+            try:
+                if int(track_row.get("item_id") or 0) == item_id:
+                    return True
+            except (TypeError, ValueError):
+                continue
+    return False
 
 
 def _read_engine_media_tags(path: Path) -> dict[str, Any]:
@@ -1154,12 +1204,18 @@ def _playlist_import_identity_ok(path: Path, item: dict[str, Any]) -> tuple[bool
     }
 
 
-def _verify_imported_track_in_library(item: dict[str, Any]) -> bool:
+def _verify_imported_track_in_library(item: dict[str, Any]) -> Optional[int]:
+    """Confirm the imported track landed in the Beets library and return its
+    item id (or None if it can't be confirmed). The returned id is
+    persisted into the playlist import operation state so later playlist
+    operations (e.g. /playlists/place-imported) can verify an item_id
+    actually belongs to the playlist operation that imported it, instead of
+    trusting a bare caller-supplied item_id."""
     mb_trackid = str(item.get("mb_trackid") or "").strip()
     if not mb_trackid:
-        return False
+        return None
     if not os.path.exists(LIB_PATH):
-        return False
+        return None
     try:
         conn = sqlite3.connect(LIB_PATH)
         try:
@@ -1167,11 +1223,11 @@ def _verify_imported_track_in_library(item: dict[str, Any]) -> bool:
                 "SELECT id FROM items WHERE mb_trackid = ? LIMIT 1",
                 (mb_trackid,),
             ).fetchone()
-            return row is not None
+            return int(row[0]) if row else None
         finally:
             conn.close()
     except Exception:
-        return False
+        return None
 
 
 def _import_source_signature(entries: list[dict[str, Any]]) -> str:
@@ -2808,6 +2864,178 @@ def _json_default(obj):
         except Exception:
             return str(obj)
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
+def _engine_playlist_quality_for_item(item, path_text: str) -> dict[str, Any]:
+    album = str(getattr(item, "album", "") or "").strip()
+    albumartist = str(getattr(item, "albumartist", "") or "").strip()
+    try:
+        length = float(getattr(item, "length", 0) or 0)
+    except (ValueError, TypeError):
+        length = 0.0
+    try:
+        bitrate = int(getattr(item, "bitrate", 0) or 0)
+    except (ValueError, TypeError):
+        bitrate = 0
+    fmt = str(getattr(item, "format", "") or Path(path_text).suffix.lstrip(".")).strip()
+    path_l = str(path_text).replace("\\", "/").lower()
+    flags: list[str] = []
+
+    if length > 0 and length < 180:
+        flags.append("preview_risk")
+    if not album:
+        flags.append("blank_album")
+    if album.lower() in ("soundcloud", "youtube", "spotify", "slskd", "spotiflac", "soulseek", "playlist", "downloads"):
+        flags.append("provider_album")
+    if (
+        "various artists -  -" in path_l
+        or ("compilations/ (2016)" in path_l and not album)
+        or path_l.startswith("non-album/")
+        or "/non-album/" in path_l
+        or path_l.startswith("playlist imports/")
+        or "/playlist imports/" in path_l
+    ):
+        flags.append("bad_playlist_path")
+
+    try:
+        if path_text and not Path(path_text).exists():
+            flags.append("missing_file")
+    except Exception:
+        flags.append("path_check_failed")
+
+    quality = "ok"
+    if "preview_risk" in flags or "missing_file" in flags:
+        quality = "bad"
+    elif flags:
+        quality = "review"
+
+    return {
+        "quality": quality,
+        "quality_flags": flags,
+        "length": round(length, 1),
+        "format": fmt,
+        "bitrate": bitrate,
+        "albumartist": albumartist,
+    }
+
+
+def _engine_playlist_quality_row_payload(row: sqlite3.Row) -> dict[str, Any]:
+    path_text = str(row["path"] if hasattr(row, "keys") and "path" in row.keys() else row[6])
+    item = type("PlaylistQualityRow", (), {})()
+    row_keys = set(row.keys()) if hasattr(row, "keys") else set()
+    for field in (
+        "id", "title", "artist", "album", "albumartist", "length", "bitrate",
+        "format", "path", "mb_trackid", "mb_albumid", "track", "disc", "year",
+        "added",
+    ):
+        try:
+            setattr(item, field, row[field] if field in row_keys else "")
+        except Exception:
+            setattr(item, field, "")
+
+    payload = {
+        "id": int(row["id"] if "id" in row_keys else 0),
+        "title": str(row["title"] if "title" in row_keys else ""),
+        "artist": str(row["artist"] if "artist" in row_keys else ""),
+        "album": str(row["album"] if "album" in row_keys else ""),
+        "albumartist": str(row["albumartist"] if "albumartist" in row_keys else ""),
+        "path": path_text,
+    }
+    for field in ("mb_trackid", "mb_albumid"):
+        if field in row_keys:
+            payload[field] = str(row[field] or "").strip()
+    for field in ("track", "disc", "year"):
+        if field in row_keys:
+            try:
+                payload[field] = int(float(row[field] or 0))
+            except Exception:
+                payload[field] = 0
+    if "added" in row_keys:
+        try:
+            payload["added"] = float(row["added"] or 0)
+        except Exception:
+            payload["added"] = 0.0
+
+    payload.update(_engine_playlist_quality_for_item(item, path_text))
+    album_item_count = 0
+    if "album_item_count" in row_keys:
+        try:
+            album_item_count = int(row["album_item_count"] or 0)
+        except Exception:
+            album_item_count = 0
+        payload["album_item_count"] = album_item_count
+
+    flags = set(payload.get("quality_flags") or [])
+    if "preview_risk" in flags:
+        payload["recommended_action"] = "delete_preview"
+        payload["repairable"] = False
+    elif flags:
+        payload["recommended_action"] = "repair"
+        payload["repairable"] = bool(payload.get("artist") and payload.get("title"))
+    else:
+        payload["recommended_action"] = "keep"
+        payload["repairable"] = False
+    return payload
+
+
+def _engine_playlist_quality_cleanup_candidates(con: sqlite3.Connection,
+                                                limit: int = 200,
+                                                item_ids: Optional[list[int]] = None,
+                                                filter_mode: str = "all") -> list[dict[str, Any]]:
+    mode = str(filter_mode or "all").strip().lower()
+    threshold = PLAYLIST_QUALITY_PREVIEW_THRESHOLD_SECONDS
+    preview_paths = (
+        "(path LIKE '%Playlist Downloads%' OR path LIKE 'Compilations/%' "
+        "OR path LIKE 'Non-Album/%' OR path LIKE '%/Non-Album/%' "
+        "OR path LIKE '%/Playlist Imports/%' OR path LIKE 'Playlist Imports/%')"
+    )
+    provider_album_sql = (
+        "lower(trim(COALESCE(album,''))) IN "
+        "('soundcloud','youtube','spotify','slskd','spotiflac','soulseek','playlist','downloads')"
+    )
+    repair_paths = (
+        "("
+        " path LIKE '%Various Artists -  - %'"
+        " OR path LIKE 'Non-Album/%'"
+        " OR path LIKE '%/Non-Album/%'"
+        " OR path LIKE '%/Playlist Imports/%'"
+        " OR path LIKE 'Playlist Imports/%'"
+        " OR COALESCE(album,'')=''"
+        " OR (COALESCE(album,'')='' AND COALESCE(albumartist,'')='Various Artists')"
+        " OR (COALESCE(album,'')<>'' AND COALESCE(title,'')<>'' "
+        "     AND lower(trim(album))=lower(trim(title)) "
+        "     AND (SELECT COUNT(*) FROM items i2 WHERE i2.album_id=items.album_id) <= 2)"
+        f" OR {provider_album_sql}"
+        ")"
+    )
+    if mode in {"preview", "preview_only", "delete_preview"}:
+        where = f"((length > 0 AND length < ?) AND {preview_paths})"
+        params: list[Any] = [threshold]
+    elif mode in {"repair", "repairable"}:
+        where = f"{repair_paths} AND NOT (length > 0 AND length < ?)"
+        params = [threshold]
+    else:
+        where = f"({repair_paths} OR ((length > 0 AND length < ?) AND {preview_paths}))"
+        params = [threshold]
+
+    id_filter = ""
+    if item_ids:
+        ids = [int(i) for i in item_ids if int(i) > 0]
+        if ids:
+            id_filter = " AND id IN (" + ",".join("?" for _ in ids) + ")"
+            params.extend(ids)
+    params.append(max(1, min(int(limit or 200), 2000)))
+
+    sql = (
+        "SELECT id,title,artist,album,albumartist,length,path,format,bitrate, "
+        "mb_trackid,mb_albumid,track,disc,year,added, "
+        "(SELECT COUNT(*) FROM items i2 WHERE i2.album_id=items.album_id) AS album_item_count "
+        f"FROM items WHERE {where}{id_filter} "
+        "ORDER BY id DESC LIMIT ?"
+    )
+    cur = con.cursor()
+    rows = cur.execute(sql, params).fetchall()
+    return [_engine_playlist_quality_row_payload(row) for row in rows]
 
 
 class ControlAgentHandler(BaseHTTPRequestHandler):
@@ -4496,8 +4724,10 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 for entry in valid_entries:
                     track_id = entry["track_id"]
                     if res.returncode < 2:
-                        if _verify_imported_track_in_library(entry):
+                        verified_item_id = _verify_imported_track_in_library(entry)
+                        if verified_item_id:
                             entry["status"] = "imported"
+                            entry["item_id"] = verified_item_id
                             verified_count += 1
                             imported_count += 1
                         else:
@@ -4547,8 +4777,330 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                         os.remove(tmp_cfg_path)
                 except Exception:
                     pass
+            return
+
+        if path == "/playlists/staging/list-files":
+            playlist_key = str(body.get("playlist_key") or "").strip()
+            playlist_id = str(body.get("playlist_id") or "").strip()
+
+            if not _valid_playlist_key(playlist_key):
+                self._send_json(400, {"error": "Invalid or missing playlist_key", "error_code": "invalid_playlist_key"})
+                return
+
+            staging_root = PLAYLIST_DOWNLOAD_ROOT.resolve(strict=False)
+            try:
+                safe_playlist_staging = resolve_safe_path(str(PLAYLIST_DOWNLOAD_ROOT / playlist_key), ["staging"])
+                safe_playlist_staging.relative_to(staging_root)
+            except (ValueError, UnsafePathError):
+                self._send_json(400, {"error": "Invalid playlist staging root", "error_code": "invalid_playlist_key"})
+                return
+
+            if _path_has_symlink_component(safe_playlist_staging, staging_root):
+                self._send_json(403, {"error": "Playlist staging path is not safe", "error_code": "playlist_staging_symlink"})
+                return
+
+            # Scope is intentionally just "downloads": that is the pre-import
+            # staging area this endpoint exists to inventory (see
+            # _playlist_reusable_download_files in the web manager). Walking
+            # the playlist root itself was both redundant (it double-listed
+            # everything already under downloads/) and overbroad (it would
+            # also surface files under imports/ and the operation-state
+            # index, which are not reusable pre-import downloads).
+            search_dir = safe_playlist_staging / "downloads"
+            files = []
+            audio_exts = set(_import_source_audio_extensions())
+            seen_paths = set()
+            truncated = False
+
+            lock_file = acquire_os_lock(read_only=True)
+            try:
+                if search_dir.exists() and search_dir.is_dir():
+                    for root_dir, dirs, filenames in os.walk(str(search_dir)):
+                        root_path = Path(root_dir)
+                        if _path_has_symlink_component(root_path, staging_root):
+                            dirs[:] = []
+                            continue
+                        for fn in filenames:
+                            if len(files) >= PLAYLIST_STAGING_LIST_FILES_MAX:
+                                truncated = True
+                                break
+                            fp = root_path / fn
+                            if fp.suffix.lower() not in audio_exts:
+                                continue
+                            if fp.is_symlink():
+                                continue
+                            str_path = str(fp)
+                            if str_path in seen_paths:
+                                continue
+                            seen_paths.add(str_path)
+                            try:
+                                st = fp.stat()
+                            except OSError:
+                                continue
+                            files.append({
+                                "path": str_path,
+                                "filename": fn,
+                                "size": int(st.st_size),
+                                "mtime": float(st.st_mtime),
+                            })
+                        if truncated:
+                            break
+            finally:
+                release_os_lock(lock_file)
+
+            self._send_json(200, {
+                "ok": True,
+                "playlist_key": playlist_key,
+                "playlist_id": playlist_id,
+                "files": files,
+                "truncated": truncated,
+            })
+            return
+
+        if path == "/playlists/staging/validate-track":
+            playlist_key = str(body.get("playlist_key") or "").strip()
+            requested_path = str(body.get("requested_path") or "").strip()
+            artist = str(body.get("artist") or "").strip()
+            title = str(body.get("title") or "").strip()
+            expected_mb_trackid = str(body.get("expected_mb_trackid") or "").strip()
+
+            if not _valid_playlist_key(playlist_key):
+                self._send_json(400, {"error": "Invalid or missing playlist_key", "error_code": "invalid_playlist_key"})
+                return
+            if not requested_path:
+                self._send_json(400, {"error": "Missing requested_path", "error_code": "missing_requested_path"})
+                return
+
+            staging_root = PLAYLIST_DOWNLOAD_ROOT.resolve(strict=False)
+            music_root = MUSIC_ROOT.resolve(strict=False)
+
+            try:
+                safe_target = resolve_safe_path(requested_path, ["staging"], require_exists=True, expected_type="file")
+            except UnsafePathError:
+                self._send_json(403, {"error": "Access denied for requested path"})
+                return
+
+            if _path_is_within(str(safe_target), str(music_root)):
+                self._send_json(403, {"error": "Refusing to validate a library file as staging"})
+                return
+
+            try:
+                relative_parts = safe_target.relative_to(staging_root).parts
+            except ValueError:
+                self._send_json(403, {"error": "Path outside playlist staging"})
+                return
+
+            if not relative_parts or relative_parts[0] != playlist_key:
+                self._send_json(403, {"error": "Path outside this playlist's staging directory"})
+                return
+
+            if _path_has_symlink_component(safe_target, staging_root):
+                self._send_json(403, {"error": "Path contains symlinks"})
+                return
+
+            if safe_target.suffix.lower() not in _import_source_audio_extensions():
+                self._send_json(400, {"error": "File is not an allowed audio format"})
+                return
+
+            st = safe_target.stat()
+            file_size = int(st.st_size)
+
+            prefs = body.get("preferences") if isinstance(body.get("preferences"), dict) else {}
+            format_res = audio_preferences.validate_audio_file_preferences(str(safe_target), prefs) if hasattr(audio_preferences, "validate_audio_file_preferences") else {"ok": True, "message": ""}
+
+            item_dict = {"artist": artist, "title": title, "mb_trackid": expected_mb_trackid}
+            ident_ok, ident_status, ident_info = _playlist_import_identity_ok(safe_target, item_dict)
+
+            self._send_json(200, {
+                "ok": True,
+                "audio_allowed": bool(format_res.get("ok", True)),
+                "format_message": str(format_res.get("message") or ""),
+                "identity": {
+                    "identity_ok": ident_ok,
+                    "identity_status": ident_status,
+                    "info": ident_info,
+                    "final_action": "accept" if ident_ok else "review",
+                },
+                "match": {
+                    "ok": ident_ok,
+                    "identity_status": ident_status,
+                    "title_score": 1.0 if ident_ok else 0.0,
+                    "artist_score": 1.0 if ident_ok else 0.0,
+                },
+                "size": file_size,
+                "path": str(safe_target),
+            })
+            return
+
+        if path == "/playlists/quality-candidates":
+            filter_mode = str(body.get("filter_mode") or "all").strip().lower()
+            limit = int(body.get("limit") or 200)
+            item_ids = body.get("item_ids")
+            if not isinstance(item_ids, list):
+                item_ids = None
+
+            lock_file = acquire_os_lock(read_only=True)
+            try:
+                con = sqlite3.connect(LIB_PATH, timeout=10)
+                con.row_factory = sqlite3.Row
+                try:
+                    candidates = _engine_playlist_quality_cleanup_candidates(con, limit=limit, item_ids=item_ids, filter_mode=filter_mode)
+                    self._send_json(200, {"ok": True, "candidates": candidates})
+                finally:
+                    con.close()
+            except Exception:
+                self._send_json(500, {"error": "Failed to fetch quality candidates"})
+            finally:
                 release_os_lock(lock_file)
             return
+
+        if path == "/playlists/place-imported":
+            playlist_key = str(body.get("playlist_key") or "").strip()
+            playlist_id = str(body.get("playlist_id") or "").strip()
+            item_id = int(body.get("item_id") or 0)
+            placement = body.get("placement") if isinstance(body.get("placement"), dict) else {}
+            action = str(body.get("action") or "repair").strip().lower()
+
+            if not _valid_playlist_key(playlist_key):
+                self._send_json(400, {"error": "Invalid or missing playlist_key", "error_code": "invalid_playlist_key"})
+                return
+            if item_id <= 0:
+                self._send_json(400, {"error": "Invalid item_id"})
+                return
+            # Authorization: item_id must belong to a playlist-import
+            # operation recorded under this exact playlist_key. Without
+            # this, any caller could mutate/move an arbitrary library item
+            # by supplying an unrelated item_id alongside a playlist_key it
+            # has no real relationship to.
+            if not _playlist_item_belongs_to_playlist(playlist_key, item_id):
+                self._send_json(403, {
+                    "error": f"Item {item_id} was not imported as part of playlist {playlist_key}",
+                    "error_code": "item_not_in_playlist",
+                })
+                return
+
+            lock_file = acquire_os_lock(read_only=False)
+            try:
+                con = sqlite3.connect(LIB_PATH, timeout=10)
+                con.row_factory = sqlite3.Row
+                try:
+                    cur = con.cursor()
+                    cur.execute("SELECT * FROM items WHERE id = ?", (item_id,))
+                    item_row = cur.fetchone()
+                    if not item_row:
+                        self._send_json(404, {"error": f"Item {item_id} not found"})
+                        return
+
+                    old_path_text = str(item_row["path"] if hasattr(item_row, "keys") and "path" in item_row.keys() else item_row[6])
+
+                    # Back up the Beets DB before any mutation, matching the
+                    # rollback/audit guarantee the web-manager side used to
+                    # provide before this mutation moved into the engine.
+                    backup_path = f"{LIB_PATH}.bak-{int(time.time())}-playlist-place-{item_id}"
+                    try:
+                        shutil.copy2(LIB_PATH, backup_path)
+                    except Exception:
+                        self._send_json(500, {"error": "Could not back up Beets library database before placement"})
+                        return
+
+                    if action == "move_singleton":
+                        job_cfg = f"/tmp/beets-playlist-singleton-move-{item_id}-{uuid.uuid4().hex}.yaml"
+                        cfg = _write_playlist_import_beets_config(job_cfg)
+                        cmd = [BEET_BIN, "-c", cfg, "move", f"id:{item_id}"]
+                        env = os.environ.copy()
+                        env["BEETSDIR"] = BEETSDIR
+                        res = subprocess.run(cmd, capture_output=True, text=True, timeout=180, env=env)
+                        try:
+                            if os.path.exists(job_cfg):
+                                os.remove(job_cfg)
+                        except Exception:
+                            pass
+                        cur.execute("SELECT path FROM items WHERE id = ?", (item_id,))
+                        new_row = cur.fetchone()
+                        new_path_text = str(new_row["path"]) if new_row else ""
+                        moved = bool(
+                            res.returncode < 2
+                            and new_path_text
+                            and new_path_text.replace("\\", "/").lower() != old_path_text.replace("\\", "/").lower()
+                        )
+                        self._send_json(200, {
+                            "ok": True,
+                            "moved": moved,
+                            "backup": backup_path,
+                            "old_path": old_path_text,
+                            "new_path": new_path_text,
+                            "returncode": res.returncode,
+                        })
+                        return
+
+                    artist = str(placement.get("artist") or item_row["artist"] or "").strip()
+                    title = str(placement.get("title") or item_row["title"] or "").strip()
+                    album = str(placement.get("album") or item_row["album"] or "").strip()
+                    albumartist = str(placement.get("albumartist") or placement.get("artist") or item_row["albumartist"] or artist).strip()
+                    year = int(float(placement.get("year") or item_row["year"] or 0))
+                    mb_trackid = str(placement.get("mb_trackid") or "").strip()
+                    mb_albumid = str(placement.get("mb_albumid") or "").strip()
+                    mb_releasegroupid = str(placement.get("mb_releasegroupid") or "").strip()
+                    mb_albumartistid = str(placement.get("mb_albumartistid") or "").strip()
+
+                    cur.execute(
+                        "UPDATE items SET artist=?, title=?, album=?, albumartist=?, year=?, mb_trackid=?, mb_albumid=?, mb_releasegroupid=?, mb_albumartistid=? WHERE id=?",
+                        (artist, title, album, albumartist, year, mb_trackid, mb_albumid, mb_releasegroupid, mb_albumartistid, item_id)
+                    )
+                    con.commit()
+
+                    job_cfg = f"/tmp/beets-playlist-place-{item_id}-{uuid.uuid4().hex}.yaml"
+                    cfg = _write_playlist_import_beets_config(job_cfg)
+                    env = os.environ.copy()
+                    env["BEETSDIR"] = BEETSDIR
+                    proc_w = subprocess.run([BEET_BIN, "-c", cfg, "write", f"id:{item_id}"], capture_output=True, text=True, timeout=90, env=env)
+                    proc_m = subprocess.run([BEET_BIN, "-c", cfg, "move", f"id:{item_id}"], capture_output=True, text=True, timeout=180, env=env)
+                    try:
+                        if os.path.exists(job_cfg):
+                            os.remove(job_cfg)
+                    except Exception:
+                        pass
+
+                    cur.execute("SELECT path FROM items WHERE id = ?", (item_id,))
+                    new_row = cur.fetchone()
+                    new_path_text = str(new_row["path"]) if new_row else ""
+                    # Both the tag write and the file move must succeed for
+                    # this to count as "repaired" -- a failed write with a
+                    # successful move previously still reported
+                    # repaired=true, leaving stale/incorrect tags on a
+                    # relocated file with no indication anything was wrong.
+                    repaired = proc_w.returncode < 2 and proc_m.returncode < 2 and bool(new_path_text)
+                    reason = "" if repaired else (
+                        f"beet write failed rc={proc_w.returncode}" if proc_w.returncode >= 2
+                        else f"beet move failed rc={proc_m.returncode}" if proc_m.returncode >= 2
+                        else "final path could not be verified after move"
+                    )
+
+                    response = {
+                        "ok": True,
+                        "repaired": repaired,
+                        "backup": backup_path,
+                        "item_id": item_id,
+                        "old_path": old_path_text,
+                        "new_path": new_path_text,
+                        "artist": artist,
+                        "title": title,
+                        "album": album,
+                        "albumartist": albumartist,
+                        "returncode": proc_m.returncode,
+                        "write_returncode": proc_w.returncode,
+                    }
+                    if reason:
+                        response["reason"] = reason
+                    self._send_json(200, response)
+                finally:
+                    con.close()
+            except Exception:
+                self._send_json(500, {"error": f"Failed to place item {item_id}"})
+            finally:
+                release_os_lock(lock_file)
+            return
+
         if path == "/playlists/export_m3u":
             playlist_key = str(body.get("playlist_key") or "").strip()
             display_name = str(body.get("display_name") or "").strip()
