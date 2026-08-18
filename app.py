@@ -42190,6 +42190,50 @@ def _playlist_existing_key(name: str,
         return ""
 
 
+def _valid_playlist_key(value: Any) -> bool:
+    """Format check mirroring backend/beets_control_agent.py's
+    _valid_playlist_key. Used to make sure web-manager never treats a raw
+    playlist_id (or any other unvalidated string) as if it were already a
+    derived, filesystem-safe playlist_key."""
+    text = _s(value).strip()
+    return bool(text) and bool(re.fullmatch(r"[a-zA-Z0-9_.-]{1,160}", text)) and ".." not in text
+
+
+def _playlist_resolve_operation_key(playlist_key: Any = "",
+                                    playlist_id: Any = "",
+                                    clean_name: str = "",
+                                    *,
+                                    log: Any = None) -> str:
+    """Strictly resolve the filesystem playlist_key for a playlist
+    operation.
+
+    playlist_key and playlist_id are NOT interchangeable: playlist_key is a
+    derived, per-playlist_id filesystem identifier (see _playlist_key()),
+    never a raw playlist_id and never a shared "pl_default" bucket. A
+    candidate/payload that supplies neither a valid playlist_key nor a
+    valid, resolvable playlist_id gets "" back and the caller MUST refuse
+    the operation -- silently falling back to a name-only lookup (or a
+    shared default key) risks operating on a different playlist's staged
+    files or library items than the one the caller actually meant.
+    """
+    key = _s(playlist_key).strip()
+    if key and _valid_playlist_key(key):
+        return key
+
+    pid = _s(playlist_id).strip()
+    if pid and _playlist_valid_internal_id(pid):
+        resolved = _playlist_existing_key(clean_name, playlist_id=pid)
+        if resolved and _valid_playlist_key(resolved):
+            return resolved
+        if log is not None:
+            _playlist_log_line(log, f"  [playlist-key] Could not resolve playlist_key for playlist_id {pid}")
+        return ""
+
+    if log is not None:
+        _playlist_log_line(log, "  [playlist-key] Missing or invalid playlist_key/playlist_id")
+    return ""
+
+
 def get_playlist_staging_root(playlist: Any) -> Path:
     """Stable per-playlist staging root; never includes job/run IDs."""
     if isinstance(playlist, dict):
@@ -42234,6 +42278,19 @@ class PlaylistStagingUnavailableError(RuntimeError):
     that did nothing (SEC-002 Wave 9 final review).
     """
     code = "staging_unavailable"
+
+
+class PlaylistQualityCandidatesUnavailableError(RuntimeError):
+    """Raised when the Beets engine cannot be queried for playlist quality
+    candidates.
+
+    Returning an empty candidate list on engine/IPC failure would be
+    indistinguishable from "the engine was queried and the library is
+    clean" -- a false negative that could hide real quality issues from an
+    operator running a cleanup scan. Callers must surface this as a failed
+    scan, not a clean one.
+    """
+    code = "quality_candidates_unavailable"
 
 
 def _playlist_ensure_staging_dirs(name: str, playlist_id: Optional[str] = None) -> None:
@@ -46152,7 +46209,7 @@ def _playlist_validate_downloaded_files(paths: Iterable[str], artist: str, title
                                         playlist_id: str = "") -> List[str]:
     valid: List[str] = []
     clean_name = _clean_playlist_name(playlist_name or "Playlist")
-    key = (playlist_id if (playlist_id and playlist_id.startswith("pl_")) else "") or _playlist_existing_key(clean_name, playlist_id=playlist_id or None) or "pl_default"
+    key = _playlist_resolve_operation_key("", playlist_id, clean_name, log=log)
 
     for path_value in _playlist_filter_preview_downloads(paths, log):
         val_res = _playlist_validate_staged_download(
@@ -46163,10 +46220,13 @@ def _playlist_validate_downloaded_files(paths: Iterable[str], artist: str, title
             identity = match.get("identity") if isinstance(match.get("identity"), dict) else {}
             action = _s(identity.get("final_action") or "review")
             if action == "reject":
-                try:
-                    beets_client.delete_playlist_staged_track(key, "", path_value)
-                except Exception:
-                    pass
+                if key:
+                    try:
+                        beets_client.delete_playlist_staged_track(key, "", path_value)
+                    except Exception:
+                        pass
+                else:
+                    log(f"  warning: could not resolve playlist key; leaving rejected file in place: {Path(path_value).name}")
                 log(
                     "  rejected mismatched download "
                     f"({_playlist_identity_log(match)}; "
@@ -46391,24 +46451,28 @@ def _playlist_download_missing_tracks(
         "Downloading missing playlist tracks via sources: "
         + ", ".join(_download_method_label(method) for method in methods)
     )
-    try:
-        _playlist_ensure_staging_dirs(playlist_name, playlist_id=playlist_id or None)
-    except Exception as ex:
-        log(f"  [warning] staging dir setup delegated to engine: {ex}")
+    # Fail closed: if the engine cannot confirm playlist staging
+    # directories exist and are safe, do not proceed to download tracks
+    # into an unconfirmed location.
+    _playlist_ensure_staging_dirs(playlist_name, playlist_id=playlist_id or None)
 
     before_done = int(state.get("done") or 0)
     before_failed = int(state.get("failed") or 0)
     before_review = _playlist_review_required_count_from_state(state)
 
     def _get_staged_paths() -> List[str]:
+        # Engine ownership: playlist staging lives in the engine container.
+        # Do not fall back to reading dl_dir directly on IPC failure -- an
+        # empty/stale result here just means download methods will be
+        # retried, which is the safe default; treating an unreachable
+        # engine as "here is the ground truth from a local directory" is
+        # not.
         try:
             res = beets_client.list_playlist_staged_files(playlist_key, playlist_id)
             if isinstance(res, dict) and res.get("ok"):
                 return [f["path"] for f in res.get("files", []) if isinstance(f, dict) and f.get("path")]
-        except Exception:
-            pass
-        if dl_dir.exists():
-            return [str(p) for p in sorted(_audio_files_in_dir(str(dl_dir)))]
+        except Exception as ex:
+            log(f"  warning: engine staged-file listing IPC failed: {ex}")
         return []
 
     for idx, trk in enumerate(tracks, start=1):
@@ -47382,11 +47446,14 @@ def _playlist_quality_cleanup_candidates(limit: int = 200,
                                          filter_mode: str = "all") -> List[Dict[str, Any]]:
     try:
         res = beets_client.get_playlist_quality_candidates(filter_mode=filter_mode, limit=limit, item_ids=item_ids)
-        if isinstance(res, dict) and res.get("ok"):
-            return res.get("candidates") or []
     except Exception as ex:
-        app.logger.warning("Engine quality candidates query failed: %s", ex)
-    return []
+        raise PlaylistQualityCandidatesUnavailableError(
+            f"Engine quality candidates query failed: {ex}"
+        ) from ex
+    if isinstance(res, dict) and res.get("ok"):
+        return res.get("candidates") or []
+    reason = (res.get("error") if isinstance(res, dict) else None) or "engine did not confirm the query"
+    raise PlaylistQualityCandidatesUnavailableError(f"Engine quality candidates query failed: {reason}")
 
 
 def _playlist_repair_metadata(candidate: Dict[str, Any]) -> Dict[str, str]:
@@ -48240,17 +48307,24 @@ def _playlist_reusable_download_files(track: Dict[str, Any],
     if not title:
         return []
     clean_name = _clean_playlist_name(playlist_name or "Playlist")
-    key = (playlist_id if (playlist_id and playlist_id.startswith("pl_")) else "") or _playlist_existing_key(clean_name, playlist_id=playlist_id or None) or "pl_default"
+    key = _playlist_resolve_operation_key("", playlist_id, clean_name, log=log)
+    if not key:
+        log("  warning: could not resolve playlist key; skipping staged-file reuse")
+        return []
     candidates: List[str] = []
     try:
         res = beets_client.list_playlist_staged_files(key, playlist_id)
         if isinstance(res, dict) and res.get("ok"):
             candidates = [f["path"] for f in res.get("files", []) if isinstance(f, dict) and f.get("path")]
-    except Exception:
-        candidates = []
-
-    if not candidates and job_dir.exists():
-        candidates = [str(p) for p in sorted(_audio_files_in_dir(str(job_dir)))]
+        else:
+            log(f"  warning: engine staged-file listing failed for reuse check: {(res or {}).get('error') if isinstance(res, dict) else res}")
+    except Exception as ex:
+        # Engine ownership: do not fall back to reading the playlist staging
+        # directory directly from web-manager. If the engine can't be
+        # reached, there is nothing safe to reuse; the caller will
+        # re-download instead of trusting an unverified local listing.
+        log(f"  warning: engine staged-file listing IPC failed for reuse check: {ex}")
+        return []
 
     for path_value in candidates:
         val_res = _playlist_validate_staged_download(
@@ -48289,8 +48363,14 @@ def _playlist_copy_source_files(files: Iterable[Path], dest_dir: Path,
             shutil.copy2(str(source), str(dest))
             copied.append(str(dest))
         except Exception as ex:
-            copied.append(str(source))
-            log(f"  warning: relying on remote staged file reference {source.name}: {ex}")
+            # A failed copy must NOT be reported as a successful one. Do not
+            # append the (uncopied) source path here -- it lives outside
+            # dest_dir/playlist staging, and downstream validation treats
+            # every entry in `copied` as if it were already staged for this
+            # playlist. Silently substituting the source path previously let
+            # an unstaged, unscoped file be validated/imported as if it were
+            # a legitimate staged download.
+            log(f"  warning: could not copy downloaded file {source.name} into playlist staging: {ex}")
     return copied
 
 
@@ -48328,7 +48408,17 @@ def _playlist_validate_staged_download(path_value: str, artist: str, title: str,
                                        playlist_name: str = "",
                                        playlist_id: str = "") -> Dict[str, Any]:
     clean_name = _clean_playlist_name(playlist_name or "Playlist")
-    key = (playlist_id if (playlist_id and playlist_id.startswith("pl_")) else "") or _playlist_existing_key(clean_name, playlist_id=playlist_id or None) or "pl_default"
+    key = _playlist_resolve_operation_key("", playlist_id, clean_name)
+    if not key:
+        return {
+            "ok": False,
+            "audio_allowed": False,
+            "identity": {"identity_status": "review_required", "final_action": "review"},
+            "match": {"ok": False, "review_required": True, "identity_status": "review_required"},
+            "size": 0,
+            "path": path_value,
+            "reason": "could not resolve the playlist for this download",
+        }
     try:
         res = beets_client.validate_playlist_staged_track(
             playlist_key=key,
@@ -48340,30 +48430,23 @@ def _playlist_validate_staged_download(path_value: str, artist: str, title: str,
         )
         if isinstance(res, dict) and res.get("ok"):
             return res
+        reason = (res.get("error") if isinstance(res, dict) else None) or "engine validation failed"
     except Exception as ex:
         app.logger.warning("Engine validate staged track IPC failed: %s", ex)
+        reason = f"engine validation IPC failed: {ex}"
 
-    candidates = _playlist_download_text_candidates(path_value)
-    match = _playlist_score_download_candidates(candidates, artist, title)
-    identity = _audio_identity_decision(
-        path_value,
-        expected_artist=artist,
-        expected_title=title,
-        expected_mb_trackid=expected_mb_trackid,
-        text_match=match,
-    )
-    match["identity"] = identity
-    match["identity_status"] = identity.get("identity_status", "review_required")
-    match["review_required"] = identity.get("final_action") == "review"
-    match["ok"] = identity.get("final_action") == "accept"
-    audio_allowed = _playlist_download_audio_allowed(path_value, log=[])
+    # Engine ownership: staging/validation lives in the engine container.
+    # Do not fingerprint or inspect the file locally on IPC failure or a
+    # non-ok engine response -- fail closed to review rather than trusting
+    # an unverified local read of what should be an engine-owned path.
     return {
-        "ok": True,
-        "audio_allowed": audio_allowed,
-        "identity": identity,
-        "match": match,
+        "ok": False,
+        "audio_allowed": False,
+        "identity": {"identity_status": "review_required", "final_action": "review"},
+        "match": {"ok": False, "review_required": True, "identity_status": "review_required"},
         "size": 0,
         "path": path_value,
+        "reason": reason,
     }
 
 
@@ -48377,18 +48460,17 @@ def _playlist_apply_album_placement(con, candidate: Dict[str, Any],
 
     artist = _s(candidate.get("artist") or candidate.get("query_artist") or "")
     clean_name = _clean_playlist_name(artist or "Playlist")
-    key = _s(candidate.get("playlist_key") or candidate.get("playlist_id") or "")
-    if not key or not _valid_playlist_key(key):
-        key = _playlist_existing_key(clean_name) or "pl_default"
+    key = _playlist_resolve_operation_key(
+        candidate.get("playlist_key"), candidate.get("playlist_id"), clean_name, log=log)
+    if not key:
+        return {
+            "id": item_id,
+            "repaired": False,
+            "reason": "could not resolve the playlist for this item; refusing to place it",
+        }
 
     # Wave 13 Engine Ownership: Placement mutations and post-import validation
     # are executed in the engine container via BeetsClient IPC.
-    # Legacy contract markers:
-    # "mb_releasegroupid": placement.get("mb_releasegroupid", "")
-    # "mb_albumartistid": placement.get("mb_albumartistid", "")
-    # beets-playlist-singleton-move
-    # _sqlite_write_retry
-    # Final path failed validation because
     try:
         res = beets_client.place_playlist_imported_item(
             playlist_key=key,
@@ -48416,202 +48498,6 @@ def _playlist_apply_album_placement(con, candidate: Dict[str, Any],
         }
     except Exception as ex:
         return {"id": item_id, "repaired": False, "reason": f"Engine placement IPC failed: {ex}"}
-
-
-def _playlist_resolve_albumartist_info_for_release_group(
-        mb_releasegroupid: str,
-        mb_release: Optional[Dict[str, Any]] = None,
-        fallback_release_artist: str = "",
-        *,
-        year: str = "",
-        track_count: int = 0,
-        log: Optional[List[str]] = None) -> Dict[str, str]:
-    rgid = _s(mb_releasegroupid).strip().lower()
-    if not _MB_UUID_RE.match(rgid):
-        return _playlist_albumartist_info_from_values(fallback_release_artist)
-    _playlist_log(log, f"  [playlist-place] Found release group ID: {rgid}")
-    mb_release = mb_release or {}
-    info = _playlist_albumartist_info_from_values(
-        mb_release.get("release_artist") or fallback_release_artist,
-        mb_release.get("release_artist_id") or mb_release.get("mb_albumartistid") or "",
-        mb_release.get("release_artistids") or mb_release.get("mb_albumartistids") or "",
-    )
-    if info.get("albumartist") and info.get("mb_albumartistid"):
-        _playlist_log(log, f"  [playlist-place] Resolved album artist: {info.get('albumartist')}")
-        return info
-
-    info = _playlist_release_group_albumartist_info(rgid, log=log)
-    if info.get("albumartist") and info.get("mb_albumartistid"):
-        _playlist_log(log, f"  [playlist-place] Resolved album artist: {info.get('albumartist')}")
-        return info
-
-    release_id = _resolve_release_group_to_release(
-        rgid,
-        log if log is not None else [],
-        year=year,
-        track_count=track_count,
-    )
-    if _MB_UUID_RE.match(_s(release_id).strip().lower()):
-        mb = _fetch_mb_release_tracklist(release_id, log)
-        info = _playlist_albumartist_info_from_values(
-            mb.get("release_artist") or "",
-            mb.get("release_artist_id") or "",
-            mb.get("release_artistids") or "",
-        )
-        if info.get("albumartist") and info.get("mb_albumartistid"):
-            _playlist_log(log, f"  [playlist-place] Resolved album artist: {info.get('albumartist')}")
-            return info
-
-    _playlist_log(log, f"  [playlist-place] Missing album artist for release group ID: {rgid}")
-    return info if info.get("albumartist") else {}
-
-
-def _playlist_resolve_albumartist_for_release_group(mb_releasegroupid: str,
-                                                    mb_release: Optional[Dict[str, Any]] = None,
-                                                    fallback_release_artist: str = "",
-                                                    *,
-                                                    year: str = "",
-                                                    track_count: int = 0,
-                                                    log: Optional[List[str]] = None) -> str:
-    info = _playlist_resolve_albumartist_info_for_release_group(
-        mb_releasegroupid,
-        mb_release=mb_release,
-        fallback_release_artist=fallback_release_artist,
-        year=year,
-        track_count=track_count,
-        log=log,
-    )
-    return _s(info.get("albumartist") or "")
-
-
-def _playlist_expected_album_path_hint(placement: Dict[str, Any]) -> str:
-    artist = _safe_artist_folder_name(_normalize_albumartist(_s(placement.get("albumartist") or "")))
-    mb_albumartistid = _s(placement.get("mb_albumartistid") or "").strip().lower()
-    if artist and _MB_UUID_RE.match(mb_albumartistid):
-        artist = f"{artist} {{{mb_albumartistid}}}"
-    album = _safe_path_component(placement.get("album") or "Unknown Album", "Unknown Album")
-    year = _playlist_int(placement.get("year"), 0)
-    rgid = _s(placement.get("mb_releasegroupid") or "").strip().lower()
-    album_folder = f"{album} ({year:04d})" if year > 0 else f"{album} ()"
-    if _MB_UUID_RE.match(rgid):
-        album_folder += f" {{{rgid}}}"
-    return str(MUSIC_ROOT / artist / album_folder / "<track file>")
-
-
-def _playlist_validate_final_album_path(path_text: str,
-                                        placement: Dict[str, Any],
-                                        log: Optional[List[str]] = None) -> Dict[str, Any]:
-    albumartist = _normalize_albumartist(_s(placement.get("albumartist") or "").strip())
-    album = _s(placement.get("album") or "").strip()
-    rgid = _s(placement.get("mb_releasegroupid") or "").strip().lower()
-    mb_albumartistids = [
-        _s(value).strip().lower()
-        for value in re.split(
-            r"[;,]",
-            _s(placement.get("mb_albumartistids") or placement.get("mb_albumartistid") or ""),
-        )
-        if _MB_UUID_RE.match(_s(value).strip().lower())
-    ]
-    expected = _playlist_expected_album_path_hint(placement)
-    if not albumartist:
-        return {
-            "ok": False,
-            "reason": f"missing album artist for release group ID {rgid or '(unknown)'}",
-            "expected_path": expected,
-        }
-    if not mb_albumartistids:
-        return {
-            "ok": False,
-            "reason": "missing MusicBrainz album artist ID",
-            "expected_path": expected,
-        }
-    if not _MB_UUID_RE.match(rgid):
-        return {
-            "ok": False,
-            "reason": "missing MusicBrainz release group ID",
-            "expected_path": expected,
-        }
-
-    final_path = _playlist_resolve_item_path(path_text)
-    try:
-        rel = final_path.resolve(strict=False).relative_to(MUSIC_ROOT.resolve(strict=False))
-    except Exception:
-        return {
-            "ok": False,
-            "reason": "final path is outside the Beets music root",
-            "final_path": str(final_path),
-            "expected_path": expected,
-        }
-    parts = rel.parts
-    if len(parts) < 3:
-        return {
-            "ok": False,
-            "reason": "artist folder was missing",
-            "final_path": str(final_path),
-            "expected_path": expected,
-        }
-
-    artist_folder, album_folder = parts[0], parts[1]
-    actual_artist_ids = set(re.findall(
-        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
-        artist_folder.lower(),
-    ))
-    if not actual_artist_ids.intersection(mb_albumartistids):
-        return {
-            "ok": False,
-            "reason": "artist folder did not include the MusicBrainz album artist ID",
-            "final_path": str(final_path),
-            "expected_path": expected,
-        }
-    artist_folder_name = re.sub(
-        r"\s*[\{\(\[]?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}[\}\)\]]?",
-        "",
-        artist_folder,
-        flags=re.I,
-    ).strip()
-    expected_artist_key = _artist_folder_merge_key(albumartist)
-    actual_artist_key = _artist_folder_merge_key(artist_folder_name)
-    if expected_artist_key and actual_artist_key != expected_artist_key:
-        return {
-            "ok": False,
-            "reason": (
-                f"artist folder was {artist_folder!r}, expected album artist "
-                f"{albumartist!r}"
-            ),
-            "final_path": str(final_path),
-            "expected_path": expected,
-        }
-
-    album_key = _album_track_norm(album)
-    first_part_key = _album_track_norm(artist_folder)
-    if album_key and album_key == first_part_key:
-        return {
-            "ok": False,
-            "reason": "album folder was written directly under the music root",
-            "final_path": str(final_path),
-            "expected_path": expected,
-        }
-    if album_key and album_key not in _album_track_norm(album_folder):
-        return {
-            "ok": False,
-            "reason": f"album folder {album_folder!r} did not contain album {album!r}",
-            "final_path": str(final_path),
-            "expected_path": expected,
-        }
-    if rgid not in album_folder.lower():
-        return {
-            "ok": False,
-            "reason": "album folder did not include the MusicBrainz release group ID",
-            "final_path": str(final_path),
-            "expected_path": expected,
-        }
-
-    _playlist_log(log, f"  [playlist-place] Final library path: {final_path}")
-    return {
-        "ok": True,
-        "final_path": str(final_path),
-        "expected_path": expected,
-    }
 
 
 def _playlist_find_or_create_album_row(con, placement: Dict[str, Any]) -> int:
@@ -48657,46 +48543,6 @@ def _playlist_find_or_create_album_row(con, placement: Dict[str, Any]) -> int:
     return int(cur.lastrowid or 0)
 
 
-def _playlist_apply_album_placement(con, candidate: Dict[str, Any],
-                                    placement: Dict[str, Any],
-                                    log: Optional[List[str]] = None,
-                                    cancel_event=None) -> Dict[str, Any]:
-    item_id = int(candidate.get("id") or 0)
-    artist = _s(candidate.get("artist") or candidate.get("query_artist") or "")
-    clean_name = _clean_playlist_name(artist or "Playlist")
-    key = _s(candidate.get("playlist_key") or candidate.get("playlist_id") or "")
-    if not key or not _valid_playlist_key(key):
-        key = _playlist_existing_key(clean_name) or "pl_default"
-
-    try:
-        res = beets_client.place_playlist_imported_item(
-            playlist_key=key,
-            item_id=item_id,
-            placement=placement,
-            action="repair",
-        )
-        if isinstance(res, dict) and res.get("ok"):
-            _playlist_log(log, f"  [playlist-place] Engine placed item {item_id}")
-            return {
-                "id": item_id,
-                "repaired": bool(res.get("repaired", True)),
-                "old_path": res.get("old_path", candidate.get("path", "")),
-                "new_path": res.get("new_path", ""),
-                "artist": placement.get("artist", ""),
-                "title": placement.get("title", ""),
-                "album": placement.get("album", ""),
-                "albumartist": placement.get("albumartist", ""),
-                "match": placement.get("match") or {},
-            }
-        return {
-            "id": item_id,
-            "repaired": False,
-            "reason": (res.get("error") if isinstance(res, dict) else None) or "Engine placement failed",
-        }
-    except Exception as ex:
-        return {"id": item_id, "repaired": False, "reason": f"Engine placement IPC failed: {ex}"}
-
-
 def _playlist_repair_quality_candidate(con, candidate: Dict[str, Any],
                                        log: Optional[List[str]] = None,
                                        cancel_event=None) -> Dict[str, Any]:
@@ -48715,6 +48561,104 @@ def _playlist_repair_quality_candidate(con, candidate: Dict[str, Any],
         con, candidate, placement, log=log, cancel_event=cancel_event)
 
 
+def _playlist_manual_placement_from_payload(candidate: Dict[str, Any],
+                                            payload: Dict[str, Any]) -> Dict[str, Any]:
+    placement_raw = payload.get("placement") if isinstance(payload.get("placement"), dict) else payload
+    artist = _playlist_clean_video_text(
+        placement_raw.get("artist")
+        or candidate.get("artist")
+        or candidate.get("query_artist")
+        or ""
+    )
+    title = _playlist_clean_video_text(
+        placement_raw.get("title")
+        or candidate.get("title")
+        or candidate.get("query_title")
+        or ""
+    )
+    album = _playlist_clean_video_text(placement_raw.get("album") or "")
+    albumartist = _playlist_clean_video_text(
+        placement_raw.get("albumartist")
+        or placement_raw.get("album_artist")
+        or artist
+    )
+    if not artist or not title or not album or not albumartist:
+        missing = [
+            name for name, value in (
+                ("artist", artist),
+                ("title", title),
+                ("album", album),
+                ("albumartist", albumartist),
+            ) if not value
+        ]
+        return {"ok": False, "reason": "Missing required field(s): " + ", ".join(missing)}
+
+    year = _playlist_int(placement_raw.get("year") or candidate.get("year"), 0)
+    disc = max(1, _playlist_int(placement_raw.get("disc") or candidate.get("disc"), 1))
+    track = max(0, _playlist_int(placement_raw.get("track") or candidate.get("track"), 0))
+    tracktotal = max(0, _playlist_int(placement_raw.get("tracktotal"), 0))
+    disctotal = max(1, _playlist_int(placement_raw.get("disctotal"), 1))
+    mb_trackid = _s(placement_raw.get("mb_trackid") or "").strip().lower()
+    mb_albumid = _s(placement_raw.get("mb_albumid") or "").strip().lower()
+    mb_releasegroupid = _s(placement_raw.get("mb_releasegroupid") or "").strip().lower()
+    mb_artistid = _s(placement_raw.get("mb_artistid") or "").strip().lower()
+    mb_albumartistid = _s(placement_raw.get("mb_albumartistid") or "").strip().lower()
+    mb_albumartistids = _s(placement_raw.get("mb_albumartistids") or mb_albumartistid).strip()
+
+    for label, value in (
+        ("mb_trackid", mb_trackid),
+        ("mb_albumid", mb_albumid),
+        ("mb_releasegroupid", mb_releasegroupid),
+        ("mb_artistid", mb_artistid),
+        ("mb_albumartistid", mb_albumartistid),
+    ):
+        if value and not _MB_UUID_RE.match(value):
+            return {"ok": False, "reason": f"{label} must be a MusicBrainz UUID"}
+
+    if not mb_releasegroupid and _MB_UUID_RE.match(mb_albumid):
+        try:
+            release = _fetch_mb_release_tracklist(mb_albumid, None)
+            mb_releasegroupid = _s(release.get("release_group") or "").strip().lower()
+        except Exception:
+            mb_releasegroupid = ""
+    if not _MB_UUID_RE.match(mb_releasegroupid):
+        return {
+            "ok": False,
+            "reason": "A MusicBrainz release group ID is required for playlist album placement",
+        }
+    if not _MB_UUID_RE.match(mb_albumartistid):
+        return {
+            "ok": False,
+            "reason": "A MusicBrainz album artist ID is required for playlist album placement",
+        }
+
+    return {
+        "ok": True,
+        "artist": artist,
+        "albumartist": albumartist,
+        "title": title,
+        "album": album,
+        "year": year,
+        "track": track,
+        "tracktotal": tracktotal,
+        "disc": disc,
+        "disctotal": disctotal,
+        "mb_trackid": mb_trackid,
+        "mb_albumid": mb_albumid,
+        "mb_releasegroupid": mb_releasegroupid,
+        "mb_artistid": mb_artistid,
+        "mb_albumartistid": mb_albumartistid,
+        "mb_albumartistids": mb_albumartistids,
+        "country": _playlist_clean_video_text(placement_raw.get("country") or ""),
+        "label": _playlist_clean_video_text(placement_raw.get("label") or ""),
+        "genre": _playlist_clean_video_text(placement_raw.get("genre") or ""),
+        "match": {
+            "source": "manual-playlist-placement",
+            "manual": True,
+        },
+    }
+
+
 def _playlist_place_quality_candidate_job(item_id: int,
                                           placement: Dict[str, Any],
                                           sync_playlist: str = "") -> str:
@@ -48726,7 +48670,12 @@ def _playlist_place_quality_candidate_job(item_id: int,
         )
         candidate = next((c for c in candidates if int(c.get("id") or 0) == item_id), None)
         if not candidate:
-            candidate = {"id": item_id, "recommended_action": "repair"}
+            # Fail closed: an item that is not (or is no longer) a genuine
+            # quality review/repair candidate must never be fabricated into
+            # one just to let a placement proceed. This can legitimately
+            # happen on a race (the item was fixed/removed between the API
+            # call's own candidate check and this job actually running).
+            raise RuntimeError(f"Item {item_id} is not a playlist review/repair candidate")
 
         log.append(
             f"[debug] Manual playlist placement id={item_id} "
@@ -48773,9 +48722,14 @@ def _playlist_move_singleton_candidate(candidate: Dict[str, Any],
 
     artist = _s(candidate.get("artist") or candidate.get("query_artist") or "")
     clean_name = _clean_playlist_name(artist or "Playlist")
-    key = _s(candidate.get("playlist_key") or candidate.get("playlist_id") or "")
-    if not key or not _valid_playlist_key(key):
-        key = _playlist_existing_key(clean_name) or "pl_default"
+    key = _playlist_resolve_operation_key(
+        candidate.get("playlist_key"), candidate.get("playlist_id"), clean_name, log=log)
+    if not key:
+        return {
+            "id": item_id,
+            "moved": False,
+            "reason": "could not resolve the playlist for this item; refusing to move it",
+        }
 
     try:
         res = beets_client.place_playlist_imported_item(
@@ -48857,7 +48811,16 @@ def _playlist_place_recent_imports_for_tracks(tracks: List[Dict[str, Any]],
     if not wanted:
         return summary
     limit = max(200, min(2000, len(wanted) * 12))
-    candidates = _playlist_quality_cleanup_candidates(limit=limit, filter_mode="repair")
+    try:
+        candidates = _playlist_quality_cleanup_candidates(limit=limit, filter_mode="repair")
+    except PlaylistQualityCandidatesUnavailableError as ex:
+        # Best-effort post-import album placement: the import itself has
+        # already completed successfully by this point, so treat a failed
+        # quality-candidate query as "nothing to place yet" rather than
+        # failing the whole playlist sync job.
+        _playlist_log(log, f"  [playlist-place] Skipping post-import placement: {ex}")
+        summary["error"] = str(ex)
+        return summary
     since_floor = float(since_ts or 0) - 120.0
     used_items: set = set()
     for candidate in candidates:
@@ -49099,8 +49062,14 @@ def playlist_quality_cleanup():
         filter_mode = "preview" if action == "delete_preview" else "repair"
     raw_ids = payload.get("item_ids") or []
     item_ids = [int(v) for v in raw_ids if str(v).strip().isdigit()] if isinstance(raw_ids, list) else []
-    candidates = _playlist_quality_cleanup_candidates(
-        limit=limit, item_ids=item_ids or None, filter_mode=filter_mode)
+    try:
+        candidates = _playlist_quality_cleanup_candidates(
+            limit=limit, item_ids=item_ids or None, filter_mode=filter_mode)
+    except PlaylistQualityCandidatesUnavailableError as ex:
+        # Never report "0 candidates" for a scan that didn't actually run --
+        # that would read as "library is clean" when it is really "engine
+        # unreachable", hiding real quality issues from the operator.
+        return jsonify({"ok": False, "error": str(ex)}), 502
     summary = {
         "candidates": len(candidates),
         "bad": len([c for c in candidates if c.get("quality") == "bad"]),
@@ -49201,11 +49170,14 @@ def playlist_quality_place():
     if item_id <= 0:
         return jsonify({"ok": False, "error": "item_id is required"}), 400
 
-    candidates = _playlist_quality_cleanup_candidates(
-        limit=50,
-        item_ids=[item_id],
-        filter_mode="repair",
-    )
+    try:
+        candidates = _playlist_quality_cleanup_candidates(
+            limit=50,
+            item_ids=[item_id],
+            filter_mode="repair",
+        )
+    except PlaylistQualityCandidatesUnavailableError as ex:
+        return jsonify({"ok": False, "error": str(ex)}), 502
     candidate = next((c for c in candidates if int(c.get("id") or 0) == item_id), None)
     if not candidate:
         return jsonify({

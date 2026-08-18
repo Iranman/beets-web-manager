@@ -77,6 +77,7 @@ class TestWave13PlaylistEngineOwnership(unittest.TestCase):
             "recommended_action": "repair",
             "quality_flags": ["provider_album"],
             "path": "/data/media/music/Non-Album/1takejay - Hoe Phase.mp3",
+            "playlist_id": "pl_" + "1" * 32,
         }
         placement_match = {
             "ok": True,
@@ -110,6 +111,7 @@ class TestWave13PlaylistEngineOwnership(unittest.TestCase):
             "title": "POWER",
             "quality_flags": ["bad_playlist_path"],
             "path": "/data/media/music/Playlist Imports/POWER.mp3",
+            "playlist_id": "pl_" + "2" * 32,
         }
         with patch.object(app.beets_client, "place_playlist_imported_item") as mock_place:
             mock_place.return_value = {
@@ -127,6 +129,7 @@ class TestWave13PlaylistEngineOwnership(unittest.TestCase):
 
     def test_reusable_download_files_uses_engine_staging_list(self):
         """Web manager must query reusable staged files via BeetsClient IPC without local filesystem scans."""
+        playlist_id = "pl_" + "a" * 32
         track = {"artist": "Drake", "title": "God's Plan", "mb_trackid": "33333333-3333-3333-3333-333333333333"}
         staged_path = str(self.staging_dir / "pl_favorites" / "downloads" / "Drake - God's Plan.mp3")
 
@@ -148,13 +151,30 @@ class TestWave13PlaylistEngineOwnership(unittest.TestCase):
                 self.staging_dir / "pl_favorites",
                 log=lambda msg: None,
                 playlist_name="Favorites",
-                playlist_id="pl_favorites",
+                playlist_id=playlist_id,
             )
             self.assertEqual(res, [staged_path])
             mock_list.assert_called_once()
 
+    def test_reusable_download_files_refuses_unresolvable_playlist_id(self):
+        """A playlist_id that is not a valid pl_<32 hex> id must not fall back to a
+        name-only or default key lookup -- it must refuse and skip reuse entirely."""
+        track = {"artist": "Drake", "title": "God's Plan"}
+        with patch.object(app.beets_client, "list_playlist_staged_files") as mock_list:
+            res = app._playlist_reusable_download_files(
+                track,
+                self.staging_dir / "pl_favorites",
+                self.staging_dir / "pl_favorites",
+                log=lambda msg: None,
+                playlist_name="Favorites",
+                playlist_id="not-a-real-playlist-id",
+            )
+            self.assertEqual(res, [])
+            mock_list.assert_not_called()
+
     def test_validate_downloaded_files_deletes_rejected_via_ipc(self):
         """Rejected staged downloads must be deleted via BeetsClient IPC instead of local unlink."""
+        playlist_id = "pl_" + "b" * 32
         paths = [str(self.staging_dir / "pl_test" / "downloads" / "bad.mp3")]
         mock_val = {
             "ok": True,
@@ -169,10 +189,35 @@ class TestWave13PlaylistEngineOwnership(unittest.TestCase):
         with patch("app._playlist_validate_staged_download", return_value=mock_val), \
              patch.object(app.beets_client, "delete_playlist_staged_track") as mock_del:
             valid = app._playlist_validate_downloaded_files(
-                paths, "Artist", "Title", log=lambda msg: None, playlist_name="Test", playlist_id="pl_test"
+                paths, "Artist", "Title", log=lambda msg: None, playlist_name="Test", playlist_id=playlist_id
             )
             self.assertEqual(valid, [])
-            mock_del.assert_called_once_with("pl_test", "", paths[0])
+            mock_del.assert_called_once()
+            call_args = mock_del.call_args[0]
+            self.assertNotEqual(call_args[0], "pl_default")
+            self.assertEqual(call_args[2], paths[0])
+
+    def test_validate_downloaded_files_skips_delete_for_unresolvable_playlist(self):
+        """If the playlist key can't be resolved, a rejected file must be left in place
+        rather than deleted via a guessed/default key that could target the wrong playlist."""
+        paths = [str(self.staging_dir / "pl_test" / "downloads" / "bad.mp3")]
+        mock_val = {
+            "ok": True,
+            "audio_allowed": True,
+            "match": {
+                "ok": False,
+                "identity": {"final_action": "reject"},
+                "title_score": 0.1,
+                "artist_score": 0.1,
+            },
+        }
+        with patch("app._playlist_validate_staged_download", return_value=mock_val), \
+             patch.object(app.beets_client, "delete_playlist_staged_track") as mock_del:
+            app._playlist_validate_downloaded_files(
+                paths, "Artist", "Title", log=lambda msg: None,
+                playlist_name="Test", playlist_id="not-a-real-id",
+            )
+            mock_del.assert_not_called()
 
     def test_control_agent_list_files_auth_and_containment(self):
         """Engine endpoint /playlists/staging/list-files enforces auth token and staging containment."""
@@ -232,6 +277,211 @@ class TestWave13PlaylistEngineOwnership(unittest.TestCase):
                 playlist_id="pl_nodata",
             )
             self.assertEqual(reused, [])
+
+
+class TestWave13FinalReviewFixes(unittest.TestCase):
+    """Regression coverage for the Claude final-review corrections made on
+    top of the initial Wave 13 (AGY) implementation: crash-level
+    regressions, playlist_id/playlist_key confusion, fabricated candidacy,
+    local-fallback removal, and engine-side authorization/backup/schema
+    fixes for /playlists/place-imported and related endpoints."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp(prefix="wave13_final_test_")
+        self.addCleanup(lambda: shutil.rmtree(self.tmp_dir, ignore_errors=True))
+        self.env_patcher = patch.dict(os.environ, {
+            "PLAYLIST_STATE_ROOT": str(Path(self.tmp_dir) / "playlists"),
+            "PLAYLIST_DOWNLOAD_ROOT": str(Path(self.tmp_dir) / "staging"),
+            "MUSIC_ROOT": str(Path(self.tmp_dir) / "music"),
+            "BEETS_API_TOKEN": "test-wave13-token-secret-32bytes-ok!",
+        })
+        self.env_patcher.start()
+        self.addCleanup(self.env_patcher.stop)
+        app._PLAYLIST_INDEX_CACHE = {"mtime": 0.0, "index": None}
+
+    def test_no_duplicate_apply_album_placement_definition(self):
+        """_playlist_apply_album_placement must be defined exactly once. A
+        duplicate definition previously shadowed the first (dead) copy and
+        both used the undefined-name pattern this test also guards."""
+        import ast
+        source = Path(app.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        names = [
+            node.name for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "_playlist_apply_album_placement"
+        ]
+        self.assertEqual(len(names), 1, "duplicate _playlist_apply_album_placement definition")
+
+    def test_valid_playlist_key_is_defined_and_matches_engine_format(self):
+        """app.py must define _valid_playlist_key (it previously called an
+        undefined name, causing a NameError on every placement call)."""
+        self.assertTrue(app._valid_playlist_key("pl_abc123_deadbeef0123"))
+        self.assertFalse(app._valid_playlist_key(""))
+        self.assertFalse(app._valid_playlist_key("../etc/passwd"))
+        self.assertFalse(app._valid_playlist_key("a/b"))
+
+    def test_manual_placement_from_payload_is_restored_and_validates(self):
+        """/api/playlists/quality-place calls this function; it must exist
+        and enforce the required-field + MusicBrainz UUID contract."""
+        candidate = {"id": 5, "artist": "A", "title": "T"}
+        missing = app._playlist_manual_placement_from_payload(candidate, {})
+        self.assertFalse(missing.get("ok"))
+
+        payload = {
+            "placement": {
+                "artist": "A", "title": "T", "album": "Alb", "albumartist": "A",
+                "mb_releasegroupid": "11111111-1111-1111-1111-111111111111",
+                "mb_albumartistid": "22222222-2222-2222-2222-222222222222",
+            }
+        }
+        ok = app._playlist_manual_placement_from_payload(candidate, payload)
+        self.assertTrue(ok.get("ok"), ok)
+        self.assertEqual(ok.get("mb_releasegroupid"), "11111111-1111-1111-1111-111111111111")
+
+    def test_resolve_operation_key_rejects_pl_default_style_fallback(self):
+        """A candidate with neither a valid playlist_key nor a valid
+        playlist_id must resolve to "" (refuse), never a shared default
+        key or a name-only guess."""
+        key = app._playlist_resolve_operation_key("", "", "Some Playlist")
+        self.assertEqual(key, "")
+        key = app._playlist_resolve_operation_key("", "not-a-real-id", "Some Playlist")
+        self.assertEqual(key, "")
+
+    def test_resolve_operation_key_does_not_accept_raw_playlist_id_as_key(self):
+        """A bare playlist_id must never be used directly as a playlist_key
+        -- it must be derived via _playlist_existing_key."""
+        pid = "pl_" + "c" * 32
+        key = app._playlist_resolve_operation_key("", pid, "Some Playlist")
+        self.assertNotEqual(key, pid)
+        self.assertTrue(app._valid_playlist_key(key))
+
+    def test_apply_album_placement_refuses_when_key_unresolvable(self):
+        """Placement must refuse rather than fall back to pl_default when
+        the candidate carries no resolvable playlist identity."""
+        candidate = {"id": 9, "artist": "", "playlist_key": "", "playlist_id": ""}
+        with patch.object(app.beets_client, "place_playlist_imported_item") as mock_place:
+            res = app._playlist_apply_album_placement(None, candidate, {}, log=[])
+            self.assertFalse(res.get("repaired"))
+            mock_place.assert_not_called()
+
+    def test_move_singleton_refuses_when_key_unresolvable(self):
+        candidate = {
+            "id": 9, "artist": "", "playlist_key": "", "playlist_id": "",
+            "quality_flags": ["bad_playlist_path"],
+        }
+        with patch.object(app.beets_client, "place_playlist_imported_item") as mock_place:
+            res = app._playlist_move_singleton_candidate(candidate, log=[])
+            self.assertFalse(res.get("moved"))
+            mock_place.assert_not_called()
+
+    def test_place_quality_candidate_job_fails_closed_on_missing_candidate(self):
+        """If the item is no longer a genuine quality review/repair
+        candidate by the time the job runs, it must refuse -- not fabricate
+        a synthetic candidate that lets an arbitrary item_id through."""
+        with patch.object(app, "_playlist_quality_cleanup_candidates", return_value=[]), \
+             patch.object(app, "_playlist_apply_album_placement") as mock_apply:
+            job_id = app._playlist_place_quality_candidate_job(999, {"artist": "A", "title": "T"})
+            job = app.jobs.get(job_id)
+            # Wait for the background job to finish.
+            import time as _time
+            deadline = _time.time() + 5
+            while job.status == "running" and _time.time() < deadline:
+                _time.sleep(0.02)
+            self.assertEqual(job.status, "failed")
+            mock_apply.assert_not_called()
+
+    def test_quality_cleanup_candidates_fails_closed_on_ipc_error(self):
+        """An engine IPC failure must not be reported as '0 candidates' --
+        that is indistinguishable from a clean scan result."""
+        with patch.object(app.beets_client, "get_playlist_quality_candidates", side_effect=RuntimeError("boom")):
+            with self.assertRaises(app.PlaylistQualityCandidatesUnavailableError):
+                app._playlist_quality_cleanup_candidates(limit=10, filter_mode="repair")
+
+    def test_copy_source_files_does_not_fake_success_on_copy_failure(self):
+        """A failed copy must not be reported as a successfully staged
+        file -- the caller treats every returned path as already staged
+        for this playlist."""
+        src_dir = Path(self.tmp_dir) / "src"
+        src_dir.mkdir()
+        src_file = src_dir / "track.mp3"
+        src_file.write_bytes(b"data")
+        dest_dir = Path(self.tmp_dir) / "dest_readonly_target_missing" / "nested"
+
+        with patch("app.shutil.copy2", side_effect=OSError("disk full")):
+            result = app._playlist_copy_source_files([src_file], dest_dir, "Artist", "Title", log=lambda m: None)
+        self.assertEqual(result, [])
+
+    def test_validate_staged_download_fails_closed_without_local_fingerprinting(self):
+        """On engine IPC failure, validation must fail closed to review
+        rather than fingerprinting the file locally (engine ownership)."""
+        pid = "pl_" + "d" * 32
+        with patch.object(app.beets_client, "validate_playlist_staged_track", side_effect=RuntimeError("unreachable")), \
+             patch("app._audio_identity_decision") as mock_identity:
+            res = app._playlist_validate_staged_download(
+                "/some/staged/path.mp3", "Artist", "Title", playlist_id=pid)
+            self.assertFalse(res.get("ok"))
+            self.assertFalse((res.get("match") or {}).get("ok"))
+            mock_identity.assert_not_called()
+
+
+@unittest.skipIf(os.name == "nt", "resolve_safe_path requires POSIX-absolute paths")
+class TestWave13EnginePlaceImportedAuthorization(unittest.TestCase):
+    """Engine-side authorization/backup/schema regression tests for
+    /playlists/place-imported and the operation-state ownership check it
+    relies on."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp(prefix="wave13_engine_test_")
+        self.addCleanup(lambda: shutil.rmtree(self.tmp_dir, ignore_errors=True))
+        self.staging_root = Path(self.tmp_dir) / "staging"
+        self.staging_root.mkdir(parents=True, exist_ok=True)
+        self._orig_root = bca.PLAYLIST_DOWNLOAD_ROOT
+        bca.PLAYLIST_DOWNLOAD_ROOT = self.staging_root
+        self.addCleanup(lambda: setattr(bca, "PLAYLIST_DOWNLOAD_ROOT", self._orig_root))
+
+    def _write_operations_index(self, playlist_key, item_id, status="imported"):
+        ops_root = bca._playlist_import_operations_root()
+        ops_root.mkdir(parents=True, exist_ok=True)
+        index_path = bca._playlist_import_operations_index_path(ops_root)
+        state = {
+            "operations": {
+                "op_" + "e" * 32: {
+                    "playlist_key": playlist_key,
+                    "tracks": {
+                        "trk_" + "f" * 32: {"item_id": item_id, "status": status},
+                    },
+                },
+            },
+        }
+        bca._playlist_import_write_state(index_path, state)
+
+    def test_item_belongs_to_playlist_true_when_recorded(self):
+        key = "pl_test_" + "a" * 12
+        self._write_operations_index(key, 555)
+        self.assertTrue(bca._playlist_item_belongs_to_playlist(key, 555))
+
+    def test_item_belongs_to_playlist_false_for_unrelated_item(self):
+        key = "pl_test_" + "a" * 12
+        self._write_operations_index(key, 555)
+        self.assertFalse(bca._playlist_item_belongs_to_playlist(key, 999))
+
+    def test_item_belongs_to_playlist_false_for_different_playlist(self):
+        key_a = "pl_test_" + "a" * 12
+        key_b = "pl_test_" + "b" * 12
+        self._write_operations_index(key_a, 555)
+        self.assertFalse(bca._playlist_item_belongs_to_playlist(key_b, 555))
+
+    def test_item_belongs_to_playlist_false_when_no_state_exists(self):
+        self.assertFalse(bca._playlist_item_belongs_to_playlist("pl_test_" + "a" * 12, 555))
+
+    def test_item_belongs_to_playlist_rejects_invalid_key_format(self):
+        self.assertFalse(bca._playlist_item_belongs_to_playlist("../../etc", 555))
+        self.assertFalse(bca._playlist_item_belongs_to_playlist("", 555))
+
+    def test_item_belongs_to_playlist_ignores_non_imported_status(self):
+        key = "pl_test_" + "a" * 12
+        self._write_operations_index(key, 555, status="failed")
+        self.assertFalse(bca._playlist_item_belongs_to_playlist(key, 555))
 
 
 if __name__ == "__main__":

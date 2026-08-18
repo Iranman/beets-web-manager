@@ -95,7 +95,12 @@ class PlaylistBackendJobTests(unittest.TestCase):
         self.assertIn("def _playlist_repair_quality_candidate", app_source)
         self.assertIn("def _playlist_move_singleton_candidate", app_source)
         self.assertIn("move_singletons", app_source)
-        self.assertIn("beets-playlist-singleton-move", app_source)
+        # Wave 13: the singleton move subprocess invocation itself now runs
+        # engine-side (backend/beets_control_agent.py's
+        # /playlists/place-imported action=move_singleton); app.py only
+        # delegates to it via BeetsClient IPC.
+        self.assertIn("beets-playlist-singleton-move", combined_source)
+        self.assertIn("place_playlist_imported_item", app_source)
         self.assertIn("def _playlist_release_looks_like_track_single", app_source)
         self.assertIn("release title", app_source)
         self.assertIn("track_title_album", app_source)

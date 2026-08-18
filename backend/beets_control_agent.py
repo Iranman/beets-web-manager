@@ -857,6 +857,15 @@ PLAYLIST_IMPORT_MAX_REQUEST_BYTES = _env_int_clamped(
 PLAYLIST_IMPORT_MAX_TRACKS = _env_int_clamped(
     "BEETS_PLAYLIST_IMPORT_MAX_TRACKS", 100, minimum=1, maximum=500
 )
+PLAYLIST_STAGING_LIST_FILES_MAX = _env_int_clamped(
+    "BEETS_PLAYLIST_STAGING_LIST_FILES_MAX", 500, minimum=1, maximum=5000
+)
+# Matches the web-manager's PLAYLIST_MIN_DOWNLOAD_SECONDS acceptance-gate
+# default (app.py) so a track that is accepted on download is not
+# immediately re-flagged as a too-short "preview" by the quality scanner.
+PLAYLIST_QUALITY_PREVIEW_THRESHOLD_SECONDS = _env_int_clamped(
+    "PLAYLIST_MIN_DOWNLOAD_SECONDS", 45, minimum=0, maximum=3600
+)
 PLAYLIST_IMPORT_MAX_TIMEOUT_SECONDS = _env_int_clamped(
     "BEETS_PLAYLIST_IMPORT_MAX_TIMEOUT_SECONDS", 900, minimum=60, maximum=3600
 )
@@ -963,6 +972,47 @@ def _playlist_import_write_state(state_path: Path, state: dict[str, Any]) -> Non
             os.close(dir_fd)
     except Exception:
         pass
+
+
+def _playlist_item_belongs_to_playlist(playlist_key: str, item_id: int) -> bool:
+    """Authorization gate for /playlists/place-imported: confirm item_id was
+    actually imported as part of a playlist-import operation recorded under
+    this playlist_key, before permitting any mutation or move.
+
+    Without this check, any caller who can reach the engine's HTTP API with
+    a bare item_id could rewrite metadata and move the file for ANY item in
+    the library, not just items that belong to a playlist import -- there
+    was previously no association at all between the item_id in the
+    request body and the playlist_key also in the request body. Reuses the
+    existing playlist-import operation-state index (SEC-002 Wave 12/13)
+    rather than adding a new tracking mechanism.
+    """
+    if not _valid_playlist_key(playlist_key) or item_id <= 0:
+        return False
+    try:
+        operations_root = _playlist_import_operations_root()
+        index_path = _playlist_import_operations_index_path(operations_root)
+        index_state = _playlist_import_read_state(index_path)
+    except (UnsafePathError, OSError, ValueError):
+        return False
+    operations = index_state.get("operations") if isinstance(index_state.get("operations"), dict) else {}
+    for op_state in operations.values():
+        if not isinstance(op_state, dict):
+            continue
+        if str(op_state.get("playlist_key") or "") != playlist_key:
+            continue
+        tracks = op_state.get("tracks") if isinstance(op_state.get("tracks"), dict) else {}
+        for track_row in tracks.values():
+            if not isinstance(track_row, dict):
+                continue
+            if track_row.get("status") not in ("imported", "already_imported"):
+                continue
+            try:
+                if int(track_row.get("item_id") or 0) == item_id:
+                    return True
+            except (TypeError, ValueError):
+                continue
+    return False
 
 
 def _read_engine_media_tags(path: Path) -> dict[str, Any]:
@@ -1154,12 +1204,18 @@ def _playlist_import_identity_ok(path: Path, item: dict[str, Any]) -> tuple[bool
     }
 
 
-def _verify_imported_track_in_library(item: dict[str, Any]) -> bool:
+def _verify_imported_track_in_library(item: dict[str, Any]) -> Optional[int]:
+    """Confirm the imported track landed in the Beets library and return its
+    item id (or None if it can't be confirmed). The returned id is
+    persisted into the playlist import operation state so later playlist
+    operations (e.g. /playlists/place-imported) can verify an item_id
+    actually belongs to the playlist operation that imported it, instead of
+    trusting a bare caller-supplied item_id."""
     mb_trackid = str(item.get("mb_trackid") or "").strip()
     if not mb_trackid:
-        return False
+        return None
     if not os.path.exists(LIB_PATH):
-        return False
+        return None
     try:
         conn = sqlite3.connect(LIB_PATH)
         try:
@@ -1167,11 +1223,11 @@ def _verify_imported_track_in_library(item: dict[str, Any]) -> bool:
                 "SELECT id FROM items WHERE mb_trackid = ? LIMIT 1",
                 (mb_trackid,),
             ).fetchone()
-            return row is not None
+            return int(row[0]) if row else None
         finally:
             conn.close()
     except Exception:
-        return False
+        return None
 
 
 def _import_source_signature(entries: list[dict[str, Any]]) -> str:
@@ -2927,7 +2983,7 @@ def _engine_playlist_quality_cleanup_candidates(con: sqlite3.Connection,
                                                 item_ids: Optional[list[int]] = None,
                                                 filter_mode: str = "all") -> list[dict[str, Any]]:
     mode = str(filter_mode or "all").strip().lower()
-    threshold = 180
+    threshold = PLAYLIST_QUALITY_PREVIEW_THRESHOLD_SECONDS
     preview_paths = (
         "(path LIKE '%Playlist Downloads%' OR path LIKE 'Compilations/%' "
         "OR path LIKE 'Non-Album/%' OR path LIKE '%/Non-Album/%' "
@@ -4668,8 +4724,10 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 for entry in valid_entries:
                     track_id = entry["track_id"]
                     if res.returncode < 2:
-                        if _verify_imported_track_in_library(entry):
+                        verified_item_id = _verify_imported_track_in_library(entry)
+                        if verified_item_id:
                             entry["status"] = "imported"
+                            entry["item_id"] = verified_item_id
                             verified_count += 1
                             imported_count += 1
                         else:
@@ -4741,20 +4799,31 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 self._send_json(403, {"error": "Playlist staging path is not safe", "error_code": "playlist_staging_symlink"})
                 return
 
+            # Scope is intentionally just "downloads": that is the pre-import
+            # staging area this endpoint exists to inventory (see
+            # _playlist_reusable_download_files in the web manager). Walking
+            # the playlist root itself was both redundant (it double-listed
+            # everything already under downloads/) and overbroad (it would
+            # also surface files under imports/ and the operation-state
+            # index, which are not reusable pre-import downloads).
+            search_dir = safe_playlist_staging / "downloads"
             files = []
             audio_exts = set(_import_source_audio_extensions())
-            search_dirs = [safe_playlist_staging / "downloads", safe_playlist_staging]
             seen_paths = set()
+            truncated = False
 
-            for sdir in search_dirs:
-                if not sdir.exists() or not sdir.is_dir():
-                    continue
-                try:
-                    for root_dir, dirs, filenames in os.walk(str(sdir)):
+            lock_file = acquire_os_lock(read_only=True)
+            try:
+                if search_dir.exists() and search_dir.is_dir():
+                    for root_dir, dirs, filenames in os.walk(str(search_dir)):
                         root_path = Path(root_dir)
                         if _path_has_symlink_component(root_path, staging_root):
+                            dirs[:] = []
                             continue
                         for fn in filenames:
+                            if len(files) >= PLAYLIST_STAGING_LIST_FILES_MAX:
+                                truncated = True
+                                break
                             fp = root_path / fn
                             if fp.suffix.lower() not in audio_exts:
                                 continue
@@ -4766,22 +4835,25 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                             seen_paths.add(str_path)
                             try:
                                 st = fp.stat()
-                                files.append({
-                                    "path": str_path,
-                                    "filename": fn,
-                                    "size": int(st.st_size),
-                                    "mtime": float(st.st_mtime),
-                                })
                             except OSError:
                                 continue
-                except Exception:
-                    pass
+                            files.append({
+                                "path": str_path,
+                                "filename": fn,
+                                "size": int(st.st_size),
+                                "mtime": float(st.st_mtime),
+                            })
+                        if truncated:
+                            break
+            finally:
+                release_os_lock(lock_file)
 
             self._send_json(200, {
                 "ok": True,
                 "playlist_key": playlist_key,
                 "playlist_id": playlist_id,
                 "files": files,
+                "truncated": truncated,
             })
             return
 
@@ -4876,8 +4948,8 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                     self._send_json(200, {"ok": True, "candidates": candidates})
                 finally:
                     con.close()
-            except Exception as exc:
-                self._send_json(500, {"error": f"Failed to fetch quality candidates: {exc}"})
+            except Exception:
+                self._send_json(500, {"error": "Failed to fetch quality candidates"})
             finally:
                 release_os_lock(lock_file)
             return
@@ -4889,8 +4961,22 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             placement = body.get("placement") if isinstance(body.get("placement"), dict) else {}
             action = str(body.get("action") or "repair").strip().lower()
 
+            if not _valid_playlist_key(playlist_key):
+                self._send_json(400, {"error": "Invalid or missing playlist_key", "error_code": "invalid_playlist_key"})
+                return
             if item_id <= 0:
                 self._send_json(400, {"error": "Invalid item_id"})
+                return
+            # Authorization: item_id must belong to a playlist-import
+            # operation recorded under this exact playlist_key. Without
+            # this, any caller could mutate/move an arbitrary library item
+            # by supplying an unrelated item_id alongside a playlist_key it
+            # has no real relationship to.
+            if not _playlist_item_belongs_to_playlist(playlist_key, item_id):
+                self._send_json(403, {
+                    "error": f"Item {item_id} was not imported as part of playlist {playlist_key}",
+                    "error_code": "item_not_in_playlist",
+                })
                 return
 
             lock_file = acquire_os_lock(read_only=False)
@@ -4906,7 +4992,17 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                         return
 
                     old_path_text = str(item_row["path"] if hasattr(item_row, "keys") and "path" in item_row.keys() else item_row[6])
-                    
+
+                    # Back up the Beets DB before any mutation, matching the
+                    # rollback/audit guarantee the web-manager side used to
+                    # provide before this mutation moved into the engine.
+                    backup_path = f"{LIB_PATH}.bak-{int(time.time())}-playlist-place-{item_id}"
+                    try:
+                        shutil.copy2(LIB_PATH, backup_path)
+                    except Exception:
+                        self._send_json(500, {"error": "Could not back up Beets library database before placement"})
+                        return
+
                     if action == "move_singleton":
                         job_cfg = f"/tmp/beets-playlist-singleton-move-{item_id}-{uuid.uuid4().hex}.yaml"
                         cfg = _write_playlist_import_beets_config(job_cfg)
@@ -4922,10 +5018,15 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                         cur.execute("SELECT path FROM items WHERE id = ?", (item_id,))
                         new_row = cur.fetchone()
                         new_path_text = str(new_row["path"]) if new_row else ""
-                        moved = bool(new_path_text and new_path_text.replace("\\", "/").lower() != old_path_text.replace("\\", "/").lower())
+                        moved = bool(
+                            res.returncode < 2
+                            and new_path_text
+                            and new_path_text.replace("\\", "/").lower() != old_path_text.replace("\\", "/").lower()
+                        )
                         self._send_json(200, {
                             "ok": True,
                             "moved": moved,
+                            "backup": backup_path,
                             "old_path": old_path_text,
                             "new_path": new_path_text,
                             "returncode": res.returncode,
@@ -4963,11 +5064,22 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                     cur.execute("SELECT path FROM items WHERE id = ?", (item_id,))
                     new_row = cur.fetchone()
                     new_path_text = str(new_row["path"]) if new_row else ""
-                    repaired = proc_m.returncode < 2 and bool(new_path_text)
+                    # Both the tag write and the file move must succeed for
+                    # this to count as "repaired" -- a failed write with a
+                    # successful move previously still reported
+                    # repaired=true, leaving stale/incorrect tags on a
+                    # relocated file with no indication anything was wrong.
+                    repaired = proc_w.returncode < 2 and proc_m.returncode < 2 and bool(new_path_text)
+                    reason = "" if repaired else (
+                        f"beet write failed rc={proc_w.returncode}" if proc_w.returncode >= 2
+                        else f"beet move failed rc={proc_m.returncode}" if proc_m.returncode >= 2
+                        else "final path could not be verified after move"
+                    )
 
-                    self._send_json(200, {
+                    response = {
                         "ok": True,
                         "repaired": repaired,
+                        "backup": backup_path,
                         "item_id": item_id,
                         "old_path": old_path_text,
                         "new_path": new_path_text,
@@ -4976,11 +5088,15 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                         "album": album,
                         "albumartist": albumartist,
                         "returncode": proc_m.returncode,
-                    })
+                        "write_returncode": proc_w.returncode,
+                    }
+                    if reason:
+                        response["reason"] = reason
+                    self._send_json(200, response)
                 finally:
                     con.close()
-            except Exception as exc:
-                self._send_json(500, {"error": f"Failed to place item {item_id}: {exc}"})
+            except Exception:
+                self._send_json(500, {"error": f"Failed to place item {item_id}"})
             finally:
                 release_os_lock(lock_file)
             return

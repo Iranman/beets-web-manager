@@ -316,17 +316,24 @@ class PlaylistPipelineTests(unittest.TestCase):
         self.assertIn("review_required", APP_SOURCE)
 
     def test_release_group_drives_album_reuse_and_beets_path(self):
+        # Wave 13: album placement mutations moved into the engine
+        # (backend/beets_control_agent.py); _playlist_find_or_create_album_row
+        # is now bounded by the next helper that follows it in app.py rather
+        # than by _playlist_apply_album_placement, which precedes it.
         find_start = APP_SOURCE.index("def _playlist_find_or_create_album_row")
-        find_end = APP_SOURCE.index("def _playlist_apply_album_placement", find_start)
+        find_end = APP_SOURCE.index("def _playlist_repair_quality_candidate", find_start)
         find_source = APP_SOURCE[find_start:find_end]
         self.assertLess(find_source.index("if mb_releasegroupid"), find_source.index("if not row and mb_albumid"))
         self.assertIn("$mb_releasegroupid", APP_SOURCE)
-        self.assertIn('"mb_releasegroupid": placement.get("mb_releasegroupid", "")', COMBINED_SOURCE)
+        # Wave 13: the actual mb_releasegroupid/mb_albumartistid -> UPDATE
+        # items mutation now happens engine-side in
+        # /playlists/place-imported (backend/beets_control_agent.py).
+        self.assertIn('mb_releasegroupid = str(placement.get("mb_releasegroupid") or "").strip()', COMBINED_SOURCE)
+        self.assertIn('mb_albumartistid = str(placement.get("mb_albumartistid") or "").strip()', COMBINED_SOURCE)
         singleton_line = next(line for line in COMBINED_SOURCE.splitlines() if "_SINGLE_TRACK_PATH_TEMPLATE" in line)
         self.assertIn("_ARTIST_FOLDER_PATH_TEMPLATE", singleton_line)
         self.assertIn("$mb_releasegroupid", singleton_line)
         self.assertNotIn("$mb_albumid", singleton_line)
-        self.assertIn('"mb_albumartistid": placement.get("mb_albumartistid", "")', COMBINED_SOURCE)
 
     def test_playlist_import_final_path_validation_requires_album_artist_folder(self):
         rgid = "511eea39-083a-4741-ae35-5a4d686ca2a6"
@@ -387,7 +394,13 @@ class PlaylistPipelineTests(unittest.TestCase):
         self.assertIn("Missing album artist for release group ID", APP_SOURCE)
         self.assertIn("mb_albumartistid", resolve_source)
         self.assertIn('"review_required"', APP_SOURCE)
-        self.assertIn("Final path failed validation because", COMBINED_SOURCE)
+        # Wave 13: _playlist_validate_final_album_path still exists and is
+        # exercised directly (see
+        # test_playlist_import_final_path_validation_requires_album_artist_folder),
+        # but its caller is now the engine-side placement path rather than a
+        # local _playlist_apply_album_placement mutation, so the specific
+        # "Final path failed validation because" log line it used to emit
+        # from app.py is no longer produced there.
         self.assertIn("_playlist_validate_final_album_path", APP_SOURCE)
 
     def test_download_and_import_are_idempotent_at_their_boundaries(self):
@@ -407,10 +420,19 @@ class PlaylistPipelineTests(unittest.TestCase):
         self.assertIn("status_code = 409", APP_SOURCE)
 
     def test_playlist_import_placement_uses_short_retryable_db_writes(self):
+        # Wave 13: album placement mutation moved from a local, retried
+        # SQLite write in app.py to a single engine-owned write inside
+        # /playlists/place-imported (backend/beets_control_agent.py), guarded
+        # by acquire_os_lock rather than _sqlite_write_retry. app.py's
+        # _playlist_apply_album_placement must delegate via BeetsClient IPC
+        # and must not perform the SQLite write itself.
         apply_start = APP_SOURCE.index("def _playlist_apply_album_placement")
-        apply_end = APP_SOURCE.index("def _playlist_repair_quality_candidate", apply_start)
+        apply_end = APP_SOURCE.index("def _playlist_find_or_create_album_row", apply_start)
         apply_source = APP_SOURCE[apply_start:apply_end]
-        self.assertIn("_sqlite_write_retry", apply_source)
+        self.assertNotIn("_sqlite_write_retry", apply_source)
+        self.assertIn("beets_client.place_playlist_imported_item", apply_source)
+        self.assertIn("acquire_os_lock(read_only=False)", AGENT_SOURCE)
+        self.assertIn('if path == "/playlists/place-imported":', AGENT_SOURCE)
 
     def test_playlist_pipeline_record_clears_stale_errors_on_success(self):
         record_start = APP_SOURCE.index("def _playlist_record_pipeline")
