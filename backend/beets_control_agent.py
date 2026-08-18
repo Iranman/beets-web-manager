@@ -25,6 +25,7 @@ import tempfile
 import threading
 import time
 import urllib.parse
+import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
@@ -913,6 +914,8 @@ def _safe_playlist_import_error(status: str) -> str:
         "staged_track_missing": "Staged track is missing.",
         "invalid_track_id": "Track identifier is invalid.",
         "identity_mismatch": "Staged track metadata does not match the expected track.",
+        "review_required": "Staged track identity could not be confirmed by fingerprint; review is required.",
+        "identity_verification_unavailable": "Deterministic audio identity verification is currently unavailable.",
         "tag_write_failed": "Could not safely prepare staged track metadata for import.",
         "import_failed": "Beets import failed.",
         "operation_state_corrupt": "Playlist import operation state is corrupt.",
@@ -982,10 +985,129 @@ def _norm_import_text(value: object) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip()).casefold()
 
 
+def _import_text_similarity(expected: str, candidate: str) -> float:
+    """Bounded, conservative text similarity in [0, 1]. Deliberately simple
+    (exact match after normalization, or one containing the other) rather
+    than importing app.py's richer fuzzy scorers -- this module is a
+    standalone engine script with no app.py/Flask coupling (see the
+    audio_preferences import fallback above)."""
+    a, b = _norm_import_text(expected), _norm_import_text(candidate)
+    if not a or not b:
+        return 0.0
+    if a == b:
+        return 1.0
+    if a in b or b in a:
+        return 0.85
+    return 0.0
+
+
+_PLAYLIST_ACOUSTID_LOOKUP_LOCK = threading.Lock()
+_PLAYLIST_ACOUSTID_NEXT_LOOKUP_AT = 0.0
+try:
+    _PLAYLIST_ACOUSTID_MIN_INTERVAL_SECONDS = max(
+        0.0, float(os.environ.get("ACOUSTID_MIN_INTERVAL_SECONDS", "0.35") or "0.35")
+    )
+except Exception:
+    _PLAYLIST_ACOUSTID_MIN_INTERVAL_SECONDS = 0.35
+
+
+def _playlist_import_fpcalc_available() -> bool:
+    return bool(shutil.which("fpcalc") or Path("/usr/bin/fpcalc").exists())
+
+
+def _engine_acoustid_lookup(path: Path) -> Optional[list[dict[str, Any]]]:
+    """Run fpcalc + an AcoustID API lookup entirely engine-side (mirrors
+    helpers_mb.py's _acoustid_lookup() output shape/policy -- AcoustID
+    fingerprint evidence is this project's primary deterministic
+    track-identity verification, tags are supporting evidence only).
+    Returns None on a lookup-level failure (network/API error, distinct
+    from "ran fine, no candidates found" which returns []), so the caller
+    can tell "verification failed to run" apart from "verification ran and
+    found nothing" -- both must fail closed, but for different reasons."""
+    fpcalc = shutil.which("fpcalc") or "/usr/bin/fpcalc"
+    if not Path(fpcalc).exists():
+        return None
+    try:
+        r = subprocess.run([fpcalc, "-json", str(path)], capture_output=True, text=True, timeout=30)
+        if r.returncode != 0 or not r.stdout.strip():
+            return None
+        fp_data = json.loads(r.stdout)
+        duration = int(fp_data.get("duration") or 0)
+        fingerprint = str(fp_data.get("fingerprint") or "").strip()
+        if not fingerprint or duration < 5:
+            return None
+    except Exception:
+        return None
+
+    aid_key = os.environ.get("ACOUSTID_API_KEY") or "8XaBELgH"
+    params = urllib.parse.urlencode({
+        "client": aid_key,
+        "meta": "recordings releases releasegroups",
+        "duration": duration,
+        "fingerprint": fingerprint,
+        "format": "json",
+    })
+    req = urllib.request.Request(
+        f"https://api.acoustid.org/v2/lookup?{params}",
+        headers={"User-Agent": "BeetsWebManager-Engine/1.0"},
+    )
+    data: dict[str, Any] = {}
+    got_response = False
+    for attempt in range(2):
+        try:
+            with _PLAYLIST_ACOUSTID_LOOKUP_LOCK:
+                global _PLAYLIST_ACOUSTID_NEXT_LOOKUP_AT
+                now = time.monotonic()
+                if _PLAYLIST_ACOUSTID_NEXT_LOOKUP_AT > now:
+                    time.sleep(_PLAYLIST_ACOUSTID_NEXT_LOOKUP_AT - now)
+                _PLAYLIST_ACOUSTID_NEXT_LOOKUP_AT = time.monotonic() + _PLAYLIST_ACOUSTID_MIN_INTERVAL_SECONDS
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read())
+            got_response = True
+            break
+        except Exception:
+            if attempt >= 1:
+                return None
+            time.sleep(1.0)
+    if not got_response or data.get("status") != "ok":
+        return None
+
+    out: list[dict[str, Any]] = []
+    seen_mbids: set = set()
+    for result in (data.get("results") or [])[:5]:
+        try:
+            confidence = int(round((result.get("score") or 0) * 100))
+        except Exception:
+            confidence = 0
+        acoustid_id = str(result.get("id") or "")
+        for rec in (result.get("recordings") or [])[:3]:
+            mb_id = str(rec.get("id") or "")
+            if not mb_id or mb_id in seen_mbids:
+                continue
+            seen_mbids.add(mb_id)
+            out.append({
+                "score": confidence,
+                "acoustid_id": acoustid_id,
+                "mb_trackid": mb_id,
+                "title": str(rec.get("title") or ""),
+                "artist": " / ".join(a.get("name", "") for a in (rec.get("artists") or [])),
+            })
+    return out
+
+
 def _playlist_import_identity_ok(path: Path, item: dict[str, Any]) -> tuple[bool, str, dict[str, Any]]:
+    """Deterministic pre-import identity gate. AcoustID fingerprint
+    evidence is required to authorize import; embedded tags are used only
+    as a fast-fail conflict pre-check (tags are mutable, attacker/user-
+    controlled metadata -- matching tags alone never authorizes import,
+    only fingerprint evidence does). This is evaluated on the *original*
+    staged source, before any tag is written onto it, so the evidence is
+    never self-fulfilling: the engine cannot verify a value it wrote
+    itself (SEC-002 Wave 12 second final review)."""
     expected_mbid = str(item.get("mb_trackid") or "").strip()
     expected_artist = str(item.get("artist") or "").strip()
     expected_title = str(item.get("title") or "").strip()
+
     tags = _read_engine_media_tags(path)
     actual_mbid = str(tags.get("mb_trackid") or "").strip()
     if expected_mbid and actual_mbid and actual_mbid != expected_mbid:
@@ -996,9 +1118,39 @@ def _playlist_import_identity_ok(path: Path, item: dict[str, Any]) -> tuple[bool
     if expected_artist and tags.get("artist"):
         if _norm_import_text(tags.get("artist")) != _norm_import_text(expected_artist):
             return False, "identity_mismatch", {"artist": tags.get("artist", "")}
-    return True, "verified" if tags else "metadata_unavailable", {
-        key: tags.get(key, "") for key in ("title", "artist", "album", "albumartist", "year", "mb_trackid")
-        if tags.get(key) not in ("", 0, None)
+
+    if not _playlist_import_fpcalc_available():
+        return False, "identity_verification_unavailable", {"reason": "fpcalc_unavailable"}
+
+    candidates = _engine_acoustid_lookup(path)
+    if candidates is None:
+        return False, "identity_verification_unavailable", {"reason": "acoustid_lookup_failed"}
+    if not candidates:
+        return False, "review_required", {"reason": "no_acoustid_result"}
+
+    confirmed: Optional[dict[str, Any]] = None
+    for cand in candidates:
+        cand_mbid = str(cand.get("mb_trackid") or "").strip().lower()
+        mbid_ok = bool(expected_mbid and cand_mbid and cand_mbid == expected_mbid.lower())
+        title_ok = bool(expected_title and _import_text_similarity(expected_title, cand.get("title", "")) >= 0.78)
+        artist_ok = bool(
+            not expected_artist
+            or _import_text_similarity(expected_artist, cand.get("artist", "")) >= 0.6
+        )
+        if mbid_ok or (title_ok and artist_ok):
+            confirmed = cand
+            break
+
+    if not confirmed:
+        return False, "identity_mismatch", {
+            "reason": "acoustid_no_matching_candidate",
+            "top_candidate_mb_trackid": candidates[0].get("mb_trackid", ""),
+        }
+
+    return True, "verified", {
+        "mb_trackid": confirmed.get("mb_trackid", ""),
+        "acoustid_id": confirmed.get("acoustid_id", ""),
+        "acoustid_score": confirmed.get("score", 0),
     }
 
 

@@ -264,6 +264,137 @@ class Wave12EngineImportHandoffTests(unittest.TestCase):
         self.assertEqual(beets_calls, [])
         self.assertTrue(staged.exists())
 
+    # -- SEC-002 Wave 12 second final review: circular/bypassable identity
+    # verification correction. _playlist_import_identity_ok() previously
+    # only checked for *conflicting* tags, so completely untagged audio
+    # (or audio with tags forged to match) passed with zero deterministic
+    # verification, and the engine's own post-import DB check merely
+    # confirmed a tag the engine itself had just written moments earlier.
+    # These tests exercise the corrected function directly. ---------------
+
+    def test_untagged_wrong_audio_is_not_authorized_without_fingerprint_match(self):
+        """Completely untagged audio must not be accepted just because
+        there is no tag to conflict with -- AcoustID fingerprint evidence
+        is now required, and here it finds nothing resembling the
+        expected track."""
+        staged = self.staging_dir / "untagged.mp3"
+        staged.write_bytes(b"totally different audio content, no tags")
+        with mock.patch.object(beets_control_agent, "_read_engine_media_tags", return_value={}), \
+             mock.patch.object(beets_control_agent, "_playlist_import_fpcalc_available", return_value=True), \
+             mock.patch.object(beets_control_agent, "_engine_acoustid_lookup", return_value=[]):
+            ok, status, evidence = beets_control_agent._playlist_import_identity_ok(staged, {
+                "artist": "Expected Artist", "title": "Expected Title", "mb_trackid": "expected-mbid-0001",
+            })
+        self.assertFalse(ok)
+        self.assertNotEqual(status, "verified")
+        self.assertNotIn(status, ("metadata_unavailable",), "must not accept solely because tags are absent")
+
+    def test_forged_matching_tags_do_not_bypass_fingerprint_verification(self):
+        """Wrong audio deliberately tagged with the exact expected
+        artist/title/mb_trackid must still be rejected once fingerprint
+        evidence identifies a different recording -- matching tags alone
+        must never be sufficient authority."""
+        staged = self.staging_dir / "forged.mp3"
+        staged.write_bytes(b"wrong audio content with forged tags")
+        with mock.patch.object(beets_control_agent, "_read_engine_media_tags", return_value={
+            "artist": "Expected Artist", "title": "Expected Title", "mb_trackid": "expected-mbid-0001",
+        }), \
+             mock.patch.object(beets_control_agent, "_playlist_import_fpcalc_available", return_value=True), \
+             mock.patch.object(beets_control_agent, "_engine_acoustid_lookup", return_value=[
+                 {"score": 92, "acoustid_id": "aid-x", "mb_trackid": "totally-different-mbid",
+                  "title": "Unrelated Song", "artist": "Unrelated Artist"},
+             ]):
+            ok, status, evidence = beets_control_agent._playlist_import_identity_ok(staged, {
+                "artist": "Expected Artist", "title": "Expected Title", "mb_trackid": "expected-mbid-0001",
+            })
+        self.assertFalse(ok, "forged tags matching the expected track must not authorize import")
+        self.assertEqual(status, "identity_mismatch")
+
+    def test_acoustid_unavailable_requires_review_not_silent_accept(self):
+        """If fpcalc/AcoustID is unavailable, the track must not be
+        silently treated as verified -- it must fail closed."""
+        staged = self.staging_dir / "no-fpcalc.mp3"
+        staged.write_bytes(b"audio")
+        with mock.patch.object(beets_control_agent, "_read_engine_media_tags", return_value={}), \
+             mock.patch.object(beets_control_agent, "_playlist_import_fpcalc_available", return_value=False):
+            ok, status, evidence = beets_control_agent._playlist_import_identity_ok(staged, {
+                "artist": "Expected Artist", "title": "Expected Title", "mb_trackid": "expected-mbid-0001",
+            })
+        self.assertFalse(ok)
+        self.assertEqual(status, "identity_verification_unavailable")
+
+    def test_acoustid_lookup_error_requires_review_not_silent_accept(self):
+        """A network/API-level AcoustID failure (distinct from "ran fine,
+        found nothing") must also fail closed, not be treated as verified."""
+        staged = self.staging_dir / "api-error.mp3"
+        staged.write_bytes(b"audio")
+        with mock.patch.object(beets_control_agent, "_read_engine_media_tags", return_value={}), \
+             mock.patch.object(beets_control_agent, "_playlist_import_fpcalc_available", return_value=True), \
+             mock.patch.object(beets_control_agent, "_engine_acoustid_lookup", return_value=None):
+            ok, status, evidence = beets_control_agent._playlist_import_identity_ok(staged, {
+                "artist": "Expected Artist", "title": "Expected Title", "mb_trackid": "expected-mbid-0001",
+            })
+        self.assertFalse(ok)
+        self.assertEqual(status, "identity_verification_unavailable")
+
+    def test_correct_audio_with_genuine_fingerprint_match_is_authorized(self):
+        """The positive case: real AcoustID evidence confirming the
+        expected recording must still authorize import."""
+        staged = self.staging_dir / "correct.mp3"
+        staged.write_bytes(b"correct audio content")
+        with mock.patch.object(beets_control_agent, "_read_engine_media_tags", return_value={}), \
+             mock.patch.object(beets_control_agent, "_playlist_import_fpcalc_available", return_value=True), \
+             mock.patch.object(beets_control_agent, "_engine_acoustid_lookup", return_value=[
+                 {"score": 95, "acoustid_id": "aid-y", "mb_trackid": "expected-mbid-0001",
+                  "title": "Expected Title", "artist": "Expected Artist"},
+             ]):
+            ok, status, evidence = beets_control_agent._playlist_import_identity_ok(staged, {
+                "artist": "Expected Artist", "title": "Expected Title", "mb_trackid": "expected-mbid-0001",
+            })
+        self.assertTrue(ok, status)
+        self.assertEqual(status, "verified")
+        self.assertEqual(evidence.get("mb_trackid"), "expected-mbid-0001")
+
+    def test_post_import_verification_is_not_circular(self):
+        """End-to-end through the real endpoint: the expected mb_trackid is
+        only written to the file (and later found in the Beets DB) after
+        AcoustID has already independently confirmed the *original,
+        untouched* staged source matches -- the DB check is a postcondition
+        on already-established evidence, not the evidence itself."""
+        pid, key = self._playlist("Circularity Check")
+        staged = self._staged_file(key, "track.mp3", b"genuinely correct audio bytes")
+        payload = {
+            "playlist_key": key,
+            "playlist_id": pid,
+            "operation_id": "pl-import-circularity-check",
+            "tracks": [{
+                "track_id": "tr_1",
+                "staged_path": str(staged),
+                "artist": "Expected Artist",
+                "title": "Expected Title",
+                "mb_trackid": "expected-mbid-0001",
+            }],
+        }
+        acoustid_calls = []
+
+        def fake_lookup(path):
+            # Must be called on the *original* source, before any tag is
+            # written -- prove it by checking no mb_trackid tag exists yet.
+            acoustid_calls.append(path)
+            return [{"score": 95, "acoustid_id": "aid-z", "mb_trackid": "expected-mbid-0001",
+                     "title": "Expected Title", "artist": "Expected Artist"}]
+
+        with mock.patch.object(beets_control_agent, "_read_engine_media_tags", return_value={}), \
+             mock.patch.object(beets_control_agent, "_playlist_import_fpcalc_available", return_value=True), \
+             mock.patch.object(beets_control_agent, "_engine_acoustid_lookup", side_effect=fake_lookup), \
+             mock.patch.object(beets_control_agent.subprocess, "run",
+                                return_value=mock.Mock(returncode=0, stdout="", stderr="")), \
+             mock.patch.object(beets_control_agent, "_verify_imported_track_in_library", return_value=True):
+            code, data = _post_agent("/playlists/import-staged", payload)
+        self.assertEqual(code, 200, data)
+        self.assertTrue(data.get("ok"), data)
+        self.assertEqual(len(acoustid_calls), 1, "fingerprint lookup must run exactly once, before any mutation")
+
     def test_missing_source_without_history_is_not_completed(self):
         pid, key = self._playlist()
         missing = self.staging_dir / key / "downloads" / "missing.mp3"
@@ -294,6 +425,7 @@ class Wave12EngineImportHandoffTests(unittest.TestCase):
             "tracks": [{"track_id": "tr_1", "staged_path": str(staged)}],
         }
         with mock.patch.object(beets_control_agent.subprocess, "run", side_effect=fake_run), \
+             mock.patch.object(beets_control_agent, "_playlist_import_identity_ok", return_value=(True, "verified", {})), \
              mock.patch.object(beets_control_agent, "_verify_imported_track_in_library", return_value=True):
             code, first = _post_agent("/playlists/import-staged", payload)
             self.assertEqual(code, 200, first)
@@ -322,6 +454,7 @@ class Wave12EngineImportHandoffTests(unittest.TestCase):
             "tracks": [{"track_id": "tr_1", "staged_path": str(staged)}],
         }
         with mock.patch.object(beets_control_agent.subprocess, "run", return_value=mock.Mock(returncode=0, stdout="", stderr="")), \
+             mock.patch.object(beets_control_agent, "_playlist_import_identity_ok", return_value=(True, "verified", {})), \
              mock.patch.object(beets_control_agent, "_verify_imported_track_in_library", return_value=True):
             code, first = _post_agent("/playlists/import-staged", first_payload)
         self.assertEqual(code, 200, first)
@@ -350,6 +483,7 @@ class Wave12EngineImportHandoffTests(unittest.TestCase):
             "tracks": [{"track_id": "tr_1", "staged_path": str(staged)}],
         }
         with mock.patch.object(beets_control_agent.subprocess, "run", side_effect=fake_run), \
+             mock.patch.object(beets_control_agent, "_playlist_import_identity_ok", return_value=(True, "verified", {})), \
              mock.patch.object(beets_control_agent, "_verify_imported_track_in_library", return_value=True):
             code, first = _post_agent("/playlists/import-staged", payload)
             self.assertEqual(code, 200, first)
@@ -376,6 +510,7 @@ class Wave12EngineImportHandoffTests(unittest.TestCase):
             return mock.Mock(returncode=0, stdout="", stderr="")
 
         with mock.patch.object(beets_control_agent.subprocess, "run", side_effect=fake_run), \
+             mock.patch.object(beets_control_agent, "_playlist_import_identity_ok", return_value=(True, "verified", {})), \
              mock.patch.object(beets_control_agent, "_verify_imported_track_in_library", return_value=True):
             code, data = _post_agent("/playlists/import-staged", {
                 "playlist_key": key,
