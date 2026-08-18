@@ -456,6 +456,8 @@ class MatchingDecision:
         action_allowed = bool(self.decision.get("action_allowed", False))
         reason_code = _s(self.decision.get("reason_code") or self.decision.get("safety_key") or "review_required")
         explanation = _s(self.decision.get("explanation") or self.decision.get("reason") or self.decision.get("eligibility_reason") or "")
+        safety_key = _s(self.decision.get("safety_key") or "review")
+        safety_result = _s(self.decision.get("safety_result") or "Needs review")
 
         return {
             "contract_version": 2,
@@ -477,6 +479,8 @@ class MatchingDecision:
             "action_allowed": action_allowed,
             "reason_code": reason_code,
             "explanation": explanation,
+            "safety_key": safety_key,
+            "safety_result": safety_result,
         }
 
     def to_review_recording_candidate(self) -> Dict[str, Any]:
@@ -1197,7 +1201,9 @@ def build_album_matching_decision(
     matched_count = 0
     used_mb_tracks: set[int] = set()
 
+    deterministic_track_proof = False
     if item_list and track_list:
+        deterministic_track_matches = 0
         for item in item_list:
             item_title = _s(item.get("title"))
             item_track = int(item.get("track") or 0)
@@ -1215,6 +1221,7 @@ def build_album_matching_decision(
                 if item_mbid and trk_mbid and item_mbid == trk_mbid:
                     best_idx = idx
                     best_score = 1.0
+                    deterministic_track_matches += 1
                     break
 
                 s = similarity(item_title, trk_title) if item_title and trk_title else 0.0
@@ -1227,6 +1234,8 @@ def build_album_matching_decision(
             if best_idx >= 0 and best_score >= 0.70:
                 used_mb_tracks.add(best_idx)
                 matched_count += 1
+
+        deterministic_track_proof = bool(deterministic_track_matches > 0 and deterministic_track_matches == len(item_list))
 
         if len(item_list) > 0:
             if matched_count == 0:
@@ -1247,11 +1256,10 @@ def build_album_matching_decision(
 
     # --- Local Identity Verification Proof ---
     local_rgid_matched = bool(candidate_rg_id and local_rg_id and candidate_rg_id == local_rg_id)
-    strong_track_alignment = bool(item_list and matched_count == len(item_list) and not conflicts)
     identity_verified = bool(
         candidate_rg_id
         and not conflicts
-        and (local_rgid_matched or strong_track_alignment)
+        and (local_rgid_matched or deterministic_track_proof)
     )
 
     # --- Fail-Closed Decision Flags ---
@@ -1325,7 +1333,7 @@ def build_album_matching_decision(
     }
 
     return MatchingDecision(
-        input={"current_album": current},
+        input={"current": current, "current_album": current, "candidate": candidate},
         identity=identity_payload,
         evidence=evidence_payload,
         ai=ai_payload,

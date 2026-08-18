@@ -6225,10 +6225,46 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
         and source_match_ratio >= 1.0
     ):
         gate_ok = True
+    local_album_title = ""
+    local_artist_name = result.get("folder_artist") or ""
+    local_rgid = ""
+
+    if existing_album_id:
+        try:
+            with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:
+                arow = con.execute("SELECT album, albumartist, mb_releasegroupid FROM albums WHERE id=?", (existing_album_id,)).fetchone()
+                if arow:
+                    local_album_title = _s(arow["album"])
+                    if _s(arow["albumartist"]):
+                        local_artist_name = _s(arow["albumartist"])
+                    if _s(arow["mb_releasegroupid"]):
+                        local_rgid = _s(arow["mb_releasegroupid"])
+        except Exception:
+            pass
+
+    if not local_album_title and inspect_evidence:
+        props = (inspect_evidence.get("properties") or {}) if isinstance(inspect_evidence.get("properties"), dict) else {}
+        local_album_title = _s(props.get("album"))
+        if _s(props.get("mb_releasegroupid")):
+            local_rgid = _s(props.get("mb_releasegroupid"))
+
+    if not local_album_title and folder_path:
+        local_album_title = Path(folder_path).name
+
+    if not local_rgid and audio_files:
+        for fpath in audio_files[:3]:
+            parsed = _read_file_media_tags(str(fpath))
+            if parsed.get("mb_releasegroupid"):
+                local_rgid = _s(parsed.get("mb_releasegroupid"))
+                break
+            if not local_album_title and parsed.get("album"):
+                local_album_title = _s(parsed.get("album"))
+
     matching_decision = build_album_matching_decision(
         current={
-            "album": result.get("release_title"),
-            "artist": result.get("folder_artist"),
+            "album": local_album_title,
+            "artist": local_artist_name,
+            "mb_releasegroupid": local_rgid,
         },
         candidate={
             "mb_releasegroupid": result.get("release_group"),
