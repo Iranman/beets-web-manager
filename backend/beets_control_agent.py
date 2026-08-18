@@ -893,6 +893,13 @@ def _valid_playlist_import_track_id(value: str) -> bool:
     return bool(value and _PLAYLIST_TRACK_ID_RE.fullmatch(value))
 
 
+def _playlist_import_operation_storage_key(operation_id: str) -> str:
+    if not _valid_playlist_import_operation_id(operation_id):
+        raise UnsafePathError("invalid playlist import operation_id")
+    digest = hashlib.sha256(operation_id.encode("utf-8", "surrogatepass")).hexdigest()
+    return f"op_{digest}"
+
+
 def _safe_playlist_import_error(status: str) -> str:
     messages = {
         "invalid_path": "Staged track path is invalid.",
@@ -911,7 +918,7 @@ def _safe_playlist_import_error(status: str) -> str:
 
 def _playlist_import_operation_state_path(playlist_staging: Path, operation_id: str) -> Path:
     operations_dir = playlist_staging / ".operations"
-    return operations_dir / f"{operation_id}.json"
+    return operations_dir / f"{_playlist_import_operation_storage_key(operation_id)}.json"
 
 
 def _playlist_import_read_state(state_path: Path) -> dict[str, Any]:
@@ -3994,9 +4001,14 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 if _path_has_symlink_component(safe_playlist_staging, staging_root):
                     self._send_json(403, {"error": "Playlist staging path is not safe", "error_code": "playlist_staging_symlink"})
                     return
-                imports_root = safe_playlist_staging / "imports"
-                operation_dir = imports_root / operation_id
-                state_path = _playlist_import_operation_state_path(safe_playlist_staging, operation_id)
+                operation_storage_key = _playlist_import_operation_storage_key(operation_id)
+                try:
+                    imports_root = resolve_safe_path(str(safe_playlist_staging / "imports"), ["staging"])
+                    operation_dir = resolve_safe_path(str(imports_root / operation_storage_key), ["staging"])
+                    state_path = _playlist_import_operation_state_path(safe_playlist_staging, operation_id)
+                except UnsafePathError:
+                    self._send_json(403, {"error": "Playlist import operation staging is not safe", "error_code": "import_staging_symlink"})
+                    return
                 if _path_has_symlink_component(state_path.parent, safe_playlist_staging, include_leaf=True):
                     self._send_json(403, {"error": "Playlist import operation state is not safe", "error_code": "operation_state_symlink"})
                     return
@@ -4170,7 +4182,10 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                             suffix += 1
                             dest_file = operation_dir / f"{safe_source.stem}-{index}-{suffix}{safe_source.suffix}"
                         try:
-                            shutil.move(str(safe_source), str(dest_file))
+                            trusted_dest = resolve_safe_path(str(dest_file), ["staging"])
+                            trusted_dest.relative_to(operation_dir.resolve(strict=False))
+                            shutil.move(str(resolve_safe_path(str(safe_source), ["staging"], require_exists=True, expected_type="file")), str(trusted_dest))
+                            dest_file = trusted_dest
                         except Exception:
                             track_results.append({"track_id": track_id, "status": "import_failed", "error": _safe_playlist_import_error("import_failed")})
                             continue

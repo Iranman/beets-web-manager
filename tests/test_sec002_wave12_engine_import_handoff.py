@@ -176,7 +176,7 @@ class Wave12EngineImportHandoffTests(unittest.TestCase):
         staged = self._staged_file(key, "track.mp3", b"audio")
         imports_root = self.staging_dir / key / "imports"
         imports_root.mkdir(parents=True)
-        operation_link = imports_root / "pl-import-operation-symlink"
+        operation_link = imports_root / beets_control_agent._playlist_import_operation_storage_key("pl-import-operation-symlink")
         operation_link.symlink_to(self.outside_dir, target_is_directory=True)
         code, data = _post_agent("/playlists/import-staged", {
             "playlist_key": key,
@@ -335,7 +335,9 @@ class Wave12EngineImportHandoffTests(unittest.TestCase):
             })
         self.assertEqual(code, 200, data)
         self.assertTrue(data.get("ok"), data)
-        self.assertEqual(Path(seen_cmds[0][-1]).name, "pl-import-current-operation")
+        import_dir_name = Path(seen_cmds[0][-1]).name
+        self.assertRegex(import_dir_name, r"^op_[0-9a-f]{64}$")
+        self.assertNotEqual(import_dir_name, "pl-import-current-operation")
         self.assertTrue(old_file.exists())
 
     def test_playlist_run_import_downloaded_delegates_to_engine_ipc_without_local_media_access(self):
