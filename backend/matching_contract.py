@@ -451,9 +451,9 @@ class MatchingDecision:
         confidence = float(self.decision.get("confidence_score") or self.decision.get("confidence") or 0.0)
         confidence_source = _s(self.decision.get("confidence_source") or "heuristic")
         
-        identity_verified = bool(self.decision.get("identity_verified", not conflicts and confidence >= 0.78))
-        review_required = bool(self.decision.get("review_required"))
-        action_allowed = bool(self.decision.get("action_allowed", not conflicts and not review_required))
+        identity_verified = bool(self.decision.get("identity_verified", False))
+        review_required = bool(self.decision.get("review_required", True))
+        action_allowed = bool(self.decision.get("action_allowed", False))
         reason_code = _s(self.decision.get("reason_code") or self.decision.get("safety_key") or "review_required")
         explanation = _s(self.decision.get("explanation") or self.decision.get("reason") or self.decision.get("eligibility_reason") or "")
 
@@ -1042,6 +1042,8 @@ def build_recording_matching_decision(
         "conflicts": conflicts,
         "warnings": warnings,
         "review_required": review_required,
+        "action_allowed": attach_without_review,
+        "identity_verified": attach_without_review,
         "action_eligibility": {
             "attach_without_review": attach_without_review,
             "destructive_use": False,
@@ -1152,73 +1154,143 @@ def build_album_matching_decision(
     candidate_album = _s(candidate.get("album") or candidate.get("release_title") or candidate.get("title"))
     candidate_artist = _s(candidate.get("albumartist") or candidate.get("release_artist") or candidate.get("artist"))
 
-    album_score = similarity(local_album, candidate_album) if local_album and candidate_album else 1.0
-    artist_score = similarity(local_artist, candidate_artist) if local_artist and candidate_artist else 1.0
-
     conflicts: List[str] = []
     warnings: List[str] = []
 
-    # Hard conflict: local Release Group ID exists and differs from candidate Release Group ID
-    if local_rg_id and candidate_rg_id and local_rg_id != candidate_rg_id:
-        conflicts.append("release_group_conflict")
+    # --- Missing metadata handling: missing evidence does NOT score as perfect 1.0 ---
+    album_score: Optional[float] = None
+    if local_album and candidate_album:
+        album_score = similarity(local_album, candidate_album)
+    elif not local_album and not candidate_album:
+        warnings.append("album_title_missing")
+    elif not local_album:
+        warnings.append("local_album_title_missing")
+    else:
+        warnings.append("candidate_album_title_missing")
 
-    # Hard conflict: different artist text with no MB artist ID match
-    if local_artist and candidate_artist and artist_score < 0.50 and not (local_art_id and local_art_id == candidate_art_id):
+    artist_score: Optional[float] = None
+    if local_artist and candidate_artist:
+        artist_score = similarity(local_artist, candidate_artist)
+    elif not local_artist and not candidate_artist:
+        warnings.append("artist_missing")
+    elif not local_artist:
+        warnings.append("local_artist_missing")
+    else:
+        warnings.append("candidate_artist_missing")
+
+    # --- Artist ID & text conflict checks ---
+    if local_art_id and candidate_art_id and local_art_id != candidate_art_id:
+        conflicts.append("artist_id_conflict")
+    elif local_artist and candidate_artist and artist_score is not None and artist_score < 0.50:
         conflicts.append("artist_conflict")
 
-    # Tracklist comparison evidence
+    # --- Release Group ID canonical requirement ---
+    if not candidate_rg_id:
+        conflicts.append("release_group_missing")
+        warnings.append("release_group_id_missing")
+    elif local_rg_id and local_rg_id != candidate_rg_id:
+        conflicts.append("release_group_conflict")
+
+    # --- 1-to-1 Tracklist Alignment ---
     item_list = list(items) if items is not None else []
     track_list = list(mb_tracks) if mb_tracks is not None else []
     matched_count = 0
+    used_mb_tracks: set[int] = set()
+
     if item_list and track_list:
         for item in item_list:
             item_title = _s(item.get("title"))
-            for trk in track_list:
-                if similarity(item_title, _s(trk.get("title"))) >= 0.75:
-                    matched_count += 1
+            item_track = int(item.get("track") or 0)
+            best_idx = -1
+            best_score = 0.0
+
+            for idx, trk in enumerate(track_list):
+                if idx in used_mb_tracks:
+                    continue
+                trk_title = _s(trk.get("title"))
+                trk_num = int(trk.get("track") or trk.get("position") or 0)
+                trk_mbid = _uuid(trk.get("mb_trackid") or trk.get("recording_id"))
+                item_mbid = _uuid(item.get("mb_trackid") or item.get("recording_id"))
+
+                if item_mbid and trk_mbid and item_mbid == trk_mbid:
+                    best_idx = idx
+                    best_score = 1.0
                     break
-        if matched_count < len(item_list) and len(item_list) > 0:
-            warnings.append("tracklist_mismatch")
 
-    if not candidate_rg_id:
-        warnings.append("release_group_id_missing")
+                s = similarity(item_title, trk_title) if item_title and trk_title else 0.0
+                if item_track and trk_num and item_track == trk_num and s >= 0.60:
+                    s += 0.15
+                if s > best_score:
+                    best_score = s
+                    best_idx = idx
 
-    confidence_score = _round_score(
-        1.0 if (candidate_rg_id and local_rg_id and candidate_rg_id == local_rg_id) else ((album_score + artist_score) / 2.0)
+            if best_idx >= 0 and best_score >= 0.70:
+                used_mb_tracks.add(best_idx)
+                matched_count += 1
+
+        if len(item_list) > 0:
+            if matched_count == 0:
+                conflicts.append("no_tracks_matched")
+            elif matched_count < (0.50 * len(item_list)):
+                conflicts.append("large_tracklist_mismatch")
+            elif matched_count < len(item_list):
+                warnings.append("tracklist_mismatch")
+
+    # --- Confidence Score Calculation ---
+    scores = [s for s in [album_score, artist_score] if s is not None]
+    if scores:
+        confidence_score = _round_score(sum(scores) / len(scores))
+        if len(scores) < 2:
+            confidence_score = _round_score(confidence_score * 0.75)
+    else:
+        confidence_score = 0.0
+
+    # --- Local Identity Verification Proof ---
+    local_rgid_matched = bool(candidate_rg_id and local_rg_id and candidate_rg_id == local_rg_id)
+    strong_track_alignment = bool(item_list and matched_count == len(item_list) and not conflicts)
+    identity_verified = bool(
+        candidate_rg_id
+        and not conflicts
+        and (local_rgid_matched or strong_track_alignment)
     )
 
-    if "release_group_conflict" in conflicts or "artist_conflict" in conflicts:
+    # --- Fail-Closed Decision Flags ---
+    if conflicts:
         safety_result = "Conflict"
         safety_key = "conflict"
         confidence_tier = "low"
-        reason_code = "release_group_conflict" if "release_group_conflict" in conflicts else "artist_conflict"
+        reason_code = conflicts[0]
         recommended_action = "Reject candidate"
-        eligibility_reason = "Release Group or artist identity conflicts with local album."
-    elif conflicts:
+        eligibility_reason = f"Candidate has identity conflicts: {', '.join(conflicts)}"
+        action_allowed = False
+        review_required = True
+    elif not candidate_rg_id:
+        safety_result = "Needs review"
+        safety_key = "review"
+        confidence_tier = "medium"
+        reason_code = "release_group_missing"
+        recommended_action = "Resolve Release Group ID before canonical import"
+        eligibility_reason = "Release ID alone is edition evidence; Release Group ID must be resolved before canonical album action."
+        action_allowed = False
+        review_required = True
+    elif not identity_verified:
         safety_result = "Needs review"
         safety_key = "review"
         confidence_tier = "medium"
         reason_code = "review_required"
-        recommended_action = "Review conflicts before proceeding"
-        eligibility_reason = f"Candidate has conflicts: {', '.join(conflicts)}"
-    elif not candidate_rg_id and not candidate_rel_id:
-        safety_result = "Needs review"
-        safety_key = "review"
-        confidence_tier = "low"
-        reason_code = "identity_missing"
-        recommended_action = "Search MusicBrainz"
-        eligibility_reason = "No MusicBrainz identifiers present."
+        recommended_action = "Review candidate before attaching"
+        eligibility_reason = "Candidate has valid Release Group ID but requires review to verify local album equivalence."
+        action_allowed = False
+        review_required = True
     else:
         safety_result = "Safe to attach"
         safety_key = "safe"
         confidence_tier = "high"
         reason_code = "identity_verified"
         recommended_action = "Use candidate"
-        eligibility_reason = "Album Release Group identity verified."
-
-    review_required = safety_key != "safe"
-    action_allowed = safety_key == "safe"
-    identity_verified = action_allowed and bool(candidate_rg_id)
+        eligibility_reason = "Album Release Group identity verified with local proof."
+        action_allowed = True
+        review_required = False
 
     identity_payload = {
         "release_group_id": candidate_rg_id or local_rg_id,

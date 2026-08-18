@@ -20,6 +20,7 @@ class TestSEC002Wave14MbIdentityMatching(unittest.TestCase):
         release_id_us = "11111111-1111-1111-1111-111111111111"
         release_id_eu = "22222222-2222-2222-2222-222222222222"
 
+        current = {"mb_releasegroupid": rgid, "album": "Chxtape 5", "artist": "Tory Lanez"}
         candidate_us = {
             "mb_releasegroupid": rgid,
             "mb_albumid": release_id_us,
@@ -33,8 +34,8 @@ class TestSEC002Wave14MbIdentityMatching(unittest.TestCase):
             "artist": "Tory Lanez",
         }
 
-        decision_us = build_album_matching_decision(current={}, candidate=candidate_us)
-        decision_eu = build_album_matching_decision(current={}, candidate=candidate_eu)
+        decision_us = build_album_matching_decision(current=current, candidate=candidate_us)
+        decision_eu = build_album_matching_decision(current=current, candidate=candidate_eu)
 
         d_us = decision_us.to_dict()
         d_eu = decision_eu.to_dict()
@@ -143,21 +144,109 @@ class TestSEC002Wave14MbIdentityMatching(unittest.TestCase):
         self.assertFalse(d["action_allowed"])
 
     def test_release_id_only_resolves_rgid_or_reviews(self):
-        """Release ID without RGID requires RGID resolution or marks review_required."""
+        """Release ID without RGID requires RGID resolution or marks review_required (FAILS CLOSED)."""
         rel_id = "11111111-1111-1111-1111-111111111111"
         candidate = {"mb_albumid": rel_id, "album": "Some Release"}
         decision = build_album_matching_decision(current={}, candidate=candidate)
         d = decision.to_dict()
 
-        # Without RGID, release_group_id_missing warning is present
-        self.assertIn("release_group_id_missing", d["warnings"])
-        self.assertEqual(d["release_id"], rel_id)
+        self.assertFalse(d["action_allowed"])
+        self.assertFalse(d["identity_verified"])
+        self.assertTrue(d["review_required"])
+        self.assertEqual(d["reason_code"], "release_group_missing")
+        self.assertIn("release_group_missing", d["conflicts"])
+
+    def test_candidate_rgid_with_no_local_proof_requires_review(self):
+        """Candidate supplying an RGID without local RGID or track proof is NOT identity_verified."""
+        rgid = "511eea39-083a-4741-ae35-5a4d686ca2a6"
+        current_album = {"album": "Unlabeled Folder", "artist": "Unknown Artist"}
+        candidate_album = {"mb_releasegroupid": rgid, "album": "Specific Album", "artist": "Known Artist"}
+
+        decision = build_album_matching_decision(current=current_album, candidate=candidate_album)
+        d = decision.to_dict()
+
+        self.assertFalse(d["identity_verified"])
+        self.assertFalse(d["action_allowed"])
+        self.assertTrue(d["review_required"])
+        self.assertEqual(d["reason_code"], "review_required")
+
+    def test_artist_ids_conflict_same_text_is_hard_conflict(self):
+        """Differing MB Artist IDs with matching display text must produce a hard artist_id_conflict."""
+        art1 = "11111111-1111-1111-1111-111111111111"
+        art2 = "22222222-2222-2222-2222-222222222222"
+        current = {"artist": "John Smith", "artist_id": art1}
+        candidate = {"artist": "John Smith", "artist_id": art2, "mb_releasegroupid": "33333333-3333-3333-3333-333333333333"}
+
+        decision = build_album_matching_decision(current=current, candidate=candidate)
+        d = decision.to_dict()
+
+        self.assertIn("artist_id_conflict", d["conflicts"])
+        self.assertFalse(d["action_allowed"])
+
+    def test_missing_metadata_does_not_score_as_perfect(self):
+        """Missing album/artist title does not produce a perfect score or hide missing evidence."""
+        current = {"artist": "Artist Name"}
+        candidate = {"mb_releasegroupid": "33333333-3333-3333-3333-333333333333", "artist": "Artist Name"}
+
+        decision = build_album_matching_decision(current=current, candidate=candidate)
+        d = decision.to_dict()
+
+        self.assertIn("album_title_missing", d["warnings"])
+        self.assertLess(d["confidence"], 1.0)
+
+    def test_duplicate_titles_in_tracklist_one_to_one(self):
+        """One-to-one tracklist alignment prevents one MB track from satisfying multiple local tracks."""
+        items = [
+            {"title": "Track One", "track": 1},
+            {"title": "Track One", "track": 2},
+        ]
+        mb_tracks = [
+            {"title": "Track One", "track": 1},
+        ]
+        candidate = {"mb_releasegroupid": "33333333-3333-3333-3333-333333333333", "album": "EP", "artist": "Artist"}
+        current = {"album": "EP", "artist": "Artist"}
+
+        decision = build_album_matching_decision(current=current, candidate=candidate, items=items, mb_tracks=mb_tracks)
+        d = decision.to_dict()
+
+        # Matched count is 1, expected is 1, but items has 2 tracks -> tracklist_mismatch warning
+        self.assertEqual(d["evidence"]["matched_count"], 1)
+
+    def test_large_tracklist_mismatch_blocks_auto_action(self):
+        """Severe tracklist mismatch (e.g. 12 local tracks vs 2 matched) blocks auto action."""
+        items = [{"title": f"Song {i}", "track": i} for i in range(1, 13)]
+        mb_tracks = [{"title": "Song 1", "track": 1}, {"title": "Song 2", "track": 2}]
+        candidate = {"mb_releasegroupid": "33333333-3333-3333-3333-333333333333", "album": "Album", "artist": "Artist"}
+        current = {"album": "Album", "artist": "Artist"}
+
+        decision = build_album_matching_decision(current=current, candidate=candidate, items=items, mb_tracks=mb_tracks)
+        d = decision.to_dict()
+
+        self.assertIn("large_tracklist_mismatch", d["conflicts"])
+        self.assertFalse(d["action_allowed"])
+
+    def test_matching_decision_to_dict_fail_closed(self):
+        """MatchingDecision.to_dict() fails closed if decision security keys are missing."""
+        incomplete_decision = MatchingDecision(
+            input={},
+            identity={},
+            evidence={},
+            ai={},
+            decision={},
+            candidate={},
+        )
+        d = incomplete_decision.to_dict()
+
+        self.assertFalse(d["action_allowed"])
+        self.assertFalse(d["identity_verified"])
+        self.assertTrue(d["review_required"])
 
     def test_rgid_only_retains_rgid_as_canonical_identity(self):
         """RGID specified retains RGID as canonical identity."""
         rgid = "511eea39-083a-4741-ae35-5a4d686ca2a6"
-        candidate = {"mb_releasegroupid": rgid, "album": "Chxtape 5"}
-        decision = build_album_matching_decision(current={}, candidate=candidate)
+        current = {"mb_releasegroupid": rgid, "album": "Chxtape 5", "artist": "Artist"}
+        candidate = {"mb_releasegroupid": rgid, "album": "Chxtape 5", "artist": "Artist"}
+        decision = build_album_matching_decision(current=current, candidate=candidate)
         d = decision.to_dict()
 
         self.assertEqual(d["release_group_id"], rgid)

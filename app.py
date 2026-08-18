@@ -345,7 +345,12 @@ from backend.beets_config import (
     filter_job_plugins as _filter_job_plugins,
 )
 from backend.mb_alignment import summarize_mb_track_alignment
-from backend.matching_contract import AiState, build_recording_matching_decision, compute_decision_version
+from backend.matching_contract import (
+    AiState,
+    build_album_matching_decision,
+    build_recording_matching_decision,
+    compute_decision_version,
+)
 from backend.import_guard import (
     existing_track_can_block_downloaded_replacement as _guard_existing_track_can_block_downloaded_replacement,
     filter_wanted_tracks_against_missing as _guard_filter_wanted_tracks_against_missing,
@@ -6220,6 +6225,24 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
         and source_match_ratio >= 1.0
     ):
         gate_ok = True
+    matching_decision = build_album_matching_decision(
+        current={
+            "album": result.get("release_title"),
+            "artist": result.get("folder_artist"),
+        },
+        candidate={
+            "mb_releasegroupid": result.get("release_group"),
+            "mb_albumid": mb_albumid,
+            "album": result.get("release_title"),
+            "artist": result.get("release_artist"),
+        },
+        items=candidates,
+        mb_tracks=mb_tracks,
+    )
+    decision_dict = matching_decision.to_dict()
+    if decision_dict.get("conflicts"):
+        gate_ok = False
+
     result.update({
         "ok": gate_ok,
         "matches": matches,
@@ -6230,6 +6253,8 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
         "source_match_ratio": round(source_match_ratio, 3),
         "oversized_subset_complete": bool(oversized_subset),
         "examples": best_lines,
+        "release_group_id": decision_dict.get("release_group_id", ""),
+        "matching_decision": decision_dict,
     })
     return result
 
@@ -20792,6 +20817,11 @@ def _import_review_revalidation_preflight(
             base["ok"] = True
             base["error"] = ""
     return base
+
+
+def _extract_mb_uuid(val: Any) -> str:
+    s = _s(val).strip().lower()
+    return s if _MB_UUID_RE.match(s) else ""
 
 
 def _import_review_build_revalidated_match(
@@ -38379,6 +38409,7 @@ def _album_cleanup_safe_artwork_relative(rel: str, occupied: set) -> str:
 
 
 def _album_cleanup_merge_plan(records: List[Dict[str, Any]], canonical_path: str) -> Dict[str, Any]:
+    from backend.matching_contract import build_album_matching_decision
     canonical = next((r for r in records if _s(r.get("path")) == canonical_path), None)
     canonical_files: Dict[str, Dict[str, Any]] = dict((canonical or {}).get("files") or {})
     occupied = set(canonical_files.keys())
@@ -38393,6 +38424,25 @@ def _album_cleanup_merge_plan(records: List[Dict[str, Any]], canonical_path: str
         source_path = _s(rec.get("path"))
         if source_path == canonical_path:
             continue
+        if canonical:
+            c_rg_raw = _s(canonical.get("release_group_id") or canonical.get("mb_releasegroupid")).strip().lower()
+            c_rg = c_rg_raw if _MB_UUID_RE.match(c_rg_raw) else ""
+            r_rg_raw = _s(rec.get("release_group_id") or rec.get("mb_releasegroupid")).strip().lower()
+            r_rg = r_rg_raw if _MB_UUID_RE.match(r_rg_raw) else ""
+            if c_rg and r_rg and c_rg != r_rg:
+                merge_decision = build_album_matching_decision(
+                    current={"mb_releasegroupid": c_rg, "album": canonical.get("album"), "artist": canonical.get("artist")},
+                    candidate={"mb_releasegroupid": r_rg, "album": rec.get("album"), "artist": rec.get("artist")},
+                )
+                d_dict = merge_decision.to_dict()
+                if d_dict.get("conflicts"):
+                    conflicts.append({
+                        "source": source_path,
+                        "target": canonical_path,
+                        "relative_path": "",
+                        "reason": f"Release Group / identity conflict ({d_dict.get('reason_code')}): auto-merge rejected",
+                    })
+                    continue
         for rel, source_info in sorted((rec.get("files") or {}).items(), key=lambda item: _s(item[0]).casefold()):
             rel_text = _s(rel).replace("\\", "/").strip("/")
             if not rel_text:
