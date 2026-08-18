@@ -3797,8 +3797,239 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 _inspect_result(exists=True, authorized=False, status="non_audio")
                 return
 
-            _inspect_result(exists=True, authorized=True, status="ok")
+        if path == "/playlists/import-staged":
+            playlist_key = str(body.get("playlist_key") or "").strip()
+            playlist_id = str(body.get("playlist_id") or "").strip()
+            operation_id = str(body.get("operation_id") or "").strip()
+            tracks_payload = body.get("tracks")
+            if not isinstance(tracks_payload, list):
+                tracks_payload = []
+
+            if not playlist_key or not re.match(r"^[a-zA-Z0-9_.-]{1,160}$", playlist_key) or ".." in playlist_key:
+                self._send_json(400, {"error": "Invalid or missing playlist_key", "error_code": "invalid_playlist_key"})
+                return
+
+            staging_root = PLAYLIST_DOWNLOAD_ROOT.resolve(strict=False)
+            music_root = MUSIC_ROOT.resolve(strict=False)
+
+            try:
+                safe_playlist_staging = (PLAYLIST_DOWNLOAD_ROOT / playlist_key).resolve(strict=False)
+                safe_playlist_staging.relative_to(staging_root)
+            except (ValueError, Exception):
+                self._send_json(400, {"error": "Invalid playlist staging root", "error_code": "invalid_playlist_key"})
+                return
+
+            lock_file = acquire_os_lock(read_only=False)
+            try:
+                imports_dir = safe_playlist_staging / "imports"
+                imports_dir.mkdir(parents=True, exist_ok=True)
+
+                valid_entries = []
+                track_results = []
+                seen_sources = set()
+
+                for index, item in enumerate(tracks_payload, start=1):
+                    if not isinstance(item, dict):
+                        continue
+                    track_id = str(item.get("track_id") or item.get("id") or f"tr_{index}").strip()
+                    staged_path_str = str(item.get("staged_path") or item.get("path") or "").strip()
+                    artist = str(item.get("artist") or "").strip()
+                    title = str(item.get("title") or "").strip()
+                    album = str(item.get("album") or "").strip()
+                    albumartist = str(item.get("albumartist") or "").strip()
+                    year = item.get("year", 0)
+                    mb_trackid = str(item.get("mb_trackid") or "").strip()
+
+                    if not staged_path_str:
+                        track_results.append({
+                            "track_id": track_id,
+                            "status": "staged_track_missing",
+                            "error": "Missing staged path",
+                        })
+                        continue
+
+                    # 1. Resolve safe path under staging
+                    try:
+                        safe_source = resolve_safe_path(staged_path_str, ["staging"], require_exists=True, expected_type="file")
+                    except UnsafePathError as exc:
+                        msg = str(exc).lower()
+                        err_code = "staged_track_missing" if "does not exist" in msg else "staged_track_symlink" if "symlink" in msg else "invalid_path"
+                        track_results.append({
+                            "track_id": track_id,
+                            "status": err_code,
+                            "error": str(exc),
+                        })
+                        continue
+
+                    # 2. Reject MUSIC_ROOT
+                    if _path_is_within(str(safe_source), str(music_root)):
+                        track_results.append({
+                            "track_id": track_id,
+                            "status": "cross_playlist_target",
+                            "error": "Refusing to import from music library root",
+                        })
+                        continue
+
+                    # 3. Cross-playlist containment: relative_parts[0] MUST be playlist_key
+                    try:
+                        relative_parts = safe_source.relative_to(staging_root).parts
+                    except ValueError:
+                        track_results.append({
+                            "track_id": track_id,
+                            "status": "cross_playlist_target",
+                            "error": "Source path is outside staging root",
+                        })
+                        continue
+
+                    if not relative_parts or relative_parts[0] != playlist_key:
+                        track_results.append({
+                            "track_id": track_id,
+                            "status": "cross_playlist_target",
+                            "error": "Source path belongs to another playlist staging tree",
+                        })
+                        continue
+
+                    # 4. Refuse symlinks in path
+                    if _path_has_symlink_component(safe_source, staging_root):
+                        track_results.append({
+                            "track_id": track_id,
+                            "status": "staged_track_symlink",
+                            "error": "Symlinks are not allowed in staged import paths",
+                        })
+                        continue
+
+                    # 5. Check allowed audio extension
+                    if safe_source.suffix.lower() not in _import_source_audio_extensions():
+                        track_results.append({
+                            "track_id": track_id,
+                            "status": "staged_track_not_audio",
+                            "error": "Staged file is not an allowed audio type",
+                        })
+                        continue
+
+                    source_key = str(safe_source).casefold()
+                    if source_key in seen_sources:
+                        continue
+                    seen_sources.add(source_key)
+
+                    # Move file to imports_dir engine-side
+                    dest_file = imports_dir / safe_source.name
+                    if dest_file.exists():
+                        dest_file = imports_dir / f"{safe_source.stem}-{index}{safe_source.suffix}"
+                    try:
+                        shutil.move(str(safe_source), str(dest_file))
+                    except Exception as exc:
+                        track_results.append({
+                            "track_id": track_id,
+                            "status": "import_failed",
+                            "error": f"Failed to stage file for import: {exc}",
+                        })
+                        continue
+
+                    # Enrich tags engine-side
+                    tags_to_write = {}
+                    if artist:
+                        tags_to_write["artist"] = artist
+                        tags_to_write["albumartist"] = albumartist or artist
+                    if title:
+                        tags_to_write["title"] = title
+                        tags_to_write["album"] = album or title
+                    if mb_trackid:
+                        tags_to_write["mb_trackid"] = mb_trackid
+
+                    if tags_to_write:
+                        try:
+                            from beets.mediafile import MediaFile
+                            mf = MediaFile(dest_file)
+                            for k, v in tags_to_write.items():
+                                if hasattr(mf, k) and k in _TAG_WRITE_FIELDS:
+                                    setattr(mf, k, str(v))
+                            mf.save()
+                        except Exception:
+                            pass
+
+                    valid_entries.append({
+                        "track_id": track_id,
+                        "staged_path": str(dest_file),
+                        "artist": artist,
+                        "title": title,
+                    })
+
+                if not valid_entries:
+                    self._send_json(200, {
+                        "ok": True,
+                        "status": "already_completed" if track_results else "completed",
+                        "operation_id": operation_id,
+                        "playlist_key": playlist_key,
+                        "imported_count": 0,
+                        "tracks": track_results,
+                        "beets": {"returncode": 0, "message": "No valid files to import"},
+                    })
+                    return
+
+                # Execute Beets import via command invocation under lock
+                tmp_cfg_path = f"/tmp/beets_pl_import_{uuid.uuid4().hex}.yaml"
+                with open(tmp_cfg_path, "w", encoding="utf-8") as f:
+                    f.write("import:\n  copy: no\n  move: yes\n  write: yes\n  autotag: yes\n  quiet_fallback: asis\n  singletons: yes\n  incremental: no\n")
+                os.chmod(tmp_cfg_path, 0o600)
+
+                cmd = [
+                    BEET_BIN, "-c", tmp_cfg_path,
+                    "import", "-q", "--singletons", "--noincremental", "--move", "--quiet-fallback", "asis",
+                    str(imports_dir)
+                ]
+
+                env = os.environ.copy()
+                env["BEETSDIR"] = BEETSDIR
+                proc_timeout = max(300, len(valid_entries) * 120)
+
+                res = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=proc_timeout,
+                    env=env
+                )
+
+                try:
+                    if os.path.exists(tmp_cfg_path):
+                        os.remove(tmp_cfg_path)
+                except Exception:
+                    pass
+
+                imported_count = 0
+                for entry in valid_entries:
+                    if res.returncode < 2:
+                        entry["status"] = "imported"
+                        imported_count += 1
+                    else:
+                        entry["status"] = "failed"
+                        entry["error"] = f"Beets import failed with returncode {res.returncode}"
+                    track_results.append(entry)
+
+                try:
+                    if imports_dir.exists() and not any(imports_dir.iterdir()):
+                        imports_dir.rmdir()
+                except Exception:
+                    pass
+
+                self._send_json(200, {
+                    "ok": True,
+                    "status": "completed" if res.returncode < 2 else "failed",
+                    "operation_id": operation_id,
+                    "playlist_key": playlist_key,
+                    "imported_count": imported_count,
+                    "tracks": track_results,
+                    "beets": {
+                        "returncode": res.returncode,
+                        "stdout": (res.stdout or "")[-2000:],
+                        "stderr": (res.stderr or "")[-2000:],
+                    }
+                })
+            finally:
+                release_os_lock(lock_file)
             return
+
         if path == "/playlists/export_m3u":
             playlist_key = str(body.get("playlist_key") or "").strip()
             display_name = str(body.get("display_name") or "").strip()

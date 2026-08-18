@@ -50951,10 +50951,15 @@ def _playlist_run_import_downloaded(name: str,
                                     cancel_event=None,
                                     playlist_id: str = "") -> Dict[str, Any]:
     clean_name = _clean_playlist_name(name)
-    entries = _playlist_staged_entries(clean_name, playlist_id=playlist_id)
+    pid = _playlist_resolve_stable_id(clean_name, playlist_id=playlist_id or None) or playlist_id
+    key = _playlist_key(clean_name, playlist_id=pid or None, allocate=False)
+
+    entries = _playlist_staged_entries(clean_name, playlist_id=pid)
     if not entries:
         raise RuntimeError("No downloaded playlist staging files are ready to import")
-    valid_entries: List[Tuple[Dict[str, Any], Path]] = []
+
+    tracks_payload = []
+    imported_tracks = []
     for track, source_path in entries:
         if not _playlist_download_audio_allowed(str(source_path), log):
             _playlist_store_track_state(
@@ -50980,75 +50985,86 @@ def _playlist_run_import_downloaded(name: str,
                 **_playlist_identity_status_fields(match))
             log.append(f"  Review required: unable to verify staged audio ({_playlist_identity_log(match)}): {source_path.name}")
             continue
-        valid_entries.append((track, source_path))
+
         _playlist_store_track_state(
             clean_name, track, "waiting_import",
             message="fingerprint verified; waiting for Beets import",
             staged_path=str(source_path), path=str(source_path),
             **_playlist_identity_status_fields(match))
-    entries = valid_entries
-    if not entries:
-        raise RuntimeError("No downloaded playlist staging files are fingerprint-verified for import")
-    batch_dir = _playlist_imports_dir(clean_name, playlist_id=playlist_id)
-    batch_dir.mkdir(parents=True, exist_ok=True)
-    imported_tracks: List[Dict[str, Any]] = []
-    for index, (track, source_path) in enumerate(entries, start=1):
-        if cancel_event is not None and cancel_event.is_set():
-            raise RuntimeError("playlist import stopped by user")
-        destination = batch_dir / source_path.name
-        if destination.exists():
-            destination = batch_dir / f"{source_path.stem}-{index}{source_path.suffix}"
-        shutil.move(str(source_path), str(destination))
-        _enrich_playlist_file_tags(destination, track, log)
-        imported_tracks.append(track)
-        import_match = _playlist_download_match(
-            str(destination),
-            _s(track.get("artist") or ""),
-            _s(track.get("title") or ""),
-            _s(track.get("mb_trackid") or ""),
-        )
-        _playlist_store_track_state(
-            clean_name, track, "importing",
-            message="importing fingerprint-verified staged download into Beets",
-            staged_path=str(destination), path=str(destination),
-            **_playlist_identity_status_fields(import_match))
 
-    import_started_at = time.time()
-    cfg = _write_playlist_import_beets_config(
-        f"/tmp/beets-playlist-import-{uuid.uuid4().hex}.yaml")
-    command = [
-        BEET_BIN, "-c", cfg, "import", "-q", "--singletons",
-        "--noincremental", "--move", "--quiet-fallback", "asis", str(batch_dir),
-    ]
-    _validate_import_source_audio(str(batch_dir), log, reject_downloads=True)
-    log.append("Importing through Beets")
-    result = _beet_run(
-        command,
-        log,
-        timeout=max(1800, min(21600, len(entries) * 240)),
-        env=_beet_env(),
-        cancel=cancel_event,
-    )
-    if result.returncode == -9:
+        imported_tracks.append(track)
+        tracks_payload.append({
+            "track_id": _playlist_status_id(track),
+            "staged_path": str(source_path),
+            "artist": _s(track.get("artist") or ""),
+            "title": _s(track.get("title") or ""),
+            "album": _s(track.get("album") or track.get("title") or ""),
+            "albumartist": _s(track.get("artist") or ""),
+            "mb_trackid": _s(track.get("mb_trackid") or ""),
+        })
+
+    if not imported_tracks:
+        raise RuntimeError("No downloaded playlist staging files are fingerprint-verified for import")
+
+    if cancel_event is not None and cancel_event.is_set():
         raise RuntimeError("playlist import stopped by user")
-    combined = _ANSI_RE.sub("", ((result.stdout or "") + (result.stderr or "")).strip())
-    for line in combined.splitlines()[-120:]:
-        if line.strip():
-            log.append("  " + line)
-    _delete_if_already_in_library(str(batch_dir), combined, log)
-    if result.returncode >= 2:
+
+    log.append(f"Starting engine Beets singleton import for {len(imported_tracks)} track(s)...")
+    import_started_at = time.time()
+    try:
+        res = beets_client.import_playlist_staged(
+            key, pid, tracks_payload, operation_id=f"pl-import-{key}-{int(import_started_at)}"
+        )
+    except Exception as exc:
+        log.append(f"  [playlist] Engine import handoff failed: {exc}")
         for track in imported_tracks:
             _playlist_store_track_state(
                 clean_name, track, "failed",
-                message=f"Beets import failed with rc={result.returncode}",
-                failure_reason="import failed")
-        raise RuntimeError(f"beet import exited with rc={result.returncode}")
+                message=f"Engine import handoff failed: {exc}",
+                failure_reason="import_failed")
+        raise RuntimeError("engine_unavailable") from exc
+
+    if not (isinstance(res, dict) and res.get("ok")):
+        err_msg = res.get("error") or res.get("message") or "Engine playlist import failed"
+        log.append(f"  [playlist] Engine import failed: {err_msg}")
+        for track in imported_tracks:
+            _playlist_store_track_state(
+                clean_name, track, "failed",
+                message=f"Engine import failed: {err_msg}",
+                failure_reason="import_failed")
+        raise RuntimeError(res.get("error_code") or "import_failed")
+
+    beets_res = res.get("beets") if isinstance(res.get("beets"), dict) else {}
+    stdout_text = _s(beets_res.get("stdout") or "")
+    for line in stdout_text.splitlines()[-60:]:
+        if line.strip():
+            log.append("  " + line)
+
+    track_results = res.get("tracks") if isinstance(res.get("tracks"), list) else []
+    for trk_res in track_results:
+        if not isinstance(trk_res, dict):
+            continue
+        tid = _s(trk_res.get("track_id"))
+        status = _s(trk_res.get("status"))
+        matched_trk = next((t for t in imported_tracks if _playlist_status_id(t) == tid), {"id": tid})
+        if status in {"imported", "already_imported"}:
+            _playlist_store_track_state(
+                clean_name, matched_trk, "importing",
+                playlist_id=pid,
+                message="imported into Beets library by engine",
+                staged_path=_s(trk_res.get("staged_path") or ""))
+        elif status in {"cross_playlist_target", "staged_track_symlink", "staged_track_not_audio", "staged_track_missing"}:
+            _playlist_store_track_state(
+                clean_name, matched_trk, "failed",
+                playlist_id=pid,
+                message=_s(trk_res.get("error") or "engine import refused track"),
+                failure_reason=status)
 
     _invalidate_lib_cache()
     placement = _playlist_place_recent_imports_for_tracks(
-        imported_tracks, import_started_at, log=log, cancel_event=cancel_event)
+        imported_tracks, import_started_at - 10, log=log, cancel_event=cancel_event)
     _invalidate_lib_cache()
-    time.sleep(1)
+
     detail = _playlist_detail_payload(clean_name)
     matched_by_key = {
         _playlist_status_id(track): track
@@ -51128,10 +51144,10 @@ def _playlist_run_import_downloaded(name: str,
                 clean_name, track, "failed",
                 message="Beets import completed but the track was not found in the library",
                 failure_reason="import failed", staged_path="")
-    detail = _playlist_write_local_membership(clean_name, _playlist_read_manifest(clean_name))
+    final_detail = _playlist_write_local_membership(clean_name, _playlist_read_manifest(clean_name))
     return {
-        "playlist": detail,
-        "imported_files": len(entries),
+        "playlist": final_detail,
+        "imported_files": int(res.get("imported_count") or len(imported_tracks)),
         "placement": placement,
     }
 

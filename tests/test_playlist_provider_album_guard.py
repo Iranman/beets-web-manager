@@ -204,7 +204,8 @@ class PlaylistProviderAlbumGuardTests(unittest.TestCase):
         self.assertTrue(any("provider name" in line for line in log))
 
     def test_all_playlist_import_entrypoints_share_preimport_sanitizer(self):
-        self.assertIn("_enrich_playlist_file_tags(destination, track, log)", APP_SOURCE)
+        self.assertIn("def _enrich_playlist_file_tags", APP_SOURCE)
+        self.assertIn("beets_client.import_playlist_staged", APP_SOURCE)
         self.assertIn("elif action == \"import_downloaded\":\n                result = _playlist_run_import_downloaded", APP_SOURCE)
         self.assertIn("_playlist_run_import_downloaded(name, state[\"log\"]", APP_SOURCE)
         self.assertIn("full = action in {\"run_full\", \"resume\"}", APP_SOURCE)
