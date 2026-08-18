@@ -3745,21 +3745,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 return
 
             staging_root = PLAYLIST_DOWNLOAD_ROOT.resolve(strict=False)
-            playlist_staging = (staging_root / playlist_key).resolve(strict=False)
             music_root = MUSIC_ROOT.resolve(strict=False)
-
-            try:
-                safe_target = resolve_safe_path(requested_path, ["staging"])
-            except UnsafePathError:
-                self._send_json(200, {
-                    "ok": True,
-                    "exists": False,
-                    "authorized": False,
-                    "playlist_key": playlist_key,
-                    "track_id": track_id,
-                    "status": "invalid_path",
-                })
-                return
 
             def _inspect_result(*, exists: bool, authorized: bool, status: str) -> None:
                 self._send_json(200, {
@@ -3771,28 +3757,43 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                     "status": status,
                 })
 
+            try:
+                safe_target = resolve_safe_path(requested_path, ["staging"])
+            except UnsafePathError:
+                _inspect_result(exists=False, authorized=False, status="invalid_path")
+                return
+
             if _path_is_within(str(safe_target), str(music_root)):
                 _inspect_result(exists=False, authorized=False, status="library_path")
                 return
-            if not _path_is_within(str(safe_target), str(playlist_staging)):
+            try:
+                relative_parts = safe_target.relative_to(staging_root).parts
+            except ValueError:
+                _inspect_result(exists=False, authorized=False, status="invalid_path")
+                return
+            if not relative_parts or relative_parts[0] != playlist_key:
                 _inspect_result(exists=False, authorized=False, status="outside_playlist_staging")
                 return
-            if str(safe_target) in (str(staging_root), str(playlist_staging), str(music_root)):
+            if len(relative_parts) == 1:
                 _inspect_result(exists=False, authorized=False, status="root_or_directory")
                 return
             if _path_has_symlink_component(safe_target, staging_root):
                 _inspect_result(exists=False, authorized=False, status="symlink_path")
                 return
-            if safe_target.is_dir():
-                _inspect_result(exists=True, authorized=False, status="root_or_directory")
+
+            try:
+                verified_target = resolve_safe_path(requested_path, ["staging"], require_exists=True, expected_type="file")
+            except UnsafePathError as exc:
+                msg = str(exc).lower()
+                if "does not exist" in msg:
+                    _inspect_result(exists=False, authorized=False, status="missing")
+                    return
+                if "not a regular file" in msg or "not a file" in msg:
+                    _inspect_result(exists=True, authorized=False, status="not_file")
+                    return
+                _inspect_result(exists=False, authorized=False, status="invalid_path")
                 return
-            if not safe_target.exists():
-                _inspect_result(exists=False, authorized=False, status="missing")
-                return
-            if not safe_target.is_file():
-                _inspect_result(exists=True, authorized=False, status="not_file")
-                return
-            if safe_target.suffix.lower() not in _import_source_audio_extensions():
+            if verified_target.suffix.lower() not in _import_source_audio_extensions():
                 _inspect_result(exists=True, authorized=False, status="non_audio")
                 return
 
