@@ -323,6 +323,34 @@ class Wave11PlaylistJobStateSecurityTests(unittest.TestCase):
             flask_app._playlist_saved_job_states_for_name("Corrupt Test", playlist_id=pid, strict=True)
         self.assertEqual(cm.exception.code, "checkpoint_corrupt")
 
+    def test_unrelated_corrupt_checkpoint_does_not_block_strict_resume_of_another_playlist(self):
+        """SEC-002 Wave 11 second final review: a corrupt checkpoint
+        belonging to playlist B must not deny/DoS a strict-mode resume of
+        an unrelated playlist A that has its own valid checkpoint."""
+        pid_a = flask_app._playlist_ensure_stable_id("Playlist A")
+        job_key_a = flask_app._playlist_job_key_payload("Playlist A", "url", "", [], [], playlist_id=pid_a)
+        jid_a = flask_app._playlist_job_id_for_key(job_key_a)
+        flask_app._playlist_save_job_state({
+            "job_id": jid_a,
+            "job_key": job_key_a,
+            "playlist_id": pid_a,
+            "playlist_key": job_key_a["playlist_key"],
+            "name": "Playlist A",
+            "status": "running",
+            "tracks": [],
+        })
+
+        # Playlist B's checkpoint file is corrupt -- unrelated to A.
+        corrupt_path = self.jobs_dir / ("pl-" + "c" * 20 + ".json")
+        corrupt_path.write_text("{not valid json at all...", encoding="utf-8")
+
+        rows = flask_app._playlist_saved_job_states_for_name("Playlist A", playlist_id=pid_a, strict=True)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["job_id"], jid_a)
+        # The corrupt file must survive untouched -- it is not this call's
+        # job to clean it up, only to not let it block an unrelated playlist.
+        self.assertTrue(corrupt_path.exists())
+
     def test_invalid_job_id_grammar_rejected(self):
         invalid_ids = [
             "../outside",
@@ -363,9 +391,45 @@ class Wave11PlaylistJobStateSecurityTests(unittest.TestCase):
                 flask_app._playlist_delete_job_state(jid)
         self.assertEqual((self.outside_dir / "sentinel.txt").read_text(encoding="utf-8"), "OUTSIDE_SENTINEL")
 
+    def test_job_state_load_refuses_symlinked_checkpoint(self):
+        """SEC-002 Wave 11 second final review: reads must refuse a
+        symlinked checkpoint leaf the same way writes/deletes already do --
+        Path.read_text() otherwise follows it and returns arbitrary
+        outside content as if it were this playlist's own checkpoint."""
+        jid = "pl-" + "e" * 20
+        secret = self.outside_dir / "checkpoint-secret.json"
+        secret.write_text(json.dumps({"leaked": "OUTSIDE_SENTINEL"}), encoding="utf-8")
+        link = self.jobs_dir / f"{jid}.json"
+        try:
+            os.symlink(secret, link)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlink creation not supported")
+
+        state = flask_app._playlist_load_job_state(jid)
+        self.assertEqual(state, {}, "symlinked checkpoint must not be read")
+        with self.assertRaises(PlaylistStateError):
+            flask_app._playlist_load_job_state(jid, strict=True)
+
+    def test_job_states_for_name_skips_symlinked_checkpoint(self):
+        """Same guarantee via the glob-based lister used by resume/delete."""
+        pid = flask_app._playlist_ensure_stable_id("Symlink Scan Test")
+        secret = self.outside_dir / "checkpoint-secret2.json"
+        secret.write_text(json.dumps({"leaked": "OUTSIDE_SENTINEL"}), encoding="utf-8")
+        link = self.jobs_dir / ("pl-" + "f" * 20 + ".json")
+        try:
+            os.symlink(secret, link)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlink creation not supported")
+
+        rows = flask_app._playlist_saved_job_states_for_name("Symlink Scan Test", playlist_id=pid)
+        self.assertEqual(rows, [])
+        self.assertFalse(any(row.get("leaked") for row in rows))
+
 
 class Wave11ControlAgentStagingInspectTests(unittest.TestCase):
     def setUp(self):
+        if os.name == "nt":
+            self.skipTest("resolve_safe_path requires POSIX-absolute input; covered by Docker/Linux runtime")
         self.tmp = tempfile.mkdtemp()
         self.staging = Path(self.tmp) / "staging"
         self.music = Path(self.tmp) / "music"
@@ -590,14 +654,72 @@ class Wave11PlexStableIdentitySecurityTests(unittest.TestCase):
 
         with mock.patch.object(flask_app, "_plex_audio_playlists", return_value=mock_playlists), \
              mock.patch.object(flask_app, "_plex_request", side_effect=mock_items_req):
-            keys_target, rkey, am = flask_app._plex_playlist_rating_keys_by_key_or_title(rating_key="70001", title="Summer Vibes")
+            keys_target, rkey, am, stale = flask_app._plex_playlist_rating_keys_by_key_or_title(rating_key="70001", title="Summer Vibes")
             self.assertEqual(keys_target, ["t1", "t2"])
             self.assertEqual(rkey, "70001")
             self.assertFalse(am)
+            self.assertFalse(stale)
 
-            keys_ambig, rkey_ambig, am_ambig = flask_app._plex_playlist_rating_keys_by_key_or_title(rating_key="", title="Summer Vibes")
+            keys_ambig, rkey_ambig, am_ambig, stale_ambig = flask_app._plex_playlist_rating_keys_by_key_or_title(rating_key="", title="Summer Vibes")
             self.assertEqual(keys_ambig, [])
             self.assertTrue(am_ambig)
+            self.assertFalse(stale_ambig)
+
+    def test_stale_rating_key_does_not_silently_rebind_by_title(self):
+        """A stored ratingKey that no longer resolves in Plex must not fall
+        through to a same-title lookup -- that could silently bind this
+        app playlist's identity to a completely different Plex playlist
+        that merely shares a title (SEC-002 Wave 11 second final review).
+        Scenario: app playlist A stored ratingKey=10001 (deleted from
+        Plex); Plex currently has an unrelated playlist ratingKey=20002
+        also titled "Favorites"."""
+        mock_playlists = [
+            {"title": "Favorites", "ratingKey": "20002", "smart": "0"},
+        ]
+
+        def mock_items_req(path, timeout=20):
+            if "20002" in path:
+                return {"MediaContainer": {"Metadata": [{"ratingKey": "unrelated-track"}]}}
+            return {}
+
+        with mock.patch.object(flask_app, "_plex_audio_playlists", return_value=mock_playlists), \
+             mock.patch.object(flask_app, "_plex_request", side_effect=mock_items_req):
+            keys, found_rkey, is_ambig, is_stale = flask_app._plex_playlist_rating_keys_by_key_or_title(
+                rating_key="10001", title="Favorites")
+
+        self.assertTrue(is_stale, "a stored ratingKey that 404s in Plex must be reported stale")
+        self.assertEqual(found_rkey, "", "must not silently adopt playlist-20002's ratingKey")
+        self.assertEqual(keys, [], "must not return playlist-20002's tracks as if they belonged to A")
+        self.assertFalse(is_ambig)
+
+    def test_stale_rating_key_verification_does_not_persist_wrong_key(self):
+        """End-to-end: _create_playlist_outputs()'s verification step must
+        not persist a wrongly-adopted ratingKey into the manifest when the
+        prior stored key is stale and a same-titled Plex playlist exists."""
+        pid = flask_app._playlist_ensure_stable_id("Favorites")
+        flask_app._playlist_write_manifest(
+            "Favorites", desired_tracks=[], playlist_id=pid,
+        )
+        manifest = flask_app._playlist_read_manifest("Favorites", playlist_id=pid)
+        manifest["last_plex"] = {"rating_key": "10001"}
+        flask_app._playlist_replace_manifest("Favorites", manifest)
+
+        mock_playlists = [
+            {"title": "Favorites", "ratingKey": "20002", "smart": "0"},
+        ]
+        with mock.patch.object(flask_app.beets_client, "export_playlist_m3u",
+                                return_value={"ok": True, "playlist_key": "irrelevant"}), \
+             mock.patch.object(flask_app, "_plex_audio_playlists", return_value=mock_playlists), \
+             mock.patch.object(flask_app, "_plex_request", return_value={}), \
+             mock.patch.object(flask_app, "_plex_find_music_section", return_value=(None, "", "")):
+            flask_app._create_playlist_outputs(
+                "Favorites", [{"artist": "A", "title": "T", "path": "/data/media/music/Artist/track.flac"}],
+                playlist_id=pid, sync_plex=True,
+            )
+
+        final_manifest = flask_app._playlist_read_manifest("Favorites", playlist_id=pid)
+        persisted_key = (final_manifest.get("last_plex") or {}).get("rating_key")
+        self.assertNotEqual(persisted_key, "20002", "must not persist another playlist's ratingKey")
 
 
 if __name__ == "__main__":

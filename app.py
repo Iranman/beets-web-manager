@@ -44483,7 +44483,7 @@ def _create_playlist_outputs(name, items, *, log=None, replace_plex=True,
                     try:
                         target_rkey = _s(plex.get("rating_key") or prior_rating_key).strip()
                         # Lookup uses rating_key or unambiguous fallback via _plex_playlist_rating_keys_by_title
-                        verified_keys, found_rkey, is_ambig = _plex_playlist_rating_keys_by_key_or_title(rating_key=target_rkey, title=name)
+                        verified_keys, found_rkey, is_ambig, is_stale = _plex_playlist_rating_keys_by_key_or_title(rating_key=target_rkey, title=name)
                         if found_rkey:
                             plex["rating_key"] = found_rkey
                         verified_unique = {str(key) for key in verified_keys}
@@ -44494,7 +44494,16 @@ def _create_playlist_outputs(name, items, *, log=None, replace_plex=True,
                         if log is not None:
                             log.append(f"  [plex] Created/updated Plex playlist: {name}")
                             log.append(f"  [plex] Verified Plex playlist count: {len(verified_unique)}")
-                        if is_ambig:
+                        if is_stale:
+                            # target_rkey was just-created above (new_rating_key) and
+                            # should always resolve; is_stale here means creation's
+                            # own returned key is already gone (race/API oddity) --
+                            # do not fall back to prior_rating_key/title, surface it.
+                            plex["complete"] = False
+                            plex["status"] = "review_required"
+                            plex["issue_reason"] = "stale_plex_identity"
+                            plex["action_needed"] = "Plex playlist identity could not be re-verified; re-sync to re-establish it"
+                        elif is_ambig:
                             plex["complete"] = False
                             plex["status"] = "review_required"
                             plex["issue_reason"] = "ambiguous_plex_playlist"
@@ -44539,10 +44548,16 @@ def _create_playlist_outputs(name, items, *, log=None, replace_plex=True,
     if sync_plex and _plex_settings().get("token") and (plex.get("error") or not plex.get("created")):
         try:
             target_rkey = _s(plex.get("rating_key") or prior_rating_key).strip()
-            existing_keys, found_rkey, is_ambig = _plex_playlist_rating_keys_by_key_or_title(rating_key=target_rkey, title=name)
+            existing_keys, found_rkey, is_ambig, is_stale = _plex_playlist_rating_keys_by_key_or_title(rating_key=target_rkey, title=name)
             if found_rkey:
                 plex["rating_key"] = found_rkey
-            if is_ambig:
+            if is_stale:
+                # A previously-stored ratingKey no longer resolves in Plex.
+                # Do not silently rebind to whatever else currently shares
+                # this title -- report it and leave the stored identity
+                # alone (SEC-002 Wave 11 second final review).
+                plex["issue_reason"] = "stale_plex_identity"
+            elif is_ambig:
                 plex["issue_reason"] = "ambiguous_plex_playlist"
             plex["verified_count"] = len(existing_keys)
             plex["existing_playlist_count"] = len(existing_keys)
@@ -44857,26 +44872,38 @@ def _plex_playlist_by_rating_key(rating_key: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _plex_playlist_rating_keys_by_key_or_title(rating_key: str = "", title: str = "") -> Tuple[List[str], str, bool]:
+def _plex_playlist_rating_keys_by_key_or_title(rating_key: str = "", title: str = "") -> Tuple[List[str], str, bool, bool]:
     """Look up track ratingKeys for verification from a specific Plex ratingKey,
-    or unambiguously by title. Returns (track_keys, target_rating_key, is_ambiguous)."""
+    or unambiguously by title. Returns (track_keys, target_rating_key, is_ambiguous, is_stale).
+
+    A supplied rating_key that no longer resolves in Plex is STALE identity,
+    not "no identity yet" -- it must not silently fall through to a
+    same-title match, which could bind to a completely different logical
+    Plex playlist that merely happens to share a title (SEC-002 Wave 11
+    second final review: the exact vulnerability the title-fallback
+    previously reintroduced after Wave 10 fixed the same-name-delete case).
+    Title-based lookup is legacy discovery, used only when the caller has
+    no rating_key at all -- never as a fallback for one that failed to
+    resolve.
+    """
     r_key = _s(rating_key).strip()
     if r_key:
         pl = _plex_playlist_by_rating_key(r_key)
         if pl:
-            return _plex_playlist_rating_keys(pl), r_key, False
+            return _plex_playlist_rating_keys(pl), r_key, False, False
+        return [], "", False, True
     if title:
         candidates = _plex_playlist_candidates_by_title(title)
         if len(candidates) > 1:
-            return [], "", True
+            return [], "", True, False
         if len(candidates) == 1:
             pl, found_key = candidates[0]
-            return _plex_playlist_rating_keys(pl), found_key, False
-    return [], "", False
+            return _plex_playlist_rating_keys(pl), found_key, False, False
+    return [], "", False, False
 
 
 def _plex_playlist_rating_keys_by_title(title: str) -> List[str]:
-    keys, _, _ = _plex_playlist_rating_keys_by_key_or_title(title=title)
+    keys, _, _, _ = _plex_playlist_rating_keys_by_key_or_title(title=title)
     return keys
 
 
@@ -45522,10 +45549,24 @@ def _playlist_job_state_path(jid: str) -> Path:
     return PLAYLIST_JOB_STATE_DIR / f"{safe}.json"
 
 
+def _playlist_job_state_safe_read_text(path: Path) -> str:
+    """Read a checkpoint file's text, refusing to follow a symlink leaf.
+
+    glob("pl-*.json") can return a symlink, and plain Path.read_text()
+    follows it -- a surprising/malicious state symlink must not cause
+    reading an arbitrary file outside the job-state root (SEC-002 Wave 11
+    second final review; the write/delete paths already refuse symlinks,
+    this closes the same gap on the read side).
+    """
+    if path.is_symlink():
+        raise ValueError("checkpoint path is a symlink")
+    return path.read_text(encoding="utf-8")
+
+
 def _playlist_load_job_state(jid: str, *, strict: bool = False) -> Dict[str, Any]:
     try:
         path = _playlist_job_state_path(jid)
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(_playlist_job_state_safe_read_text(path))
         if isinstance(data, dict):
             return data
         raise ValueError("checkpoint root is not an object")
@@ -45712,21 +45753,47 @@ def _playlist_saved_job_states_for_name(name: str,
 
     target_norm = _norm(name) if name else ""
     rows: List[Dict[str, Any]] = []
+    # Ownership of an unparseable checkpoint is unknowable up front. It
+    # must not immediately fail-closed a resume/delete for a *different*
+    # playlist that has its own valid, attributable checkpoint elsewhere
+    # (SEC-002 Wave 11 second final review: cross-playlist checkpoint-
+    # corruption denial of service) -- but if the target ends up with no
+    # discoverable checkpoint of its own at all, an unattributed corrupt
+    # file might BE the one being looked for, so strict mode still raises
+    # in that case rather than silently reporting "nothing to resume".
+    # Nothing is deleted either way; a corrupt file just isn't listed.
+    had_unattributed_corruption = False
     for path in PLAYLIST_JOB_STATE_DIR.glob("pl-*.json"):
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(_playlist_job_state_safe_read_text(path))
             if not isinstance(data, dict):
                 raise ValueError("checkpoint root is not an object")
-        except Exception as exc:
-            if strict:
-                raise PlaylistStateError(
-                    "checkpoint_corrupt",
-                    "Playlist checkpoint is corrupt; manual review is required.",
-                ) from exc
+        except Exception:
+            had_unattributed_corruption = True
             continue
 
         job_key = data.get("job_key") if isinstance(data.get("job_key"), dict) else {}
         ckpt_pid = _s(data.get("playlist_id") or job_key.get("playlist_id") or "").strip()
+        job_name = _playlist_job_state_name(data)
+
+        # Ownership match against the caller's target happens BEFORE any
+        # strict format validation below -- a checkpoint that isn't this
+        # playlist's own must be skipped regardless of what's wrong with
+        # it; strict is a promise about the *target* playlist's own
+        # checkpoint state, not about every unrelated file in the directory.
+        if target_pid:
+            owned_by_target = (
+                ckpt_pid == target_pid if ckpt_pid
+                else bool(target_norm) and _norm(job_name) == target_norm
+            )
+        elif target_norm:
+            owned_by_target = _norm(job_name) == target_norm
+        else:
+            owned_by_target = True  # no filter requested: every checkpoint is in scope
+
+        if not owned_by_target:
+            continue
+
         if ckpt_pid and not _playlist_valid_internal_id(ckpt_pid):
             if strict:
                 raise PlaylistStateError(
@@ -45734,18 +45801,6 @@ def _playlist_saved_job_states_for_name(name: str,
                     "Playlist checkpoint contains an invalid playlist_id.",
                 )
             continue
-        job_name = _playlist_job_state_name(data)
-
-        if target_pid:
-            if ckpt_pid:
-                if ckpt_pid != target_pid:
-                    continue
-            else:
-                if target_norm and _norm(job_name) != target_norm:
-                    continue
-        elif target_norm:
-            if _norm(job_name) != target_norm:
-                continue
 
         jid = _s(data.get("job_id") or path.stem)
         if not _playlist_valid_job_id(jid):
@@ -45767,6 +45822,12 @@ def _playlist_saved_job_states_for_name(name: str,
         ):
             data = _playlist_interrupted_saved_job_state(jid, data)
         rows.append(data)
+
+    if strict and had_unattributed_corruption and not rows and (target_pid or target_norm):
+        raise PlaylistStateError(
+            "checkpoint_corrupt",
+            "Playlist checkpoint is corrupt; manual review is required.",
+        )
     return rows
 
 
