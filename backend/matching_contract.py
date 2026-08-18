@@ -441,14 +441,42 @@ class MatchingDecision:
     candidate: Dict[str, Any]
 
     def to_dict(self) -> Dict[str, Any]:
+        rg_id = _s(self.identity.get("release_group_id") or self.identity.get("mb_releasegroupid") or "")
+        rel_id = _s(self.identity.get("release_id") or self.identity.get("mb_albumid") or "")
+        rec_id = _s(self.identity.get("recording_id") or self.identity.get("resolved_recording_id") or self.identity.get("mb_trackid") or "")
+        art_id = _s(self.identity.get("artist_id") or self.identity.get("mb_albumartistid") or self.identity.get("mb_artistid") or "")
+        
+        conflicts = list(self.decision.get("conflicts") or [])
+        warnings = list(self.decision.get("warnings") or [])
+        confidence = float(self.decision.get("confidence_score") or self.decision.get("confidence") or 0.0)
+        confidence_source = _s(self.decision.get("confidence_source") or "heuristic")
+        
+        identity_verified = bool(self.decision.get("identity_verified", not conflicts and confidence >= 0.78))
+        review_required = bool(self.decision.get("review_required"))
+        action_allowed = bool(self.decision.get("action_allowed", not conflicts and not review_required))
+        reason_code = _s(self.decision.get("reason_code") or self.decision.get("safety_key") or "review_required")
+        explanation = _s(self.decision.get("explanation") or self.decision.get("reason") or self.decision.get("eligibility_reason") or "")
+
         return {
             "contract_version": 2,
+            "release_group_id": rg_id,
+            "release_id": rel_id,
+            "recording_id": rec_id,
+            "artist_id": art_id,
             "input": self.input,
             "identity": self.identity,
             "evidence": self.evidence,
             "ai": self.ai,
             "decision": self.decision,
-            "warnings": list(self.decision.get("warnings") or []),
+            "conflicts": conflicts,
+            "warnings": warnings,
+            "confidence": confidence,
+            "confidence_source": confidence_source,
+            "identity_verified": identity_verified,
+            "review_required": review_required,
+            "action_allowed": action_allowed,
+            "reason_code": reason_code,
+            "explanation": explanation,
         }
 
     def to_review_recording_candidate(self) -> Dict[str, Any]:
@@ -557,7 +585,7 @@ def build_recording_matching_decision(
     raw_selected_release = (
         selected_release
         if selected_release is not None
-        else (candidate.get("selected_release") or details.get("selected_release") or {})
+        else (candidate.get("selected_release") or details.get("selected_release") or details)
     )
     raw_linked_releases = (
         linked_releases
@@ -1096,3 +1124,139 @@ def compute_decision_version(item_id: Any, decision: "MatchingDecision") -> str:
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     digest = hashlib.sha256(blob.encode("utf-8")).hexdigest()[:24]
     return f"drv2:{digest}"
+
+
+def build_album_matching_decision(
+    *,
+    current: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+    items: Optional[Iterable[Mapping[str, Any]]] = None,
+    mb_tracks: Optional[Sequence[Mapping[str, Any]]] = None,
+    ai_state: Optional[AiState] = None,
+    similarity_fn: Optional[SimilarityFn] = None,
+) -> MatchingDecision:
+    current = current if isinstance(current, Mapping) else {}
+    candidate = candidate if isinstance(candidate, Mapping) else {}
+    similarity = similarity_fn or _similarity
+
+    candidate_rg_id = _uuid(candidate.get("mb_releasegroupid") or candidate.get("release_group_id"))
+    candidate_rel_id = _uuid(candidate.get("mb_albumid") or candidate.get("release_id"))
+    candidate_art_id = _uuid(candidate.get("mb_albumartistid") or candidate.get("artist_id"))
+
+    local_rg_id = _uuid(current.get("mb_releasegroupid") or current.get("release_group_id"))
+    local_rel_id = _uuid(current.get("mb_albumid") or current.get("release_id"))
+    local_art_id = _uuid(current.get("mb_albumartistid") or current.get("artist_id"))
+
+    local_album = _s(current.get("album") or current.get("title"))
+    local_artist = _s(current.get("albumartist") or current.get("artist"))
+    candidate_album = _s(candidate.get("album") or candidate.get("release_title") or candidate.get("title"))
+    candidate_artist = _s(candidate.get("albumartist") or candidate.get("release_artist") or candidate.get("artist"))
+
+    album_score = similarity(local_album, candidate_album) if local_album and candidate_album else 1.0
+    artist_score = similarity(local_artist, candidate_artist) if local_artist and candidate_artist else 1.0
+
+    conflicts: List[str] = []
+    warnings: List[str] = []
+
+    # Hard conflict: local Release Group ID exists and differs from candidate Release Group ID
+    if local_rg_id and candidate_rg_id and local_rg_id != candidate_rg_id:
+        conflicts.append("release_group_conflict")
+
+    # Hard conflict: different artist text with no MB artist ID match
+    if local_artist and candidate_artist and artist_score < 0.50 and not (local_art_id and local_art_id == candidate_art_id):
+        conflicts.append("artist_conflict")
+
+    # Tracklist comparison evidence
+    item_list = list(items) if items is not None else []
+    track_list = list(mb_tracks) if mb_tracks is not None else []
+    matched_count = 0
+    if item_list and track_list:
+        for item in item_list:
+            item_title = _s(item.get("title"))
+            for trk in track_list:
+                if similarity(item_title, _s(trk.get("title"))) >= 0.75:
+                    matched_count += 1
+                    break
+        if matched_count < len(item_list) and len(item_list) > 0:
+            warnings.append("tracklist_mismatch")
+
+    if not candidate_rg_id:
+        warnings.append("release_group_id_missing")
+
+    confidence_score = _round_score(
+        1.0 if (candidate_rg_id and local_rg_id and candidate_rg_id == local_rg_id) else ((album_score + artist_score) / 2.0)
+    )
+
+    if "release_group_conflict" in conflicts or "artist_conflict" in conflicts:
+        safety_result = "Conflict"
+        safety_key = "conflict"
+        confidence_tier = "low"
+        reason_code = "release_group_conflict" if "release_group_conflict" in conflicts else "artist_conflict"
+        recommended_action = "Reject candidate"
+        eligibility_reason = "Release Group or artist identity conflicts with local album."
+    elif conflicts:
+        safety_result = "Needs review"
+        safety_key = "review"
+        confidence_tier = "medium"
+        reason_code = "review_required"
+        recommended_action = "Review conflicts before proceeding"
+        eligibility_reason = f"Candidate has conflicts: {', '.join(conflicts)}"
+    elif not candidate_rg_id and not candidate_rel_id:
+        safety_result = "Needs review"
+        safety_key = "review"
+        confidence_tier = "low"
+        reason_code = "identity_missing"
+        recommended_action = "Search MusicBrainz"
+        eligibility_reason = "No MusicBrainz identifiers present."
+    else:
+        safety_result = "Safe to attach"
+        safety_key = "safe"
+        confidence_tier = "high"
+        reason_code = "identity_verified"
+        recommended_action = "Use candidate"
+        eligibility_reason = "Album Release Group identity verified."
+
+    review_required = safety_key != "safe"
+    action_allowed = safety_key == "safe"
+    identity_verified = action_allowed and bool(candidate_rg_id)
+
+    identity_payload = {
+        "release_group_id": candidate_rg_id or local_rg_id,
+        "release_id": candidate_rel_id or local_rel_id,
+        "artist_id": candidate_art_id or local_art_id,
+        "mb_releasegroupid": candidate_rg_id or local_rg_id,
+        "mb_albumid": candidate_rel_id or local_rel_id,
+    }
+    evidence_payload = {
+        "album_score": album_score,
+        "artist_score": artist_score,
+        "matched_count": matched_count,
+        "expected_count": len(track_list),
+    }
+    ai_payload = (ai_state or AiState()).to_dict()
+    decision_payload = {
+        "confidence_score": confidence_score,
+        "confidence_tier": confidence_tier,
+        "confidence_source": "release_group" if candidate_rg_id else "metadata",
+        "identity_verified": identity_verified,
+        "review_required": review_required,
+        "action_allowed": action_allowed,
+        "reason_code": reason_code,
+        "reason": eligibility_reason,
+        "eligibility_reason": eligibility_reason,
+        "safety_result": safety_result,
+        "safety_key": safety_key,
+        "recommended_action": recommended_action,
+        "conflicts": conflicts,
+        "warnings": warnings,
+        "explanation": eligibility_reason,
+    }
+
+    return MatchingDecision(
+        input={"current_album": current},
+        identity=identity_payload,
+        evidence=evidence_payload,
+        ai=ai_payload,
+        decision=decision_payload,
+        candidate=candidate,
+    )

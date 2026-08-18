@@ -38559,11 +38559,6 @@ def _album_cleanup_source_audio_count(records: List[Dict[str, Any]], canonical_p
     )
 
 
-def _album_cleanup_valid_rgid(value: Any) -> str:
-    text = _s(value).strip().lower()
-    return text if _MB_UUID_RE.match(text) else ""
-
-
 def _album_cleanup_canonical_candidates(records: List[Dict[str, Any]]) -> List[Dict[str, str]]:
     candidates: List[Dict[str, str]] = []
     seen: set = set()
