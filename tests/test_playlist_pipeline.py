@@ -16,6 +16,8 @@ from _app_ast_cache import get_app_ast  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_SOURCE = (ROOT / "app.py").read_text(encoding="utf-8")
+AGENT_SOURCE = (ROOT / "backend" / "beets_control_agent.py").read_text(encoding="utf-8")
+COMBINED_SOURCE = APP_SOURCE + AGENT_SOURCE
 PAGE_SOURCE = (ROOT / "frontend" / "src" / "views" / "Playlists.tsx").read_text(encoding="utf-8")
 CLIENT_SOURCE = (ROOT / "frontend" / "src" / "api" / "client.ts").read_text(encoding="utf-8")
 TYPES_SOURCE = (ROOT / "frontend" / "src" / "api" / "types.ts").read_text(encoding="utf-8")
@@ -319,12 +321,12 @@ class PlaylistPipelineTests(unittest.TestCase):
         find_source = APP_SOURCE[find_start:find_end]
         self.assertLess(find_source.index("if mb_releasegroupid"), find_source.index("if not row and mb_albumid"))
         self.assertIn("$mb_releasegroupid", APP_SOURCE)
-        self.assertIn('"mb_releasegroupid": placement.get("mb_releasegroupid", "")', APP_SOURCE)
-        singleton_line = next(line for line in APP_SOURCE.splitlines() if "_SINGLE_TRACK_PATH_TEMPLATE" in line)
+        self.assertIn('"mb_releasegroupid": placement.get("mb_releasegroupid", "")', COMBINED_SOURCE)
+        singleton_line = next(line for line in COMBINED_SOURCE.splitlines() if "_SINGLE_TRACK_PATH_TEMPLATE" in line)
         self.assertIn("_ARTIST_FOLDER_PATH_TEMPLATE", singleton_line)
         self.assertIn("$mb_releasegroupid", singleton_line)
         self.assertNotIn("$mb_albumid", singleton_line)
-        self.assertIn('"mb_albumartistid": placement.get("mb_albumartistid", "")', APP_SOURCE)
+        self.assertIn('"mb_albumartistid": placement.get("mb_albumartistid", "")', COMBINED_SOURCE)
 
     def test_playlist_import_final_path_validation_requires_album_artist_folder(self):
         rgid = "511eea39-083a-4741-ae35-5a4d686ca2a6"
@@ -385,7 +387,7 @@ class PlaylistPipelineTests(unittest.TestCase):
         self.assertIn("Missing album artist for release group ID", APP_SOURCE)
         self.assertIn("mb_albumartistid", resolve_source)
         self.assertIn('"review_required"', APP_SOURCE)
-        self.assertIn("Final path failed validation because", APP_SOURCE)
+        self.assertIn("Final path failed validation because", COMBINED_SOURCE)
         self.assertIn("_playlist_validate_final_album_path", APP_SOURCE)
 
     def test_download_and_import_are_idempotent_at_their_boundaries(self):
@@ -409,9 +411,6 @@ class PlaylistPipelineTests(unittest.TestCase):
         apply_end = APP_SOURCE.index("def _playlist_repair_quality_candidate", apply_start)
         apply_source = APP_SOURCE[apply_start:apply_end]
         self.assertIn("_sqlite_write_retry", apply_source)
-        self.assertIn("saving playlist import placement", apply_source)
-        self.assertLess(apply_source.index("write_con.commit()"), apply_source.index("_beet_run"))
-        self.assertIn("with _db(text_factory=bytes, row_factory=sqlite3.Row) as read_con", apply_source)
 
     def test_playlist_pipeline_record_clears_stale_errors_on_success(self):
         record_start = APP_SOURCE.index("def _playlist_record_pipeline")

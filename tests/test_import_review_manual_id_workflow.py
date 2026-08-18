@@ -73,10 +73,11 @@ def _load_app_for_manual_id_tests():
     patcher = mock.patch.dict(os.environ, env, clear=False)
     patcher.start()
     sys.path.insert(0, str(ROOT))
+    orig_app = sys.modules.get("app")
     sys.modules.pop("app", None)
     app_module = importlib.import_module("app")
     app_module.app.config.update(TESTING=True)
-    return tmp, patcher, app_module
+    return tmp, patcher, app_module, orig_app
 
 
 def _section(source: str, start: str, end: str) -> str:
@@ -275,7 +276,7 @@ class ImportReviewMatchingSafetyUiTests(unittest.TestCase):
 class ImportReviewManualIdBehaviorTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.tmp, cls.env_patcher, cls.app_module = _load_app_for_manual_id_tests()
+        cls.tmp, cls.env_patcher, cls.app_module, cls.orig_app = _load_app_for_manual_id_tests()
 
     @classmethod
     def tearDownClass(cls):
@@ -285,7 +286,10 @@ class ImportReviewManualIdBehaviorTests(unittest.TestCase):
             pass
         cls.env_patcher.stop()
         cls.tmp.cleanup()
-        sys.modules.pop("app", None)
+        if cls.orig_app is not None:
+            sys.modules["app"] = cls.orig_app
+        else:
+            sys.modules.pop("app", None)
 
     def setUp(self):
         self.client = self.app_module.app.test_client()

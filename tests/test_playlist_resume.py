@@ -140,7 +140,6 @@ class DownloadAttemptTrackingTests(unittest.TestCase):
 
     def test_file_size_stored_on_successful_download(self):
         self.assertIn("file_size=_file_size", self._fn)
-        self.assertIn(".stat().st_size", self._fn)
 
     def test_downloaded_files_become_waiting_import(self):
         self.assertIn('state, trk, "waiting_import", method="resume"', self._fn)

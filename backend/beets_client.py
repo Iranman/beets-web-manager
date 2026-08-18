@@ -349,6 +349,56 @@ class BeetsClient:
             "tracks": tracks,
         })
 
+    def list_playlist_staged_files(self, playlist_key: str, playlist_id: str = "") -> Dict[str, Any]:
+        """List regular non-symlink audio files in engine playlist staging."""
+        return self._request("POST", "/playlists/staging/list-files", {
+            "playlist_key": playlist_key,
+            "playlist_id": playlist_id,
+        })
+
+    def validate_playlist_staged_track(self,
+                                      playlist_key: str,
+                                      requested_path: str,
+                                      artist: str = "",
+                                      title: str = "",
+                                      expected_mb_trackid: str = "",
+                                      preferences: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Validate audio format preferences and fingerprint identity engine-side."""
+        return self._request("POST", "/playlists/staging/validate-track", {
+            "playlist_key": playlist_key,
+            "requested_path": requested_path,
+            "artist": artist,
+            "title": title,
+            "expected_mb_trackid": expected_mb_trackid,
+            "preferences": preferences or {},
+        })
+
+    def get_playlist_quality_candidates(self,
+                                        filter_mode: str = "all",
+                                        limit: int = 200,
+                                        item_ids: Optional[List[int]] = None) -> Dict[str, Any]:
+        """Query engine library for playlist quality repair/cleanup candidates."""
+        return self._request("POST", "/playlists/quality-candidates", {
+            "filter_mode": filter_mode,
+            "limit": limit,
+            "item_ids": item_ids,
+        })
+
+    def place_playlist_imported_item(self,
+                                    playlist_key: str,
+                                    item_id: int,
+                                    placement: Optional[Dict[str, Any]] = None,
+                                    action: str = "repair",
+                                    playlist_id: str = "") -> Dict[str, Any]:
+        """Reconcile and place an imported item in the engine library under OS lock."""
+        return self._request("POST", "/playlists/place-imported", {
+            "playlist_key": playlist_key,
+            "playlist_id": playlist_id,
+            "item_id": item_id,
+            "placement": placement or {},
+            "action": action,
+        })
+
     def export_playlist_m3u(self, playlist_key: str, display_name: str, items: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Export an M3U playlist file engine-side under PLAYLIST_DIR."""
         return self._request("POST", "/playlists/export_m3u", {
