@@ -1,7 +1,9 @@
 import json
 import os
 import shutil
+import sys
 import tempfile
+import types
 import unittest
 from io import BytesIO
 from pathlib import Path
@@ -100,6 +102,40 @@ class Wave12EngineImportHandoffTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
         return path
+
+    def _fake_beets_mediafile_module(self):
+        """Same pattern as tests/test_album_folder_cleanup.py: inject a fake
+        beets.mediafile module so the tag-write step (a real MediaFile()
+        call on the moved file, separate from _read_engine_media_tags)
+        doesn't choke on fixture bytes that aren't a real parseable audio
+        container."""
+        old_beets = sys.modules.get("beets")
+        old_mediafile = sys.modules.get("beets.mediafile")
+        beets_module = types.ModuleType("beets")
+        mediafile_module = types.ModuleType("beets.mediafile")
+
+        class FakeMediaFile:
+            def __init__(self, path):
+                self.path = path
+
+            def save(self):
+                pass
+
+        mediafile_module.MediaFile = FakeMediaFile
+        sys.modules["beets"] = beets_module
+        sys.modules["beets.mediafile"] = mediafile_module
+
+        def _restore():
+            if old_beets is None:
+                sys.modules.pop("beets", None)
+            else:
+                sys.modules["beets"] = old_beets
+            if old_mediafile is None:
+                sys.modules.pop("beets.mediafile", None)
+            else:
+                sys.modules["beets.mediafile"] = old_mediafile
+
+        self.addCleanup(_restore)
 
     def test_import_staged_requires_auth(self):
         token = "valid-secret-token-1234567890abcdef"
@@ -384,6 +420,7 @@ class Wave12EngineImportHandoffTests(unittest.TestCase):
             return [{"score": 95, "acoustid_id": "aid-z", "mb_trackid": "expected-mbid-0001",
                      "title": "Expected Title", "artist": "Expected Artist"}]
 
+        self._fake_beets_mediafile_module()
         with mock.patch.object(beets_control_agent, "_read_engine_media_tags", return_value={}), \
              mock.patch.object(beets_control_agent, "_playlist_import_fpcalc_available", return_value=True), \
              mock.patch.object(beets_control_agent, "_engine_acoustid_lookup", side_effect=fake_lookup), \
