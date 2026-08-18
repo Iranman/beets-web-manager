@@ -50901,6 +50901,10 @@ def _playlist_staged_entries(name: str,
         track = by_key.get(key) or {
             "artist": _s(row.get("artist") or ""),
             "title": _s(row.get("title") or ""),
+            "album": _s(row.get("album") or ""),
+            "albumartist": _s(row.get("albumartist") or ""),
+            "year": row.get("year") or 0,
+            "mb_trackid": _s(row.get("mb_trackid") or ""),
             "id": key,
         }
         entries.append((track, Path(raw_path)))
@@ -50960,52 +50964,40 @@ def _playlist_run_import_downloaded(name: str,
 
     tracks_payload = []
     imported_tracks = []
+    operation_material = []
     for track, source_path in entries:
-        if not _playlist_download_audio_allowed(str(source_path), log):
-            _playlist_store_track_state(
-                clean_name, track, "failed",
-                message="downloaded audio does not match Music Format Preferences",
-                failure_reason="downloaded audio does not match Music Format Preferences",
-                staged_path="", path="")
-            continue
-        match = _playlist_download_match(
-            str(source_path),
-            _s(track.get("artist") or ""),
-            _s(track.get("title") or ""),
-            _s(track.get("mb_trackid") or ""),
-        )
-        if not match.get("ok"):
-            identity = match.get("identity") if isinstance(match.get("identity"), dict) else {}
-            reason = _s(identity.get("decision_reason") or "downloaded audio needs review before import")
-            _playlist_store_track_state(
-                clean_name, track, "review_required",
-                message=reason,
-                failure_reason=reason,
-                staged_path=str(source_path), path=str(source_path),
-                **_playlist_identity_status_fields(match))
-            log.append(f"  Review required: unable to verify staged audio ({_playlist_identity_log(match)}): {source_path.name}")
-            continue
-
+        track_id = _playlist_status_id(track)
+        raw_source = str(source_path)
         _playlist_store_track_state(
             clean_name, track, "waiting_import",
-            message="fingerprint verified; waiting for Beets import",
-            staged_path=str(source_path), path=str(source_path),
-            **_playlist_identity_status_fields(match))
-
+            playlist_id=pid,
+            message="waiting for engine-side staged media verification and Beets import",
+            staged_path=raw_source, path=raw_source)
         imported_tracks.append(track)
+        operation_material.append(f"{track_id}:{raw_source}")
         tracks_payload.append({
-            "track_id": _playlist_status_id(track),
-            "staged_path": str(source_path),
+            "track_id": track_id,
+            "staged_path": raw_source,
             "artist": _s(track.get("artist") or ""),
             "title": _s(track.get("title") or ""),
             "album": _s(track.get("album") or track.get("title") or ""),
             "albumartist": _s(track.get("artist") or ""),
+            "year": track.get("year") or 0,
             "mb_trackid": _s(track.get("mb_trackid") or ""),
         })
 
     if not imported_tracks:
-        raise RuntimeError("No downloaded playlist staging files are fingerprint-verified for import")
+        raise RuntimeError("No downloaded playlist staging files are ready for engine verification")
 
+    operation_digest = hashlib.sha256(
+        (f"{pid}|{key}|" + "|".join(sorted(operation_material))).encode("utf-8", "surrogatepass")
+    ).hexdigest()[:32]
+    operation_id = f"pl-import-{operation_digest}"
+    for track in imported_tracks:
+        _playlist_store_track_state(
+            clean_name, track, "waiting_import",
+            playlist_id=pid,
+            import_operation_id=operation_id)
     if cancel_event is not None and cancel_event.is_set():
         raise RuntimeError("playlist import stopped by user")
 
@@ -51013,7 +51005,7 @@ def _playlist_run_import_downloaded(name: str,
     import_started_at = time.time()
     try:
         res = beets_client.import_playlist_staged(
-            key, pid, tracks_payload, operation_id=f"pl-import-{key}-{int(import_started_at)}"
+            key, pid, tracks_payload, operation_id=operation_id
         )
     except Exception as exc:
         log.append(f"  [playlist] Engine import handoff failed: {exc}")
@@ -51035,11 +51027,11 @@ def _playlist_run_import_downloaded(name: str,
         raise RuntimeError(res.get("error_code") or "import_failed")
 
     beets_res = res.get("beets") if isinstance(res.get("beets"), dict) else {}
-    stdout_text = _s(beets_res.get("stdout") or "")
-    for line in stdout_text.splitlines()[-60:]:
-        if line.strip():
-            log.append("  " + line)
+    beets_message = _s(beets_res.get("message") or "")
+    if beets_message:
+        log.append("  " + beets_message)
 
+    engine_imported_tracks = []
     track_results = res.get("tracks") if isinstance(res.get("tracks"), list) else []
     for trk_res in track_results:
         if not isinstance(trk_res, dict):
@@ -51048,11 +51040,13 @@ def _playlist_run_import_downloaded(name: str,
         status = _s(trk_res.get("status"))
         matched_trk = next((t for t in imported_tracks if _playlist_status_id(t) == tid), {"id": tid})
         if status in {"imported", "already_imported"}:
+            engine_imported_tracks.append(matched_trk)
             _playlist_store_track_state(
-                clean_name, matched_trk, "importing",
+                clean_name, matched_trk, "imported",
                 playlist_id=pid,
                 message="imported into Beets library by engine",
-                staged_path=_s(trk_res.get("staged_path") or ""))
+                failure_reason="",
+                staged_path="")
         elif status in {"cross_playlist_target", "staged_track_symlink", "staged_track_not_audio", "staged_track_missing"}:
             _playlist_store_track_state(
                 clean_name, matched_trk, "failed",
@@ -51060,9 +51054,13 @@ def _playlist_run_import_downloaded(name: str,
                 message=_s(trk_res.get("error") or "engine import refused track"),
                 failure_reason=status)
 
+    placed_tracks = engine_imported_tracks or [
+        track for track in imported_tracks
+        if any(isinstance(row, dict) and _s(row.get("track_id")) == _playlist_status_id(track) and _s(row.get("status")) in {"imported", "already_imported"} for row in track_results)
+    ]
     _invalidate_lib_cache()
     placement = _playlist_place_recent_imports_for_tracks(
-        imported_tracks, import_started_at - 10, log=log, cancel_event=cancel_event)
+        placed_tracks, import_started_at - 10, log=log, cancel_event=cancel_event)
     _invalidate_lib_cache()
 
     detail = _playlist_detail_payload(clean_name)
@@ -51083,7 +51081,7 @@ def _playlist_run_import_downloaded(name: str,
         if row.get("playlist_track_id") and not row.get("repaired")
     }
     placement_failed = int(placement.get("failed") or 0) > 0
-    for track in imported_tracks:
+    for track in placed_tracks:
         track_key = _playlist_status_id(track)
         if track_key in matched_keys:
             if track_key in review_keys or (placement_failed and track_key not in placed_keys):
@@ -51145,9 +51143,13 @@ def _playlist_run_import_downloaded(name: str,
                 message="Beets import completed but the track was not found in the library",
                 failure_reason="import failed", staged_path="")
     final_detail = _playlist_write_local_membership(clean_name, _playlist_read_manifest(clean_name))
+    if "imported_count" in res:
+        imported_files = int(res.get("imported_count") or 0)
+    else:
+        imported_files = len(placed_tracks)
     return {
         "playlist": final_detail,
-        "imported_files": int(res.get("imported_count") or len(imported_tracks)),
+        "imported_files": imported_files,
         "placement": placement,
     }
 

@@ -203,10 +203,13 @@ class AudioIdentityPipelineStaticTests(unittest.TestCase):
         self.assertNotIn("_acoustid_lookup_cached(audio_path)", body)
         self.assertNotIn("Path(staged_str)", body)
 
-    def test_import_downloaded_uses_same_identity_gate(self):
+    def test_import_downloaded_delegates_identity_verification_to_engine(self):
         body = self.function_source("_playlist_run_import_downloaded")
-        self.assertIn("_playlist_download_match", body)
-        self.assertIn("No downloaded playlist staging files are fingerprint-verified", body)
+        self.assertIn("beets_client.import_playlist_staged", body)
+        self.assertIn("waiting for engine-side staged media verification", body)
+        self.assertIn("No downloaded playlist staging files are ready for engine verification", body)
+        self.assertNotIn("_playlist_download_match(", body)
+        self.assertNotIn("_playlist_download_audio_allowed(", body)
 
     def test_replacement_verification_requires_fingerprint_evidence(self):
         body = self.function_source("_music_format_find_verified_replacement")
