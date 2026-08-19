@@ -57,7 +57,14 @@ class ImportReviewCleanupPathBoundaryTests(unittest.TestCase):
                 str(self.tmp_downloads),
                 str(self.quarantine),
             ]
-            return execute_import_review_cleanup_plan(self.tx_store, payload, roots)
+            # execute_import_review_cleanup_plan no longer reaches into
+            # sys.modules["app"] for MUSIC_ROOT (SEC-002 Wave 15 final
+            # review fix: transaction_engine.py must not depend on app.py)
+            # -- the caller must pass it explicitly, exactly as
+            # beets_control_agent.py does in production.
+            return execute_import_review_cleanup_plan(
+                self.tx_store, payload, roots, music_root=str(self.music),
+            )
 
         def mock_apply(op_id, **kwargs):
             return execute_import_review_cleanup_apply(self.tx_store, op_id, quarantine_root=str(self.quarantine))

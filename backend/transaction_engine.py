@@ -6,6 +6,7 @@ beside the existing JobStore without changing the job architecture.
 from __future__ import annotations
 
 import csv
+import errno
 import io
 import json
 import os
@@ -13,7 +14,6 @@ import re
 import shutil
 import sqlite3
 import stat
-import sys
 import threading
 import time
 import uuid
@@ -614,8 +614,26 @@ class TransactionStore:
         target_path = meta.get("target_path")
         expected_states = meta.get("expected_states") or {}
 
+        # A source whose step already durably completed (persisted to disk
+        # by a prior Apply attempt, including one that then crashed before
+        # finishing the rest of the transaction) is *expected* to be gone
+        # or moved -- that is the correct, already-applied outcome for this
+        # transaction, not evidence of unexpected external tampering.
+        # Re-checking its original pre-mutation stat here would otherwise
+        # permanently wedge crash-recovery retries: the file legitimately
+        # no longer exists at that path, so "no longer exists" would always
+        # fire, and the transaction could neither finish nor be marked
+        # Completed.
+        already_done_sources = {
+            step.get("source")
+            for step in (meta.get("steps") or [])
+            if step.get("source") and step.get("status") in {"completed", "irreversible_completed", "rolled_back"}
+        }
+
         # 1. Check symlink / existence / size / mtime / ino / dev for recorded paths
         for path_str, state in expected_states.items():
+            if path_str in already_done_sources:
+                continue
             p = Path(path_str)
             if os.path.islink(p) or p.is_symlink():
                 return False, f"Path {path_str} became a symlink."
@@ -676,6 +694,8 @@ def execute_import_review_cleanup_plan(
     store: TransactionStore,
     payload: Dict[str, Any],
     allowed_roots: List[str],
+    *,
+    music_root: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Execute plan creation for import review folder/files with strict validation and durable step tracking."""
     raw_path = str(payload.get("path") or payload.get("folder") or "").strip()
@@ -715,15 +735,17 @@ def execute_import_review_cleanup_plan(
         if resolved_target == r:
             return {"ok": False, "error": f"Cannot delete approved root {r} itself."}
 
-    # Check music library refusal if not confirmed wrong library folder
-    music_root_cand = None
-    if "app" in sys.modules:
-        music_root_cand = getattr(sys.modules["app"], "MUSIC_ROOT", None)
-    if not music_root_cand:
-        music_root_cand = os.environ.get("MUSIC_ROOT") or os.environ.get("BEETS_MUSIC_DIR") or "/music"
-    music_root = Path(music_root_cand).resolve(strict=False)
+    # Check music library refusal if not confirmed wrong library folder.
+    # SEC-002 Wave 15 final review: this module must not depend on app.py
+    # (it also runs inside the engine container, where app.py is never
+    # imported) -- the caller (beets_control_agent.py, which already
+    # resolves MUSIC_ROOT for allowed_roots) passes it explicitly instead
+    # of this function reaching into sys.modules["app"] or re-deriving it
+    # from os.environ on its own.
+    music_root_cand = music_root or os.environ.get("MUSIC_ROOT") or os.environ.get("BEETS_MUSIC_DIR") or "/music"
+    music_root_path = Path(music_root_cand).resolve(strict=False)
 
-    if (resolved_target == music_root or music_root in resolved_target.parents) and not confirmed_wrong_library_folder and album_id <= 0:
+    if (resolved_target == music_root_path or music_root_path in resolved_target.parents) and not confirmed_wrong_library_folder and album_id <= 0:
         return {"ok": False, "error": f"Review folder path {resolved_target} is inside music library."}
 
     expected_states: Dict[str, Any] = {}
@@ -960,111 +982,155 @@ def execute_import_review_cleanup_apply(
             continue
 
         step["status"] = "running"
-        step_type = step.get("type")
-        src_str = step.get("source")
-        if not src_str:
-            step["status"] = "completed"
-            continue
-        src = Path(src_str)
-
-        # Stat revalidation right before step execution
-        if not src.exists():
-            step["status"] = "completed"
-            continue
-
-        if _is_symlink(src):
-            skipped.append({"file": str(src), "reason": "symlink"})
-            step["status"] = "completed"
-            continue
-
-        # Compare current stat vs expected
-        exp_st = expected_states.get(src_str) or {}
         try:
-            st = os.lstat(str(src))
-            if exp_st.get("ino") is not None and st.st_ino != exp_st["ino"]:
-                step["status"] = "failed"
-                store.update(operation_id, status="Failed", logs=log + [f"File replacement detected at {src} (inode changed)"])
-                return {"ok": False, "error": f"File replacement detected at {src} (inode changed)"}
-        except Exception:
-            step["status"] = "completed"
-            skipped.append({"file": str(src), "reason": "invalid_path"})
-            continue
+            step_type = step.get("type")
+            src_str = step.get("source")
+            if not src_str:
+                step["status"] = "completed"
+                continue
+            src = Path(src_str)
 
-        if step_type == "move_quarantine":
-            rel = src.relative_to(target_path) if target_path in src.parents else Path(src.name)
-            dest = op_q_dir / rel
-            step["destination"] = str(dest)
-
-            try:
-                dest_parent = dest.parent
-                if _path_has_symlink_under(dest_parent, q_base):
-                    skipped.append({"file": str(src), "reason": "symlink"})
-                    step["status"] = "completed"
-                    continue
-
-                dest_parent.mkdir(parents=True, exist_ok=True)
-
-                if _path_has_symlink_under(dest_parent, q_base) or _is_symlink(dest) or dest.is_symlink():
-                    skipped.append({"file": str(src), "reason": "symlink"})
-                    step["status"] = "completed"
-                    continue
-
-                q_resolved = q_base.resolve(strict=False)
-                dest_resolved = dest_parent.resolve(strict=False)
-                if dest_resolved == q_resolved or q_resolved not in dest_resolved.parents:
-                    skipped.append({"file": str(src), "reason": "unsafe_destination"})
-                    step["status"] = "completed"
-                    continue
-            except Exception:
-                skipped.append({"file": str(src), "reason": "unsafe_destination"})
+            # Stat revalidation right before step execution
+            if not src.exists():
                 step["status"] = "completed"
                 continue
 
+            if _is_symlink(src):
+                skipped.append({"file": str(src), "reason": "symlink"})
+                step["status"] = "completed"
+                continue
+
+            # Compare current stat vs expected -- immediately before mutating,
+            # not just once at the top of this function. Checks device+inode
+            # (identifies the exact underlying file, not merely a look-alike at
+            # the same path) and size+mtime_ns (catches an in-place content
+            # swap on the same inode, e.g. truncate+rewrite, which a bare
+            # inode check alone would miss).
+            exp_st = expected_states.get(src_str) or {}
             try:
-                shutil.move(str(src), str(dest))
-                dest_res = dest.resolve(strict=False)
-                written_file = (dest / src.name) if (dest.exists() and dest.is_dir() and dest != dest_parent) else dest
-                written_resolved = written_file.resolve(strict=False)
-                is_invalid = _is_symlink(dest) or dest.is_symlink() or dest_res == q_resolved or q_resolved not in dest_res.parents or written_resolved == q_resolved or q_resolved not in written_resolved.parents
+                st = os.lstat(str(src))
+                mismatch = None
+                if exp_st.get("ino") is not None and st.st_ino != exp_st["ino"]:
+                    mismatch = "inode changed"
+                elif exp_st.get("dev") is not None and st.st_dev != exp_st["dev"]:
+                    mismatch = "device changed"
+                elif exp_st.get("size") is not None and st.st_size != exp_st["size"]:
+                    mismatch = "size changed"
+                elif exp_st.get("mtime_ns") is not None and st.st_mtime_ns != exp_st["mtime_ns"]:
+                    mismatch = "mtime changed"
+                if mismatch:
+                    step["status"] = "failed"
+                    store.update(operation_id, status="Failed", logs=log + [f"File replacement detected at {src} ({mismatch})"])
+                    return {"ok": False, "error": f"File replacement detected at {src} ({mismatch})"}
+            except Exception:
+                step["status"] = "completed"
+                skipped.append({"file": str(src), "reason": "invalid_path"})
+                continue
 
-                if is_invalid:
-                    try:
-                        if (written_file != dest or (dest.exists() and dest.is_dir())) and written_resolved.exists() and written_resolved.is_file() and q_resolved not in written_resolved.parents:
-                            try:
-                                if not src.exists():
-                                    shutil.move(str(written_resolved), str(src))
-                                else:
-                                    written_resolved.unlink()
-                            except Exception:
-                                pass
+            if step_type == "move_quarantine":
+                rel = src.relative_to(target_path) if target_path in src.parents else Path(src.name)
+                dest = op_q_dir / rel
+                step["destination"] = str(dest)
 
-                        if _is_symlink(dest) or dest.is_symlink():
-                            try:
-                                os.unlink(str(dest))
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
-                    skipped.append({"file": str(src), "reason": "symlink"})
+                try:
+                    dest_parent = dest.parent
+                    if _path_has_symlink_under(dest_parent, q_base):
+                        skipped.append({"file": str(src), "reason": "symlink"})
+                        step["status"] = "completed"
+                        continue
+
+                    dest_parent.mkdir(parents=True, exist_ok=True)
+
+                    if _path_has_symlink_under(dest_parent, q_base) or _is_symlink(dest) or dest.is_symlink():
+                        skipped.append({"file": str(src), "reason": "symlink"})
+                        step["status"] = "completed"
+                        continue
+
+                    q_resolved = q_base.resolve(strict=False)
+                    dest_resolved = dest_parent.resolve(strict=False)
+                    if dest_resolved == q_resolved or q_resolved not in dest_resolved.parents:
+                        skipped.append({"file": str(src), "reason": "unsafe_destination"})
+                        step["status"] = "completed"
+                        continue
+
+                    # shutil.move() silently descends into an existing directory
+                    # destination (moving src *inside* it, using src's own
+                    # basename) rather than treating dest as the literal target
+                    # -- the exact gotcha the pre-Wave-15 app.py code for this
+                    # same quarantine operation was written to avoid. Refuse
+                    # outright if anything already exists at the exact chosen
+                    # leaf, and use os.rename()/copy instead of shutil.move so
+                    # dest is always the literal target, never a directory to
+                    # land inside.
+                    if dest.exists() or dest.is_symlink():
+                        skipped.append({"file": str(src), "reason": "unsafe_destination"})
+                        step["status"] = "completed"
+                        continue
+                except Exception:
+                    skipped.append({"file": str(src), "reason": "unsafe_destination"})
                     step["status"] = "completed"
                     continue
 
-                moved.append({"source": str(src), "quarantined": str(dest)})
-                log.append(f"Quarantined {src} -> {dest}")
-                step["status"] = "completed"
-            except Exception as ex:
-                skipped.append({"file": str(src), "reason": f"failed_move: {ex}"})
-                step["status"] = "completed"
+                try:
+                    try:
+                        os.rename(str(src), str(dest))
+                    except OSError as exc:
+                        if getattr(exc, "errno", None) != errno.EXDEV:
+                            raise
+                        shutil.copyfile(str(src), str(dest))
+                        try:
+                            shutil.copystat(str(src), str(dest))
+                        except Exception:
+                            pass
+                        src.unlink()
 
-        elif step_type == "delete_file":
-            try:
-                src.unlink()
-                deleted.append(str(src))
-                log.append(f"Deleted {src}")
-                step["status"] = "irreversible_completed"
-            except Exception as ex:
-                skipped.append({"file": str(src), "reason": f"failed_delete: {ex}"})
-                step["status"] = "completed"
+                    dest_res = dest.resolve(strict=False)
+                    is_invalid = _is_symlink(dest) or dest.is_symlink() or not dest.is_file() or dest_res == q_resolved or q_resolved not in dest_res.parents
+
+                    if is_invalid:
+                        # The source was swapped for a symlink (or dest was
+                        # otherwise replaced) in the instant between our checks
+                        # and the rename/copy syscall: undo rather than report a
+                        # false success.
+                        try:
+                            if not src.exists() and dest.exists() and not dest.is_symlink() and dest.is_file():
+                                os.rename(str(dest), str(src))
+                            elif dest.exists() or dest.is_symlink():
+                                os.unlink(str(dest))
+                        except Exception:
+                            pass
+                        skipped.append({"file": str(src), "reason": "symlink"})
+                        step["status"] = "completed"
+                        continue
+
+                    moved.append({"source": str(src), "quarantined": str(dest)})
+                    log.append(f"Quarantined {src} -> {dest}")
+                    step["status"] = "completed"
+                except Exception as ex:
+                    skipped.append({"file": str(src), "reason": f"failed_move: {ex}"})
+                    step["status"] = "completed"
+
+            elif step_type == "delete_file":
+                try:
+                    src.unlink()
+                    deleted.append(str(src))
+                    log.append(f"Deleted {src}")
+                    step["status"] = "irreversible_completed"
+                except Exception as ex:
+                    skipped.append({"file": str(src), "reason": f"failed_delete: {ex}"})
+                    step["status"] = "completed"
+        finally:
+            # Persist per-step progress durably (not just at the very end
+            # of this function) so a crash mid-loop cannot lose track of
+            # which steps already mutated the filesystem. Without this, a
+            # crash after this step legitimately completed but before the
+            # function's final store.update() call would leave the step
+            # recorded as "pending" on disk -- a retry would then either
+            # try to redo an already-completed destructive mutation, or
+            # (via revalidate_preconditions' expected_states check) refuse
+            # to proceed at all because the file it already correctly
+            # deleted/moved no longer matches its pre-mutation stat.
+            store.update(operation_id, metadata={"steps": steps})
 
     # Cleanup empty parent directories
     if target_path.exists() and target_path.is_dir():
@@ -1130,12 +1196,46 @@ def rollback_import_review_cleanup(
             if src_str and dest_str:
                 dest = Path(dest_str)
                 src = Path(src_str)
-                if dest.exists() and not dest.is_symlink():
-                    src.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.move(str(dest), str(src))
-                    restored.append(src_str)
-                    log.append(f"Restored {dest} -> {src}")
-                    step["status"] = "rolled_back"
+                if not dest.exists() or dest.is_symlink():
+                    continue
+                # Refuse rather than silently overwrite/descend if something
+                # has since reappeared at the original path (a new file
+                # created there since quarantine, or -- via shutil.move's
+                # directory-descend behavior -- a directory), and refuse if
+                # any existing parent component of the restore target is a
+                # symlink.
+                if src.exists() or src.is_symlink():
+                    log.append(f"Skipped restore of {dest}: {src} already exists")
+                    continue
+                parent = src.parent
+                existing_parent = parent
+                while not existing_parent.exists() and existing_parent != existing_parent.parent:
+                    existing_parent = existing_parent.parent
+                if existing_parent.is_symlink():
+                    log.append(f"Skipped restore of {dest}: unsafe parent directory for {src}")
+                    continue
+                try:
+                    parent.mkdir(parents=True, exist_ok=True)
+                    if src.exists() or src.is_symlink():
+                        log.append(f"Skipped restore of {dest}: {src} already exists")
+                        continue
+                    try:
+                        os.rename(str(dest), str(src))
+                    except OSError as exc:
+                        if getattr(exc, "errno", None) != errno.EXDEV:
+                            raise
+                        shutil.copyfile(str(dest), str(src))
+                        try:
+                            shutil.copystat(str(dest), str(src))
+                        except Exception:
+                            pass
+                        dest.unlink()
+                except Exception as ex:
+                    log.append(f"Failed to restore {dest} -> {src}: {ex}")
+                    continue
+                restored.append(src_str)
+                log.append(f"Restored {dest} -> {src}")
+                step["status"] = "rolled_back"
 
     tx_meta = {**meta, "rollback_available": False, "steps": steps}
     store.update(
@@ -1185,6 +1285,12 @@ def create_album_cleanup_plan(
     if not rows and not album_row:
         return {"ok": False, "error": f"Album {album_id} not found in database."}
 
+    # SEC-002 Wave 15 final review: capture the exact item ids planned for
+    # deletion, not just their paths -- Apply must delete precisely this
+    # set of DB rows, never a broad "WHERE album_id = ?" that could also
+    # sweep up items added to this album_id between Plan and Apply whose
+    # files were never planned, precondition-checked, or deleted.
+    item_ids: List[int] = []
     item_paths: List[Path] = []
     expected_states: Dict[str, Any] = {}
     sources: List[str] = []
@@ -1198,6 +1304,7 @@ def create_album_cleanup_plan(
                 raw_p = raw_p.decode("utf-8", "ignore")
         p = Path(raw_p)
         item_paths.append(p)
+        item_ids.append(int(r["id"]))
 
     if not item_paths:
         return {"ok": False, "error": f"Album {album_id} has no track items in database."}
@@ -1245,6 +1352,7 @@ def create_album_cleanup_plan(
         "step_id": f"step_{step_idx}",
         "type": "delete_db_record",
         "album_id": album_id,
+        "item_ids": item_ids,
         "db_path": str(lib_db),
         "status": "pending",
         "reversibility": "IRREVERSIBLE",
@@ -1271,6 +1379,7 @@ def create_album_cleanup_plan(
         metadata={
             "mutation_family": "album_cleanup_v1",
             "album_id": album_id,
+            "item_ids": item_ids,
             "target_path": str(album_dir),
             "allowed_roots": [str(r) for r in roots],
             "source_paths": sources,
@@ -1321,6 +1430,7 @@ def execute_album_cleanup_apply(
 
     album_id = meta.get("album_id")
     steps = meta.get("steps") or []
+    expected_states = meta.get("expected_states") or {}
     log: List[str] = []
     deleted: List[str] = []
 
@@ -1334,55 +1444,126 @@ def execute_album_cleanup_apply(
             continue
 
         step["status"] = "running"
-        step_type = step.get("type")
+        try:
+            step_type = step.get("type")
 
-        if step_type == "delete_file":
-            src_str = step.get("source")
-            if src_str:
-                src = Path(src_str)
-                if src.exists():
-                    if src.is_symlink() or os.path.islink(str(src)):
-                        step["status"] = "failed"
-                        store.update(operation_id, status="Failed", logs=log + [f"Symlink detected at {src}"])
-                        return {"ok": False, "error": f"Symlink detected at {src}"}
-                    try:
-                        src.unlink()
-                        deleted.append(src_str)
-                        log.append(f"Deleted track file {src_str}")
-                        step["status"] = "irreversible_completed"
-                    except Exception as ex:
-                        step["status"] = "failed"
-                        store.update(operation_id, status="Failed", logs=log + [f"Failed deleting {src_str}: {ex}"])
-                        return {"ok": False, "error": f"Failed deleting {src_str}: {ex}"}
-                else:
-                    step["status"] = "completed"
+            if step_type == "delete_file":
+                src_str = step.get("source")
+                if src_str:
+                    src = Path(src_str)
+                    if src.exists():
+                        if src.is_symlink() or os.path.islink(str(src)):
+                            step["status"] = "failed"
+                            store.update(operation_id, status="Failed", logs=log + [f"Symlink detected at {src}"])
+                            return {"ok": False, "error": f"Symlink detected at {src}"}
+                        # Immediately-before-mutation precondition re-check
+                        # (same device/inode/size/mtime_ns comparison as the
+                        # import-review cleanup path), not just the one-time
+                        # revalidate_preconditions() call at the top of this
+                        # function.
+                        exp_st = expected_states.get(src_str) or {}
+                        try:
+                            st = os.lstat(str(src))
+                            mismatch = None
+                            if exp_st.get("ino") is not None and st.st_ino != exp_st["ino"]:
+                                mismatch = "inode changed"
+                            elif exp_st.get("dev") is not None and st.st_dev != exp_st["dev"]:
+                                mismatch = "device changed"
+                            elif exp_st.get("size") is not None and st.st_size != exp_st["size"]:
+                                mismatch = "size changed"
+                            elif exp_st.get("mtime_ns") is not None and st.st_mtime_ns != exp_st["mtime_ns"]:
+                                mismatch = "mtime changed"
+                            if mismatch:
+                                step["status"] = "failed"
+                                store.update(operation_id, status="Failed", logs=log + [f"File replacement detected at {src} ({mismatch})"])
+                                return {"ok": False, "error": f"File replacement detected at {src} ({mismatch})"}
+                        except OSError as ex:
+                            step["status"] = "failed"
+                            store.update(operation_id, status="Failed", logs=log + [f"Could not stat {src}: {ex}"])
+                            return {"ok": False, "error": f"Could not stat {src}: {ex}"}
+                        try:
+                            src.unlink()
+                            deleted.append(src_str)
+                            log.append(f"Deleted track file {src_str}")
+                            step["status"] = "irreversible_completed"
+                        except Exception as ex:
+                            step["status"] = "failed"
+                            store.update(operation_id, status="Failed", logs=log + [f"Failed deleting {src_str}: {ex}"])
+                            return {"ok": False, "error": f"Failed deleting {src_str}: {ex}"}
+                    else:
+                        step["status"] = "completed"
 
-        elif step_type == "delete_db_record":
-            if album_id and os.path.exists(lib_db):
+            elif step_type == "delete_db_record":
+                planned_item_ids = sorted(int(i) for i in (step.get("item_ids") or []))
+                if not album_id or not os.path.exists(lib_db):
+                    step["status"] = "failed"
+                    store.update(operation_id, status="Failed", logs=log + [f"Beets database not found at {lib_db}"])
+                    return {"ok": False, "error": f"Beets database not found at {lib_db}"}
                 try:
-                    with sqlite3.connect(lib_db, timeout=10) as con:
+                    # NOTE: `with sqlite3.connect(...) as con:` only wraps the
+                    # transaction (commit-on-success / rollback-on-exception) --
+                    # it does NOT close the connection on exit. Leaving the
+                    # connection open here would hold a live handle/lock on the
+                    # Beets DB file after every album-cleanup apply, which can
+                    # block subsequent operations (including the engine's own
+                    # retries) from opening the same database. Open and close
+                    # explicitly instead.
+                    con = sqlite3.connect(lib_db, timeout=10)
+                    try:
                         cur = con.cursor()
-                        cur.execute("DELETE FROM items WHERE album_id = ?", (album_id,))
+                        # SEC-002 Wave 15 final review: re-verify the album's
+                        # CURRENT item membership exactly matches what was
+                        # planned (and whose files were just deleted above)
+                        # before touching the DB at all. A broad
+                        # "WHERE album_id = ?" delete would also remove rows
+                        # for any item added to this album_id between Plan and
+                        # Apply -- rows whose files were never planned,
+                        # precondition-checked, or deleted -- leaving the DB
+                        # claiming those files are gone when they are not.
+                        cur.execute("SELECT id FROM items WHERE album_id = ?", (album_id,))
+                        current_item_ids = sorted(int(row[0]) for row in cur.fetchall())
+                        if current_item_ids != planned_item_ids:
+                            step["status"] = "failed"
+                            msg = (
+                                f"Album {album_id} membership changed since planning "
+                                f"(planned items {planned_item_ids}, now {current_item_ids}); "
+                                "refusing to delete DB rows."
+                            )
+                            store.update(operation_id, status="Failed", logs=log + [msg])
+                            return {"ok": False, "error": msg}
+                        if planned_item_ids:
+                            placeholders = ",".join("?" for _ in planned_item_ids)
+                            cur.execute(f"DELETE FROM items WHERE id IN ({placeholders})", planned_item_ids)
                         cur.execute("DELETE FROM albums WHERE id = ?", (album_id,))
                         con.commit()
-                    log.append(f"Deleted album {album_id} and items from Beets database {lib_db}")
+                    finally:
+                        con.close()
+                    log.append(f"Deleted album {album_id} and {len(planned_item_ids)} item(s) from Beets database {lib_db}")
                     step["status"] = "irreversible_completed"
                 except Exception as ex:
-                    log.append(f"Warning: DB deletion for album {album_id} failed: {ex}")
-                    step["status"] = "completed"
+                    step["status"] = "failed"
+                    store.update(operation_id, status="Failed", logs=log + [f"DB deletion for album {album_id} failed: {ex}"])
+                    return {"ok": False, "error": f"DB deletion for album {album_id} failed: {ex}"}
 
-        elif step_type == "remove_dir":
-            target_str = step.get("target")
-            if target_str:
-                target_path = Path(target_str)
-                if target_path.exists() and target_path.is_dir():
-                    try:
-                        if not any(target_path.iterdir()):
-                            target_path.rmdir()
-                            log.append(f"Deleted empty album directory {target_path}")
-                    except Exception:
-                        pass
-                step["status"] = "completed"
+            elif step_type == "remove_dir":
+                target_str = step.get("target")
+                if target_str:
+                    target_path = Path(target_str)
+                    if target_path.exists() and target_path.is_dir():
+                        try:
+                            if not any(target_path.iterdir()):
+                                target_path.rmdir()
+                                log.append(f"Deleted empty album directory {target_path}")
+                        except Exception:
+                            pass
+                    step["status"] = "completed"
+        finally:
+            # Persist per-step progress durably for the same crash-recovery
+            # reason as execute_import_review_cleanup_apply: a crash after
+            # this step legitimately completed but before the function's
+            # final store.update() call must not leave it recorded as
+            # "pending" on disk.
+            store.update(operation_id, metadata={"steps": steps})
 
     store.update(
         operation_id,

@@ -3737,15 +3737,18 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/imports/review/cleanup/plan":
+            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
             allowed_roots = [
                 os.environ.get("DOWNLOADS_ROOT", "/downloads"),
                 os.environ.get("PLAYLIST_DOWNLOAD_ROOT", "/data/torrents/music/Playlist Downloads"),
                 os.environ.get("TORRENT_SOURCE_ROOTS", "/torrents"),
                 tempfile.gettempdir(),
                 os.environ.get("IMPORT_REVIEW_QUARANTINE_DIR", "/config/import_review_quarantine"),
-                os.environ.get("MUSIC_ROOT", "/music"),
+                music_root_env,
             ]
-            res = transaction_engine.execute_import_review_cleanup_plan(_txn_store, body, allowed_roots)
+            res = transaction_engine.execute_import_review_cleanup_plan(
+                _txn_store, body, allowed_roots, music_root=music_root_env,
+            )
             code = 200 if res.get("ok") else 400
             self._send_json(code, res)
             return
