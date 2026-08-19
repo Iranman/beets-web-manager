@@ -21,6 +21,8 @@ import ast
 import os
 import sqlite3
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -437,6 +439,68 @@ class Wave16RealEngineIntegrationTests(unittest.TestCase):
         con = sqlite3.connect(self.db_file)
         self.assertEqual(con.execute("SELECT COUNT(*) FROM albums WHERE id = 10").fetchone()[0], 1)
         con.close()
+
+    def test_concurrent_apply_for_same_transaction_is_serialized_not_racy(self):
+        """The control agent serves requests via ThreadingHTTPServer, so two
+        Apply requests for the SAME operation_id can genuinely arrive in
+        parallel threads. This calls the real engine function directly
+        (the authoritative enforcement point -- see
+        backend.transaction_engine._get_apply_lock) from two real threads
+        and proves the second call is actually blocked until the first
+        releases its per-operation-id lock, not racing through the same
+        destructive delete_file step."""
+        plan_res = create_album_cleanup_plan(
+            self.tx_store, album_id=10, db_path=str(self.db_file), allowed_roots=[str(self.music_root)],
+        )
+        op_id = plan_res["operation_id"]
+
+        entered_critical_section = threading.Event()
+        release_critical_section = threading.Event()
+        original_unlink = Path.unlink
+        call_count = {"n": 0}
+
+        def slow_unlink(self_path, *args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                entered_critical_section.set()
+                # Hold thread A inside the locked section long enough for
+                # the test to prove thread B is genuinely blocked, not just
+                # "happened to run after" by scheduling luck.
+                release_critical_section.wait(timeout=5)
+            return original_unlink(self_path, *args, **kwargs)
+
+        results: dict = {}
+
+        def run_apply(name):
+            results[name] = execute_album_cleanup_apply(self.tx_store, op_id, db_path=str(self.db_file))
+
+        with patch.object(Path, "unlink", slow_unlink):
+            thread_a = threading.Thread(target=run_apply, args=("A",))
+            thread_a.start()
+            self.assertTrue(entered_critical_section.wait(timeout=5), "thread A never reached the delete step")
+
+            thread_b = threading.Thread(target=run_apply, args=("B",))
+            thread_b.start()
+
+            # Thread A is deliberately still holding the lock (blocked
+            # inside slow_unlink). If _get_apply_lock did not exist, thread
+            # B would race straight through and very likely finish within
+            # this window; with it, thread B must still be blocked waiting
+            # to acquire the same operation_id's lock.
+            time.sleep(0.3)
+            self.assertNotIn("B", results, "thread B ran concurrently with thread A instead of being serialized")
+
+            release_critical_section.set()
+            thread_a.join(timeout=5)
+            thread_b.join(timeout=5)
+
+        self.assertTrue(results["A"]["ok"])
+        self.assertTrue(results["B"]["ok"])
+        # Thread B must observe the transaction as already Completed (the
+        # idempotent short-circuit), never having re-attempted the delete.
+        self.assertEqual(results["B"]["status"], "Completed")
+        self.assertEqual(call_count["n"], 1, "the file was unlinked more than once across the two Apply calls")
+        self.assertFalse(self.track.exists())
 
 
 class Wave16AstStructuralTests(unittest.TestCase):

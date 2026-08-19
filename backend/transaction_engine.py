@@ -68,6 +68,34 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
 
 _TRANSACTION_ID_RE = re.compile(r"^txn_\d+_[0-9a-f]{12}$")
 
+# SEC-002 Wave 16 final review: the control agent serves requests via
+# ThreadingHTTPServer, so two Apply requests for the SAME operation_id can
+# genuinely run concurrently in separate threads. TransactionStore's own
+# _lock only guards individual get()/update() calls, not a whole multi-step
+# Apply operation -- two threads could each read the same step as "pending"
+# before either persists its "completed" status, racing through the same
+# destructive step. This per-operation-id lock registry serializes Apply
+# calls for the SAME transaction (never blocking unrelated transactions'
+# Apply calls against each other) so retries/concurrent double-clicks are
+# genuinely idempotent rather than racing. Entries are intentionally never
+# removed: transaction ids are unique and Apply is a rare, deliberate,
+# low-frequency user action, so the dict's steady-state size (one small
+# Lock object per transaction ever applied, for the life of the process) is
+# negligible -- and popping entries would reopen the exact race this exists
+# to close (a thread already blocked on the old Lock object while a new
+# request creates a fresh one for the same id).
+_apply_locks_guard = threading.Lock()
+_apply_locks: Dict[str, threading.Lock] = {}
+
+
+def _get_apply_lock(operation_id: str) -> threading.Lock:
+    with _apply_locks_guard:
+        lock = _apply_locks.get(operation_id)
+        if lock is None:
+            lock = threading.Lock()
+            _apply_locks[operation_id] = lock
+        return lock
+
 
 def _now() -> float:
     return time.time()
@@ -913,7 +941,23 @@ def execute_import_review_cleanup_apply(
     operation_id: str,
     quarantine_root: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Execute plan application for import review folder/files with durable steps and server-derived quarantine."""
+    """Execute plan application for import review folder/files with durable steps and server-derived quarantine.
+
+    Serializes concurrent Apply calls for the SAME operation_id (see
+    _get_apply_lock) -- the control agent's ThreadingHTTPServer means two
+    requests for the same transaction can genuinely arrive in parallel
+    threads, and without this lock they could each read the same step as
+    still-pending before either persists its completion.
+    """
+    with _get_apply_lock(operation_id):
+        return _execute_import_review_cleanup_apply_locked(store, operation_id, quarantine_root)
+
+
+def _execute_import_review_cleanup_apply_locked(
+    store: TransactionStore,
+    operation_id: str,
+    quarantine_root: Optional[str] = None,
+) -> Dict[str, Any]:
     # store.get() raises KeyError for BOTH a malformed id (fails
     # TransactionStore's id-format regex) and a well-formed but unknown
     # id -- it never returns a falsy value, so the "if not tx" pattern
@@ -1442,7 +1486,20 @@ def execute_album_cleanup_apply(
     operation_id: str,
     db_path: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Execute album cleanup plan application with durable steps and DB consistency (SEC-002 Wave 15)."""
+    """Execute album cleanup plan application with durable steps and DB consistency (SEC-002 Wave 15).
+
+    Serializes concurrent Apply calls for the SAME operation_id -- see the
+    identical rationale on execute_import_review_cleanup_apply.
+    """
+    with _get_apply_lock(operation_id):
+        return _execute_album_cleanup_apply_locked(store, operation_id, db_path)
+
+
+def _execute_album_cleanup_apply_locked(
+    store: TransactionStore,
+    operation_id: str,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
     try:
         tx = store.get(operation_id)
     except KeyError:
