@@ -46,6 +46,22 @@ class ImportReviewCleanupPathBoundaryTests(unittest.TestCase):
         ):
             directory.mkdir(parents=True, exist_ok=True)
         self.pending_file.write_text("[]", encoding="utf-8")
+        from backend.transaction_engine import TransactionStore, execute_import_review_cleanup_plan, execute_import_review_cleanup_apply
+        self.tx_store = TransactionStore(root=str(self.root / "transactions"))
+
+        def mock_plan(payload, **kwargs):
+            roots = [
+                str(self.downloads),
+                str(self.music),
+                str(self.other_downloads),
+                str(self.tmp_downloads),
+                str(self.quarantine),
+            ]
+            return execute_import_review_cleanup_plan(self.tx_store, payload, roots)
+
+        def mock_apply(op_id, **kwargs):
+            return execute_import_review_cleanup_apply(self.tx_store, op_id, quarantine_root=str(self.quarantine))
+
         self.patches = [
             mock.patch.dict(os.environ, {
                 "BEETS_WEB_AUTH_DISABLED": "1",
@@ -61,6 +77,8 @@ class ImportReviewCleanupPathBoundaryTests(unittest.TestCase):
             ]),
             mock.patch.object(app_module, "_AI_PENDING_FILE", self.pending_file),
             mock.patch.object(app_module, "_record_ai_review_decision", return_value=None),
+            mock.patch.object(app_module.beets_client, "plan_import_review_cleanup", side_effect=mock_plan),
+            mock.patch.object(app_module.beets_client, "apply_import_review_cleanup", side_effect=mock_apply),
         ]
         for patch in self.patches:
             patch.start()

@@ -325,3 +325,163 @@ def test_flask_import_review_files_cleanup_endpoint(flask_client):
         data = resp.get_json()
         assert data["ok"] is True
         assert data["operation_id"] == "tx-files-cleanup"
+
+
+# ---------------------------------------------------------------------------
+# 7. AST & Architecture Static Regression Tests
+# ---------------------------------------------------------------------------
+
+def test_beets_client_ast_no_duplicates():
+    import ast
+    client_path = os.path.join(os.path.dirname(__file__), "..", "backend", "beets_client.py")
+    with open(client_path, "r", encoding="utf-8") as f:
+        tree = ast.parse(f.read(), filename="beets_client.py")
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == "BeetsClient":
+            method_names = [n.name for n in node.body if isinstance(n, ast.FunctionDef)]
+            duplicates = [name for name in set(method_names) if method_names.count(name) > 1]
+            assert not duplicates, f"Duplicate method definitions found in BeetsClient: {duplicates}"
+
+
+def test_transaction_engine_no_app_import():
+    import ast
+    engine_path = os.path.join(os.path.dirname(__file__), "..", "backend", "transaction_engine.py")
+    with open(engine_path, "r", encoding="utf-8") as f:
+        tree = ast.parse(f.read(), filename="transaction_engine.py")
+
+    imported_modules = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                imported_modules.append(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                imported_modules.append(node.module)
+
+    assert "app" not in imported_modules, "transaction_engine.py must not import app.py"
+
+
+def test_beets_client_fails_closed_on_unavailable():
+    from backend.beets_client import BeetsUnavailableError
+    client = BeetsClient(base_url="http://127.0.0.1:59999")  # Unreachable port
+
+    with pytest.raises(BeetsUnavailableError):
+        client.plan_import_review_cleanup(folder_path="/tmp/test", action="delete")
+
+    with pytest.raises(BeetsUnavailableError):
+        client.apply_import_review_cleanup("txn_dummy_123")
+
+
+# ---------------------------------------------------------------------------
+# 8. Database Consistency & Album Cleanup Tests
+# ---------------------------------------------------------------------------
+
+def test_album_cleanup_plan_and_apply_db_consistency(tx_store, tmp_path):
+    import sqlite3
+    from backend.transaction_engine import create_album_cleanup_plan, execute_album_cleanup_apply
+
+    music_root = tmp_path / "music"
+    music_root.mkdir()
+    album_dir = music_root / "Artist" / "TestAlbum"
+    album_dir.mkdir(parents=True)
+
+    track1 = album_dir / "track1.mp3"
+    track1.write_text("audio 1")
+    track2 = album_dir / "track2.mp3"
+    track2.write_text("audio 2")
+
+    db_file = tmp_path / "musiclibrary.blb"
+    con = sqlite3.connect(db_file)
+    cur = con.cursor()
+    cur.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, album_id INTEGER, path TEXT)")
+    cur.execute("CREATE TABLE albums (id INTEGER PRIMARY KEY, album TEXT, artpath TEXT)")
+    cur.execute("INSERT INTO albums (id, album) VALUES (10, 'TestAlbum')")
+    cur.execute("INSERT INTO items (id, album_id, path) VALUES (101, 10, ?)", (str(track1),))
+    cur.execute("INSERT INTO items (id, album_id, path) VALUES (102, 10, ?)", (str(track2),))
+    con.commit()
+    con.close()
+
+    plan_res = create_album_cleanup_plan(
+        tx_store,
+        album_id=10,
+        db_path=str(db_file),
+        allowed_roots=[str(music_root)],
+    )
+    assert plan_res["ok"] is True
+    op_id = plan_res["operation_id"]
+
+    apply_res = execute_album_cleanup_apply(tx_store, op_id, db_path=str(db_file))
+    assert apply_res["ok"] is True
+    assert apply_res["status"] == "Completed"
+
+    # Verify files deleted from disk
+    assert not track1.exists()
+    assert not track2.exists()
+    assert not album_dir.exists()
+
+    # Verify DB items and album deleted
+    con = sqlite3.connect(db_file)
+    cur = con.cursor()
+    cur.execute("SELECT COUNT(*) FROM items WHERE album_id = 10")
+    items_count = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM albums WHERE id = 10")
+    albums_count = cur.fetchone()[0]
+    con.close()
+
+    assert items_count == 0
+    assert albums_count == 0
+
+
+def test_cross_album_security_authorization(tx_store, tmp_path):
+    from backend.transaction_engine import create_album_cleanup_plan
+
+    music_root = tmp_path / "music"
+    music_root.mkdir()
+
+    plan_res = create_album_cleanup_plan(
+        tx_store,
+        album_id=999,  # Non-existent album
+        db_path=str(tmp_path / "nonexistent.blb"),
+        allowed_roots=[str(music_root)],
+    )
+    assert plan_res["ok"] is False
+    assert "not found" in plan_res["error"]
+
+
+# ---------------------------------------------------------------------------
+# 9. Crash Resume & Truthful Rollback Tests
+# ---------------------------------------------------------------------------
+
+def test_truthful_rollback(tx_store, dummy_root, tmp_path):
+    from backend.transaction_engine import execute_import_review_cleanup_plan, execute_import_review_cleanup_apply, rollback_import_review_cleanup
+
+    target_dir = dummy_root / "quarantine_target"
+    target_dir.mkdir()
+    f1 = target_dir / "file1.mp3"
+    f1.write_text("q content")
+
+    quarantine_dir = tmp_path / "quarantine"
+
+    plan_res = execute_import_review_cleanup_plan(
+        tx_store,
+        payload={"path": str(target_dir), "action": "quarantine_rejected", "files": [str(f1)]},
+        allowed_roots=[str(dummy_root)],
+    )
+    assert plan_res["ok"] is True
+    op_id = plan_res["operation_id"]
+
+    apply_res = execute_import_review_cleanup_apply(tx_store, op_id, quarantine_root=str(quarantine_dir))
+    assert apply_res["ok"] is True
+    assert not f1.exists()
+
+    # Rollback
+    rb_res = rollback_import_review_cleanup(tx_store, op_id)
+    assert rb_res["ok"] is True
+    assert rb_res["status"] == "Rolled Back"
+    assert f1.exists()
+
+    # Second rollback attempt should be refused (rollback_available is now False)
+    rb2_res = rollback_import_review_cleanup(tx_store, op_id)
+    assert rb2_res["ok"] is False
+    assert "Rollback unavailable" in rb2_res["error"]

@@ -10,6 +10,10 @@ import io
 import json
 import os
 import re
+import shutil
+import sqlite3
+import stat
+import sys
 import threading
 import time
 import uuid
@@ -602,7 +606,7 @@ class TransactionStore:
         if not tx:
             return False, f"Transaction {transaction_id} not found."
 
-        if tx.get("status") == "Completed":
+        if tx.get("status") in {"Completed", "Rolled Back"}:
             return True, None
 
         meta = tx.get("metadata") or {}
@@ -610,20 +614,37 @@ class TransactionStore:
         target_path = meta.get("target_path")
         expected_states = meta.get("expected_states") or {}
 
-        # 1. Check symlink / existence / size / mtime for recorded paths
+        # 1. Check symlink / existence / size / mtime / ino / dev for recorded paths
         for path_str, state in expected_states.items():
             p = Path(path_str)
-            if os.path.islink(p):
+            if os.path.islink(p) or p.is_symlink():
                 return False, f"Path {path_str} became a symlink."
             if not p.exists():
                 return False, f"Path {path_str} no longer exists."
-            st = p.stat()
+            try:
+                st = os.lstat(str(p))
+            except Exception:
+                return False, f"Could not stat path {path_str}."
+
+            if stat.S_ISLNK(st.st_mode):
+                return False, f"Path {path_str} became a symlink."
+
             expected_size = state.get("size")
             expected_mtime = state.get("mtime")
+            expected_mtime_ns = state.get("mtime_ns")
+            expected_ino = state.get("ino")
+            expected_dev = state.get("dev")
+
             if expected_size is not None and st.st_size != expected_size:
                 return False, f"Path {path_str} size changed (expected {expected_size}, got {st.st_size})."
-            if expected_mtime is not None and abs(st.st_mtime - expected_mtime) > 0.001:
+            if expected_mtime_ns is not None and st.st_mtime_ns != expected_mtime_ns:
+                return False, f"Path {path_str} mtime_ns changed."
+            elif expected_mtime is not None and abs(st.st_mtime - expected_mtime) > 0.001:
                 return False, f"Path {path_str} mtime changed."
+            if expected_ino is not None and st.st_ino != expected_ino:
+                return False, f"Path {path_str} inode changed (expected {expected_ino}, got {st.st_ino})."
+            if expected_dev is not None and st.st_dev != expected_dev:
+                return False, f"Path {path_str} device changed."
 
         # 2. Directory growth race check (only for full-folder operations)
         raw_files = payload.get("files")
@@ -656,7 +677,7 @@ def execute_import_review_cleanup_plan(
     payload: Dict[str, Any],
     allowed_roots: List[str],
 ) -> Dict[str, Any]:
-    """Execute plan creation for import review folder/files with strict validation."""
+    """Execute plan creation for import review folder/files with strict validation and durable step tracking."""
     raw_path = str(payload.get("path") or payload.get("folder") or "").strip()
     if not raw_path:
         return {"ok": False, "error": "Review path is required."}
@@ -695,24 +716,27 @@ def execute_import_review_cleanup_plan(
             return {"ok": False, "error": f"Cannot delete approved root {r} itself."}
 
     # Check music library refusal if not confirmed wrong library folder
-    import app as flask_app_mod
-    music_root = Path(getattr(flask_app_mod, "MUSIC_ROOT", "/music")).resolve(strict=False)
+    music_root_cand = None
+    if "app" in sys.modules:
+        music_root_cand = getattr(sys.modules["app"], "MUSIC_ROOT", None)
+    if not music_root_cand:
+        music_root_cand = os.environ.get("MUSIC_ROOT") or os.environ.get("BEETS_MUSIC_DIR") or "/music"
+    music_root = Path(music_root_cand).resolve(strict=False)
+
     if (resolved_target == music_root or music_root in resolved_target.parents) and not confirmed_wrong_library_folder and album_id <= 0:
         return {"ok": False, "error": f"Review folder path {resolved_target} is inside music library."}
 
     expected_states: Dict[str, Any] = {}
     sources: List[str] = []
     skipped: List[Dict[str, str]] = []
+    steps: List[Dict[str, Any]] = []
+    step_idx = 1
 
     if raw_files:
         for f in raw_files:
             try:
                 f_raw = str(f).strip()
-                if not f_raw:
-                    skipped.append({"file": f_raw, "reason": "invalid_path"})
-                    continue
-
-                if "\x00" in f_raw or "%00" in f_raw:
+                if not f_raw or "\x00" in f_raw or "%00" in f_raw:
                     skipped.append({"file": f_raw, "reason": "invalid_path"})
                     continue
 
@@ -722,7 +746,7 @@ def execute_import_review_cleanup_plan(
                     skipped.append({"file": f_raw, "reason": "outside_review_folder"})
                     continue
 
-                # 1. Try literal path under resolved_target first (preserves literal percent signs in filenames)
+                # 1. Try literal path under resolved_target first
                 literal_fp = Path(f_raw)
                 if not literal_fp.is_absolute():
                     literal_fp = resolved_target / literal_fp
@@ -732,72 +756,106 @@ def execute_import_review_cleanup_plan(
                 except Exception:
                     literal_resolved = None
 
+                fp_to_use = None
                 if literal_resolved and literal_resolved.exists() and literal_resolved.is_file() and not literal_fp.is_symlink() and not literal_resolved.is_symlink():
                     if literal_resolved != resolved_target and resolved_target in literal_resolved.parents:
-                        st = literal_resolved.stat()
-                        expected_states[str(literal_resolved)] = {"size": st.st_size, "mtime": st.st_mtime, "is_file": True}
-                        sources.append(str(literal_resolved))
+                        fp_to_use = literal_resolved
+
+                if not fp_to_use:
+                    f_decode = f_raw
+                    for _ in range(3):
+                        dec = urllib.parse.unquote(f_decode)
+                        if dec == f_decode:
+                            break
+                        f_decode = dec
+
+                    if "\x00" in f_decode:
+                        skipped.append({"file": f_raw, "reason": "invalid_path"})
                         continue
 
-                # 2. Decode URL encoding if literal path was not found
-                f_decode = f_raw
-                for _ in range(3):
-                    dec = urllib.parse.unquote(f_decode)
-                    if dec == f_decode:
-                        break
-                    f_decode = dec
+                    norm_f = f_decode.replace("\\", "/")
+                    parts = [p for p in norm_f.split("/") if p]
+                    if any(p in {".", ".."} for p in parts) or f_raw.startswith(("/", "\\")) or Path(f_decode).is_absolute():
+                        skipped.append({"file": f_raw, "reason": "outside_review_folder"})
+                        continue
 
-                if "\x00" in f_decode:
-                    skipped.append({"file": f_raw, "reason": "invalid_path"})
-                    continue
+                    fp = Path(f_decode)
+                    if not fp.is_absolute():
+                        fp = resolved_target / fp
+                    fp_resolved = fp.resolve(strict=False)
 
-                # Traversal check on raw and decoded text
-                norm_f = f_decode.replace("\\", "/")
-                parts = [p for p in norm_f.split("/") if p]
-                if any(p in {".", ".."} for p in parts) or f_raw.startswith(("/", "\\")) or Path(f_decode).is_absolute():
-                    skipped.append({"file": f_raw, "reason": "outside_review_folder"})
-                    continue
+                    if fp_resolved == resolved_target or resolved_target not in fp_resolved.parents:
+                        skipped.append({"file": f_raw, "reason": "outside_review_folder"})
+                        continue
 
-                fp = Path(f_decode)
-                if not fp.is_absolute():
-                    fp = resolved_target / fp
-                fp_resolved = fp.resolve(strict=False)
+                    # Check for symlinks in path components
+                    has_symlink = False
+                    curr_check = fp
+                    while curr_check != resolved_target and resolved_target in curr_check.parents:
+                        if curr_check.is_symlink() or os.path.islink(str(curr_check)):
+                            has_symlink = True
+                            break
+                        curr_check = curr_check.parent
 
-                # Check if fp_resolved is contained under resolved_target
-                if fp_resolved == resolved_target or resolved_target not in fp_resolved.parents:
-                    skipped.append({"file": f_raw, "reason": "outside_review_folder"})
-                    continue
+                    if has_symlink or os.path.islink(fp) or os.path.islink(fp_resolved) or fp.is_symlink() or fp_resolved.is_symlink():
+                        skipped.append({"file": f_raw, "reason": "symlink"})
+                        continue
 
-                # Check for symlinks in path components
-                has_symlink = False
-                curr_check = fp
-                while curr_check != resolved_target and resolved_target in curr_check.parents:
-                    if curr_check.is_symlink() or os.path.islink(str(curr_check)):
-                        has_symlink = True
-                        break
-                    curr_check = curr_check.parent
+                    if fp_resolved.exists() and fp_resolved.is_file():
+                        fp_to_use = fp_resolved
+                    else:
+                        skipped.append({"file": f_raw, "reason": "not_found"})
+                        continue
 
-                if has_symlink or os.path.islink(fp) or os.path.islink(fp_resolved) or fp.is_symlink() or fp_resolved.is_symlink():
-                    skipped.append({"file": f_raw, "reason": "symlink"})
-                    continue
+                if fp_to_use:
+                    st = os.lstat(str(fp_to_use))
+                    expected_states[str(fp_to_use)] = {
+                        "size": st.st_size,
+                        "mtime_ns": st.st_mtime_ns,
+                        "mtime": st.st_mtime,
+                        "dev": st.st_dev,
+                        "ino": st.st_ino,
+                        "is_file": True,
+                    }
+                    sources.append(str(fp_to_use))
+                    is_quarantine = action in {"quarantine_rejected", "quarantine_duplicate"}
+                    steps.append({
+                        "step_id": f"step_{step_idx}",
+                        "type": "move_quarantine" if is_quarantine else "delete_file",
+                        "source": str(fp_to_use),
+                        "status": "pending",
+                        "reversibility": "RECOVERABLE" if is_quarantine else "IRREVERSIBLE",
+                    })
+                    step_idx += 1
 
-                if fp_resolved.exists() and fp_resolved.is_file():
-                    st = fp_resolved.stat()
-                    expected_states[str(fp_resolved)] = {"size": st.st_size, "mtime": st.st_mtime, "is_file": True}
-                    sources.append(str(fp_resolved))
-                else:
-                    skipped.append({"file": f_raw, "reason": "not_found"})
             except Exception:
                 skipped.append({"file": str(f), "reason": "invalid_path"})
     else:
         if resolved_target.is_dir():
             for fp in resolved_target.rglob("*"):
                 if fp.is_file() and not os.path.islink(fp) and not fp.is_symlink():
-                    st = fp.stat()
-                    expected_states[str(fp.resolve())] = {"size": st.st_size, "mtime": st.st_mtime, "is_file": True}
+                    st = os.lstat(str(fp.resolve()))
+                    expected_states[str(fp.resolve())] = {
+                        "size": st.st_size,
+                        "mtime_ns": st.st_mtime_ns,
+                        "mtime": st.st_mtime,
+                        "dev": st.st_dev,
+                        "ino": st.st_ino,
+                        "is_file": True,
+                    }
                     sources.append(str(fp.resolve()))
+                    is_quarantine = action in {"quarantine_rejected", "quarantine_duplicate"}
+                    steps.append({
+                        "step_id": f"step_{step_idx}",
+                        "type": "move_quarantine" if is_quarantine else "delete_file",
+                        "source": str(fp.resolve()),
+                        "status": "pending",
+                        "reversibility": "RECOVERABLE" if is_quarantine else "IRREVERSIBLE",
+                    })
+                    step_idx += 1
 
     payload_with_skipped = {**payload, "skipped": skipped}
+    is_recoverable = action in {"quarantine_rejected", "quarantine_duplicate"}
 
     try:
         op_id, tx = store.create_import_review_cleanup_plan(
@@ -805,9 +863,17 @@ def execute_import_review_cleanup_plan(
             allowed_roots=allowed_roots,
             source_paths=sources,
             expected_states=expected_states,
-            reversibility="RECOVERABLE" if action != "delete_folder" else "IRREVERSIBLE",
+            reversibility="RECOVERABLE" if is_recoverable else "IRREVERSIBLE",
             payload=payload_with_skipped,
         )
+
+        # Attach mutation_family, steps, and rollback_available to transaction metadata
+        tx_meta = tx.get("metadata") or {}
+        tx_meta["mutation_family"] = "import_review_cleanup_v1"
+        tx_meta["steps"] = steps
+        tx_meta["rollback_available"] = is_recoverable
+        store.update(op_id, metadata=tx_meta)
+
         return {
             "ok": True,
             "operation_id": op_id,
@@ -825,7 +891,7 @@ def execute_import_review_cleanup_apply(
     operation_id: str,
     quarantine_root: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Execute plan application for import review folder/files after revalidating preconditions."""
+    """Execute plan application for import review folder/files with durable steps and server-derived quarantine."""
     tx = store.get(operation_id)
     if not tx:
         return {"ok": False, "error": f"Transaction {operation_id} not found."}
@@ -833,6 +899,9 @@ def execute_import_review_cleanup_apply(
     meta = tx.get("metadata") or {}
     payload = meta.get("payload") or {}
     skipped = payload.get("skipped", [])
+
+    if meta.get("mutation_family") and meta.get("mutation_family") != "import_review_cleanup_v1":
+        return {"ok": False, "error": f"Transaction {operation_id} is not an import_review_cleanup_v1 operation."}
 
     if tx.get("status") == "Completed":
         return {
@@ -851,6 +920,7 @@ def execute_import_review_cleanup_apply(
 
     action = str(payload.get("action") or "delete").strip().lower()
     expected_states = meta.get("expected_states") or {}
+    steps = meta.get("steps") or []
 
     log: List[str] = []
     deleted: List[str] = []
@@ -858,9 +928,7 @@ def execute_import_review_cleanup_apply(
 
     target_path = Path(meta.get("target_path", ""))
     q_base = Path(quarantine_root or os.environ.get("IMPORT_REVIEW_QUARANTINE_DIR", "/config/import_review_quarantine"))
-
-    import shutil
-    import stat
+    op_q_dir = q_base / time.strftime("%Y%m%d") / operation_id
 
     def _is_symlink(p: Path) -> bool:
         try:
@@ -881,97 +949,124 @@ def execute_import_review_cleanup_apply(
             return True
         return False
 
-    if action in {"quarantine_rejected", "quarantine_duplicate"}:
-        date_folder = q_base / time.strftime("%Y%m%d")
-        for src_str in expected_states.keys():
-            src = Path(src_str)
-            if not src.exists() or not src.is_file() or src.is_symlink() or os.path.islink(str(src)):
-                skipped.append({"file": str(src), "reason": "symlink"})
-                continue
+    # Process steps durably
+    for step in steps:
+        st_status = step.get("status")
+        if st_status in {"completed", "irreversible_completed"}:
+            if step.get("type") == "move_quarantine" and step.get("destination"):
+                moved.append({"source": step.get("source"), "quarantined": step.get("destination")})
+            elif step.get("type") == "delete_file" and step.get("source"):
+                deleted.append(step.get("source"))
+            continue
 
+        step["status"] = "running"
+        step_type = step.get("type")
+        src_str = step.get("source")
+        if not src_str:
+            step["status"] = "completed"
+            continue
+        src = Path(src_str)
+
+        # Stat revalidation right before step execution
+        if not src.exists():
+            step["status"] = "completed"
+            continue
+
+        if _is_symlink(src):
+            skipped.append({"file": str(src), "reason": "symlink"})
+            step["status"] = "completed"
+            continue
+
+        # Compare current stat vs expected
+        exp_st = expected_states.get(src_str) or {}
+        try:
+            st = os.lstat(str(src))
+            if exp_st.get("ino") is not None and st.st_ino != exp_st["ino"]:
+                step["status"] = "failed"
+                store.update(operation_id, status="Failed", logs=log + [f"File replacement detected at {src} (inode changed)"])
+                return {"ok": False, "error": f"File replacement detected at {src} (inode changed)"}
+        except Exception:
+            step["status"] = "completed"
+            skipped.append({"file": str(src), "reason": "invalid_path"})
+            continue
+
+        if step_type == "move_quarantine":
             rel = src.relative_to(target_path) if target_path in src.parents else Path(src.name)
-            dest = date_folder / rel
+            dest = op_q_dir / rel
+            step["destination"] = str(dest)
 
-            # Validate destination directory safety & no symlink components under q_base
             try:
                 dest_parent = dest.parent
                 if _path_has_symlink_under(dest_parent, q_base):
                     skipped.append({"file": str(src), "reason": "symlink"})
+                    step["status"] = "completed"
                     continue
 
                 dest_parent.mkdir(parents=True, exist_ok=True)
 
-                if _path_has_symlink_under(dest_parent, q_base) or dest.is_symlink() or os.path.islink(str(dest)):
+                if _path_has_symlink_under(dest_parent, q_base) or _is_symlink(dest) or dest.is_symlink():
                     skipped.append({"file": str(src), "reason": "symlink"})
+                    step["status"] = "completed"
                     continue
 
                 q_resolved = q_base.resolve(strict=False)
                 dest_resolved = dest_parent.resolve(strict=False)
                 if dest_resolved == q_resolved or q_resolved not in dest_resolved.parents:
                     skipped.append({"file": str(src), "reason": "unsafe_destination"})
+                    step["status"] = "completed"
                     continue
             except Exception:
                 skipped.append({"file": str(src), "reason": "unsafe_destination"})
-                continue
-
-            # Pre-move check: src must still not be a symlink and dest must not exist as a symlink/dir
-            if src.is_symlink() or os.path.islink(str(src)) or dest.is_symlink() or os.path.islink(str(dest)) or (dest.exists() and dest.is_dir()):
-                skipped.append({"file": str(src), "reason": "symlink"})
+                step["status"] = "completed"
                 continue
 
             try:
                 shutil.move(str(src), str(dest))
-                # Post-move verification: ensure no file escaped q_base or was written through a symlink
-                q_resolved = q_base.resolve(strict=False)
-                dest_resolved = dest.resolve(strict=False)
-
-                is_invalid = dest.is_symlink() or os.path.islink(str(dest)) or dest_resolved == q_resolved or q_resolved not in dest_resolved.parents
+                dest_res = dest.resolve(strict=False)
                 written_file = (dest / src.name) if (dest.exists() and dest.is_dir() and dest != dest_parent) else dest
                 written_resolved = written_file.resolve(strict=False)
-                if written_resolved != q_resolved and q_resolved not in written_resolved.parents:
-                    is_invalid = True
+                is_invalid = _is_symlink(dest) or dest.is_symlink() or dest_res == q_resolved or q_resolved not in dest_res.parents or written_resolved == q_resolved or q_resolved not in written_resolved.parents
 
                 if is_invalid:
                     try:
-                        # 1. If a file was written through a symlink to an escaped directory, restore it to src
-                        if (dest.exists() and dest.is_dir() and dest != dest_parent) or (written_file != dest):
-                            if written_resolved.exists() and written_resolved.is_file() and not src.exists() and q_resolved not in written_resolved.parents:
-                                try:
+                        if (written_file != dest or (dest.exists() and dest.is_dir())) and written_resolved.exists() and written_resolved.is_file() and q_resolved not in written_resolved.parents:
+                            try:
+                                if not src.exists():
                                     shutil.move(str(written_resolved), str(src))
-                                except Exception:
-                                    pass
+                                else:
+                                    written_resolved.unlink()
+                            except Exception:
+                                pass
 
-                        # 2. Remove destination symlink itself (does not touch external files like sentinel)
                         if _is_symlink(dest) or dest.is_symlink():
                             try:
                                 os.unlink(str(dest))
                             except Exception:
                                 pass
-                        else:
-                            if written_file.exists() and q_resolved in written_file.resolve(strict=False).parents:
-                                try:
-                                    written_file.unlink()
-                                except Exception:
-                                    pass
                     except Exception:
                         pass
                     skipped.append({"file": str(src), "reason": "symlink"})
+                    step["status"] = "completed"
                     continue
+
                 moved.append({"source": str(src), "quarantined": str(dest)})
                 log.append(f"Quarantined {src} -> {dest}")
-            except Exception:
-                skipped.append({"file": str(src), "reason": "failed_move"})
+                step["status"] = "completed"
+            except Exception as ex:
+                skipped.append({"file": str(src), "reason": f"failed_move: {ex}"})
+                step["status"] = "completed"
 
-    elif action in {"delete_rejected", "delete_duplicate", "delete", "delete_folder"}:
-        for src_str in expected_states.keys():
-            src = Path(src_str)
-            if src.exists():
-                if src.is_file() or src.is_symlink():
-                    src.unlink()
-                    deleted.append(str(src))
-                    log.append(f"Deleted {src}")
+        elif step_type == "delete_file":
+            try:
+                src.unlink()
+                deleted.append(str(src))
+                log.append(f"Deleted {src}")
+                step["status"] = "irreversible_completed"
+            except Exception as ex:
+                skipped.append({"file": str(src), "reason": f"failed_delete: {ex}"})
+                step["status"] = "completed"
 
-    # Remove empty parent subdirectories if target_path is a directory
+    # Cleanup empty parent directories
     if target_path.exists() and target_path.is_dir():
         for d in sorted([p for p in target_path.rglob("*") if p.is_dir()], key=lambda x: len(x.parts), reverse=True):
             try:
@@ -986,11 +1081,314 @@ def execute_import_review_cleanup_apply(
             except Exception:
                 pass
 
+    has_failed = any(s.get("status") == "failed" for s in steps)
+    final_status = "Completed" if not has_failed else "Partially Rolled Back"
+
+    has_irreversible = any(s.get("status") == "irreversible_completed" for s in steps)
+    rollback_avail = meta.get("rollback_available", True) and not has_irreversible and not has_failed
+
+    store.update(
+        operation_id,
+        status=final_status,
+        applied_at=time.time(),
+        metadata={**meta, "deleted": deleted, "moved": moved, "steps": steps, "rollback_available": rollback_avail},
+        logs=log,
+    )
+
+    return {
+        "ok": not has_failed,
+        "status": final_status,
+        "operation_id": operation_id,
+        "deleted": deleted,
+        "moved": moved,
+        "skipped": skipped,
+        "log": log,
+    }
+
+
+def rollback_import_review_cleanup(
+    store: TransactionStore,
+    operation_id: str,
+) -> Dict[str, Any]:
+    """Rollback a recoverable import review cleanup transaction by moving files back from quarantine."""
+    tx = store.get(operation_id)
+    if not tx:
+        return {"ok": False, "error": f"Transaction {operation_id} not found."}
+
+    meta = tx.get("metadata") or {}
+    if not meta.get("rollback_available"):
+        return {"ok": False, "error": "Rollback unavailable: transaction contains irreversible steps or has already been rolled back."}
+
+    steps = meta.get("steps") or []
+    log: List[str] = []
+    restored: List[str] = []
+
+    for step in steps:
+        if step.get("type") == "move_quarantine" and step.get("status") == "completed":
+            src_str = step.get("source")
+            dest_str = step.get("destination")
+            if src_str and dest_str:
+                dest = Path(dest_str)
+                src = Path(src_str)
+                if dest.exists() and not dest.is_symlink():
+                    src.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(dest), str(src))
+                    restored.append(src_str)
+                    log.append(f"Restored {dest} -> {src}")
+                    step["status"] = "rolled_back"
+
+    tx_meta = {**meta, "rollback_available": False, "steps": steps}
+    store.update(
+        operation_id,
+        status="Rolled Back",
+        applied_at=time.time(),
+        metadata=tx_meta,
+        logs=tx.get("logs", []) + log,
+    )
+
+    return {
+        "ok": True,
+        "status": "Rolled Back",
+        "operation_id": operation_id,
+        "restored": restored,
+        "log": log,
+    }
+
+
+def create_album_cleanup_plan(
+    store: TransactionStore,
+    album_id: int,
+    db_path: Optional[str] = None,
+    allowed_roots: Optional[List[str]] = None,
+    payload: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Create transaction plan for deleting an album from Beets DB and disk (SEC-002 Wave 15)."""
+    if album_id <= 0:
+        return {"ok": False, "error": "Invalid album_id"}
+
+    lib_db = db_path or os.environ.get("BEETS_DB_PATH", os.path.expanduser("~/.config/beets/musiclibrary.blb"))
+    if not os.path.exists(lib_db):
+        return {"ok": False, "error": f"Beets database file not found at {lib_db}"}
+
+    try:
+        con = sqlite3.connect(lib_db, timeout=10)
+        con.row_factory = sqlite3.Row
+        cur = con.cursor()
+        cur.execute("SELECT id, path FROM items WHERE album_id = ?", (album_id,))
+        rows = cur.fetchall()
+        cur.execute("SELECT id, artpath FROM albums WHERE id = ?", (album_id,))
+        album_row = cur.fetchone()
+        con.close()
+    except Exception as ex:
+        return {"ok": False, "error": f"Database query failed: {ex}"}
+
+    if not rows and not album_row:
+        return {"ok": False, "error": f"Album {album_id} not found in database."}
+
+    item_paths: List[Path] = []
+    expected_states: Dict[str, Any] = {}
+    sources: List[str] = []
+
+    for r in rows:
+        raw_p = r["path"]
+        if isinstance(raw_p, bytes):
+            try:
+                raw_p = raw_p.decode("utf-8", "surrogateescape")
+            except Exception:
+                raw_p = raw_p.decode("utf-8", "ignore")
+        p = Path(raw_p)
+        item_paths.append(p)
+
+    if not item_paths:
+        return {"ok": False, "error": f"Album {album_id} has no track items in database."}
+
+    album_dir = item_paths[0].parent.resolve(strict=False)
+    music_root = Path(os.environ.get("BEETS_MUSIC_DIR", os.environ.get("MUSIC_ROOT", "/music"))).resolve(strict=False)
+
+    roots = [music_root] + [Path(r).resolve(strict=False) for r in (allowed_roots or [])]
+    is_under_root = any(album_dir == r or r in album_dir.parents for r in roots)
+    if not is_under_root:
+        return {"ok": False, "error": f"Album path {album_dir} is outside authorized music roots."}
+
+    if album_dir == music_root:
+        return {"ok": False, "error": f"Refusing to delete music root directory {music_root} itself."}
+
+    steps: List[Dict[str, Any]] = []
+    step_idx = 1
+
+    for p in item_paths:
+        try:
+            resolved_p = p.resolve(strict=False)
+            if resolved_p.exists() and resolved_p.is_file() and not p.is_symlink() and not resolved_p.is_symlink():
+                st = os.lstat(str(resolved_p))
+                expected_states[str(resolved_p)] = {
+                    "size": st.st_size,
+                    "mtime_ns": st.st_mtime_ns,
+                    "mtime": st.st_mtime,
+                    "dev": st.st_dev,
+                    "ino": st.st_ino,
+                    "is_file": True,
+                }
+                sources.append(str(resolved_p))
+                steps.append({
+                    "step_id": f"step_{step_idx}",
+                    "type": "delete_file",
+                    "source": str(resolved_p),
+                    "status": "pending",
+                    "reversibility": "IRREVERSIBLE",
+                })
+                step_idx += 1
+        except Exception:
+            pass
+
+    steps.append({
+        "step_id": f"step_{step_idx}",
+        "type": "delete_db_record",
+        "album_id": album_id,
+        "db_path": str(lib_db),
+        "status": "pending",
+        "reversibility": "IRREVERSIBLE",
+    })
+    step_idx += 1
+
+    steps.append({
+        "step_id": f"step_{step_idx}",
+        "type": "remove_dir",
+        "target": str(album_dir),
+        "status": "pending",
+        "reversibility": "IRREVERSIBLE",
+    })
+
+    tx_payload = payload or {}
+    tx_payload["album_id"] = album_id
+    tx_payload["db_path"] = str(lib_db)
+
+    tx = store.create(
+        operation_type="Library Cleanup",
+        initiating_user="operator",
+        status="Preview",
+        summary=f"Album cleanup plan for album_id={album_id} ({album_dir.name})",
+        metadata={
+            "mutation_family": "album_cleanup_v1",
+            "album_id": album_id,
+            "target_path": str(album_dir),
+            "allowed_roots": [str(r) for r in roots],
+            "source_paths": sources,
+            "expected_states": expected_states,
+            "reversibility": "IRREVERSIBLE",
+            "rollback_available": False,
+            "steps": steps,
+            "payload": tx_payload,
+        },
+    )
+    op_id = tx["id"]
+    return {
+        "ok": True,
+        "operation_id": op_id,
+        "status": "Preview",
+        "album_id": album_id,
+        "target_path": str(album_dir),
+        "file_count": len(sources),
+    }
+
+
+def execute_album_cleanup_apply(
+    store: TransactionStore,
+    operation_id: str,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Execute album cleanup plan application with durable steps and DB consistency (SEC-002 Wave 15)."""
+    tx = store.get(operation_id)
+    if not tx:
+        return {"ok": False, "error": f"Transaction {operation_id} not found."}
+
+    meta = tx.get("metadata") or {}
+    if meta.get("mutation_family") != "album_cleanup_v1":
+        return {"ok": False, "error": f"Transaction {operation_id} is not an album_cleanup_v1 operation."}
+
+    if tx.get("status") == "Completed":
+        return {
+            "ok": True,
+            "status": "Completed",
+            "operation_id": operation_id,
+            "deleted": meta.get("deleted", []),
+            "log": tx.get("logs", []),
+        }
+
+    is_valid, err = store.revalidate_preconditions(operation_id)
+    if not is_valid:
+        return {"ok": False, "error": err or "Precondition revalidation failed."}
+
+    album_id = meta.get("album_id")
+    steps = meta.get("steps") or []
+    log: List[str] = []
+    deleted: List[str] = []
+
+    lib_db = db_path or meta.get("payload", {}).get("db_path") or os.environ.get("BEETS_DB_PATH", os.path.expanduser("~/.config/beets/musiclibrary.blb"))
+
+    for step in steps:
+        st_status = step.get("status")
+        if st_status in {"completed", "irreversible_completed"}:
+            if step.get("type") == "delete_file" and step.get("source"):
+                deleted.append(step.get("source"))
+            continue
+
+        step["status"] = "running"
+        step_type = step.get("type")
+
+        if step_type == "delete_file":
+            src_str = step.get("source")
+            if src_str:
+                src = Path(src_str)
+                if src.exists():
+                    if src.is_symlink() or os.path.islink(str(src)):
+                        step["status"] = "failed"
+                        store.update(operation_id, status="Failed", logs=log + [f"Symlink detected at {src}"])
+                        return {"ok": False, "error": f"Symlink detected at {src}"}
+                    try:
+                        src.unlink()
+                        deleted.append(src_str)
+                        log.append(f"Deleted track file {src_str}")
+                        step["status"] = "irreversible_completed"
+                    except Exception as ex:
+                        step["status"] = "failed"
+                        store.update(operation_id, status="Failed", logs=log + [f"Failed deleting {src_str}: {ex}"])
+                        return {"ok": False, "error": f"Failed deleting {src_str}: {ex}"}
+                else:
+                    step["status"] = "completed"
+
+        elif step_type == "delete_db_record":
+            if album_id and os.path.exists(lib_db):
+                try:
+                    with sqlite3.connect(lib_db, timeout=10) as con:
+                        cur = con.cursor()
+                        cur.execute("DELETE FROM items WHERE album_id = ?", (album_id,))
+                        cur.execute("DELETE FROM albums WHERE id = ?", (album_id,))
+                        con.commit()
+                    log.append(f"Deleted album {album_id} and items from Beets database {lib_db}")
+                    step["status"] = "irreversible_completed"
+                except Exception as ex:
+                    log.append(f"Warning: DB deletion for album {album_id} failed: {ex}")
+                    step["status"] = "completed"
+
+        elif step_type == "remove_dir":
+            target_str = step.get("target")
+            if target_str:
+                target_path = Path(target_str)
+                if target_path.exists() and target_path.is_dir():
+                    try:
+                        if not any(target_path.iterdir()):
+                            target_path.rmdir()
+                            log.append(f"Deleted empty album directory {target_path}")
+                    except Exception:
+                        pass
+                step["status"] = "completed"
+
     store.update(
         operation_id,
         status="Completed",
         applied_at=time.time(),
-        metadata={"deleted": deleted, "moved": moved},
+        metadata={**meta, "deleted": deleted, "steps": steps, "rollback_available": False},
         logs=log,
     )
 
@@ -999,7 +1397,5 @@ def execute_import_review_cleanup_apply(
         "status": "Completed",
         "operation_id": operation_id,
         "deleted": deleted,
-        "moved": moved,
-        "skipped": skipped,
         "log": log,
     }

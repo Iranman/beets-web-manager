@@ -12952,15 +12952,18 @@ def delete_import_review_folder():
         album_id = 0
     log: List[str] = []
 
-    if not confirmed_wrong_library_folder and album_id <= 0:
+    resolved = Path(src_path).resolve(strict=False)
+    missing_mbid_album_match = _library_no_mb_album_matches_folder(album_id, str(resolved))
+
+    if not confirmed_wrong_library_folder and not missing_mbid_album_match:
         if _AI_PENDING_FILE.exists() and not _pending_review_matches(src_path, ""):
-            return jsonify({"ok": False, "error": "Folder is not in Pending Review.", "log": log}), 400
+            return jsonify({"ok": False, "error": "Folder is not in Pending Review, or a Needs MB ID album row match.", "log": log}), 400
 
     try:
         result = _delete_review_source_folder(
             src_path,
             log,
-            confirmed_wrong_library_folder=confirmed_wrong_library_folder,
+            confirmed_wrong_library_folder=confirmed_wrong_library_folder or missing_mbid_album_match,
             album_id=album_id,
         )
         return jsonify({"ok": True, **result, "log": log})
@@ -13029,6 +13032,7 @@ def cleanup_import_review_files():
         return jsonify({"ok": False, "error": "Review item does not match the source folder.", "log": log}), 400
 
     allow_delete = bool(payload.get("allow_delete"))
+    # Permanent delete requires allow_delete=true
     plan_req = {
         "path": folder_path,
         "files": raw_files,
@@ -13050,6 +13054,33 @@ def cleanup_import_review_files():
         skipped = apply_res.get("skipped", [])
         for l in apply_res.get("log", []):
             log.append(f"  {l}")
+
+        # Update pending review item state & audit log
+        folder_p = Path(folder_path)
+        remaining_audio = 0
+        if folder_p.exists() and folder_p.is_dir():
+            try:
+                for f in folder_p.rglob("*"):
+                    if f.is_file() and f.suffix.lower() in AUDIO_EXT:
+                        remaining_audio += 1
+            except Exception:
+                pass
+
+        if remaining_audio == 0:
+            try:
+                _remove_pending_review_for_path(folder_path, log)
+            except Exception as ex:
+                log.append(f"  Pending review removal warning: {ex}")
+        else:
+            try:
+                _mark_pending_review_status(folder_path, "files_cleaned_up", note=f"Remaining audio files: {remaining_audio}")
+            except Exception:
+                pass
+
+        try:
+            _record_ai_review_decision(action, folder_path, note=f"Cleaned up files: {len(deleted)} deleted, {len(moved)} quarantined")
+        except Exception:
+            pass
 
         return jsonify({
             "ok": True,
