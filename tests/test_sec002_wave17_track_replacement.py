@@ -867,6 +867,25 @@ class RealEndToEndRouteTests(unittest.TestCase):
         self._downloads_root_patch = mock.patch.object(flask_app, "DOWNLOADS_ROOT", self.staging_root)
         self._downloads_root_patch.start()
         self.addCleanup(self._downloads_root_patch.stop)
+
+        # _import_review_cleanup_roots() also includes PLAYLIST_DOWNLOAD_ROOT,
+        # _DOWNLOADS_ROOTS (which literally contains "/tmp"), and
+        # TORRENT_SOURCE_ROOTS. On Linux, tempfile.TemporaryDirectory()
+        # lands under /tmp -- leaving those at their real defaults would
+        # make ANY path under self.tmp_path (including a deliberately
+        # "outside all roots" test path) incidentally pass containment via
+        # the literal "/tmp" entry, silently masking whether the check is
+        # actually being exercised. This is the identical Wave 6/7 pitfall
+        # already avoided by this suite's other fixtures; neutralize the
+        # roots this fixture doesn't intentionally use.
+        self._other_roots_patch = mock.patch.multiple(
+            flask_app,
+            PLAYLIST_DOWNLOAD_ROOT=Path("/nonexistent-playlist-root-for-tests"),
+            _DOWNLOADS_ROOTS=[],
+            TORRENT_SOURCE_ROOTS=(),
+        )
+        self._other_roots_patch.start()
+        self.addCleanup(self._other_roots_patch.stop)
         con = sqlite3.connect(self.db_path)
         cur = con.cursor()
         cur.execute(
