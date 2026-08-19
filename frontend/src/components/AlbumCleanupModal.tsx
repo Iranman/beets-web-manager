@@ -28,7 +28,7 @@ export interface AlbumCleanupModalProps {
   onSuccess: () => void;
 }
 
-type ModalStep = 'planning' | 'review' | 'applying' | 'completed' | 'stale' | 'failed';
+type ModalStep = 'planning' | 'review' | 'applying' | 'completed' | 'stale' | 'partial' | 'failed';
 
 export function AlbumCleanupModal({
   open,
@@ -85,36 +85,31 @@ export function AlbumCleanupModal({
         setApplyResult(res);
         setStep('completed');
       } else {
-        const err = res.error || 'Apply failed.';
-        if (
-          err.toLowerCase().includes('stale') ||
-          err.toLowerCase().includes('changed') ||
-          err.toLowerCase().includes('precondition')
-        ) {
-          setErrorMsg(
-            'The album changed after this cleanup plan was created. Nothing was changed. Generate a new plan to continue.'
-          );
+        // error_kind is the Web Manager's authoritative classification
+        // (see _classify_album_cleanup_apply_failure in app.py) -- it is
+        // driven by the engine's own "mutated" flag, never guessed here by
+        // matching substrings in the error text. "stale_plan" is the only
+        // kind that may ever be presented as "nothing changed";
+        // "partial_mutation" means some file(s) were already deleted
+        // before the failure and must be shown as a distinct, more urgent
+        // state, never folded into the same reassuring copy.
+        setErrorMsg(res.error || 'Apply failed.');
+        if (res.error_kind === 'stale_plan') {
           setStep('stale');
+        } else if (res.error_kind === 'partial_mutation') {
+          setStep('partial');
         } else {
-          setErrorMsg(err);
           setStep('failed');
         }
       }
     } catch (err: unknown) {
+      // A thrown error here means the request itself failed (network,
+      // engine unreachable, non-2xx with an unparseable body) -- there is
+      // no error_kind/mutated signal available, so this can never be
+      // presented as "nothing changed."
       const msg = err instanceof Error ? err.message : 'Failed to apply cleanup plan.';
-      if (
-        msg.toLowerCase().includes('stale') ||
-        msg.toLowerCase().includes('changed') ||
-        msg.toLowerCase().includes('precondition')
-      ) {
-        setErrorMsg(
-          'The album changed after this cleanup plan was created. Nothing was changed. Generate a new plan to continue.'
-        );
-        setStep('stale');
-      } else {
-        setErrorMsg(msg);
-        setStep('failed');
-      }
+      setErrorMsg(msg);
+      setStep('failed');
     }
   };
 
@@ -153,10 +148,12 @@ export function AlbumCleanupModal({
             <div className="flex items-start justify-between gap-3 border-b border-graphite-800 pb-3">
               <div>
                 <DialogTitle className="text-lg font-semibold text-zinc-100">
-                  Clean Up Album
+                  Delete Album Files &amp; Database Records
                 </DialogTitle>
                 <p className="mt-0.5 text-xs text-zinc-400">
-                  Review engine cleanup plan for album identity and file mutations before confirming.
+                  Review the engine's plan before confirming. This deletes every track file Beets has
+                  catalogued for this album and removes its database records -- it does not detect or
+                  remove duplicates selectively.
                 </p>
               </div>
               <Button size="small" variant="outlined" onClick={onClose}>
@@ -205,16 +202,19 @@ export function AlbumCleanupModal({
                   </div>
                 </div>
 
-                {/* Reversibility Status Banner */}
-                {isIrreversible ? (
-                  <Alert severity="warning">
-                    <strong className="font-semibold">Reversibility: Irreversible</strong> — This cleanup plan contains permanent file unlinks and database row deletions.
-                  </Alert>
-                ) : (
-                  <Alert severity="info">
-                    <strong className="font-semibold">Reversibility: Recoverable</strong> — Files will be safely quarantined to date-partitioned storage.
-                  </Alert>
-                )}
+                {/* Reversibility Status Banner. Album Cleanup is always
+                    IRREVERSIBLE today (execute_album_cleanup_apply unlinks
+                    files and deletes DB rows directly, with no quarantine/
+                    backup step) -- there is deliberately no "Recoverable"
+                    branch here to describe. Reintroduce one only once a
+                    real, tested recovery model exists for this mutation
+                    family; a dead branch describing a capability that
+                    cannot occur is itself a way to accidentally lie later. */}
+                <Alert severity="warning">
+                  <strong className="font-semibold">Irreversible</strong> — This will permanently
+                  delete every catalogued track file for this album and remove its database records.
+                  There is no rollback or quarantine for this operation.
+                </Alert>
 
                 {/* Before / After Diff */}
                 <div className="rounded-md border border-graphite-800 bg-graphite-900/40 p-3">
@@ -230,11 +230,16 @@ export function AlbumCleanupModal({
                     </div>
                     <div className="rounded border border-emerald-900/40 bg-emerald-950/20 p-2 text-emerald-200">
                       <div className="font-semibold text-emerald-300 mb-1">After Cleanup</div>
-                      <div>• {isIrreversible ? 'Files deleted from disk' : 'Files moved to quarantine'}</div>
+                      <div>• Track files deleted from disk</div>
                       <div>• Album & item DB rows deleted</div>
-                      <div>• Empty parent directories removed</div>
+                      <div>• Album directory removed only if nothing else remains in it</div>
                     </div>
                   </div>
+                  <p className="mt-2 text-[0.7rem] text-zinc-500">
+                    Only the track files Beets has catalogued for this album are deleted. Artwork,
+                    .cue/.log files, booklets, and any other non-catalogued files in the album
+                    directory are left in place -- if any remain, the directory itself is not removed.
+                  </p>
                 </div>
 
                 {/* Itemized Steps */}
@@ -390,6 +395,42 @@ export function AlbumCleanupModal({
                   </Button>
                   <Button variant="contained" color="primary" onClick={fetchPlan}>
                     Generate New Plan
+                  </Button>
+                </div>
+              </div>
+            ) : null}
+
+            {/* Step: Partial -- distinct from Stale. The Web Manager only
+                ever sets this when the engine's "mutated" flag confirms at
+                least one file was already irreversibly deleted before the
+                failure (see error_kind === 'partial_mutation' in
+                handleApply). This must never be presented as "nothing
+                changed," and blindly offering "Generate New Plan" here
+                would invite acting on a plan built from a state the user
+                hasn't actually seen yet -- so this step routes to a refresh
+                instead. */}
+            {step === 'partial' ? (
+              <div className="mt-4 space-y-4">
+                <Alert severity="error">
+                  <strong className="font-semibold">Cleanup Did Not Complete -- Album Was Partially Modified:</strong>{' '}
+                  {errorMsg}
+                </Alert>
+                <p className="text-xs text-zinc-400">
+                  Some file(s) for this album were already deleted before the operation stopped. The
+                  album's current state on disk and in the database may no longer match what was shown
+                  in the review step. Close this dialog and check the album before deciding what to do
+                  next -- do not assume a new plan reflects a clean starting point.
+                </p>
+                <div className="flex justify-end gap-2 pt-2 border-t border-graphite-800">
+                  <Button
+                    variant="contained"
+                    color="error"
+                    onClick={() => {
+                      onSuccess();
+                      onClose();
+                    }}
+                  >
+                    Close &amp; Refresh Library
                   </Button>
                 </div>
               </div>

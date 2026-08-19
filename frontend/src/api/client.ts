@@ -1423,6 +1423,13 @@ export interface AlbumCleanupPlanResponse extends ApiOkResponse {
   error?: string;
 }
 
+/** Authoritative failure classification from the Web Manager route -- see
+ * _classify_album_cleanup_apply_failure in app.py. Only "stale_plan" may
+ * ever be presented as "nothing was changed"; "partial_mutation" means at
+ * least one file was already deleted before the failure and must be shown
+ * distinctly from a plain stale-plan refusal. */
+export type AlbumCleanupApplyErrorKind = 'stale_plan' | 'partial_mutation' | 'other';
+
 export interface AlbumCleanupApplyResponse extends ApiOkResponse {
   operation_id?: string;
   status?: string;
@@ -1431,6 +1438,8 @@ export interface AlbumCleanupApplyResponse extends ApiOkResponse {
   skipped?: Array<{ file: string; reason: string }>;
   log?: string[];
   error?: string;
+  error_kind?: AlbumCleanupApplyErrorKind;
+  mutated?: boolean;
 }
 
 export interface AlbumCleanupRollbackResponse extends ApiOkResponse {
@@ -1449,20 +1458,12 @@ export function applyAlbumCleanup(operationId: string): Promise<AlbumCleanupAppl
   return apiJson<AlbumCleanupApplyResponse>('/api/albums/cleanup/apply', jsonRequest('POST', { operation_id: operationId }));
 }
 
+// Album Cleanup transactions are irreversible by design (Wave 15/16): the
+// engine always sets reversibility=IRREVERSIBLE and rollback_available=False
+// for this mutation family, so this always resolves with ok:false. It still
+// calls the generic /api/transactions/<id>/rollback route (not a dedicated
+// album-cleanup route) so the same transaction-family enforcement the
+// engine applies to every rollback request applies here too.
 export function rollbackAlbumCleanup(operationId: string): Promise<AlbumCleanupRollbackResponse> {
   return apiJson<AlbumCleanupRollbackResponse>(`/api/transactions/${operationId}/rollback`, jsonRequest('POST'));
-}
-
-export function getEngineTransaction(operationId: string): Promise<Record<string, unknown>> {
-  return apiJson<Record<string, unknown>>(`/api/transactions/${operationId}`);
-}
-
-export function listEngineTransactions(params?: { offset?: number; limit?: number; status?: string; operation?: string; query?: string }): Promise<Record<string, unknown>> {
-  const qs = new URLSearchParams();
-  if (params?.offset !== undefined) qs.set('offset', String(params.offset));
-  if (params?.limit !== undefined) qs.set('limit', String(params.limit));
-  if (params?.status) qs.set('status', params.status);
-  if (params?.operation) qs.set('operation', params.operation);
-  if (params?.query) qs.set('query', params.query);
-  return apiJson<Record<string, unknown>>(`/api/transactions?${qs.toString()}`);
 }
