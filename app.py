@@ -52114,11 +52114,22 @@ def item_replacement_plan(iid: int):
         return jsonify({"ok": False, "error": "Item not found."}), 404
 
     original_path = _s(getattr(item, "path", "") or "")
-    cand_p = Path(candidate_path_raw)
-    if not cand_p.is_absolute():
-        cand_p = MUSIC_ROOT / candidate_path_raw
-    if not cand_p.exists() or not cand_p.is_file():
-        return jsonify({"ok": False, "error": "Candidate file was not found or is not accessible."}), 400
+    # SEC-002 Wave 17 final review: this used to build cand_p from the raw
+    # client string and stat() it directly (a Path-under-MUSIC_ROOT
+    # fallback for relative input, no less -- wrong root for a replacement
+    # *candidate*, which must come from a staging/acquisition area, not
+    # the music library). Reuse the already-hardened, already-tested
+    # _resolve_import_review_source_path() (Wave 6/7/8) instead of a
+    # second, weaker ad hoc check: candidate/staging roots only
+    # (allow_music=False), full symlink-component walk, containment
+    # re-verified after resolve(). The engine independently re-validates
+    # its own candidate_allowed_roots at Plan and Apply time -- this is
+    # defense-in-depth, not the only boundary.
+    cand_p, cand_path_error = _resolve_import_review_source_path(
+        candidate_path_raw, allow_music=False, expected_type="file", require_exists=True,
+    )
+    if cand_path_error or cand_p is None:
+        return jsonify({"ok": False, "error": cand_path_error or "Candidate file was not found or is not accessible."}), 400
 
     # Real AcoustID fingerprint verification -- reusing
     # _acoustid_fingerprint_match / _acoustid_fingerprint_ids, the exact
@@ -52170,10 +52181,18 @@ def item_replacement_plan(iid: int):
         })
         status_code = 200 if res.get("ok") else 400
         return jsonify(res), status_code
-    except BeetsUnavailableError as ex:
-        return jsonify({"ok": False, "error": f"Beets engine unavailable: {ex}"}), 503
-    except BeetsError as ex:
-        return jsonify({"ok": False, "error": str(ex)}), 400
+    except BeetsUnavailableError as exc:
+        # Never interpolate the raw exception text into a client-facing
+        # response: BeetsClient._request() falls back to embedding up to
+        # 200 raw response-body characters for any non-JSON error response
+        # it doesn't recognize (e.g. an unexpected proxy/framework error
+        # page), which could carry stack-trace-shaped text -- the same
+        # established precedent as get_config()/_config_error_response()
+        # above. error_code is a short, fixed identifier string, never
+        # free text, so it's safe to echo.
+        return jsonify({"ok": False, "error": "Beets engine is unavailable.", "code": exc.error_code or "beets_unavailable"}), 503
+    except BeetsError as exc:
+        return jsonify({"ok": False, "error": "Track replacement planning failed.", "code": exc.error_code or "beets_error"}), 400
     except Exception:
         app.logger.exception("item_replacement_plan failed for iid=%s", iid)
         return jsonify({"ok": False, "error": "Track replacement planning failed."}), 500
@@ -52194,10 +52213,10 @@ def item_replacement_apply(iid: int):
         res = beets_client.apply_track_replacement(op_id)
         status_code = 200 if res.get("ok") else 400
         return jsonify(res), status_code
-    except BeetsUnavailableError as ex:
-        return jsonify({"ok": False, "error": f"Beets engine unavailable: {ex}"}), 503
-    except BeetsError as ex:
-        return jsonify({"ok": False, "error": str(ex)}), 400
+    except BeetsUnavailableError as exc:
+        return jsonify({"ok": False, "error": "Beets engine is unavailable.", "code": exc.error_code or "beets_unavailable"}), 503
+    except BeetsError as exc:
+        return jsonify({"ok": False, "error": "Track replacement apply failed.", "code": exc.error_code or "beets_error"}), 400
     except Exception:
         app.logger.exception("item_replacement_apply failed for iid=%s op_id=%s", iid, op_id)
         return jsonify({"ok": False, "error": "Track replacement apply failed."}), 500
@@ -52756,10 +52775,15 @@ def api_transaction_rollback(transaction_id):
         # security boundary.
         try:
             detail = beets_client.get_transaction(transaction_id)
-        except BeetsUnavailableError as ex:
-            return jsonify({"ok": False, "error": f"Beets engine unavailable: {ex}"}), 503
-        except BeetsError as ex:
-            return jsonify({"ok": False, "error": str(ex)}), 404
+        except BeetsUnavailableError as exc:
+            # Never interpolate the raw exception text: BeetsClient._request()
+            # falls back to embedding up to 200 raw response-body characters
+            # for any non-JSON error response it doesn't recognize, which
+            # could carry stack-trace-shaped text. error_code is a short,
+            # fixed identifier string, never free text.
+            return jsonify({"ok": False, "error": "Beets engine is unavailable.", "code": exc.error_code or "beets_unavailable"}), 503
+        except BeetsError as exc:
+            return jsonify({"ok": False, "error": "Transaction not found", "code": exc.error_code or "beets_error"}), 404
         except Exception:
             return jsonify({"ok": False, "error": "Transaction not found"}), 404
 
@@ -52780,10 +52804,10 @@ def api_transaction_rollback(transaction_id):
                 return jsonify({"ok": False, "error": "Transaction not found"}), 404
             status_code = 200 if res.get("ok") else 400
             return jsonify(res), status_code
-        except BeetsUnavailableError as ex:
-            return jsonify({"ok": False, "error": f"Beets engine unavailable: {ex}"}), 503
-        except BeetsError as ex:
-            return jsonify({"ok": False, "error": str(ex)}), 400
+        except BeetsUnavailableError as exc:
+            return jsonify({"ok": False, "error": "Beets engine is unavailable.", "code": exc.error_code or "beets_unavailable"}), 503
+        except BeetsError as exc:
+            return jsonify({"ok": False, "error": "Rollback failed.", "code": exc.error_code or "beets_error"}), 400
         except Exception:
             return jsonify({"ok": False, "error": "Transaction not found"}), 404
     rollback = tx.get("rollback") or {}

@@ -759,6 +759,12 @@ class AstStructuralTests(unittest.TestCase):
         # Reused deliberately rather than building a second fingerprint
         # stack (SEC-002 Wave 17 final review, task section 5).
         "_acoustid_fingerprint_match", "_acoustid_fingerprint_ids",
+        # Reviewed: read-only path validation (containment + symlink-walk
+        # + existence check, no mutation) -- the same hardened, already-
+        # tested helper SEC-002 Waves 6/7/8 established for Import Review
+        # source paths, reused here instead of a second ad hoc check
+        # (CodeQL py/path-injection fix, final review).
+        "_resolve_import_review_source_path",
     }
 
     def setUp(self):
@@ -848,6 +854,19 @@ class RealEndToEndRouteTests(unittest.TestCase):
         self.orig.write_bytes(b"ORIGINAL_AUDIO")
         self.cand = self.staging_root / "track_hq.flac"
         self.cand.write_bytes(b"REPLACEMENT_AUDIO")
+
+        # item_replacement_plan (final review fix) now validates
+        # candidate_path against app.py's own trusted candidate/staging
+        # roots via _resolve_import_review_source_path(allow_music=False)
+        # BEFORE ever reaching beets_client.plan_track_replacement --
+        # patch DOWNLOADS_ROOT to this test's staging_root rather than
+        # relying on the OS temp dir incidentally matching one of the real
+        # default roots, which would silently mask whether the containment
+        # check is actually being exercised (the identical Wave 6/7
+        # pitfall this suite's sibling fixtures already avoid).
+        self._downloads_root_patch = mock.patch.object(flask_app, "DOWNLOADS_ROOT", self.staging_root)
+        self._downloads_root_patch.start()
+        self.addCleanup(self._downloads_root_patch.stop)
         con = sqlite3.connect(self.db_path)
         cur = con.cursor()
         cur.execute(
@@ -927,6 +946,27 @@ class RealEndToEndRouteTests(unittest.TestCase):
         data = resp.get_json()
         self.assertFalse(data["ok"])
         self.assertEqual(data["code"], "candidate_not_verified")
+
+    def test_plan_route_rejects_candidate_path_outside_trusted_roots(self):
+        """Regression test for the CodeQL-flagged finding this final review
+        fixed: item_replacement_plan used to build cand_p from the raw
+        client string and stat() it directly (with no containment check at
+        all, and a wrong MUSIC_ROOT-relative fallback for relative input),
+        letting an authenticated caller probe for the existence of
+        arbitrary files on the web-manager host before the engine ever saw
+        the request. It must now be rejected via the same hardened
+        _resolve_import_review_source_path() containment check Import
+        Review already uses, without ever reaching beets_client at all."""
+        outside = self.tmp_path / "outside_all_roots"
+        outside.mkdir()
+        probe = outside / "not_a_staging_file.flac"
+        probe.write_bytes(b"whatever")
+        with patch.object(flask_app.beets_client, "plan_track_replacement", side_effect=self.mock_plan) as plan_mock, \
+             patch.object(flask_app, "_acoustid_fingerprint_match", return_value=(self.rid, [self.rid], [self.rid])):
+            resp = self.client.post(f"/api/items/{self.item_id}/replacement/plan", json={"candidate_path": str(probe)})
+        self.assertEqual(resp.status_code, 400)
+        self.assertFalse(resp.get_json()["ok"])
+        plan_mock.assert_not_called()
 
     def test_end_to_end_plan_apply_rollback_through_real_routes(self):
         with patch.object(flask_app.beets_client, "plan_track_replacement", side_effect=self.mock_plan), \
