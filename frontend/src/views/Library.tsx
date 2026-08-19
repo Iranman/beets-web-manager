@@ -18,6 +18,7 @@ import { artistNeedsAttention, getAlbumHealth } from '../lib/libraryHealth';
 import { apiGet } from '../lib/api';
 import type { LibraryAlbum, LibraryArtist, LibraryResponse, LibraryTrack } from '../types/api';
 import { AlbumCleanupModal } from '../components/AlbumCleanupModal';
+import { TrackReplacementModal } from '../components/TrackReplacementModal';
 
 type StatusFilter = 'all' | 'ids' | 'missing' | 'extra' | 'art' | 'clean';
 type SearchScope = 'all' | 'artists' | 'albums' | 'tracks';
@@ -1023,6 +1024,7 @@ function AlbumDetailsDialog({
   libraryVersion,
   onClose,
   onCleanAlbum,
+  onReplaceTrack,
 }: {
   row: AlbumRow | null;
   tracks: LibraryTrack[];
@@ -1033,6 +1035,7 @@ function AlbumDetailsDialog({
   libraryVersion?: number;
   onClose: () => void;
   onCleanAlbum?: (row: AlbumRow) => void;
+  onReplaceTrack?: (track: LibraryTrack) => void;
 }) {
   const album = row?.album ?? null;
   const artist = row?.artist ?? null;
@@ -1106,11 +1109,17 @@ function AlbumDetailsDialog({
                       <div className="max-h-80 overflow-y-auto">
                         {tracks.map((track, index) => {
                           const status = trackStatus(track);
+                          const canReplace = Boolean(track.id && track.path && !track.missing);
                           return (
-                            <div key={`${track.id || index}-${track.title}`} className="grid grid-cols-[3rem_minmax(0,1fr)_8rem] gap-2 border-t border-graphite-800 px-3 py-2 text-sm">
+                            <div key={`${track.id || index}-${track.title}`} className="grid grid-cols-[3rem_minmax(0,1fr)_8rem_auto] items-center gap-2 border-t border-graphite-800 px-3 py-2 text-sm">
                               <span className="font-mono text-xs text-zinc-500">{track.disc && track.disc > 1 ? `${track.disc}.` : ''}{track.track || index + 1}</span>
                               <span className="min-w-0 truncate text-zinc-200">{stripStamps(track.title) || 'Untitled track'}</span>
                               <span className={cx('truncate text-right text-xs', status.color)}>{status.label}</span>
+                              {canReplace ? (
+                                <Button size="small" variant="outlined" onClick={() => onReplaceTrack?.(track)}>
+                                  Replace…
+                                </Button>
+                              ) : <span />}
                             </div>
                           );
                         })}
@@ -1151,6 +1160,7 @@ export default function Library() {
   const [detailsLoading, setDetailsLoading] = useState(false);
   const [detailsError, setDetailsError] = useState('');
   const [cleanupTarget, setCleanupTarget] = useState<AlbumRow | null>(null);
+  const [replacementTarget, setReplacementTarget] = useState<LibraryTrack | null>(null);
 
   const loadLibrary = useCallback(async (includeTracks = false) => {
     setLoading(true);
@@ -1496,6 +1506,7 @@ export default function Library() {
         libraryVersion={libraryVersion}
         onClose={() => setDetailsRow(null)}
         onCleanAlbum={setCleanupTarget}
+        onReplaceTrack={setReplacementTarget}
       />
 
       <AlbumCleanupModal
@@ -1505,6 +1516,15 @@ export default function Library() {
         artistName={cleanupTarget ? displayArtistName(cleanupTarget.artist) : ''}
         mbReleaseGroupId={cleanupTarget?.album.mb_releasegroupid}
         onClose={() => setCleanupTarget(null)}
+        onSuccess={() => void loadLibrary()}
+      />
+
+      <TrackReplacementModal
+        open={Boolean(replacementTarget)}
+        itemId={Number(replacementTarget?.id || 0)}
+        trackTitle={replacementTarget ? (stripStamps(replacementTarget.title) || 'Untitled track') : ''}
+        originalPath={replacementTarget?.path || ''}
+        onClose={() => setReplacementTarget(null)}
         onSuccess={() => void loadLibrary()}
       />
     </div>

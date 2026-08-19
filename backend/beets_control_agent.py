@@ -3798,6 +3798,68 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             self._send_json(code, res)
             return
 
+        if path == "/tracks/replacement/plan":
+            # SEC-002 Wave 17 final review: role-specific roots, not one
+            # combined set. An "original" must be a Beets-owned item under
+            # the music library root; a "candidate" must come from an
+            # approved acquisition/staging root -- never the reverse, and
+            # never accepted merely because a path happens to be under
+            # *some* trusted root.
+            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            original_allowed_roots = [music_root_env]
+            candidate_allowed_roots = [
+                os.environ.get("DOWNLOADS_ROOT", "/downloads"),
+                os.environ.get("PLAYLIST_DOWNLOAD_ROOT", "/data/torrents/music/Playlist Downloads"),
+                os.environ.get("TORRENT_SOURCE_ROOTS", "/torrents"),
+                tempfile.gettempdir(),
+            ]
+            res = transaction_engine.create_track_replacement_plan(
+                _txn_store, body,
+                original_allowed_roots=original_allowed_roots,
+                candidate_allowed_roots=candidate_allowed_roots,
+                db_path=MUSIC_LIBRARY_PATH,
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        if path == "/tracks/replacement/apply":
+            op_id = str(body.get("operation_id") or "").strip()
+            if not op_id:
+                self._send_json(400, {"ok": False, "error": "operation_id required"})
+                return
+            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            quarantine_root = os.environ.get("REPLACEMENT_QUARANTINE_DIR", "/config/track_replacement_quarantine")
+            original_allowed_roots = [music_root_env]
+            candidate_allowed_roots = [
+                os.environ.get("DOWNLOADS_ROOT", "/downloads"),
+                os.environ.get("PLAYLIST_DOWNLOAD_ROOT", "/data/torrents/music/Playlist Downloads"),
+                os.environ.get("TORRENT_SOURCE_ROOTS", "/torrents"),
+                tempfile.gettempdir(),
+            ]
+            res = transaction_engine.execute_track_replacement_apply(
+                _txn_store, op_id, db_path=MUSIC_LIBRARY_PATH,
+                original_allowed_roots=original_allowed_roots,
+                candidate_allowed_roots=candidate_allowed_roots,
+                quarantine_allowed_root=quarantine_root,
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        if path == "/tracks/replacement/rollback":
+            op_id = str(body.get("operation_id") or "").strip()
+            if not op_id:
+                self._send_json(400, {"ok": False, "error": "operation_id required"})
+                return
+            quarantine_root = os.environ.get("REPLACEMENT_QUARANTINE_DIR", "/config/track_replacement_quarantine")
+            res = transaction_engine.rollback_track_replacement(
+                _txn_store, op_id, db_path=MUSIC_LIBRARY_PATH, quarantine_allowed_root=quarantine_root,
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
         if path == "/imports/source/inspect":
             # SEC-002 Wave 8 ARCH-003: read-only, bounded inspection of an
             # import/reimport source -- the engine-side counterpart to

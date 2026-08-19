@@ -52022,65 +52022,204 @@ def _music_format_find_verified_replacement(row: Dict[str, Any], prefs: Dict[str
     return {}
 
 
-def _music_format_remove_original_after_replacement(original_path: str, final_path: str, prefs: Dict[str, Any], log: list,
-                                                    original_item_id: int = 0) -> Dict[str, Any]:
-    result = {"removed": False, "quarantined_to": "", "reason": ""}
-    def _delete_original_db_row() -> None:
-        try:
-            with _db() as con:
-                if original_item_id:
-                    con.execute("DELETE FROM items WHERE id=?", (int(original_item_id),))
-                elif original_path:
-                    con.execute("DELETE FROM items WHERE path=?", (original_path,))
-                con.commit()
-        except Exception as ex:
-            log.append(f"Skipped DB cleanup for replaced original: {ex}")
+def _music_format_replacement_matching_contract(resolved: Dict[str, Any], replacement: Dict[str, Any]) -> Dict[str, Any]:
+    """Build the matching_contract the engine requires to authorize a track
+    replacement, from evidence this caller already computed via
+    _music_format_resolve_replacement_identity (the original's identity)
+    and _music_format_find_verified_replacement (the candidate's AcoustID
+    fingerprint verification against that identity) -- SEC-002 Wave 17
+    final review.
 
-    if not original_path:
-        result["reason"] = "original path missing"
+    This is deliberately NOT a fresh AI suggestion or an unverified
+    client claim: fingerprint_validation is only ever populated by
+    _music_format_find_verified_replacement after an actual AcoustID
+    fingerprint comparison (see _acoustid_fingerprint_match /
+    _acoustid_fingerprint_ids), so identity_source is set to
+    "acoustid_fingerprint" only when that real verification produced a
+    result -- never a bare guess."""
+    fp = (replacement or {}).get("fingerprint_validation") or {}
+    replacement_recording_id = _s(fp.get("mb_recording_id_candidate") or "").strip().lower()
+    identity_source = "acoustid_fingerprint" if (replacement_recording_id and fp.get("fingerprint_status") == "matched") else ""
+    return {
+        "identity_source": identity_source,
+        "original_recording_id": _s(resolved.get("mb_trackid") or "").strip().lower(),
+        "replacement_recording_id": replacement_recording_id,
+        "original_release_group_id": _s(resolved.get("mb_releasegroupid") or "").strip().lower(),
+        "replacement_release_group_id": _s(resolved.get("mb_releasegroupid") or "").strip().lower(),
+        "decision_reason": _s(fp.get("decision_reason") or ""),
+    }
+
+
+def _music_format_remove_original_after_replacement(original_path: str, final_path: str, prefs: Dict[str, Any], log: list,
+                                                    original_item_id: int = 0,
+                                                    resolved: Optional[Dict[str, Any]] = None,
+                                                    replacement: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Execute engine-owned track replacement transaction without direct local filesystem or DB mutations (SEC-002 Wave 17)."""
+    result = {"removed": False, "quarantined_to": "", "reason": ""}
+    if not original_path or not final_path:
+        result["reason"] = "original or replacement path missing"
         return result
-    original = Path(original_path)
-    if not original.is_absolute():
-        original = MUSIC_ROOT / original_path
-    final = Path(final_path) if final_path else Path("")
+
+    matching_contract = _music_format_replacement_matching_contract(resolved or {}, replacement or {})
+
     try:
-        if final_path and original.resolve(strict=False) == final.resolve(strict=False):
-            result["reason"] = "replacement uses original path"
+        plan_res = beets_client.plan_track_replacement({
+            "original_item_id": int(original_item_id or 0),
+            "original_path": original_path,
+            "replacement_path": final_path,
+            "reason": "Music format quality replacement",
+            "matching_contract": matching_contract,
+        })
+        if not plan_res.get("ok"):
+            error_msg = plan_res.get("error") or "track replacement plan failed"
+            log.append(f"Track replacement plan failed: {error_msg}")
+            result["reason"] = error_msg
             return result
-    except Exception:
-        pass
-    if not original.exists():
+
+        op_id = plan_res.get("operation_id")
+        apply_res = beets_client.apply_track_replacement(op_id)
+        if not apply_res.get("ok"):
+            error_msg = apply_res.get("error") or "track replacement apply failed"
+            log.append(f"Track replacement apply failed: {error_msg}")
+            result["reason"] = error_msg
+            return result
+
         result["removed"] = True
-        result["reason"] = "original already removed"
-        _delete_original_db_row()
-        log.append("Original removed after verified replacement")
-        return result
-    if not _path_is_under(original.resolve(strict=False), MUSIC_ROOT.resolve(strict=False)):
-        result["reason"] = "original is outside music library"
-        return result
-    handling = _s(prefs.get("rejected_download_handling") or "quarantine").strip().lower()
-    try:
-        if handling == "delete":
-            original.unlink(missing_ok=True)
-            result["removed"] = True
-            _delete_original_db_row()
-            log.append("Original removed after verified replacement")
-        else:
-            quarantine_root = Path(os.environ.get("MUSIC_FORMAT_QUARANTINE_DIR", "/config/music_format_quarantine")) / "library" / time.strftime("%Y%m%d")
-            quarantine_root.mkdir(parents=True, exist_ok=True)
-            target = quarantine_root / original.name
-            if target.exists():
-                target = quarantine_root / f"{original.stem}-{int(time.time())}{original.suffix}"
-            shutil.move(str(original), str(target))
-            result["removed"] = True
-            result["quarantined_to"] = str(target)
-            _delete_original_db_row()
-            log.append("Original removed after verified replacement")
+        result["quarantined_to"] = apply_res.get("quarantined_to") or ""
+        log.append("Original removed after verified replacement via engine transaction")
         return result
     except Exception as ex:
         result["reason"] = str(ex)
-        log.append(f"Skipped removal: replacement verified but original removal failed: {ex}")
+        log.append(f"Track replacement engine IPC failed: {ex}")
         return result
+
+
+@app.post("/api/items/<int:iid>/replacement/plan")
+def item_replacement_plan(iid: int):
+    """Manual, human-reviewed counterpart to the automatic music-format
+    replacement job (SEC-002 Wave 17 final review): a user supplies a
+    specific replacement candidate file for a specific track, this route
+    verifies it via the SAME established AcoustID fingerprint
+    infrastructure the automatic job already uses (no new fingerprint
+    stack), and only then asks the engine to Plan a track_replacement_v1
+    transaction. Planning never mutates anything -- Apply is a distinct,
+    separate, explicit user action (see item_replacement_apply)."""
+    payload = request.get_json(silent=True) or {}
+    candidate_path_raw = _s(payload.get("candidate_path") or payload.get("replacement_path") or "").strip()
+    if not candidate_path_raw:
+        return jsonify({"ok": False, "error": "candidate_path is required."}), 400
+
+    item = lib.get_item(iid)
+    if item is None:
+        return jsonify({"ok": False, "error": "Item not found."}), 404
+
+    original_path = _s(getattr(item, "path", "") or "")
+    # SEC-002 Wave 17 final review: this used to build cand_p from the raw
+    # client string and stat() it directly (a Path-under-MUSIC_ROOT
+    # fallback for relative input, no less -- wrong root for a replacement
+    # *candidate*, which must come from a staging/acquisition area, not
+    # the music library). Reuse the already-hardened, already-tested
+    # _resolve_import_review_source_path() (Wave 6/7/8) instead of a
+    # second, weaker ad hoc check: candidate/staging roots only
+    # (allow_music=False), full symlink-component walk, containment
+    # re-verified after resolve(). The engine independently re-validates
+    # its own candidate_allowed_roots at Plan and Apply time -- this is
+    # defense-in-depth, not the only boundary.
+    cand_p, cand_path_error = _resolve_import_review_source_path(
+        candidate_path_raw, allow_music=False, expected_type="file", require_exists=True,
+    )
+    if cand_path_error or cand_p is None:
+        return jsonify({"ok": False, "error": cand_path_error or "Candidate file was not found or is not accessible."}), 400
+
+    # Real AcoustID fingerprint verification -- reusing
+    # _acoustid_fingerprint_match / _acoustid_fingerprint_ids, the exact
+    # same functions the automatic replacement job uses. AI is never
+    # consulted here and could not authorize this even if it were.
+    shared_id = ""
+    if original_path and Path(original_path).exists():
+        shared_id, _src_ids, cand_ids = _acoustid_fingerprint_match(str(cand_p), original_path)
+    else:
+        cand_ids = _acoustid_fingerprint_ids(str(cand_p))
+
+    fingerprint_validation: Dict[str, Any] = {}
+    expected_mbid = _s(getattr(item, "mb_trackid", "") or "").strip().lower()
+    if shared_id:
+        fingerprint_validation = {
+            "fingerprint_status": "matched",
+            "mb_recording_id_candidate": shared_id,
+            "decision_reason": f"Replacement AcoustID fingerprint matches original recording {shared_id}.",
+        }
+    elif expected_mbid and expected_mbid in (cand_ids or []):
+        fingerprint_validation = {
+            "fingerprint_status": "matched",
+            "mb_recording_id_candidate": expected_mbid,
+            "decision_reason": "Replacement AcoustID fingerprint matches the track's known MusicBrainz recording.",
+        }
+
+    if not fingerprint_validation:
+        return jsonify({
+            "ok": False,
+            "error": "Could not verify the replacement candidate is the same recording via AcoustID fingerprint. Refusing to plan an unverified replacement.",
+            "code": "candidate_not_verified",
+        }), 400
+
+    resolved_evidence = {
+        "mb_trackid": _s(getattr(item, "mb_trackid", "") or ""),
+        "mb_releasegroupid": _s(getattr(item, "mb_releasegroupid", "") or getattr(item, "album_mb_releasegroupid", "") or ""),
+    }
+    matching_contract = _music_format_replacement_matching_contract(
+        resolved_evidence, {"fingerprint_validation": fingerprint_validation},
+    )
+
+    try:
+        res = beets_client.plan_track_replacement({
+            "original_item_id": iid,
+            "original_path": original_path,
+            "replacement_path": str(cand_p),
+            "reason": _s(payload.get("reason") or "Manual track replacement"),
+            "matching_contract": matching_contract,
+        })
+        status_code = 200 if res.get("ok") else 400
+        return jsonify(res), status_code
+    except BeetsUnavailableError as exc:
+        # Never interpolate the raw exception text into a client-facing
+        # response: BeetsClient._request() falls back to embedding up to
+        # 200 raw response-body characters for any non-JSON error response
+        # it doesn't recognize (e.g. an unexpected proxy/framework error
+        # page), which could carry stack-trace-shaped text -- the same
+        # established precedent as get_config()/_config_error_response()
+        # above. error_code is a short, fixed identifier string, never
+        # free text, so it's safe to echo.
+        return jsonify({"ok": False, "error": "Beets engine is unavailable.", "code": exc.error_code or "beets_unavailable"}), 503
+    except BeetsError as exc:
+        return jsonify({"ok": False, "error": "Track replacement planning failed.", "code": exc.error_code or "beets_error"}), 400
+    except Exception:
+        app.logger.exception("item_replacement_plan failed for iid=%s", iid)
+        return jsonify({"ok": False, "error": "Track replacement planning failed."}), 500
+
+
+@app.post("/api/items/<int:iid>/replacement/apply")
+def item_replacement_apply(iid: int):
+    """Apply a previously-Planned track replacement. Requires the
+    operation_id returned by item_replacement_plan -- there is deliberately
+    no way to Apply without having gone through Plan first, and Plan
+    itself performs no mutation, so this is the only place a destructive
+    change can actually occur for this workflow."""
+    payload = request.get_json(silent=True) or {}
+    op_id = _s(payload.get("operation_id")).strip()
+    if not op_id:
+        return jsonify({"ok": False, "error": "operation_id required"}), 400
+    try:
+        res = beets_client.apply_track_replacement(op_id)
+        status_code = 200 if res.get("ok") else 400
+        return jsonify(res), status_code
+    except BeetsUnavailableError as exc:
+        return jsonify({"ok": False, "error": "Beets engine is unavailable.", "code": exc.error_code or "beets_unavailable"}), 503
+    except BeetsError as exc:
+        return jsonify({"ok": False, "error": "Track replacement apply failed.", "code": exc.error_code or "beets_error"}), 400
+    except Exception:
+        app.logger.exception("item_replacement_apply failed for iid=%s op_id=%s", iid, op_id)
+        return jsonify({"ok": False, "error": "Track replacement apply failed."}), 500
 
 
 def _music_format_replace_rows(log: list, cancel_event=None, update_state=None, *, limit: int = 0,
@@ -52194,6 +52333,8 @@ def _music_format_replace_rows(log: list, cancel_event=None, update_state=None, 
                 prefs,
                 log,
                 original_item_id=int(row.get("item_id") or 0),
+                resolved=resolved,
+                replacement=replacement,
             )
             if not removal.get("removed"):
                 raise RuntimeError(removal.get("reason") or "original was not removed after replacement")
@@ -52620,14 +52761,53 @@ def api_transaction_rollback(transaction_id):
     try:
         tx = transactions.get(transaction_id)
     except KeyError:
+        # SEC-002 Wave 17 final review: dispatch to the correct
+        # family-specific rollback executor rather than always trying the
+        # Import Review one -- that was exactly the "generic rollback
+        # route silently routes everything through an unrelated family's
+        # executor" anti-pattern flagged in Wave 16 review, just not yet
+        # closed for a THIRD mutation family. Fetch the transaction's own
+        # record first (a narrow, justified use of the engine
+        # get_transaction lookup -- not the general browsing surface
+        # removed in Wave 16) to learn its mutation_family, then dispatch;
+        # each executor also independently enforces its own family match,
+        # so this dispatch is a UX/correctness improvement, not the sole
+        # security boundary.
         try:
-            res = beets_client.rollback_import_review_cleanup(transaction_id)
+            detail = beets_client.get_transaction(transaction_id)
+        except BeetsUnavailableError as exc:
+            # Never interpolate the raw exception text: BeetsClient._request()
+            # falls back to embedding up to 200 raw response-body characters
+            # for any non-JSON error response it doesn't recognize, which
+            # could carry stack-trace-shaped text. error_code is a short,
+            # fixed identifier string, never free text.
+            return jsonify({"ok": False, "error": "Beets engine is unavailable.", "code": exc.error_code or "beets_unavailable"}), 503
+        except BeetsError as exc:
+            return jsonify({"ok": False, "error": "Transaction not found", "code": exc.error_code or "beets_error"}), 404
+        except Exception:
+            return jsonify({"ok": False, "error": "Transaction not found"}), 404
+
+        engine_tx = (detail or {}).get("transaction") or {}
+        mutation_family = (engine_tx.get("metadata") or {}).get("mutation_family")
+
+        try:
+            if mutation_family == "track_replacement_v1":
+                res = beets_client.rollback_track_replacement(transaction_id)
+            elif mutation_family == "import_review_cleanup_v1":
+                res = beets_client.rollback_import_review_cleanup(transaction_id)
+            elif mutation_family:
+                return jsonify({
+                    "ok": False,
+                    "error": f"Transactions of type {mutation_family!r} do not support rollback through this endpoint.",
+                }), 400
+            else:
+                return jsonify({"ok": False, "error": "Transaction not found"}), 404
             status_code = 200 if res.get("ok") else 400
             return jsonify(res), status_code
-        except BeetsUnavailableError as ex:
-            return jsonify({"ok": False, "error": f"Beets engine unavailable: {ex}"}), 503
-        except BeetsError as ex:
-            return jsonify({"ok": False, "error": str(ex)}), 400
+        except BeetsUnavailableError as exc:
+            return jsonify({"ok": False, "error": "Beets engine is unavailable.", "code": exc.error_code or "beets_unavailable"}), 503
+        except BeetsError as exc:
+            return jsonify({"ok": False, "error": "Rollback failed.", "code": exc.error_code or "beets_error"}), 400
         except Exception:
             return jsonify({"ok": False, "error": "Transaction not found"}), 404
     rollback = tx.get("rollback") or {}

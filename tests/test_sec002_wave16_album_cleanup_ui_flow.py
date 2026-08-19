@@ -252,9 +252,21 @@ class Wave16RealEngineIntegrationTests(unittest.TestCase):
         def mock_rollback(operation_id, **kwargs):
             return rollback_import_review_cleanup(self.tx_store, operation_id)
 
+        def mock_get_transaction(operation_id, **kwargs):
+            # SEC-002 Wave 17 final review: the generic rollback route now
+            # looks up the transaction's real mutation_family via
+            # beets_client.get_transaction() before dispatching, instead
+            # of always assuming Import Review cleanup -- see
+            # app.api_transaction_rollback. Route it to the real store.
+            try:
+                return {"ok": True, "transaction": self.tx_store.get(operation_id)}
+            except KeyError:
+                return {"ok": False, "error": "Transaction not found"}
+
         self.mock_plan_album_cleanup = mock_plan_album_cleanup
         self.mock_apply_album_cleanup = mock_apply_album_cleanup
         self.mock_rollback = mock_rollback
+        self.mock_get_transaction = mock_get_transaction
 
         flask_app.app.config["TESTING"] = True
         self._env_patch = mock.patch.dict(os.environ, {"BEETS_WEB_AUTH_DISABLED": "1"})
@@ -345,7 +357,8 @@ class Wave16RealEngineIntegrationTests(unittest.TestCase):
         message, never silently "succeed" having restored nothing."""
         with patch.object(flask_app.beets_client, "plan_album_cleanup", side_effect=self.mock_plan_album_cleanup), \
              patch.object(flask_app.beets_client, "apply_album_cleanup", side_effect=self.mock_apply_album_cleanup), \
-             patch.object(flask_app.beets_client, "rollback_import_review_cleanup", side_effect=self.mock_rollback):
+             patch.object(flask_app.beets_client, "rollback_import_review_cleanup", side_effect=self.mock_rollback), \
+             patch.object(flask_app.beets_client, "get_transaction", side_effect=self.mock_get_transaction):
             plan_resp = self.client.post("/api/albums/10/cleanup/plan")
             op_id = plan_resp.get_json()["operation_id"]
             apply_resp = self.client.post("/api/albums/cleanup/apply", json={"operation_id": op_id})
@@ -366,7 +379,8 @@ class Wave16RealEngineIntegrationTests(unittest.TestCase):
              patch.object(flask_app.beets_client, "apply_import_review_cleanup",
                            side_effect=lambda op_id, **kw: execute_import_review_cleanup_apply(
                                self.tx_store, op_id, quarantine_root=str(self.tmp_path / "quarantine"))), \
-             patch.object(flask_app.beets_client, "rollback_import_review_cleanup", side_effect=self.mock_rollback):
+             patch.object(flask_app.beets_client, "rollback_import_review_cleanup", side_effect=self.mock_rollback), \
+             patch.object(flask_app.beets_client, "get_transaction", side_effect=self.mock_get_transaction):
             op_id = self._create_real_import_review_transaction(action="quarantine_rejected")
             apply_res = execute_import_review_cleanup_apply(
                 self.tx_store, op_id, quarantine_root=str(self.tmp_path / "quarantine"),

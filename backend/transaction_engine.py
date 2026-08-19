@@ -97,6 +97,86 @@ def _get_apply_lock(operation_id: str) -> threading.Lock:
         return lock
 
 
+# SEC-002 Wave 17 final review: _get_apply_lock above only serializes two
+# Apply calls for the SAME operation_id. It does nothing to stop two
+# DIFFERENT transactions that both target the same underlying resource
+# (e.g. two separately-Planned replacements for the same Beets item id)
+# from applying concurrently and racing on the same file/DB row. This is a
+# second, orthogonal lock registry keyed by an arbitrary caller-chosen
+# resource key (e.g. f"item:{item_id}") -- same never-released-entries
+# rationale as _apply_locks above.
+_resource_locks_guard = threading.Lock()
+_resource_locks: Dict[str, threading.Lock] = {}
+
+
+def _get_resource_lock(key: str) -> threading.Lock:
+    with _resource_locks_guard:
+        lock = _resource_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _resource_locks[key] = lock
+        return lock
+
+
+# SEC-002 Wave 17 final review: shared, hardened path-safety helpers,
+# extracted from what were previously private closures inside
+# _execute_import_review_cleanup_apply_locked (Wave 15/16). Every mutation
+# family should use these SAME helpers rather than re-implementing
+# (and potentially under-implementing) symlink-component-walk logic per
+# family -- see the Wave 17 track replacement functions below for the
+# second real user.
+def _is_symlink_path(p: Path) -> bool:
+    try:
+        return p.is_symlink() or os.path.islink(str(p)) or stat.S_ISLNK(os.lstat(str(p)).st_mode)
+    except Exception:
+        return False
+
+
+def _path_has_symlink_under(path: Path, base: Path) -> bool:
+    """True if `path` itself, or any component between it and `base`
+    (inclusive of `base`), is a symlink. Walking every parent component --
+    not just the leaf -- is what actually defends against a symlinked
+    *parent directory* being substituted in after Plan time; a leaf-only
+    is_symlink() check misses that entirely."""
+    try:
+        curr = path
+        while curr != base and base in curr.parents:
+            if _is_symlink_path(curr):
+                return True
+            curr = curr.parent
+        if curr == base and _is_symlink_path(curr):
+            return True
+    except Exception:
+        return True
+    return False
+
+
+def _safe_rename(src: Path, dest: Path) -> None:
+    """Atomically move src to dest as the literal target, never descending
+    into dest if it happens to already exist as a directory.
+
+    shutil.move() silently moves src *inside* dest (using src's own
+    basename) when dest already exists as a directory, rather than
+    treating dest as the literal target -- the exact Wave 15 regression
+    this helper exists to make structurally impossible for every mutation
+    family, instead of re-deriving the same os.rename()+EXDEV-fallback
+    pattern inline in each one. Callers are still responsible for refusing
+    up front if something already exists at the exact destination leaf
+    (this only prevents the directory-descend ambiguity, not overwrites).
+    """
+    try:
+        os.rename(str(src), str(dest))
+    except OSError as exc:
+        if getattr(exc, "errno", None) != errno.EXDEV:
+            raise
+        shutil.copyfile(str(src), str(dest))
+        try:
+            shutil.copystat(str(src), str(dest))
+        except Exception:
+            pass
+        src.unlink()
+
+
 def _now() -> float:
     return time.time()
 
@@ -1006,24 +1086,9 @@ def _execute_import_review_cleanup_apply_locked(
     q_base = Path(quarantine_root or os.environ.get("IMPORT_REVIEW_QUARANTINE_DIR", "/config/import_review_quarantine"))
     op_q_dir = q_base / time.strftime("%Y%m%d") / operation_id
 
-    def _is_symlink(p: Path) -> bool:
-        try:
-            return p.is_symlink() or os.path.islink(str(p)) or stat.S_ISLNK(os.lstat(str(p)).st_mode)
-        except Exception:
-            return False
-
-    def _path_has_symlink_under(path: Path, base: Path) -> bool:
-        try:
-            curr = path
-            while curr != base and base in curr.parents:
-                if _is_symlink(curr):
-                    return True
-                curr = curr.parent
-            if curr == base and _is_symlink(curr):
-                return True
-        except Exception:
-            return True
-        return False
+    # _is_symlink_path / _path_has_symlink_under are the module-level
+    # shared helpers (see their definitions near the top of this file) --
+    # this function previously defined its own private copies here.
 
     # Process steps durably
     for step in steps:
@@ -1049,7 +1114,7 @@ def _execute_import_review_cleanup_apply_locked(
                 step["status"] = "completed"
                 continue
 
-            if _is_symlink(src):
+            if _is_symlink_path(src):
                 skipped.append({"file": str(src), "reason": "symlink"})
                 step["status"] = "completed"
                 continue
@@ -1095,7 +1160,7 @@ def _execute_import_review_cleanup_apply_locked(
 
                     dest_parent.mkdir(parents=True, exist_ok=True)
 
-                    if _path_has_symlink_under(dest_parent, q_base) or _is_symlink(dest) or dest.is_symlink():
+                    if _path_has_symlink_under(dest_parent, q_base) or _is_symlink_path(dest) or dest.is_symlink():
                         skipped.append({"file": str(src), "reason": "symlink"})
                         step["status"] = "completed"
                         continue
@@ -1139,7 +1204,7 @@ def _execute_import_review_cleanup_apply_locked(
                         src.unlink()
 
                     dest_res = dest.resolve(strict=False)
-                    is_invalid = _is_symlink(dest) or dest.is_symlink() or not dest.is_file() or dest_res == q_resolved or q_resolved not in dest_res.parents
+                    is_invalid = _is_symlink_path(dest) or dest.is_symlink() or not dest.is_file() or dest_res == q_resolved or q_resolved not in dest_res.parents
 
                     if is_invalid:
                         # The source was swapped for a symlink (or dest was
@@ -1682,3 +1747,804 @@ def _execute_album_cleanup_apply_locked(
         "deleted": deleted,
         "log": log,
     }
+
+
+def _decode_row_bytes(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Beets stores several sqlite columns (notably `path`) as raw bytes.
+    Decode every bytes value for safe JSON storage / display, using the
+    same surrogateescape convention as the rest of this codebase's raw-path
+    handling, so a rollback re-insert can encode it back byte-for-byte."""
+    out: Dict[str, Any] = {}
+    for k, v in row.items():
+        if isinstance(v, bytes):
+            try:
+                out[k] = v.decode("utf-8", "surrogateescape")
+            except Exception:
+                out[k] = v.decode("utf-8", "ignore")
+        else:
+            out[k] = v
+    return out
+
+
+def _fetch_authoritative_item_row(db_path: str, item_id: int) -> Optional[Dict[str, Any]]:
+    """Read the full, current Beets `items` row for item_id directly from
+    the engine's own SQLite access -- the only authority for what path,
+    recording id, etc. this item actually has right now. Returns None if
+    not found. Raises on a genuine DB access failure (caller decides how
+    to report that)."""
+    con = sqlite3.connect(db_path, timeout=10)
+    con.row_factory = sqlite3.Row
+    try:
+        cur = con.cursor()
+        cur.execute("SELECT * FROM items WHERE id = ?", (item_id,))
+        row = cur.fetchone()
+    finally:
+        con.close()
+    if row is None:
+        return None
+    return _decode_row_bytes(dict(row))
+
+
+def create_track_replacement_plan(
+    store: TransactionStore,
+    payload: Dict[str, Any],
+    *,
+    original_allowed_roots: List[str],
+    candidate_allowed_roots: List[str],
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Create a track replacement plan.
+
+    SEC-002 Wave 17 final review -- this is a from-scratch rewrite of the
+    original implementation, which had several confirmed defects: a
+    client-controlled quarantine root, a transaction-id/quarantine-path
+    mismatch bug, no verification that original_item_id actually owns the
+    supplied original_path, a matching-authority check that only fired
+    when a matching_contract happened to be supplied (never REQUIRED one),
+    and a single undifferentiated allowed_roots list letting an "original"
+    be accepted from a downloads root and a "candidate" from the music
+    root. All fixed here:
+
+    - original_item_id is the ONLY authority for the original file's
+      location: the engine reads the item's current path/mb_trackid
+      directly from the Beets DB. A client-supplied original_path, if
+      given, is used only as expected-state evidence and must exactly
+      match the engine's own record or the plan is refused.
+    - The candidate must live under a role-specific
+      candidate/staging/acquisition root; the original must be a
+      Beets-owned item under the music-library root. A candidate can
+      never be accepted from the music root, nor an original from a
+      downloads root, just because both happen to be in "some" trusted
+      root.
+    - matching_contract is REQUIRED, not optional, and is cross-checked
+      against the item's actual current Recording ID from the DB (not
+      merely trusted at face value). A contract whose only identity_source
+      is "ai"/"ai_suggestion" is rejected outright -- AI is advisory only.
+    - The quarantine root always comes from server configuration
+      (REPLACEMENT_QUARANTINE_DIR); any client-supplied quarantine_root in
+      the payload is ignored entirely.
+    - The quarantine path is computed AFTER store.create() returns the
+      real, durable transaction id, so it can never diverge from the
+      operation_id the caller actually receives.
+    - The full original item row is captured (schema-agnostic, via
+      SELECT *) so rollback can genuinely re-insert it rather than
+      guessing at a handful of columns.
+    """
+    original_item_id = int(payload.get("original_item_id") or payload.get("item_id") or 0)
+    if original_item_id <= 0:
+        return {"ok": False, "error": "original_item_id is required.", "code": "item_id_required"}
+
+    replacement_path_raw = str(payload.get("replacement_path") or payload.get("candidate_path") or payload.get("replacement") or "").strip()
+    if not replacement_path_raw:
+        return {"ok": False, "error": "Replacement path is required.", "code": "replacement_path_required"}
+
+    if not db_path or not os.path.exists(db_path):
+        return {"ok": False, "error": f"Beets database not found at {db_path}.", "code": "db_not_found"}
+
+    # URL decoding budget & null-byte check (client-supplied replacement path only;
+    # the original path is engine-derived below, never taken from the client).
+    cur_decode = replacement_path_raw
+    for _ in range(3):
+        dec = urllib.parse.unquote(cur_decode)
+        if dec == cur_decode:
+            break
+        cur_decode = dec
+    if "\x00" in cur_decode or "%00" in replacement_path_raw or "\x00" in replacement_path_raw:
+        return {"ok": False, "error": "Path contains unsafe encoded characters.", "code": "invalid_path"}
+
+    # --- Candidate validation (role: candidate/staging root only) ---
+    if os.path.islink(replacement_path_raw):
+        return {"ok": False, "error": "Symlinks are not permitted for track replacement.", "code": "symlink_rejected"}
+    repl_p = Path(replacement_path_raw)
+    if repl_p.is_symlink():
+        return {"ok": False, "error": "Symlinks are not permitted for track replacement.", "code": "symlink_rejected"}
+
+    # Normalize (collapse ".."/".") WITHOUT resolving symlinks yet -- the
+    # component-by-component symlink walk below only means anything if it
+    # runs on a path that could still *contain* a symlink component;
+    # Path.resolve() would already have transparently followed and erased
+    # every symlink in the path before the walk ever saw it, making the
+    # walk a structural no-op. Root-containment is checked on this
+    # normalized-but-unresolved form first; resolve() is only used
+    # afterward, for the file's actual on-disk identity.
+    abs_repl = Path(os.path.normpath(str(repl_p if repl_p.is_absolute() else repl_p.absolute())))
+    candidate_roots_resolved = [Path(r).resolve(strict=False) for r in (candidate_allowed_roots or [])]
+    candidate_root = next((r for r in candidate_roots_resolved if abs_repl == r or r in abs_repl.parents), None)
+    if candidate_root is None:
+        return {"ok": False, "error": f"Replacement path {abs_repl} is outside approved candidate/staging roots.", "code": "candidate_outside_roots"}
+    if _path_has_symlink_under(abs_repl, candidate_root):
+        return {"ok": False, "error": f"Symlink component detected in replacement path {abs_repl}.", "code": "symlink_rejected"}
+
+    try:
+        resolved_repl = abs_repl.resolve(strict=False)
+    except Exception:
+        return {"ok": False, "error": "Invalid replacement path.", "code": "invalid_path"}
+    if resolved_repl.is_symlink():
+        return {"ok": False, "error": "Symlinks are not permitted for track replacement.", "code": "symlink_rejected"}
+    # Defense in depth: confirm resolution didn't itself land outside the
+    # matched root (covers any resolve()-only edge case the lexical walk
+    # above didn't anticipate).
+    if not (resolved_repl == candidate_root or candidate_root in resolved_repl.parents):
+        return {"ok": False, "error": f"Replacement path {resolved_repl} is outside approved candidate/staging roots.", "code": "candidate_outside_roots"}
+
+    if not resolved_repl.exists() or not resolved_repl.is_file():
+        return {"ok": False, "error": f"Replacement file {resolved_repl} does not exist or is not a regular file.", "code": "candidate_missing"}
+    st_repl = resolved_repl.stat()
+    if st_repl.st_size <= 0:
+        return {"ok": False, "error": f"Replacement file {resolved_repl} is empty.", "code": "candidate_empty"}
+
+    # --- Original validation (role: music-library root only, bound by item_id) ---
+    try:
+        original_row = _fetch_authoritative_item_row(db_path, original_item_id)
+    except Exception as exc:
+        return {"ok": False, "error": f"Failed to read original item record: {exc}", "code": "db_read_failed"}
+    if original_row is None:
+        return {"ok": False, "error": f"Beets item {original_item_id} not found.", "code": "item_not_found"}
+
+    original_path_raw = str(original_row.get("path") or "")
+    if not original_path_raw:
+        return {"ok": False, "error": f"Beets item {original_item_id} has no recorded path.", "code": "item_path_missing"}
+
+    # Client-supplied original_path (if given at all) is expected-state
+    # evidence ONLY -- it must exactly match what the engine's own record
+    # says, never override it. This is what stops a client from pairing
+    # an item ID from Track A with a path belonging to Track B.
+    client_original_path = str(payload.get("original_path") or payload.get("original") or "").strip()
+    if client_original_path:
+        try:
+            client_resolved = Path(client_original_path).resolve(strict=False)
+            record_resolved = Path(original_path_raw).resolve(strict=False)
+        except Exception:
+            return {"ok": False, "error": "Invalid original_path.", "code": "invalid_path"}
+        if client_resolved != record_resolved:
+            return {
+                "ok": False,
+                "error": "Supplied original_path does not match the path currently recorded for this item.",
+                "code": "item_path_mismatch",
+            }
+
+    if os.path.islink(original_path_raw):
+        return {"ok": False, "error": "Symlinks are not permitted for track replacement.", "code": "symlink_rejected"}
+    orig_p = Path(original_path_raw)
+    if orig_p.is_symlink():
+        return {"ok": False, "error": "Symlinks are not permitted for track replacement.", "code": "symlink_rejected"}
+
+    # See the identical comment on the candidate path above: containment
+    # and the symlink-component walk both run on the normalized-but-not-
+    # symlink-resolved form first, since resolve() would erase any
+    # symlink component before the walk could ever see it.
+    abs_orig = Path(os.path.normpath(str(orig_p if orig_p.is_absolute() else orig_p.absolute())))
+    original_roots_resolved = [Path(r).resolve(strict=False) for r in (original_allowed_roots or [])]
+    original_root = next((r for r in original_roots_resolved if abs_orig == r or r in abs_orig.parents), None)
+    if original_root is None:
+        return {"ok": False, "error": f"Original path {abs_orig} is outside the music library root.", "code": "original_outside_roots"}
+    if _path_has_symlink_under(abs_orig, original_root):
+        return {"ok": False, "error": f"Symlink component detected in original path {abs_orig}.", "code": "symlink_rejected"}
+
+    try:
+        resolved_orig = abs_orig.resolve(strict=False)
+    except Exception:
+        return {"ok": False, "error": "Invalid original path.", "code": "invalid_path"}
+    if resolved_orig.is_symlink():
+        return {"ok": False, "error": "Symlinks are not permitted for track replacement.", "code": "symlink_rejected"}
+    if not (resolved_orig == original_root or original_root in resolved_orig.parents):
+        return {"ok": False, "error": f"Original path {resolved_orig} is outside the music library root.", "code": "original_outside_roots"}
+
+    if not resolved_orig.exists() or not resolved_orig.is_file():
+        return {"ok": False, "error": f"Original file {resolved_orig} does not exist or is not a regular file.", "code": "original_missing"}
+    st_orig = resolved_orig.stat()
+    if st_orig.st_size <= 0:
+        return {"ok": False, "error": f"Original file {resolved_orig} is empty.", "code": "original_empty"}
+
+    if resolved_orig == resolved_repl or (st_orig.st_ino == st_repl.st_ino and st_orig.st_dev == st_repl.st_dev):
+        return {"ok": False, "error": "Original and replacement paths point to the exact same file.", "code": "same_file"}
+
+    # --- Matching authority (REQUIRED, engine-verified against the DB) ---
+    matching_contract = payload.get("matching_contract") if isinstance(payload.get("matching_contract"), dict) else {}
+    identity_source = str(matching_contract.get("identity_source") or "").strip().lower()
+    replacement_recording_id = str(
+        matching_contract.get("replacement_recording_id") or matching_contract.get("expected_recording_id") or ""
+    ).strip().lower()
+    original_recording_id_claim = str(matching_contract.get("original_recording_id") or "").strip().lower()
+    orig_rgid_claim = str(matching_contract.get("original_release_group_id") or "").strip().lower()
+    repl_rgid_claim = str(matching_contract.get("replacement_release_group_id") or "").strip().lower()
+
+    if not identity_source or identity_source in ("ai", "ai_suggestion", "ai_only"):
+        return {
+            "ok": False,
+            "error": "Replacement requires non-AI identity evidence (e.g. AcoustID fingerprint match); AI suggestions are advisory only and cannot authorize a replacement by themselves.",
+            "code": "ai_only_evidence_rejected",
+        }
+    if not replacement_recording_id:
+        return {
+            "ok": False,
+            "error": "Replacement candidate is missing verified Recording ID evidence.",
+            "code": "recording_id_required",
+        }
+
+    actual_original_recording_id = str(original_row.get("mb_trackid") or "").strip().lower()
+    if actual_original_recording_id and original_recording_id_claim and actual_original_recording_id != original_recording_id_claim:
+        return {
+            "ok": False,
+            "error": "Matching evidence does not match the original item's current Recording ID -- the evidence appears to be stale or built against a different item.",
+            "code": "original_recording_id_mismatch",
+        }
+    # A higher-quality file is not sufficient evidence: if the original
+    # already has a known Recording ID, the candidate's verified Recording
+    # ID must match it exactly. This is the actual guard against "a FLAC
+    # of the wrong song replacing an MP3 of the right one."
+    if actual_original_recording_id and replacement_recording_id != actual_original_recording_id:
+        return {
+            "ok": False,
+            "error": "Replacement candidate's verified Recording ID does not match the original track's Recording ID.",
+            "code": "recording_id_mismatch",
+        }
+    if orig_rgid_claim and repl_rgid_claim and orig_rgid_claim != repl_rgid_claim:
+        return {
+            "ok": False,
+            "error": "Candidate belongs to a different Release Group than the original track.",
+            "code": "release_group_mismatch",
+        }
+
+    orig_stat_data = {
+        "inode": st_orig.st_ino,
+        "dev": st_orig.st_dev,
+        "size": st_orig.st_size,
+        "mtime_ns": getattr(st_orig, "st_mtime_ns", int(st_orig.st_mtime * 1e9)),
+    }
+    repl_stat_data = {
+        "inode": st_repl.st_ino,
+        "dev": st_repl.st_dev,
+        "size": st_repl.st_size,
+        "mtime_ns": getattr(st_repl, "st_mtime_ns", int(st_repl.st_mtime * 1e9)),
+    }
+
+    change_entry = {
+        "id": f"item:{original_item_id}",
+        "operation": "Track Replacement",
+        "mutation_family": "track_replacement_v1",
+        "original_item_id": original_item_id,
+        "original_path": str(resolved_orig),
+        "original_stat": orig_stat_data,
+        "replacement_path": str(resolved_repl),
+        "replacement_stat": repl_stat_data,
+        "matching_contract": matching_contract,
+    }
+
+    # store.create() generates the durable transaction id itself -- do NOT
+    # invent a separate id up front and use it to build the quarantine
+    # path; that produced the exact "quarantine stored under txn_B while
+    # the transaction is actually txn_A" bug this review found. Compute
+    # the quarantine path from the REAL id, after create() returns it.
+    tx_data = store.create(
+        operation_type="Replace",
+        initiating_user=str(payload.get("initiating_user") or "operator"),
+        status="Preview",
+        summary=f"Replace track {resolved_orig.name} with {resolved_repl.name}",
+        reason=str(payload.get("reason") or "Audio quality replacement"),
+        source="Track Replacement",
+        rollback_available=True,
+        changes=[change_entry],
+        metadata={
+            "mutation_family": "track_replacement_v1",
+            "reversibility": "RECOVERABLE",
+            "original_item_id": original_item_id,
+            "original_path": str(resolved_orig),
+            "original_stat": orig_stat_data,
+            "original_item_row": original_row,
+            "replacement_path": str(resolved_repl),
+            "replacement_stat": repl_stat_data,
+            "matching_contract": matching_contract,
+            "item_ids": [original_item_id],
+            "apply_steps": [
+                {"step": "original_quarantined", "status": "pending"},
+                {"step": "db_row_removed", "status": "pending"},
+            ],
+        },
+    )
+    op_id = tx_data["id"]
+
+    # Server-derived quarantine root only -- a client-supplied
+    # quarantine_root in the payload is never read at all.
+    quarantine_root = os.environ.get("REPLACEMENT_QUARANTINE_DIR", "/config/track_replacement_quarantine")
+    date_str = time.strftime("%Y%m%d")
+    quarantine_target = str(Path(quarantine_root) / "library" / date_str / op_id / resolved_orig.name)
+
+    updated_meta = dict(tx_data.get("metadata") or {})
+    updated_meta["quarantine_target"] = quarantine_target
+    tx_data = store.update(op_id, metadata=updated_meta)
+
+    return {
+        "ok": True,
+        "operation_id": op_id,
+        "plan": tx_data,
+        "quarantine_target": quarantine_target,
+        "reversibility": "RECOVERABLE",
+    }
+
+
+def execute_track_replacement_apply(
+    store: TransactionStore,
+    operation_id: str,
+    *,
+    db_path: Optional[str] = None,
+    original_allowed_roots: Optional[List[str]] = None,
+    candidate_allowed_roots: Optional[List[str]] = None,
+    quarantine_allowed_root: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Apply a track replacement plan.
+
+    Serializes on BOTH the operation id (repeated/concurrent Apply calls
+    for the SAME transaction) and the target Beets item id (two DIFFERENT
+    transactions racing to apply against the SAME item) -- see
+    _get_apply_lock / _get_resource_lock. The item lock is acquired first
+    (outer) and the operation lock second (inner): every caller only ever
+    holds a lock unique to its own operation_id as the inner lock, so this
+    ordering can never deadlock across concurrent calls.
+    """
+    try:
+        tx_peek = store.get(operation_id)
+    except KeyError:
+        tx_peek = None
+    if not tx_peek:
+        return {"ok": False, "error": f"Transaction {operation_id} not found.", "code": "not_found", "mutated": False}
+
+    meta_peek = tx_peek.get("metadata") or {}
+    item_id_peek = int(meta_peek.get("original_item_id") or 0)
+    resource_key = f"item:{item_id_peek}" if item_id_peek > 0 else f"path:{meta_peek.get('original_path', '')}"
+
+    with _get_resource_lock(resource_key):
+        with _get_apply_lock(operation_id):
+            return _execute_track_replacement_apply_locked(
+                store,
+                operation_id,
+                db_path=db_path,
+                original_allowed_roots=original_allowed_roots,
+                candidate_allowed_roots=candidate_allowed_roots,
+                quarantine_allowed_root=quarantine_allowed_root,
+            )
+
+
+def _track_replacement_fail(
+    store: TransactionStore, operation_id: str, log: str, error: str, *, code: str, mutated: bool,
+) -> Dict[str, Any]:
+    store.update(operation_id, status="Failed", logs=[log])
+    return {"ok": False, "error": error, "code": code, "mutated": mutated, "retryable": not mutated}
+
+
+def _execute_track_replacement_apply_locked(
+    store: TransactionStore,
+    operation_id: str,
+    *,
+    db_path: Optional[str] = None,
+    original_allowed_roots: Optional[List[str]] = None,
+    candidate_allowed_roots: Optional[List[str]] = None,
+    quarantine_allowed_root: Optional[str] = None,
+) -> Dict[str, Any]:
+    try:
+        tx = store.get(operation_id)
+    except KeyError:
+        tx = None
+    if not tx:
+        return {"ok": False, "error": f"Transaction {operation_id} not found.", "code": "not_found", "mutated": False}
+
+    meta = tx.get("metadata") or {}
+    mutation_family = meta.get("mutation_family")
+    if mutation_family != "track_replacement_v1":
+        return {
+            "ok": False,
+            "error": f"Transaction {operation_id} is not a track_replacement_v1 operation.",
+            "code": "wrong_mutation_family",
+            "mutated": False,
+        }
+
+    if tx.get("status") == "Completed":
+        return {
+            "ok": True,
+            "already_completed": True,
+            "operation_id": operation_id,
+            "status": "Completed",
+            "quarantined_to": meta.get("quarantine_target"),
+        }
+
+    orig_path_str = meta.get("original_path") or ""
+    orig_stat_expected = meta.get("original_stat") or {}
+    repl_path_str = meta.get("replacement_path") or ""
+    repl_stat_expected = meta.get("replacement_stat") or {}
+    quarantine_target_str = meta.get("quarantine_target") or ""
+    original_item_id = int(meta.get("original_item_id") or 0)
+    original_item_row = meta.get("original_item_row") or {}
+    apply_steps = meta.get("apply_steps") or [
+        {"step": "original_quarantined", "status": "pending"},
+        {"step": "db_row_removed", "status": "pending"},
+    ]
+    steps_by_name = {s["step"]: s for s in apply_steps}
+
+    def _persist_step(name: str, status: str, note: str = "") -> None:
+        steps_by_name[name]["status"] = status
+        if note:
+            steps_by_name[name]["note"] = note
+        store.update(operation_id, metadata={**meta, "apply_steps": list(steps_by_name.values())})
+
+    already_quarantined = steps_by_name.get("original_quarantined", {}).get("status") == "completed"
+    already_db_removed = steps_by_name.get("db_row_removed", {}).get("status") == "completed"
+
+    q_target_p = Path(quarantine_target_str)
+    orig_p = Path(orig_path_str)
+
+    if not quarantine_allowed_root:
+        return {"ok": False, "error": "Quarantine root is not configured.", "code": "quarantine_root_missing", "mutated": already_quarantined}
+    q_root_resolved = Path(quarantine_allowed_root).resolve(strict=False)
+
+    if not already_quarantined:
+        # --- Re-verify original TOCTOU + root containment + full symlink walk ---
+        # Containment and the symlink-component walk both run BEFORE
+        # resolve() -- resolve() transparently follows and erases symlinks,
+        # which would make a walk over the already-resolved path a
+        # structural no-op (there being nothing left to find).
+        original_roots_resolved = [Path(r).resolve(strict=False) for r in (original_allowed_roots or [])]
+        if not orig_p.exists() or orig_p.is_symlink() or os.path.islink(orig_path_str):
+            return _track_replacement_fail(store, operation_id, f"Original file missing or symlink at {orig_path_str}",
+                                            f"File replacement detected at {orig_path_str} (missing or symlink)",
+                                            code="original_toctou_failed", mutated=False)
+        original_root = next((r for r in original_roots_resolved if orig_p == r or r in orig_p.parents), None)
+        if original_root is None:
+            return _track_replacement_fail(store, operation_id, f"Original path {orig_p} no longer under an approved root",
+                                            f"Original path {orig_p} is outside the music library root", code="original_outside_roots", mutated=False)
+        if _path_has_symlink_under(orig_p, original_root):
+            return _track_replacement_fail(store, operation_id, f"Symlink component detected under {orig_p}",
+                                            f"Symlink component detected in original path {orig_p}", code="symlink_rejected", mutated=False)
+        try:
+            resolved_orig = orig_p.resolve(strict=False)
+        except Exception:
+            return _track_replacement_fail(store, operation_id, f"Failed to resolve {orig_path_str}",
+                                            f"Invalid path {orig_path_str}", code="invalid_path", mutated=False)
+        if resolved_orig.is_symlink() or not (resolved_orig == original_root or original_root in resolved_orig.parents):
+            return _track_replacement_fail(store, operation_id, f"Symlink target detected at {orig_path_str}",
+                                            f"Symlinks are not permitted at {orig_path_str}", code="symlink_rejected", mutated=False)
+
+        st_orig_now = resolved_orig.stat()
+        orig_mtime_now = getattr(st_orig_now, "st_mtime_ns", int(st_orig_now.st_mtime * 1e9))
+        if orig_stat_expected:
+            mismatch = None
+            if st_orig_now.st_ino != orig_stat_expected.get("inode") or st_orig_now.st_dev != orig_stat_expected.get("dev"):
+                mismatch = "inode/device changed"
+            elif st_orig_now.st_size != orig_stat_expected.get("size"):
+                mismatch = "size changed"
+            elif orig_mtime_now != orig_stat_expected.get("mtime_ns"):
+                mismatch = "mtime changed"
+            if mismatch:
+                return _track_replacement_fail(store, operation_id, f"Original file replacement detected at {orig_path_str} ({mismatch})",
+                                                f"File replacement detected at {orig_path_str} ({mismatch})", code="original_toctou_failed", mutated=False)
+
+        # --- Re-verify candidate TOCTOU (full signature -- inode, dev, size, mtime_ns) + root containment + symlink walk ---
+        candidate_roots_resolved = [Path(r).resolve(strict=False) for r in (candidate_allowed_roots or [])]
+        repl_p = Path(repl_path_str)
+        if not repl_p.exists() or repl_p.is_symlink() or os.path.islink(repl_path_str):
+            return _track_replacement_fail(store, operation_id, f"Replacement candidate missing or symlink at {repl_path_str}",
+                                            f"File replacement detected at {repl_path_str} (missing or symlink)", code="candidate_toctou_failed", mutated=False)
+        candidate_root = next((r for r in candidate_roots_resolved if repl_p == r or r in repl_p.parents), None)
+        if candidate_root is None:
+            return _track_replacement_fail(store, operation_id, f"Replacement path {repl_p} no longer under an approved root",
+                                            f"Replacement path {repl_p} is outside approved candidate/staging roots", code="candidate_outside_roots", mutated=False)
+        if _path_has_symlink_under(repl_p, candidate_root):
+            return _track_replacement_fail(store, operation_id, f"Symlink component detected under {repl_p}",
+                                            f"Symlink component detected in replacement path {repl_p}", code="symlink_rejected", mutated=False)
+        try:
+            resolved_repl = repl_p.resolve(strict=False)
+        except Exception:
+            return _track_replacement_fail(store, operation_id, f"Failed to resolve {repl_path_str}",
+                                            f"Invalid path {repl_path_str}", code="invalid_path", mutated=False)
+        if resolved_repl.is_symlink() or not (resolved_repl == candidate_root or candidate_root in resolved_repl.parents):
+            return _track_replacement_fail(store, operation_id, f"Symlink target detected at {repl_path_str}",
+                                            f"Symlinks are not permitted at {repl_path_str}", code="symlink_rejected", mutated=False)
+
+        st_repl_now = resolved_repl.stat()
+        repl_mtime_now = getattr(st_repl_now, "st_mtime_ns", int(st_repl_now.st_mtime * 1e9))
+        if repl_stat_expected:
+            mismatch = None
+            if st_repl_now.st_ino != repl_stat_expected.get("inode") or st_repl_now.st_dev != repl_stat_expected.get("dev"):
+                mismatch = "inode/device changed"
+            elif st_repl_now.st_size != repl_stat_expected.get("size"):
+                mismatch = "size changed"
+            elif repl_mtime_now != repl_stat_expected.get("mtime_ns"):
+                mismatch = "mtime changed"
+            if mismatch:
+                return _track_replacement_fail(store, operation_id, f"Replacement candidate replacement detected at {repl_path_str} ({mismatch})",
+                                                f"File replacement detected at {repl_path_str} ({mismatch})", code="candidate_toctou_failed", mutated=False)
+
+        # --- Quarantine the original (candidate is left exactly where it
+        # is -- it is already in its own intended location; Wave 17's
+        # original implementation moved it onto the original's path,
+        # which does not match the pre-Wave-17 semantics of this
+        # operation and was a real behavioral regression this review
+        # caught and reverted). ---
+        if q_target_p.exists() or q_target_p.is_symlink():
+            return _track_replacement_fail(store, operation_id, f"Quarantine destination already exists at {q_target_p}",
+                                            f"Unsafe quarantine destination at {q_target_p}", code="quarantine_destination_exists", mutated=False)
+        q_parent = q_target_p.parent
+        try:
+            q_parent.mkdir(parents=True, exist_ok=True)
+            if q_root_resolved not in q_parent.resolve(strict=False).parents and q_parent.resolve(strict=False) != q_root_resolved:
+                return _track_replacement_fail(store, operation_id, f"Quarantine destination {q_target_p} escaped the quarantine root",
+                                                "Unsafe quarantine destination", code="quarantine_destination_exists", mutated=False)
+            if _path_has_symlink_under(q_parent, q_root_resolved):
+                return _track_replacement_fail(store, operation_id, f"Symlink detected under quarantine destination {q_target_p}",
+                                                "Unsafe quarantine destination", code="symlink_rejected", mutated=False)
+            os.chmod(str(q_parent), 0o700)
+        except Exception as exc:
+            return _track_replacement_fail(store, operation_id, f"Failed to prepare quarantine directory: {exc}",
+                                            f"Failed to prepare quarantine directory: {exc}", code="quarantine_prepare_failed", mutated=False)
+
+        try:
+            _safe_rename(resolved_orig, q_target_p)
+        except Exception as exc:
+            return _track_replacement_fail(store, operation_id, f"Quarantine move failed: {exc}",
+                                            "Failed to quarantine original file.", code="quarantine_move_failed", mutated=False)
+
+        _persist_step("original_quarantined", "completed")
+    else:
+        # Crash-recovery resume: the original was already quarantined by a
+        # prior attempt at this same Apply call. Sanity-check the
+        # quarantine target is actually there before proceeding, rather
+        # than assuming.
+        if not q_target_p.exists():
+            return {
+                "ok": False,
+                "error": f"Transaction records the original as already quarantined, but nothing is present at {q_target_p}. Manual investigation required.",
+                "code": "inconsistent_recovery_state",
+                "mutated": True,
+            }
+
+    # --- Remove the original's DB row (the replacement is a separately,
+    # already-tracked library item; this operation's job is to retire the
+    # original's row, not to redirect it onto the replacement's file). ---
+    if not already_db_removed:
+        if not db_path or not os.path.exists(db_path):
+            return {"ok": False, "error": f"Beets database not found at {db_path}.", "code": "db_not_found", "mutated": True}
+        try:
+            con = sqlite3.connect(db_path, timeout=10)
+            try:
+                cur = con.cursor()
+                cur.execute("SELECT * FROM items WHERE id = ?", (original_item_id,))
+                current_row = cur.fetchone()
+                if current_row is None:
+                    con.close()
+                    return {
+                        "ok": False,
+                        "error": f"Beets item {original_item_id} no longer exists; refusing to report success without confirming DB state.",
+                        "code": "item_vanished",
+                        "mutated": True,
+                    }
+                cur.execute("DELETE FROM items WHERE id = ?", (original_item_id,))
+                rowcount = cur.rowcount
+                if rowcount != 1:
+                    con.rollback()
+                    con.close()
+                    return {
+                        "ok": False,
+                        "error": f"Expected to delete exactly 1 row for item {original_item_id}, affected {rowcount}; rolled back the DB change.",
+                        "code": "db_rowcount_mismatch",
+                        "mutated": True,
+                    }
+                con.commit()
+            finally:
+                con.close()
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error": f"Database update failed after the original file was already quarantined: {exc}",
+                "code": "db_update_failed",
+                "mutated": True,
+            }
+        _persist_step("db_row_removed", "completed")
+
+    # --- Post-apply verification: confirm the DB row is genuinely gone
+    # and the quarantined original is genuinely present, before ever
+    # claiming Completed. ---
+    try:
+        con = sqlite3.connect(db_path, timeout=10)
+        try:
+            still_present = con.execute("SELECT COUNT(*) FROM items WHERE id = ?", (original_item_id,)).fetchone()[0]
+        finally:
+            con.close()
+    except Exception as exc:
+        return {"ok": False, "error": f"Post-apply verification failed: {exc}", "code": "verification_failed", "mutated": True}
+    if still_present:
+        return {"ok": False, "error": f"Post-apply verification failed: item {original_item_id} row still present.", "code": "verification_failed", "mutated": True}
+    if not q_target_p.exists() or q_target_p.stat().st_size <= 0:
+        return {"ok": False, "error": "Post-apply verification failed: quarantined original is missing or empty.", "code": "verification_failed", "mutated": True}
+
+    store.update(
+        operation_id,
+        status="Completed",
+        applied_at=time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        logs=["Original quarantined and its database row removed; replacement left in place."],
+        metadata={**meta, "apply_steps": list(steps_by_name.values()), "mutated": True, "original_item_row": original_item_row},
+    )
+
+    return {
+        "ok": True,
+        "operation_id": operation_id,
+        "status": "Completed",
+        "quarantined_to": str(q_target_p),
+        "replacement_path": repl_path_str,
+    }
+
+
+def rollback_track_replacement(
+    store: TransactionStore,
+    operation_id: str,
+    *,
+    db_path: Optional[str] = None,
+    quarantine_allowed_root: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Rollback a completed track replacement transaction by restoring the
+    original file from quarantine and re-inserting its captured DB row.
+
+    SEC-002 Wave 17 final review: the original implementation destroyed
+    the replacement's slot via unlink() BEFORE confirming the quarantined
+    original could actually be restored -- if the restore then failed, the
+    user could lose both the replacement and the original. This version
+    never removes anything from the destination until the quarantined
+    original has already been moved into a temporary rollback holding
+    location successfully; only once that has genuinely succeeded does it
+    touch the destination, and only the actual quarantined original (never
+    the replacement file itself, which was never moved during Apply and is
+    not touched here either) is restored.
+    """
+    try:
+        tx = store.get(operation_id)
+    except KeyError:
+        tx = None
+    if not tx:
+        return {"ok": False, "error": f"Transaction {operation_id} not found.", "code": "not_found"}
+
+    meta = tx.get("metadata") or {}
+    mutation_family = meta.get("mutation_family")
+    if mutation_family != "track_replacement_v1":
+        return {
+            "ok": False,
+            "error": f"Transaction {operation_id} is a {mutation_family!r} operation and cannot be rolled back through the track replacement rollback executor.",
+            "code": "wrong_mutation_family",
+        }
+
+    if not meta.get("rollback_available", True):
+        return {"ok": False, "error": "Rollback unavailable for this transaction.", "code": "rollback_unavailable"}
+
+    if tx.get("status") != "Completed":
+        return {"ok": False, "error": f"Cannot rollback transaction in status {tx.get('status')}.", "code": "wrong_status"}
+
+    original_item_id = int(meta.get("original_item_id") or 0)
+    orig_path_str = meta.get("original_path") or ""
+    quarantine_target_str = meta.get("quarantine_target") or ""
+    original_item_row = meta.get("original_item_row") or {}
+
+    with _get_apply_lock(operation_id):
+        # Re-fetch after acquiring the lock in case a concurrent rollback
+        # attempt already completed while we were waiting.
+        tx = store.get(operation_id)
+        if tx.get("status") != "Completed":
+            return {"ok": False, "error": f"Transaction is no longer in a rollback-eligible state (status={tx.get('status')}).", "code": "wrong_status"}
+
+        q_p = Path(quarantine_target_str)
+        orig_p = Path(orig_path_str)
+
+        if not quarantine_allowed_root:
+            return {"ok": False, "error": "Quarantine root is not configured.", "code": "quarantine_root_missing"}
+        q_root_resolved = Path(quarantine_allowed_root).resolve(strict=False)
+
+        if not q_p.exists():
+            return {"ok": False, "error": f"Quarantine backup missing at {quarantine_target_str}.", "code": "quarantine_missing"}
+        if q_p.is_symlink() or _path_has_symlink_under(q_p, q_root_resolved):
+            return {"ok": False, "error": "Symlink detected on the quarantined original; refusing to restore.", "code": "symlink_rejected"}
+        try:
+            if q_p.resolve(strict=False) != q_root_resolved and q_root_resolved not in q_p.resolve(strict=False).parents:
+                return {"ok": False, "error": "Quarantine path is outside the trusted quarantine root.", "code": "quarantine_outside_root"}
+        except Exception:
+            return {"ok": False, "error": "Invalid quarantine path.", "code": "invalid_path"}
+
+        if orig_p.exists() or orig_p.is_symlink():
+            return {
+                "ok": False,
+                "error": f"Something already exists at the original path {orig_path_str}; refusing to overwrite it during rollback.",
+                "code": "original_path_occupied",
+            }
+
+        # Move the quarantined original into a transaction-owned rollback
+        # holding location FIRST. Only after that genuinely succeeds do we
+        # treat the destination as safe to populate -- nothing at the
+        # original destination is ever destroyed before the restore
+        # target is confirmed available.
+        holding_p = q_p.with_name(q_p.name + ".rollback-holding")
+        try:
+            _safe_rename(q_p, holding_p)
+        except Exception as exc:
+            return {"ok": False, "error": f"Failed to stage quarantined original for restoration: {exc}", "code": "restore_stage_failed"}
+
+        orig_p.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            _safe_rename(holding_p, orig_p)
+        except Exception as exc:
+            # Restoration itself failed -- move the file back to its
+            # original quarantine slot rather than leaving it stranded
+            # under a ".rollback-holding" name with nothing pointing at
+            # it, and report Failed (not Rolled Back).
+            try:
+                _safe_rename(holding_p, q_p)
+            except Exception:
+                pass
+            store.update(operation_id, status="Failed", logs=[f"Rollback restore failed: {exc}"])
+            return {"ok": False, "error": f"Failed to restore original file: {exc}", "code": "restore_failed"}
+
+        # Restore the DB row from the captured full-row snapshot.
+        db_restored = False
+        db_error = ""
+        if db_path and os.path.exists(db_path) and original_item_row:
+            try:
+                columns = list(original_item_row.keys())
+                placeholders = ",".join("?" for _ in columns)
+                col_list = ",".join(columns)
+                values = [original_item_row[c] for c in columns]
+                con = sqlite3.connect(db_path, timeout=10)
+                try:
+                    cur = con.cursor()
+                    cur.execute("SELECT COUNT(*) FROM items WHERE id = ?", (original_item_id,))
+                    if cur.fetchone()[0] > 0:
+                        con.close()
+                        # Something re-used this item id since Apply --
+                        # do NOT clobber it. Filesystem restore already
+                        # succeeded; report the partial state truthfully.
+                        store.update(operation_id, status="Partially Rolled Back",
+                                     logs=[f"Filesystem restored, but item id {original_item_id} already exists in the DB; DB row was not restored."])
+                        return {
+                            "ok": True,
+                            "operation_id": operation_id,
+                            "status": "Partially Rolled Back",
+                            "warning": "Filesystem restored; DB row was not restored because the item id is now in use.",
+                        }
+                    cur.execute(f"INSERT INTO items ({col_list}) VALUES ({placeholders})", values)
+                    if cur.rowcount != 1:
+                        con.rollback()
+                        raise RuntimeError(f"expected to insert 1 row, affected {cur.rowcount}")
+                    con.commit()
+                finally:
+                    con.close()
+                db_restored = True
+            except Exception as exc:
+                db_error = str(exc)
+
+        if not db_restored:
+            store.update(operation_id, status="Partially Rolled Back",
+                         logs=[f"Filesystem restored, but DB row restoration failed: {db_error}" if db_error else "Filesystem restored, but no DB row snapshot was available to restore."])
+            return {
+                "ok": True,
+                "operation_id": operation_id,
+                "status": "Partially Rolled Back",
+                "warning": f"Filesystem restored; DB restoration failed: {db_error}" if db_error else "Filesystem restored; no DB snapshot available.",
+            }
+
+        store.update(operation_id, status="Rolled Back", logs=["Track replacement rolled back: original file and database row restored."],
+                     metadata={**meta, "rollback_available": False})
+        return {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
+

@@ -1467,3 +1467,80 @@ export function applyAlbumCleanup(operationId: string): Promise<AlbumCleanupAppl
 export function rollbackAlbumCleanup(operationId: string): Promise<AlbumCleanupRollbackResponse> {
   return apiJson<AlbumCleanupRollbackResponse>(`/api/transactions/${operationId}/rollback`, jsonRequest('POST'));
 }
+
+// --- Track Replacement (SEC-002 Wave 17) ---
+
+export interface TrackReplacementMatchingContract {
+  identity_source?: string;
+  original_recording_id?: string;
+  replacement_recording_id?: string;
+  original_release_group_id?: string;
+  replacement_release_group_id?: string;
+  decision_reason?: string;
+}
+
+export interface TrackReplacementTransaction {
+  id?: string;
+  status?: string;
+  metadata?: {
+    original_path?: string;
+    original_stat?: Record<string, unknown>;
+    replacement_path?: string;
+    replacement_stat?: Record<string, unknown>;
+    matching_contract?: TrackReplacementMatchingContract;
+    reversibility?: string;
+    rollback_available?: boolean;
+    quarantine_target?: string;
+  };
+}
+
+export interface TrackReplacementPlanResponse extends ApiOkResponse {
+  operation_id?: string;
+  plan?: TrackReplacementTransaction;
+  quarantine_target?: string;
+  reversibility?: string;
+  error?: string;
+  code?: string;
+}
+
+export interface TrackReplacementApplyResponse extends ApiOkResponse {
+  operation_id?: string;
+  status?: string;
+  quarantined_to?: string;
+  replacement_path?: string;
+  already_completed?: boolean;
+  error?: string;
+  code?: string;
+  mutated?: boolean;
+}
+
+export function planTrackReplacement(
+  itemId: number,
+  candidatePath: string,
+  reason?: string,
+): Promise<TrackReplacementPlanResponse> {
+  return apiJson<TrackReplacementPlanResponse>(
+    `/api/items/${itemId}/replacement/plan`,
+    jsonRequest('POST', { candidate_path: candidatePath, reason }),
+  );
+}
+
+export function applyTrackReplacement(
+  itemId: number,
+  operationId: string,
+): Promise<TrackReplacementApplyResponse> {
+  return apiJson<TrackReplacementApplyResponse>(
+    `/api/items/${itemId}/replacement/apply`,
+    jsonRequest('POST', { operation_id: operationId }),
+  );
+}
+
+// Track Replacement is genuinely recoverable (server-derived quarantine of
+// the original, not an irreversible delete) -- unlike Album Cleanup, this
+// can and does return ok:true when the engine's own rollback_available
+// metadata says so. Routed through the same generic
+// /api/transactions/<id>/rollback dispatcher, which resolves the
+// transaction's real mutation_family before picking an executor.
+export function rollbackTrackReplacement(operationId: string): Promise<TrackReplacementApplyResponse> {
+  return apiJson<TrackReplacementApplyResponse>(`/api/transactions/${operationId}/rollback`, jsonRequest('POST'));
+}
