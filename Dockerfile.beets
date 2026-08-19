@@ -43,6 +43,8 @@ RUN mkdir -p /opt/beets-web-manager-agent/beetsplug /custom-services.d
 COPY backend/beets_control_agent.py /opt/beets-web-manager-agent/beets_control_agent.py
 COPY backend/beets_startup_guard.py /opt/beets-web-manager-agent/beets_startup_guard.py
 COPY backend/audio_preferences.py /opt/beets-web-manager-agent/audio_preferences.py
+COPY backend/transaction_engine.py /opt/beets-web-manager-agent/transaction_engine.py
+COPY backend/matching_contract.py /opt/beets-web-manager-agent/matching_contract.py
 COPY beetsplug/ /opt/beets-web-manager-agent/beetsplug/
 
 # Install S6 supervision service for the control agent and locked CLI wrapper.

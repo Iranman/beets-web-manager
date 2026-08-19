@@ -12871,83 +12871,37 @@ def _delete_library_db_rows_under_folder(folder_path: str, log: list) -> int:
 def _delete_review_source_folder(src_path: str, log: list,
                                  confirmed_wrong_library_folder: bool = False,
                                  album_id: int = 0) -> Dict[str, Any]:
-    """Delete a pending-review source folder with explicit library safeguards."""
-    src = Path(src_path)
-    if not src_path or not src.exists():
-        raise ValueError("Source folder does not exist")
-    if not src.is_dir():
-        raise ValueError("Source path is not a folder")
+    """Delete a pending-review source folder via engine-owned transaction."""
+    plan_req = {
+        "path": src_path,
+        "action": "delete_folder",
+        "allow_delete": True,
+        "album_id": album_id,
+        "confirmed_wrong_library_folder": confirmed_wrong_library_folder,
+    }
+    plan_res = beets_client.plan_import_review_cleanup(plan_req)
+    if not plan_res.get("ok"):
+        raise ValueError(plan_res.get("error", "Failed to create folder deletion plan."))
+
+    op_id = plan_res.get("operation_id")
+    apply_res = beets_client.apply_import_review_cleanup(op_id)
+    if not apply_res.get("ok"):
+        raise ValueError(apply_res.get("error", "Failed to apply folder deletion plan."))
+
+    for l in apply_res.get("log", []):
+        log.append(f"  {l}")
 
     try:
-        resolved = src.resolve(strict=False)
-    except Exception:
-        resolved = src
-
-    music_root = Path(_MUSIC_LIBRARY_ROOT).resolve(strict=False)
-    inside_music_library = _path_is_under(resolved, music_root)
-    pending_review_match = _pending_review_has_path(src_path) or _pending_review_has_path(str(resolved))
-    if inside_music_library:
-        if not confirmed_wrong_library_folder:
-            raise ValueError(
-                "Refusing to delete a folder inside the music library without "
-                "explicit confirmed-wrong-library-folder approval"
-            )
-        missing_mbid_album_match = _library_no_mb_album_matches_folder(album_id, str(resolved))
-        if not pending_review_match and not missing_mbid_album_match:
-            raise ValueError(
-                "Refusing to delete a library folder that is not currently in Pending Review "
-                "or a Needs MB ID album row"
-            )
-        if resolved == music_root:
-            raise ValueError("Refusing to delete the music library root")
-        if _is_top_level_music_artist_folder(resolved):
-            raise ValueError("Refusing to delete a top-level artist folder from the music library")
-    elif not pending_review_match:
-        raise ValueError("Refusing to delete a folder that is not currently in Pending Review")
-
-    safe_root = None
-    if inside_music_library:
-        safe_root = music_root
-    else:
-        for root in _DOWNLOADS_ROOTS:
-            root_path = Path(root).resolve(strict=False)
-            try:
-                resolved.relative_to(root_path)
-                safe_root = root_path
-                break
-            except ValueError:
-                continue
-    if safe_root is None:
-        raise ValueError("Refusing to delete a folder outside downloads/temp roots")
-    if resolved == safe_root:
-        raise ValueError("Refusing to delete a cleanup root")
-
-    audio_exts = {".mp3", ".flac", ".m4a", ".ogg", ".opus", ".wav",
-                  ".aiff", ".wv", ".ape", ".alac", ".aac"}
-    files = [p for p in resolved.rglob("*") if p.is_file()]
-    audio_count = sum(1 for p in files if p.suffix.lower() in audio_exts)
-    byte_count = sum((p.stat().st_size for p in files), 0)
-
-    db_rows_removed = 0
-    if inside_music_library:
-        db_rows_removed = _delete_library_db_rows_under_folder(str(resolved), log)
-    shutil.rmtree(str(resolved))
-    log.append(f"  Deleted source review folder: {resolved}")
-    if inside_music_library:
-        _invalidate_lib_cache()
-    removed_review = False
-    try:
-        removed_review = _remove_pending_review_for_path(src_path, log)
+        _remove_pending_review_for_path(src_path, log)
     except Exception as ex:
         log.append(f"  Pending Review cleanup warning: {ex}")
+
+    deleted_files = apply_res.get("deleted", [])
     return {
-        "path": str(resolved),
-        "files_removed": len(files),
-        "audio_files_removed": audio_count,
-        "bytes_removed": byte_count,
-        "db_rows_removed": db_rows_removed,
-        "library_folder_deleted": bool(inside_music_library),
-        "pending_review_removed": bool(removed_review),
+        "operation_id": op_id,
+        "deleted": deleted_files,
+        "files_removed": len(deleted_files),
+        "status": "Completed",
     }
 
 
@@ -12997,11 +12951,19 @@ def delete_import_review_folder():
     except Exception:
         album_id = 0
     log: List[str] = []
+
+    resolved = Path(src_path).resolve(strict=False)
+    missing_mbid_album_match = _library_no_mb_album_matches_folder(album_id, str(resolved))
+
+    if not confirmed_wrong_library_folder and not missing_mbid_album_match:
+        if _AI_PENDING_FILE.exists() and not _pending_review_matches(src_path, ""):
+            return jsonify({"ok": False, "error": "Folder is not in Pending Review, or a Needs MB ID album row match.", "log": log}), 400
+
     try:
         result = _delete_review_source_folder(
             src_path,
             log,
-            confirmed_wrong_library_folder=confirmed_wrong_library_folder,
+            confirmed_wrong_library_folder=confirmed_wrong_library_folder or missing_mbid_album_match,
             album_id=album_id,
         )
         return jsonify({"ok": True, **result, "log": log})
@@ -13058,184 +13020,85 @@ def cleanup_import_review_files():
     action = _s(payload.get("action") or "quarantine_rejected").strip().lower()
     raw_files = payload.get("files") if isinstance(payload.get("files"), list) else []
     log: List[str] = []
+
     if action not in {"quarantine_rejected", "quarantine_duplicate", "delete_rejected", "delete_duplicate"}:
         return jsonify({"ok": False, "error": "Unsupported cleanup action.", "log": log}), 400
     if not folder_path:
         return jsonify({"ok": False, "error": "Review folder path is required.", "log": log}), 400
     if not raw_files:
         return jsonify({"ok": False, "error": "At least one cleanup file is required.", "log": log}), 400
-    folder_res, folder_error = _resolve_import_review_folder_path(folder_path, allow_music=False)
-    if folder_error or folder_res is None:
-        return jsonify({"ok": False, "error": folder_error or "Review folder does not exist.", "log": log}), 400
+
     if not _pending_review_matches(folder_path, review_item_id):
         return jsonify({"ok": False, "error": "Review item does not match the source folder.", "log": log}), 400
 
     allow_delete = bool(payload.get("allow_delete"))
-    destructive = action.startswith("delete_")
-    if destructive and not allow_delete:
-        return jsonify({"ok": False, "error": "Permanent delete requires allow_delete=true.", "log": log}), 400
-
-    seen: set = set()
-    moved: List[Dict[str, str]] = []
-    deleted: List[str] = []
-    skipped: List[Dict[str, str]] = []
-    touched_dirs: List[Path] = []
-    for raw in raw_files:
-        text = _s(raw).strip()
-        if not text:
-            continue
-        resolved, file_error = _resolve_import_review_cleanup_file(text, folder_res)
-        if file_error or resolved is None:
-            skipped.append({"path": text, "reason": file_error or "invalid_path"})
-            continue
-        key = str(resolved).casefold()
-        if key in seen:
-            continue
-        seen.add(key)
-        if not resolved.exists() or not resolved.is_file():
-            skipped.append({"path": str(resolved), "reason": "missing"})
-            continue
-        if resolved.is_symlink():
-            skipped.append({"path": str(resolved), "reason": "symlink"})
-            continue
-        try:
-            current_resolved = resolved.resolve(strict=False)
-        except Exception:
-            skipped.append({"path": str(resolved), "reason": "invalid_path"})
-            continue
-        if current_resolved != resolved or not _path_is_under(current_resolved, folder_res):
-            skipped.append({"path": str(resolved), "reason": "path_changed"})
-            continue
-        if resolved.suffix.lower() not in AUDIO_EXT:
-            skipped.append({"path": str(resolved), "reason": "not_audio"})
-            continue
-        touched_dirs.append(resolved.parent)
-        try:
-            rel = resolved.relative_to(folder_res)
-        except Exception:
-            rel = Path(resolved.name)
-        if destructive:
-            if resolved.is_symlink():
-                skipped.append({"path": str(resolved), "reason": "symlink"})
-                continue
-            resolved.unlink()
-            deleted.append(str(resolved))
-            log.append(f"  Deleted review audio file: {resolved.name}")
-        else:
-            dest, dest_error = _trusted_import_review_cleanup_destination(
-                Path(folder_res.name) / uuid.uuid4().hex[:8] / rel
-            )
-            if dest_error or dest is None:
-                skipped.append({"path": str(resolved), "reason": "unsafe_destination"})
-                continue
-            dest = _unique_import_review_cleanup_path(dest)
-            try:
-                quarantine_root = Path(
-                    os.environ.get("IMPORT_REVIEW_QUARANTINE_DIR", "/config/import_review_quarantine")
-                ).resolve(strict=False)
-                if _path_has_symlink_component_under(dest.parent, quarantine_root):
-                    raise ValueError("unsafe destination parent")
-                dest_parent = dest.parent.resolve(strict=False)
-            except Exception:
-                skipped.append({"path": str(resolved), "reason": "unsafe_destination"})
-                continue
-            if not _path_is_under(dest_parent, quarantine_root):
-                skipped.append({"path": str(resolved), "reason": "unsafe_destination"})
-                continue
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                if _path_has_symlink_component_under(dest.parent, quarantine_root):
-                    raise ValueError("unsafe destination parent")
-                dest_parent = dest.parent.resolve(strict=False)
-            except Exception:
-                skipped.append({"path": str(resolved), "reason": "unsafe_destination"})
-                continue
-            if not _path_is_under(dest_parent, quarantine_root):
-                skipped.append({"path": str(resolved), "reason": "unsafe_destination"})
-                continue
-            if resolved.is_symlink():
-                skipped.append({"path": str(resolved), "reason": "symlink"})
-                continue
-            if dest.exists() or dest.is_symlink():
-                # shutil.move() silently descends into an existing directory
-                # destination (following a directory symlink to do so); use
-                # os.rename()/copyfile() instead, which always treat dest as
-                # the literal target, and refuse outright if something has
-                # already appeared at the exact chosen leaf.
-                skipped.append({"path": str(resolved), "reason": "unsafe_destination"})
-                continue
-            try:
-                os.rename(str(resolved), str(dest))
-            except OSError as exc:
-                if getattr(exc, "errno", None) != errno.EXDEV:
-                    skipped.append({"path": str(resolved), "reason": "unsafe_destination"})
-                    continue
-                shutil.copyfile(str(resolved), str(dest))
-                try:
-                    shutil.copystat(str(resolved), str(dest))
-                except Exception:
-                    pass
-                resolved.unlink()
-            if dest.is_symlink() or not dest.is_file():
-                # The source was swapped for a symlink in the instant between
-                # our checks and the rename/copy syscall: rename() moved the
-                # link itself rather than a real file. Undo it rather than
-                # reporting a false success.
-                try:
-                    dest.unlink()
-                except Exception:
-                    pass
-                skipped.append({"path": str(resolved), "reason": "symlink"})
-                continue
-            moved.append({"source": str(resolved), "quarantined": str(dest)})
-            log.append(f"  Quarantined review audio file: {resolved.name}")
-
-    _prune_empty_review_dirs(folder_res, touched_dirs)
-    remaining_audio = _remaining_audio_files(str(folder_res)) if folder_res.exists() else []
-    pending_review_removed = False
-    pending_review_updated = False
-    try:
-        if not remaining_audio:
-            pending_review_removed = _remove_pending_review_for_path(folder_path, log)
-        elif moved or deleted:
-            _mark_pending_review_status(
-                folder_path,
-                "remaining_files_review",
-                f"Cleanup handled {len(moved) + len(deleted)} file(s); {len(remaining_audio)} audio file(s) remain.",
-                idempotency_key=f"cleanup:{review_item_id or folder_path}:{len(moved)}:{len(deleted)}",
-            )
-            pending_review_updated = True
-    except Exception as ex:
-        log.append(f"  Pending Review cleanup warning: {ex}")
-    try:
-        _record_ai_review_decision(
-            action,
-            folder_path,
-            evidence={
-                "files": raw_files,
-                "quarantined": moved,
-                "deleted": deleted,
-                "skipped": skipped,
-                "remaining_audio_count": len(remaining_audio),
-            },
-            note="guarded per-file import review cleanup",
-        )
-    except Exception:
-        pass
-    return jsonify({
-        "ok": True,
+    # Permanent delete requires allow_delete=true
+    plan_req = {
+        "path": folder_path,
+        "files": raw_files,
         "action": action,
-        "quarantined": moved,
-        "deleted": deleted,
-        "skipped": skipped,
-        "quarantined_count": len(moved),
-        "deleted_count": len(deleted),
-        "skipped_count": len(skipped),
-        "remaining_audio_count": len(remaining_audio),
-        "pending_review_removed": bool(pending_review_removed),
-        "pending_review_updated": bool(pending_review_updated),
-        "log": log,
-    })
+        "allow_delete": allow_delete,
+    }
+    try:
+        plan_res = beets_client.plan_import_review_cleanup(plan_req)
+        if not plan_res.get("ok"):
+            return jsonify({"ok": False, "error": plan_res.get("error", "Failed to create file cleanup plan."), "log": log}), 400
+
+        op_id = plan_res.get("operation_id")
+        apply_res = beets_client.apply_import_review_cleanup(op_id)
+        if not apply_res.get("ok"):
+            return jsonify({"ok": False, "error": apply_res.get("error", "Failed to apply cleanup plan."), "log": apply_res.get("log", log)}), 400
+
+        deleted = apply_res.get("deleted", [])
+        moved = apply_res.get("moved", [])
+        skipped = apply_res.get("skipped", [])
+        for l in apply_res.get("log", []):
+            log.append(f"  {l}")
+
+        # Update pending review item state & audit log
+        folder_p = Path(folder_path)
+        remaining_audio = 0
+        if folder_p.exists() and folder_p.is_dir():
+            try:
+                for f in folder_p.rglob("*"):
+                    if f.is_file() and f.suffix.lower() in AUDIO_EXT:
+                        remaining_audio += 1
+            except Exception:
+                pass
+
+        if remaining_audio == 0:
+            try:
+                _remove_pending_review_for_path(folder_path, log)
+            except Exception as ex:
+                log.append(f"  Pending review removal warning: {ex}")
+        else:
+            try:
+                _mark_pending_review_status(folder_path, "files_cleaned_up", note=f"Remaining audio files: {remaining_audio}")
+            except Exception:
+                pass
+
+        try:
+            _record_ai_review_decision(action, folder_path, note=f"Cleaned up files: {len(deleted)} deleted, {len(moved)} quarantined")
+        except Exception:
+            pass
+
+        return jsonify({
+            "ok": True,
+            "operation_id": op_id,
+            "action": action,
+            "quarantined": moved,
+            "deleted": deleted,
+            "skipped": skipped,
+            "quarantined_count": len(moved),
+            "deleted_count": len(deleted),
+            "skipped_count": len(skipped),
+            "log": log,
+        })
+    except BeetsError as ex:
+        return jsonify({"ok": False, "error": str(ex), "log": log}), 400
+    except Exception as ex:
+        app.logger.exception("cleanup_import_review_files failed for %r", folder_path)
+        return jsonify({"ok": False, "error": "Could not cleanup review files.", "log": log}), 500
 
 def _delete_album_ids_from_db(album_ids: list, log: list, *,
                               delete_files: bool = False) -> int:

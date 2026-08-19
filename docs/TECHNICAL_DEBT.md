@@ -28,9 +28,9 @@ Statuses: Open, In Progress, Blocked, Done.
 - Evidence: The `beets` control agent now owns Beets CLI execution, direct SQLite compatibility queries, tag writes, and file move/delete endpoints inside the authoritative engine container. `app.py` still contains many legacy command-array call sites and residual direct filesystem operations (`shutil.move`, `shutil.rmtree`, `Path.unlink`, `os.replace`, copies, and directory removals) that are not all planned, audited, and verified through one transaction boundary. `backend/transaction_engine.py` exists but is not universal.
 - Current risk: Preview/audit/rollback behavior varies by workflow. Partial failure can be hard to recover or may be reported inconsistently. Residual filesystem call sites also make it easy to accidentally depend on web-manager media mounts that the supported two-service Compose files intentionally do not provide.
 - Desired state: Mutating workflows use shared plan/apply/verify/recover semantics with root validation, diffs, audit records, and recovery information, and all media/Beets mutations execute in the `beets` engine boundary.
-- Safe migration approach: Wrap one high-risk mutation family at a time using `TransactionStore` and explicit control-agent/BeetsClient APIs rather than replacing all callers. Start with deletes/moves from Import Review and cleanup paths.
+- Safe migration approach: Wrap one high-risk mutation family at a time using `TransactionStore` and explicit control-agent/BeetsClient APIs rather than replacing all callers. Wave 15 established the controlled mutation boundary for Import Review + cleanup mutations via engine-side `TransactionStore` (`/imports/review/cleanup/plan`, `/imports/review/cleanup/apply`, `/albums/cleanup/plan`, `/albums/cleanup/apply`).
 - Priority: P0.
-- Status: Open.
+- Status: In Progress.
 
 ## ARCH-004 Job Persistence And Idempotency Are Uneven
 

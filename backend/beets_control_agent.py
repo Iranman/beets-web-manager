@@ -45,6 +45,16 @@ try:
 except ImportError:
     from backend import audio_preferences
 
+try:
+    import transaction_engine
+except ImportError:
+    from backend import transaction_engine
+
+try:
+    import matching_contract
+except ImportError:
+    from backend import matching_contract
+
 # Configuration
 PORT = int(os.environ.get("BEETS_AGENT_PORT", "8338"))
 BEETS_API_TOKEN = os.environ.get("BEETS_API_TOKEN", "")
@@ -85,6 +95,10 @@ PLAYLIST_DOWNLOAD_ROOT = Path(os.environ.get(
 LOCK_PATH = os.environ.get("BEETS_LOCK_PATH", os.path.join(BEETSDIR, ".beet_db.lock"))
 LIB_PATH = os.path.join(BEETSDIR, "musiclibrary.blb")
 BEET_BIN = os.environ.get("BEET_BIN", "beet")
+
+_txn_store = transaction_engine.TransactionStore(
+    root=os.environ.get("BEETS_TRANSACTION_DIR") or os.path.join(BEETSDIR, "transactions")
+)
 
 
 def _env_int_clamped(name: str, default: int, *, minimum: int, maximum: int) -> int:
@@ -3099,6 +3113,47 @@ def _engine_playlist_quality_cleanup_candidates(con: sqlite3.Connection,
     return [_engine_playlist_quality_row_payload(row) for row in rows]
 
 
+AUDIO_EXT = {".mp3", ".flac", ".m4a", ".ogg", ".opus", ".wav", ".aiff", ".wv", ".ape", ".alac", ".aac"}
+
+
+def _path_lexically_under(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except Exception:
+        return False
+
+
+def _path_has_symlink_component_under(path: Path, root: Path, *, include_leaf: bool = True) -> bool:
+    try:
+        relative = path.relative_to(root)
+    except Exception:
+        return True
+    current = root
+    parts = relative.parts if include_leaf else relative.parts[:-1]
+    for part in parts:
+        current = current / part
+        try:
+            if current.is_symlink():
+                return True
+        except Exception:
+            return True
+    return False
+
+
+def _unique_import_review_cleanup_path(path: Path) -> Path:
+    if not path.exists():
+        return path
+    for idx in range(1, 1000):
+        candidate = path.with_name(f"{path.stem}.{idx}{path.suffix}")
+        if not candidate.exists():
+            return candidate
+    return path.with_name(f"{path.stem}.{uuid.uuid4().hex[:8]}{path.suffix}")
+
+
+
+
+
 class ControlAgentHandler(BaseHTTPRequestHandler):
     def _send_json(self, code: int, data: dict):
         body = json.dumps(data, indent=2, default=_json_default).encode("utf-8")
@@ -3141,6 +3196,35 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             return
 
         if not self._authenticate():
+            return
+
+        if path == "/transactions":
+            offset = int(params.get("offset", [0])[0])
+            limit = int(params.get("limit", [50])[0])
+            status_f = params.get("status", [""])[0]
+            op_f = params.get("operation", [""])[0]
+            q_f = params.get("query", [""])[0]
+            job_f = params.get("job", [""])[0]
+            rows, total = _txn_store.list(offset=offset, limit=limit, status=status_f, operation=op_f, query=q_f, job=job_f)
+            self._send_json(200, {"ok": True, "transactions": rows, "total": total, "offset": offset, "limit": limit})
+            return
+
+        if path.startswith("/transactions/"):
+            tx_id = path.split("/transactions/")[1].strip()
+            try:
+                fmt = params.get("format", ["json"])[0]
+                if fmt in {"markdown", "md", "csv"}:
+                    content, mime = _txn_store.export(tx_id, fmt)
+                    self.send_response(200)
+                    self.send_header("Content-Type", f"{mime}; charset=utf-8")
+                    self.send_header("Content-Length", str(len(content.encode("utf-8"))))
+                    self.end_headers()
+                    self.wfile.write(content.encode("utf-8"))
+                    return
+                tx_data = _txn_store.get(tx_id, offset=int(params.get("offset", [0])[0]), limit=int(params.get("limit", [1000])[0]))
+                self._send_json(200, {"ok": True, "transaction": tx_data})
+            except KeyError:
+                self._send_json(404, {"error": "Transaction not found"})
             return
 
         if path == "/status":
@@ -3650,6 +3734,58 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 self._send_json(500, {"error": "Failed to set artpath"})
             finally:
                 release_os_lock(lock_file)
+            return
+
+        if path == "/imports/review/cleanup/plan":
+            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            allowed_roots = [
+                os.environ.get("DOWNLOADS_ROOT", "/downloads"),
+                os.environ.get("PLAYLIST_DOWNLOAD_ROOT", "/data/torrents/music/Playlist Downloads"),
+                os.environ.get("TORRENT_SOURCE_ROOTS", "/torrents"),
+                tempfile.gettempdir(),
+                os.environ.get("IMPORT_REVIEW_QUARANTINE_DIR", "/config/import_review_quarantine"),
+                music_root_env,
+            ]
+            res = transaction_engine.execute_import_review_cleanup_plan(
+                _txn_store, body, allowed_roots, music_root=music_root_env,
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        if path == "/imports/review/cleanup/apply":
+            op_id = str(body.get("operation_id") or "").strip()
+            if not op_id:
+                self._send_json(400, {"ok": False, "error": "operation_id required"})
+                return
+            quarantine_root = os.environ.get("IMPORT_REVIEW_QUARANTINE_DIR", "/config/import_review_quarantine")
+            res = transaction_engine.execute_import_review_cleanup_apply(_txn_store, op_id, quarantine_root)
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        if path == "/albums/cleanup/plan":
+            try:
+                album_id = int(body.get("album_id") or 0)
+            except Exception:
+                album_id = 0
+            allowed_roots = [
+                os.environ.get("DOWNLOADS_ROOT", "/downloads"),
+                os.environ.get("MUSIC_ROOT", "/music"),
+            ]
+            res = transaction_engine.create_album_cleanup_plan(_txn_store, album_id, allowed_roots=allowed_roots, payload=body)
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        if path == "/albums/cleanup/apply":
+            op_id = str(body.get("operation_id") or "").strip()
+            if not op_id:
+                self._send_json(400, {"ok": False, "error": "operation_id required"})
+                return
+            res = transaction_engine.execute_album_cleanup_apply(_txn_store, op_id)
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
             return
 
         if path == "/imports/source/inspect":
