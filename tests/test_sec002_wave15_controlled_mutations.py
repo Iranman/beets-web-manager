@@ -570,7 +570,14 @@ class CrashResumeRollbackTests(unittest.TestCase):
 
         plan_res = execute_import_review_cleanup_plan(
             self.tx_store,
-            payload={"path": str(target_dir), "action": "quarantine_rejected", "files": [str(f1)]},
+            # "files" entries are relative names within the review folder,
+            # matching the API contract enforced by
+            # execute_import_review_cleanup_plan's traversal guard (which
+            # explicitly rejects any entry starting with "/" or "\\" as
+            # outside_review_folder -- an absolute path here would be
+            # silently skipped rather than planned, on POSIX where str(f1)
+            # itself starts with "/").
+            payload={"path": str(target_dir), "action": "quarantine_rejected", "files": [f1.name]},
             allowed_roots=[str(self.dummy_root)],
         )
         self.assertTrue(plan_res["ok"])
@@ -621,7 +628,7 @@ class ImportReviewCleanupFailureModeTests(unittest.TestCase):
 
         plan_res = execute_import_review_cleanup_plan(
             self.tx_store,
-            payload={"path": str(target_dir), "action": "delete_rejected", "files": [str(f1)]},
+            payload={"path": str(target_dir), "action": "delete_rejected", "files": [f1.name]},
             allowed_roots=[str(self.dummy_root)],
         )
         self.assertTrue(plan_res["ok"])
@@ -651,7 +658,7 @@ class ImportReviewCleanupFailureModeTests(unittest.TestCase):
 
         plan_res = execute_import_review_cleanup_plan(
             self.tx_store,
-            payload={"path": str(target_dir), "action": "delete_rejected", "files": [str(f1)]},
+            payload={"path": str(target_dir), "action": "delete_rejected", "files": [f1.name]},
             allowed_roots=[str(self.dummy_root)],
         )
         self.assertTrue(plan_res["ok"])
@@ -684,7 +691,7 @@ class ImportReviewCleanupFailureModeTests(unittest.TestCase):
 
         plan_res = execute_import_review_cleanup_plan(
             self.tx_store,
-            payload={"path": str(target_dir), "action": "delete_rejected", "files": [str(f1), str(f2)]},
+            payload={"path": str(target_dir), "action": "delete_rejected", "files": [f1.name, f2.name]},
             allowed_roots=[str(self.dummy_root)],
         )
         self.assertTrue(plan_res["ok"])
@@ -728,7 +735,7 @@ class ImportReviewCleanupFailureModeTests(unittest.TestCase):
 
         plan_res = execute_import_review_cleanup_plan(
             self.tx_store,
-            payload={"path": str(target_dir), "action": "delete_rejected", "files": [str(f1)]},
+            payload={"path": str(target_dir), "action": "delete_rejected", "files": [f1.name]},
             allowed_roots=[str(self.dummy_root)],
         )
         self.assertTrue(plan_res["ok"])
@@ -759,7 +766,7 @@ class ImportReviewCleanupFailureModeTests(unittest.TestCase):
 
         plan_res = execute_import_review_cleanup_plan(
             self.tx_store,
-            payload={"path": str(target_dir), "action": "delete_rejected", "files": [str(f1)]},
+            payload={"path": str(target_dir), "action": "delete_rejected", "files": [f1.name]},
             allowed_roots=[str(self.dummy_root)],
         )
         op_id = plan_res["operation_id"]
