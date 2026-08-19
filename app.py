@@ -345,7 +345,12 @@ from backend.beets_config import (
     filter_job_plugins as _filter_job_plugins,
 )
 from backend.mb_alignment import summarize_mb_track_alignment
-from backend.matching_contract import AiState, build_recording_matching_decision, compute_decision_version
+from backend.matching_contract import (
+    AiState,
+    build_album_matching_decision,
+    build_recording_matching_decision,
+    compute_decision_version,
+)
 from backend.import_guard import (
     existing_track_can_block_downloaded_replacement as _guard_existing_track_can_block_downloaded_replacement,
     filter_wanted_tracks_against_missing as _guard_filter_wanted_tracks_against_missing,
@@ -1418,12 +1423,25 @@ def _preflight_match_ratio(preflight: Optional[Dict[str, Any]]) -> float:
 
 def _preflight_oversized_subset_complete(preflight: Dict[str, Any]) -> bool:
     """True when a small source folder cleanly matches part of an oversized MB release."""
-    audio_count = int((preflight or {}).get("audio_count") or 0)
-    expected = int((preflight or {}).get("expected") or 0)
-    matches = int((preflight or {}).get("matches") or 0)
+    preflight = preflight or {}
+    audio_count = int(preflight.get("audio_count") or 0)
+    expected = int(preflight.get("expected") or 0)
+    matches = int(preflight.get("matches") or 0)
     if audio_count < 6 or expected <= audio_count + max(3, audio_count // 2):
         return False
-    if not bool((preflight or {}).get("artist_ok", True)):
+    if not bool(preflight.get("artist_ok", True)):
+        return False
+    # SEC-002 Wave 14: this is an independent tracklist-ratio heuristic that
+    # callers (_resolve_album_release_for_import's _source_accepts_release/
+    # _same_group_source_sized_release) use to accept a release candidate
+    # WITHOUT checking preflight["ok"] at all -- so it must not itself
+    # become a way to bypass the shared MatchingDecision authority. When a
+    # matching_decision was computed and explicitly marks the candidate
+    # action_allowed=False (unresolved Release Group ID, identity
+    # conflict, ...), an oversized-subset track-count match alone is not
+    # sufficient.
+    matching_decision = preflight.get("matching_decision")
+    if isinstance(matching_decision, dict) and matching_decision and not matching_decision.get("action_allowed", True):
         return False
     return matches >= min(audio_count, max(6, int(math.ceil(audio_count * 0.90))))
 
@@ -6220,6 +6238,71 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
         and source_match_ratio >= 1.0
     ):
         gate_ok = True
+    local_album_title = ""
+    local_artist_name = result.get("folder_artist") or ""
+    local_rgid = ""
+
+    # Engine ownership (SEC-002 Wave 14 final review): local evidence for the
+    # album-matching decision must come from BeetsClient IPC, never from a
+    # local Beets DB connection or a local media-tag read. The web manager
+    # has no /data mount in the supported topology and must not depend on
+    # one -- if the engine can't supply this evidence, local_album_title/
+    # local_rgid simply stay unresolved and the decision below falls
+    # through to review_required rather than silently reading local state.
+    if existing_album_id:
+        try:
+            album_row = beets_client.get_album(existing_album_id)
+        except Exception:
+            album_row = None
+        if album_row:
+            local_album_title = _s(album_row.get("album"))
+            if _s(album_row.get("albumartist")):
+                local_artist_name = _s(album_row.get("albumartist"))
+            if _s(album_row.get("mb_releasegroupid")):
+                local_rgid = _s(album_row.get("mb_releasegroupid"))
+
+    if not local_album_title and inspect_evidence:
+        for entry in inspect_evidence.get("audio_files") or []:
+            props = entry.get("properties") if isinstance(entry.get("properties"), dict) else {}
+            if _s(props.get("album")):
+                local_album_title = _s(props.get("album"))
+            if _s(props.get("mb_releasegroupid")):
+                local_rgid = _s(props.get("mb_releasegroupid"))
+            if local_album_title and local_rgid:
+                break
+
+    if not local_album_title and folder_path:
+        local_album_title = Path(folder_path).name
+
+    matching_decision = build_album_matching_decision(
+        current={
+            "album": local_album_title,
+            "artist": local_artist_name,
+            "mb_releasegroupid": local_rgid,
+        },
+        candidate={
+            "mb_releasegroupid": result.get("release_group"),
+            "mb_albumid": mb_albumid,
+            "album": result.get("release_title"),
+            "artist": result.get("release_artist"),
+        },
+        items=candidates,
+        mb_tracks=mb_tracks,
+    )
+    decision_dict = matching_decision.to_dict()
+    # The old tracklist-heuristic gate_ok and the new MatchingDecision are
+    # both required, not either/or: a candidate that only satisfies the
+    # tracklist heuristic but that MatchingDecision marks review_required
+    # (e.g. no resolved Release Group ID, or track-identity conflicts) must
+    # not authorize the destructive action just because `conflicts` happens
+    # to be empty. `action_allowed` (never `conflicts` alone) is the single
+    # field that may ever authorize automatic/destructive action here; a
+    # review-required candidate stays visible in the result (via
+    # `matching_decision`) but `ok` reflects automatic-action authority
+    # only.
+    if not decision_dict.get("action_allowed"):
+        gate_ok = False
+
     result.update({
         "ok": gate_ok,
         "matches": matches,
@@ -6230,6 +6313,8 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
         "source_match_ratio": round(source_match_ratio, 3),
         "oversized_subset_complete": bool(oversized_subset),
         "examples": best_lines,
+        "release_group_id": decision_dict.get("release_group_id", ""),
+        "matching_decision": decision_dict,
     })
     return result
 
@@ -17668,6 +17753,11 @@ def _compact_preflight(preflight: Optional[Dict[str, Any]]) -> Optional[Dict[str
         "release_group": preflight.get("release_group", ""),
         "error": preflight.get("error", ""),
         "examples": (preflight.get("examples") or [])[:5],
+        # SEC-002 Wave 14: without this, the authoritative MatchingDecision
+        # computed by _folder_release_preflight is silently dropped here and
+        # never reaches the Import Review auto-import gate downstream.
+        "release_group_id": preflight.get("release_group_id", ""),
+        "matching_decision": preflight.get("matching_decision") or {},
     }
 
 
@@ -20782,6 +20872,10 @@ def _import_review_revalidation_preflight(
             "acoustid_mismatch", "acoustid_target_hits", "acoustid_top_release",
             "acoustid_top_hits", "acoustid_release_hits", "artist_ok", "artist_score",
             "release_title", "release_artist", "release_group",
+            # SEC-002 Wave 14: the shared MatchingDecision authority must
+            # survive this compaction step to reach the real Import Review
+            # auto-import gate in _import_review_build_revalidated_match().
+            "release_group_id", "matching_decision",
         ):
             if key in compact:
                 base[key] = compact.get(key)
@@ -20792,6 +20886,11 @@ def _import_review_revalidation_preflight(
             base["ok"] = True
             base["error"] = ""
     return base
+
+
+def _extract_mb_uuid(val: Any) -> str:
+    s = _s(val).strip().lower()
+    return s if _MB_UUID_RE.match(s) else ""
 
 
 def _import_review_build_revalidated_match(
@@ -20821,12 +20920,32 @@ def _import_review_build_revalidated_match(
     preflight_status = "passed" if identity_validated and importable_count > 0 and not preflight.get("acoustid_mismatch") else "failed"
     is_release_group_usable = bool(release_group_id and _MB_UUID_RE.match(release_group_id))
     has_representative = bool(representative_release_id and _MB_UUID_RE.match(representative_release_id))
-    is_importable = bool(identity_validated and is_release_group_usable and has_representative and importable_count > 0 and preflight_status == "passed")
+    # SEC-002 Wave 14: the shared MatchingDecision (build_album_matching_decision,
+    # via _folder_release_preflight -> _compact_preflight ->
+    # _import_review_revalidation_preflight) must be authoritative here, not
+    # merely informational -- a candidate it marks action_allowed=False (e.g.
+    # unresolved Release Group ID, or a track-identity conflict) must not be
+    # importable no matter what this function's own independent heuristic
+    # concludes. An absent/empty matching_decision (no album preflight ran)
+    # does not itself block import -- the pre-existing heuristic below still
+    # applies in that case -- but an explicit action_allowed=False always does.
+    matching_decision = preflight.get("matching_decision") if isinstance(preflight.get("matching_decision"), dict) else {}
+    matching_decision_blocks = bool(matching_decision) and not matching_decision.get("action_allowed", True)
+    is_importable = bool(
+        identity_validated
+        and is_release_group_usable
+        and has_representative
+        and importable_count > 0
+        and preflight_status == "passed"
+        and not matching_decision_blocks
+    )
     confidence_score = _import_review_revalidation_confidence_score(suggestion, comparison, preflight)
     confidence_level = _import_review_confidence_level(confidence_score, is_importable, preflight_status)
     extra_count = int(comparison.get("extra_count") or 0)
     if not identity_validated:
         reason = candidate_identity_error or "Representative Release ID rejected: it does not belong to selected Release Group."
+    elif matching_decision_blocks:
+        reason = _s(matching_decision.get("explanation") or matching_decision.get("reason")) or "Candidate requires review before import (deterministic identity not verified)."
     elif importable_count:
         reason = (
             f"Revalidated: {importable_count} verified track(s) can import."
@@ -20864,6 +20983,8 @@ def _import_review_build_revalidated_match(
         "rejected_representative_release_id": comparison.get("rejected_representative_release_id", ""),
         "release_group_diagnostics": comparison.get("release_group_diagnostics") or {},
         "source": "candidate",
+        "matching_decision": matching_decision,
+        "matching_decision_blocks_import": matching_decision_blocks,
     }
 
 
@@ -32436,7 +32557,8 @@ def _album_mb_completeness(album_id: int, mb_override: str = "",
 
     album_title = _s(album_row["album"]).strip()
     album_artist = _s(album_row["albumartist"]).strip()
-    mb_albumid = (mb_override or _s(album_row["mb_albumid"])).strip().lower()
+    caller_override = _s(mb_override).strip().lower()
+    mb_albumid = (caller_override or _s(album_row["mb_albumid"])).strip().lower()
     mb_rg = _s(album_row["mb_releasegroupid"]).strip().lower()
     if not mb_albumid and mb_rg:
         mb_albumid = _resolve_release_group_to_release(
@@ -32447,6 +32569,20 @@ def _album_mb_completeness(album_id: int, mb_override: str = "",
     mb = _fetch_mb_release_tracklist(mb_albumid, log)
     if not mb.get("ok"):
         raise RuntimeError(mb.get("error") or "MusicBrainz release lookup failed")
+    # SEC-002 Wave 14: a caller-supplied mb_albumid override is release-edition
+    # evidence only, not album-family identity -- reject it outright rather
+    # than silently repairing tracks against a different release family than
+    # the one already established for this album (mirrors the RGID-equality
+    # guard build_album_matching_decision/_album_cleanup_merge_plan already
+    # enforce elsewhere; deliberately narrow rather than a full retrofit of
+    # this pre-existing, unrelated repair workflow).
+    if caller_override and mb_rg:
+        candidate_rg = _s(mb.get("release_group") or "").strip().lower()
+        if candidate_rg and candidate_rg != mb_rg:
+            raise RuntimeError(
+                "Requested release belongs to a different Release Group than "
+                "this album's established identity; refusing repair."
+            )
     mb_tracks = mb["tracks"]
 
     try:
@@ -38379,6 +38515,7 @@ def _album_cleanup_safe_artwork_relative(rel: str, occupied: set) -> str:
 
 
 def _album_cleanup_merge_plan(records: List[Dict[str, Any]], canonical_path: str) -> Dict[str, Any]:
+    from backend.matching_contract import build_album_matching_decision
     canonical = next((r for r in records if _s(r.get("path")) == canonical_path), None)
     canonical_files: Dict[str, Dict[str, Any]] = dict((canonical or {}).get("files") or {})
     occupied = set(canonical_files.keys())
@@ -38393,6 +38530,25 @@ def _album_cleanup_merge_plan(records: List[Dict[str, Any]], canonical_path: str
         source_path = _s(rec.get("path"))
         if source_path == canonical_path:
             continue
+        if canonical:
+            c_rg_raw = _s(canonical.get("release_group_id") or canonical.get("mb_releasegroupid")).strip().lower()
+            c_rg = c_rg_raw if _MB_UUID_RE.match(c_rg_raw) else ""
+            r_rg_raw = _s(rec.get("release_group_id") or rec.get("mb_releasegroupid")).strip().lower()
+            r_rg = r_rg_raw if _MB_UUID_RE.match(r_rg_raw) else ""
+            if c_rg and r_rg and c_rg != r_rg:
+                merge_decision = build_album_matching_decision(
+                    current={"mb_releasegroupid": c_rg, "album": canonical.get("album"), "artist": canonical.get("artist")},
+                    candidate={"mb_releasegroupid": r_rg, "album": rec.get("album"), "artist": rec.get("artist")},
+                )
+                d_dict = merge_decision.to_dict()
+                if d_dict.get("conflicts"):
+                    conflicts.append({
+                        "source": source_path,
+                        "target": canonical_path,
+                        "relative_path": "",
+                        "reason": f"Release Group / identity conflict ({d_dict.get('reason_code')}): auto-merge rejected",
+                    })
+                    continue
         for rel, source_info in sorted((rec.get("files") or {}).items(), key=lambda item: _s(item[0]).casefold()):
             rel_text = _s(rel).replace("\\", "/").strip("/")
             if not rel_text:
@@ -38557,11 +38713,6 @@ def _album_cleanup_source_audio_count(records: List[Dict[str, Any]], canonical_p
         1 for item in plan.get("duplicate_files_to_quarantine") or []
         if _s(item.get("reason")).endswith("audio")
     )
-
-
-def _album_cleanup_valid_rgid(value: Any) -> str:
-    text = _s(value).strip().lower()
-    return text if _MB_UUID_RE.match(text) else ""
 
 
 def _album_cleanup_canonical_candidates(records: List[Dict[str, Any]]) -> List[Dict[str, str]]:

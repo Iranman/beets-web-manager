@@ -1238,6 +1238,56 @@ def _import_source_signature(entries: list[dict[str, Any]]) -> str:
     return hashlib.sha256("|".join(parts).encode("utf-8", "surrogatepass")).hexdigest()
 
 
+def _read_media_tags_best_effort(safe_file_path: Path) -> dict[str, Any]:
+    """Read tags from an already-validated (resolve_safe_path()'d) file path.
+
+    Shared by /tags/read and inspect_import_source() -- the latter reuses
+    this so the web manager can get title/album/mb_* evidence for a folder
+    matching decision from the SAME bounded, already-authorized engine-side
+    directory walk, instead of needing a second local media read of its own
+    (which it cannot safely do -- it has no /data mount).
+    """
+    tags: dict[str, Any] = {}
+    try:
+        from beets.mediafile import MediaFile
+        mf = MediaFile(safe_file_path)
+        tags = {
+            "title": mf.title,
+            "artist": mf.artist,
+            "album": mf.album,
+            "albumartist": mf.albumartist,
+            "year": mf.year,
+            "track": mf.track,
+            "tracktotal": mf.tracktotal,
+            "disc": mf.disc,
+            "disctotal": mf.disctotal,
+            "genre": mf.genre,
+            "mb_trackid": mf.mb_trackid,
+            "mb_albumid": mf.mb_albumid,
+            "mb_artistid": mf.mb_artistid,
+            "mb_albumartistid": mf.mb_albumartistid,
+            "mb_releasegroupid": getattr(mf, "mb_releasegroupid", None),
+            "length": getattr(mf, "length", None),
+        }
+    except Exception:
+        try:
+            import mutagen
+            f = mutagen.File(safe_file_path, easy=True)
+            if f is not None:
+                tags = {
+                    "title": (f.get("title") or [""])[0],
+                    "artist": (f.get("artist") or [""])[0],
+                    "album": (f.get("album") or [""])[0],
+                    "albumartist": (f.get("albumartist") or [""])[0],
+                    "year": (f.get("date") or [0])[0],
+                    "track": (f.get("tracknumber") or [0])[0],
+                    "genre": (f.get("genre") or [""])[0],
+                }
+        except Exception:
+            tags = {}
+    return tags
+
+
 def inspect_import_source(source_path: object, operation: str) -> dict[str, Any]:
     """Engine-authoritative validation + bounded audio inventory for an
     import/reimport source. Returns a plain result dict (never raises for
@@ -1317,6 +1367,17 @@ def inspect_import_source(source_path: object, operation: str) -> dict[str, Any]
                 except Exception:
                     continue
                 properties = audio_preferences.inspect_audio_file(str(child))
+                # Merge in tag evidence (title/album/mb_*) from the same
+                # already-validated path, using the same bounded walk --
+                # this is what lets a web-manager-side folder/import
+                # matching decision get real title/album/mb_releasegroupid
+                # evidence without the web manager reading the file itself.
+                try:
+                    tag_evidence = _read_media_tags_best_effort(child)
+                except Exception:
+                    tag_evidence = {}
+                if tag_evidence:
+                    properties = {**properties, **{k: v for k, v in tag_evidence.items() if v not in (None, "")}}
                 entries.append({
                     "relative_path": rel,
                     "size": st.st_size,
@@ -3821,41 +3882,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 return
 
             try:
-                tags = {}
-                try:
-                    from beets.mediafile import MediaFile
-                    mf = MediaFile(safe_file_path)
-                    tags = {
-                        "title": mf.title,
-                        "artist": mf.artist,
-                        "album": mf.album,
-                        "albumartist": mf.albumartist,
-                        "year": mf.year,
-                        "track": mf.track,
-                        "tracktotal": mf.tracktotal,
-                        "disc": mf.disc,
-                        "disctotal": mf.disctotal,
-                        "genre": mf.genre,
-                        "mb_trackid": mf.mb_trackid,
-                        "mb_albumid": mf.mb_albumid,
-                        "mb_artistid": mf.mb_artistid,
-                        "mb_albumartistid": mf.mb_albumartistid,
-                        "mb_releasegroupid": getattr(mf, "mb_releasegroupid", None),
-                    }
-                except Exception:
-                    import mutagen
-                    f = mutagen.File(safe_file_path, easy=True)
-                    if f is not None:
-                        tags = {
-                            "title": (f.get("title") or [""])[0],
-                            "artist": (f.get("artist") or [""])[0],
-                            "album": (f.get("album") or [""])[0],
-                            "albumartist": (f.get("albumartist") or [""])[0],
-                            "year": (f.get("date") or [0])[0],
-                            "track": (f.get("tracknumber") or [0])[0],
-                            "genre": (f.get("genre") or [""])[0],
-                        }
-                self._send_json(200, {"tags": tags})
+                self._send_json(200, {"tags": _read_media_tags_best_effort(safe_file_path)})
             except Exception:
                 self._send_json(500, {"error": "Failed to read tags"})
             return
