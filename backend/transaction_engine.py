@@ -68,6 +68,34 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
 
 _TRANSACTION_ID_RE = re.compile(r"^txn_\d+_[0-9a-f]{12}$")
 
+# SEC-002 Wave 16 final review: the control agent serves requests via
+# ThreadingHTTPServer, so two Apply requests for the SAME operation_id can
+# genuinely run concurrently in separate threads. TransactionStore's own
+# _lock only guards individual get()/update() calls, not a whole multi-step
+# Apply operation -- two threads could each read the same step as "pending"
+# before either persists its "completed" status, racing through the same
+# destructive step. This per-operation-id lock registry serializes Apply
+# calls for the SAME transaction (never blocking unrelated transactions'
+# Apply calls against each other) so retries/concurrent double-clicks are
+# genuinely idempotent rather than racing. Entries are intentionally never
+# removed: transaction ids are unique and Apply is a rare, deliberate,
+# low-frequency user action, so the dict's steady-state size (one small
+# Lock object per transaction ever applied, for the life of the process) is
+# negligible -- and popping entries would reopen the exact race this exists
+# to close (a thread already blocked on the old Lock object while a new
+# request creates a fresh one for the same id).
+_apply_locks_guard = threading.Lock()
+_apply_locks: Dict[str, threading.Lock] = {}
+
+
+def _get_apply_lock(operation_id: str) -> threading.Lock:
+    with _apply_locks_guard:
+        lock = _apply_locks.get(operation_id)
+        if lock is None:
+            lock = threading.Lock()
+            _apply_locks[operation_id] = lock
+        return lock
+
 
 def _now() -> float:
     return time.time()
@@ -913,8 +941,34 @@ def execute_import_review_cleanup_apply(
     operation_id: str,
     quarantine_root: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Execute plan application for import review folder/files with durable steps and server-derived quarantine."""
-    tx = store.get(operation_id)
+    """Execute plan application for import review folder/files with durable steps and server-derived quarantine.
+
+    Serializes concurrent Apply calls for the SAME operation_id (see
+    _get_apply_lock) -- the control agent's ThreadingHTTPServer means two
+    requests for the same transaction can genuinely arrive in parallel
+    threads, and without this lock they could each read the same step as
+    still-pending before either persists its completion.
+    """
+    with _get_apply_lock(operation_id):
+        return _execute_import_review_cleanup_apply_locked(store, operation_id, quarantine_root)
+
+
+def _execute_import_review_cleanup_apply_locked(
+    store: TransactionStore,
+    operation_id: str,
+    quarantine_root: Optional[str] = None,
+) -> Dict[str, Any]:
+    # store.get() raises KeyError for BOTH a malformed id (fails
+    # TransactionStore's id-format regex) and a well-formed but unknown
+    # id -- it never returns a falsy value, so the "if not tx" pattern
+    # here needs this except clause to actually be reachable. SEC-002
+    # Wave 16 final review: a malformed operation_id must return a clean
+    # {"ok": False, ...} result, not propagate an uncaught KeyError up
+    # through the HTTP layer.
+    try:
+        tx = store.get(operation_id)
+    except KeyError:
+        tx = None
     if not tx:
         return {"ok": False, "error": f"Transaction {operation_id} not found."}
 
@@ -1176,12 +1230,38 @@ def rollback_import_review_cleanup(
     store: TransactionStore,
     operation_id: str,
 ) -> Dict[str, Any]:
-    """Rollback a recoverable import review cleanup transaction by moving files back from quarantine."""
-    tx = store.get(operation_id)
+    """Rollback a recoverable import review cleanup transaction by moving files back from quarantine.
+
+    This executor's restore logic only understands "move_quarantine" steps
+    (the Import Review cleanup shape). It must never be reached for a
+    transaction from a different mutation family (e.g. "album_cleanup_v1",
+    whose steps are delete_file/delete_db_record/remove_dir) -- silently
+    finding zero matching steps and reporting a false "Rolled Back" success
+    without having restored anything. SEC-002 Wave 16 final review: callers
+    (Web Manager routes, other engine endpoints) must not be relied on to
+    enforce this; it is enforced here, at the authoritative layer, matching
+    the same explicit mutation_family check execute_album_cleanup_apply()
+    already performs for its own family.
+    """
+    try:
+        tx = store.get(operation_id)
+    except KeyError:
+        tx = None
     if not tx:
         return {"ok": False, "error": f"Transaction {operation_id} not found."}
 
     meta = tx.get("metadata") or {}
+    mutation_family = meta.get("mutation_family")
+    if mutation_family and mutation_family != "import_review_cleanup_v1":
+        return {
+            "ok": False,
+            "error": (
+                f"Transaction {operation_id} is a {mutation_family!r} operation "
+                "and cannot be rolled back through the import review cleanup "
+                "rollback executor."
+            ),
+        }
+
     if not meta.get("rollback_available"):
         return {"ok": False, "error": "Rollback unavailable: transaction contains irreversible steps or has already been rolled back."}
 
@@ -1406,14 +1486,30 @@ def execute_album_cleanup_apply(
     operation_id: str,
     db_path: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Execute album cleanup plan application with durable steps and DB consistency (SEC-002 Wave 15)."""
-    tx = store.get(operation_id)
+    """Execute album cleanup plan application with durable steps and DB consistency (SEC-002 Wave 15).
+
+    Serializes concurrent Apply calls for the SAME operation_id -- see the
+    identical rationale on execute_import_review_cleanup_apply.
+    """
+    with _get_apply_lock(operation_id):
+        return _execute_album_cleanup_apply_locked(store, operation_id, db_path)
+
+
+def _execute_album_cleanup_apply_locked(
+    store: TransactionStore,
+    operation_id: str,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    try:
+        tx = store.get(operation_id)
+    except KeyError:
+        tx = None
     if not tx:
-        return {"ok": False, "error": f"Transaction {operation_id} not found."}
+        return {"ok": False, "error": f"Transaction {operation_id} not found.", "mutated": False}
 
     meta = tx.get("metadata") or {}
     if meta.get("mutation_family") != "album_cleanup_v1":
-        return {"ok": False, "error": f"Transaction {operation_id} is not an album_cleanup_v1 operation."}
+        return {"ok": False, "error": f"Transaction {operation_id} is not an album_cleanup_v1 operation.", "mutated": False}
 
     if tx.get("status") == "Completed":
         return {
@@ -1426,7 +1522,13 @@ def execute_album_cleanup_apply(
 
     is_valid, err = store.revalidate_preconditions(operation_id)
     if not is_valid:
-        return {"ok": False, "error": err or "Precondition revalidation failed."}
+        # SEC-002 Wave 16 final review: this check runs before the step
+        # loop below has touched anything, so "mutated" is always False
+        # here -- callers (Web Manager routes / UI) may truthfully tell
+        # the user nothing changed. Contrast with the mid-loop failures
+        # below, which set "mutated": bool(deleted) since earlier steps in
+        # THIS apply call may have already deleted files irreversibly.
+        return {"ok": False, "error": err or "Precondition revalidation failed.", "mutated": False}
 
     album_id = meta.get("album_id")
     steps = meta.get("steps") or []
@@ -1455,7 +1557,7 @@ def execute_album_cleanup_apply(
                         if src.is_symlink() or os.path.islink(str(src)):
                             step["status"] = "failed"
                             store.update(operation_id, status="Failed", logs=log + [f"Symlink detected at {src}"])
-                            return {"ok": False, "error": f"Symlink detected at {src}"}
+                            return {"ok": False, "error": f"Symlink detected at {src}", "mutated": bool(deleted)}
                         # Immediately-before-mutation precondition re-check
                         # (same device/inode/size/mtime_ns comparison as the
                         # import-review cleanup path), not just the one-time
@@ -1476,11 +1578,11 @@ def execute_album_cleanup_apply(
                             if mismatch:
                                 step["status"] = "failed"
                                 store.update(operation_id, status="Failed", logs=log + [f"File replacement detected at {src} ({mismatch})"])
-                                return {"ok": False, "error": f"File replacement detected at {src} ({mismatch})"}
+                                return {"ok": False, "error": f"File replacement detected at {src} ({mismatch})", "mutated": bool(deleted)}
                         except OSError as ex:
                             step["status"] = "failed"
                             store.update(operation_id, status="Failed", logs=log + [f"Could not stat {src}: {ex}"])
-                            return {"ok": False, "error": f"Could not stat {src}: {ex}"}
+                            return {"ok": False, "error": f"Could not stat {src}: {ex}", "mutated": bool(deleted)}
                         try:
                             src.unlink()
                             deleted.append(src_str)
@@ -1489,7 +1591,7 @@ def execute_album_cleanup_apply(
                         except Exception as ex:
                             step["status"] = "failed"
                             store.update(operation_id, status="Failed", logs=log + [f"Failed deleting {src_str}: {ex}"])
-                            return {"ok": False, "error": f"Failed deleting {src_str}: {ex}"}
+                            return {"ok": False, "error": f"Failed deleting {src_str}: {ex}", "mutated": bool(deleted)}
                     else:
                         step["status"] = "completed"
 
@@ -1498,7 +1600,7 @@ def execute_album_cleanup_apply(
                 if not album_id or not os.path.exists(lib_db):
                     step["status"] = "failed"
                     store.update(operation_id, status="Failed", logs=log + [f"Beets database not found at {lib_db}"])
-                    return {"ok": False, "error": f"Beets database not found at {lib_db}"}
+                    return {"ok": False, "error": f"Beets database not found at {lib_db}", "mutated": bool(deleted)}
                 try:
                     # NOTE: `with sqlite3.connect(...) as con:` only wraps the
                     # transaction (commit-on-success / rollback-on-exception) --
@@ -1530,7 +1632,7 @@ def execute_album_cleanup_apply(
                                 "refusing to delete DB rows."
                             )
                             store.update(operation_id, status="Failed", logs=log + [msg])
-                            return {"ok": False, "error": msg}
+                            return {"ok": False, "error": msg, "mutated": bool(deleted)}
                         if planned_item_ids:
                             placeholders = ",".join("?" for _ in planned_item_ids)
                             cur.execute(f"DELETE FROM items WHERE id IN ({placeholders})", planned_item_ids)
@@ -1543,7 +1645,7 @@ def execute_album_cleanup_apply(
                 except Exception as ex:
                     step["status"] = "failed"
                     store.update(operation_id, status="Failed", logs=log + [f"DB deletion for album {album_id} failed: {ex}"])
-                    return {"ok": False, "error": f"DB deletion for album {album_id} failed: {ex}"}
+                    return {"ok": False, "error": f"DB deletion for album {album_id} failed: {ex}", "mutated": bool(deleted)}
 
             elif step_type == "remove_dir":
                 target_str = step.get("target")

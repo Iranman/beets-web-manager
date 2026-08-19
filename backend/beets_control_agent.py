@@ -3788,6 +3788,16 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             self._send_json(code, res)
             return
 
+        if path == "/imports/review/cleanup/rollback":
+            op_id = str(body.get("operation_id") or "").strip()
+            if not op_id:
+                self._send_json(400, {"ok": False, "error": "operation_id required"})
+                return
+            res = transaction_engine.rollback_import_review_cleanup(_txn_store, op_id)
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
         if path == "/imports/source/inspect":
             # SEC-002 Wave 8 ARCH-003: read-only, bounded inspection of an
             # import/reimport source -- the engine-side counterpart to

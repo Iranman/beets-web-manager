@@ -13100,6 +13100,108 @@ def cleanup_import_review_files():
         app.logger.exception("cleanup_import_review_files failed for %r", folder_path)
         return jsonify({"ok": False, "error": "Could not cleanup review files.", "log": log}), 500
 
+
+@app.post("/api/albums/<int:album_id>/cleanup/plan")
+@app.post("/api/albums/cleanup/plan")
+def plan_album_cleanup_route(album_id: int = 0):
+    payload = request.get_json(silent=True) or {}
+    target_album_id = album_id or int(payload.get("album_id") or 0)
+    if not target_album_id:
+        return jsonify({"ok": False, "error": "album_id required"}), 400
+
+    try:
+        res = beets_client.plan_album_cleanup(target_album_id)
+        status_code = 200 if res.get("ok") else 400
+        return jsonify(res), status_code
+    except BeetsUnavailableError as ex:
+        return jsonify({"ok": False, "error": f"Beets engine unavailable: {ex}"}), 503
+    except BeetsError as ex:
+        return jsonify({"ok": False, "error": str(ex)}), 400
+    except Exception as ex:
+        app.logger.exception("plan_album_cleanup_route failed for album_id=%s", target_album_id)
+        return jsonify({"ok": False, "error": "Album cleanup planning failed"}), 500
+
+
+@app.post("/api/albums/cleanup/apply")
+def apply_album_cleanup_route():
+    payload = request.get_json(silent=True) or {}
+    op_id = _s(payload.get("operation_id")).strip()
+    if not op_id:
+        return jsonify({"ok": False, "error": "operation_id required"}), 400
+
+    try:
+        res = beets_client.apply_album_cleanup(op_id)
+        if not res.get("ok"):
+            kind, message = _classify_album_cleanup_apply_failure(res)
+            return jsonify({
+                "ok": False,
+                "error": message,
+                # error_kind is the authoritative UI signal -- the frontend
+                # must not re-derive this by matching substrings in "error"
+                # itself. "stale_plan" is the only kind that may ever be
+                # presented as "nothing was changed"; it is only ever
+                # chosen when the engine's own "mutated" flag (see
+                # execute_album_cleanup_apply) confirms no destructive step
+                # ran before this failure.
+                "error_kind": kind,
+                "mutated": bool(res.get("mutated")),
+                "log": res.get("log", []),
+            }), 400
+        return jsonify(res), 200
+    except BeetsUnavailableError as ex:
+        return jsonify({"ok": False, "error": f"Beets engine unavailable: {ex}", "error_kind": "other", "mutated": False}), 503
+    except BeetsError as ex:
+        # A raised BeetsError means the engine's HTTP response body couldn't
+        # be parsed into a normal {"ok": False, ...} result (see
+        # BeetsClient._request), so there is no "mutated" signal available
+        # here at all -- do not guess. Report the operation as refused
+        # without claiming to know whether anything changed.
+        return jsonify({"ok": False, "error": str(ex), "error_kind": "other"}), 400
+    except Exception as ex:
+        app.logger.exception("apply_album_cleanup_route failed for op_id=%s", op_id)
+        return jsonify({"ok": False, "error": "Album cleanup apply failed", "error_kind": "other"}), 500
+
+
+def _classify_album_cleanup_apply_failure(res: Dict[str, Any]) -> Tuple[str, str]:
+    """Classify an Apply failure into (error_kind, user-facing message).
+
+    error_kind is one of:
+      - "stale_plan": confirmed nothing changed (engine's "mutated" flag is
+        False) and the failure looks like a precondition/staleness refusal.
+        Safe to tell the user nothing happened and offer "generate a new
+        plan."
+      - "partial_mutation": the engine's "mutated" flag is True -- at least
+        one file was already irreversibly deleted in this Apply call before
+        the failure. Must never be described as "nothing changed."
+      - "other": mutated is False but the failure isn't a staleness signal
+        (e.g. a missing/unreachable database) -- a genuine operational
+        error, not evidence the album changed.
+
+    The one guarantee that must never be violated: "stale_plan" -- and only
+    "stale_plan" -- may ever be shown to the user as "nothing was changed."
+    That decision is driven by the engine's own "mutated" flag, never by
+    guessing from error-string content, because a failure's text can look
+    like an early/stale-plan refusal even when it fired mid-Apply, after
+    earlier steps in the same call already deleted files (e.g. the
+    DB-membership-drift check inside the delete_db_record step).
+    """
+    raw_error = res.get("error") or "Precondition revalidation failed."
+    if res.get("mutated"):
+        return "partial_mutation", (
+            "The cleanup plan could not finish: some file(s) were already "
+            "deleted before this error occurred, but the operation did not "
+            "complete. Check the album's current state carefully before "
+            f"retrying. Details: {raw_error}"
+        )
+    lowered = raw_error.lower()
+    stale_signals = (
+        "precondition", "changed", "stale", "symlink",
+        "no longer exists", "could not stat",
+    )
+    if any(signal in lowered for signal in stale_signals):
+        return "stale_plan", "The album changed after this cleanup plan was created. Nothing was changed. Generate a new plan to continue."
+    return "other", raw_error
+
 def _delete_album_ids_from_db(album_ids: list, log: list, *,
                               delete_files: bool = False) -> int:
     """Remove imported DB rows for failed validation.
@@ -52437,6 +52539,15 @@ def api_transaction_settings_save():
 
 @app.get("/api/transactions")
 def api_transactions_list():
+    # SEC-002 Wave 16 final review: this previously fell back to
+    # beets_client.list_transactions() (browsing the ENTIRE engine
+    # TransactionStore, across every mutation family and every
+    # operation ever run, not just this session's own) whenever the local
+    # list was empty. Nothing in the frontend calls this fallback --
+    # AlbumCleanupModal only ever reads the transaction embedded directly
+    # in its own Plan/Apply responses -- so it was unused, unjustified
+    # attack surface (unbounded server-side path/metadata exposure for no
+    # product benefit). Kept local-only until a real feature needs it.
     _sync_transactions_from_jobs()
     rows, total = transactions.list(
         offset=_transaction_int_arg("offset", 0, 0, 1_000_000),
@@ -52451,6 +52562,12 @@ def api_transactions_list():
 
 @app.get("/api/transactions/<transaction_id>")
 def api_transaction_detail(transaction_id):
+    # SEC-002 Wave 16 final review: same rationale as api_transactions_list
+    # above -- the engine get_transaction() fallback here was unused dead
+    # surface (AlbumCleanupModal reads plan.transaction /
+    # applyResult directly from the Plan/Apply responses, never a separate
+    # GET). Kept local-only; add a properly scoped fallback if a real
+    # feature needs to poll a specific known engine transaction by ID.
     _sync_transactions_from_jobs()
     try:
         tx = transactions.get(
@@ -52458,9 +52575,9 @@ def api_transaction_detail(transaction_id):
             offset=_transaction_int_arg("offset", 0, 0, 1_000_000),
             limit=_transaction_int_arg("limit", 100, 1, 1000),
         )
+        return jsonify({"ok": True, "transaction": tx})
     except KeyError:
         return jsonify({"ok": False, "error": "Transaction not found"}), 404
-    return jsonify({"ok": True, "transaction": tx})
 
 
 @app.post("/api/transactions/<transaction_id>/approve")
@@ -52499,10 +52616,20 @@ def api_transaction_apply(transaction_id):
 
 @app.post("/api/transactions/<transaction_id>/rollback")
 def api_transaction_rollback(transaction_id):
+    _sync_transactions_from_jobs()
     try:
         tx = transactions.get(transaction_id)
     except KeyError:
-        return jsonify({"ok": False, "error": "Transaction not found"}), 404
+        try:
+            res = beets_client.rollback_import_review_cleanup(transaction_id)
+            status_code = 200 if res.get("ok") else 400
+            return jsonify(res), status_code
+        except BeetsUnavailableError as ex:
+            return jsonify({"ok": False, "error": f"Beets engine unavailable: {ex}"}), 503
+        except BeetsError as ex:
+            return jsonify({"ok": False, "error": str(ex)}), 400
+        except Exception:
+            return jsonify({"ok": False, "error": "Transaction not found"}), 404
     rollback = tx.get("rollback") or {}
     operations = rollback.get("operations") or []
     if not rollback.get("available") or not operations:

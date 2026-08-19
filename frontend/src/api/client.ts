@@ -1411,3 +1411,59 @@ export function albumAddMbids(
 ): Promise<JobStartResponse> {
   return apiJson<JobStartResponse>(`/api/albums/${albumId}/add-mbids`, jsonRequest('POST', payload));
 }
+
+export interface AlbumCleanupPlanResponse extends ApiOkResponse {
+  operation_id?: string;
+  status?: string;
+  album_id?: number;
+  target_path?: string;
+  file_count?: number;
+  transaction?: Record<string, unknown>;
+  reversibility?: string;
+  error?: string;
+}
+
+/** Authoritative failure classification from the Web Manager route -- see
+ * _classify_album_cleanup_apply_failure in app.py. Only "stale_plan" may
+ * ever be presented as "nothing was changed"; "partial_mutation" means at
+ * least one file was already deleted before the failure and must be shown
+ * distinctly from a plain stale-plan refusal. */
+export type AlbumCleanupApplyErrorKind = 'stale_plan' | 'partial_mutation' | 'other';
+
+export interface AlbumCleanupApplyResponse extends ApiOkResponse {
+  operation_id?: string;
+  status?: string;
+  deleted?: string[];
+  moved?: string[];
+  skipped?: Array<{ file: string; reason: string }>;
+  log?: string[];
+  error?: string;
+  error_kind?: AlbumCleanupApplyErrorKind;
+  mutated?: boolean;
+}
+
+export interface AlbumCleanupRollbackResponse extends ApiOkResponse {
+  operation_id?: string;
+  status?: string;
+  restored?: string[];
+  log?: string[];
+  error?: string;
+}
+
+export function planAlbumCleanup(albumId: number): Promise<AlbumCleanupPlanResponse> {
+  return apiJson<AlbumCleanupPlanResponse>(`/api/albums/${albumId}/cleanup/plan`, jsonRequest('POST'));
+}
+
+export function applyAlbumCleanup(operationId: string): Promise<AlbumCleanupApplyResponse> {
+  return apiJson<AlbumCleanupApplyResponse>('/api/albums/cleanup/apply', jsonRequest('POST', { operation_id: operationId }));
+}
+
+// Album Cleanup transactions are irreversible by design (Wave 15/16): the
+// engine always sets reversibility=IRREVERSIBLE and rollback_available=False
+// for this mutation family, so this always resolves with ok:false. It still
+// calls the generic /api/transactions/<id>/rollback route (not a dedicated
+// album-cleanup route) so the same transaction-family enforcement the
+// engine applies to every rollback request applies here too.
+export function rollbackAlbumCleanup(operationId: string): Promise<AlbumCleanupRollbackResponse> {
+  return apiJson<AlbumCleanupRollbackResponse>(`/api/transactions/${operationId}/rollback`, jsonRequest('POST'));
+}
