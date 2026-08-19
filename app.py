@@ -13100,6 +13100,74 @@ def cleanup_import_review_files():
         app.logger.exception("cleanup_import_review_files failed for %r", folder_path)
         return jsonify({"ok": False, "error": "Could not cleanup review files.", "log": log}), 500
 
+
+@app.post("/api/albums/<int:album_id>/cleanup/plan")
+@app.post("/api/albums/cleanup/plan")
+def plan_album_cleanup_route(album_id: int = 0):
+    payload = request.get_json(silent=True) or {}
+    target_album_id = album_id or int(payload.get("album_id") or 0)
+    if not target_album_id:
+        return jsonify({"ok": False, "error": "album_id required"}), 400
+
+    try:
+        res = beets_client.plan_album_cleanup(target_album_id)
+        status_code = 200 if res.get("ok") else 400
+        return jsonify(res), status_code
+    except BeetsUnavailableError as ex:
+        return jsonify({"ok": False, "error": f"Beets engine unavailable: {ex}"}), 503
+    except BeetsError as ex:
+        return jsonify({"ok": False, "error": str(ex)}), 400
+    except Exception as ex:
+        app.logger.exception("plan_album_cleanup_route failed for album_id=%s", target_album_id)
+        return jsonify({"ok": False, "error": "Album cleanup planning failed"}), 500
+
+
+@app.post("/api/albums/cleanup/apply")
+def apply_album_cleanup_route():
+    payload = request.get_json(silent=True) or {}
+    op_id = _s(payload.get("operation_id")).strip()
+    if not op_id:
+        return jsonify({"ok": False, "error": "operation_id required"}), 400
+
+    try:
+        res = beets_client.apply_album_cleanup(op_id)
+        if not res.get("ok"):
+            err_msg = res.get("error") or "Precondition revalidation failed."
+            if "precondition" in err_msg.lower() or "changed" in err_msg.lower() or "stale" in err_msg.lower():
+                err_msg = "The album changed after this cleanup plan was created. Nothing was changed. Generate a new plan to continue."
+            return jsonify({"ok": False, "error": err_msg, "log": res.get("log", [])}), 400
+        return jsonify(res), 200
+    except BeetsUnavailableError as ex:
+        return jsonify({"ok": False, "error": f"Beets engine unavailable: {ex}"}), 503
+    except BeetsError as ex:
+        err_str = str(ex)
+        if "precondition" in err_str.lower() or "changed" in err_str.lower() or "stale" in err_str.lower():
+            err_str = "The album changed after this cleanup plan was created. Nothing was changed. Generate a new plan to continue."
+        return jsonify({"ok": False, "error": err_str}), 400
+    except Exception as ex:
+        app.logger.exception("apply_album_cleanup_route failed for op_id=%s", op_id)
+        return jsonify({"ok": False, "error": "Album cleanup apply failed"}), 500
+
+
+@app.post("/api/albums/cleanup/rollback")
+def rollback_album_cleanup_route():
+    payload = request.get_json(silent=True) or {}
+    op_id = _s(payload.get("operation_id")).strip()
+    if not op_id:
+        return jsonify({"ok": False, "error": "operation_id required"}), 400
+
+    try:
+        res = beets_client.rollback_import_review_cleanup(op_id)
+        status_code = 200 if res.get("ok") else 400
+        return jsonify(res), status_code
+    except BeetsUnavailableError as ex:
+        return jsonify({"ok": False, "error": f"Beets engine unavailable: {ex}"}), 503
+    except BeetsError as ex:
+        return jsonify({"ok": False, "error": str(ex)}), 400
+    except Exception as ex:
+        app.logger.exception("rollback_album_cleanup_route failed for op_id=%s", op_id)
+        return jsonify({"ok": False, "error": "Transaction rollback failed"}), 500
+
 def _delete_album_ids_from_db(album_ids: list, log: list, *,
                               delete_files: bool = False) -> int:
     """Remove imported DB rows for failed validation.
@@ -52438,14 +52506,35 @@ def api_transaction_settings_save():
 @app.get("/api/transactions")
 def api_transactions_list():
     _sync_transactions_from_jobs()
+    offset = _transaction_int_arg("offset", 0, 0, 1_000_000)
+    limit = _transaction_int_arg("limit", 50, 1, 500)
+    status = str(request.args.get("status") or "")
+    operation = str(request.args.get("operation") or "")
+    query = str(request.args.get("q") or "")
+    job = str(request.args.get("job") or "")
+
     rows, total = transactions.list(
-        offset=_transaction_int_arg("offset", 0, 0, 1_000_000),
-        limit=_transaction_int_arg("limit", 50, 1, 500),
-        status=str(request.args.get("status") or ""),
-        operation=str(request.args.get("operation") or ""),
-        query=str(request.args.get("q") or ""),
-        job=str(request.args.get("job") or ""),
+        offset=offset,
+        limit=limit,
+        status=status,
+        operation=operation,
+        query=query,
+        job=job,
     )
+    if not rows:
+        try:
+            res = beets_client.list_transactions(
+                offset=offset,
+                limit=limit,
+                status=status,
+                operation=operation,
+                query=query,
+            )
+            if res.get("ok"):
+                return jsonify(res)
+        except Exception as ex:
+            app.logger.debug("Engine transactions list fallback skipped: %s", ex)
+
     return jsonify({"ok": True, "transactions": rows, "total": total})
 
 
@@ -52458,9 +52547,17 @@ def api_transaction_detail(transaction_id):
             offset=_transaction_int_arg("offset", 0, 0, 1_000_000),
             limit=_transaction_int_arg("limit", 100, 1, 1000),
         )
+        return jsonify({"ok": True, "transaction": tx})
     except KeyError:
-        return jsonify({"ok": False, "error": "Transaction not found"}), 404
-    return jsonify({"ok": True, "transaction": tx})
+        try:
+            res = beets_client.get_transaction(transaction_id)
+            return jsonify(res), 200
+        except BeetsUnavailableError as ex:
+            return jsonify({"ok": False, "error": f"Beets engine unavailable: {ex}"}), 503
+        except BeetsError as ex:
+            return jsonify({"ok": False, "error": str(ex)}), 404
+        except Exception:
+            return jsonify({"ok": False, "error": "Transaction not found"}), 404
 
 
 @app.post("/api/transactions/<transaction_id>/approve")
@@ -52499,10 +52596,20 @@ def api_transaction_apply(transaction_id):
 
 @app.post("/api/transactions/<transaction_id>/rollback")
 def api_transaction_rollback(transaction_id):
+    _sync_transactions_from_jobs()
     try:
         tx = transactions.get(transaction_id)
     except KeyError:
-        return jsonify({"ok": False, "error": "Transaction not found"}), 404
+        try:
+            res = beets_client.rollback_import_review_cleanup(transaction_id)
+            status_code = 200 if res.get("ok") else 400
+            return jsonify(res), status_code
+        except BeetsUnavailableError as ex:
+            return jsonify({"ok": False, "error": f"Beets engine unavailable: {ex}"}), 503
+        except BeetsError as ex:
+            return jsonify({"ok": False, "error": str(ex)}), 400
+        except Exception:
+            return jsonify({"ok": False, "error": "Transaction not found"}), 404
     rollback = tx.get("rollback") or {}
     operations = rollback.get("operations") or []
     if not rollback.get("available") or not operations:

@@ -17,6 +17,7 @@ import type { ArtRepairItem, ArtRepairReportResponse } from '../api/types';
 import { artistNeedsAttention, getAlbumHealth } from '../lib/libraryHealth';
 import { apiGet } from '../lib/api';
 import type { LibraryAlbum, LibraryArtist, LibraryResponse, LibraryTrack } from '../types/api';
+import { AlbumCleanupModal } from '../components/AlbumCleanupModal';
 
 type StatusFilter = 'all' | 'ids' | 'missing' | 'extra' | 'art' | 'clean';
 type SearchScope = 'all' | 'artists' | 'albums' | 'tracks';
@@ -792,6 +793,7 @@ function AlbumCard({
   showArtist,
   onDetails,
   onNavigate,
+  onCleanAlbum,
 }: {
   row: AlbumRow;
   artRepairAlbumIds: Set<number>;
@@ -800,6 +802,7 @@ function AlbumCard({
   showArtist: boolean;
   onDetails: (row: AlbumRow) => void;
   onNavigate: (path: string) => void;
+  onCleanAlbum?: (row: AlbumRow) => void;
 }) {
   const { album, artist } = row;
   const title = displayAlbumTitle(album);
@@ -834,6 +837,16 @@ function AlbumCard({
           <Button size="small" variant="outlined" onClick={() => onDetails(row)}>
             View details
           </Button>
+          {album.album_id ? (
+            <Button
+              size="small"
+              variant="outlined"
+              color="warning"
+              onClick={() => onCleanAlbum?.(row)}
+            >
+              Clean Up Album
+            </Button>
+          ) : null}
           {action ? (
             album.pending_review ? (
               <Button
@@ -873,6 +886,7 @@ function AlbumGrid({
   showArtist,
   onDetails,
   onNavigate,
+  onCleanAlbum,
 }: {
   rows: AlbumRow[];
   title: string;
@@ -883,6 +897,7 @@ function AlbumGrid({
   showArtist: boolean;
   onDetails: (row: AlbumRow) => void;
   onNavigate: (path: string) => void;
+  onCleanAlbum?: (row: AlbumRow) => void;
 }) {
   return (
     <section className="space-y-3">
@@ -905,6 +920,7 @@ function AlbumGrid({
                 showArtist={showArtist}
                 onDetails={onDetails}
                 onNavigate={onNavigate}
+                onCleanAlbum={onCleanAlbum}
               />
             ))}
           </div>
@@ -925,6 +941,7 @@ function ArtistDetail({
   onBack,
   onDetails,
   onNavigate,
+  onCleanAlbum,
 }: {
   artist: LibraryArtist;
   rows: AlbumRow[];
@@ -934,6 +951,7 @@ function ArtistDetail({
   onBack: () => void;
   onDetails: (row: AlbumRow) => void;
   onNavigate: (path: string) => void;
+  onCleanAlbum?: (row: AlbumRow) => void;
 }) {
   const name = displayArtistName(artist);
   const attentionAlbums = countAttentionAlbums(artist);
@@ -981,6 +999,7 @@ function ArtistDetail({
         showArtist={false}
         onDetails={onDetails}
         onNavigate={onNavigate}
+        onCleanAlbum={onCleanAlbum}
       />
     </section>
   );
@@ -1003,6 +1022,7 @@ function AlbumDetailsDialog({
   artRepairItemMap,
   libraryVersion,
   onClose,
+  onCleanAlbum,
 }: {
   row: AlbumRow | null;
   tracks: LibraryTrack[];
@@ -1012,6 +1032,7 @@ function AlbumDetailsDialog({
   artRepairItemMap: Map<number, ArtRepairItem>;
   libraryVersion?: number;
   onClose: () => void;
+  onCleanAlbum?: (row: AlbumRow) => void;
 }) {
   const album = row?.album ?? null;
   const artist = row?.artist ?? null;
@@ -1046,7 +1067,22 @@ function AlbumDetailsDialog({
                       </div>
                     </div>
                   </div>
-                  <Button size="small" variant="outlined" onClick={onClose}>Close</Button>
+                  <div className="flex items-center gap-2">
+                    {album.album_id ? (
+                      <Button
+                        size="small"
+                        variant="contained"
+                        color="warning"
+                        onClick={() => {
+                          onClose();
+                          if (row) onCleanAlbum?.(row);
+                        }}
+                      >
+                        Clean Up Album
+                      </Button>
+                    ) : null}
+                    <Button size="small" variant="outlined" onClick={onClose}>Close</Button>
+                  </div>
                 </div>
 
                 <div className="rounded border border-graphite-800 bg-graphite-900/50 p-3">
@@ -1114,6 +1150,7 @@ export default function Library() {
   const [detailsTracks, setDetailsTracks] = useState<LibraryTrack[]>([]);
   const [detailsLoading, setDetailsLoading] = useState(false);
   const [detailsError, setDetailsError] = useState('');
+  const [cleanupTarget, setCleanupTarget] = useState<AlbumRow | null>(null);
 
   const loadLibrary = useCallback(async (includeTracks = false) => {
     setLoading(true);
@@ -1424,6 +1461,7 @@ export default function Library() {
           showArtist
           onDetails={setDetailsRow}
           onNavigate={handleNavigate}
+          onCleanAlbum={setCleanupTarget}
         />
       ) : selectedArtist ? (
         <ArtistDetail
@@ -1435,6 +1473,7 @@ export default function Library() {
           onBack={() => setSelectedArtistName('')}
           onDetails={setDetailsRow}
           onNavigate={handleNavigate}
+          onCleanAlbum={setCleanupTarget}
         />
       ) : (
         <ArtistBrowser
@@ -1456,6 +1495,17 @@ export default function Library() {
         artRepairItemMap={artRepairItemMap}
         libraryVersion={libraryVersion}
         onClose={() => setDetailsRow(null)}
+        onCleanAlbum={setCleanupTarget}
+      />
+
+      <AlbumCleanupModal
+        open={Boolean(cleanupTarget)}
+        albumId={Number(cleanupTarget?.album.album_id || 0)}
+        albumTitle={cleanupTarget ? displayAlbumTitle(cleanupTarget.album) : ''}
+        artistName={cleanupTarget ? displayArtistName(cleanupTarget.artist) : ''}
+        mbReleaseGroupId={cleanupTarget?.album.mb_releasegroupid}
+        onClose={() => setCleanupTarget(null)}
+        onSuccess={() => void loadLibrary()}
       />
     </div>
   );

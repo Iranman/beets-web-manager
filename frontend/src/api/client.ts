@@ -1411,3 +1411,58 @@ export function albumAddMbids(
 ): Promise<JobStartResponse> {
   return apiJson<JobStartResponse>(`/api/albums/${albumId}/add-mbids`, jsonRequest('POST', payload));
 }
+
+export interface AlbumCleanupPlanResponse extends ApiOkResponse {
+  operation_id?: string;
+  status?: string;
+  album_id?: number;
+  target_path?: string;
+  file_count?: number;
+  transaction?: Record<string, unknown>;
+  reversibility?: string;
+  error?: string;
+}
+
+export interface AlbumCleanupApplyResponse extends ApiOkResponse {
+  operation_id?: string;
+  status?: string;
+  deleted?: string[];
+  moved?: string[];
+  skipped?: Array<{ file: string; reason: string }>;
+  log?: string[];
+  error?: string;
+}
+
+export interface AlbumCleanupRollbackResponse extends ApiOkResponse {
+  operation_id?: string;
+  status?: string;
+  restored?: string[];
+  log?: string[];
+  error?: string;
+}
+
+export function planAlbumCleanup(albumId: number): Promise<AlbumCleanupPlanResponse> {
+  return apiJson<AlbumCleanupPlanResponse>(`/api/albums/${albumId}/cleanup/plan`, jsonRequest('POST'));
+}
+
+export function applyAlbumCleanup(operationId: string): Promise<AlbumCleanupApplyResponse> {
+  return apiJson<AlbumCleanupApplyResponse>('/api/albums/cleanup/apply', jsonRequest('POST', { operation_id: operationId }));
+}
+
+export function rollbackAlbumCleanup(operationId: string): Promise<AlbumCleanupRollbackResponse> {
+  return apiJson<AlbumCleanupRollbackResponse>(`/api/transactions/${operationId}/rollback`, jsonRequest('POST'));
+}
+
+export function getEngineTransaction(operationId: string): Promise<Record<string, unknown>> {
+  return apiJson<Record<string, unknown>>(`/api/transactions/${operationId}`);
+}
+
+export function listEngineTransactions(params?: { offset?: number; limit?: number; status?: string; operation?: string; query?: string }): Promise<Record<string, unknown>> {
+  const qs = new URLSearchParams();
+  if (params?.offset !== undefined) qs.set('offset', String(params.offset));
+  if (params?.limit !== undefined) qs.set('limit', String(params.limit));
+  if (params?.status) qs.set('status', params.status);
+  if (params?.operation) qs.set('operation', params.operation);
+  if (params?.query) qs.set('query', params.query);
+  return apiJson<Record<string, unknown>>(`/api/transactions?${qs.toString()}`);
+}

@@ -275,6 +275,10 @@ class BeetsClient:
         """Engine-side album cleanup application (SEC-002 Wave 15)."""
         return self._request("POST", "/albums/cleanup/apply", {"operation_id": operation_id}, timeout=timeout)
 
+    def rollback_import_review_cleanup(self, operation_id: str, *, timeout: float = 60.0) -> Dict[str, Any]:
+        """Engine-side import review / album cleanup rollback (SEC-002 Wave 15/16)."""
+        return self._request("POST", "/imports/review/cleanup/rollback", {"operation_id": operation_id}, timeout=timeout)
+
     def get_transaction(self, transaction_id: str, *, format: str = "json", timeout: float = 15.0) -> Dict[str, Any]:
         """Fetch transaction record from engine TransactionStore (SEC-002 Wave 15)."""
         return self._request("GET", f"/transactions/{transaction_id}?format={format}", timeout=timeout)
