@@ -6577,109 +6577,34 @@ def _merge_imported_album_into_existing(imported_album_id: int, existing_album_i
                 repair_threshold=_MB_TRACK_REPAIR_MATCH_THRESHOLD,
             )
 
-        def _delete_row_file(row: sqlite3.Row, reason: str) -> None:
-            raw_path = _s(row["path"]) if "path" in row.keys() else ""
-            if not raw_path:
-                return
-            fpath = Path(raw_path)
-            if not fpath.is_absolute():
-                fpath = MUSIC_ROOT / raw_path
-            try:
-                resolved = fpath.resolve(strict=False)
-                if _path_is_under(resolved, MUSIC_ROOT):
-                    resolved.unlink(missing_ok=True)
-                    log.append(
-                        f"  [merge] Removed {reason} track "
-                        f"{int(row['track'] or 0):02d}: {resolved.name}"
-                    )
-            except Exception as ex:
-                log.append(f"  [merge] WARN removing conflicting file: {ex}")
-
-        with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:
-            existing = con.execute(
-                "SELECT id, album, albumartist, mb_albumid, year FROM albums WHERE id=?",
-                (existing_album_id,),
-            ).fetchone()
-            if not existing:
-                log.append(f"  [merge] Existing album_id {existing_album_id} not found; keeping imported album_id {imported_album_id}")
-                return imported_album_id
-            existing_rows = con.execute(
-                "SELECT id, title, disc, track, path, mb_trackid, length "
-                "FROM items WHERE album_id=? ORDER BY disc, track, id",
-                (existing_album_id,),
-            ).fetchall()
-            existing_by_key: Dict[tuple, List[sqlite3.Row]] = {}
-            for row in existing_rows:
-                key = (int(row["disc"] or 1), int(row["track"] or 0))
-                if key[1]:
-                    existing_by_key.setdefault(key, []).append(row)
-            imported_rows = con.execute(
-                "SELECT id, title, disc, track, path, mb_trackid, length "
-                "FROM items WHERE album_id=? ORDER BY disc, track, id",
-                (imported_album_id,),
-            ).fetchall()
-            move_ids: List[int] = []
-            dup_rows: List[sqlite3.Row] = []
-            replace_rows: List[sqlite3.Row] = []
-            for row in imported_rows:
-                key = (int(row["disc"] or 1), int(row["track"] or 0))
-                if key[1] and key in existing_by_key:
-                    target = target_by_key.get(key, {})
-                    existing_rows_for_key = existing_by_key.get(key, [])
-                    forced_replace_rows = [
-                        ex for ex in existing_rows_for_key
-                        if int(ex["id"] or 0) in forced_replace_ids
-                    ]
-                    if forced_replace_rows:
-                        existing_by_key[key] = [
-                            ex for ex in existing_rows_for_key
-                            if int(ex["id"] or 0) not in forced_replace_ids
-                        ]
-                    else:
-                        existing_matches = [
-                            ex for ex in existing_rows_for_key
-                            if _row_matches_target(ex, target)
-                        ]
-                        if existing_matches:
-                            dup_rows.append(row)
-                            continue
-                        replace_rows.extend(existing_rows_for_key)
-                        existing_by_key[key] = []
-                move_ids.append(int(row["id"]))
-                if key[1]:
-                    existing_by_key.setdefault(key, []).append(row)
-
             if replace_rows:
                 replace_ids = sorted({int(r["id"]) for r in replace_rows})
-                for row in replace_rows:
-                    _delete_row_file(row, "wrong existing")
-                con.execute(
-                    f"DELETE FROM items WHERE id IN ({','.join('?' * len(replace_ids))})",
-                    replace_ids,
-                )
-                log.append(
-                    f"  [merge] Removed {len(replace_ids)} conflicting existing DB row(s) "
-                    "before merging downloaded replacements."
-                )
+                try:
+                    plan_res = beets_client.plan_bulk_import_replacement({
+                        "existing_album_id": existing_album_id,
+                        "old_item_ids": replace_ids,
+                        "source_folder": source_folder,
+                        "mb_albumid": mb_albumid,
+                        "reason": "Bulk import album merge replacement",
+                    })
+                    if plan_res.get("ok"):
+                        op_id = plan_res.get("operation_id")
+                        apply_res = beets_client.apply_bulk_import_replacement(op_id)
+                        if apply_res.get("ok"):
+                            log.append(
+                                f"  [merge] Delegated removal of {len(replace_ids)} conflicting row(s) "
+                                f"to engine bulk replacement tx {op_id}."
+                            )
+                        else:
+                            log.append(f"  [merge] WARN bulk replacement apply failed: {apply_res.get('error')}")
+                    else:
+                        log.append(f"  [merge] WARN bulk replacement plan failed: {plan_res.get('error')}")
+                except Exception as ex:
+                    log.append(f"  [merge] WARN exception delegating bulk replacement to engine: {ex}")
 
             if dup_rows:
-                source_root = Path(source_folder).resolve(strict=False)
-                for row in dup_rows:
-                    raw_path = _s(row["path"])
-                    fpath = Path(raw_path)
-                    if not fpath.is_absolute():
-                        fpath = MUSIC_ROOT / raw_path
-                    try:
-                        resolved = fpath.resolve(strict=False)
-                        resolved.relative_to(source_root)
-                        resolved.unlink(missing_ok=True)
-                        log.append(f"  [merge] Removed duplicate downloaded track {int(row['track'] or 0):02d}: {resolved.name}")
-                    except Exception:
-                        pass
-                con.execute(
-                    f"DELETE FROM items WHERE id IN ({','.join('?' * len(dup_rows))})",
-                    [int(r["id"]) for r in dup_rows],
-                )
+                dup_ids = [int(r["id"]) for r in dup_rows]
+                log.append(f"  [merge] Skipping {len(dup_ids)} duplicate downloaded track(s)")
 
             if move_ids:
                 album_name = _s(existing["album"])

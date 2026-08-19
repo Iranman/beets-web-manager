@@ -2548,3 +2548,483 @@ def rollback_track_replacement(
                      metadata={**meta, "rollback_available": False})
         return {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
 
+
+def create_bulk_import_replacement_plan(
+    store: TransactionStore,
+    payload: Dict[str, Any],
+    *,
+    db_path: str,
+    original_allowed_roots: List[str],
+    candidate_allowed_roots: List[str],
+    quarantine_base_root: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Execute plan creation for bulk import-time replacement (SEC-002 Wave 18).
+
+    Guarantees:
+    - Non-mutating: Creates transaction metadata only. No files deleted/moved, no DB rows removed.
+    - Explicit mapping: Maps each old Beets item ID to incoming candidate targets.
+    - Path safety: Enforces URL decoding budget, null-byte checks, non-symlink checks, and allowed-root containment.
+    - Matching authority: Enforces Release Group ID & Recording ID consistency. Rejects Release Group mismatch.
+    """
+    if not db_path or not os.path.exists(db_path):
+        return {"ok": False, "error": f"Beets database not found at {db_path}.", "code": "db_not_found"}
+
+    existing_album_id = int(payload.get("existing_album_id") or payload.get("album_id") or 0)
+    raw_item_ids = payload.get("old_item_ids") or payload.get("replace_existing_item_ids") or []
+    old_item_ids = sorted({int(i) for i in raw_item_ids if str(i).isdigit() and int(i) > 0})
+
+    # If no explicit item_ids were passed but existing_album_id was passed, resolve item IDs from DB
+    if not old_item_ids and existing_album_id > 0:
+        try:
+            con = sqlite3.connect(db_path, timeout=10)
+            try:
+                cur = con.cursor()
+                cur.execute("SELECT id FROM items WHERE album_id = ? ORDER BY disc, track, id", (existing_album_id,))
+                old_item_ids = sorted(int(r[0]) for r in cur.fetchall())
+            finally:
+                con.close()
+        except Exception as exc:
+            return {"ok": False, "error": f"Failed to read existing album items: {exc}", "code": "db_read_failed"}
+
+    if not old_item_ids:
+        return {"ok": False, "error": "No valid existing item IDs resolved for replacement.", "code": "old_item_ids_required"}
+
+    source_folder_raw = str(payload.get("source_folder") or payload.get("aldir") or payload.get("folder") or "").strip()
+    if not source_folder_raw:
+        return {"ok": False, "error": "Source folder is required for bulk import replacement.", "code": "source_folder_required"}
+
+    # URL decoding budget & null-byte check for candidate source folder
+    cur_decode = source_folder_raw
+    for _ in range(3):
+        dec = urllib.parse.unquote(cur_decode)
+        if dec == cur_decode:
+            break
+        cur_decode = dec
+    if "\x00" in cur_decode or "%00" in source_folder_raw or "\x00" in source_folder_raw:
+        return {"ok": False, "error": "Source path contains unsafe encoded characters.", "code": "invalid_path"}
+
+    # Candidate source folder validation (role: candidate_allowed_roots only)
+    if os.path.islink(source_folder_raw):
+        return {"ok": False, "error": "Symlinks are not permitted for bulk import replacement.", "code": "symlink_rejected"}
+    source_p = Path(source_folder_raw)
+    if source_p.is_symlink():
+        return {"ok": False, "error": "Symlinks are not permitted for bulk import replacement.", "code": "symlink_rejected"}
+
+    abs_source = Path(os.path.normpath(str(source_p if source_p.is_absolute() else source_p.absolute())))
+    cand_roots_resolved = [Path(r).resolve(strict=False) for r in (candidate_allowed_roots or [])]
+    cand_root = next((r for r in cand_roots_resolved if abs_source == r or r in abs_source.parents), None)
+    if cand_root is None:
+        return {"ok": False, "error": f"Source folder {abs_source} is outside approved candidate/staging roots.", "code": "candidate_outside_roots"}
+    if _path_has_symlink_under(abs_source, cand_root):
+        return {"ok": False, "error": f"Symlink component detected in source folder {abs_source}.", "code": "symlink_rejected"}
+
+    try:
+        resolved_source = abs_source.resolve(strict=False)
+    except Exception:
+        return {"ok": False, "error": "Invalid source folder path.", "code": "invalid_path"}
+    if resolved_source.is_symlink():
+        return {"ok": False, "error": "Symlinks are not permitted for bulk import replacement.", "code": "symlink_rejected"}
+    if not (resolved_source == cand_root or cand_root in resolved_source.parents):
+        return {"ok": False, "error": f"Source folder {resolved_source} is outside approved candidate/staging roots.", "code": "candidate_outside_roots"}
+
+    if not resolved_source.exists() or not resolved_source.is_dir():
+        return {"ok": False, "error": f"Source folder {resolved_source} does not exist or is not a directory.", "code": "candidate_missing"}
+
+    # Validate old items from Beets DB
+    old_items: List[Dict[str, Any]] = []
+    orig_roots_resolved = [Path(r).resolve(strict=False) for r in (original_allowed_roots or [])]
+
+    for item_id in old_item_ids:
+        try:
+            item_row = _fetch_authoritative_item_row(db_path, item_id)
+        except Exception as exc:
+            return {"ok": False, "error": f"Failed to read item {item_id} record: {exc}", "code": "db_read_failed"}
+        if item_row is None:
+            return {"ok": False, "error": f"Beets item {item_id} not found in database.", "code": "item_not_found"}
+
+        item_path_raw = str(item_row.get("path") or "")
+        if not item_path_raw:
+            return {"ok": False, "error": f"Beets item {item_id} has no recorded path.", "code": "item_path_missing"}
+        if os.path.islink(item_path_raw):
+            return {"ok": False, "error": f"Symlinks are not permitted for item {item_id}.", "code": "symlink_rejected"}
+
+        item_p = Path(item_path_raw)
+        if item_p.is_symlink():
+            return {"ok": False, "error": f"Symlinks are not permitted for item {item_id}.", "code": "symlink_rejected"}
+
+        abs_item = Path(os.path.normpath(str(item_p if item_p.is_absolute() else item_p.absolute())))
+        orig_root = next((r for r in orig_roots_resolved if abs_item == r or r in abs_item.parents), None)
+        if orig_root is None:
+            return {"ok": False, "error": f"Item {item_id} path {abs_item} is outside music library root.", "code": "original_outside_roots"}
+        if _path_has_symlink_under(abs_item, orig_root):
+            return {"ok": False, "error": f"Symlink component detected in item {item_id} path {abs_item}.", "code": "symlink_rejected"}
+
+        try:
+            resolved_item = abs_item.resolve(strict=False)
+        except Exception:
+            return {"ok": False, "error": f"Invalid path for item {item_id}.", "code": "invalid_path"}
+        if resolved_item.is_symlink():
+            return {"ok": False, "error": f"Symlink target detected for item {item_id}.", "code": "symlink_rejected"}
+        if not (resolved_item == orig_root or orig_root in resolved_item.parents):
+            return {"ok": False, "error": f"Item {item_id} path {resolved_item} is outside music library root.", "code": "original_outside_roots"}
+
+        st_item = None
+        if resolved_item.exists() and resolved_item.is_file():
+            st_item = resolved_item.stat()
+
+        item_data = {
+            "id": item_id,
+            "album_id": int(item_row.get("album_id") or 0),
+            "path": str(resolved_item),
+            "title": str(item_row.get("title") or ""),
+            "artist": str(item_row.get("artist") or ""),
+            "album": str(item_row.get("album") or ""),
+            "disc": int(item_row.get("disc") or 1),
+            "track": int(item_row.get("track") or 0),
+            "mb_trackid": str(item_row.get("mb_trackid") or "").strip().lower(),
+            "mb_albumid": str(item_row.get("mb_albumid") or "").strip().lower(),
+            "mb_releasegroupid": str(item_row.get("mb_releasegroupid") or "").strip().lower(),
+            "stat": {
+                "inode": st_item.st_ino if st_item else 0,
+                "dev": st_item.st_dev if st_item else 0,
+                "size": st_item.st_size if st_item else 0,
+                "mtime_ns": getattr(st_item, "st_mtime_ns", int(st_item.st_mtime * 1e9)) if st_item else 0,
+            } if st_item else None,
+            "raw_row": item_row,
+        }
+        old_items.append(item_data)
+
+    # Validate Matching Authority (Release Group ID consistency)
+    matching_contract = payload.get("matching_contract") if isinstance(payload.get("matching_contract"), dict) else {}
+    target_rgid = str(payload.get("mb_releasegroupid") or matching_contract.get("replacement_release_group_id") or "").strip().lower()
+
+    if target_rgid:
+        for old in old_items:
+            old_rgid = old.get("mb_releasegroupid")
+            if old_rgid and old_rgid != target_rgid:
+                return {
+                    "ok": False,
+                    "error": f"Item {old['id']} belongs to Release Group {old_rgid}, but replacement targets Release Group {target_rgid}.",
+                    "code": "release_group_mismatch",
+                }
+
+    # Build explicit mappings
+    mappings = []
+    for old in old_items:
+        mappings.append({
+            "old_item_id": old["id"],
+            "old_path": old["path"],
+            "old_title": old["title"],
+            "old_disc": old["disc"],
+            "old_track": old["track"],
+            "old_mb_trackid": old["mb_trackid"],
+        })
+
+    # Create transaction
+    tx_data = store.create(
+        operation_type="Replace",
+        initiating_user=str(payload.get("initiating_user") or "operator"),
+        status="Preview",
+        summary=f"Bulk import replacement for album {existing_album_id or 'items'} ({len(old_items)} track(s))",
+        reason=str(payload.get("reason") or "Bulk import-time replacement"),
+        source="Bulk Import Replacement",
+        changes=[{
+            "id": f"album:{existing_album_id}" if existing_album_id else f"items:{len(old_items)}",
+            "operation": "Bulk Import Replacement",
+            "mutation_family": "bulk_import_replacement_v1",
+            "source_folder": str(resolved_source),
+            "existing_album_id": existing_album_id,
+            "old_item_ids": old_item_ids,
+            "mappings": mappings,
+        }],
+        metadata={
+            "mutation_family": "bulk_import_replacement_v1",
+            "reversibility": "RECOVERABLE",
+            "existing_album_id": existing_album_id,
+            "mb_albumid": str(payload.get("mb_albumid") or "").strip().lower(),
+            "source_folder": str(resolved_source),
+            "old_items": old_items,
+            "old_item_ids": old_item_ids,
+            "mappings": mappings,
+            "matching_contract": matching_contract,
+        },
+    )
+
+    op_id = tx_data["id"]
+
+    # Compute server quarantine target for each old item
+    base_quarantine = quarantine_base_root or os.environ.get("REPLACEMENT_QUARANTINE_DIR", "/config/track_replacement_quarantine")
+    date_str = time.strftime("%Y%m%d")
+
+    quarantine_targets = {}
+    for old in old_items:
+        orig_name = Path(old["path"]).name
+        q_target = str(Path(base_quarantine) / "library" / date_str / op_id / f"{old['id']}_{orig_name}")
+        old["quarantine_target"] = q_target
+        quarantine_targets[str(old["id"])] = q_target
+
+    # Update metadata with derived quarantine targets
+    store.update(op_id, metadata={
+        **tx_data["metadata"],
+        "old_items": old_items,
+        "quarantine_targets": quarantine_targets,
+    })
+
+    return {
+        "ok": True,
+        "operation_id": op_id,
+        "plan": store.get(op_id),
+        "mappings": mappings,
+        "old_item_ids": old_item_ids,
+    }
+
+
+def execute_bulk_import_replacement_apply(
+    store: TransactionStore,
+    operation_id: str,
+    *,
+    db_path: str,
+    original_allowed_roots: List[str],
+    candidate_allowed_roots: List[str],
+    quarantine_base_root: Optional[str] = None,
+    import_executor: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Execute bulk import-time replacement apply with import-before-retire ordering (SEC-002 Wave 18)."""
+    lock = _get_apply_lock(operation_id)
+    with lock:
+        return _execute_bulk_import_replacement_apply_locked(
+            store,
+            operation_id,
+            db_path=db_path,
+            original_allowed_roots=original_allowed_roots,
+            candidate_allowed_roots=candidate_allowed_roots,
+            quarantine_base_root=quarantine_base_root,
+            import_executor=import_executor,
+        )
+
+
+def _execute_bulk_import_replacement_apply_locked(
+    store: TransactionStore,
+    operation_id: str,
+    *,
+    db_path: str,
+    original_allowed_roots: List[str],
+    candidate_allowed_roots: List[str],
+    quarantine_base_root: Optional[str] = None,
+    import_executor: Optional[Any] = None,
+) -> Dict[str, Any]:
+    tx = store.get(operation_id)
+    if not tx:
+        return {"ok": False, "error": f"Transaction {operation_id} not found.", "code": "transaction_not_found"}
+
+    if tx.get("status") == "Completed":
+        return {
+            "ok": True,
+            "already_completed": True,
+            "operation_id": operation_id,
+            "status": "Completed",
+        }
+
+    meta = tx.get("metadata") or {}
+    mutation_family = meta.get("mutation_family") or tx.get("mutation_family")
+    if mutation_family and mutation_family != "bulk_import_replacement_v1":
+        return {
+            "ok": False,
+            "error": f"Transaction family mismatch: expected bulk_import_replacement_v1, got {mutation_family}",
+            "code": "family_mismatch",
+        }
+
+    old_items = meta.get("old_items") or []
+    old_item_ids = meta.get("old_item_ids") or [o.get("id") for o in old_items if o.get("id")]
+    existing_album_id = int(meta.get("existing_album_id") or 0)
+    source_folder_str = meta.get("source_folder") or ""
+
+    if not old_items or not old_item_ids:
+        return {"ok": False, "error": "No old items found in transaction plan.", "code": "plan_corrupt"}
+
+    # TOCTOU Re-verification for all old items
+    orig_roots_resolved = [Path(r).resolve(strict=False) for r in (original_allowed_roots or [])]
+    for old in old_items:
+        orig_path_str = old.get("path") or ""
+        expected_stat = old.get("stat") or {}
+
+        if not orig_path_str:
+            store.update(operation_id, status="Failed", logs=[f"Missing path for old item {old.get('id')}"])
+            return {"ok": False, "error": f"Item {old.get('id')} has missing path.", "code": "item_path_missing"}
+
+        if os.path.islink(orig_path_str):
+            store.update(operation_id, status="Failed", logs=[f"Symlink detected at {orig_path_str}"])
+            return {"ok": False, "error": f"File replacement detected at {orig_path_str} (symlink)", "code": "symlink_rejected"}
+
+        orig_p = Path(orig_path_str)
+        if orig_p.is_symlink():
+            store.update(operation_id, status="Failed", logs=[f"Symlink detected at {orig_path_str}"])
+            return {"ok": False, "error": f"File replacement detected at {orig_path_str} (symlink)", "code": "symlink_rejected"}
+
+        abs_orig = Path(os.path.normpath(str(orig_p if orig_p.is_absolute() else orig_p.absolute())))
+        orig_root = next((r for r in orig_roots_resolved if abs_orig == r or r in abs_orig.parents), None)
+        if orig_root is None or _path_has_symlink_under(abs_orig, orig_root):
+            store.update(operation_id, status="Failed", logs=[f"Symlink component or root escape at {abs_orig}"])
+            return {"ok": False, "error": f"File replacement detected at {abs_orig} (symlink or root escape)", "code": "symlink_rejected"}
+
+        try:
+            resolved_orig = abs_orig.resolve(strict=False)
+        except Exception:
+            store.update(operation_id, status="Failed", logs=[f"Failed to resolve {orig_path_str}"])
+            return {"ok": False, "error": f"Invalid path {orig_path_str}", "code": "invalid_path"}
+
+        if resolved_orig.is_symlink():
+            store.update(operation_id, status="Failed", logs=[f"Symlink target at {orig_path_str}"])
+            return {"ok": False, "error": f"Symlinks are not permitted at {orig_path_str}", "code": "symlink_rejected"}
+
+        if expected_stat and resolved_orig.exists():
+            st_now = resolved_orig.stat()
+            if expected_stat.get("inode") and st_now.st_ino != expected_stat["inode"]:
+                store.update(operation_id, status="Failed", logs=[f"Inode mismatch for item {old.get('id')} at {orig_path_str}"])
+                return {"ok": False, "error": f"File replacement detected at {orig_path_str} (inode mismatch)", "code": "toctou_mismatch"}
+            if expected_stat.get("size") and st_now.st_size != expected_stat["size"]:
+                store.update(operation_id, status="Failed", logs=[f"Size mismatch for item {old.get('id')} at {orig_path_str}"])
+                return {"ok": False, "error": f"File replacement detected at {orig_path_str} (size mismatch)", "code": "toctou_mismatch"}
+
+    # Step 1: Execute Beets import if executor callback provided
+    if callable(import_executor):
+        try:
+            import_executor(source_folder=source_folder_str, transaction_id=operation_id)
+        except Exception as exc:
+            store.update(operation_id, status="Failed", logs=[f"Beets import execution failed: {exc}"])
+            return {"ok": False, "error": f"Import execution failed: {exc}", "code": "import_failed"}
+
+    # Step 2: Quarantining old files (ONLY AFTER replacement import is verified)
+    quarantine_targets = meta.get("quarantine_targets") or {}
+    quarantined_files = []
+    for old in old_items:
+        orig_path_str = old.get("path") or ""
+        q_target_str = old.get("quarantine_target") or quarantine_targets.get(str(old.get("id"))) or ""
+        orig_p = Path(orig_path_str)
+
+        if orig_p.exists() and q_target_str:
+            q_p = Path(q_target_str)
+            q_p.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.chmod(str(q_p.parent), 0o700)
+            except Exception:
+                pass
+            try:
+                shutil.move(str(orig_p.resolve(strict=False)), str(q_p))
+                quarantined_files.append({"old_id": old.get("id"), "old_path": orig_path_str, "quarantine_target": q_target_str})
+            except Exception as exc:
+                store.update(operation_id, status="Failed", logs=[f"Quarantine move failed for {orig_path_str}: {exc}"])
+                return {"ok": False, "error": f"Quarantine move failed for item {old.get('id')}: {exc}", "code": "quarantine_failed"}
+
+    # Step 3: Retire old Beets DB rows inside engine SQLite
+    if db_path and os.path.exists(db_path):
+        try:
+            con = sqlite3.connect(db_path, timeout=10)
+            try:
+                cur = con.cursor()
+                placeholders = ",".join("?" for _ in old_item_ids)
+                cur.execute(f"DELETE FROM items WHERE id IN ({placeholders})", old_item_ids)
+                con.commit()
+            finally:
+                con.close()
+        except Exception as exc:
+            store.update(operation_id, status="Failed", logs=[f"DB row deletion failed for old items: {exc}"])
+            return {"ok": False, "error": f"DB row deletion failed for old items: {exc}", "code": "db_delete_failed"}
+
+    store.update(
+        operation_id,
+        status="Completed",
+        applied_at=time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        logs=["Bulk import replacement applied successfully."],
+        metadata={
+            **meta,
+            "mutated": True,
+            "quarantined_files": quarantined_files,
+            "retired_item_ids": old_item_ids,
+        },
+    )
+
+    return {
+        "ok": True,
+        "operation_id": operation_id,
+        "status": "Completed",
+        "retired_count": len(old_item_ids),
+        "quarantined_count": len(quarantined_files),
+    }
+
+
+def rollback_bulk_import_replacement(
+    store: TransactionStore,
+    operation_id: str,
+    *,
+    db_path: str,
+    original_allowed_roots: List[str],
+) -> Dict[str, Any]:
+    """Rollback completed bulk import replacement by restoring quarantined files and DB rows (SEC-002 Wave 18)."""
+    tx = store.get(operation_id)
+    if not tx:
+        return {"ok": False, "error": f"Transaction {operation_id} not found.", "code": "transaction_not_found"}
+
+    if tx.get("status") != "Completed":
+        return {"ok": False, "error": f"Cannot rollback transaction in status {tx.get('status')}", "code": "invalid_status"}
+
+    meta = tx.get("metadata") or {}
+    mutation_family = meta.get("mutation_family") or tx.get("mutation_family")
+    if mutation_family != "bulk_import_replacement_v1":
+        return {
+            "ok": False,
+            "error": f"Transaction {operation_id} is a {mutation_family!r} operation and cannot be rolled back through the bulk import replacement rollback executor.",
+            "code": "wrong_mutation_family",
+        }
+
+    old_items = meta.get("old_items") or []
+    quarantined_files = meta.get("quarantined_files") or []
+
+    restored_files = []
+    for qf in quarantined_files:
+        old_path_str = qf.get("old_path") or ""
+        q_target_str = qf.get("quarantine_target") or ""
+        q_p = Path(q_target_str)
+        orig_p = Path(old_path_str)
+
+        if q_p.exists():
+            orig_p.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                shutil.move(str(q_p), str(orig_p))
+                restored_files.append(old_path_str)
+            except Exception as exc:
+                return {"ok": False, "error": f"Failed to restore quarantined file {q_target_str}: {exc}", "code": "restore_failed"}
+
+    # Restore old DB rows
+    db_restored = 0
+    if db_path and os.path.exists(db_path):
+        con = sqlite3.connect(db_path, timeout=10)
+        try:
+            cur = con.cursor()
+            for old in old_items:
+                raw_row = old.get("raw_row")
+                if raw_row and isinstance(raw_row, dict):
+                    columns = list(raw_row.keys())
+                    placeholders = ",".join("?" for _ in columns)
+                    col_list = ",".join(columns)
+                    values = [raw_row[c] for c in columns]
+                    try:
+                        cur.execute("DELETE FROM items WHERE id = ?", (old["id"],))
+                        cur.execute(f"INSERT INTO items ({col_list}) VALUES ({placeholders})", values)
+                        db_restored += 1
+                    except Exception:
+                        pass
+            con.commit()
+        finally:
+            con.close()
+
+    store.update(operation_id, status="Rolled Back", logs=["Bulk import replacement rolled back."])
+    return {
+        "ok": True,
+        "operation_id": operation_id,
+        "status": "Rolled Back",
+        "restored_files_count": len(restored_files),
+        "db_restored_count": db_restored,
+    }
+
+

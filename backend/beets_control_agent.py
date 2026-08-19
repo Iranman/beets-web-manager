@@ -3860,6 +3860,63 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             self._send_json(code, res)
             return
 
+        if path == "/imports/bulk-replacement/plan":
+            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            original_allowed_roots = [music_root_env]
+            candidate_allowed_roots = [
+                os.environ.get("DOWNLOADS_ROOT", "/downloads"),
+                os.environ.get("PLAYLIST_DOWNLOAD_ROOT", "/data/torrents/music/Playlist Downloads"),
+                os.environ.get("TORRENT_SOURCE_ROOTS", "/torrents"),
+                tempfile.gettempdir(),
+            ]
+            res = transaction_engine.create_bulk_import_replacement_plan(
+                _txn_store, body,
+                original_allowed_roots=original_allowed_roots,
+                candidate_allowed_roots=candidate_allowed_roots,
+                db_path=MUSIC_LIBRARY_PATH,
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        if path == "/imports/bulk-replacement/apply":
+            op_id = str(body.get("operation_id") or "").strip()
+            if not op_id:
+                self._send_json(400, {"ok": False, "error": "operation_id required"})
+                return
+            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            original_allowed_roots = [music_root_env]
+            candidate_allowed_roots = [
+                os.environ.get("DOWNLOADS_ROOT", "/downloads"),
+                os.environ.get("PLAYLIST_DOWNLOAD_ROOT", "/data/torrents/music/Playlist Downloads"),
+                os.environ.get("TORRENT_SOURCE_ROOTS", "/torrents"),
+                tempfile.gettempdir(),
+            ]
+            res = transaction_engine.execute_bulk_import_replacement_apply(
+                _txn_store, op_id,
+                db_path=MUSIC_LIBRARY_PATH,
+                original_allowed_roots=original_allowed_roots,
+                candidate_allowed_roots=candidate_allowed_roots,
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        if path == "/imports/bulk-replacement/rollback":
+            op_id = str(body.get("operation_id") or "").strip()
+            if not op_id:
+                self._send_json(400, {"ok": False, "error": "operation_id required"})
+                return
+            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            res = transaction_engine.rollback_bulk_import_replacement(
+                _txn_store, op_id,
+                db_path=MUSIC_LIBRARY_PATH,
+                original_allowed_roots=[music_root_env],
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
         if path == "/imports/source/inspect":
             # SEC-002 Wave 8 ARCH-003: read-only, bounded inspection of an
             # import/reimport source -- the engine-side counterpart to
