@@ -52024,62 +52024,40 @@ def _music_format_find_verified_replacement(row: Dict[str, Any], prefs: Dict[str
 
 def _music_format_remove_original_after_replacement(original_path: str, final_path: str, prefs: Dict[str, Any], log: list,
                                                     original_item_id: int = 0) -> Dict[str, Any]:
+    """Execute engine-owned track replacement transaction without direct local filesystem or DB mutations (SEC-002 Wave 17)."""
     result = {"removed": False, "quarantined_to": "", "reason": ""}
-    def _delete_original_db_row() -> None:
-        try:
-            with _db() as con:
-                if original_item_id:
-                    con.execute("DELETE FROM items WHERE id=?", (int(original_item_id),))
-                elif original_path:
-                    con.execute("DELETE FROM items WHERE path=?", (original_path,))
-                con.commit()
-        except Exception as ex:
-            log.append(f"Skipped DB cleanup for replaced original: {ex}")
+    if not original_path or not final_path:
+        result["reason"] = "original or replacement path missing"
+        return result
 
-    if not original_path:
-        result["reason"] = "original path missing"
-        return result
-    original = Path(original_path)
-    if not original.is_absolute():
-        original = MUSIC_ROOT / original_path
-    final = Path(final_path) if final_path else Path("")
     try:
-        if final_path and original.resolve(strict=False) == final.resolve(strict=False):
-            result["reason"] = "replacement uses original path"
+        plan_res = beets_client.plan_track_replacement({
+            "original_item_id": int(original_item_id or 0),
+            "original_path": original_path,
+            "replacement_path": final_path,
+            "reason": "Music format quality replacement",
+        })
+        if not plan_res.get("ok"):
+            error_msg = plan_res.get("error") or "track replacement plan failed"
+            log.append(f"Track replacement plan failed: {error_msg}")
+            result["reason"] = error_msg
             return result
-    except Exception:
-        pass
-    if not original.exists():
+
+        op_id = plan_res.get("operation_id")
+        apply_res = beets_client.apply_track_replacement(op_id)
+        if not apply_res.get("ok"):
+            error_msg = apply_res.get("error") or "track replacement apply failed"
+            log.append(f"Track replacement apply failed: {error_msg}")
+            result["reason"] = error_msg
+            return result
+
         result["removed"] = True
-        result["reason"] = "original already removed"
-        _delete_original_db_row()
-        log.append("Original removed after verified replacement")
-        return result
-    if not _path_is_under(original.resolve(strict=False), MUSIC_ROOT.resolve(strict=False)):
-        result["reason"] = "original is outside music library"
-        return result
-    handling = _s(prefs.get("rejected_download_handling") or "quarantine").strip().lower()
-    try:
-        if handling == "delete":
-            original.unlink(missing_ok=True)
-            result["removed"] = True
-            _delete_original_db_row()
-            log.append("Original removed after verified replacement")
-        else:
-            quarantine_root = Path(os.environ.get("MUSIC_FORMAT_QUARANTINE_DIR", "/config/music_format_quarantine")) / "library" / time.strftime("%Y%m%d")
-            quarantine_root.mkdir(parents=True, exist_ok=True)
-            target = quarantine_root / original.name
-            if target.exists():
-                target = quarantine_root / f"{original.stem}-{int(time.time())}{original.suffix}"
-            shutil.move(str(original), str(target))
-            result["removed"] = True
-            result["quarantined_to"] = str(target)
-            _delete_original_db_row()
-            log.append("Original removed after verified replacement")
+        result["quarantined_to"] = apply_res.get("quarantined_to") or ""
+        log.append("Original removed after verified replacement via engine transaction")
         return result
     except Exception as ex:
         result["reason"] = str(ex)
-        log.append(f"Skipped removal: replacement verified but original removal failed: {ex}")
+        log.append(f"Track replacement engine IPC failed: {ex}")
         return result
 
 
