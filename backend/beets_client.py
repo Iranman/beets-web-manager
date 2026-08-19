@@ -243,6 +243,29 @@ class BeetsClient:
             payload["plan_id"] = plan_id
         return self._request("POST", "/imports/source/preserve", payload, timeout=timeout + 5.0)
 
+    def plan_import_review_cleanup(self, payload: Dict[str, Any], *, timeout: float = 30.0) -> Dict[str, Any]:
+        """Engine-side import review cleanup planning (SEC-002 Wave 15)."""
+        return self._request("POST", "/imports/review/cleanup/plan", payload, timeout=timeout)
+
+    def apply_import_review_cleanup(self, operation_id: str, *, timeout: float = 60.0) -> Dict[str, Any]:
+        """Engine-side import review cleanup application (SEC-002 Wave 15)."""
+        return self._request("POST", "/imports/review/cleanup/apply", {"operation_id": operation_id}, timeout=timeout)
+
+    def get_transaction(self, transaction_id: str, *, format: str = "json", timeout: float = 15.0) -> Dict[str, Any]:
+        """Fetch transaction record from engine TransactionStore (SEC-002 Wave 15)."""
+        return self._request("GET", f"/transactions/{transaction_id}?format={format}", timeout=timeout)
+
+    def list_transactions(self, *, offset: int = 0, limit: int = 50, status: str = "", operation: str = "", query: str = "", timeout: float = 15.0) -> Dict[str, Any]:
+        """List transaction records from engine TransactionStore (SEC-002 Wave 15)."""
+        params = f"?offset={offset}&limit={limit}"
+        if status:
+            params += f"&status={urllib.parse.quote(status)}"
+        if operation:
+            params += f"&operation={urllib.parse.quote(operation)}"
+        if query:
+            params += f"&query={urllib.parse.quote(query)}"
+        return self._request("GET", f"/transactions{params}", timeout=timeout)
+
     def reimport_source(self, source_path: str, expected_source_signature: Optional[str] = None, expected_deterministic_identity: Optional[Dict[str, Any]] = None, beets_options: Optional[Dict[str, Any]] = None, *, timeout: float = 180.0) -> Dict[str, Any]:
         """Engine-side atomic reimport operation (SEC-002 Wave 8 ARCH-003)."""
         payload: Dict[str, Any] = {"source_path": source_path}
@@ -637,6 +660,62 @@ class BeetsClient:
     def delete_album(self, album_id: int, delete_files: bool = True) -> Dict[str, Any]:
         """Perform transactional single-writer album deletion under lock."""
         return self._request("DELETE", f"/albums/{album_id}", {"delete_files": delete_files})
+
+    def plan_import_review_cleanup(
+        self,
+        payload_or_folder: Any = None,
+        action: str = "delete",
+        files: Optional[List[str]] = None,
+        **kwargs,
+    ) -> Dict[str, Any]:
+        """Request plan for import review folder or per-file cleanup from engine agent."""
+        if isinstance(payload_or_folder, dict):
+            payload = payload_or_folder
+        else:
+            target = kwargs.get("folder_path") or payload_or_folder or ""
+            payload = {
+                "path": target,
+                "folder": target,
+                "action": action,
+                "files": files or [],
+            }
+        try:
+            return self._request("POST", "/imports/review/cleanup/plan", payload)
+        except BeetsUnavailableError:
+            from backend.transaction_engine import TransactionStore, execute_import_review_cleanup_plan
+            import app as flask_app_mod
+            roots = [
+                str(getattr(flask_app_mod, "DOWNLOADS_ROOT", "/downloads")),
+                str(getattr(flask_app_mod, "MUSIC_ROOT", "/music")),
+                *[str(r) for r in getattr(flask_app_mod, "_DOWNLOADS_ROOTS", [])],
+                "/tmp",
+                os.environ.get("IMPORT_REVIEW_QUARANTINE_DIR", "/config/import_review_quarantine"),
+            ]
+            store = TransactionStore()
+            return execute_import_review_cleanup_plan(store, payload, roots)
+
+    def apply_import_review_cleanup(self, operation_id: str) -> Dict[str, Any]:
+        """Apply plan for import review folder or per-file cleanup via engine agent."""
+        try:
+            return self._request("POST", "/imports/review/cleanup/apply", {
+                "operation_id": operation_id,
+            })
+        except BeetsUnavailableError:
+            from backend.transaction_engine import TransactionStore, execute_import_review_cleanup_apply
+            store = TransactionStore()
+            return execute_import_review_cleanup_apply(store, operation_id)
+
+    def plan_album_cleanup(self, album_id: int) -> Dict[str, Any]:
+        """Request album folder cleanup plan from engine agent."""
+        return self._request("POST", "/albums/cleanup/plan", {
+            "album_id": album_id,
+        })
+
+    def apply_album_cleanup(self, operation_id: str) -> Dict[str, Any]:
+        """Apply album folder cleanup plan via engine agent."""
+        return self._request("POST", "/albums/cleanup/apply", {
+            "operation_id": operation_id,
+        })
 
 
 class RemoteSQLiteCursor:

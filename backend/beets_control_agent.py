@@ -45,6 +45,16 @@ try:
 except ImportError:
     from backend import audio_preferences
 
+try:
+    import transaction_engine
+except ImportError:
+    from backend import transaction_engine
+
+try:
+    import matching_contract
+except ImportError:
+    from backend import matching_contract
+
 # Configuration
 PORT = int(os.environ.get("BEETS_AGENT_PORT", "8338"))
 BEETS_API_TOKEN = os.environ.get("BEETS_API_TOKEN", "")
@@ -85,6 +95,10 @@ PLAYLIST_DOWNLOAD_ROOT = Path(os.environ.get(
 LOCK_PATH = os.environ.get("BEETS_LOCK_PATH", os.path.join(BEETSDIR, ".beet_db.lock"))
 LIB_PATH = os.path.join(BEETSDIR, "musiclibrary.blb")
 BEET_BIN = os.environ.get("BEET_BIN", "beet")
+
+_txn_store = transaction_engine.TransactionStore(
+    root=os.environ.get("BEETS_TRANSACTION_DIR") or os.path.join(BEETSDIR, "transactions")
+)
 
 
 def _env_int_clamped(name: str, default: int, *, minimum: int, maximum: int) -> int:
@@ -3099,6 +3113,373 @@ def _engine_playlist_quality_cleanup_candidates(con: sqlite3.Connection,
     return [_engine_playlist_quality_row_payload(row) for row in rows]
 
 
+AUDIO_EXT = {".mp3", ".flac", ".m4a", ".ogg", ".opus", ".wav", ".aiff", ".wv", ".ape", ".alac", ".aac"}
+
+
+def _path_lexically_under(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except Exception:
+        return False
+
+
+def _path_has_symlink_component_under(path: Path, root: Path, *, include_leaf: bool = True) -> bool:
+    try:
+        relative = path.relative_to(root)
+    except Exception:
+        return True
+    current = root
+    parts = relative.parts if include_leaf else relative.parts[:-1]
+    for part in parts:
+        current = current / part
+        try:
+            if current.is_symlink():
+                return True
+        except Exception:
+            return True
+    return False
+
+
+def _unique_import_review_cleanup_path(path: Path) -> Path:
+    if not path.exists():
+        return path
+    for idx in range(1, 1000):
+        candidate = path.with_name(f"{path.stem}.{idx}{path.suffix}")
+        if not candidate.exists():
+            return candidate
+    return path.with_name(f"{path.stem}.{uuid.uuid4().hex[:8]}{path.suffix}")
+
+
+def plan_import_review_cleanup(body: dict) -> dict:
+    raw_path = _s(body.get("path")).strip()
+    raw_files = body.get("files") if isinstance(body.get("files"), list) else []
+    action = _s(body.get("action") or "quarantine_rejected").strip().lower()
+    allow_delete = bool(body.get("allow_delete"))
+    album_id = int(body.get("album_id") or 0)
+    confirmed_wrong_library = bool(body.get("confirmed_wrong_library_folder") or body.get("allow_library_delete"))
+
+    if action not in {"quarantine_rejected", "quarantine_duplicate", "delete_rejected", "delete_duplicate", "delete_folder"}:
+        return {"ok": False, "error_code": "unsupported_action", "error": "Unsupported cleanup action."}
+
+    if action.startswith("delete_") and not allow_delete:
+        return {"ok": False, "error_code": "delete_not_allowed", "error": "Permanent delete requires allow_delete=true."}
+
+    if not raw_path:
+        return {"ok": False, "error_code": "path_required", "error": "Review folder path is required."}
+
+    roles = ["staging", "music"] if (confirmed_wrong_library and album_id > 0) else ["staging"]
+    try:
+        safe_folder = resolve_safe_path(raw_path, roles)
+    except UnsafePathError as ex:
+        return {"ok": False, "error_code": "invalid_path", "error": str(ex)}
+
+    allowed_roots = [os.path.realpath(root) for root in _allowed_root_paths(roles)]
+    if str(safe_folder) in allowed_roots or str(safe_folder.resolve(strict=False)) in allowed_roots:
+        return {"ok": False, "error_code": "root_self_rejected", "error": "Refusing to delete an allowed-root directory itself."}
+
+    if not safe_folder.exists() or not safe_folder.is_dir():
+        return {"ok": False, "error_code": "folder_not_found", "error": "Review folder does not exist or is not a directory."}
+
+    for root_str in allowed_roots:
+        r_path = Path(root_str)
+        if _path_lexically_under(safe_folder, r_path):
+            if _path_has_symlink_component_under(safe_folder, r_path):
+                return {"ok": False, "error_code": "symlink_component_forbidden", "error": "Review folder path cannot contain symlink components."}
+            break
+
+    if safe_folder.is_symlink():
+        return {"ok": False, "error_code": "symlink_forbidden", "error": "Review folder cannot be a symlink."}
+
+    changes = []
+    file_details = []
+    quarantine_root = Path(os.environ.get("IMPORT_REVIEW_QUARANTINE_DIR", "/config/import_review_quarantine")) / time.strftime("%Y%m%d")
+
+    if action == "delete_folder":
+        all_files = [f for f in safe_folder.rglob("*") if f.is_file()]
+        expected_file_count = len(all_files)
+        for f in sorted(all_files):
+            try:
+                st = f.stat()
+                f_size = st.st_size
+                f_mtime = st.st_mtime
+            except Exception:
+                f_size, f_mtime = 0, 0.0
+
+            rel_str = str(f.relative_to(safe_folder))
+            if action.startswith("quarantine"):
+                dst = quarantine_root / f.name
+                op = "MOVE"
+                reversibility = "REVERSIBLE"
+            else:
+                dst = ""
+                op = "DELETE"
+                reversibility = "IRREVERSIBLE"
+
+            changes.append({
+                "operation": op,
+                "source": str(f),
+                "destination": str(dst),
+                "reason": action,
+                "reversibility": reversibility,
+                "expected_size": f_size,
+                "expected_mtime": f_mtime,
+                "relative_path": rel_str,
+            })
+            file_details.append({"path": str(f), "size": f_size, "mtime": f_mtime})
+
+        changes.append({
+            "operation": "DIR_REMOVE",
+            "source": str(safe_folder),
+            "destination": "",
+            "reason": "folder_cleanup",
+            "reversibility": "IRREVERSIBLE",
+        })
+    else:
+        if not raw_files:
+            return {"ok": False, "error_code": "files_required", "error": "At least one file is required for cleanup."}
+
+        expected_file_count = 0
+        touched_dirs = set()
+        for raw in raw_files:
+            text = _s(raw).strip()
+            if not text:
+                continue
+            cand = Path(text)
+            if not cand.is_absolute():
+                cand = safe_folder / cand
+            try:
+                safe_cand = resolve_safe_path(str(cand), roles)
+            except Exception:
+                continue
+
+            if safe_cand == safe_folder or not _path_lexically_under(safe_cand, safe_folder):
+                continue
+            if safe_cand.is_symlink() or _path_has_symlink_component_under(safe_cand, safe_folder):
+                continue
+            if not safe_cand.exists() or not safe_cand.is_file():
+                continue
+            if safe_cand.suffix.lower() not in AUDIO_EXT:
+                continue
+
+            try:
+                st = safe_cand.stat()
+                f_size = st.st_size
+                f_mtime = st.st_mtime
+            except Exception:
+                f_size, f_mtime = 0, 0.0
+
+            rel_str = str(safe_cand.relative_to(safe_folder))
+            touched_dirs.add(safe_cand.parent)
+
+            if action.startswith("quarantine"):
+                dst = quarantine_root / safe_cand.name
+                op = "MOVE"
+                reversibility = "REVERSIBLE"
+            else:
+                dst = ""
+                op = "DELETE"
+                reversibility = "IRREVERSIBLE"
+
+            changes.append({
+                "operation": op,
+                "source": str(safe_cand),
+                "destination": str(dst),
+                "reason": action,
+                "reversibility": reversibility,
+                "expected_size": f_size,
+                "expected_mtime": f_mtime,
+                "relative_path": rel_str,
+            })
+            file_details.append({"path": str(safe_cand), "size": f_size, "mtime": f_mtime})
+            expected_file_count += 1
+
+        for d in sorted(touched_dirs, key=lambda p: len(p.parts), reverse=True):
+            changes.append({
+                "operation": "DIR_REMOVE",
+                "source": str(d),
+                "destination": "",
+                "reason": "empty_dir_prune",
+                "reversibility": "IRREVERSIBLE",
+            })
+
+    tx = _txn_store.create(
+        operation_type="Library Cleanup",
+        status="Preview",
+        summary=f"Import Review Cleanup ({action}) on {safe_folder.name}",
+        reason=f"Action: {action}",
+        source=str(safe_folder),
+        changes=changes,
+        rollback_available=any(c["reversibility"] == "REVERSIBLE" for c in changes),
+        metadata={
+            "action": action,
+            "path": str(safe_folder),
+            "expected_file_count": expected_file_count,
+            "files": file_details,
+            "roles": roles,
+            "confirmed_wrong_library": confirmed_wrong_library,
+            "album_id": album_id,
+        },
+    )
+
+    return {
+        "ok": True,
+        "operation_id": tx["id"],
+        "status": "Preview",
+        "plan": {
+            "operation_id": tx["id"],
+            "action": action,
+            "source_path": str(safe_folder),
+            "changes": changes,
+            "expected_file_count": expected_file_count,
+            "rollback_available": any(c["reversibility"] == "REVERSIBLE" for c in changes),
+        },
+    }
+
+
+def apply_import_review_cleanup(body: dict) -> dict:
+    op_id = _s(body.get("operation_id")).strip()
+    if not op_id:
+        return {"ok": False, "error_code": "operation_id_required", "error": "operation_id is required."}
+
+    try:
+        tx = _txn_store.get(op_id)
+    except KeyError:
+        return {"ok": False, "error_code": "transaction_not_found", "error": "Operation ID not found."}
+
+    if tx.get("status") == "Completed":
+        return {
+            "ok": True,
+            "status": "Completed",
+            "already_completed": True,
+            "operation_id": op_id,
+            "summary": tx.get("summary"),
+            "counts": tx.get("counts"),
+        }
+
+    metadata = tx.get("metadata") or {}
+    changes = tx.get("changes") or []
+    folder_str = metadata.get("path") or tx.get("source") or ""
+    action = metadata.get("action") or ""
+    roles = metadata.get("roles") or ["staging"]
+    expected_file_count = metadata.get("expected_file_count", 0)
+
+    lock_file = acquire_os_lock(read_only=False)
+    try:
+        try:
+            safe_folder = resolve_safe_path(folder_str, roles)
+        except UnsafePathError as ex:
+            _txn_store.update(op_id, status="Failed")
+            return {"ok": False, "error_code": "invalid_path", "error": str(ex)}
+
+        if safe_folder.is_symlink():
+            _txn_store.update(op_id, status="Failed")
+            return {"ok": False, "error_code": "symlink_forbidden", "error": "Folder became a symlink."}
+
+        if action == "delete_folder":
+            current_files = [f for f in safe_folder.rglob("*") if f.is_file()]
+            if len(current_files) != expected_file_count:
+                _txn_store.update(op_id, status="Failed")
+                return {
+                    "ok": False,
+                    "error_code": "directory_growth_race",
+                    "error": f"Directory contents changed since preview plan ({len(current_files)} files vs {expected_file_count} planned). Replan required.",
+                }
+
+        for change in changes:
+            op = change.get("operation")
+            if op not in {"DELETE", "MOVE"}:
+                continue
+            src_str = change.get("source")
+            exp_size = change.get("expected_size")
+            exp_mtime = change.get("expected_mtime")
+
+            p = Path(src_str)
+            if not p.exists() or not p.is_file():
+                continue
+            if p.is_symlink():
+                _txn_store.update(op_id, status="Failed")
+                return {"ok": False, "error_code": "symlink_forbidden", "error": f"File {p.name} became a symlink."}
+
+            try:
+                st = p.stat()
+                if exp_size is not None and st.st_size != exp_size:
+                    _txn_store.update(op_id, status="Failed")
+                    return {
+                        "ok": False,
+                        "error_code": "file_replacement_race",
+                        "error": f"File {p.name} size changed since preview plan ({st.st_size} vs {exp_size}). Replan required.",
+                    }
+            except Exception:
+                pass
+
+        deleted = []
+        moved = []
+        logs = []
+
+        _txn_store.update(op_id, status="Running")
+
+        for change in changes:
+            op = change.get("operation")
+            src_str = change.get("source")
+            dst_str = change.get("destination")
+
+            src = Path(src_str)
+            if op == "DELETE":
+                if src.exists():
+                    try:
+                        src.unlink()
+                        deleted.append(src_str)
+                        logs.append(f"Deleted {src.name}")
+                    except Exception as ex:
+                        logs.append(f"Failed to delete {src.name}: {ex}")
+            elif op == "MOVE":
+                if src.exists():
+                    dst = Path(dst_str)
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    if dst.exists():
+                        dst = _unique_import_review_cleanup_path(dst)
+                    try:
+                        shutil.move(str(src), str(dst))
+                        moved.append({"source": src_str, "destination": str(dst)})
+                        logs.append(f"Moved {src.name} -> {dst.name}")
+                    except Exception as ex:
+                        logs.append(f"Failed to move {src.name}: {ex}")
+            elif op == "DIR_REMOVE":
+                if src.exists() and src.is_dir():
+                    try:
+                        src.rmdir()
+                        logs.append(f"Pruned empty directory {src.name}")
+                    except Exception:
+                        pass
+
+        for change in changes:
+            op = change.get("operation")
+            src_str = change.get("source")
+            if op == "DELETE":
+                if Path(src_str).exists():
+                    _txn_store.update(op_id, status="Failed")
+                    return {"ok": False, "error_code": "verification_failed", "error": f"Post-apply verification failed: {src_str} still exists."}
+
+        _txn_store.update(
+            op_id,
+            status="Completed",
+            counts={"items": len(changes), "files": len(deleted) + len(moved), "changes": len(changes)},
+            logs=logs,
+        )
+
+        return {
+            "ok": True,
+            "status": "Completed",
+            "operation_id": op_id,
+            "deleted": deleted,
+            "moved": moved,
+            "log": logs,
+        }
+    finally:
+        release_os_lock(lock_file)
+
+
 class ControlAgentHandler(BaseHTTPRequestHandler):
     def _send_json(self, code: int, data: dict):
         body = json.dumps(data, indent=2, default=_json_default).encode("utf-8")
@@ -3141,6 +3522,35 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             return
 
         if not self._authenticate():
+            return
+
+        if path == "/transactions":
+            offset = int(params.get("offset", [0])[0])
+            limit = int(params.get("limit", [50])[0])
+            status_f = params.get("status", [""])[0]
+            op_f = params.get("operation", [""])[0]
+            q_f = params.get("query", [""])[0]
+            job_f = params.get("job", [""])[0]
+            rows, total = _txn_store.list(offset=offset, limit=limit, status=status_f, operation=op_f, query=q_f, job=job_f)
+            self._send_json(200, {"ok": True, "transactions": rows, "total": total, "offset": offset, "limit": limit})
+            return
+
+        if path.startswith("/transactions/"):
+            tx_id = path.split("/transactions/")[1].strip()
+            try:
+                fmt = params.get("format", ["json"])[0]
+                if fmt in {"markdown", "md", "csv"}:
+                    content, mime = _txn_store.export(tx_id, fmt)
+                    self.send_response(200)
+                    self.send_header("Content-Type", f"{mime}; charset=utf-8")
+                    self.send_header("Content-Length", str(len(content.encode("utf-8"))))
+                    self.end_headers()
+                    self.wfile.write(content.encode("utf-8"))
+                    return
+                tx_data = _txn_store.get(tx_id, offset=int(params.get("offset", [0])[0]), limit=int(params.get("limit", [1000])[0]))
+                self._send_json(200, {"ok": True, "transaction": tx_data})
+            except KeyError:
+                self._send_json(404, {"error": "Transaction not found"})
             return
 
         if path == "/status":
@@ -3650,6 +4060,36 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 self._send_json(500, {"error": "Failed to set artpath"})
             finally:
                 release_os_lock(lock_file)
+            return
+
+        if path == "/imports/review/cleanup/plan":
+            res = plan_import_review_cleanup(body)
+            code = 200 if res.get("ok") else {
+                "unsupported_action": 400,
+                "delete_not_allowed": 400,
+                "path_required": 400,
+                "files_required": 400,
+                "invalid_path": 403,
+                "root_self_rejected": 403,
+                "symlink_component_forbidden": 403,
+                "symlink_forbidden": 403,
+                "folder_not_found": 404,
+            }.get(res.get("error_code"), 500)
+            self._send_json(code, res)
+            return
+
+        if path == "/imports/review/cleanup/apply":
+            res = apply_import_review_cleanup(body)
+            code = 200 if res.get("ok") else {
+                "operation_id_required": 400,
+                "transaction_not_found": 404,
+                "invalid_path": 403,
+                "symlink_forbidden": 403,
+                "directory_growth_race": 409,
+                "file_replacement_race": 409,
+                "verification_failed": 500,
+            }.get(res.get("error_code"), 500)
+            self._send_json(code, res)
             return
 
         if path == "/imports/source/inspect":
@@ -5427,6 +5867,54 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 self._send_json(500, {"error": f"Failed to update album: {exc}"})
             finally:
                 release_os_lock(lock_file)
+            return
+
+        if path in {"/imports/review/cleanup/plan", "/albums/cleanup/plan"}:
+            raw_path = str(body.get("path") or "").strip()
+            action = str(body.get("action") or "delete_folder").strip()
+            allow_delete = bool(body.get("allow_delete"))
+            confirmed_wrong_library_folder = bool(body.get("confirmed_wrong_library_folder"))
+            try:
+                album_id = int(body.get("album_id") or 0)
+            except Exception:
+                album_id = 0
+            raw_files = body.get("files")
+            allowed_roots = [
+                os.environ.get("DOWNLOADS_ROOT", "/downloads"),
+                os.environ.get("PLAYLIST_DOWNLOAD_ROOT", "/data/torrents/music/Playlist Downloads"),
+                os.environ.get("TORRENT_SOURCE_ROOTS", "/torrents"),
+                tempfile.gettempdir(),
+                os.environ.get("IMPORT_REVIEW_QUARANTINE_DIR", "/config/import_review_quarantine"),
+                os.environ.get("MUSIC_ROOT", "/music"),
+            ]
+            res = transaction_engine.execute_import_review_cleanup_plan(
+                store=_txn_store,
+                raw_path=raw_path,
+                action=action,
+                allow_delete=allow_delete,
+                confirmed_wrong_library_folder=confirmed_wrong_library_folder,
+                album_id=album_id,
+                raw_files=raw_files,
+                allowed_roots=allowed_roots,
+                payload=body,
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        if path in {"/imports/review/cleanup/apply", "/albums/cleanup/apply"}:
+            op_id = str(body.get("operation_id") or "").strip()
+            if not op_id:
+                self._send_json(400, {"ok": False, "error": "operation_id required"})
+                return
+            quarantine_root = os.environ.get("IMPORT_REVIEW_QUARANTINE_DIR", "/config/import_review_quarantine")
+            res = transaction_engine.execute_import_review_cleanup_apply(
+                store=_txn_store,
+                operation_id=op_id,
+                quarantine_root=quarantine_root,
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
             return
 
         self._send_json(404, {"error": f"Endpoint not found: {path}"})
