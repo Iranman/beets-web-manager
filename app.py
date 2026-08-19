@@ -6577,12 +6577,143 @@ def _merge_imported_album_into_existing(imported_album_id: int, existing_album_i
                 repair_threshold=_MB_TRACK_REPAIR_MATCH_THRESHOLD,
             )
 
+        # SEC-002 Wave 18 final review: this entire data-gathering and
+        # matching block (existing/existing_rows/imported_rows/move_ids/
+        # dup_rows/replace_rows) had been deleted by the Wave 18 diff while
+        # leaving the code below that consumes those names untouched and
+        # nested INSIDE _row_matches_target's body as unreachable dead code
+        # after its own return statement -- meaning this whole function
+        # silently did nothing at all (fell out of the try block with no
+        # return, implicitly returning None) on every call, worse than the
+        # NameError the review brief anticipated. Restored verbatim from
+        # the pre-Wave-18 implementation, with only the replace_rows branch
+        # below changed to delegate to the engine instead of deleting rows
+        # and unlinking files directly from the Web Manager.
+        def _delete_row_file(row: sqlite3.Row, reason: str) -> None:
+            raw_path = _s(row["path"]) if "path" in row.keys() else ""
+            if not raw_path:
+                return
+            fpath = Path(raw_path)
+            if not fpath.is_absolute():
+                fpath = MUSIC_ROOT / raw_path
+            try:
+                resolved = fpath.resolve(strict=False)
+                if _path_is_under(resolved, MUSIC_ROOT):
+                    resolved.unlink(missing_ok=True)
+                    log.append(
+                        f"  [merge] Removed {reason} track "
+                        f"{int(row['track'] or 0):02d}: {resolved.name}"
+                    )
+            except Exception as ex:
+                log.append(f"  [merge] WARN removing conflicting file: {ex}")
+
+        with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:
+            existing = con.execute(
+                "SELECT id, album, albumartist, mb_albumid, year FROM albums WHERE id=?",
+                (existing_album_id,),
+            ).fetchone()
+            if not existing:
+                log.append(f"  [merge] Existing album_id {existing_album_id} not found; keeping imported album_id {imported_album_id}")
+                return imported_album_id
+            existing_rows = con.execute(
+                "SELECT id, title, disc, track, path, mb_trackid, mb_albumid, mb_releasegroupid, length "
+                "FROM items WHERE album_id=? ORDER BY disc, track, id",
+                (existing_album_id,),
+            ).fetchall()
+            existing_by_key: Dict[tuple, List[sqlite3.Row]] = {}
+            for row in existing_rows:
+                key = (int(row["disc"] or 1), int(row["track"] or 0))
+                if key[1]:
+                    existing_by_key.setdefault(key, []).append(row)
+            imported_rows = con.execute(
+                "SELECT id, title, disc, track, path, mb_trackid, mb_albumid, mb_releasegroupid, length "
+                "FROM items WHERE album_id=? ORDER BY disc, track, id",
+                (imported_album_id,),
+            ).fetchall()
+            move_ids: List[int] = []
+            dup_rows: List[sqlite3.Row] = []
+            replace_rows: List[sqlite3.Row] = []
+            # SEC-002 Wave 18: explicit old_item_id -> new_item_id
+            # correspondence, captured directly from the same matching loop
+            # that decides an existing row is being superseded -- not
+            # reconstructed later from "whatever else is now in the album",
+            # which cannot distinguish a genuine replacement from an
+            # unrelated pre-existing row.
+            mapping_pairs: List[Dict[str, int]] = []
+            for row in imported_rows:
+                key = (int(row["disc"] or 1), int(row["track"] or 0))
+                if key[1] and key in existing_by_key:
+                    target = target_by_key.get(key, {})
+                    existing_rows_for_key = existing_by_key.get(key, [])
+                    forced_replace_rows = [
+                        ex for ex in existing_rows_for_key
+                        if int(ex["id"] or 0) in forced_replace_ids
+                    ]
+                    if forced_replace_rows:
+                        # SEC-002 Wave 18 final review: do NOT also route
+                        # forced_replace_rows through bulk_import_replacement_v1.
+                        # replace_existing_item_ids' only real production
+                        # caller is the automatic music-format retry
+                        # pipeline (_music_format_replace_rows), which
+                        # retires this exact old item through its own,
+                        # separate, already-verified engine transaction --
+                        # _music_format_remove_original_after_replacement,
+                        # SEC-002 Wave 17's track_replacement_v1 -- called
+                        # independently after this import completes (see
+                        # start_music_format_replacement_retry). At the
+                        # point this function runs, that retirement has
+                        # NOT happened yet (the old row is still present,
+                        # which is exactly why forced_replace_rows finds
+                        # it), so also planning a bulk_import_replacement_v1
+                        # retirement for the same old item here would be a
+                        # second, redundant, and potentially conflicting
+                        # retirement attempt racing the real one. This
+                        # branch's only job is bookkeeping: stop the
+                        # duplicate-matching heuristic below from
+                        # reconsidering this old row, and let `row` (the
+                        # newly imported track) take its place via
+                        # move_ids. This matches the pre-Wave-18 behavior
+                        # exactly -- untouched by this wave.
+                        existing_by_key[key] = [
+                            ex for ex in existing_rows_for_key
+                            if int(ex["id"] or 0) not in forced_replace_ids
+                        ]
+                    else:
+                        existing_matches = [
+                            ex for ex in existing_rows_for_key
+                            if _row_matches_target(ex, target)
+                        ]
+                        if existing_matches:
+                            dup_rows.append(row)
+                            continue
+                        replace_rows.extend(existing_rows_for_key)
+                        for ex in existing_rows_for_key:
+                            # Weaker, real (not AI-only) evidence: `row`
+                            # was imported specifically to fill this
+                            # disc/track position against the resolved MB
+                            # release tracklist, and none of the existing
+                            # rows already occupying that position passed
+                            # _row_matches_target against it. The engine
+                            # still independently requires the imported
+                            # row to carry its own Recording ID for this
+                            # identity_source (see recording_id_required).
+                            mapping_pairs.append({
+                                "old_item_id": int(ex["id"]),
+                                "new_item_id": int(row["id"]),
+                                "identity_source": "mb_tracklist_position_match",
+                            })
+                        existing_by_key[key] = []
+                move_ids.append(int(row["id"]))
+                if key[1]:
+                    existing_by_key.setdefault(key, []).append(row)
+
             if replace_rows:
                 replace_ids = sorted({int(r["id"]) for r in replace_rows})
                 try:
                     plan_res = beets_client.plan_bulk_import_replacement({
                         "existing_album_id": existing_album_id,
                         "old_item_ids": replace_ids,
+                        "mappings": mapping_pairs,
                         "source_folder": source_folder,
                         "mb_albumid": mb_albumid,
                         "reason": "Bulk import album merge replacement",
@@ -6596,15 +6727,36 @@ def _merge_imported_album_into_existing(imported_album_id: int, existing_album_i
                                 f"to engine bulk replacement tx {op_id}."
                             )
                         else:
-                            log.append(f"  [merge] WARN bulk replacement apply failed: {apply_res.get('error')}")
+                            # Fail closed: do NOT fall back to a local
+                            # DELETE/unlink of the old rows. If the engine
+                            # refused (e.g. a mapping could not be
+                            # identity-verified), those old rows remain in
+                            # place -- both versions coexist rather than
+                            # silently losing the only verified copy.
+                            log.append(f"  [merge] WARN bulk replacement apply failed, old rows left in place: {apply_res.get('error')}")
                     else:
-                        log.append(f"  [merge] WARN bulk replacement plan failed: {plan_res.get('error')}")
+                        log.append(f"  [merge] WARN bulk replacement plan failed, old rows left in place: {plan_res.get('error')}")
                 except Exception as ex:
-                    log.append(f"  [merge] WARN exception delegating bulk replacement to engine: {ex}")
+                    log.append(f"  [merge] WARN exception delegating bulk replacement to engine, old rows left in place: {ex}")
 
             if dup_rows:
-                dup_ids = [int(r["id"]) for r in dup_rows]
-                log.append(f"  [merge] Skipping {len(dup_ids)} duplicate downloaded track(s)")
+                source_root = Path(source_folder).resolve(strict=False)
+                for row in dup_rows:
+                    raw_path = _s(row["path"])
+                    fpath = Path(raw_path)
+                    if not fpath.is_absolute():
+                        fpath = MUSIC_ROOT / raw_path
+                    try:
+                        resolved = fpath.resolve(strict=False)
+                        resolved.relative_to(source_root)
+                        resolved.unlink(missing_ok=True)
+                        log.append(f"  [merge] Removed duplicate downloaded track {int(row['track'] or 0):02d}: {resolved.name}")
+                    except Exception:
+                        pass
+                con.execute(
+                    f"DELETE FROM items WHERE id IN ({','.join('?' * len(dup_rows))})",
+                    [int(r["id"]) for r in dup_rows],
+                )
 
             if move_ids:
                 album_name = _s(existing["album"])
@@ -52720,6 +52872,10 @@ def api_transaction_rollback(transaction_id):
                 res = beets_client.rollback_track_replacement(transaction_id)
             elif mutation_family == "import_review_cleanup_v1":
                 res = beets_client.rollback_import_review_cleanup(transaction_id)
+            elif mutation_family == "bulk_import_replacement_v1":
+                # SEC-002 Wave 18 final review: explicit, known dispatch --
+                # no "unknown family -> try bulk replacement" fallback.
+                res = beets_client.rollback_bulk_import_replacement(transaction_id)
             elif mutation_family:
                 return jsonify({
                     "ok": False,

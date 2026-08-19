@@ -3861,19 +3861,21 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/imports/bulk-replacement/plan":
+            # SEC-002 Wave 18 final review: bulk_import_replacement_v1 does
+            # not own or trigger import (see create_bulk_import_replacement_plan's
+            # docstring) -- both the old items being retired AND the new,
+            # already-imported replacement items live under the SAME music
+            # library root. There is no separate staging/candidate root
+            # for this family; unlike track_replacement_v1, a "candidate"
+            # here is never an unimported file sitting in a download
+            # directory.
             music_root_env = os.environ.get("MUSIC_ROOT", "/music")
-            original_allowed_roots = [music_root_env]
-            candidate_allowed_roots = [
-                os.environ.get("DOWNLOADS_ROOT", "/downloads"),
-                os.environ.get("PLAYLIST_DOWNLOAD_ROOT", "/data/torrents/music/Playlist Downloads"),
-                os.environ.get("TORRENT_SOURCE_ROOTS", "/torrents"),
-                tempfile.gettempdir(),
-            ]
+            quarantine_root = os.environ.get("REPLACEMENT_QUARANTINE_DIR", "/config/track_replacement_quarantine")
             res = transaction_engine.create_bulk_import_replacement_plan(
                 _txn_store, body,
-                original_allowed_roots=original_allowed_roots,
-                candidate_allowed_roots=candidate_allowed_roots,
+                original_allowed_roots=[music_root_env],
                 db_path=MUSIC_LIBRARY_PATH,
+                quarantine_base_root=quarantine_root,
             )
             code = 200 if res.get("ok") else 400
             self._send_json(code, res)
@@ -3885,18 +3887,12 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 self._send_json(400, {"ok": False, "error": "operation_id required"})
                 return
             music_root_env = os.environ.get("MUSIC_ROOT", "/music")
-            original_allowed_roots = [music_root_env]
-            candidate_allowed_roots = [
-                os.environ.get("DOWNLOADS_ROOT", "/downloads"),
-                os.environ.get("PLAYLIST_DOWNLOAD_ROOT", "/data/torrents/music/Playlist Downloads"),
-                os.environ.get("TORRENT_SOURCE_ROOTS", "/torrents"),
-                tempfile.gettempdir(),
-            ]
+            quarantine_root = os.environ.get("REPLACEMENT_QUARANTINE_DIR", "/config/track_replacement_quarantine")
             res = transaction_engine.execute_bulk_import_replacement_apply(
                 _txn_store, op_id,
                 db_path=MUSIC_LIBRARY_PATH,
-                original_allowed_roots=original_allowed_roots,
-                candidate_allowed_roots=candidate_allowed_roots,
+                original_allowed_roots=[music_root_env],
+                quarantine_base_root=quarantine_root,
             )
             code = 200 if res.get("ok") else 400
             self._send_json(code, res)
@@ -3908,10 +3904,12 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 self._send_json(400, {"ok": False, "error": "operation_id required"})
                 return
             music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            quarantine_root = os.environ.get("REPLACEMENT_QUARANTINE_DIR", "/config/track_replacement_quarantine")
             res = transaction_engine.rollback_bulk_import_replacement(
                 _txn_store, op_id,
                 db_path=MUSIC_LIBRARY_PATH,
                 original_allowed_roots=[music_root_env],
+                quarantine_base_root=quarantine_root,
             )
             code = 200 if res.get("ok") else 400
             self._send_json(code, res)
