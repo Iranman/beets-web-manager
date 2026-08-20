@@ -344,6 +344,18 @@ class BeetsClient:
         """Engine-side existing-album duplicate & move reconciliation rollback (SEC-002 Wave 20)."""
         return self._request("POST", "/albums/existing-reconcile/rollback", {"operation_id": operation_id}, timeout=timeout)
 
+    def plan_artist_folder_reconcile(self, payload: Dict[str, Any], *, timeout: float = 30.0) -> Dict[str, Any]:
+        """Engine-side artist-folder merge & MBID stamping planning (SEC-002 Wave 21)."""
+        return self._request("POST", "/artists/reconcile/plan", payload, timeout=timeout)
+
+    def apply_artist_folder_reconcile(self, operation_id: str, *, timeout: float = 60.0) -> Dict[str, Any]:
+        """Engine-side artist-folder merge & MBID stamping application (SEC-002 Wave 21)."""
+        return self._request("POST", "/artists/reconcile/apply", {"operation_id": operation_id}, timeout=timeout)
+
+    def rollback_artist_folder_reconcile(self, operation_id: str, *, timeout: float = 60.0) -> Dict[str, Any]:
+        """Engine-side artist-folder merge & MBID stamping rollback (SEC-002 Wave 21)."""
+        return self._request("POST", "/artists/reconcile/rollback", {"operation_id": operation_id}, timeout=timeout)
+
 
 
     def get_transaction(self, transaction_id: str, *, format: str = "json", timeout: float = 15.0) -> Dict[str, Any]:

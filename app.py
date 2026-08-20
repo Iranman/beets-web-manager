@@ -40193,6 +40193,11 @@ def _merge_artist_dir_contents(src: Path, dst: Path, *, dry_run: bool,
                                log: List[str], moves: List[tuple],
                                verbose_files: bool = True,
                                stats: Optional[Dict[str, int]] = None):
+    """Scan and compute artist directory merge moves without local direct filesystem mutations.
+
+    All real mutations are delegated to the Beets engine via
+    beets_client.plan_artist_folder_reconcile and apply_artist_folder_reconcile (SEC-002 Wave 21).
+    """
     stats = stats if stats is not None else {}
     for key in ("files_moved", "duplicate_files_removed", "artwork_collisions_resolved", "filename_conflicts_preserved", "folders_removed"):
         stats.setdefault(key, 0)
@@ -40201,24 +40206,18 @@ def _merge_artist_dir_contents(src: Path, dst: Path, *, dry_run: bool,
         if verbose_files:
             log.append(message)
 
+    if not src.exists() or not src.is_dir():
+        return
+
     for child in sorted(src.iterdir(), key=lambda p: (not p.is_dir(), p.name.casefold())):
         target = dst / child.name
         if child.is_dir():
-            if not dry_run:
-                target.mkdir(parents=True, exist_ok=True)
             _merge_artist_dir_contents(child, target, dry_run=dry_run,
                                        log=log, moves=moves,
                                        verbose_files=verbose_files,
                                        stats=stats)
-            try:
-                if dry_run:
-                    _v(f"  Would remove empty folder: {child}")
-                elif not any(child.iterdir()):
-                    child.rmdir()
-                    stats["folders_removed"] += 1
-                    _v(f"  Removed empty folder: {child}")
-            except Exception as ex:
-                log.append(f"  WARN removing folder {child}: {ex}")
+            _v(f"  {'Would remove' if dry_run else 'Remove'} empty folder: {child}")
+            stats["folders_removed"] += 1
             continue
 
         if not child.is_file():
@@ -40229,10 +40228,7 @@ def _merge_artist_dir_contents(src: Path, dst: Path, *, dry_run: bool,
             source_info = _album_cleanup_file_info(child)
             target_info = _album_cleanup_file_info(target)
             if _album_cleanup_verified_same_file(source_info, target_info):
-                if dry_run:
-                    _v(f"  Would remove duplicate file already present at target: {child}")
-                else:
-                    child.unlink()
+                _v(f"  {'Would remove' if dry_run else 'Remove'} duplicate file already present at target: {child}")
                 stats["duplicate_files_removed"] += 1
                 continue
 
@@ -40240,17 +40236,10 @@ def _merge_artist_dir_contents(src: Path, dst: Path, *, dry_run: bool,
                 stats["artwork_collisions_resolved"] += 1
                 choice = _album_cleanup_duplicate_file_choice(child, target, source_info, target_info)
                 if choice == "candidate":
-                    if dry_run:
-                        _v(f"  Would replace lower-quality artwork: {target.name}")
-                    else:
-                        target.unlink()
-                        shutil.move(str(child), str(target))
+                    _v(f"  {'Would replace' if dry_run else 'Replace'} lower-quality artwork: {target.name}")
                     moves.append((child, target))
                 else:
-                    if dry_run:
-                        _v(f"  Would remove lower-quality duplicate artwork: {child}")
-                    else:
-                        child.unlink()
+                    _v(f"  {'Would remove' if dry_run else 'Remove'} lower-quality duplicate artwork: {child}")
                 continue
 
             final = _unique_dest(target)
@@ -40259,9 +40248,6 @@ def _merge_artist_dir_contents(src: Path, dst: Path, *, dry_run: bool,
 
         moves.append((child, final))
         _v(f"  {'Would move' if dry_run else 'Move'}: {child} -> {final}")
-        if not dry_run:
-            final.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(child), str(final))
         stats["files_moved"] += 1
 
 
@@ -40319,16 +40305,13 @@ def _apply_artist_folder_groups(root: str, keys: Optional[List[str]],
     if wanted:
         groups = [g for g in groups if g["key"] in wanted]
 
-    summary = {"groups": 0, "folders": 0, "files": 0, "db_paths": 0, "db_artists": 0, "db_tags": 0}
+    summary = {"groups": len(groups), "folders": 0, "files": 0, "db_paths": 0, "db_artists": 0, "db_tags": 0}
     if not groups:
         log.append("No duplicate artist folders found.")
         return summary
 
     all_moves: List[tuple] = []
-    artist_updates: Dict[str, str] = {}
-    artist_update_mbids: Dict[str, str] = {}
-    affected_album_ids: set = set()
-
+    reconcile_candidates: List[Dict[str, Any]] = []
     for group in groups:
         canonical = Path(group["canonical"]["path"])
         canonical_name = group["canonical"]["name"]
@@ -40336,32 +40319,14 @@ def _apply_artist_folder_groups(root: str, keys: Optional[List[str]],
         if not _path_under(canonical, root_path):
             log.append(f"Skipping unsafe canonical path: {canonical}")
             continue
-        summary["groups"] += 1
         log.append(f"\nArtist: {canonical_name}")
         if mb_artistid:
             log.append(f"  MusicBrainz canonical: {canonical_name} [{mb_artistid}]")
-            artist_updates[canonical_name] = canonical_name
-            artist_update_mbids[canonical_name] = mb_artistid
         for source in group["sources"]:
             src = Path(source["path"])
             if not _path_under(src, root_path) or src.parent != root_path:
                 log.append(f"  Skipping unsafe source path: {src}")
                 continue
-            # group["musicbrainz"]["id"] (mb_artistid) is derived from a
-            # MusicBrainz *text search on the folder name* (see
-            # _mb_canonical_for_artist_entries), not from per-folder audio
-            # evidence -- two different real artists who share a folder name
-            # would produce the same search result, so it is not independent
-            # confirmation that these folders belong to the same artist.
-            # Sample audio and AcoustID-verify before merging any source,
-            # with or without that name-derived MBID, so two different
-            # artists that happen to share a folder name are never silently
-            # commingled just because fuzzy name matching (or a name search
-            # built on top of it) agrees. Only an explicit True confirmation
-            # authorizes the merge -- False (confirmed mismatch) and None
-            # (no fingerprint evidence available: empty folder, no
-            # fpcalc/AcoustID reachable, provider error, etc.) both block
-            # it, since an absent result is not evidence of a safe match.
             fp_result = _artist_folder_fingerprint_confirms(src, canonical_name)
             if fp_result is not True:
                 reason = (
@@ -40374,20 +40339,14 @@ def _apply_artist_folder_groups(root: str, keys: Optional[List[str]],
                 )
                 continue
             log.append(f"  Merge folder: {src.name} -> {canonical.name}")
-            artist_updates[source["name"]] = canonical_name
-            if mb_artistid:
-                artist_update_mbids[source["name"]] = mb_artistid
-            _merge_artist_dir_contents(src, canonical, dry_run=dry_run,
-                                       log=log, moves=all_moves)
+            _merge_artist_dir_contents(src, canonical, dry_run=dry_run, log=log, moves=all_moves)
             summary["folders"] += 1
-            try:
-                if dry_run:
-                    log.append(f"  Would remove artist folder: {src}")
-                elif not any(src.iterdir()):
-                    src.rmdir()
-                    log.append(f"  Removed artist folder: {src}")
-            except Exception as ex:
-                log.append(f"  WARN removing artist folder {src}: {ex}")
+            reconcile_candidates.append({
+                "source_path": str(src),
+                "target_path": str(canonical),
+                "source_mbid": mb_artistid,
+                "target_mbid": mb_artistid,
+            })
 
     summary["files"] = len(all_moves)
     if dry_run:
@@ -40395,88 +40354,66 @@ def _apply_artist_folder_groups(root: str, keys: Optional[List[str]],
                    f"{summary['folders']} folder(s), {summary['files']} file move(s).")
         return summary
 
-    try:
-        with _db() as con:
-            for old_artist, new_artist in artist_updates.items():
-                mb_artistid = artist_update_mbids.get(old_artist, "")
-                if old_artist == new_artist and not mb_artistid:
-                    continue
-                rows = con.execute(
-                    "SELECT id FROM albums WHERE albumartist=?",
-                    (old_artist,)
-                ).fetchall()
-                affected_album_ids.update(int(r[0]) for r in rows)
-                if mb_artistid:
-                    cur1 = con.execute(
-                        "UPDATE albums SET albumartist=?, albumartists=?, "
-                        "mb_albumartistid=?, mb_albumartistids=? WHERE albumartist=?",
-                        (new_artist, new_artist, mb_artistid, mb_artistid, old_artist)
-                    )
-                    cur2 = con.execute(
-                        "UPDATE items SET albumartist=?, albumartists=?, "
-                        "mb_albumartistid=?, mb_albumartistids=? WHERE albumartist=?",
-                        (new_artist, new_artist, mb_artistid, mb_artistid, old_artist)
-                    )
-                    con.execute(
-                        "UPDATE items SET artist=?, artists=?, mb_artistid=?, mb_artistids=? WHERE artist=?",
-                        (new_artist, new_artist, mb_artistid, mb_artistid, old_artist)
-                    )
-                else:
-                    cur1 = con.execute("UPDATE albums SET albumartist=? WHERE albumartist=?",
-                                       (new_artist, old_artist))
-                    cur2 = con.execute("UPDATE items SET albumartist=? WHERE albumartist=?",
-                                       (new_artist, old_artist))
-                    con.execute("UPDATE items SET artist=? WHERE artist=?",
-                                (new_artist, old_artist))
-                summary["db_artists"] += (cur1.rowcount if cur1.rowcount > 0 else 0)
-                summary["db_artists"] += (cur2.rowcount if cur2.rowcount > 0 else 0)
-            con.commit()
-    except Exception as ex:
-        log.append(f"  WARN updating artist names in DB: {ex}")
+    if not reconcile_candidates:
+        log.append("No duplicate artist folders passed validation.")
+        return summary
 
+    # Apply phase: delegate all real mutations to Beets Engine transaction boundary
+    op_payload = {
+        "root": str(root_path),
+        "mode": "scan_merge",
+        "selected_keys": list(wanted) if wanted else [],
+        "candidates": reconcile_candidates,
+    }
     try:
-        with _db(text_factory=bytes) as conp:
-            for old_path, new_path in all_moves:
-                old_abs = str(old_path).encode()
-                old_db = _db_path_value(old_path).encode()
-                new_db = _db_path_value(new_path).encode()
-                cur = conp.execute(
-                    "UPDATE items SET path=? WHERE path=? OR path=?",
-                    (new_db, old_db, old_abs)
-                )
-                if cur.rowcount > 0:
-                    summary["db_paths"] += cur.rowcount
-            conp.commit()
-    except Exception as ex:
-        log.append(f"  WARN updating file paths in DB: {ex}")
+        plan_res = beets_client.plan_artist_folder_reconcile(op_payload)
+        if not plan_res.get("ok"):
+            log.append(f"Refusing to operate: {plan_res.get('error')}")
+            return summary
 
-    if affected_album_ids:
-        cfg = _write_job_beets_config("/tmp/beets_artist_folder_merge.yaml")
-        for aid in sorted(affected_album_ids):
-            for cmd_label, timeout_s in (("write", 120),):
-                try:
-                    r = subprocess.run(
-                        [BEET_BIN, "-c", cfg, cmd_label, f"album_id:{aid}"],
-                        capture_output=True, text=True, timeout=timeout_s,
-                        env=_beet_env(),
-                    )
-                    for line in (r.stdout + r.stderr).splitlines():
-                        if line.strip():
-                            log.append("  " + line)
-                    if cmd_label == "write" and r.returncode == 0:
-                        summary["db_tags"] += 1
-                    elif r.returncode != 0:
-                        log.append(
-                            f"  WARN beet {cmd_label} for album_id:{aid} exited {r.returncode}"
-                        )
-                except Exception as ex:
-                    log.append(f"  WARN beet {cmd_label} for album_id:{aid}: {ex}")
-        log.append("  Skipped beet move; artist-folder merge already moved files and updated DB paths.")
+        op_id = plan_res["operation_id"]
+        apply_res = beets_client.apply_artist_folder_reconcile(op_id)
+        if not apply_res.get("ok"):
+            log.append(f"Engine artist folder merge failed: {apply_res.get('error')}")
+            return summary
+    except Exception as ex:
+        # Fall back to in-process transaction_engine execution if beets_client IPC is unreachable
+        try:
+            from backend.transaction_engine import (
+                TransactionStore,
+                create_artist_folder_reconcile_plan,
+                execute_artist_folder_reconcile_apply,
+            )
+            tx_store = TransactionStore(root=str(METADATA_CACHE_ROOT / "transactions"))
+            plan_res = create_artist_folder_reconcile_plan(
+                tx_store,
+                op_payload,
+                music_allowed_roots=[str(MUSIC_ROOT)],
+                db_path=str(LIB_PATH),
+            )
+            if not plan_res.get("ok"):
+                log.append(f"Refusing to operate: {plan_res.get('error')}")
+                return summary
+            op_id = plan_res["operation_id"]
+            apply_res = execute_artist_folder_reconcile_apply(
+                tx_store,
+                op_id,
+                music_allowed_roots=[str(MUSIC_ROOT)],
+                db_path=str(LIB_PATH),
+            )
+            if not apply_res.get("ok"):
+                log.append(f"Engine artist folder merge failed: {apply_res.get('error')}")
+                return summary
+        except Exception as inner_ex:
+            log.append(f"  WARN delegating artist folder merge to engine: {inner_ex}")
+            return summary
 
     _invalidate_lib_cache()
-    log.append(f"\nDone: merged {summary['groups']} artist group(s), moved "
-               f"{summary['files']} file(s), updated {summary['db_paths']} DB path(s), "
-               f"wrote tags for {summary['db_tags']} album(s).")
+    log.append(f"  [merge] Delegated artist folder merge to engine (op_id={op_id})")
+    summary["files"] = apply_res.get("moved_files", 0)
+    summary["folders"] = summary.get("groups", 0)
+
+    log.append(f"\nDone: merged {summary['groups']} artist group(s), moved {summary['files']} file(s).")
     return summary
 
 
@@ -41122,104 +41059,70 @@ def clean_artist_folders_stamp_mbid():
             log.append("No artist folders need MB ID stamping.")
             _append_stamp_skipped_log(log, skipped, include_examples=False)
             return {"renamed": 0, "merged": 0, "skipped": 0}
+        # Formerly performed direct disk merge via _merge_artist_dir_contents(; now delegated to beets_client.plan_artist_folder_reconcile
         log.append(f"Stamping MB IDs on {len(candidates)} artist folder(s)…")
-        renamed = 0
-        merged = 0
-        skipped = 0
-        merge_stats_total: Counter = Counter()
-        for c in candidates:
-            if cancel_event and cancel_event.is_set():
-                log.append("  Cancelled.")
-                break
-            src = Path(c["path"])
-            dst = Path(c["new_path"])
-            try:
-                if not src.exists() or not src.is_dir():
-                    log.append(f"  Skip (source missing): {c['name']!r}")
-                    skipped += 1
-                    continue
-                if src.resolve(strict=False) == dst.resolve(strict=False):
-                    log.append(f"  Skip (already canonical): {c['name']!r}")
-                    skipped += 1
-                    continue
-                if dst.exists() and not dst.is_dir():
-                    log.append(f"  Skip (target is not a folder): {c['new_name']!r}")
-                    skipped += 1
-                    continue
-                prefix_pairs = _stamp_db_path_prefix_pairs(src, dst)
-                if dst.exists():
-                    moves: List[tuple] = []
-                    merge_stats: Dict[str, int] = {}
-                    log.append(f"  Merge: {c['name']!r} -> {c['new_name']!r}")
-                    _merge_artist_dir_contents(
-                        src,
-                        dst,
-                        dry_run=False,
-                        log=log,
-                        moves=moves,
-                        verbose_files=not compact_log,
-                        stats=merge_stats,
-                    )
-                    merge_stats_total.update(merge_stats)
-                    try:
-                        if not any(src.iterdir()):
-                            src.rmdir()
-                            merge_stats_total["folders_removed"] += 1
-                            if not compact_log:
-                                log.append(f"  Removed empty artist folder: {src}")
-                    except Exception as ex:
-                        log.append(f"  WARN removing artist folder {src}: {ex}")
-                    if compact_log:
-                        log.append(
-                            "    Consolidated: "
-                            f"{merge_stats.get('files_moved', 0)} file(s) moved, "
-                            f"{merge_stats.get('duplicate_files_removed', 0)} duplicate file(s) removed, "
-                            f"{merge_stats.get('artwork_collisions_resolved', 0)} artwork collision(s) resolved"
-                        )
-                    merged += 1
-                    with _db(text_factory=bytes) as con:
-                        exact_items = _replace_stamp_db_exact_paths(con, "items", "path", moves)
-                        exact_album_paths = _replace_stamp_db_exact_paths(con, "albums", "path", moves)
-                        exact_artpaths = _replace_stamp_db_exact_paths(con, "albums", "artpath", moves)
-                        updated_items = exact_items + _replace_stamp_db_path_prefixes(con, "items", "path", prefix_pairs)
-                        updated_album_paths = exact_album_paths + _replace_stamp_db_path_prefixes(con, "albums", "path", prefix_pairs)
-                        updated_albums = exact_artpaths + _replace_stamp_db_path_prefixes(con, "albums", "artpath", prefix_pairs)
-                        con.commit()
-                    log.append(
-                        f"    DB updated: {updated_items} item path(s), {updated_album_paths} album path(s), {updated_albums} album artpath(s)"
-                    )
-                    continue
+        payload = {
+            "root": str(root_path),
+            "mode": "stamp_mbid",
+        }
+        try:
+            plan_res = beets_client.plan_artist_folder_reconcile(payload)
+            if not plan_res.get("ok"):
+                log.append(f"Refusing to operate: {plan_res.get('error')}")
+                return {"renamed": 0, "merged": 0, "skipped": len(skipped)}
 
-                src.rename(dst)
-                renamed += 1
-                log.append(f"  Renamed: {c['name']!r} -> {c['new_name']!r}")
-                with _db(text_factory=bytes) as con:
-                    updated_items = _replace_stamp_db_path_prefixes(con, "items", "path", prefix_pairs)
-                    updated_album_paths = _replace_stamp_db_path_prefixes(con, "albums", "path", prefix_pairs)
-                    updated_albums = _replace_stamp_db_path_prefixes(con, "albums", "artpath", prefix_pairs)
-                    con.commit()
-                log.append(
-                    f"    DB updated: {updated_items} item path(s), {updated_album_paths} album path(s), {updated_albums} album artpath(s)"
+            op_id = plan_res["operation_id"]
+            apply_res = beets_client.apply_artist_folder_reconcile(op_id)
+            if not apply_res.get("ok"):
+                log.append(f"Engine MBID stamping failed: {apply_res.get('error')}")
+                return {"renamed": 0, "merged": 0, "skipped": len(skipped)}
+        except Exception as ex:
+            # Fall back to in-process transaction_engine execution if beets_client IPC is unreachable
+            try:
+                from backend.transaction_engine import (
+                    TransactionStore,
+                    create_artist_folder_reconcile_plan,
+                    execute_artist_folder_reconcile_apply,
                 )
-            except Exception as ex:
-                log.append(f"  WARN stamping {c['name']!r}: {ex}")
-                skipped += 1
+                tx_store = TransactionStore(root=str(METADATA_CACHE_ROOT / "transactions"))
+                plan_res = create_artist_folder_reconcile_plan(
+                    tx_store,
+                    payload,
+                    music_allowed_roots=[str(MUSIC_ROOT)],
+                    db_path=str(LIB_PATH),
+                )
+                if not plan_res.get("ok"):
+                    log.append(f"Refusing to operate: {plan_res.get('error')}")
+                    return {"renamed": 0, "merged": 0, "skipped": len(skipped)}
+                op_id = plan_res["operation_id"]
+                apply_res = execute_artist_folder_reconcile_apply(
+                    tx_store,
+                    op_id,
+                    music_allowed_roots=[str(MUSIC_ROOT)],
+                    db_path=str(LIB_PATH),
+                )
+                if not apply_res.get("ok"):
+                    log.append(f"Engine MBID stamping failed: {apply_res.get('error')}")
+                    return {"renamed": 0, "merged": 0, "skipped": len(skipped)}
+            except Exception as inner_ex:
+                log.append(f"  WARN delegating MBID stamping to engine: {inner_ex}")
+                return {"renamed": 0, "merged": 0, "skipped": len(skipped)}
+
         _invalidate_lib_cache()
+        log.append(f"  [stamp] Delegated MBID stamping to engine (op_id={op_id})")
         summary = {
-            "renamed": renamed,
-            "merged": merged,
-            "skipped": skipped,
-            "files_moved": int(merge_stats_total.get("files_moved") or 0),
-            "duplicate_files_removed": int(merge_stats_total.get("duplicate_files_removed") or 0),
-            "artwork_collisions_resolved": int(merge_stats_total.get("artwork_collisions_resolved") or 0),
-            "filename_conflicts_preserved": int(merge_stats_total.get("filename_conflicts_preserved") or 0),
-            "folders_removed": int(merge_stats_total.get("folders_removed") or 0),
+            "renamed": apply_res.get("moved_files", 0),
+            "merged": apply_res.get("quarantined_files", 0),
+            "skipped": len(skipped),
+            "files_moved": apply_res.get("moved_files", 0),
+            "duplicate_files_removed": apply_res.get("quarantined_files", 0),
+            "artwork_collisions_resolved": 0,
+            "filename_conflicts_preserved": 0,
+            "folders_removed": apply_res.get("removed_dirs", 0),
         }
         log.append(
-            f"Done: {renamed} renamed, {merged} merged, {skipped} skipped; "
-            f"{summary['files_moved']} file(s) moved, "
-            f"{summary['duplicate_files_removed']} duplicate file(s) removed, "
-            f"{summary['artwork_collisions_resolved']} artwork collision(s) resolved."
+            f"Done: {summary['renamed']} renamed, {summary['merged']} merged, {summary['skipped']} skipped; "
+            f"{summary['files_moved']} file(s) moved, {summary['duplicate_files_removed']} duplicate file(s) removed."
         )
         return summary
 
@@ -52856,6 +52759,8 @@ def api_transaction_rollback(transaction_id):
                 res = beets_client.rollback_album_mb_track_repair(transaction_id)
             elif mutation_family == "existing_album_reconcile_v1":
                 res = beets_client.rollback_existing_album_reconcile(transaction_id)
+            elif mutation_family == "artist_folder_reconcile_v1":
+                res = beets_client.rollback_artist_folder_reconcile(transaction_id)
             elif mutation_family:
                 return jsonify({
                     "ok": False,
