@@ -311,6 +311,19 @@ class BeetsClient:
         """Engine-side bulk import replacement rollback (SEC-002 Wave 18)."""
         return self._request("POST", "/imports/bulk-replacement/rollback", {"operation_id": operation_id}, timeout=timeout)
 
+    def plan_album_mb_track_repair(self, payload: Dict[str, Any], *, timeout: float = 30.0) -> Dict[str, Any]:
+        """Engine-side album MB track repair planning (SEC-002 Wave 19)."""
+        return self._request("POST", "/albums/mb-track-repair/plan", payload, timeout=timeout)
+
+    def apply_album_mb_track_repair(self, operation_id: str, *, timeout: float = 60.0) -> Dict[str, Any]:
+        """Engine-side album MB track repair application (SEC-002 Wave 19)."""
+        return self._request("POST", "/albums/mb-track-repair/apply", {"operation_id": operation_id}, timeout=timeout)
+
+    def rollback_album_mb_track_repair(self, operation_id: str, *, timeout: float = 60.0) -> Dict[str, Any]:
+        """Engine-side album MB track repair rollback (SEC-002 Wave 19)."""
+        return self._request("POST", "/albums/mb-track-repair/rollback", {"operation_id": operation_id}, timeout=timeout)
+
+
     def get_transaction(self, transaction_id: str, *, format: str = "json", timeout: float = 15.0) -> Dict[str, Any]:
         """Fetch transaction record from engine TransactionStore (SEC-002 Wave 15)."""
         return self._request("GET", f"/transactions/{transaction_id}?format={format}", timeout=timeout)

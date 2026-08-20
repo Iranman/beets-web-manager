@@ -831,3 +831,66 @@ def _resolve_mb_release_id(mb_input: str, log: list) -> str:
         except Exception as ex:
             log.append(f"  WARN: release-group lookup failed ({ex}), using raw UUID")
     return mb_uuid
+
+
+def fetch_mb_release_tracklist(mb_albumid: str, log: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Fetch tracklist for a MusicBrainz release ID without app.py dependencies."""
+    mb_albumid = (mb_albumid or "").strip().lower()
+    if not _MB_UUID_RE.match(mb_albumid):
+        return {"ok": False, "error": "Invalid MusicBrainz release ID", "tracks": []}
+    mb_url = (f"https://musicbrainz.org/ws/2/release/{mb_albumid}"
+              "?inc=recordings+release-groups&fmt=json")
+    req = _ur.Request(
+        mb_url,
+        headers={"User-Agent": "BeetsWebControl/1.0 (beets-webcontrol)"}
+    )
+    mb_data: Dict[str, Any] = {}
+    transient_codes = {429, 500, 502, 503, 504}
+    for attempt in range(1, 4):
+        try:
+            with _ur.urlopen(req, timeout=30) as resp:
+                mb_data = json.loads(resp.read())
+            break
+        except Exception as ex:
+            code = getattr(ex, "code", None)
+            reason = str(getattr(ex, "reason", "") or "").lower()
+            transient = code in transient_codes or "timed out" in reason or "temporarily" in reason
+            if transient and attempt < 3:
+                if log is not None:
+                    public_reason = code if code is not None else "transient network error"
+                    log.append(f"  MB fetch transient error ({public_reason}); retrying {attempt + 1}/3")
+                time.sleep(1.5 * attempt)
+                continue
+            if log is not None:
+                log.append("  MB fetch failed: MusicBrainz lookup failed.")
+            return {"ok": False, "error": "MusicBrainz lookup failed.", "tracks": []}
+
+    rg = mb_data.get("release-group") or {}
+    release_group_id = str(rg.get("id") or "").strip().lower()
+    tracks: List[Dict[str, Any]] = []
+    for medium in mb_data.get("media", []) or []:
+        disc_num = int(medium.get("position") or 1)
+        for trk in medium.get("tracks", []) or []:
+            rec = trk.get("recording") or {}
+            rec_id = str(rec.get("id") or "").strip()
+            if not rec_id:
+                continue
+            try:
+                length_ms = int(trk.get("length") or rec.get("length") or 0)
+            except Exception:
+                length_ms = 0
+            tracks.append({
+                "disc": disc_num,
+                "track": int(trk.get("position") or len(tracks) + 1),
+                "title": _mb_text(trk.get("title") or rec.get("title")),
+                "mb_trackid": rec_id,
+                "duration_ms": length_ms,
+            })
+    return {
+        "ok": True,
+        "release_id": mb_albumid,
+        "release_group": release_group_id,
+        "release_title": _mb_text(mb_data.get("title")),
+        "tracks": tracks,
+    }
+

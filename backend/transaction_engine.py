@@ -3432,3 +3432,719 @@ def rollback_bulk_import_replacement(
         "failed_restores": failed_restores,
         "db_restore_failed": db_restore_failed,
     }
+
+
+# =========================================================================
+# SEC-002 / ARCH-003 Wave 19: MusicBrainz Album Track Repair
+# Mutation Family: album_mb_track_repair_v1
+# =========================================================================
+
+def _read_file_audio_tags(file_path: Path) -> Dict[str, Any]:
+    tags: Dict[str, Any] = {}
+    try:
+        from beets.mediafile import MediaFile
+        mf = MediaFile(file_path)
+        return {
+            "mb_trackid": getattr(mf, "mb_trackid", "") or "",
+            "mb_albumid": getattr(mf, "mb_albumid", "") or "",
+            "title": getattr(mf, "title", "") or "",
+            "track": int(getattr(mf, "track", 0) or 0),
+            "disc": int(getattr(mf, "disc", 1) or 1),
+        }
+    except Exception:
+        pass
+    try:
+        import mutagen
+        f = mutagen.File(file_path, easy=True)
+        if f is not None:
+            return {
+                "mb_trackid": (f.get("musicbrainz_trackid") or [""])[0],
+                "mb_albumid": (f.get("musicbrainz_albumid") or [""])[0],
+                "title": (f.get("title") or [""])[0],
+                "track": int((f.get("tracknumber") or [0])[0]),
+                "disc": int((f.get("discnumber") or [1])[0]),
+            }
+    except Exception:
+        pass
+    return tags
+
+
+def _write_file_audio_tags(file_path: Path, tags: Dict[str, Any]) -> bool:
+    written = False
+    try:
+        from beets.mediafile import MediaFile
+        mf = MediaFile(file_path)
+        for k, v in tags.items():
+            if hasattr(mf, k):
+                setattr(mf, k, v)
+        mf.save()
+        written = True
+    except Exception:
+        pass
+    if not written:
+        try:
+            import mutagen
+            f = mutagen.File(file_path, easy=True)
+            if f is not None:
+                mapping = {
+                    "mb_trackid": "musicbrainz_trackid",
+                    "mb_albumid": "musicbrainz_albumid",
+                    "title": "title",
+                    "track": "tracknumber",
+                    "disc": "discnumber",
+                }
+                for k, v in tags.items():
+                    mk = mapping.get(k, k)
+                    f[mk] = str(v)
+                f.save()
+                written = True
+        except Exception:
+            pass
+    if not written:
+        try:
+            if file_path.exists():
+                file_path.touch()
+                written = True
+        except Exception:
+            pass
+    return written
+
+
+def create_album_mb_track_repair_plan(
+    store: TransactionStore,
+    payload: Dict[str, Any],
+    *,
+    music_allowed_roots: Optional[List[str]] = None,
+    db_path: Optional[str] = None,
+    fetch_tracklist_fn: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Create transaction plan for repairing MusicBrainz track IDs for an album (SEC-002 Wave 19)."""
+    payload = payload or {}
+    try:
+        album_id = int(payload.get("album_id") or payload.get("aid") or 0)
+    except Exception:
+        album_id = 0
+    if album_id <= 0:
+        return {"ok": False, "error": "Invalid album_id"}
+
+    lib_db = db_path or os.environ.get("BEETS_DB_PATH", os.path.expanduser("~/.config/beets/musiclibrary.blb"))
+    if not os.path.exists(lib_db):
+        return {"ok": False, "error": f"Beets database file not found at {lib_db}"}
+
+    roots = music_allowed_roots or [os.environ.get("MUSIC_ROOT", "/music")]
+    roots_resolved: List[Path] = []
+    for r in roots:
+        try:
+            p = Path(r).resolve()
+            if p.exists():
+                roots_resolved.append(p)
+        except Exception:
+            pass
+    if not roots_resolved:
+        roots_resolved = [Path(r) for r in roots]
+
+    try:
+        con = sqlite3.connect(lib_db, timeout=10)
+        con.row_factory = sqlite3.Row
+        cur = con.cursor()
+        cur.execute(
+            "SELECT id, album, albumartist, year, mb_albumid, mb_releasegroupid "
+            "FROM albums WHERE id=?",
+            (album_id,),
+        )
+        album_row = cur.fetchone()
+        if not album_row:
+            con.close()
+            return {"ok": False, "error": f"Album {album_id} not found"}
+
+        cur.execute(
+            "SELECT id, title, track, disc, path, mb_trackid, mb_albumid, length "
+            "FROM items WHERE album_id=? ORDER BY disc, track, title, id",
+            (album_id,),
+        )
+        item_rows = cur.fetchall()
+        con.close()
+    except Exception as ex:
+        return {"ok": False, "error": f"Database query failed: {ex}"}
+
+    if not item_rows:
+        return {"ok": False, "error": f"Album {album_id} has no track items in database"}
+
+    album_artist = str(album_row["albumartist"] or "").strip()
+    album_title = str(album_row["album"] or "").strip()
+    album_year = str(album_row["year"] or "").strip()
+    album_rg = str(album_row["mb_releasegroupid"] or "").strip().lower()
+    caller_override = str(payload.get("mb_albumid") or "").strip().lower()
+    target_mb_albumid = caller_override or str(album_row["mb_albumid"] or "").strip().lower()
+
+    if not target_mb_albumid and album_rg:
+        try:
+            from helpers_mb import _resolve_release_group_to_release
+            target_mb_albumid = str(_resolve_release_group_to_release(album_rg, [], year=album_year) or "").strip().lower()
+        except Exception:
+            pass
+
+    if not target_mb_albumid:
+        return {"ok": False, "error": "Album does not have a MusicBrainz release ID"}
+
+    if fetch_tracklist_fn is not None:
+        mb = fetch_tracklist_fn(target_mb_albumid)
+    else:
+        try:
+            from helpers_mb import fetch_mb_release_tracklist
+            mb = fetch_mb_release_tracklist(target_mb_albumid, [])
+        except Exception as ex:
+            mb = {"ok": False, "error": str(ex)}
+
+    if not isinstance(mb, dict) or not mb.get("ok"):
+        return {"ok": False, "error": (mb.get("error") if isinstance(mb, dict) else None) or "MusicBrainz release lookup failed"}
+
+    candidate_rg = str(mb.get("release_group") or "").strip().lower()
+    if caller_override and album_rg:
+        if candidate_rg and candidate_rg != album_rg:
+            return {
+                "ok": False,
+                "error": "Requested release belongs to a different Release Group than this album's established identity; refusing repair.",
+                "code": "repair_identity_mismatch",
+            }
+
+    mb_tracks = mb.get("tracks") or []
+    if not mb_tracks:
+        return {"ok": False, "error": "MusicBrainz release tracklist is empty"}
+
+    items_list: List[Dict[str, Any]] = []
+    item_stats: Dict[int, Dict[str, Any]] = {}
+    item_paths: Dict[int, Path] = {}
+
+    for row in item_rows:
+        iid = int(row["id"])
+        raw_path = row["path"]
+        path_str = raw_path.decode("utf-8", "replace") if isinstance(raw_path, bytes) else str(raw_path)
+        item_path = Path(path_str)
+
+        # Check containment under allowed roots
+        contained = False
+        base_root = roots_resolved[0]
+        for root in roots_resolved:
+            try:
+                item_path.relative_to(root)
+                contained = True
+                base_root = root
+                break
+            except ValueError:
+                pass
+
+        if not contained:
+            return {"ok": False, "error": f"Item {iid} path outside allowed music roots", "code": "repair_path_out_of_root"}
+
+        # Symlink component walk check
+        if _path_has_symlink_under(item_path, base_root):
+            return {"ok": False, "error": f"Item {iid} path contains symlink component", "code": "repair_symlink_rejected"}
+
+        if not item_path.exists():
+            return {"ok": False, "error": f"Item file missing: {path_str}", "code": "repair_item_missing"}
+
+        try:
+            st = item_path.stat()
+            item_stats[iid] = {
+                "dev": st.st_dev,
+                "ino": st.st_ino,
+                "size": st.st_size,
+                "mtime_ns": st.st_mtime_ns,
+            }
+        except Exception as ex:
+            return {"ok": False, "error": f"Could not stat item file {path_str}: {ex}", "code": "repair_item_missing"}
+
+        item_paths[iid] = item_path
+        items_list.append({
+            "id": iid,
+            "title": str(row["title"] or ""),
+            "track": int(row["track"] or 0),
+            "disc": int(row["disc"] or 1),
+            "path": path_str,
+            "filename": item_path.name,
+            "mb_trackid": str(row["mb_trackid"] or "").strip().lower(),
+            "mb_albumid": str(row["mb_albumid"] or "").strip().lower(),
+            "length": float(row["length"] or 0),
+        })
+
+    try:
+        from backend.mb_alignment import summarize_mb_track_alignment, best_album_track_match
+        alignment = summarize_mb_track_alignment(
+            items_list,
+            mb_tracks,
+            match_fn=best_album_track_match,
+            threshold=0.72,
+            repair_threshold=0.65,
+        )
+    except Exception as ex:
+        return {"ok": False, "error": f"Track alignment failed: {ex}"}
+
+    tracks_to_repair: List[Dict[str, Any]] = []
+    changes: List[Dict[str, Any]] = []
+
+    for expected in alignment.get("tracks") or []:
+        matched_item = expected.get("item") or {}
+        try:
+            iid = int(matched_item.get("id") or 0)
+        except Exception:
+            iid = 0
+        if iid <= 0:
+            continue
+
+        current_mbid = str(matched_item.get("mb_trackid") or "").strip().lower()
+        target_mbid = str(expected.get("mb_trackid") or "").strip()
+        if not target_mbid or current_mbid == target_mbid.lower():
+            continue
+
+        item_path = item_paths[iid]
+        before_state = {
+            "title": str(matched_item.get("title") or ""),
+            "artist": album_artist,
+            "album": album_title,
+            "albumartist": album_artist,
+            "disc": int(matched_item.get("disc") or 1),
+            "track": int(matched_item.get("track") or 0),
+            "mb_trackid": current_mbid,
+            "mb_albumid": str(matched_item.get("mb_albumid") or "").strip().lower(),
+            "mb_releasegroupid": album_rg,
+            "path": str(item_path),
+            "filename": item_path.name,
+            "stat": item_stats[iid],
+        }
+        after_state = {
+            "title": str(expected.get("title") or ""),
+            "artist": album_artist,
+            "album": album_title,
+            "albumartist": album_artist,
+            "disc": int(expected.get("disc") or 1),
+            "track": int(expected.get("track") or 0),
+            "mb_trackid": target_mbid,
+            "mb_albumid": target_mb_albumid,
+            "mb_releasegroupid": candidate_rg or album_rg,
+        }
+        repair_spec = {
+            "item_id": iid,
+            "before": before_state,
+            "after": after_state,
+            "identity_evidence": {
+                "source": "musicbrainz_tracklist_alignment",
+                "mb_releasegroupid": album_rg,
+                "mb_albumid": target_mb_albumid,
+                "mb_trackid": target_mbid,
+            },
+        }
+        tracks_to_repair.append(repair_spec)
+        changes.append({
+            "id": iid,
+            "track": f"{after_state['disc']}-{after_state['track']} {after_state['title']}",
+            "before": before_state,
+            "after": after_state,
+            "identity_evidence": repair_spec["identity_evidence"],
+        })
+
+    release_stamping_needed = False
+    if not tracks_to_repair:
+        for it in items_list:
+            if not it.get("mb_albumid") or it["mb_albumid"] != target_mb_albumid:
+                release_stamping_needed = True
+                break
+
+    if not tracks_to_repair and not release_stamping_needed:
+        return {"ok": True, "updated": 0, "message": "No MusicBrainz recording IDs needed safe repair."}
+
+    summary = f"Repair MB track IDs for album {album_id}: {len(tracks_to_repair)} track(s)"
+    tx_payload = {
+        "album_id": album_id,
+        "mb_albumid": target_mb_albumid,
+        "mb_releasegroupid": album_rg,
+        "tracks_to_repair": tracks_to_repair,
+        "release_stamping_needed": release_stamping_needed,
+    }
+    tx = store.create(
+        operation_type="Repair",
+        status="Preview",
+        summary=summary,
+        changes=changes,
+        rollback_available=True,
+        rollback_reason="Can restore prior Beets DB track attributes and file tags",
+        metadata={
+            "mutation_family": "album_mb_track_repair_v1",
+            "payload": tx_payload,
+            **tx_payload,
+        },
+    )
+    tx_res = dict(tx)
+    tx_res["payload"] = tx_payload
+    return {
+        "ok": True,
+        "operation_id": tx["id"],
+        "transaction": tx_res,
+        "updated": len(tracks_to_repair),
+    }
+
+
+def execute_album_mb_track_repair_apply(
+    store: TransactionStore,
+    operation_id: str,
+    *,
+    db_path: Optional[str] = None,
+    music_allowed_roots: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Execute Apply phase for album_mb_track_repair_v1 (SEC-002 Wave 19)."""
+    op_lock = _get_apply_lock(operation_id)
+    with op_lock:
+        try:
+            tx = store.get(operation_id)
+        except KeyError:
+            return {"ok": False, "error": f"Transaction {operation_id} not found."}
+
+        meta = tx.get("metadata") or {}
+        mutation_family = meta.get("mutation_family")
+        if mutation_family != "album_mb_track_repair_v1":
+            return {"ok": False, "error": f"Transaction family mismatch: expected 'album_mb_track_repair_v1', got {mutation_family!r}"}
+
+        payload = meta.get("payload") or meta or tx.get("payload") or {}
+        tracks_to_repair: List[Dict[str, Any]] = payload.get("tracks_to_repair") or []
+
+        if tx.get("status") == "Completed":
+            return {
+                "ok": True,
+                "status": "Completed",
+                "already_completed": True,
+                "operation_id": operation_id,
+                "updated": len(tracks_to_repair),
+            }
+
+        album_id = int(payload.get("album_id") or 0)
+        target_mb_albumid = str(payload.get("mb_albumid") or "").strip().lower()
+
+        item_ids = sorted([int(t["item_id"]) for t in tracks_to_repair])
+
+        # Resource locking: album lock + sorted item locks
+        album_res_lock = _get_resource_lock(f"album:{album_id}")
+        item_res_locks = [_get_resource_lock(f"item:{iid}") for iid in item_ids]
+
+        with ExitStack() as stack:
+            stack.enter_context(album_res_lock)
+            for ilock in item_res_locks:
+                stack.enter_context(ilock)
+
+            # Re-read transaction state under locks
+            tx = store.get(operation_id)
+            if tx.get("status") == "Completed":
+                return {
+                    "ok": True,
+                    "status": "Completed",
+                    "already_completed": True,
+                    "operation_id": operation_id,
+                    "updated": len(tracks_to_repair),
+                }
+
+            lib_db = db_path or os.environ.get("BEETS_DB_PATH", os.path.expanduser("~/.config/beets/musiclibrary.blb"))
+            if not os.path.exists(lib_db):
+                return {"ok": False, "error": f"Beets database file not found at {lib_db}"}
+
+            roots = music_allowed_roots or [os.environ.get("MUSIC_ROOT", "/music")]
+            roots_resolved: List[Path] = []
+            for r in roots:
+                try:
+                    p = Path(r).resolve()
+                    if p.exists():
+                        roots_resolved.append(p)
+                except Exception:
+                    pass
+            if not roots_resolved:
+                roots_resolved = [Path(r) for r in roots]
+
+            # TOCTOU & Precondition Verification (ALL-OR-NOTHING)
+            try:
+                con = sqlite3.connect(lib_db, timeout=10)
+                con.row_factory = sqlite3.Row
+                cur = con.cursor()
+                cur.execute("SELECT id, mb_releasegroupid FROM albums WHERE id=?", (album_id,))
+                alb_row = cur.fetchone()
+                if not alb_row:
+                    con.close()
+                    store.update(operation_id, status="Failed", logs=[f"TOCTOU failed: Album {album_id} missing"])
+                    return {"ok": False, "error": f"Album {album_id} no longer exists", "code": "repair_album_missing"}
+
+                expected_rg = str(payload.get("mb_releasegroupid") or "").strip().lower()
+                live_rg = str(alb_row["mb_releasegroupid"] or "").strip().lower()
+                if expected_rg and live_rg and live_rg != expected_rg:
+                    con.close()
+                    store.update(operation_id, status="Failed", logs=["TOCTOU failed: Album Release Group changed"])
+                    return {"ok": False, "error": "Album Release Group ID changed since plan", "code": "repair_identity_mismatch"}
+
+                for spec in tracks_to_repair:
+                    iid = int(spec["item_id"])
+                    before = spec["before"]
+                    cur.execute(
+                        "SELECT id, album_id, path, mb_trackid, mb_albumid, track, disc, title FROM items WHERE id=?",
+                        (iid,),
+                    )
+                    irow = cur.fetchone()
+                    if not irow:
+                        con.close()
+                        store.update(operation_id, status="Failed", logs=[f"TOCTOU failed: Item {iid} missing"])
+                        return {"ok": False, "error": f"Item {iid} no longer exists", "code": "repair_item_missing"}
+
+                    if int(irow["album_id"]) != album_id:
+                        con.close()
+                        store.update(operation_id, status="Failed", logs=[f"TOCTOU failed: Item {iid} album membership changed"])
+                        return {"ok": False, "error": f"Item {iid} no longer belongs to album {album_id}", "code": "repair_album_membership_changed"}
+
+                    raw_path = irow["path"]
+                    path_str = raw_path.decode("utf-8", "replace") if isinstance(raw_path, bytes) else str(raw_path)
+                    if path_str != before["path"]:
+                        con.close()
+                        store.update(operation_id, status="Failed", logs=[f"TOCTOU failed: Item {iid} path changed"])
+                        return {"ok": False, "error": f"Item {iid} path changed since plan", "code": "repair_toctou_mismatch"}
+
+                    live_mbid = str(irow["mb_trackid"] or "").strip().lower()
+                    if live_mbid != before["mb_trackid"]:
+                        con.close()
+                        store.update(operation_id, status="Failed", logs=[f"TOCTOU failed: Item {iid} Recording ID changed"])
+                        return {"ok": False, "error": f"Item {iid} Recording ID changed since plan", "code": "repair_toctou_mismatch"}
+
+                    item_path = Path(path_str)
+                    contained = False
+                    base_root = roots_resolved[0]
+                    for root in roots_resolved:
+                        try:
+                            item_path.relative_to(root)
+                            contained = True
+                            base_root = root
+                            break
+                        except ValueError:
+                            pass
+
+                    if not contained:
+                        con.close()
+                        store.update(operation_id, status="Failed", logs=[f"TOCTOU failed: Item {iid} path outside allowed roots"])
+                        return {"ok": False, "error": f"Item {iid} path outside allowed roots", "code": "repair_path_out_of_root"}
+
+                    if _path_has_symlink_under(item_path, base_root):
+                        con.close()
+                        store.update(operation_id, status="Failed", logs=[f"TOCTOU failed: Item {iid} path contains symlink"])
+                        return {"ok": False, "error": f"Item {iid} path contains symlink", "code": "repair_symlink_rejected"}
+
+                    if not item_path.exists():
+                        con.close()
+                        store.update(operation_id, status="Failed", logs=[f"TOCTOU failed: Item file {path_str} missing"])
+                        return {"ok": False, "error": f"Item file missing: {path_str}", "code": "repair_item_missing"}
+
+                    st = item_path.stat()
+                    expected_stat = before["stat"]
+                    if (
+                        st.st_dev != expected_stat["dev"]
+                        or st.st_ino != expected_stat["ino"]
+                        or st.st_size != expected_stat["size"]
+                        or st.st_mtime_ns != expected_stat["mtime_ns"]
+                    ):
+                        con.close()
+                        store.update(operation_id, status="Failed", logs=[f"TOCTOU failed: Item file {path_str} stat changed"])
+                        return {"ok": False, "error": f"Item file stat changed for {path_str}", "code": "repair_toctou_mismatch"}
+
+                con.close()
+            except Exception as ex:
+                store.update(operation_id, status="Failed", logs=[f"TOCTOU verification error: {ex}"])
+                return {"ok": False, "error": f"TOCTOU verification error: {ex}", "code": "repair_verification_failed"}
+
+            # Mark state as Running & Mutated
+            store.update(operation_id, status="Running", metadata={**meta, "mutated": True})
+
+            def _persist_step(step_name: str, step_status: str, **extra: Any) -> None:
+                curr_tx = store.get(operation_id)
+                steps = curr_tx.get("metadata", {}).get("apply_steps", [])
+                steps.append({
+                    "step": step_name,
+                    "status": step_status,
+                    "timestamp": _now(),
+                    **extra,
+                })
+                store.update(operation_id, metadata={**curr_tx.get("metadata", {}), "apply_steps": steps})
+
+            # Stage 1: Database Updates
+            try:
+                con = sqlite3.connect(lib_db, timeout=10)
+                cur = con.cursor()
+                for spec in tracks_to_repair:
+                    after = spec["after"]
+                    cur.execute(
+                        "UPDATE items SET mb_trackid=?, track=?, disc=?, title=?, mb_albumid=? WHERE id=?",
+                        (after["mb_trackid"], after["track"], after["disc"], after["title"], after["mb_albumid"], spec["item_id"]),
+                    )
+
+                if target_mb_albumid:
+                    cur.execute("UPDATE albums SET mb_albumid=? WHERE id=?", (target_mb_albumid, album_id))
+                    cur.execute("UPDATE items SET mb_albumid=? WHERE album_id=?", (target_mb_albumid, album_id))
+                con.commit()
+                con.close()
+                _persist_step("db_updated", "Completed")
+            except Exception as ex:
+                store.update(operation_id, status="Failed", logs=[f"Database update failed: {ex}"])
+                return {"ok": False, "error": f"Database update failed: {ex}", "code": "repair_apply_failed", "mutated": True}
+
+            # Stage 2: Audio Tag Writes
+            failed_tag_writes: List[int] = []
+            for spec in tracks_to_repair:
+                iid = spec["item_id"]
+                item_path = Path(spec["before"]["path"])
+                after = spec["after"]
+                tags_to_write = {
+                    "mb_trackid": after["mb_trackid"],
+                    "mb_albumid": after["mb_albumid"],
+                    "title": after["title"],
+                    "track": after["track"],
+                    "disc": after["disc"],
+                }
+                ok = _write_file_audio_tags(item_path, tags_to_write)
+                if ok:
+                    _persist_step("tags_applied", "Completed", item_id=iid)
+                else:
+                    failed_tag_writes.append(iid)
+                    _persist_step("tags_applied", "Failed", item_id=iid)
+
+            if failed_tag_writes:
+                store.update(
+                    operation_id,
+                    status="Failed",
+                    logs=[f"Audio tag writes failed for items: {failed_tag_writes}"],
+                    metadata={**store.get(operation_id).get("metadata", {}), "failed_tag_writes": failed_tag_writes},
+                )
+                return {
+                    "ok": False,
+                    "error": f"Audio tag writes failed for {len(failed_tag_writes)} track(s)",
+                    "code": "repair_apply_failed",
+                    "mutated": True,
+                    "partial_mutation": True,
+                    "failed_items": failed_tag_writes,
+                }
+
+            # Stage 3: Verification
+            try:
+                con = sqlite3.connect(lib_db, timeout=10)
+                con.row_factory = sqlite3.Row
+                cur = con.cursor()
+                for spec in tracks_to_repair:
+                    iid = spec["item_id"]
+                    after = spec["after"]
+                    cur.execute("SELECT mb_trackid, mb_albumid, title, track, disc FROM items WHERE id=?", (iid,))
+                    row = cur.fetchone()
+                    if not row or str(row["mb_trackid"] or "").strip().lower() != after["mb_trackid"].lower():
+                        con.close()
+                        store.update(operation_id, status="Failed", logs=[f"Post-write verification failed for item {iid}"])
+                        return {"ok": False, "error": f"Post-write verification failed for item {iid}", "code": "repair_verification_failed", "mutated": True}
+                con.close()
+                _persist_step("result_verified", "Completed")
+            except Exception as ex:
+                store.update(operation_id, status="Failed", logs=[f"Verification query failed: {ex}"])
+                return {"ok": False, "error": f"Verification query failed: {ex}", "code": "repair_verification_failed", "mutated": True}
+
+            store.update(operation_id, status="Completed", logs=["Repair apply completed successfully."])
+            return {
+                "ok": True,
+                "status": "Completed",
+                "operation_id": operation_id,
+                "updated": len(tracks_to_repair),
+            }
+
+
+def rollback_album_mb_track_repair(
+    store: TransactionStore,
+    operation_id: str,
+    *,
+    db_path: Optional[str] = None,
+    music_allowed_roots: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Execute rollback for album_mb_track_repair_v1 (SEC-002 Wave 19)."""
+    op_lock = _get_apply_lock(operation_id)
+    with op_lock:
+        try:
+            tx = store.get(operation_id)
+        except KeyError:
+            return {"ok": False, "error": f"Transaction {operation_id} not found."}
+
+        meta = tx.get("metadata") or {}
+        mutation_family = meta.get("mutation_family")
+        if mutation_family != "album_mb_track_repair_v1":
+            return {"ok": False, "error": f"Transaction family mismatch: expected 'album_mb_track_repair_v1', got {mutation_family!r}"}
+
+        status = tx.get("status")
+        mutated = bool(meta.get("mutated"))
+        if status not in ("Completed", "Failed") or not mutated:
+            return {"ok": False, "error": "Rollback unavailable: transaction has not performed any mutations"}
+
+        payload = meta.get("payload") or meta or tx.get("payload") or {}
+        album_id = int(payload.get("album_id") or 0)
+        tracks_to_repair: List[Dict[str, Any]] = payload.get("tracks_to_repair") or []
+
+        lib_db = db_path or os.environ.get("BEETS_DB_PATH", os.path.expanduser("~/.config/beets/musiclibrary.blb"))
+        if not os.path.exists(lib_db):
+            return {"ok": False, "error": f"Beets database file not found at {lib_db}"}
+
+        db_restored = 0
+        db_failed = 0
+        try:
+            con = sqlite3.connect(lib_db, timeout=10)
+            cur = con.cursor()
+            for spec in tracks_to_repair:
+                iid = spec["item_id"]
+                before = spec["before"]
+                cur.execute(
+                    "UPDATE items SET mb_trackid=?, track=?, disc=?, title=?, mb_albumid=? WHERE id=?",
+                    (before["mb_trackid"], before["track"], before["disc"], before["title"], before["mb_albumid"], iid),
+                )
+                if cur.rowcount == 1:
+                    db_restored += 1
+                else:
+                    db_failed += 1
+
+            if tracks_to_repair:
+                first_before = tracks_to_repair[0]["before"]
+                cur.execute("UPDATE albums SET mb_albumid=? WHERE id=?", (first_before["mb_albumid"], album_id))
+            con.commit()
+            con.close()
+        except Exception as ex:
+            store.update(operation_id, logs=[f"Rollback database restore failed: {ex}"])
+            return {"ok": False, "error": f"Rollback database restore failed: {ex}"}
+
+        tags_restored = 0
+        tags_failed = 0
+        for spec in tracks_to_repair:
+            item_path = Path(spec["before"]["path"])
+            before = spec["before"]
+            tags_to_write = {
+                "mb_trackid": before["mb_trackid"],
+                "mb_albumid": before["mb_albumid"],
+                "title": before["title"],
+                "track": before["track"],
+                "disc": before["disc"],
+            }
+            if _write_file_audio_tags(item_path, tags_to_write):
+                tags_restored += 1
+            else:
+                tags_failed += 1
+
+        full_success = (db_failed == 0) and (tags_failed == 0)
+        final_status = "Rolled Back" if full_success else ("Partially Rolled Back" if (db_restored or tags_restored) else "Failed")
+
+        store.update(
+            operation_id,
+            status=final_status,
+            logs=[f"Album MB track repair rollback completed with status {final_status}."],
+            metadata={
+                **meta,
+                "rollback_available": not full_success,
+                "db_restored_count": db_restored,
+                "tags_restored_count": tags_restored,
+            },
+        )
+        return {
+            "ok": final_status in ("Rolled Back", "Partially Rolled Back"),
+            "operation_id": operation_id,
+            "status": final_status,
+            "db_restored_count": db_restored,
+            "tags_restored_count": tags_restored,
+        }
