@@ -5357,7 +5357,20 @@ def execute_existing_album_reconcile_apply(
                 # creating a directory earlier (SEC-002 Wave 20 final
                 # review, "quarantine directory creation timing").
                 q_root_env = quarantine_base_root or os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
+                q_root_norm = os.path.normpath(q_root_env)
                 q_dir = Path(q_root_env) / operation_id
+                # Explicit normalize-then-prefix-check barrier (the exact
+                # idiom CodeQL's py/path-injection query documents as a
+                # sanitizer) on top of the _TRANSACTION_ID_RE format check
+                # already performed at function entry: operation_id can
+                # never actually escape q_root_env (no "/", "\", or ".."
+                # passes the id regex), but this makes that guarantee
+                # explicit and locally checkable rather than relying on a
+                # cross-function invariant a static analyzer cannot see.
+                if os.path.normpath(str(q_dir)) != os.path.join(q_root_norm, operation_id):
+                    LOG.error("Reconcile apply: quarantine path escaped root for op %s", operation_id)
+                    store.update(operation_id, status="Failed", logs=["Quarantine path validation failed."])
+                    return {"ok": False, "error": "Quarantine path validation failed.", "code": "reconcile_path_out_of_root", "mutated": True}
 
                 # Stage 1: Duplicate file quarantine. Every recoverable
                 # duplicate (hardlink or distinct file) is quarantined via
@@ -5385,7 +5398,16 @@ def execute_existing_album_reconcile_apply(
                         store.update(operation_id, status="Failed", logs=["Quarantine directory creation failed."])
                         return {"ok": False, "error": "Quarantine directory creation failed.", "code": "reconcile_filesystem_failed", "mutated": True}
 
-                    target_q = q_dir / f"{iid}_{fpath.name}"
+                    # fpath.name strips every directory component (no
+                    # "..", no "/") -- but make the containment guarantee
+                    # for target_q explicit and locally checkable too,
+                    # same normalize-then-prefix idiom as q_dir above.
+                    safe_leaf = fpath.name
+                    target_q = q_dir / f"{iid}_{safe_leaf}"
+                    q_dir_norm = os.path.normpath(str(q_dir))
+                    if os.path.dirname(os.path.normpath(str(target_q))) != q_dir_norm:
+                        store.update(operation_id, status="Failed", logs=[f"Quarantine target path validation failed for item {iid}."])
+                        return {"ok": False, "error": "Quarantine path validation failed.", "code": "reconcile_path_out_of_root", "mutated": True}
                     if target_q.exists() or target_q.is_symlink():
                         store.update(operation_id, status="Failed", logs=[f"Quarantine destination already exists for item {iid}."])
                         return {"ok": False, "error": "Quarantine destination collision.", "code": "reconcile_filesystem_failed", "mutated": True}
