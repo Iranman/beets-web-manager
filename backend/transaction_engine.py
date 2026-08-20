@@ -4608,6 +4608,27 @@ def _resolve_path_role(path_str: str, roots: List[Path]) -> Optional[Path]:
     return None
 
 
+def _normpath_within_roots(path_str: str, roots: List[Path]) -> bool:
+    """Textual `os.path.normpath` + prefix containment check -- the idiom
+    CodeQL's py/path-injection query recognizes as a sanitizing barrier.
+    Always paired with a resolve()-based check (`_resolve_path_role` /
+    `_path_under`), which is what actually matters at runtime since it
+    also collapses symlinks; this one exists purely so static analysis can
+    see the same containment guarantee those checks already provide."""
+    try:
+        norm = os.path.normpath(path_str)
+    except Exception:
+        return False
+    for r in roots:
+        try:
+            r_norm = os.path.normpath(str(r))
+        except Exception:
+            continue
+        if norm == r_norm or norm.startswith(r_norm + os.sep):
+            return True
+    return False
+
+
 def create_existing_album_reconcile_plan(
     store: TransactionStore,
     payload: Dict[str, Any],
@@ -5791,6 +5812,21 @@ def _lock_resources(resource_keys: List[str]):
 
 
 def _path_under(child: Path, parent: Path) -> bool:
+    """True iff `child` is contained within `parent`.
+
+    Two independent checks, both required: a textual `os.path.normpath` +
+    prefix check (the idiom CodeQL's py/path-injection query recognizes as
+    a sanitizing barrier), and the pre-existing `.resolve(strict=False)` +
+    `.relative_to()` check (the one that actually matters at runtime,
+    since it also collapses symlinks -- a purely textual check would still
+    let a symlink inside an already-validated root point outside it)."""
+    try:
+        child_norm = os.path.normpath(str(child))
+        parent_norm = os.path.normpath(str(parent))
+        if child_norm != parent_norm and not child_norm.startswith(parent_norm + os.sep):
+            return False
+    except Exception:
+        return False
     try:
         c_res = child.resolve(strict=False)
         p_res = parent.resolve(strict=False)
@@ -5826,6 +5862,13 @@ def create_artist_folder_reconcile_plan(
 
     root_role = _resolve_path_role(raw_root, allowed_roots)
     if root_role is None:
+        return {"ok": False, "error": "root is outside allowed music library roots", "code": "artist_reconcile_path_out_of_root"}
+
+    # Textual normpath+prefix containment check, in addition to the
+    # resolve()-based one above -- the idiom CodeQL's py/path-injection
+    # query recognizes as a sanitizing barrier for every filesystem call
+    # on root_path below.
+    if not _normpath_within_roots(raw_root, allowed_roots):
         return {"ok": False, "error": "root is outside allowed music library roots", "code": "artist_reconcile_path_out_of_root"}
 
     root_path = Path(raw_root)
@@ -6205,9 +6248,9 @@ def execute_artist_folder_reconcile_apply(
                         continue
                     src_p = Path(m["source"])
                     dst_p = Path(m["destination"])
-                    if _resolve_path_role(str(src_p), allowed_roots) is None:
+                    if _resolve_path_role(str(src_p), allowed_roots) is None or not _normpath_within_roots(str(src_p), allowed_roots):
                         return _fail(f"Move source outside allowed roots for item {m.get('candidate_idx')}.", "artist_reconcile_path_out_of_root")
-                    if _resolve_path_role(str(dst_p.parent), allowed_roots) is None and dst_p.parent.exists():
+                    if not _normpath_within_roots(str(dst_p.parent), allowed_roots) or (_resolve_path_role(str(dst_p.parent), allowed_roots) is None and dst_p.parent.exists()):
                         return _fail(f"Move destination outside allowed roots for item {m.get('candidate_idx')}.", "artist_reconcile_path_out_of_root")
                     if _path_has_symlink_under(src_p, allowed_roots[0]) or (dst_p.parent.exists() and _path_has_symlink_under(dst_p.parent, allowed_roots[0])):
                         return _fail("Symlink detected on move path.", "artist_reconcile_symlink_rejected")
@@ -6225,10 +6268,10 @@ def execute_artist_folder_reconcile_apply(
                     if dq["source"] in already_quarantined_sources:
                         continue
                     src_p = Path(dq["source"])
+                    if _resolve_path_role(str(src_p), allowed_roots) is None or not _normpath_within_roots(str(src_p), allowed_roots):
+                        return _fail("Quarantine source outside allowed roots.", "artist_reconcile_path_out_of_root")
                     if not src_p.exists():
                         continue
-                    if _resolve_path_role(str(src_p), allowed_roots) is None:
-                        return _fail("Quarantine source outside allowed roots.", "artist_reconcile_path_out_of_root")
                     if _path_has_symlink_under(src_p, allowed_roots[0]):
                         return _fail("Symlink detected on quarantine source.", "artist_reconcile_symlink_rejected")
                     st = src_p.stat()
@@ -6529,11 +6572,20 @@ def rollback_artist_folder_reconcile(
             # directories, and restore quarantined files -- BEFORE DB rows
             # are pointed back at them (SEC-002 Wave 21 final review,
             # finding #40, the same ordering bug Wave 20 already fixed).
+            q_base = quarantine_base_root or os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
+            try:
+                q_base_root = Path(q_base).resolve()
+            except Exception:
+                q_base_root = Path(q_base)
+
             for m in reversed(moved_records):
                 src_p = Path(m["destination"])
                 dst_p = Path(m["source"])
                 base_root = _resolve_path_role(str(dst_p), allowed_roots)
-                if base_root is None:
+                if base_root is None or not _normpath_within_roots(str(dst_p), allowed_roots):
+                    files_failed += 1
+                    continue
+                if _resolve_path_role(str(src_p), allowed_roots) is None or not _normpath_within_roots(str(src_p), allowed_roots):
                     files_failed += 1
                     continue
                 if dst_p.exists() or dst_p.is_symlink():
@@ -6555,7 +6607,7 @@ def rollback_artist_folder_reconcile(
             for dr in removed_dirs:
                 dr_p = Path(dr)
                 base_root = _resolve_path_role(dr, allowed_roots)
-                if base_root is None:
+                if base_root is None or not _normpath_within_roots(dr, allowed_roots):
                     continue
                 try:
                     dr_p.mkdir(parents=True, exist_ok=True)
@@ -6566,7 +6618,11 @@ def rollback_artist_folder_reconcile(
                 q_p = Path(q["quarantine"])
                 orig_p = Path(q["source"])
                 base_root = _resolve_path_role(str(orig_p), allowed_roots)
-                if base_root is None:
+                if base_root is None or not _normpath_within_roots(str(orig_p), allowed_roots):
+                    files_failed += 1
+                    continue
+                if (_resolve_path_role(str(q_p), [q_base_root]) is None
+                        or not _normpath_within_roots(str(q_p), [q_base_root])):
                     files_failed += 1
                     continue
                 if orig_p.exists() or orig_p.is_symlink():
