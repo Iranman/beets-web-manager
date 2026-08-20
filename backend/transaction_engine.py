@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import csv
 import errno
+import hashlib
 import io
 import json
 import logging
@@ -18,10 +19,11 @@ import stat
 import threading
 import time
 import uuid
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 import urllib.parse
+import unicodedata
 
 LOG = logging.getLogger("beets_web.transaction_engine")
 
@@ -4606,6 +4608,27 @@ def _resolve_path_role(path_str: str, roots: List[Path]) -> Optional[Path]:
     return None
 
 
+def _normpath_within_roots(path_str: str, roots: List[Path]) -> bool:
+    """Textual `os.path.normpath` + prefix containment check -- the idiom
+    CodeQL's py/path-injection query recognizes as a sanitizing barrier.
+    Always paired with a resolve()-based check (`_resolve_path_role` /
+    `_path_under`), which is what actually matters at runtime since it
+    also collapses symlinks; this one exists purely so static analysis can
+    see the same containment guarantee those checks already provide."""
+    try:
+        norm = os.path.normpath(path_str)
+    except Exception:
+        return False
+    for r in roots:
+        try:
+            r_norm = os.path.normpath(str(r))
+        except Exception:
+            continue
+        if norm == r_norm or norm.startswith(r_norm + os.sep):
+            return True
+    return False
+
+
 def create_existing_album_reconcile_plan(
     store: TransactionStore,
     payload: Dict[str, Any],
@@ -5777,4 +5800,1379 @@ def rollback_existing_album_reconcile(
                 "files_restored_count": files_restored,
                 "total_items": total_expected,
             }
+
+
+@contextmanager
+def _lock_resources(resource_keys: List[str]):
+    locks = [_get_resource_lock(k) for k in sorted(set(resource_keys or []))]
+    with ExitStack() as stack:
+        for l in locks:
+            stack.enter_context(l)
+        yield
+
+
+def _path_under(child: Path, parent: Path) -> bool:
+    """True iff `child` is contained within `parent`.
+
+    Two independent checks, both required: a textual `os.path.normpath` +
+    prefix check (the idiom CodeQL's py/path-injection query recognizes as
+    a sanitizing barrier), and the pre-existing `.resolve(strict=False)` +
+    `.relative_to()` check (the one that actually matters at runtime,
+    since it also collapses symlinks -- a purely textual check would still
+    let a symlink inside an already-validated root point outside it)."""
+    try:
+        child_norm = os.path.normpath(str(child))
+        parent_norm = os.path.normpath(str(parent))
+        if child_norm != parent_norm and not child_norm.startswith(parent_norm + os.sep):
+            return False
+    except Exception:
+        return False
+    try:
+        c_res = child.resolve(strict=False)
+        p_res = parent.resolve(strict=False)
+        c_res.relative_to(p_res)
+        return True
+    except Exception:
+        return False
+
+
+# ── artist_folder_reconcile_v1 ────────────────────────────────────────────────
+
+def create_artist_folder_reconcile_plan(
+    store: TransactionStore,
+    payload: Dict[str, Any],
+    *,
+    music_allowed_roots: Optional[List[str]] = None,
+    db_path: Optional[str] = None,
+    quarantine_base_root: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Create a non-mutating preview plan for artist-folder reconciliation.
+
+    Handles artist folder merging, MBID folder stamping, duplicate file
+    quarantine, artwork collision resolution, directory cleanup, and Beets DB
+    path/artist attribute updates under an engine-owned transaction boundary.
+    """
+    raw_root = str(payload.get("root") or "").strip()
+    mode = str(payload.get("mode") or "scan_merge").strip()
+    selected_keys = set(payload.get("selected_keys") or [])
+
+    allowed_roots = music_allowed_roots or [str(os.environ.get("MUSIC_ROOT", "/music"))]
+    if not raw_root:
+        return {"ok": False, "error": "root is required", "code": "artist_reconcile_invalid_root"}
+
+    root_role = _resolve_path_role(raw_root, allowed_roots)
+    if root_role is None:
+        return {"ok": False, "error": "root is outside allowed music library roots", "code": "artist_reconcile_path_out_of_root"}
+
+    # Textual normpath+prefix containment check, in addition to the
+    # resolve()-based one above -- the idiom CodeQL's py/path-injection
+    # query recognizes as a sanitizing barrier for every filesystem call
+    # on root_path below.
+    if not _normpath_within_roots(raw_root, allowed_roots):
+        return {"ok": False, "error": "root is outside allowed music library roots", "code": "artist_reconcile_path_out_of_root"}
+
+    root_path = Path(raw_root)
+    if _path_has_symlink_under(root_path, Path(allowed_roots[0])):
+        return {"ok": False, "error": "root contains symlink components", "code": "artist_reconcile_symlink_rejected"}
+
+    if not root_path.exists() or not root_path.is_dir():
+        return {"ok": False, "error": "root directory does not exist", "code": "artist_reconcile_invalid_root"}
+
+    lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB", "")
+    if lib_db and not Path(lib_db).exists():
+        LOG.error("Artist reconcile plan: Beets database not found at %s", lib_db)
+        lib_db = ""
+
+    # Discover candidate folder pairs based on mode & DB metadata. Name-based
+    # discovery (_engine_scan_artist_folder_groups) and majority-based MBID
+    # discovery (_engine_stamp_artist_folder_scan) are both candidate
+    # GENERATION only -- neither is trusted as merge authority. Every
+    # candidate is independently identity-gated below regardless of source
+    # (SEC-002 Wave 21 final review, "candidate generation may use name
+    # similarity; Apply eligibility may not").
+    candidates_raw: List[Dict[str, Any]] = []
+    if payload.get("candidates"):
+        candidates_raw = list(payload["candidates"])
+    elif mode == "stamp_mbid":
+        candidates_raw = _engine_stamp_artist_folder_scan(root_path, lib_db)
+    else:
+        candidates_raw = _engine_scan_artist_folder_groups(root_path, lib_db, only_keys=selected_keys if selected_keys else None)
+
+    if selected_keys:
+        candidates_raw = [c for c in candidates_raw if c.get("key") in selected_keys or c.get("group_key") in selected_keys]
+
+    moves_plan: List[Dict[str, Any]] = []
+    dup_quarantines: List[Dict[str, Any]] = []
+    art_quarantines: List[Dict[str, Any]] = []
+    directory_removals: List[str] = []
+    db_item_updates: List[Dict[str, Any]] = []
+    db_album_updates: List[Dict[str, Any]] = []
+    db_artist_updates: List[Dict[str, Any]] = []
+    resource_keys: set = set()
+    requires_review: List[Dict[str, Any]] = []
+    eligible_candidates: List[Dict[str, Any]] = []
+
+    for idx, cand in enumerate(candidates_raw):
+        src = Path(cand["source_path"])
+        dst = Path(cand["target_path"])
+
+        if not _path_under(src, root_path) or not _path_under(dst, root_path):
+            return {"ok": False, "error": "Path outside root.", "code": "artist_reconcile_path_out_of_root"}
+
+        if _path_has_symlink_under(src, root_path) or _path_has_symlink_under(dst, root_path):
+            return {"ok": False, "error": "Symlink rejected.", "code": "artist_reconcile_symlink_rejected"}
+
+        if not src.exists() or not src.is_dir():
+            requires_review.append({"source_path": str(src), "target_path": str(dst), "reason": "artist_reconcile_source_missing"})
+            continue
+
+        # Identity authority: independently derive each side's established
+        # Artist ID(s) from Beets DB state -- never trust the caller-supplied
+        # id as authority (SEC-002 Wave 21 final review, findings #4-#7).
+        is_merge = dst.exists() and dst.is_dir() and dst.resolve(strict=False) != src.resolve(strict=False)
+        src_identity = _derive_artist_folder_identity(src, lib_db)
+        dst_identity = _derive_artist_folder_identity(dst, lib_db) if is_merge else {"ids": set(), "album_count": 0}
+        caller_mbid = str(cand.get("source_mbid") or cand.get("target_mbid") or cand.get("mbid") or "").strip().lower()
+        fingerprint_confirmed = cand.get("fingerprint_confirmed") is True
+
+        eligible, resolved_mbid, reason = _artist_folder_identity_decision(
+            src_identity, dst_identity, is_merge, caller_mbid, fingerprint_confirmed,
+        )
+        if not eligible:
+            requires_review.append({
+                "source_path": str(src), "target_path": str(dst), "reason": reason,
+                "source_established_ids": sorted(src_identity["ids"]),
+                "target_established_ids": sorted(dst_identity["ids"]),
+            })
+            continue
+
+        resource_keys.add(f"artist:{src.name.casefold()}")
+        resource_keys.add(f"artist:{dst.name.casefold()}")
+        if resolved_mbid:
+            resource_keys.add(f"artist-mbid:{resolved_mbid}")
+
+        eligible_candidates.append({
+            "source_path": str(src),
+            "target_path": str(dst),
+            "source_name": cand.get("source_name") or src.name,
+            "target_name": cand.get("target_name") or dst.name,
+            "resolved_mbid": resolved_mbid,
+            "identity_evidence": {
+                "source_established_ids": sorted(src_identity["ids"]),
+                "target_established_ids": sorted(dst_identity["ids"]),
+                "caller_mbid": caller_mbid,
+                "fingerprint_confirmed": fingerprint_confirmed,
+                "is_merge": is_merge,
+            },
+        })
+
+        if is_merge:
+            _build_artist_folder_move_graph(
+                src, dst, root_path, idx,
+                moves_plan, dup_quarantines, art_quarantines, directory_removals
+            )
+            directory_removals.append(str(src))
+        else:
+            st = src.stat()
+            moves_plan.append({
+                "candidate_idx": idx,
+                "type": "rename_dir",
+                "source": str(src),
+                "destination": str(dst),
+                "stat": {"dev": st.st_dev, "ino": st.st_ino, "size": st.st_size, "mtime_ns": st.st_mtime_ns},
+            })
+
+    # Capture DB before-state snapshots for affected items & albums, and
+    # (SEC-002 Wave 21 final review, findings #26/#27) bind exact item/album
+    # IDs discovered here -- never a name-equality WHERE clause -- for the
+    # artist-attribute stamping stage below.
+    candidate_album_ids: Dict[int, set] = {}
+    candidate_item_ids: Dict[int, set] = {}
+    if lib_db and Path(lib_db).exists():
+        con = sqlite3.connect(lib_db, timeout=10)
+        con.row_factory = sqlite3.Row
+        try:
+            for m in moves_plan:
+                idx = m["candidate_idx"]
+                src_p = m["source"]
+                dst_p = m["destination"]
+                if m["type"] == "rename_dir":
+                    old_prefix = src_p.encode("utf-8") + os.sep.encode("utf-8")
+                    rows = _rows_by_path_prefix(con, "items", "id, path, album_id", "path", old_prefix)
+                    for r in rows:
+                        iid = int(r["id"])
+                        raw_p = r["path"]
+                        p_str = raw_p.decode("utf-8", "replace") if isinstance(raw_p, bytes) else str(raw_p)
+                        rel = p_str[len(src_p):]
+                        new_p = dst_p + rel
+                        resource_keys.add(f"item:{iid}")
+                        candidate_item_ids.setdefault(idx, set()).add(iid)
+                        if r["album_id"]:
+                            aid = int(r["album_id"])
+                            resource_keys.add(f"album:{aid}")
+                            candidate_album_ids.setdefault(idx, set()).add(aid)
+                        db_item_updates.append({"candidate_idx": idx, "id": iid, "old_path": p_str, "new_path": new_p})
+
+                    arows = _rows_by_path_prefix(con, "albums", "id, path, artpath", "path", old_prefix)
+                    for r in arows:
+                        aid = int(r["id"])
+                        raw_p = r["path"]
+                        p_str = raw_p.decode("utf-8", "replace") if isinstance(raw_p, bytes) else str(raw_p)
+                        rel = p_str[len(src_p):]
+                        new_p = dst_p + rel
+                        raw_art = r["artpath"]
+                        art_str = raw_art.decode("utf-8", "replace") if isinstance(raw_art, bytes) else (str(raw_art) if raw_art else "")
+                        new_art = (dst_p + art_str[len(src_p):]) if art_str and art_str.startswith(src_p) else art_str
+                        resource_keys.add(f"album:{aid}")
+                        candidate_album_ids.setdefault(idx, set()).add(aid)
+                        db_album_updates.append({"candidate_idx": idx, "id": aid, "old_path": p_str, "new_path": new_p, "old_artpath": art_str, "new_artpath": new_art})
+                elif m["type"] in ("move_file", "move_unique"):
+                    old_b = src_p.encode("utf-8")
+                    rows = con.execute("SELECT id, path, album_id FROM items WHERE path=?", (old_b,)).fetchall()
+                    for r in rows:
+                        iid = int(r["id"])
+                        resource_keys.add(f"item:{iid}")
+                        candidate_item_ids.setdefault(idx, set()).add(iid)
+                        if r["album_id"]:
+                            aid = int(r["album_id"])
+                            resource_keys.add(f"album:{aid}")
+                            candidate_album_ids.setdefault(idx, set()).add(aid)
+                        db_item_updates.append({"candidate_idx": idx, "id": iid, "old_path": src_p, "new_path": dst_p})
+
+            # Artist attribute stamping: bound to the EXACT album/item ids
+            # just discovered for this candidate, never a text-equality
+            # WHERE clause across the whole library.
+            for idx, cand in enumerate(eligible_candidates):
+                album_ids = sorted(candidate_album_ids.get(idx) or set())
+                item_ids = sorted(candidate_item_ids.get(idx) or set())
+                if not album_ids and not item_ids:
+                    continue
+                dst_name = cand["target_name"]
+                mbid = cand["resolved_mbid"]
+                albums_before: Dict[int, Dict[str, Any]] = {}
+                items_before: Dict[int, Dict[str, Any]] = {}
+                if album_ids:
+                    placeholders = ",".join("?" * len(album_ids))
+                    for r in con.execute(
+                        f"SELECT id, albumartist, albumartists, mb_albumartistid, mb_albumartistids FROM albums WHERE id IN ({placeholders})",
+                        album_ids,
+                    ).fetchall():
+                        albums_before[int(r["id"])] = {
+                            "albumartist": r["albumartist"], "albumartists": r["albumartists"],
+                            "mb_albumartistid": r["mb_albumartistid"], "mb_albumartistids": r["mb_albumartistids"],
+                        }
+                if item_ids:
+                    placeholders = ",".join("?" * len(item_ids))
+                    for r in con.execute(
+                        f"SELECT id, albumartist, albumartists, mb_albumartistid, mb_albumartistids, artist, artists, mb_artistid, mb_artistids "
+                        f"FROM items WHERE id IN ({placeholders})",
+                        item_ids,
+                    ).fetchall():
+                        items_before[int(r["id"])] = {
+                            "albumartist": r["albumartist"], "albumartists": r["albumartists"],
+                            "mb_albumartistid": r["mb_albumartistid"], "mb_albumartistids": r["mb_albumartistids"],
+                            "artist": r["artist"], "artists": r["artists"],
+                            "mb_artistid": r["mb_artistid"], "mb_artistids": r["mb_artistids"],
+                        }
+                if albums_before or items_before:
+                    db_artist_updates.append({
+                        "candidate_idx": idx,
+                        "src_name": cand.get("source_name") or "",
+                        "dst_name": dst_name,
+                        "mbid": mbid,
+                        "album_ids": album_ids,
+                        "item_ids": item_ids,
+                        "albums_before": albums_before,
+                        "items_before": items_before,
+                    })
+        finally:
+            con.close()
+
+    if not moves_plan and not dup_quarantines and not art_quarantines and not db_artist_updates:
+        return {
+            "ok": True,
+            "candidate_count": 0,
+            "requires_review": requires_review,
+            "message": "No artist folder reconciliation could be safely planned.",
+        }
+
+    summary_text = (
+        f"Artist folder reconciliation ({mode}): {len(eligible_candidates)} eligible candidate(s), "
+        f"{len(moves_plan)} file move(s), {len(requires_review)} requiring review"
+    )
+    changes = [
+        {"id": f"move:{i}", "source": m["source"], "destination": m["destination"], "operation": m["type"]}
+        for i, m in enumerate(moves_plan)
+    ] + [
+        {"id": f"dup:{i}", "source": q["source"], "operation": "Quarantine Duplicate File"}
+        for i, q in enumerate(dup_quarantines)
+    ] + [
+        {"id": f"art:{i}", "source": q["source"], "operation": "Quarantine Artwork"}
+        for i, q in enumerate(art_quarantines)
+    ] + [
+        {"id": f"dir:{i}", "source": d, "operation": "Remove Empty Directory"}
+        for i, d in enumerate(directory_removals)
+    ] + [
+        {
+            "id": f"artist:{u['candidate_idx']}", "operation": "Stamp Artist Attributes",
+            "target_name": u["dst_name"], "mbid": u["mbid"],
+            "album_ids": u["album_ids"], "item_ids": u["item_ids"],
+        }
+        for u in db_artist_updates
+    ]
+    tx = store.create(
+        operation_type="Artist Folder Reconcile",
+        status="Preview",
+        summary=summary_text,
+        changes=changes,
+        rollback_available=True,
+        rollback_reason="Can restore file paths, artwork, duplicate files, directories, and artist attributes captured at Plan.",
+        metadata={
+            "mutation_family": "artist_folder_reconcile_v1",
+            "root": raw_root,
+            "mode": mode,
+            "candidates": eligible_candidates,
+            "requires_review": requires_review,
+            "moves_plan": moves_plan,
+            "dup_quarantines": dup_quarantines,
+            "art_quarantines": art_quarantines,
+            "directory_removals": directory_removals,
+            "db_item_updates": db_item_updates,
+            "db_album_updates": db_album_updates,
+            "db_artist_updates": db_artist_updates,
+            "resource_keys": sorted(resource_keys),
+            "allowed_roots": allowed_roots,
+            "cancellable": False,
+            "created_at": _now(),
+        },
+    )
+    op_id = tx["id"]
+
+    return {
+        "ok": True,
+        "operation_id": op_id,
+        "mode": mode,
+        "candidate_count": len(eligible_candidates),
+        "requires_review": requires_review,
+        "file_moves_count": len(moves_plan),
+        "dup_quarantine_count": len(dup_quarantines),
+        "art_quarantine_count": len(art_quarantines),
+        "directory_removal_count": len(directory_removals),
+        "db_items_count": len(db_item_updates),
+        "db_albums_count": len(db_album_updates),
+        "db_artist_updates_count": len(db_artist_updates),
+        "resource_keys": sorted(resource_keys),
+    }
+
+
+def execute_artist_folder_reconcile_apply(
+    store: TransactionStore,
+    operation_id: str,
+    *,
+    music_allowed_roots: Optional[List[str]] = None,
+    db_path: Optional[str] = None,
+    quarantine_base_root: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Execute artist-folder reconciliation with full TOCTOU checks, quarantine, and locking."""
+    if not _TRANSACTION_ID_RE.match(operation_id):
+        return {"ok": False, "error": "Invalid operation_id format.", "code": "artist_reconcile_invalid_id"}
+
+    with _get_apply_lock(operation_id):
+        try:
+            tx = store.get(operation_id)
+        except KeyError:
+            return {"ok": False, "error": "Transaction not found.", "code": "artist_reconcile_not_found"}
+
+        meta = dict(tx.get("metadata") or {})
+        mutation_family = meta.get("mutation_family")
+        if mutation_family != "artist_folder_reconcile_v1":
+            return {"ok": False, "error": "Transaction family mismatch.", "code": "artist_reconcile_family_mismatch"}
+
+        status = tx.get("status")
+
+        if status == "Completed":
+            return {
+                "ok": True,
+                "operation_id": operation_id,
+                "status": "Completed",
+                "already_completed": True,
+            }
+
+        if status not in ("Preview", "Failed"):
+            return {"ok": False, "error": "Transaction is not in a state Apply can act on.", "code": "artist_reconcile_invalid_state"}
+
+        resource_keys = meta.get("resource_keys") or []
+        allowed_roots_raw = music_allowed_roots or tx.get("allowed_roots") or [str(os.environ.get("MUSIC_ROOT", "/music"))]
+        allowed_roots: List[Path] = []
+        for r in allowed_roots_raw:
+            try:
+                p = Path(r).resolve()
+                if p.exists():
+                    allowed_roots.append(p)
+            except Exception:
+                pass
+        if not allowed_roots:
+            allowed_roots = [Path(r) for r in allowed_roots_raw]
+        lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB", "")
+
+        def _fail(msg: str, code: str) -> Dict[str, Any]:
+            LOG.error("Artist reconcile apply failed for %s: %s (%s)", operation_id, msg, code)
+            curr = store.get(operation_id)
+            c_meta = curr.get("metadata") or {}
+            mutated = bool(c_meta.get("filesystem_mutated") or c_meta.get("db_mutated"))
+            store.update(operation_id, status="Failed", logs=[msg])
+            return {"ok": False, "error": msg, "code": code, "mutated": mutated, "partial_mutation": mutated, "rollback_available": mutated}
+
+        with _lock_resources(resource_keys):
+            moves_plan = meta.get("moves_plan") or []
+            dup_quarantines = meta.get("dup_quarantines") or []
+            art_quarantines = meta.get("art_quarantines") or []
+            directory_removals = meta.get("directory_removals") or []
+            db_item_updates = meta.get("db_item_updates") or []
+            db_album_updates = meta.get("db_album_updates") or []
+            db_artist_updates = meta.get("db_artist_updates") or []
+
+            curr_meta_snapshot = store.get(operation_id).get("metadata", {})
+            already_moved_sources = {m["source"] for m in (curr_meta_snapshot.get("moved_records") or [])}
+            already_quarantined_sources = {q["source"] for q in (curr_meta_snapshot.get("quarantined_records") or [])}
+            db_stage_done = bool(curr_meta_snapshot.get("db_mutated"))
+
+            # Full TOCTOU (dev, inode, size, mtime_ns) plus root/symlink
+            # revalidation for every source AND destination parent,
+            # immediately before mutation -- SEC-002 Wave 21 final review,
+            # findings #15-#18 (Apply only checked size/mtime_ns and never
+            # rechecked root/symlink at all).
+            if not db_stage_done:
+                for m in moves_plan:
+                    if m["source"] in already_moved_sources:
+                        continue
+                    src_p = Path(m["source"])
+                    dst_p = Path(m["destination"])
+                    if _resolve_path_role(str(src_p), allowed_roots) is None or not _normpath_within_roots(str(src_p), allowed_roots):
+                        return _fail(f"Move source outside allowed roots for item {m.get('candidate_idx')}.", "artist_reconcile_path_out_of_root")
+                    if not _normpath_within_roots(str(dst_p.parent), allowed_roots) or (_resolve_path_role(str(dst_p.parent), allowed_roots) is None and dst_p.parent.exists()):
+                        return _fail(f"Move destination outside allowed roots for item {m.get('candidate_idx')}.", "artist_reconcile_path_out_of_root")
+                    if _path_has_symlink_under(src_p, allowed_roots[0]) or (dst_p.parent.exists() and _path_has_symlink_under(dst_p.parent, allowed_roots[0])):
+                        return _fail("Symlink detected on move path.", "artist_reconcile_symlink_rejected")
+                    if not src_p.exists():
+                        return _fail("Move source file/folder missing.", "artist_reconcile_toctou_mismatch")
+                    st = src_p.stat()
+                    exp_st = m["stat"]
+                    if (st.st_dev != exp_st.get("dev") or st.st_ino != exp_st.get("ino")
+                            or st.st_size != exp_st["size"] or st.st_mtime_ns != exp_st["mtime_ns"]):
+                        return _fail("Move source changed since plan.", "artist_reconcile_toctou_mismatch")
+                    if m["type"] != "rename_dir" and dst_p.exists():
+                        return _fail("Move destination now occupied.", "artist_reconcile_toctou_mismatch")
+
+                for dq in dup_quarantines + art_quarantines:
+                    if dq["source"] in already_quarantined_sources:
+                        continue
+                    src_p = Path(dq["source"])
+                    if _resolve_path_role(str(src_p), allowed_roots) is None or not _normpath_within_roots(str(src_p), allowed_roots):
+                        return _fail("Quarantine source outside allowed roots.", "artist_reconcile_path_out_of_root")
+                    if not src_p.exists():
+                        continue
+                    if _path_has_symlink_under(src_p, allowed_roots[0]):
+                        return _fail("Symlink detected on quarantine source.", "artist_reconcile_symlink_rejected")
+                    st = src_p.stat()
+                    exp_st = dq["stat"]
+                    if (st.st_dev != exp_st.get("dev") or st.st_ino != exp_st.get("ino")
+                            or st.st_size != exp_st["size"] or st.st_mtime_ns != exp_st["mtime_ns"]):
+                        return _fail("Quarantine source changed since plan.", "artist_reconcile_toctou_mismatch")
+
+            store.update(operation_id, status="Running", metadata={**meta, "mutation_started": True})
+
+            def _persist_fs_progress(quarantined: List[Dict[str, Any]], moved: List[Dict[str, Any]], removed: List[str], *, mutated: bool) -> None:
+                curr = store.get(operation_id).get("metadata", {})
+                update = {**curr, "quarantined_records": quarantined, "moved_records": moved, "removed_dirs": removed}
+                if mutated:
+                    update["filesystem_mutated"] = True
+                    update["mutated"] = True
+                store.update(operation_id, metadata=update)
+
+            quarantined_records: List[Dict[str, Any]] = list(curr_meta_snapshot.get("quarantined_records") or [])
+            moved_records: List[Dict[str, Any]] = list(curr_meta_snapshot.get("moved_records") or [])
+            removed_dirs: List[str] = list(curr_meta_snapshot.get("removed_dirs") or [])
+
+            if not db_stage_done:
+                q_base = quarantine_base_root or os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
+                q_dir = Path(q_base) / operation_id
+
+                try:
+                    for kind, items in (("duplicate", dup_quarantines), ("artwork", art_quarantines)):
+                        for dq in items:
+                            if dq["source"] in already_quarantined_sources:
+                                continue
+                            src_p = Path(dq["source"])
+                            if not (src_p.exists() and src_p.is_file()):
+                                continue
+                            sub = "dup" if kind == "duplicate" else "art"
+                            q_dest = q_dir / sub / dq.get("quarantine_key", src_p.name)
+                            q_dest.parent.mkdir(parents=True, exist_ok=True)
+                            if q_dest.exists() or q_dest.is_symlink():
+                                return _fail("Quarantine destination collision.", "artist_reconcile_filesystem_failed")
+                            _safe_rename(src_p, q_dest)
+                            quarantined_records.append({"type": kind, "source": str(src_p), "quarantine": str(q_dest)})
+                            already_quarantined_sources.add(str(src_p))
+                            _persist_fs_progress(quarantined_records, moved_records, removed_dirs, mutated=True)
+
+                    for m in moves_plan:
+                        if m["source"] in already_moved_sources:
+                            continue
+                        src_p = Path(m["source"])
+                        dst_p = Path(m["destination"])
+                        if not src_p.exists():
+                            continue
+                        dst_p.parent.mkdir(parents=True, exist_ok=True)
+                        if dst_p.exists():
+                            return _fail("Move destination collision.", "artist_reconcile_filesystem_failed")
+                        _safe_rename(src_p, dst_p)
+                        moved_records.append({"type": m["type"], "source": str(src_p), "destination": str(dst_p)})
+                        already_moved_sources.add(m["source"])
+                        _persist_fs_progress(quarantined_records, moved_records, removed_dirs, mutated=True)
+
+                    for dr in directory_removals:
+                        if dr in removed_dirs:
+                            continue
+                        dr_p = Path(dr)
+                        if dr_p.exists() and dr_p.is_dir() and not dr_p.is_symlink() and not any(dr_p.iterdir()):
+                            dr_p.rmdir()
+                            removed_dirs.append(dr)
+                            _persist_fs_progress(quarantined_records, moved_records, removed_dirs, mutated=True)
+                except OSError as ex:
+                    LOG.error("Artist reconcile apply: filesystem mutation failed for %s: %s", operation_id, ex)
+                    _persist_fs_progress(quarantined_records, moved_records, removed_dirs, mutated=bool(quarantined_records or moved_records or removed_dirs))
+                    store.update(operation_id, status="Failed", logs=["Filesystem mutation failed."])
+                    return {
+                        "ok": False, "error": "Filesystem mutation failed.", "code": "artist_reconcile_filesystem_failed",
+                        "mutated": True, "partial_mutation": True, "rollback_available": True,
+                    }
+
+                # Stage 2: Database operations -- exact bound IDs only,
+                # exact rowcount verified per statement (SEC-002 Wave 21
+                # final review, findings #25-#27).
+                if lib_db and Path(lib_db).exists():
+                    try:
+                        con = sqlite3.connect(lib_db, timeout=10)
+                        try:
+                            cur = con.cursor()
+                            for u in db_item_updates:
+                                cur.execute("UPDATE items SET path=? WHERE id=?", (u["new_path"].encode("utf-8"), u["id"]))
+                                if cur.rowcount != 1:
+                                    con.rollback()
+                                    return _fail("Item path rowcount mismatch.", "artist_reconcile_db_failed")
+
+                            for u in db_album_updates:
+                                if u.get("new_artpath"):
+                                    cur.execute("UPDATE albums SET path=?, artpath=? WHERE id=?", (u["new_path"].encode("utf-8"), u["new_artpath"].encode("utf-8"), u["id"]))
+                                else:
+                                    cur.execute("UPDATE albums SET path=? WHERE id=?", (u["new_path"].encode("utf-8"), u["id"]))
+                                if cur.rowcount != 1:
+                                    con.rollback()
+                                    return _fail("Album path rowcount mismatch.", "artist_reconcile_db_failed")
+
+                            for au in db_artist_updates:
+                                dst_name = au["dst_name"]
+                                mbid = au["mbid"]
+                                for aid in au["album_ids"]:
+                                    if mbid:
+                                        cur.execute(
+                                            "UPDATE albums SET albumartist=?, albumartists=?, mb_albumartistid=?, mb_albumartistids=? WHERE id=?",
+                                            (dst_name, dst_name, mbid, mbid, aid),
+                                        )
+                                    else:
+                                        cur.execute("UPDATE albums SET albumartist=? WHERE id=?", (dst_name, aid))
+                                    if cur.rowcount != 1:
+                                        con.rollback()
+                                        return _fail("Album artist rowcount mismatch.", "artist_reconcile_db_failed")
+                                for iid in au["item_ids"]:
+                                    before = au["items_before"].get(iid) or {}
+                                    if mbid:
+                                        cur.execute(
+                                            "UPDATE items SET albumartist=?, albumartists=?, mb_albumartistid=?, mb_albumartistids=? WHERE id=?",
+                                            (dst_name, dst_name, mbid, mbid, iid),
+                                        )
+                                    else:
+                                        cur.execute("UPDATE items SET albumartist=? WHERE id=?", (dst_name, iid))
+                                    if cur.rowcount != 1:
+                                        con.rollback()
+                                        return _fail("Item albumartist rowcount mismatch.", "artist_reconcile_db_failed")
+                                    # Track-level artist/mb_artistid is only
+                                    # relabeled when it currently matches the
+                                    # source folder's own artist name --
+                                    # never a blind blanket rewrite, so a
+                                    # differently-credited track (e.g. a
+                                    # featured/compilation credit) is left
+                                    # alone.
+                                    src_folder_name = au.get("src_name") or ""
+                                    if before.get("artist") == src_folder_name or not src_folder_name:
+                                        if mbid:
+                                            cur.execute(
+                                                "UPDATE items SET artist=?, artists=?, mb_artistid=?, mb_artistids=? WHERE id=?",
+                                                (dst_name, dst_name, mbid, mbid, iid),
+                                            )
+                                        else:
+                                            cur.execute("UPDATE items SET artist=? WHERE id=?", (dst_name, iid))
+                                        if cur.rowcount != 1:
+                                            con.rollback()
+                                            return _fail("Item artist rowcount mismatch.", "artist_reconcile_db_failed")
+
+                            con.commit()
+                        finally:
+                            con.close()
+                    except sqlite3.Error as ex:
+                        LOG.error("Artist reconcile apply: database update failed for %s: %s", operation_id, ex)
+                        store.update(operation_id, status="Failed", logs=["Database update failed."], metadata={**store.get(operation_id).get("metadata", {}), "partial_mutation": True})
+                        return {"ok": False, "error": "Database update failed.", "code": "artist_reconcile_db_failed", "mutated": True, "partial_mutation": True, "rollback_available": True}
+
+                store.update(operation_id, metadata={**store.get(operation_id).get("metadata", {}), "db_mutated": True, "mutated": True})
+
+            # Stage 3: real post-write verification -- DB state and final
+            # filesystem state, not just "commit succeeded" (SEC-002 Wave
+            # 21 final review, finding #29).
+            try:
+                if lib_db and Path(lib_db).exists():
+                    con = sqlite3.connect(lib_db, timeout=10)
+                    con.row_factory = sqlite3.Row
+                    try:
+                        cur = con.cursor()
+                        for u in db_item_updates:
+                            cur.execute("SELECT path FROM items WHERE id=?", (u["id"],))
+                            row = cur.fetchone()
+                            got = (row["path"].decode("utf-8", "replace") if row and isinstance(row["path"], bytes) else (row["path"] if row else None))
+                            if not row or got != u["new_path"]:
+                                return _fail("Post-write verification failed for item path.", "artist_reconcile_verification_failed")
+                        for u in db_album_updates:
+                            cur.execute("SELECT path FROM albums WHERE id=?", (u["id"],))
+                            row = cur.fetchone()
+                            got = (row["path"].decode("utf-8", "replace") if row and isinstance(row["path"], bytes) else (row["path"] if row else None))
+                            if not row or got != u["new_path"]:
+                                return _fail("Post-write verification failed for album path.", "artist_reconcile_verification_failed")
+                        for au in db_artist_updates:
+                            for aid in au["album_ids"]:
+                                cur.execute("SELECT albumartist, mb_albumartistid FROM albums WHERE id=?", (aid,))
+                                row = cur.fetchone()
+                                if not row or row["albumartist"] != au["dst_name"] or (au["mbid"] and str(row["mb_albumartistid"] or "").lower() != au["mbid"]):
+                                    return _fail("Post-write verification failed for album artist attributes.", "artist_reconcile_verification_failed")
+                    finally:
+                        con.close()
+
+                for qr in quarantined_records:
+                    if Path(qr["source"]).exists():
+                        return _fail("Verification failed: quarantined original still present.", "artist_reconcile_verification_failed")
+                    if not Path(qr["quarantine"]).exists():
+                        return _fail("Verification failed: quarantine copy missing.", "artist_reconcile_verification_failed")
+                for mr in moved_records:
+                    if not Path(mr["destination"]).exists():
+                        return _fail("Verification failed: move destination missing.", "artist_reconcile_verification_failed")
+            except sqlite3.Error as ex:
+                LOG.error("Artist reconcile apply: verification query failed for %s: %s", operation_id, ex)
+                return _fail("Post-write verification query failed.", "artist_reconcile_verification_failed")
+
+            store.update(
+                operation_id,
+                status="Completed",
+                metadata={
+                    **store.get(operation_id).get("metadata", {}),
+                    "rollback_available": True,
+                    "completed_at": _now(),
+                },
+                logs=["Artist folder reconciliation applied successfully."],
+            )
+
+            return {
+                "ok": True,
+                "operation_id": operation_id,
+                "status": "Completed",
+                "mutated": True,
+                "moved_files": len(moved_records),
+                "quarantined_files": len(quarantined_records),
+                "removed_dirs": len(removed_dirs),
+            }
+
+
+def rollback_artist_folder_reconcile(
+    store: TransactionStore,
+    operation_id: str,
+    *,
+    music_allowed_roots: Optional[List[str]] = None,
+    db_path: Optional[str] = None,
+    quarantine_base_root: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Roll back an applied artist-folder reconciliation transaction."""
+    if not _TRANSACTION_ID_RE.match(operation_id):
+        return {"ok": False, "error": "Invalid operation_id format.", "code": "artist_reconcile_invalid_id"}
+
+    with _get_apply_lock(operation_id):
+        try:
+            tx = store.get(operation_id)
+        except KeyError:
+            return {"ok": False, "error": "Transaction not found.", "code": "artist_reconcile_not_found"}
+
+        meta = dict(tx.get("metadata") or {})
+        mutation_family = meta.get("mutation_family")
+        if mutation_family != "artist_folder_reconcile_v1":
+            return {"ok": False, "error": "Transaction family mismatch.", "code": "artist_reconcile_family_mismatch"}
+
+        status = tx.get("status")
+
+        if status == "Rolled Back":
+            return {"ok": True, "operation_id": operation_id, "status": "Rolled Back", "already_rolled_back": True}
+
+        if not meta.get("mutated") and not meta.get("filesystem_mutated") and not meta.get("db_mutated"):
+            return {"ok": False, "error": "Transaction was never mutated.", "code": "artist_reconcile_not_mutated"}
+
+        resource_keys = meta.get("resource_keys") or []
+        lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB", "")
+        allowed_roots_raw = music_allowed_roots or meta.get("allowed_roots") or [str(os.environ.get("MUSIC_ROOT", "/music"))]
+        allowed_roots: List[Path] = []
+        for r in allowed_roots_raw:
+            try:
+                p = Path(r).resolve()
+                if p.exists():
+                    allowed_roots.append(p)
+            except Exception:
+                pass
+        if not allowed_roots:
+            allowed_roots = [Path(r) for r in allowed_roots_raw]
+
+        db_item_updates = meta.get("db_item_updates") or []
+        db_album_updates = meta.get("db_album_updates") or []
+        db_artist_updates = meta.get("db_artist_updates") or []
+        moved_records = meta.get("moved_records") or []
+        removed_dirs = meta.get("removed_dirs") or []
+        quarantined_records = meta.get("quarantined_records") or []
+
+        with _lock_resources(resource_keys):
+            # Current-state validation: refuse to clobber a later,
+            # unrelated legitimate change (SEC-002 Wave 21 final review,
+            # finding #42). Check the DB-mutated destinations this
+            # transaction itself produced still hold the values it wrote.
+            if lib_db and Path(lib_db).exists() and meta.get("db_mutated"):
+                con = sqlite3.connect(lib_db, timeout=10)
+                con.row_factory = sqlite3.Row
+                try:
+                    cur = con.cursor()
+                    for u in db_item_updates:
+                        cur.execute("SELECT path FROM items WHERE id=?", (u["id"],))
+                        row = cur.fetchone()
+                        got = (row["path"].decode("utf-8", "replace") if row and isinstance(row["path"], bytes) else (row["path"] if row else None))
+                        if row and got != u["new_path"]:
+                            store.update(operation_id, logs=[f"Rollback precondition failed: item {u['id']} changed after apply."])
+                            return {"ok": False, "error": "Item changed after apply; refusing to overwrite a later change.", "code": "artist_reconcile_rollback_stale"}
+                finally:
+                    con.close()
+
+            db_restored = 0
+            db_failed = 0
+            files_restored = 0
+            files_failed = 0
+
+            # Filesystem first: restore moved files, recreate removed
+            # directories, and restore quarantined files -- BEFORE DB rows
+            # are pointed back at them (SEC-002 Wave 21 final review,
+            # finding #40, the same ordering bug Wave 20 already fixed).
+            q_base = quarantine_base_root or os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
+            try:
+                q_base_root = Path(q_base).resolve()
+            except Exception:
+                q_base_root = Path(q_base)
+
+            for m in reversed(moved_records):
+                src_p = Path(m["destination"])
+                dst_p = Path(m["source"])
+                base_root = _resolve_path_role(str(dst_p), allowed_roots)
+                if base_root is None or not _normpath_within_roots(str(dst_p), allowed_roots):
+                    files_failed += 1
+                    continue
+                if _resolve_path_role(str(src_p), allowed_roots) is None or not _normpath_within_roots(str(src_p), allowed_roots):
+                    files_failed += 1
+                    continue
+                if dst_p.exists() or dst_p.is_symlink():
+                    files_failed += 1
+                    continue
+                if not src_p.exists():
+                    files_failed += 1
+                    continue
+                try:
+                    dst_p.parent.mkdir(parents=True, exist_ok=True)
+                    if _path_has_symlink_under(dst_p.parent, base_root):
+                        files_failed += 1
+                        continue
+                    _safe_rename(src_p, dst_p)
+                    files_restored += 1
+                except OSError:
+                    files_failed += 1
+
+            for dr in removed_dirs:
+                dr_p = Path(dr)
+                base_root = _resolve_path_role(dr, allowed_roots)
+                if base_root is None or not _normpath_within_roots(dr, allowed_roots):
+                    continue
+                try:
+                    dr_p.mkdir(parents=True, exist_ok=True)
+                except OSError:
+                    pass
+
+            for q in quarantined_records:
+                q_p = Path(q["quarantine"])
+                orig_p = Path(q["source"])
+                base_root = _resolve_path_role(str(orig_p), allowed_roots)
+                if base_root is None or not _normpath_within_roots(str(orig_p), allowed_roots):
+                    files_failed += 1
+                    continue
+                if (_resolve_path_role(str(q_p), [q_base_root]) is None
+                        or not _normpath_within_roots(str(q_p), [q_base_root])):
+                    files_failed += 1
+                    continue
+                if orig_p.exists() or orig_p.is_symlink():
+                    files_failed += 1
+                    continue
+                if not q_p.exists():
+                    files_failed += 1
+                    continue
+                try:
+                    orig_p.parent.mkdir(parents=True, exist_ok=True)
+                    if _path_has_symlink_under(orig_p.parent, base_root):
+                        files_failed += 1
+                        continue
+                    _safe_rename(q_p, orig_p)
+                    files_restored += 1
+                except OSError:
+                    files_failed += 1
+
+            # Then DB: paths, artpaths, and (SEC-002 Wave 21 final review,
+            # finding #28) the artist/MBID attributes Apply's stamping
+            # stage changed -- the original implementation never restored
+            # these at all.
+            if lib_db and Path(lib_db).exists():
+                try:
+                    con = sqlite3.connect(lib_db, timeout=10)
+                    try:
+                        cur = con.cursor()
+                        for u in db_item_updates:
+                            cur.execute("UPDATE items SET path=? WHERE id=?", (u["old_path"].encode("utf-8"), u["id"]))
+                            db_restored += 1 if cur.rowcount == 1 else 0
+                            db_failed += 0 if cur.rowcount == 1 else 1
+                        for u in db_album_updates:
+                            if u.get("old_artpath"):
+                                cur.execute("UPDATE albums SET path=?, artpath=? WHERE id=?", (u["old_path"].encode("utf-8"), u["old_artpath"].encode("utf-8"), u["id"]))
+                            else:
+                                cur.execute("UPDATE albums SET path=? WHERE id=?", (u["old_path"].encode("utf-8"), u["id"]))
+                            db_restored += 1 if cur.rowcount == 1 else 0
+                            db_failed += 0 if cur.rowcount == 1 else 1
+                        for au in db_artist_updates:
+                            for aid in au["album_ids"]:
+                                before = au["albums_before"].get(aid) or au["albums_before"].get(str(aid))
+                                if not before:
+                                    db_failed += 1
+                                    continue
+                                cur.execute(
+                                    "UPDATE albums SET albumartist=?, albumartists=?, mb_albumartistid=?, mb_albumartistids=? WHERE id=?",
+                                    (before["albumartist"], before["albumartists"], before["mb_albumartistid"], before["mb_albumartistids"], aid),
+                                )
+                                db_restored += 1 if cur.rowcount == 1 else 0
+                                db_failed += 0 if cur.rowcount == 1 else 1
+                            for iid in au["item_ids"]:
+                                before = au["items_before"].get(iid) or au["items_before"].get(str(iid))
+                                if not before:
+                                    db_failed += 1
+                                    continue
+                                cur.execute(
+                                    "UPDATE items SET albumartist=?, albumartists=?, mb_albumartistid=?, mb_albumartistids=?, "
+                                    "artist=?, artists=?, mb_artistid=?, mb_artistids=? WHERE id=?",
+                                    (
+                                        before["albumartist"], before["albumartists"], before["mb_albumartistid"], before["mb_albumartistids"],
+                                        before["artist"], before["artists"], before["mb_artistid"], before["mb_artistids"], iid,
+                                    ),
+                                )
+                                db_restored += 1 if cur.rowcount == 1 else 0
+                                db_failed += 0 if cur.rowcount == 1 else 1
+                        con.commit()
+                    finally:
+                        con.close()
+                except sqlite3.Error as ex:
+                    LOG.error("Artist reconcile rollback: DB restore failed for %s: %s", operation_id, ex)
+                    store.update(operation_id, logs=["Rollback database restore failed."])
+                    return {"ok": False, "error": "Rollback database restore failed.", "code": "artist_reconcile_rollback_db_failed"}
+
+            full_success = files_failed == 0 and db_failed == 0
+            any_restored = files_restored > 0 or db_restored > 0
+            final_status = "Rolled Back" if full_success else ("Partially Rolled Back" if any_restored else "Failed")
+
+            store.update(
+                operation_id,
+                status=final_status,
+                metadata={**meta, "rollback_available": False, "rolled_back_at": _now()},
+                logs=[f"Artist folder reconciliation rollback completed with status {final_status}."],
+            )
+
+            return {
+                "ok": final_status == "Rolled Back",
+                "operation_id": operation_id,
+                "status": final_status,
+                "partial_mutation": final_status == "Partially Rolled Back",
+                "restored_moves": files_restored,
+                "restored_quarantine": len(quarantined_records),
+                "db_restored": db_restored,
+                "db_failed": db_failed,
+            }
+
+
+# ── Helper functions for artist folder reconciliation ─────────────────────────
+
+# SEC-002 Wave 21 final review: the original implementation called
+# _album_cleanup_file_info/_album_cleanup_verified_same_file/
+# _album_cleanup_duplicate_file_choice/_unique_dest/_MB_UUID_RE/_ART_EXTS
+# without ever defining or importing any of them in this module -- all six
+# names exist only in app.py (the Web Manager), which this engine module
+# must never depend on (it also runs inside the engine container, where
+# app.py is never imported -- see the Wave 15 precedent comment on
+# execute_import_review_cleanup_plan). Every code path that reached these
+# names (any artist-folder merge where the destination already contains
+# files, or any MBID stamping) would raise NameError at actual runtime.
+# Engine-local equivalents, ported faithfully from app.py's originals:
+
+_ART_EXTS = frozenset({".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"})
+_MB_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
+
+
+def _rows_by_path_prefix(
+    con: sqlite3.Connection, table: str, cols: str, path_col: str, prefix: bytes,
+    *, path_result_col: str = "path",
+) -> List[sqlite3.Row]:
+    """Return rows from `table` whose `path_col` starts with `prefix` (bytes).
+
+    SEC-002 Wave 21 final review, CI-only regression: SQL `LIKE` against a
+    BLOB-stored path column with a BLOB pattern is not a reliable prefix
+    match -- its behavior (textual vs. binary comparison, implicit
+    type handling) is undocumented and version-dependent, and it silently
+    returned zero rows on the CI runner's SQLite build while appearing to
+    work locally. A `LIKE` pattern also mistreats literal `%`/`_` bytes in
+    real folder/file names as wildcards. Avoid both problems: narrow with a
+    binary-collation range scan (`path_col >= prefix AND path_col < prefix +
+    0xFF`, safe because prefix is valid UTF-8 and 0xFF never appears in
+    valid UTF-8), then confirm the exact byte-prefix match in Python.
+
+    `path_col` is the (possibly table-qualified) column used in the WHERE
+    clause; `path_result_col` is the column/alias name to read the path back
+    from in the result rows (defaults to `path_col` itself when unqualified
+    and unaliased -- callers that alias or table-qualify the select must
+    pass it explicitly).
+    """
+    upper = prefix + b"\xff\xff\xff\xff"
+    rows = con.execute(
+        f"SELECT {cols} FROM {table} WHERE {path_col} >= ? AND {path_col} < ?",
+        (prefix, upper),
+    ).fetchall()
+    out = []
+    for r in rows:
+        raw_p = r[path_result_col]
+        pb = raw_p if isinstance(raw_p, bytes) else str(raw_p or "").encode("utf-8", "replace")
+        if pb.startswith(prefix):
+            out.append(r)
+    return out
+
+
+def _unique_dest(path: Path) -> Path:
+    if not path.exists():
+        return path
+    base = path.with_suffix("")
+    suffix = path.suffix
+    n = 1
+    while True:
+        cand = Path(f"{base}.{n}{suffix}")
+        if not cand.exists():
+            return cand
+        n += 1
+
+
+def _artist_folder_file_hash(path: Path) -> str:
+    if not path.exists() or not path.is_file():
+        return ""
+    h = hashlib.sha1()
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                h.update(chunk)
+    except OSError:
+        return ""
+    return h.hexdigest()
+
+
+def _album_cleanup_verified_same_file(a: Path, b: Path) -> bool:
+    """Content-identity check (size + full SHA1), not filename/title --
+    this is what actually justifies quarantining one copy as a duplicate
+    (SEC-002 Wave 21 final review, 'duplicate file policy must be
+    identity-safe')."""
+    try:
+        if a.stat().st_size != b.stat().st_size:
+            return False
+    except OSError:
+        return False
+    a_hash = _artist_folder_file_hash(a)
+    b_hash = _artist_folder_file_hash(b)
+    return bool(a_hash and b_hash and a_hash == b_hash)
+
+
+def _album_cleanup_duplicate_file_choice(candidate: Path, existing: Path) -> str:
+    """Artwork-only quality choice (this helper is only ever invoked for
+    files both classified as artwork by _ART_EXTS) -- larger file size is
+    the same proxy app.py's original quality tuple reduces to once the
+    lossless/bitrate fields are inapplicable to image files."""
+    try:
+        cand_size = candidate.stat().st_size
+    except OSError:
+        cand_size = -1
+    try:
+        exist_size = existing.stat().st_size
+    except OSError:
+        exist_size = -1
+    return "candidate" if cand_size > exist_size else "existing"
+
+
+def _derive_artist_folder_identity(folder_path: Path, lib_db: str) -> Dict[str, Any]:
+    """Independently establish Artist ID(s) for a folder directly from
+    Beets DB state (distinct non-blank mb_albumartistid values among
+    albums whose item paths live under this folder) -- SEC-002 Wave 21
+    final review: a caller-supplied MBID is evidence, never authority.
+    More than one distinct established id under the same folder is itself
+    a conflict signal (returned via "ids" having len > 1)."""
+    result: Dict[str, Any] = {"ids": set(), "album_count": 0}
+    if not lib_db or not Path(lib_db).exists():
+        return result
+    prefix = str(folder_path).encode("utf-8") + os.sep.encode("utf-8")
+    try:
+        con = sqlite3.connect(lib_db, timeout=10)
+        con.row_factory = sqlite3.Row
+        try:
+            rows = _rows_by_path_prefix(
+                con, "items JOIN albums ON items.album_id = albums.id",
+                "DISTINCT albums.id AS album_id, albums.mb_albumartistid, items.path AS item_path",
+                "items.path", prefix, path_result_col="item_path",
+            )
+        finally:
+            con.close()
+    except sqlite3.Error as ex:
+        LOG.warning("Artist folder identity derivation failed for %s: %s", folder_path, ex)
+        return result
+    album_ids: set = set()
+    for row in rows:
+        try:
+            album_ids.add(int(row["album_id"]))
+        except (TypeError, ValueError):
+            pass
+        aid = str(row["mb_albumartistid"] or "").strip().lower()
+        if _MB_UUID_RE.match(aid):
+            result["ids"].add(aid)
+    result["album_count"] = len(album_ids)
+    return result
+
+
+def _artist_folder_identity_decision(
+    src_identity: Dict[str, Any],
+    dst_identity: Dict[str, Any],
+    is_merge: bool,
+    caller_mbid: str,
+    fingerprint_confirmed: bool,
+) -> Tuple[bool, str, str]:
+    """Returns (eligible, resolved_mbid, reason_code_if_not_eligible).
+
+    Policy (SEC-002 Wave 21 final review, exact rules requested):
+    - Same established Artist ID on both sides (or established on one side
+      matching a well-formed caller-supplied id when the other is a pure
+      rename with no pre-existing destination): eligible.
+    - Different established Artist IDs, or more than one established id
+      under a single folder: hard conflict, never eligible.
+    - One side established / one side blank: requires explicit caller
+      fingerprint-confirmation evidence.
+    - Both sides blank: requires explicit caller fingerprint-confirmation
+      evidence; name equality alone is never sufficient.
+    """
+    src_ids = src_identity.get("ids") or set()
+    dst_ids = dst_identity.get("ids") or set()
+    if len(src_ids) > 1 or len(dst_ids) > 1:
+        return False, "", "artist_reconcile_identity_conflict"
+    src_id = next(iter(src_ids), "")
+    dst_id = next(iter(dst_ids), "")
+    caller_mbid = caller_mbid if _MB_UUID_RE.match(caller_mbid or "") else ""
+
+    if is_merge:
+        if src_id and dst_id:
+            if src_id != dst_id:
+                return False, "", "artist_reconcile_identity_conflict"
+            return True, src_id, ""
+        if src_id or dst_id:
+            if not fingerprint_confirmed:
+                return False, "", "artist_reconcile_requires_review"
+            return True, (src_id or dst_id), ""
+        if not fingerprint_confirmed:
+            return False, "", "artist_reconcile_requires_review"
+        return True, caller_mbid, ""
+
+    # Pure rename (no pre-existing destination directory): the only
+    # established evidence available is the source folder's own DB state.
+    if src_id and caller_mbid and src_id != caller_mbid:
+        return False, "", "artist_reconcile_identity_conflict"
+    return True, (src_id or caller_mbid), ""
+
+
+def _artist_folder_quarantine_key(path: Path, root_path: Path) -> str:
+    """Stable, collision-free quarantine leaf name -- SEC-002 Wave 21 final
+    review: using only the basename let two different album subdirectories
+    both named "folder.jpg" collide in the same quarantine bucket. The
+    path relative to the scan root is unique by construction."""
+    try:
+        rel = path.relative_to(root_path)
+    except ValueError:
+        rel = Path(path.name)
+    safe = str(rel).replace(os.sep, "__").replace("/", "__")
+    return safe or path.name
+
+
+def _build_artist_folder_move_graph(
+    src: Path,
+    dst: Path,
+    root_path: Path,
+    candidate_idx: int,
+    moves_plan: List[Dict[str, Any]],
+    dup_quarantines: List[Dict[str, Any]],
+    art_quarantines: List[Dict[str, Any]],
+    directory_removals: List[str],
+) -> None:
+    """Recursively build a non-mutating move graph for merging src into dst."""
+    for child in sorted(src.iterdir(), key=lambda p: (not p.is_dir(), p.name.casefold())):
+        target = dst / child.name
+        if child.is_dir():
+            _build_artist_folder_move_graph(
+                child, target, root_path, candidate_idx,
+                moves_plan, dup_quarantines, art_quarantines, directory_removals
+            )
+            directory_removals.append(str(child))
+            continue
+
+        if not child.is_file():
+            continue
+
+        final_dest = target
+        if target.exists():
+            if _album_cleanup_verified_same_file(child, target):
+                st = child.stat()
+                dup_quarantines.append({
+                    "candidate_idx": candidate_idx,
+                    "source": str(child),
+                    "quarantine_key": _artist_folder_quarantine_key(child, root_path),
+                    "stat": {"dev": st.st_dev, "ino": st.st_ino, "size": st.st_size, "mtime_ns": st.st_mtime_ns},
+                })
+                continue
+
+            if child.suffix.lower() in _ART_EXTS and target.suffix.lower() in _ART_EXTS:
+                choice = _album_cleanup_duplicate_file_choice(child, target)
+                if choice == "candidate":
+                    tgt_st = target.stat()
+                    art_quarantines.append({
+                        "candidate_idx": candidate_idx,
+                        "source": str(target),
+                        "quarantine_key": _artist_folder_quarantine_key(target, root_path),
+                        "stat": {"dev": tgt_st.st_dev, "ino": tgt_st.st_ino, "size": tgt_st.st_size, "mtime_ns": tgt_st.st_mtime_ns},
+                    })
+                    final_dest = target
+                else:
+                    c_st = child.stat()
+                    art_quarantines.append({
+                        "candidate_idx": candidate_idx,
+                        "source": str(child),
+                        "quarantine_key": _artist_folder_quarantine_key(child, root_path),
+                        "stat": {"dev": c_st.st_dev, "ino": c_st.st_ino, "size": c_st.st_size, "mtime_ns": c_st.st_mtime_ns},
+                    })
+                    continue
+            else:
+                final_dest = _unique_dest(target)
+
+        st = child.stat()
+        moves_plan.append({
+            "candidate_idx": candidate_idx,
+            "type": "move_file" if final_dest == target else "move_unique",
+            "source": str(child),
+            "destination": str(final_dest),
+            "stat": {"dev": st.st_dev, "ino": st.st_ino, "size": st.st_size, "mtime_ns": st.st_mtime_ns},
+        })
+
+
+_ENGINE_STAMP_UUID_IN_NAME_RE = re.compile(
+    r'\s*(?:\{|\()[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:\}|\))\s*$',
+    re.IGNORECASE,
+)
+_ENGINE_STAMP_UUID_CAPTURE_RE = re.compile(
+    r'\s*(?:\{|\()([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:\}|\))\s*$',
+    re.IGNORECASE,
+)
+
+
+def _artist_folder_name_without_mbid(name: str) -> str:
+    return _ENGINE_STAMP_UUID_IN_NAME_RE.sub("", str(name or "")).strip() or str(name or "").strip()
+
+
+def _artist_folder_merge_key(name: str) -> str:
+    text = _artist_folder_name_without_mbid(name).casefold().replace("&", "and")
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    return re.sub(r"[^a-z0-9]+", "", text)
+
+
+def _safe_artist_folder_name(name: str) -> str:
+    cleaned = re.sub(r'[<>:"\\|?*\x00-\x1f]', "_", str(name or "")).strip()
+    cleaned = cleaned.replace("/", "_").rstrip(". ")
+    return cleaned or "Unknown Artist"
+
+
+def _artist_folder_canonical_name(artist_name: str, mb_artistid: str = "") -> str:
+    base = _safe_artist_folder_name(artist_name)
+    mbid = str(mb_artistid or "").strip().lower()
+    if _MB_UUID_RE.match(mbid):
+        return f"{base} ({mbid})"
+    return base
+
+
+def _stamp_artist_folder_album_mbid_counts(
+    root: Path,
+    folders: List[Path],
+    lib_db: str,
+) -> Tuple[Dict[str, Dict[str, set]], Dict[str, int], str]:
+    folder_by_name = {folder.name: folder for folder in folders}
+    root_abs = root.resolve(strict=False)
+    music_root_abs = Path(os.environ.get("MUSIC_ROOT", "/music")).resolve(strict=False)
+    album_ids_by_folder: Dict[str, set] = {}
+    mbid_album_ids_by_folder: Dict[str, Dict[str, set]] = {}
+    try:
+        con = sqlite3.connect(lib_db, timeout=10)
+        con.row_factory = sqlite3.Row
+        try:
+            rows = con.execute(
+                "SELECT DISTINCT a.id AS album_id, a.mb_albumartistid, i.path "
+                "FROM albums a "
+                "JOIN items i ON i.album_id = a.id "
+                "WHERE a.mb_albumartistid IS NOT NULL AND a.mb_albumartistid != ''"
+            ).fetchall()
+        finally:
+            con.close()
+    except Exception as ex:
+        return {}, {}, str(ex)
+
+    for row in rows:
+        raw_path = row["path"]
+        text = (raw_path.decode("utf-8", "replace") if isinstance(raw_path, bytes) else str(raw_path)).replace("\\", "/").strip()
+        if not text:
+            continue
+        path_value = Path(text)
+        candidates = [path_value] if path_value.is_absolute() else [music_root_abs / text, root_abs / text]
+        folder = None
+        for candidate in candidates:
+            try:
+                rel = candidate.resolve(strict=False).relative_to(root_abs)
+            except Exception:
+                continue
+            if rel.parts:
+                folder = folder_by_name.get(rel.parts[0])
+                if folder is not None:
+                    break
+        if folder is None and not path_value.is_absolute():
+            parts = [p for p in text.split("/") if p]
+            if parts:
+                folder = folder_by_name.get(parts[0])
+        if folder is None:
+            continue
+        try:
+            album_id = int(row["album_id"] or 0)
+        except Exception:
+            album_id = 0
+        if not album_id:
+            continue
+        folder_key = str(folder)
+        album_ids_by_folder.setdefault(folder_key, set()).add(album_id)
+        aid = str(row["mb_albumartistid"] or "").strip().lower()
+        if _MB_UUID_RE.match(aid):
+            mbid_album_ids_by_folder.setdefault(folder_key, {}).setdefault(aid, set()).add(album_id)
+
+    album_totals = {folder_key: len(album_ids) for folder_key, album_ids in album_ids_by_folder.items()}
+    return mbid_album_ids_by_folder, album_totals, ""
+
+
+def _engine_scan_artist_folder_groups(
+    root_path: Path,
+    lib_db: str,
+    only_keys: Optional[set] = None,
+) -> List[Dict[str, Any]]:
+    """Engine helper to discover duplicate artist folder candidate groups."""
+    folders = sorted(
+        [p for p in root_path.iterdir() if p.is_dir() and not p.name.startswith(".")],
+        key=lambda p: p.name.casefold(),
+    )
+    by_key: Dict[str, List[Path]] = {}
+    for f in folders:
+        key = _artist_folder_merge_key(f.name)
+        if key:
+            by_key.setdefault(key, []).append(f)
+
+    candidates = []
+    for key, group in by_key.items():
+        if len(group) < 2:
+            continue
+        if only_keys and key not in only_keys:
+            continue
+        canonical = group[0]
+        for src in group[1:]:
+            candidates.append({
+                "key": key,
+                "source_path": str(src),
+                "source_name": src.name,
+                "target_path": str(canonical),
+                "target_name": canonical.name,
+            })
+    return candidates
+
+
+def _engine_stamp_artist_folder_scan(root_path: Path, lib_db: str) -> List[Dict[str, Any]]:
+    """Engine helper to discover MBID stamping candidate folders.
+
+    SEC-002 Wave 21 final review, findings #11/#37: the original threshold
+    (a single Artist ID covering >=75% of a folder's albums) meant a folder
+    with, say, 3 albums under Artist ID A and 1 album under a DIFFERENT,
+    already-established Artist ID B would still produce a stamping
+    candidate for A -- and Apply's (also-fixed) exact-bound-ID stamping
+    would then overwrite that one album's already-correct, conflicting ID
+    B. A known conflicting nonblank Artist ID must never be overwritten
+    automatically. Candidates are now only produced when a folder's
+    tagged albums show EXACTLY ONE distinct non-blank Artist ID (any
+    number of untagged/blank albums alongside it is fine -- those are
+    filled, not overwritten); more than one distinct id present in the
+    same folder is a conflict and produces no candidate at all for that
+    folder.
+    """
+    folders = sorted(
+        [p for p in root_path.iterdir() if p.is_dir() and not p.name.startswith(".")],
+        key=lambda p: p.name.casefold(),
+    )
+    mbid_counts, folder_totals, _err = _stamp_artist_folder_album_mbid_counts(root_path, folders, lib_db)
+    candidates = []
+    for f in folders:
+        f_key = str(f)
+        mbids_dict = mbid_counts.get(f_key) or {}
+        tot = folder_totals.get(f_key) or 0
+        if not tot or len(mbids_dict) != 1:
+            continue
+        mbid = next(iter(mbids_dict))
+        canon_name = _artist_folder_canonical_name(f.name, mbid)
+        target_p = root_path / canon_name
+        if target_p.resolve(strict=False) != f.resolve(strict=False):
+            candidates.append({
+                "key": _artist_folder_merge_key(f.name),
+                "source_path": str(f),
+                "source_name": f.name,
+                "target_path": str(target_p),
+                "target_name": canon_name,
+                "mbid": mbid,
+            })
+    return candidates
+
 
