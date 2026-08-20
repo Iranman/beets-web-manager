@@ -3959,11 +3959,28 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/albums/existing-reconcile/plan":
+            # SEC-002 Wave 20 final review: `source_folder` in the request
+            # body must NEVER be trusted to expand allowed filesystem
+            # roots by itself -- that is a client-controlled path becoming
+            # its own authorization, exactly the trust-boundary defect
+            # this review closes. The engine validates any claimed
+            # source_folder against this SERVER-configured staging root
+            # list (same roots track_replacement/bulk_import_replacement
+            # already use for candidate files) before treating anything
+            # under it as authorized; an unvalidated source_folder is
+            # simply ignored, not silently accepted.
             music_root_env = os.environ.get("MUSIC_ROOT", "/music")
             quarantine_root = os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
+            staging_allowed_roots = [
+                os.environ.get("DOWNLOADS_ROOT", "/downloads"),
+                os.environ.get("PLAYLIST_DOWNLOAD_ROOT", "/data/torrents/music/Playlist Downloads"),
+                os.environ.get("TORRENT_SOURCE_ROOTS", "/torrents"),
+                tempfile.gettempdir(),
+            ]
             res = transaction_engine.create_existing_album_reconcile_plan(
                 _txn_store, body,
                 music_allowed_roots=[music_root_env],
+                staging_allowed_roots=staging_allowed_roots,
                 quarantine_base_root=quarantine_root,
                 db_path=MUSIC_LIBRARY_PATH,
             )
@@ -3978,10 +3995,17 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 return
             music_root_env = os.environ.get("MUSIC_ROOT", "/music")
             quarantine_root = os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
+            staging_allowed_roots = [
+                os.environ.get("DOWNLOADS_ROOT", "/downloads"),
+                os.environ.get("PLAYLIST_DOWNLOAD_ROOT", "/data/torrents/music/Playlist Downloads"),
+                os.environ.get("TORRENT_SOURCE_ROOTS", "/torrents"),
+                tempfile.gettempdir(),
+            ]
             res = transaction_engine.execute_existing_album_reconcile_apply(
                 _txn_store, op_id,
                 db_path=MUSIC_LIBRARY_PATH,
                 music_allowed_roots=[music_root_env],
+                staging_allowed_roots=staging_allowed_roots,
                 quarantine_base_root=quarantine_root,
             )
             code = 200 if res.get("ok") else 400

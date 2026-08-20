@@ -6679,6 +6679,17 @@ def _merge_imported_album_into_existing(imported_album_id: int, existing_album_i
                 if key[1]:
                     existing_by_key.setdefault(key, []).append(row)
 
+            # SEC-002 Wave 20 final review: track whether each delegated
+            # engine operation actually succeeded so the function's return
+            # value is truthful. Previously this returned existing_album_id
+            # (implying reconciliation succeeded) whenever dup_rows/move_ids/
+            # replace_rows were non-empty, regardless of whether the engine
+            # Plan/Apply calls actually succeeded -- a caller relying on the
+            # returned album id as a success signal would be misled by a
+            # logged-and-swallowed engine failure.
+            replace_ok = True
+            reconcile_ok = True
+
             if replace_rows:
                 replace_ids = sorted({int(r["id"]) for r in replace_rows})
                 try:
@@ -6705,10 +6716,13 @@ def _merge_imported_album_into_existing(imported_album_id: int, existing_album_i
                             # identity-verified), those old rows remain in
                             # place -- both versions coexist rather than
                             # silently losing the only verified copy.
+                            replace_ok = False
                             log.append(f"  [merge] WARN bulk replacement apply failed, old rows left in place: {apply_res.get('error')}")
                     else:
+                        replace_ok = False
                         log.append(f"  [merge] WARN bulk replacement plan failed, old rows left in place: {plan_res.get('error')}")
                 except Exception as ex:
+                    replace_ok = False
                     log.append(f"  [merge] WARN exception delegating bulk replacement to engine, old rows left in place: {ex}")
 
             if dup_rows or move_ids:
@@ -6741,14 +6755,25 @@ def _merge_imported_album_into_existing(imported_album_id: int, existing_album_i
                                 f"and {len(move_ids)} move(s) to engine reconcile tx {op_id}."
                             )
                         else:
+                            reconcile_ok = False
                             log.append(f"  [merge] WARN existing album reconcile apply failed: {apply_res.get('error')}")
                     else:
+                        reconcile_ok = False
                         log.append(f"  [merge] WARN existing album reconcile plan failed: {plan_res.get('error')}")
                 except Exception as ex:
+                    reconcile_ok = False
                     log.append(f"  [merge] WARN exception delegating existing album reconcile to engine: {ex}")
 
             con.commit()
-            return existing_album_id if move_ids or dup_rows or replace_rows else imported_album_id
+            # SEC-002 Wave 20 final review: only report existing_album_id
+            # (i.e. "reconciliation happened") when what was attempted
+            # actually succeeded. A failed delegation leaves the imported
+            # album's rows exactly where they were, so the truthful return
+            # value in that case is imported_album_id, not a claim of
+            # success upstream code would otherwise trust.
+            attempted = bool(move_ids or dup_rows or replace_rows)
+            succeeded = replace_ok and reconcile_ok
+            return existing_album_id if (attempted and succeeded) else imported_album_id
     except Exception as ex:
         log.append(f"  [merge] Warning: {ex}")
         return imported_album_id

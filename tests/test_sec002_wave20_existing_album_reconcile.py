@@ -3,13 +3,16 @@
 Comprehensive focused test suite for existing_album_reconcile_v1 mutation family.
 """
 import ast
+import math
 import os
 import shutil
 import sqlite3
+import struct
 import tempfile
 import threading
 import time
 import unittest
+import wave
 from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
@@ -19,6 +22,7 @@ from backend.transaction_engine import (
     create_existing_album_reconcile_plan,
     execute_existing_album_reconcile_apply,
     rollback_existing_album_reconcile,
+    _read_file_audio_tags,
 )
 import app as app_module
 
@@ -55,6 +59,27 @@ RG_B = "bbbbbbbb-0000-0000-0000-000000000000"
 REL_A = "11111111-1111-1111-1111-111111111111"
 REC_1 = "33333333-3333-3333-3333-333333333331"
 REC_2 = "33333333-3333-3333-3333-333333333332"
+REC_3 = "33333333-3333-3333-3333-333333333333"
+
+
+def _write_test_audio(path: Path, *, freq: float = 220.0, duration: float = 0.2) -> None:
+    """Write a real, minimal, playable WAV file. SEC-002 Wave 20 final
+    review: the original fixture wrote fake b"AUDIO_DATA_N" bytes, which the
+    new survivor-readability check (_read_file_audio_tags) correctly
+    refuses to treat as usable media -- exactly the "survivor must be
+    readable / valid media" requirement this review closes. Real tests need
+    real, independently-readable audio (self-synthesized sine wave, same
+    technique as scripts/seed_demo_library.py's demo library)."""
+    sample_rate = 8000
+    n_samples = max(1, int(sample_rate * duration))
+    with wave.open(str(path), "w") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sample_rate)
+        frames = bytearray()
+        for i in range(n_samples):
+            frames += struct.pack("<h", int(3000 * math.sin(2 * math.pi * freq * i / sample_rate)))
+        w.writeframes(bytes(frames))
 
 
 class Wave20FixtureBase(unittest.TestCase):
@@ -111,6 +136,34 @@ class Wave20FixtureBase(unittest.TestCase):
         except Exception:
             pass
 
+    # Convenience: Plan/Apply wrappers that always pass staging_allowed_roots
+    # (SEC-002 Wave 20 final review: source_folder/staging paths are only
+    # ever authorized against a SERVER-configured staging root list, never
+    # accepted merely because the request claims one -- tests must supply
+    # that root explicitly, the same way the real control-agent route does).
+    def _plan(self, payload, *, roots=None, staging_roots=None):
+        return create_existing_album_reconcile_plan(
+            self.store, payload,
+            music_allowed_roots=roots if roots is not None else [str(self.music_root)],
+            staging_allowed_roots=staging_roots if staging_roots is not None else [str(self.staging_root)],
+            db_path=str(self.db_path),
+        )
+
+    def _apply(self, op_id, *, roots=None, staging_roots=None):
+        return execute_existing_album_reconcile_apply(
+            self.store, op_id,
+            db_path=str(self.db_path),
+            music_allowed_roots=roots if roots is not None else [str(self.music_root)],
+            staging_allowed_roots=staging_roots if staging_roots is not None else [str(self.staging_root)],
+        )
+
+    def _rollback(self, op_id, *, roots=None):
+        return rollback_existing_album_reconcile(
+            self.store, op_id,
+            db_path=str(self.db_path),
+            music_allowed_roots=roots if roots is not None else [str(self.music_root)],
+        )
+
     def _create_album(self, album_id: int, title: str, artist: str = "Test Artist", rg_id: str = RG_A, rel_id: str = REL_A):
         with sqlite3.connect(self.db_path) as con:
             con.execute(
@@ -131,12 +184,16 @@ class Wave20FixtureBase(unittest.TestCase):
         outside: bool = False,
         rec_id: str = REC_1,
         rg_id: str = RG_A,
+        write_audio: bool = True,
     ) -> Path:
         root = self.outside_root if outside else (self.staging_root if staging else self.music_root)
         album_dir = root / f"album_{album_id}"
         album_dir.mkdir(parents=True, exist_ok=True)
         file_path = album_dir / filename
-        file_path.write_bytes(b"AUDIO_DATA_" + str(item_id).encode())
+        if write_audio:
+            _write_test_audio(file_path, freq=220.0 + item_id)
+        else:
+            file_path.write_bytes(b"NOT_REAL_AUDIO_" + str(item_id).encode())
 
         with sqlite3.connect(self.db_path) as con:
             con.execute(
@@ -167,26 +224,18 @@ class PlanTests(Wave20FixtureBase):
         self._create_album(1, "Existing Album")
         self._create_album(2, "Imported Temp Album")
 
-        # Survivor in existing album
-        surv_path = self._create_item(10, 1, "Track 1", 1, 1, "track1_existing.flac")
-        # Move item (missing track position)
-        move_path = self._create_item(20, 2, "Track 2", 1, 2, "track2_imported.flac", staging=True)
-        # Duplicate item (same track position as survivor)
-        dup_path = self._create_item(21, 2, "Track 1", 1, 1, "track1_imported.flac", staging=True)
+        surv_path = self._create_item(10, 1, "Track 1", 1, 1, "track1_existing.wav")
+        move_path = self._create_item(20, 2, "Track 2", 1, 2, "track2_imported.wav", staging=True)
+        dup_path = self._create_item(21, 2, "Track 1", 1, 1, "track1_imported.wav", staging=True)
 
-        res = create_existing_album_reconcile_plan(
-            self.store,
-            {
-                "imported_album_id": 2,
-                "existing_album_id": 1,
-                "move_item_ids": [20],
-                "dup_item_ids": [21],
-                "dup_details": [{"dup_item_id": 21, "survivor_item_ids": [10]}],
-                "source_folder": str(self.staging_root),
-            },
-            music_allowed_roots=[str(self.music_root)],
-            db_path=str(self.db_path),
-        )
+        res = self._plan({
+            "imported_album_id": 2,
+            "existing_album_id": 1,
+            "move_item_ids": [20],
+            "dup_item_ids": [21],
+            "dup_details": [{"dup_item_id": 21, "survivor_item_ids": [10]}],
+            "source_folder": str(self.staging_root),
+        })
         self.assertTrue(res.get("ok"), res)
         op_id = res["operation_id"]
         self.assertEqual(res["reconciled_moves"], 1)
@@ -200,28 +249,22 @@ class PlanTests(Wave20FixtureBase):
         self._create_album(1, "Existing Album")
         self._create_album(2, "Imported Temp Album")
 
-        self._create_item(10, 1, "Track 1", 1, 1, "track1_existing.flac")
-        move_path = self._create_item(20, 2, "Track 2", 1, 2, "track2_imported.flac", staging=True)
-        dup_path = self._create_item(21, 2, "Track 1", 1, 1, "track1_imported.flac", staging=True)
+        self._create_item(10, 1, "Track 1", 1, 1, "track1_existing.wav")
+        move_path = self._create_item(20, 2, "Track 2", 1, 2, "track2_imported.wav", staging=True)
+        dup_path = self._create_item(21, 2, "Track 1", 1, 1, "track1_imported.wav", staging=True)
 
         mtime_dup_before = dup_path.stat().st_mtime_ns
 
-        res = create_existing_album_reconcile_plan(
-            self.store,
-            {
-                "imported_album_id": 2,
-                "existing_album_id": 1,
-                "move_item_ids": [20],
-                "dup_item_ids": [21],
-                "dup_details": [{"dup_item_id": 21, "survivor_item_ids": [10]}],
-                "source_folder": str(self.staging_root),
-            },
-            music_allowed_roots=[str(self.music_root)],
-            db_path=str(self.db_path),
-        )
-        self.assertTrue(res.get("ok"))
+        res = self._plan({
+            "imported_album_id": 2,
+            "existing_album_id": 1,
+            "move_item_ids": [20],
+            "dup_item_ids": [21],
+            "dup_details": [{"dup_item_id": 21, "survivor_item_ids": [10]}],
+            "source_folder": str(self.staging_root),
+        })
+        self.assertTrue(res.get("ok"), res)
 
-        # Verify DB items and files remain completely untouched
         with sqlite3.connect(self.db_path) as con:
             con.row_factory = sqlite3.Row
             move_row = con.execute("SELECT album_id FROM items WHERE id=20").fetchone()
@@ -239,49 +282,42 @@ class PlanTests(Wave20FixtureBase):
         self._create_album(1, "Existing Album", rg_id=RG_A)
         self._create_album(2, "Imported Temp Album", rg_id=RG_B)
 
-        self._create_item(20, 2, "Track 1", 1, 1, "track1.flac", staging=True, rg_id=RG_B)
+        self._create_item(20, 2, "Track 1", 1, 1, "track1.wav", staging=True, rg_id=RG_B)
 
-        res = create_existing_album_reconcile_plan(
-            self.store,
-            {
-                "imported_album_id": 2,
-                "existing_album_id": 1,
-                "move_item_ids": [20],
-                "source_folder": str(self.staging_root),
-            },
-            music_allowed_roots=[str(self.music_root)],
-            db_path=str(self.db_path),
-        )
+        res = self._plan({
+            "imported_album_id": 2,
+            "existing_album_id": 1,
+            "move_item_ids": [20],
+            "source_folder": str(self.staging_root),
+        })
         self.assertFalse(res.get("ok"))
         self.assertEqual(res.get("code"), "reconcile_identity_mismatch")
 
-    def test_plan_missing_survivor(self):
+    def test_plan_no_candidate_survivor_requires_review(self):
         self._create_album(1, "Existing Album")
         self._create_album(2, "Imported Temp Album")
 
-        dup_path = self._create_item(21, 2, "Track 1", 1, 1, "track1_imported.flac", staging=True)
+        self._create_item(21, 2, "Track 1", 1, 1, "track1_imported.wav", staging=True)
 
-        res = create_existing_album_reconcile_plan(
-            self.store,
-            {
-                "imported_album_id": 2,
-                "existing_album_id": 1,
-                "dup_item_ids": [21],
-                "dup_details": [{"dup_item_id": 21, "survivor_item_ids": [999]}],
-                "source_folder": str(self.staging_root),
-            },
-            music_allowed_roots=[str(self.music_root)],
-            db_path=str(self.db_path),
-        )
-        self.assertFalse(res.get("ok"))
-        self.assertEqual(res.get("code"), "reconcile_survivor_missing")
+        res = self._plan({
+            "imported_album_id": 2,
+            "existing_album_id": 1,
+            "dup_item_ids": [21],
+            "dup_details": [{"dup_item_id": 21, "survivor_item_ids": [999]}],
+            "source_folder": str(self.staging_root),
+        })
+        self.assertTrue(res.get("ok"), res)
+        self.assertEqual(res.get("reconciled_duplicates"), 0)
+        review = res.get("dup_requires_review") or []
+        self.assertEqual(len(review), 1)
+        self.assertEqual(review[0]["item_id"], 21)
 
     def test_plan_symlink_rejected(self):
         self._create_album(1, "Existing Album")
         self._create_album(2, "Imported Temp Album")
 
-        target_file = self._create_item(20, 2, "Track 1", 1, 1, "real_track1.flac", staging=True)
-        symlink_file = self.staging_root / "album_2" / "link_track1.flac"
+        target_file = self._create_item(20, 2, "Track 1", 1, 1, "real_track1.wav", staging=True)
+        symlink_file = self.staging_root / "album_2" / "link_track1.wav"
         try:
             os.symlink(target_file, symlink_file)
         except (OSError, NotImplementedError):
@@ -291,17 +327,12 @@ class PlanTests(Wave20FixtureBase):
             con.execute("UPDATE items SET path=? WHERE id=20", (str(symlink_file),))
             con.commit()
 
-        res = create_existing_album_reconcile_plan(
-            self.store,
-            {
-                "imported_album_id": 2,
-                "existing_album_id": 1,
-                "move_item_ids": [20],
-                "source_folder": str(self.staging_root),
-            },
-            music_allowed_roots=[str(self.music_root)],
-            db_path=str(self.db_path),
-        )
+        res = self._plan({
+            "imported_album_id": 2,
+            "existing_album_id": 1,
+            "move_item_ids": [20],
+            "source_folder": str(self.staging_root),
+        })
         self.assertFalse(res.get("ok"))
         self.assertEqual(res.get("code"), "reconcile_symlink_rejected")
 
@@ -309,8 +340,8 @@ class PlanTests(Wave20FixtureBase):
         self._create_album(1, "Existing Album")
         self._create_album(2, "Imported Temp Album")
 
-        surv_path = self._create_item(10, 1, "Track 1", 1, 1, "track1_existing.flac")
-        dup_path = self.staging_root / "album_2" / "track1_hardlink.flac"
+        surv_path = self._create_item(10, 1, "Track 1", 1, 1, "track1_existing.wav")
+        dup_path = self.staging_root / "album_2" / "track1_hardlink.wav"
         dup_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             os.link(surv_path, dup_path)
@@ -325,22 +356,166 @@ class PlanTests(Wave20FixtureBase):
             )
             con.commit()
 
-        res = create_existing_album_reconcile_plan(
-            self.store,
+        res = self._plan({
+            "imported_album_id": 2,
+            "existing_album_id": 1,
+            "dup_item_ids": [21],
+            "dup_details": [{"dup_item_id": 21, "survivor_item_ids": [10]}],
+            "source_folder": str(self.staging_root),
+        })
+        self.assertTrue(res.get("ok"), res)
+        tx = self.store.get(res["operation_id"])
+        dup_change = [c for c in tx["changes"] if c.get("item_id") == 21][0]
+        self.assertEqual(dup_change.get("physical_class"), "hardlink")
+
+    def test_plan_same_path_duplicate_classified_db_only(self):
+        """SEC-002 Wave 20 final review: two Beets rows pointing at the
+        exact same path must never result in a physical unlink -- that
+        would destroy the survivor's only copy too."""
+        self._create_album(1, "Existing Album")
+        self._create_album(2, "Imported Temp Album")
+
+        surv_path = self._create_item(10, 1, "Track 1", 1, 1, "track1_existing.wav")
+        with sqlite3.connect(self.db_path) as con:
+            con.execute(
+                "INSERT INTO items (id, album_id, title, artist, album, albumartist, disc, track, path, mb_trackid, mb_albumid, mb_releasegroupid, length) "
+                "VALUES (21, 2, 'Track 1', 'Test Artist', 'Test Album', 'Test Artist', 1, 1, ?, ?, ?, ?, 180.0)",
+                (str(surv_path), REC_1, REL_A, RG_A),
+            )
+            con.commit()
+
+        res = self._plan({
+            "imported_album_id": 2,
+            "existing_album_id": 1,
+            "dup_item_ids": [21],
+            "dup_details": [{"dup_item_id": 21, "survivor_item_ids": [10]}],
+        })
+        self.assertTrue(res.get("ok"), res)
+        tx = self.store.get(res["operation_id"])
+        dup_change = [c for c in tx["changes"] if c.get("item_id") == 21][0]
+        self.assertEqual(dup_change.get("physical_class"), "db_only")
+
+    def test_plan_conflicting_recording_id_fails_closed(self):
+        """SEC-002 Wave 20 final review, critical finding #3: different
+        KNOWN Recording IDs must never be treated as a safe duplicate
+        relation, even when disc/track position matches exactly."""
+        self._create_album(1, "Existing Album")
+        self._create_album(2, "Imported Temp Album")
+
+        self._create_item(10, 1, "Track 1", 1, 1, "track1_existing.wav", rec_id=REC_1)
+        self._create_item(21, 2, "Track 1", 1, 1, "track1_imported.wav", staging=True, rec_id=REC_2)
+
+        res = self._plan({
+            "imported_album_id": 2,
+            "existing_album_id": 1,
+            "dup_item_ids": [21],
+            "dup_details": [{"dup_item_id": 21, "survivor_item_ids": [10]}],
+            "source_folder": str(self.staging_root),
+        })
+        self.assertTrue(res.get("ok"), res)
+        self.assertEqual(res.get("reconciled_duplicates"), 0)
+        review = res.get("dup_requires_review") or []
+        self.assertEqual(len(review), 1)
+        self.assertEqual(review[0]["reason"], "identity_conflict")
+
+        # The duplicate row must be completely untouched.
+        with sqlite3.connect(self.db_path) as con:
+            row = con.execute("SELECT COUNT(*) FROM items WHERE id=21").fetchone()[0]
+        self.assertEqual(row, 1)
+
+    def test_plan_blank_recording_ids_require_review(self):
+        """Blank Recording ID on either side is not enough evidence for
+        automatic retirement on its own -- surfaced for review instead."""
+        self._create_album(1, "Existing Album")
+        self._create_album(2, "Imported Temp Album")
+
+        self._create_item(10, 1, "Track 1", 1, 1, "track1_existing.wav", rec_id="")
+        self._create_item(21, 2, "Track 1", 1, 1, "track1_imported.wav", staging=True, rec_id="")
+
+        res = self._plan({
+            "imported_album_id": 2,
+            "existing_album_id": 1,
+            "dup_item_ids": [21],
+            "dup_details": [{"dup_item_id": 21, "survivor_item_ids": [10]}],
+            "source_folder": str(self.staging_root),
+        })
+        self.assertTrue(res.get("ok"), res)
+        self.assertEqual(res.get("reconciled_duplicates"), 0)
+        review = res.get("dup_requires_review") or []
+        self.assertEqual(len(review), 1)
+
+    def test_plan_unreadable_survivor_requires_review(self):
+        self._create_album(1, "Existing Album")
+        self._create_album(2, "Imported Temp Album")
+
+        self._create_item(10, 1, "Track 1", 1, 1, "track1_existing.wav", write_audio=False)
+        self._create_item(21, 2, "Track 1", 1, 1, "track1_imported.wav", staging=True)
+
+        res = self._plan({
+            "imported_album_id": 2,
+            "existing_album_id": 1,
+            "dup_item_ids": [21],
+            "dup_details": [{"dup_item_id": 21, "survivor_item_ids": [10]}],
+            "source_folder": str(self.staging_root),
+        })
+        self.assertTrue(res.get("ok"), res)
+        self.assertEqual(res.get("reconciled_duplicates"), 0)
+        review = res.get("dup_requires_review") or []
+        self.assertEqual(len(review), 1)
+        self.assertEqual(review[0]["reason"], "survivor_unverified")
+
+    def test_plan_source_folder_cannot_expand_authorization(self):
+        """SEC-002 Wave 20 final review, critical finding #8/#49: an
+        unvalidated source_folder must never widen what paths are
+        authorized. A move item outside every server-configured root
+        (library or staging) must be refused even if the client claims
+        source_folder points right at it."""
+        self._create_album(1, "Existing Album")
+        self._create_album(2, "Imported Temp Album")
+
+        outside_item = self._create_item(20, 2, "Track 2", 1, 2, "track2.wav", outside=True)
+
+        res = self._plan(
             {
                 "imported_album_id": 2,
                 "existing_album_id": 1,
-                "dup_item_ids": [21],
-                "dup_details": [{"dup_item_id": 21, "survivor_item_ids": [10]}],
-                "source_folder": str(self.staging_root),
+                "move_item_ids": [20],
+                # Attacker-controlled: claims the outside root is the
+                # authorized source folder. It is NOT one of the server's
+                # configured staging roots, so it must not be trusted.
+                "source_folder": str(self.outside_root),
             },
-            music_allowed_roots=[str(self.music_root)],
-            db_path=str(self.db_path),
+            staging_roots=[str(self.staging_root)],
         )
-        self.assertTrue(res.get("ok"), res)
-        tx = self.store.get(res["operation_id"])
-        dup_change = [c for c in tx["changes"] if c.get("item_id") == 21 or c.get("id") == "item:21"][0]
-        self.assertTrue(dup_change.get("is_hardlink"))
+        self.assertFalse(res.get("ok"))
+        self.assertEqual(res.get("code"), "reconcile_path_out_of_root")
+
+    def test_plan_payload_rejects_duplicate_ids(self):
+        self._create_album(1, "Existing Album")
+        self._create_album(2, "Imported Temp Album")
+        self._create_item(20, 2, "Track 2", 1, 2, "track2.wav", staging=True)
+
+        res = self._plan({
+            "imported_album_id": 2,
+            "existing_album_id": 1,
+            "move_item_ids": [20, 20],
+        })
+        self.assertFalse(res.get("ok"))
+        self.assertEqual(res.get("code"), "reconcile_payload_overlap")
+
+    def test_plan_payload_rejects_dup_move_overlap(self):
+        self._create_album(1, "Existing Album")
+        self._create_album(2, "Imported Temp Album")
+        self._create_item(20, 2, "Track 2", 1, 2, "track2.wav", staging=True)
+
+        res = self._plan({
+            "imported_album_id": 2,
+            "existing_album_id": 1,
+            "move_item_ids": [20],
+            "dup_item_ids": [20],
+        })
+        self.assertFalse(res.get("ok"))
+        self.assertEqual(res.get("code"), "reconcile_payload_overlap")
 
 
 class ApplyTests(Wave20FixtureBase):
@@ -348,36 +523,25 @@ class ApplyTests(Wave20FixtureBase):
         self._create_album(1, "Existing Album")
         self._create_album(2, "Imported Temp Album")
 
-        self._create_item(10, 1, "Track 1", 1, 1, "track1_existing.flac")
-        move_path = self._create_item(20, 2, "Track 2", 1, 2, "track2_imported.flac", staging=True)
-        dup_path = self._create_item(21, 2, "Track 1", 1, 1, "track1_imported.flac", staging=True)
+        self._create_item(10, 1, "Track 1", 1, 1, "track1_existing.wav")
+        move_path = self._create_item(20, 2, "Track 2", 1, 2, "track2_imported.wav", staging=True)
+        dup_path = self._create_item(21, 2, "Track 1", 1, 1, "track1_imported.wav", staging=True)
 
-        plan_res = create_existing_album_reconcile_plan(
-            self.store,
-            {
-                "imported_album_id": 2,
-                "existing_album_id": 1,
-                "move_item_ids": [20],
-                "dup_item_ids": [21],
-                "dup_details": [{"dup_item_id": 21, "survivor_item_ids": [10]}],
-                "source_folder": str(self.staging_root),
-            },
-            music_allowed_roots=[str(self.music_root)],
-            db_path=str(self.db_path),
-        )
+        plan_res = self._plan({
+            "imported_album_id": 2,
+            "existing_album_id": 1,
+            "move_item_ids": [20],
+            "dup_item_ids": [21],
+            "dup_details": [{"dup_item_id": 21, "survivor_item_ids": [10]}],
+            "source_folder": str(self.staging_root),
+        })
         self.assertTrue(plan_res.get("ok"), plan_res)
         op_id = plan_res["operation_id"]
 
-        apply_res = execute_existing_album_reconcile_apply(
-            self.store,
-            op_id,
-            db_path=str(self.db_path),
-            music_allowed_roots=[str(self.music_root)],
-        )
+        apply_res = self._apply(op_id)
         self.assertTrue(apply_res.get("ok"), apply_res)
         self.assertEqual(apply_res["status"], "Completed")
 
-        # Verify DB state: move item reassigned to album 1, dup item deleted, empty album 2 deleted
         with sqlite3.connect(self.db_path) as con:
             con.row_factory = sqlite3.Row
             move_row = con.execute("SELECT album_id FROM items WHERE id=20").fetchone()
@@ -388,40 +552,68 @@ class ApplyTests(Wave20FixtureBase):
         self.assertEqual(dup_row, 0)
         self.assertEqual(alb_row, 0)
 
-        # Verify duplicate file unlinked
+        # The duplicate's original path is gone, but -- unlike the
+        # original implementation -- it was quarantined, not permanently
+        # unlinked, so rollback_available is truthful.
         self.assertFalse(dup_path.exists())
+        tx = self.store.get(op_id)
+        quarantined = tx["metadata"].get("quarantined_files") or []
+        self.assertEqual(len(quarantined), 1)
+        self.assertTrue(Path(quarantined[0]["quarantine_path"]).exists())
+        self.assertTrue(tx["metadata"]["db_mutated"])
+        self.assertTrue(tx["metadata"]["filesystem_mutated"])
+
+    def test_apply_same_path_duplicate_preserves_file(self):
+        self._create_album(1, "Existing Album")
+        self._create_album(2, "Imported Temp Album")
+
+        surv_path = self._create_item(10, 1, "Track 1", 1, 1, "track1_existing.wav")
+        with sqlite3.connect(self.db_path) as con:
+            con.execute(
+                "INSERT INTO items (id, album_id, title, artist, album, albumartist, disc, track, path, mb_trackid, mb_albumid, mb_releasegroupid, length) "
+                "VALUES (21, 2, 'Track 1', 'Test Artist', 'Test Album', 'Test Artist', 1, 1, ?, ?, ?, ?, 180.0)",
+                (str(surv_path), REC_1, REL_A, RG_A),
+            )
+            con.commit()
+
+        plan_res = self._plan({
+            "imported_album_id": 2,
+            "existing_album_id": 1,
+            "dup_item_ids": [21],
+            "dup_details": [{"dup_item_id": 21, "survivor_item_ids": [10]}],
+        })
+        self.assertTrue(plan_res.get("ok"), plan_res)
+        apply_res = self._apply(plan_res["operation_id"])
+        self.assertTrue(apply_res.get("ok"), apply_res)
+
+        # The shared file must still exist -- it backs the survivor too.
+        self.assertTrue(surv_path.exists())
+        with sqlite3.connect(self.db_path) as con:
+            cnt = con.execute("SELECT COUNT(*) FROM items WHERE id=21").fetchone()[0]
+            surv_cnt = con.execute("SELECT COUNT(*) FROM items WHERE id=10").fetchone()[0]
+        self.assertEqual(cnt, 0)
+        self.assertEqual(surv_cnt, 1)
 
     def test_apply_stale_source_row(self):
         self._create_album(1, "Existing Album")
         self._create_album(2, "Imported Temp Album")
 
-        self._create_item(10, 1, "Track 1", 1, 1, "track1_existing.flac")
-        self._create_item(20, 2, "Track 2", 1, 2, "track2_imported.flac", staging=True)
+        self._create_item(10, 1, "Track 1", 1, 1, "track1_existing.wav")
+        self._create_item(20, 2, "Track 2", 1, 2, "track2_imported.wav", staging=True)
 
-        plan_res = create_existing_album_reconcile_plan(
-            self.store,
-            {
-                "imported_album_id": 2,
-                "existing_album_id": 1,
-                "move_item_ids": [20],
-                "source_folder": str(self.staging_root),
-            },
-            music_allowed_roots=[str(self.music_root)],
-            db_path=str(self.db_path),
-        )
+        plan_res = self._plan({
+            "imported_album_id": 2,
+            "existing_album_id": 1,
+            "move_item_ids": [20],
+            "source_folder": str(self.staging_root),
+        })
         op_id = plan_res["operation_id"]
 
-        # Mutate move item in DB after Plan
         with sqlite3.connect(self.db_path) as con:
             con.execute("UPDATE items SET album_id=99 WHERE id=20")
             con.commit()
 
-        apply_res = execute_existing_album_reconcile_apply(
-            self.store,
-            op_id,
-            db_path=str(self.db_path),
-            music_allowed_roots=[str(self.music_root)],
-        )
+        apply_res = self._apply(op_id)
         self.assertFalse(apply_res.get("ok"))
         self.assertEqual(apply_res.get("code"), "reconcile_album_membership_changed")
 
@@ -429,67 +621,69 @@ class ApplyTests(Wave20FixtureBase):
         self._create_album(1, "Existing Album")
         self._create_album(2, "Imported Temp Album")
 
-        self._create_item(10, 1, "Track 1", 1, 1, "track1_existing.flac")
-        self._create_item(21, 2, "Track 1", 1, 1, "track1_imported.flac", staging=True)
+        self._create_item(10, 1, "Track 1", 1, 1, "track1_existing.wav")
+        self._create_item(21, 2, "Track 1", 1, 1, "track1_imported.wav", staging=True)
 
-        plan_res = create_existing_album_reconcile_plan(
-            self.store,
-            {
-                "imported_album_id": 2,
-                "existing_album_id": 1,
-                "dup_item_ids": [21],
-                "dup_details": [{"dup_item_id": 21, "survivor_item_ids": [10]}],
-                "source_folder": str(self.staging_root),
-            },
-            music_allowed_roots=[str(self.music_root)],
-            db_path=str(self.db_path),
-        )
+        plan_res = self._plan({
+            "imported_album_id": 2,
+            "existing_album_id": 1,
+            "dup_item_ids": [21],
+            "dup_details": [{"dup_item_id": 21, "survivor_item_ids": [10]}],
+            "source_folder": str(self.staging_root),
+        })
         op_id = plan_res["operation_id"]
 
-        # Delete survivor item row from DB after Plan
         with sqlite3.connect(self.db_path) as con:
             con.execute("DELETE FROM items WHERE id=10")
             con.commit()
 
-        apply_res = execute_existing_album_reconcile_apply(
-            self.store,
-            op_id,
-            db_path=str(self.db_path),
-            music_allowed_roots=[str(self.music_root)],
-        )
+        apply_res = self._apply(op_id)
         self.assertFalse(apply_res.get("ok"))
-        self.assertEqual(apply_res.get("code"), "reconcile_survivor_missing")
+        self.assertEqual(apply_res.get("code"), "reconcile_survivor_stale")
+
+    def test_apply_survivor_identity_changed(self):
+        self._create_album(1, "Existing Album")
+        self._create_album(2, "Imported Temp Album")
+
+        self._create_item(10, 1, "Track 1", 1, 1, "track1_existing.wav", rec_id=REC_1)
+        self._create_item(21, 2, "Track 1", 1, 1, "track1_imported.wav", staging=True, rec_id=REC_1)
+
+        plan_res = self._plan({
+            "imported_album_id": 2,
+            "existing_album_id": 1,
+            "dup_item_ids": [21],
+            "dup_details": [{"dup_item_id": 21, "survivor_item_ids": [10]}],
+            "source_folder": str(self.staging_root),
+        })
+        op_id = plan_res["operation_id"]
+
+        with sqlite3.connect(self.db_path) as con:
+            con.execute("UPDATE items SET mb_trackid=? WHERE id=10", (REC_3,))
+            con.commit()
+
+        apply_res = self._apply(op_id)
+        self.assertFalse(apply_res.get("ok"))
+        self.assertEqual(apply_res.get("code"), "reconcile_survivor_stale")
 
     def test_apply_mtime_changed(self):
         self._create_album(1, "Existing Album")
         self._create_album(2, "Imported Temp Album")
 
-        self._create_item(10, 1, "Track 1", 1, 1, "track1_existing.flac")
-        move_path = self._create_item(20, 2, "Track 2", 1, 2, "track2_imported.flac", staging=True)
+        self._create_item(10, 1, "Track 1", 1, 1, "track1_existing.wav")
+        move_path = self._create_item(20, 2, "Track 2", 1, 2, "track2_imported.wav", staging=True)
 
-        plan_res = create_existing_album_reconcile_plan(
-            self.store,
-            {
-                "imported_album_id": 2,
-                "existing_album_id": 1,
-                "move_item_ids": [20],
-                "source_folder": str(self.staging_root),
-            },
-            music_allowed_roots=[str(self.music_root)],
-            db_path=str(self.db_path),
-        )
+        plan_res = self._plan({
+            "imported_album_id": 2,
+            "existing_album_id": 1,
+            "move_item_ids": [20],
+            "source_folder": str(self.staging_root),
+        })
         op_id = plan_res["operation_id"]
 
-        # Modify file on disk to change mtime/size
         time.sleep(0.01)
         move_path.write_bytes(b"MODIFIED_AFTER_PLAN")
 
-        apply_res = execute_existing_album_reconcile_apply(
-            self.store,
-            op_id,
-            db_path=str(self.db_path),
-            music_allowed_roots=[str(self.music_root)],
-        )
+        apply_res = self._apply(op_id)
         self.assertFalse(apply_res.get("ok"))
         self.assertEqual(apply_res.get("code"), "reconcile_toctou_mismatch")
 
@@ -497,38 +691,86 @@ class ApplyTests(Wave20FixtureBase):
         self._create_album(1, "Existing Album")
         self._create_album(2, "Imported Temp Album")
 
-        self._create_item(10, 1, "Track 1", 1, 1, "track1_existing.flac")
-        self._create_item(20, 2, "Track 2", 1, 2, "track2_imported.flac", staging=True)
+        self._create_item(10, 1, "Track 1", 1, 1, "track1_existing.wav")
+        self._create_item(20, 2, "Track 2", 1, 2, "track2_imported.wav", staging=True)
 
-        plan_res = create_existing_album_reconcile_plan(
-            self.store,
-            {
-                "imported_album_id": 2,
-                "existing_album_id": 1,
-                "move_item_ids": [20],
-                "source_folder": str(self.staging_root),
-            },
-            music_allowed_roots=[str(self.music_root)],
-            db_path=str(self.db_path),
-        )
+        plan_res = self._plan({
+            "imported_album_id": 2,
+            "existing_album_id": 1,
+            "move_item_ids": [20],
+            "source_folder": str(self.staging_root),
+        })
         op_id = plan_res["operation_id"]
 
-        apply1 = execute_existing_album_reconcile_apply(
-            self.store,
-            op_id,
-            db_path=str(self.db_path),
-            music_allowed_roots=[str(self.music_root)],
-        )
+        apply1 = self._apply(op_id)
         self.assertTrue(apply1.get("ok"))
 
-        apply2 = execute_existing_album_reconcile_apply(
-            self.store,
-            op_id,
-            db_path=str(self.db_path),
-            music_allowed_roots=[str(self.music_root)],
-        )
+        apply2 = self._apply(op_id)
         self.assertTrue(apply2.get("ok"))
         self.assertTrue(apply2.get("already_completed"))
+
+    def test_apply_wrong_mutation_family(self):
+        tx = self.store.create(
+            operation_type="Merge Album",
+            status="Preview",
+            summary="Fake family",
+            metadata={"mutation_family": "track_replacement_v1"},
+        )
+        res = self._apply(tx["id"])
+        self.assertFalse(res.get("ok"))
+        self.assertEqual(res.get("code"), "reconcile_wrong_family")
+
+    def test_apply_album_rgid_changed_since_plan(self):
+        self._create_album(1, "Existing Album", rg_id=RG_A)
+        self._create_album(2, "Imported Temp Album", rg_id=RG_A)
+        self._create_item(20, 2, "Track 2", 1, 2, "track2.wav", staging=True, rg_id=RG_A)
+
+        plan_res = self._plan({
+            "imported_album_id": 2,
+            "existing_album_id": 1,
+            "move_item_ids": [20],
+            "source_folder": str(self.staging_root),
+        })
+        op_id = plan_res["operation_id"]
+
+        with sqlite3.connect(self.db_path) as con:
+            con.execute("UPDATE albums SET mb_releasegroupid=? WHERE id=1", (RG_B,))
+            con.commit()
+
+        apply_res = self._apply(op_id)
+        self.assertFalse(apply_res.get("ok"))
+        self.assertEqual(apply_res.get("code"), "reconcile_identity_mismatch")
+
+
+class ReleaseOnlyAndRetirementTests(Wave20FixtureBase):
+    def test_album_retirement_exact_set_logic(self):
+        """SEC-002 Wave 20 final review, finding #26: retirement must be
+        based on the exact affected-ID set matching current membership,
+        not a count comparison."""
+        self._create_album(1, "Existing Album")
+        self._create_album(2, "Imported Temp Album")
+
+        self._create_item(10, 1, "Track 1", 1, 1, "track1_existing.wav")
+        self._create_item(20, 2, "Track 2", 1, 2, "track2.wav", staging=True)
+        # A second, unrelated item remains in the imported album and is
+        # NOT part of this reconciliation -- the album must NOT retire.
+        self._create_item(22, 2, "Track 3", 1, 3, "track3.wav", staging=True)
+
+        res = self._plan({
+            "imported_album_id": 2,
+            "existing_album_id": 1,
+            "move_item_ids": [20],
+            "source_folder": str(self.staging_root),
+        })
+        self.assertTrue(res.get("ok"), res)
+        tx = self.store.get(res["operation_id"])
+        self.assertFalse(tx["metadata"]["retire_imported_album"])
+
+        apply_res = self._apply(res["operation_id"])
+        self.assertTrue(apply_res.get("ok"), apply_res)
+        with sqlite3.connect(self.db_path) as con:
+            alb_cnt = con.execute("SELECT COUNT(*) FROM albums WHERE id=2").fetchone()[0]
+        self.assertEqual(alb_cnt, 1)
 
 
 class ConcurrencyTests(Wave20FixtureBase):
@@ -536,31 +778,20 @@ class ConcurrencyTests(Wave20FixtureBase):
         self._create_album(1, "Existing Album")
         self._create_album(2, "Imported Temp Album")
 
-        self._create_item(10, 1, "Track 1", 1, 1, "track1_existing.flac")
-        self._create_item(20, 2, "Track 2", 1, 2, "track2_imported.flac", staging=True)
+        self._create_item(10, 1, "Track 1", 1, 1, "track1_existing.wav")
+        self._create_item(20, 2, "Track 2", 1, 2, "track2_imported.wav", staging=True)
 
-        plan_res = create_existing_album_reconcile_plan(
-            self.store,
-            {
-                "imported_album_id": 2,
-                "existing_album_id": 1,
-                "move_item_ids": [20],
-                "source_folder": str(self.staging_root),
-            },
-            music_allowed_roots=[str(self.music_root)],
-            db_path=str(self.db_path),
-        )
+        plan_res = self._plan({
+            "imported_album_id": 2,
+            "existing_album_id": 1,
+            "move_item_ids": [20],
+            "source_folder": str(self.staging_root),
+        })
         op_id = plan_res["operation_id"]
 
         results = []
         def _worker():
-            r = execute_existing_album_reconcile_apply(
-                self.store,
-                op_id,
-                db_path=str(self.db_path),
-                music_allowed_roots=[str(self.music_root)],
-            )
-            results.append(r)
+            results.append(self._apply(op_id))
 
         t1 = threading.Thread(target=_worker)
         t2 = threading.Thread(target=_worker)
@@ -579,55 +810,54 @@ class ConcurrencyTests(Wave20FixtureBase):
         self._create_album(3, "Existing Album 2")
         self._create_album(4, "Imported Temp Album 2")
 
-        self._create_item(10, 1, "Track 1", 1, 1, "alb1_track1.flac")
-        self._create_item(20, 2, "Track 2", 1, 2, "alb2_track2.flac", staging=True)
-        self._create_item(30, 3, "Track 1", 1, 1, "alb3_track1.flac")
-        self._create_item(40, 4, "Track 2", 1, 2, "alb4_track2.flac", staging=True)
+        self._create_item(10, 1, "Track 1", 1, 1, "alb1_track1.wav")
+        self._create_item(20, 2, "Track 2", 1, 2, "alb2_track2.wav", staging=True)
+        self._create_item(30, 3, "Track 1", 1, 1, "alb3_track1.wav")
+        self._create_item(40, 4, "Track 2", 1, 2, "alb4_track2.wav", staging=True)
 
-        plan1 = create_existing_album_reconcile_plan(
-            self.store,
-            {
-                "imported_album_id": 2,
-                "existing_album_id": 1,
-                "move_item_ids": [20],
-                "source_folder": str(self.staging_root),
-            },
-            music_allowed_roots=[str(self.music_root)],
-            db_path=str(self.db_path),
-        )
-        plan2 = create_existing_album_reconcile_plan(
-            self.store,
-            {
-                "imported_album_id": 4,
-                "existing_album_id": 3,
-                "move_item_ids": [40],
-                "source_folder": str(self.staging_root),
-            },
-            music_allowed_roots=[str(self.music_root)],
-            db_path=str(self.db_path),
-        )
+        plan1 = self._plan({
+            "imported_album_id": 2, "existing_album_id": 1, "move_item_ids": [20],
+            "source_folder": str(self.staging_root),
+        })
+        plan2 = self._plan({
+            "imported_album_id": 4, "existing_album_id": 3, "move_item_ids": [40],
+            "source_folder": str(self.staging_root),
+        })
 
-        res1 = []
-        res2 = []
-
-        t1 = threading.Thread(
-            target=lambda: res1.append(execute_existing_album_reconcile_apply(
-                self.store, plan1["operation_id"], db_path=str(self.db_path), music_allowed_roots=[str(self.music_root)]
-            ))
-        )
-        t2 = threading.Thread(
-            target=lambda: res2.append(execute_existing_album_reconcile_apply(
-                self.store, plan2["operation_id"], db_path=str(self.db_path), music_allowed_roots=[str(self.music_root)]
-            ))
-        )
-
-        t1.start()
-        t2.start()
-        t1.join()
-        t2.join()
+        res1, res2 = [], []
+        t1 = threading.Thread(target=lambda: res1.append(self._apply(plan1["operation_id"])))
+        t2 = threading.Thread(target=lambda: res2.append(self._apply(plan2["operation_id"])))
+        t1.start(); t2.start(); t1.join(); t2.join()
 
         self.assertTrue(res1[0].get("ok"), res1[0])
         self.assertTrue(res2[0].get("ok"), res2[0])
+
+    def test_concurrency_apply_vs_rollback_serializes(self):
+        self._create_album(1, "Existing Album")
+        self._create_album(2, "Imported Temp Album")
+        self._create_item(10, 1, "Track 1", 1, 1, "track1_existing.wav")
+        self._create_item(20, 2, "Track 2", 1, 2, "track2.wav", staging=True)
+
+        plan_res = self._plan({
+            "imported_album_id": 2, "existing_album_id": 1, "move_item_ids": [20],
+            "source_folder": str(self.staging_root),
+        })
+        op_id = plan_res["operation_id"]
+        apply_res = self._apply(op_id)
+        self.assertTrue(apply_res.get("ok"), apply_res)
+
+        results = []
+        def _rollback_worker():
+            results.append(self._rollback(op_id))
+
+        t1 = threading.Thread(target=_rollback_worker)
+        t2 = threading.Thread(target=_rollback_worker)
+        t1.start(); t2.start(); t1.join(); t2.join()
+
+        # Exactly one rollback should succeed; the other must see the
+        # already-rolled-back state and refuse cleanly, never race.
+        ok_count = sum(1 for r in results if r.get("ok"))
+        self.assertEqual(ok_count, 1)
 
 
 class RollbackTests(Wave20FixtureBase):
@@ -635,12 +865,11 @@ class RollbackTests(Wave20FixtureBase):
         self._create_album(1, "Existing Album")
         self._create_album(2, "Imported Temp Album")
 
-        self._create_item(10, 1, "Track 1", 1, 1, "track1_existing.flac")
-        self._create_item(20, 2, "Track 2", 1, 2, "track2_imported.flac", staging=True)
-        dup_path = self._create_item(21, 2, "Track 1", 1, 1, "track1_imported.flac", outside=True)
+        self._create_item(10, 1, "Track 1", 1, 1, "track1_existing.wav")
+        self._create_item(20, 2, "Track 2", 1, 2, "track2_imported.wav", staging=True)
+        dup_path = self._create_item(21, 2, "Track 1", 1, 1, "track1_imported.wav", outside=True)
 
-        plan_res = create_existing_album_reconcile_plan(
-            self.store,
+        plan_res = self._plan(
             {
                 "imported_album_id": 2,
                 "existing_album_id": 1,
@@ -649,43 +878,115 @@ class RollbackTests(Wave20FixtureBase):
                 "dup_details": [{"dup_item_id": 21, "survivor_item_ids": [10]}],
                 "source_folder": str(self.staging_root),
             },
-            music_allowed_roots=[str(self.music_root), str(self.outside_root)],
-            db_path=str(self.db_path),
+            roots=[str(self.music_root), str(self.outside_root)],
         )
         self.assertTrue(plan_res.get("ok"), plan_res)
         op_id = plan_res["operation_id"]
 
-        apply_res = execute_existing_album_reconcile_apply(
-            self.store,
-            op_id,
-            db_path=str(self.db_path),
-            music_allowed_roots=[str(self.music_root), str(self.outside_root)],
-        )
+        apply_res = self._apply(op_id, roots=[str(self.music_root), str(self.outside_root)])
         self.assertTrue(apply_res.get("ok"), apply_res)
 
-        rollback_res = rollback_existing_album_reconcile(
-            self.store,
-            op_id,
-            db_path=str(self.db_path),
-            music_allowed_roots=[str(self.music_root), str(self.outside_root)],
-        )
+        rollback_res = self._rollback(op_id, roots=[str(self.music_root), str(self.outside_root)])
         self.assertTrue(rollback_res.get("ok"), rollback_res)
         self.assertEqual(rollback_res["status"], "Rolled Back")
 
-        # Verify DB restored: move item album_id == 2, dup item row restored, album 2 row restored
         with sqlite3.connect(self.db_path) as con:
             con.row_factory = sqlite3.Row
             move_row = con.execute("SELECT album_id FROM items WHERE id=20").fetchone()
-            dup_row = con.execute("SELECT album_id FROM items WHERE id=21").fetchone()
+            dup_row = con.execute("SELECT album_id, title FROM items WHERE id=21").fetchone()
             alb_row = con.execute("SELECT id FROM albums WHERE id=2").fetchone()
 
         self.assertEqual(move_row["album_id"], 2)
         self.assertIsNotNone(dup_row)
         self.assertEqual(dup_row["album_id"], 2)
+        self.assertEqual(dup_row["title"], "Track 1")
         self.assertIsNotNone(alb_row)
-
-        # Verify quarantined duplicate file restored to original path
         self.assertTrue(dup_path.exists())
+
+    def test_rollback_repeated_refused(self):
+        self._create_album(1, "Existing Album")
+        self._create_album(2, "Imported Temp Album")
+        self._create_item(10, 1, "Track 1", 1, 1, "track1_existing.wav")
+        self._create_item(20, 2, "Track 2", 1, 2, "track2.wav", staging=True)
+
+        plan_res = self._plan({
+            "imported_album_id": 2, "existing_album_id": 1, "move_item_ids": [20],
+            "source_folder": str(self.staging_root),
+        })
+        op_id = plan_res["operation_id"]
+        self.assertTrue(self._apply(op_id).get("ok"))
+
+        first = self._rollback(op_id)
+        self.assertTrue(first.get("ok"), first)
+        second = self._rollback(op_id)
+        self.assertFalse(second.get("ok"))
+        self.assertEqual(second.get("code"), "reconcile_already_rolled_back")
+
+    def test_rollback_unmutated_refused(self):
+        self._create_album(1, "Existing Album")
+        self._create_album(2, "Imported Temp Album")
+        self._create_item(20, 2, "Track 2", 1, 2, "track2.wav", staging=True)
+
+        plan_res = self._plan({
+            "imported_album_id": 2, "existing_album_id": 1, "move_item_ids": [20],
+            "source_folder": str(self.staging_root),
+        })
+        res = self._rollback(plan_res["operation_id"])
+        self.assertFalse(res.get("ok"))
+        self.assertEqual(res.get("code"), "reconcile_not_mutated")
+
+    def test_rollback_stale_after_manual_edit_refused(self):
+        self._create_album(1, "Existing Album")
+        self._create_album(2, "Imported Temp Album")
+        self._create_item(10, 1, "Track 1", 1, 1, "track1_existing.wav")
+        self._create_item(20, 2, "Track 2", 1, 2, "track2.wav", staging=True)
+
+        plan_res = self._plan({
+            "imported_album_id": 2, "existing_album_id": 1, "move_item_ids": [20],
+            "source_folder": str(self.staging_root),
+        })
+        op_id = plan_res["operation_id"]
+        self.assertTrue(self._apply(op_id).get("ok"))
+
+        # A later, legitimate manual edit reassigns the moved item again.
+        with sqlite3.connect(self.db_path) as con:
+            con.execute("UPDATE items SET album_id=99 WHERE id=20")
+            con.commit()
+
+        res = self._rollback(op_id)
+        self.assertFalse(res.get("ok"))
+        self.assertEqual(res.get("code"), "reconcile_rollback_stale")
+
+        with sqlite3.connect(self.db_path) as con:
+            row = con.execute("SELECT album_id FROM items WHERE id=20").fetchone()
+        self.assertEqual(row[0], 99)
+
+    def test_rollback_destination_collision_refused(self):
+        self._create_album(1, "Existing Album")
+        self._create_album(2, "Imported Temp Album")
+        self._create_item(10, 1, "Track 1", 1, 1, "track1_existing.wav")
+        dup_path = self._create_item(21, 2, "Track 1", 1, 1, "track1_imported.wav", staging=True)
+
+        plan_res = self._plan({
+            "imported_album_id": 2, "existing_album_id": 1,
+            "dup_item_ids": [21],
+            "dup_details": [{"dup_item_id": 21, "survivor_item_ids": [10]}],
+            "source_folder": str(self.staging_root),
+        })
+        op_id = plan_res["operation_id"]
+        apply_res = self._apply(op_id)
+        self.assertTrue(apply_res.get("ok"), apply_res)
+        self.assertFalse(dup_path.exists())
+
+        # Something else now occupies the original duplicate path.
+        dup_path.parent.mkdir(parents=True, exist_ok=True)
+        dup_path.write_bytes(b"UNRELATED_NEW_FILE")
+
+        rollback_res = self._rollback(op_id)
+        self.assertFalse(rollback_res.get("ok"))
+        self.assertIn(rollback_res.get("status"), ("Partially Rolled Back", "Failed"))
+        # The unrelated file must survive untouched.
+        self.assertEqual(dup_path.read_bytes(), b"UNRELATED_NEW_FILE")
 
 
 class Wave18InteractionTests(Wave20FixtureBase):
@@ -693,9 +994,9 @@ class Wave18InteractionTests(Wave20FixtureBase):
         self._create_album(1, "Existing Album")
         self._create_album(2, "Imported Temp Album")
 
-        self._create_item(10, 1, "Track 1 Old", 1, 1, "track1_existing.flac")
-        self._create_item(20, 2, "Track 1 New", 1, 1, "track1_imported.flac", staging=True)
-        self._create_item(21, 2, "Track 2 New", 1, 2, "track2_imported.flac", staging=True)
+        self._create_item(10, 1, "Track 1 Old", 1, 1, "track1_existing.wav")
+        self._create_item(20, 2, "Track 1 New", 1, 1, "track1_imported.wav", staging=True)
+        self._create_item(21, 2, "Track 2 New", 1, 2, "track2_imported.wav", staging=True)
 
         plan_bulk_mock = mock.MagicMock(return_value={"ok": True, "operation_id": "op_bulk_18"})
         apply_bulk_mock = mock.MagicMock(return_value={"ok": True})
@@ -711,9 +1012,29 @@ class Wave18InteractionTests(Wave20FixtureBase):
                 2, 1, str(self.staging_root), [], mb_albumid=""
             )
 
-        # Confirm reconcile transaction was invoked
         plan_rec_mock.assert_called_once()
         apply_rec_mock.assert_called_once_with("op_rec_20")
+        self.assertEqual(res, 1)
+
+    def test_merge_job_reports_failure_truthfully(self):
+        """SEC-002 Wave 20 final review, findings #45/#46: a failed engine
+        Apply must not be reported as a successful merge upstream."""
+        self._create_album(1, "Existing Album")
+        self._create_album(2, "Imported Temp Album")
+        self._create_item(10, 1, "Track 1 Old", 1, 1, "track1_existing.wav")
+        self._create_item(20, 2, "Track 1 New", 1, 1, "track1_imported.wav", staging=True)
+
+        plan_rec_mock = mock.MagicMock(return_value={"ok": True, "operation_id": "op_rec_20"})
+        apply_rec_mock = mock.MagicMock(return_value={"ok": False, "error": "simulated engine failure"})
+
+        with mock.patch.object(app_module.beets_client, "plan_existing_album_reconcile", plan_rec_mock), \
+             mock.patch.object(app_module.beets_client, "apply_existing_album_reconcile", apply_rec_mock):
+            res = app_module._merge_imported_album_into_existing(
+                2, 1, str(self.staging_root), [], mb_albumid=""
+            )
+
+        # Apply failed -- the function must NOT claim the merge succeeded.
+        self.assertEqual(res, 2)
 
 
 class RealProductionPathIntegrationTests(Wave20FixtureBase):
@@ -721,30 +1042,16 @@ class RealProductionPathIntegrationTests(Wave20FixtureBase):
         self._create_album(1, "Existing Album")
         self._create_album(2, "Imported Temp Album")
 
-        # Item 10 in existing album 1 (disc 1, track 1)
-        self._create_item(10, 1, "Track 1", 1, 1, "track1_existing.flac")
-        # Item 20 in imported temp album 2 (disc 1, track 2 - missing track position)
-        self._create_item(20, 2, "Track 2", 1, 2, "track2_imported.flac", staging=True)
-        # Item 21 in imported temp album 2 (disc 1, track 1 - duplicate position)
-        self._create_item(21, 2, "Track 1", 1, 1, "track1_imported.flac", staging=True)
+        self._create_item(10, 1, "Track 1", 1, 1, "track1_existing.wav")
+        self._create_item(20, 2, "Track 2", 1, 2, "track2_imported.wav", staging=True)
+        self._create_item(21, 2, "Track 1", 1, 1, "track1_imported.wav", staging=True)
 
         def _mock_plan(payload, **kwargs):
-            return create_existing_album_reconcile_plan(
-                self.store,
-                payload,
-                music_allowed_roots=[str(self.music_root)],
-                db_path=str(self.db_path),
-            )
+            return self._plan(payload)
 
         def _mock_apply(operation_id, **kwargs):
-            return execute_existing_album_reconcile_apply(
-                self.store,
-                operation_id,
-                db_path=str(self.db_path),
-                music_allowed_roots=[str(self.music_root)],
-            )
+            return self._apply(operation_id)
 
-        # Mock _fetch_mb_release_tracklist and fingerprint check so _row_matches_target returns True for item 10 & 21
         mb_mock = mock.MagicMock(return_value={
             "ok": True,
             "tracks": [
@@ -764,7 +1071,6 @@ class RealProductionPathIntegrationTests(Wave20FixtureBase):
             )
             self.assertEqual(res_aid, 1)
 
-        # Confirm DB updated via complete production path
         with sqlite3.connect(self.db_path) as con:
             con.row_factory = sqlite3.Row
             move_row = con.execute("SELECT album_id FROM items WHERE id=20").fetchone()
@@ -791,7 +1097,6 @@ class WebManagerMutationProhibitionTests(unittest.TestCase):
         self.assertIsNotNone(merge_fn_def, "_merge_imported_album_into_existing not found in app.py")
         fn_source = ast.get_source_segment(source, merge_fn_def)
 
-        # Verify no direct file unlink / rename / remove / move or SQL DELETE/UPDATE calls in _merge_imported_album_into_existing
         prohibited_strings = [
             "Path.unlink", "os.unlink", "os.remove", "os.rename", "os.replace",
             "shutil.move", "shutil.rmtree", "DELETE FROM items", "UPDATE items SET album_id",
