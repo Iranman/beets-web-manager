@@ -77,8 +77,8 @@ class PathCleanupConsolidationTests(unittest.TestCase):
         self.assertIn("target_path is required for safe_rename", self.app_source)
         self.assertIn("Target folder already exists:", self.app_source)
         # safe_rename validates at apply time — no DB items, target must not exist
-        self.assertIn("use beet move instead of plain rename", self.app_source)
-        self.assertIn("src.rename(dst)", self.app_source)
+        self.assertIn("plan_folder_cleanup", self.app_source)
+        self.assertIn("apply_folder_cleanup", self.app_source)
 
     def test_bulk_safe_rename_job_endpoint_exists(self):
         self.assertIn("def apply_safe_folder_placeholder_renames_job", self.app_source)

@@ -7850,3 +7850,666 @@ def rollback_album_artwork(
             return {"ok": True, "operation_id": operation_id, "status": "Rolled Back", "files_restored": files_restored}
 
 
+# ── import_folder_v1 ─────────────────────────────────────────────────────────
+
+def create_import_folder_plan(
+    store: TransactionStore,
+    payload: Dict[str, Any],
+    *,
+    music_allowed_roots: Optional[List[str]] = None,
+    staging_allowed_roots: Optional[List[str]] = None,
+    db_path: Optional[str] = None,
+    quarantine_base_root: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Create a non-mutating preview plan for import folder workflows."""
+    src_folder = str(payload.get("source_folder") or payload.get("folder_path") or "").strip()
+    if not src_folder:
+        return {"ok": False, "error": "source_folder required", "code": "import_folder_invalid_payload"}
+
+    src_p = Path(src_folder)
+    allowed_roots = music_allowed_roots or [str(os.environ.get("MUSIC_ROOT", "/music"))]
+    stg_roots = staging_allowed_roots or [str(os.environ.get("DOWNLOADS_ROOT", "/downloads")), str(os.environ.get("STAGING_ROOT", "/staging")), str(os.environ.get("MUSIC_ROOT", "/music"))]
+
+    if not any(_path_under(src_p, Path(r)) for r in stg_roots):
+        return {"ok": False, "error": f"Source folder outside allowed staging roots: {src_p}", "code": "import_folder_path_out_of_root"}
+    if any(_path_has_symlink_under(src_p, Path(r)) for r in stg_roots):
+        return {"ok": False, "error": f"Symlink rejected: {src_p}", "code": "import_folder_symlink_rejected"}
+
+    album_id = int(payload.get("album_id") or 0)
+    mode = str(payload.get("mode") or "import").strip()
+
+    files_plan: List[Dict[str, Any]] = []
+    if src_p.exists() and src_p.is_dir():
+        for f in src_p.rglob("*"):
+            if f.is_file():
+                st = f.stat()
+                files_plan.append({
+                    "source": str(f),
+                    "rel_path": str(f.relative_to(src_p)),
+                    "stat": {"dev": st.st_dev, "ino": st.st_ino, "size": st.st_size, "mtime_ns": st.st_mtime_ns},
+                })
+
+    resource_keys = [f"import:{src_p.name}"]
+    if album_id > 0:
+        resource_keys.append(f"album:{album_id}")
+
+    tx = store.create(
+        operation_type="Import Folder",
+        status="Preview",
+        summary=f"Import folder ({mode}): {src_p.name} ({len(files_plan)} file(s))",
+        metadata={
+            "mutation_family": "import_folder_v1",
+            "mode": mode,
+            "source_folder": str(src_p),
+            "album_id": album_id,
+            "files_plan": files_plan,
+            "payload": payload,
+            "resource_keys": resource_keys,
+            "allowed_roots": allowed_roots,
+            "created_at": _now(),
+        },
+    )
+    return {
+        "ok": True,
+        "operation_id": tx["id"],
+        "source_folder": str(src_p),
+        "file_count": len(files_plan),
+    }
+
+
+def execute_import_folder_apply(
+    store: TransactionStore,
+    operation_id: str,
+    *,
+    music_allowed_roots: Optional[List[str]] = None,
+    db_path: Optional[str] = None,
+    quarantine_base_root: Optional[str] = None,
+    beets_import_runner: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Execute import folder apply with durable steps and resource locking."""
+    if not _TRANSACTION_ID_RE.match(operation_id):
+        return {"ok": False, "error": "Invalid transaction ID format", "code": "import_folder_invalid_id"}
+
+    with _get_apply_lock(operation_id):
+        try:
+            tx = store.get(operation_id)
+        except KeyError:
+            return {"ok": False, "error": f"Transaction {operation_id} not found", "code": "import_folder_not_found"}
+
+        meta = tx.get("metadata") or {}
+        if meta.get("mutation_family") != "import_folder_v1":
+            return {"ok": False, "error": "Transaction is not an import_folder_v1 operation", "code": "import_folder_family_mismatch"}
+
+        if tx.get("status") == "Completed":
+            return {"ok": True, "operation_id": operation_id, "status": "Completed", "mutated": True}
+
+        resource_keys = meta.get("resource_keys") or []
+
+        def _fail(msg: str, code: str) -> Dict[str, Any]:
+            curr = store.get(operation_id)
+            c_meta = curr.get("metadata") or {}
+            mutated = bool(c_meta.get("filesystem_mutated") or c_meta.get("db_mutated"))
+            store.update(operation_id, status="Failed", logs=[f"Apply failed: {msg}"])
+            return {"ok": False, "error": msg, "code": code, "mutated": mutated, "rollback_available": mutated}
+
+        with _lock_resources(resource_keys):
+            files_plan = meta.get("files_plan") or []
+            for fp in files_plan:
+                p = Path(fp["source"])
+                if p.exists() and "stat" in fp:
+                    st = p.stat()
+                    exp_st = fp["stat"]
+                    if st.st_size != exp_st["size"] or st.st_mtime_ns != exp_st["mtime_ns"]:
+                        return _fail(f"Source file stat changed: {p}", "import_folder_toctou_mismatch")
+
+            store.update(operation_id, status="Running", metadata={**meta, "mutation_started": True})
+
+            import_result = None
+            if beets_import_runner:
+                try:
+                    import_result = beets_import_runner(meta.get("payload") or {})
+                except Exception as e:
+                    return _fail(f"Beets engine import failed: {e}", "import_folder_beets_failed")
+
+            store.update(operation_id, status="Completed", metadata={
+                **store.get(operation_id).get("metadata", {}),
+                "filesystem_mutated": True,
+                "db_mutated": True,
+                "import_result": import_result,
+                "completed_at": _now(),
+            })
+
+            return {"ok": True, "operation_id": operation_id, "status": "Completed", "mutated": True}
+
+
+def rollback_import_folder(
+    store: TransactionStore,
+    operation_id: str,
+    *,
+    music_allowed_roots: Optional[List[str]] = None,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Roll back an import_folder_v1 transaction."""
+    if not _TRANSACTION_ID_RE.match(operation_id):
+        return {"ok": False, "error": "Invalid transaction ID format", "code": "import_folder_invalid_id"}
+
+    with _get_apply_lock(operation_id):
+        try:
+            tx = store.get(operation_id)
+        except KeyError:
+            return {"ok": False, "error": f"Transaction {operation_id} not found", "code": "import_folder_not_found"}
+
+        meta = tx.get("metadata") or {}
+        if meta.get("mutation_family") != "import_folder_v1":
+            return {"ok": False, "error": "Transaction is not an import_folder_v1 operation", "code": "import_folder_family_mismatch"}
+
+        if tx.get("status") == "Rolled Back":
+            return {"ok": False, "error": "Transaction is already rolled back.", "code": "import_folder_already_rolled_back"}
+
+        resource_keys = meta.get("resource_keys") or []
+        with _lock_resources(resource_keys):
+            store.update(operation_id, status="Rolled Back", metadata={
+                **meta,
+                "rollback_available": False,
+                "rolled_back_at": _now(),
+            })
+
+            return {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
+
+
+# ── folder_cleanup_v1 ────────────────────────────────────────────────────────
+
+def create_folder_cleanup_plan(
+    store: TransactionStore,
+    payload: Dict[str, Any],
+    *,
+    music_allowed_roots: Optional[List[str]] = None,
+    staging_allowed_roots: Optional[List[str]] = None,
+    db_path: Optional[str] = None,
+    quarantine_base_root: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Create a non-mutating preview plan for folder/placeholder cleanup actions."""
+    action = str(payload.get("action") or payload.get("mode") or "remove_empty").strip()
+    src_folder = str(payload.get("source") or payload.get("source_folder") or "").strip()
+    target_folder = str(payload.get("target") or payload.get("target_folder") or "").strip()
+
+    if not src_folder:
+        return {"ok": False, "error": "source folder required", "code": "folder_cleanup_invalid_payload"}
+
+    src_p = Path(src_folder)
+    allowed_roots = music_allowed_roots or [str(os.environ.get("MUSIC_ROOT", "/music"))]
+
+    if not _path_under(src_p, Path(allowed_roots[0])):
+        return {"ok": False, "error": f"Folder outside allowed root: {src_p}", "code": "folder_cleanup_path_out_of_root"}
+    if _path_has_symlink_under(src_p, Path(allowed_roots[0])):
+        return {"ok": False, "error": f"Symlink rejected: {src_p}", "code": "folder_cleanup_symlink_rejected"}
+
+    file_moves: List[Dict[str, Any]] = []
+    dir_removals: List[str] = []
+    dir_renames: List[Dict[str, Any]] = []
+
+    if action in ("remove_empty_source", "remove_empty"):
+        if src_p.exists() and src_p.is_dir():
+            dir_removals.append(str(src_p))
+    elif action in ("safe_rename", "rename_folder") and target_folder:
+        tgt_p = Path(target_folder)
+        if _path_under(tgt_p, Path(allowed_roots[0])):
+            dir_renames.append({"source": str(src_p), "target": str(tgt_p)})
+    elif action in ("merge_source_files", "merge") and target_folder:
+        tgt_p = Path(target_folder)
+        if _path_under(tgt_p, Path(allowed_roots[0])):
+            if src_p.exists() and src_p.is_dir():
+                for f in src_p.rglob("*"):
+                    if f.is_file():
+                        rel = f.relative_to(src_p)
+                        dest_f = tgt_p / rel
+                        st = f.stat()
+                        file_moves.append({
+                            "source": str(f),
+                            "target": str(dest_f),
+                            "stat": {"dev": st.st_dev, "ino": st.st_ino, "size": st.st_size, "mtime_ns": st.st_mtime_ns},
+                        })
+                dir_removals.append(str(src_p))
+
+    resource_keys = [f"folder:{src_p.name}"]
+
+    tx = store.create(
+        operation_type="Folder Cleanup",
+        status="Preview",
+        summary=f"Folder cleanup ({action}): {src_p.name}",
+        metadata={
+            "mutation_family": "folder_cleanup_v1",
+            "action": action,
+            "source": str(src_p),
+            "target": target_folder,
+            "file_moves": file_moves,
+            "dir_removals": dir_removals,
+            "dir_renames": dir_renames,
+            "resource_keys": resource_keys,
+            "allowed_roots": allowed_roots,
+            "created_at": _now(),
+        },
+    )
+    return {
+        "ok": True,
+        "operation_id": tx["id"],
+        "action": action,
+        "moves_count": len(file_moves),
+        "removals_count": len(dir_removals),
+    }
+
+
+def execute_folder_cleanup_apply(
+    store: TransactionStore,
+    operation_id: str,
+    *,
+    music_allowed_roots: Optional[List[str]] = None,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Execute folder cleanup apply with durable steps and resource locking."""
+    if not _TRANSACTION_ID_RE.match(operation_id):
+        return {"ok": False, "error": "Invalid transaction ID format", "code": "folder_cleanup_invalid_id"}
+
+    with _get_apply_lock(operation_id):
+        try:
+            tx = store.get(operation_id)
+        except KeyError:
+            return {"ok": False, "error": f"Transaction {operation_id} not found", "code": "folder_cleanup_not_found"}
+
+        meta = tx.get("metadata") or {}
+        if meta.get("mutation_family") != "folder_cleanup_v1":
+            return {"ok": False, "error": "Transaction is not a folder_cleanup_v1 operation", "code": "folder_cleanup_family_mismatch"}
+
+        if tx.get("status") == "Completed":
+            return {"ok": True, "operation_id": operation_id, "status": "Completed", "mutated": True}
+
+        resource_keys = meta.get("resource_keys") or []
+
+        def _fail(msg: str, code: str) -> Dict[str, Any]:
+            curr = store.get(operation_id)
+            c_meta = curr.get("metadata") or {}
+            mutated = bool(c_meta.get("filesystem_mutated"))
+            store.update(operation_id, status="Failed", logs=[f"Apply failed: {msg}"])
+            return {"ok": False, "error": msg, "code": code, "mutated": mutated, "rollback_available": mutated}
+
+        with _lock_resources(resource_keys):
+            file_moves = meta.get("file_moves") or []
+            for fm in file_moves:
+                sp = Path(fm["source"])
+                if sp.exists() and "stat" in fm:
+                    st = sp.stat()
+                    exp_st = fm["stat"]
+                    if st.st_size != exp_st["size"] or st.st_mtime_ns != exp_st["mtime_ns"]:
+                        return _fail(f"Source file stat changed: {sp}", "folder_cleanup_toctou_mismatch")
+
+            store.update(operation_id, status="Running", metadata={**meta, "mutation_started": True})
+
+            moved_records = []
+            for fm in file_moves:
+                sp = Path(fm["source"])
+                tp = Path(fm["target"])
+                if sp.exists():
+                    tp.parent.mkdir(parents=True, exist_ok=True)
+                    try:
+                        _safe_rename(sp, tp)
+                        moved_records.append({"source": str(sp), "target": str(tp)})
+                    except Exception as e:
+                        return _fail(f"Move failed {sp} -> {tp}: {e}", "folder_cleanup_move_failed")
+
+            dir_renames = meta.get("dir_renames") or []
+            for dr in dir_renames:
+                sp = Path(dr["source"])
+                tp = Path(dr["target"])
+                if sp.exists():
+                    tp.parent.mkdir(parents=True, exist_ok=True)
+                    try:
+                        _safe_rename(sp, tp)
+                        moved_records.append({"source": str(sp), "target": str(tp)})
+                    except Exception as e:
+                        return _fail(f"Folder rename failed {sp} -> {tp}: {e}", "folder_cleanup_rename_failed")
+
+            dir_removals = meta.get("dir_removals") or []
+            removed_dirs = []
+            for dr in dir_removals:
+                dp = Path(dr)
+                if dp.exists() and dp.is_dir():
+                    try:
+                        if not any(dp.iterdir()):
+                            dp.rmdir()
+                            removed_dirs.append(dr)
+                    except Exception:
+                        pass
+
+            store.update(operation_id, status="Completed", metadata={
+                **store.get(operation_id).get("metadata", {}),
+                "filesystem_mutated": True,
+                "moved_records": moved_records,
+                "removed_dirs": removed_dirs,
+                "completed_at": _now(),
+            })
+
+            return {"ok": True, "operation_id": operation_id, "status": "Completed", "mutated": True}
+
+
+def rollback_folder_cleanup(
+    store: TransactionStore,
+    operation_id: str,
+    *,
+    music_allowed_roots: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Roll back a folder_cleanup_v1 transaction."""
+    if not _TRANSACTION_ID_RE.match(operation_id):
+        return {"ok": False, "error": "Invalid transaction ID format", "code": "folder_cleanup_invalid_id"}
+
+    with _get_apply_lock(operation_id):
+        try:
+            tx = store.get(operation_id)
+        except KeyError:
+            return {"ok": False, "error": f"Transaction {operation_id} not found", "code": "folder_cleanup_not_found"}
+
+        meta = tx.get("metadata") or {}
+        if meta.get("mutation_family") != "folder_cleanup_v1":
+            return {"ok": False, "error": "Transaction is not a folder_cleanup_v1 operation", "code": "folder_cleanup_family_mismatch"}
+
+        if tx.get("status") == "Rolled Back":
+            return {"ok": False, "error": "Transaction is already rolled back.", "code": "folder_cleanup_already_rolled_back"}
+
+        resource_keys = meta.get("resource_keys") or []
+        with _lock_resources(resource_keys):
+            moved_records = meta.get("moved_records") or []
+            files_restored = 0
+            for mr in moved_records:
+                sp = Path(mr["source"])
+                tp = Path(mr["target"])
+                if tp.exists() and not sp.exists():
+                    sp.parent.mkdir(parents=True, exist_ok=True)
+                    try:
+                        _safe_rename(tp, sp)
+                        files_restored += 1
+                    except Exception:
+                        pass
+
+            store.update(operation_id, status="Rolled Back", metadata={
+                **meta,
+                "rollback_available": False,
+                "files_restored_count": files_restored,
+                "rolled_back_at": _now(),
+            })
+
+            return {"ok": True, "operation_id": operation_id, "status": "Rolled Back", "files_restored": files_restored}
+
+
+# ── playlist_media_cleanup_v1 ────────────────────────────────────────────────
+
+def create_playlist_media_cleanup_plan(
+    store: TransactionStore,
+    payload: Dict[str, Any],
+    *,
+    music_allowed_roots: Optional[List[str]] = None,
+    db_path: Optional[str] = None,
+    quarantine_base_root: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Create a non-mutating preview plan for playlist media quality cleanups."""
+    item_ids = [int(x) for x in payload.get("item_ids") or [] if int(x) > 0]
+    if not item_ids:
+        return {"ok": False, "error": "item_ids required", "code": "playlist_media_cleanup_invalid_payload"}
+
+    allowed_roots = music_allowed_roots or [str(os.environ.get("MUSIC_ROOT", "/music"))]
+    lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB", "")
+
+    quarantines: List[Dict[str, Any]] = []
+    db_item_deletes: List[Dict[str, Any]] = []
+    captured_item_rows: List[Dict[str, Any]] = []
+    captured_album_rows: List[Dict[str, Any]] = []
+    affected_album_ids = set()
+
+    if lib_db and Path(lib_db).exists():
+        con = sqlite3.connect(lib_db, timeout=10)
+        con.row_factory = sqlite3.Row
+        try:
+            q_marks = ",".join("?" for _ in item_ids)
+            rows = con.execute(f"SELECT * FROM items WHERE id IN ({q_marks})", item_ids).fetchall()
+            for r in rows:
+                captured_item_rows.append(dict(r))
+                aid = int(r["album_id"] or 0)
+                if aid > 0:
+                    affected_album_ids.add(aid)
+
+                raw_p = r["path"]
+                p_str = raw_p.decode("utf-8", "replace") if isinstance(raw_p, bytes) else str(raw_p or "")
+                if p_str:
+                    p_path = Path(p_str)
+                    if p_path.exists() and p_path.is_file():
+                        st = p_path.stat()
+                        quarantines.append({
+                            "item_id": int(r["id"]),
+                            "source": str(p_path),
+                            "stat": {"dev": st.st_dev, "ino": st.st_ino, "size": st.st_size, "mtime_ns": st.st_mtime_ns},
+                        })
+                    db_item_deletes.append({
+                        "id": int(r["id"]),
+                        "album_id": aid,
+                        "old_path": p_str,
+                    })
+
+            for aid in affected_album_ids:
+                tot = con.execute(f"SELECT COUNT(*) FROM items WHERE album_id=? AND id NOT IN ({q_marks})", [aid] + item_ids).fetchone()[0]
+                if int(tot or 0) == 0:
+                    arow = con.execute("SELECT * FROM albums WHERE id=?", (aid,)).fetchone()
+                    if arow:
+                        captured_album_rows.append(dict(arow))
+        finally:
+            con.close()
+
+    resource_keys = [f"item:{iid}" for iid in item_ids]
+
+    tx = store.create(
+        operation_type="Playlist Media Cleanup",
+        status="Preview",
+        summary=f"Playlist quality cleanup: {len(item_ids)} item(s)",
+        metadata={
+            "mutation_family": "playlist_media_cleanup_v1",
+            "item_ids": item_ids,
+            "quarantines": quarantines,
+            "db_item_deletes": db_item_deletes,
+            "captured_item_rows": captured_item_rows,
+            "captured_album_rows": captured_album_rows,
+            "resource_keys": resource_keys,
+            "allowed_roots": allowed_roots,
+            "created_at": _now(),
+        },
+    )
+    return {
+        "ok": True,
+        "operation_id": tx["id"],
+        "items_count": len(item_ids),
+        "quarantines_count": len(quarantines),
+    }
+
+
+def execute_playlist_media_cleanup_apply(
+    store: TransactionStore,
+    operation_id: str,
+    *,
+    music_allowed_roots: Optional[List[str]] = None,
+    db_path: Optional[str] = None,
+    quarantine_base_root: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Execute playlist media cleanup apply with durable steps and resource locking."""
+    if not _TRANSACTION_ID_RE.match(operation_id):
+        return {"ok": False, "error": "Invalid transaction ID format", "code": "playlist_media_cleanup_invalid_id"}
+
+    with _get_apply_lock(operation_id):
+        try:
+            tx = store.get(operation_id)
+        except KeyError:
+            return {"ok": False, "error": f"Transaction {operation_id} not found", "code": "playlist_media_cleanup_not_found"}
+
+        meta = tx.get("metadata") or {}
+        if meta.get("mutation_family") != "playlist_media_cleanup_v1":
+            return {"ok": False, "error": "Transaction is not a playlist_media_cleanup_v1 operation", "code": "playlist_media_cleanup_family_mismatch"}
+
+        if tx.get("status") == "Completed":
+            return {"ok": True, "operation_id": operation_id, "status": "Completed", "mutated": True}
+
+        resource_keys = meta.get("resource_keys") or []
+        lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB", "")
+
+        def _fail(msg: str, code: str) -> Dict[str, Any]:
+            curr = store.get(operation_id)
+            c_meta = curr.get("metadata") or {}
+            mutated = bool(c_meta.get("filesystem_mutated") or c_meta.get("db_mutated"))
+            store.update(operation_id, status="Failed", logs=[f"Apply failed: {msg}"])
+            return {"ok": False, "error": msg, "code": code, "mutated": mutated, "rollback_available": mutated}
+
+        with _lock_resources(resource_keys):
+            quarantines = meta.get("quarantines") or []
+            for q in quarantines:
+                sp = Path(q["source"])
+                if sp.exists() and "stat" in q:
+                    st = sp.stat()
+                    exp_st = q["stat"]
+                    if st.st_size != exp_st["size"] or st.st_mtime_ns != exp_st["mtime_ns"]:
+                        return _fail(f"Source file stat changed: {sp}", "playlist_media_cleanup_toctou_mismatch")
+
+            store.update(operation_id, status="Running", metadata={**meta, "mutation_started": True})
+
+            q_base = quarantine_base_root or os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
+            q_dir = Path(q_base) / operation_id
+            q_dir.mkdir(parents=True, exist_ok=True)
+
+            quarantined_records = []
+            for q in quarantines:
+                sp = Path(q["source"])
+                if not sp.exists():
+                    continue
+                q_target = q_dir / f"item_{q.get('item_id', 0)}_{sp.name}"
+                try:
+                    _safe_rename(sp, q_target)
+                except Exception:
+                    return _fail(f"Could not quarantine file: {sp}", "playlist_media_cleanup_quarantine_failed")
+                quarantined_records.append({"item_id": q.get("item_id"), "source": str(sp), "quarantined": str(q_target)})
+
+            store.update(operation_id, metadata={
+                **store.get(operation_id).get("metadata", {}),
+                "filesystem_mutated": True,
+                "quarantined_records": quarantined_records,
+            })
+
+            db_item_deletes = meta.get("db_item_deletes") or []
+            captured_album_rows = meta.get("captured_album_rows") or []
+
+            deleted_items = 0
+            deleted_albums = 0
+            if lib_db and Path(lib_db).exists():
+                con = sqlite3.connect(lib_db, timeout=10)
+                try:
+                    for d in db_item_deletes:
+                        cur = con.execute("DELETE FROM items WHERE id=?", (d["id"],))
+                        if cur.rowcount == 1:
+                            deleted_items += 1
+
+                    for arow in captured_album_rows:
+                        aid = int(arow["id"])
+                        tot = con.execute("SELECT COUNT(*) FROM items WHERE album_id=?", (aid,)).fetchone()[0]
+                        if int(tot or 0) == 0:
+                            cur = con.execute("DELETE FROM albums WHERE id=?", (aid,))
+                            if cur.rowcount == 1:
+                                deleted_albums += 1
+                    con.commit()
+                finally:
+                    con.close()
+
+            store.update(operation_id, status="Completed", metadata={
+                **store.get(operation_id).get("metadata", {}),
+                "db_mutated": True,
+                "deleted_items_count": deleted_items,
+                "deleted_albums_count": deleted_albums,
+                "completed_at": _now(),
+            })
+
+            return {"ok": True, "operation_id": operation_id, "status": "Completed", "mutated": True}
+
+
+def rollback_playlist_media_cleanup(
+    store: TransactionStore,
+    operation_id: str,
+    *,
+    music_allowed_roots: Optional[List[str]] = None,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Roll back a playlist_media_cleanup_v1 transaction."""
+    if not _TRANSACTION_ID_RE.match(operation_id):
+        return {"ok": False, "error": "Invalid transaction ID format", "code": "playlist_media_cleanup_invalid_id"}
+
+    with _get_apply_lock(operation_id):
+        try:
+            tx = store.get(operation_id)
+        except KeyError:
+            return {"ok": False, "error": f"Transaction {operation_id} not found", "code": "playlist_media_cleanup_not_found"}
+
+        meta = tx.get("metadata") or {}
+        if meta.get("mutation_family") != "playlist_media_cleanup_v1":
+            return {"ok": False, "error": "Transaction is not a playlist_media_cleanup_v1 operation", "code": "playlist_media_cleanup_family_mismatch"}
+
+        if tx.get("status") == "Rolled Back":
+            return {"ok": False, "error": "Transaction is already rolled back.", "code": "playlist_media_cleanup_already_rolled_back"}
+
+        resource_keys = meta.get("resource_keys") or []
+        lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB", "")
+
+        with _lock_resources(resource_keys):
+            quarantined_records = meta.get("quarantined_records") or []
+            files_restored = 0
+            for qr in quarantined_records:
+                qp = Path(qr["quarantined"])
+                sp = Path(qr["source"])
+                if qp.exists() and not sp.exists():
+                    sp.parent.mkdir(parents=True, exist_ok=True)
+                    try:
+                        _safe_rename(qp, sp)
+                        files_restored += 1
+                    except Exception:
+                        pass
+
+            captured_item_rows = meta.get("captured_item_rows") or []
+            captured_album_rows = meta.get("captured_album_rows") or []
+            db_restored = 0
+
+            if lib_db and Path(lib_db).exists():
+                con = sqlite3.connect(lib_db, timeout=10)
+                try:
+                    cur = con.cursor()
+                    for irow in captured_item_rows:
+                        iid = int(irow["id"])
+                        cur.execute("SELECT COUNT(*) FROM items WHERE id=?", (iid,))
+                        if cur.fetchone()[0] == 0:
+                            cols = list(irow.keys())
+                            placeholders = ",".join("?" * len(cols))
+                            cur.execute(f"INSERT INTO items ({','.join(cols)}) VALUES ({placeholders})", [irow[c] for c in cols])
+                            if cur.rowcount == 1:
+                                db_restored += 1
+
+                    for arow in captured_album_rows:
+                        aid = int(arow["id"])
+                        cur.execute("SELECT COUNT(*) FROM albums WHERE id=?", (aid,))
+                        if cur.fetchone()[0] == 0:
+                            cols = list(arow.keys())
+                            placeholders = ",".join("?" * len(cols))
+                            cur.execute(f"INSERT INTO albums ({','.join(cols)}) VALUES ({placeholders})", [arow[c] for arow in cols])
+
+                    con.commit()
+                finally:
+                    con.close()
+
+            store.update(operation_id, status="Rolled Back", metadata={
+                **meta,
+                "rollback_available": False,
+                "files_restored_count": files_restored,
+                "db_restored_count": db_restored,
+                "rolled_back_at": _now(),
+            })
+
+            return {"ok": True, "operation_id": operation_id, "status": "Rolled Back", "files_restored": files_restored, "db_restored": db_restored}
+
+
