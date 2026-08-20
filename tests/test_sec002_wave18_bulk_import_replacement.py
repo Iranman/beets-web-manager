@@ -37,6 +37,8 @@ from backend.transaction_engine import (
     create_bulk_import_replacement_plan,
     execute_bulk_import_replacement_apply,
     rollback_bulk_import_replacement,
+    create_existing_album_reconcile_plan,
+    execute_existing_album_reconcile_apply,
 )
 
 ITEMS_SCHEMA = """
@@ -1029,12 +1031,35 @@ class RealProductionPathTests(unittest.TestCase):
                 quarantine_base_root=str(self.quarantine_root),
             )
 
+        def mock_rec_plan(payload, **kw):
+            return create_existing_album_reconcile_plan(
+                self.tx_store, payload,
+                music_allowed_roots=[str(self.music_root)],
+                db_path=str(self.db_path),
+                quarantine_base_root=str(self.quarantine_root),
+            )
+
+        def mock_rec_apply(op_id, **kw):
+            return execute_existing_album_reconcile_apply(
+                self.tx_store, op_id,
+                music_allowed_roots=[str(self.music_root)],
+                db_path=str(self.db_path),
+                quarantine_base_root=str(self.quarantine_root),
+            )
+
         self._plan_patch = mock.patch.object(flask_app.beets_client, "plan_bulk_import_replacement", side_effect=mock_plan)
         self._plan_patch.start()
         self.addCleanup(self._plan_patch.stop)
         self._apply_patch = mock.patch.object(flask_app.beets_client, "apply_bulk_import_replacement", side_effect=mock_apply)
         self._apply_patch.start()
         self.addCleanup(self._apply_patch.stop)
+
+        self._rec_plan_patch = mock.patch.object(flask_app.beets_client, "plan_existing_album_reconcile", side_effect=mock_rec_plan)
+        self._rec_plan_patch.start()
+        self.addCleanup(self._rec_plan_patch.stop)
+        self._rec_apply_patch = mock.patch.object(flask_app.beets_client, "apply_existing_album_reconcile", side_effect=mock_rec_apply)
+        self._rec_apply_patch.start()
+        self.addCleanup(self._rec_apply_patch.stop)
 
     def _insert_album(self, album_id, name="Album", rgid=""):
         con = sqlite3.connect(self.db_path)

@@ -4567,3 +4567,1214 @@ def rollback_album_mb_track_repair(
                 "tags_restored_count": tags_restored,
                 "total_rows": total_rows,
             }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# SEC-002 / ARCH-003 Wave 20: existing_album_reconcile_v1
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
+    """Capture a full sqlite3.Row (every column, whatever the live Beets
+    schema actually has) as a plain, JSON-safe dict. SEC-002 Wave 20 final
+    review: rollback that only restores a hand-picked field subset can
+    silently lose real Beets metadata (genre, year, comments, flexible
+    attributes, ...) -- capturing every column at Plan time and restoring
+    the same set is schema-agnostic and does not need updating every time
+    a new Beets column/plugin field is added.
+    """
+    out: Dict[str, Any] = {}
+    for key in row.keys():
+        value = row[key]
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", "replace")
+        out[key] = value
+    return out
+
+
+def _resolve_path_role(path_str: str, roots: List[Path]) -> Optional[Path]:
+    """Return the resolved root a path is contained under, or None."""
+    try:
+        item_path = Path(path_str)
+    except Exception:
+        return None
+    for root in roots:
+        try:
+            item_path.relative_to(root)
+            return root
+        except ValueError:
+            continue
+    return None
+
+
+def create_existing_album_reconcile_plan(
+    store: TransactionStore,
+    payload: Dict[str, Any],
+    *,
+    music_allowed_roots: Optional[List[str]] = None,
+    staging_allowed_roots: Optional[List[str]] = None,
+    quarantine_base_root: Optional[str] = None,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Create a plan for existing-album duplicate & move reconciliation (SEC-002 Wave 20).
+
+    Role-specific roots (SEC-002 Wave 20 final review, "critical path
+    authorization defect"): a caller-supplied `source_folder` must never be
+    able to expand what filesystem locations this operation is authorized
+    to touch. `source_folder` is only ever used to CLASSIFY an already
+    root-validated duplicate path as "staging" (for logging/UI purposes);
+    it is validated against the server's own configured staging roots
+    before being trusted for that, and is never added to the containment
+    check itself. Survivors must always be under the music library root;
+    move/duplicate items (already-imported Beets rows) may be under the
+    library root or a validated staging root.
+    """
+    imported_album_id = int(payload.get("imported_album_id") or 0)
+    existing_album_id = int(payload.get("existing_album_id") or 0)
+    if imported_album_id <= 0 or existing_album_id <= 0 or imported_album_id == existing_album_id:
+        return {"ok": False, "error": "Invalid album IDs for existing album reconciliation", "code": "reconcile_invalid_album"}
+
+    raw_dup_ids = [int(v) for v in (payload.get("dup_item_ids") or []) if int(v or 0) > 0]
+    raw_move_ids = [int(v) for v in (payload.get("move_item_ids") or []) if int(v or 0) > 0]
+
+    # SEC-002 Wave 20 final review: canonicalize payload item-ID lists --
+    # [1, 1, 1] is not three affected rows, and the same item cannot be
+    # simultaneously a "move" and a "duplicate". Reject rather than
+    # silently dedup, so a malformed caller payload fails loudly instead
+    # of quietly processing a different set of rows than it asked for.
+    if len(set(raw_dup_ids)) != len(raw_dup_ids):
+        return {"ok": False, "error": "Duplicate item IDs repeated within dup_item_ids", "code": "reconcile_payload_overlap"}
+    if len(set(raw_move_ids)) != len(raw_move_ids):
+        return {"ok": False, "error": "Duplicate item IDs repeated within move_item_ids", "code": "reconcile_payload_overlap"}
+    if set(raw_dup_ids) & set(raw_move_ids):
+        return {"ok": False, "error": "Item IDs cannot appear in both dup_item_ids and move_item_ids", "code": "reconcile_payload_overlap"}
+
+    dup_item_ids = raw_dup_ids
+    dup_details: List[Dict[str, Any]] = payload.get("dup_details") or []
+    dup_details_map = {int(d.get("dup_item_id") or 0): d for d in dup_details if int(d.get("dup_item_id") or 0) > 0}
+
+    move_item_ids = raw_move_ids
+
+    if not dup_item_ids and not move_item_ids:
+        return {"ok": False, "error": "No duplicate or move items specified", "code": "reconcile_empty_payload"}
+
+    lib_db = db_path or os.environ.get("BEETS_DB_PATH", os.path.expanduser("~/.config/beets/musiclibrary.blb"))
+    if not os.path.exists(lib_db):
+        LOG.error("Reconcile plan: Beets database not found at %s", lib_db)
+        return {"ok": False, "error": "Beets database unavailable.", "code": "db_not_found"}
+
+    def _resolved(paths: Iterable[str]) -> List[Path]:
+        out: List[Path] = []
+        for r in paths:
+            try:
+                p = Path(r).resolve()
+                if p.exists():
+                    out.append(p)
+            except Exception:
+                pass
+        return out
+
+    library_roots = _resolved(music_allowed_roots or [os.environ.get("MUSIC_ROOT", "/music")])
+    if not library_roots:
+        library_roots = [Path(r) for r in (music_allowed_roots or [os.environ.get("MUSIC_ROOT", "/music")])]
+
+    staging_roots = _resolved(staging_allowed_roots or [])
+
+    # Only trust source_folder for classification once it is itself
+    # contained under a SERVER-configured staging root -- an arbitrary
+    # client-supplied directory is never authorized on its own. This is a
+    # pure string/lexical check (os.path.normpath, no filesystem access)
+    # against already-server-resolved roots -- the raw client-supplied
+    # string is never itself passed to a filesystem-touching call
+    # (Path.resolve()/exists()/etc.), so there is no path-injection sink
+    # to reach even for an unvalidated value (CodeQL py/path-injection).
+    source_folder_str = str(payload.get("source_folder") or "").strip()
+    source_root_validated: Optional[Path] = None
+    if source_folder_str and staging_roots:
+        normalized = os.path.normpath(source_folder_str)
+        for sroot in staging_roots:
+            sroot_str = str(sroot)
+            if normalized == sroot_str or normalized.startswith(sroot_str + os.sep):
+                source_root_validated = sroot / os.path.relpath(normalized, sroot_str) if normalized != sroot_str else sroot
+                break
+
+    # imported_item_roots: what move/duplicate items (already Beets rows
+    # under the imported album) may legitimately live under.
+    imported_item_roots = library_roots + staging_roots
+    if not imported_item_roots:
+        imported_item_roots = library_roots
+
+    con = sqlite3.connect(lib_db, timeout=10)
+    con.row_factory = sqlite3.Row
+    cur = con.cursor()
+
+    cur.execute("SELECT * FROM albums WHERE id=?", (existing_album_id,))
+    existing_alb_row = cur.fetchone()
+    if not existing_alb_row:
+        con.close()
+        return {"ok": False, "error": f"Target existing album {existing_album_id} not found", "code": "reconcile_album_missing"}
+    existing_alb = _row_to_dict(existing_alb_row)
+
+    cur.execute("SELECT * FROM albums WHERE id=?", (imported_album_id,))
+    imported_alb_row = cur.fetchone()
+    if not imported_alb_row:
+        con.close()
+        return {"ok": False, "error": f"Source imported album {imported_album_id} not found", "code": "reconcile_album_missing"}
+    imported_alb = _row_to_dict(imported_alb_row)
+
+    existing_rg = str(existing_alb.get("mb_releasegroupid") or "").strip().lower()
+    imported_rg = str(imported_alb.get("mb_releasegroupid") or "").strip().lower()
+    if existing_rg and imported_rg and existing_rg != imported_rg:
+        con.close()
+        return {"ok": False, "error": f"Cannot reconcile albums with different Release Group IDs ({imported_rg} vs {existing_rg})", "code": "reconcile_identity_mismatch"}
+
+    changes: List[Dict[str, Any]] = []
+    move_specs: List[Dict[str, Any]] = []
+    dup_specs: List[Dict[str, Any]] = []
+    dup_requires_review: List[Dict[str, Any]] = []
+
+    # Validate move_item_ids
+    for iid in move_item_ids:
+        cur.execute("SELECT * FROM items WHERE id=?", (iid,))
+        item_row = cur.fetchone()
+        if not item_row:
+            con.close()
+            return {"ok": False, "error": f"Move item {iid} not found", "code": "reconcile_item_missing"}
+        row = _row_to_dict(item_row)
+        if int(row.get("album_id") or 0) != imported_album_id:
+            con.close()
+            return {"ok": False, "error": f"Move item {iid} does not belong to imported album {imported_album_id}", "code": "reconcile_album_membership_changed"}
+
+        path_str = str(row.get("path") or "")
+        item_path = Path(path_str)
+
+        base_root = _resolve_path_role(path_str, imported_item_roots)
+        if base_root is None:
+            con.close()
+            return {"ok": False, "error": f"Move item {iid} path outside allowed roots", "code": "reconcile_path_out_of_root"}
+
+        if _path_has_symlink_under(item_path, base_root):
+            con.close()
+            return {"ok": False, "error": f"Move item {iid} path contains symlink", "code": "reconcile_symlink_rejected"}
+
+        if not item_path.exists():
+            con.close()
+            return {"ok": False, "error": f"Move item {iid} file missing on disk", "code": "reconcile_item_missing"}
+
+        st = item_path.stat()
+        stat_snapshot = {
+            "dev": st.st_dev,
+            "ino": st.st_ino,
+            "size": st.st_size,
+            "mtime_ns": st.st_mtime_ns,
+        }
+
+        spec = {
+            "item_id": iid,
+            "before": {
+                "album_id": imported_album_id,
+                "album": str(row.get("album") or ""),
+                "albumartist": str(row.get("albumartist") or ""),
+                "path": path_str,
+                "stat": stat_snapshot,
+                # Identity fields captured for TOCTOU re-verification at
+                # Apply only -- Apply does not restore these, it only
+                # confirms they have not changed since Plan (SEC-002
+                # Wave 20 final review, "item identity TOCTOU is missing").
+                "mb_trackid": str(row.get("mb_trackid") or "").strip().lower(),
+                "mb_albumid": str(row.get("mb_albumid") or "").strip().lower(),
+                "mb_releasegroupid": str(row.get("mb_releasegroupid") or "").strip().lower(),
+                "disc": int(row.get("disc") or 1),
+                "track": int(row.get("track") or 0),
+            },
+            "after": {
+                "album_id": existing_album_id,
+                "album": str(existing_alb.get("album") or ""),
+                "albumartist": str(existing_alb.get("albumartist") or ""),
+            },
+        }
+        move_specs.append(spec)
+        changes.append({
+            "id": f"item:{iid}",
+            "operation": "Reassign Album",
+            "item_id": iid,
+            "old_album_id": imported_album_id,
+            "new_album_id": existing_album_id,
+            "title": str(row.get("title") or ""),
+            "path": path_str,
+        })
+
+    # Validate dup_item_ids
+    for iid in dup_item_ids:
+        cur.execute("SELECT * FROM items WHERE id=?", (iid,))
+        item_row = cur.fetchone()
+        if not item_row:
+            con.close()
+            return {"ok": False, "error": f"Duplicate item {iid} not found", "code": "reconcile_item_missing"}
+        row = _row_to_dict(item_row)
+        if int(row.get("album_id") or 0) != imported_album_id:
+            con.close()
+            return {"ok": False, "error": f"Duplicate item {iid} does not belong to imported album {imported_album_id}", "code": "reconcile_album_membership_changed"}
+
+        path_str = str(row.get("path") or "")
+        item_path = Path(path_str)
+
+        base_root = _resolve_path_role(path_str, imported_item_roots)
+        if base_root is None:
+            con.close()
+            return {"ok": False, "error": f"Duplicate item {iid} path outside allowed roots", "code": "reconcile_path_out_of_root"}
+
+        if _path_has_symlink_under(item_path, base_root):
+            con.close()
+            return {"ok": False, "error": f"Duplicate item {iid} path contains symlink", "code": "reconcile_symlink_rejected"}
+
+        if not item_path.exists():
+            con.close()
+            return {"ok": False, "error": f"Duplicate item {iid} file missing on disk", "code": "reconcile_item_missing"}
+
+        st = item_path.stat()
+        stat_snapshot = {
+            "dev": st.st_dev,
+            "ino": st.st_ino,
+            "size": st.st_size,
+            "mtime_ns": st.st_mtime_ns,
+        }
+        dup_mbid = str(row.get("mb_trackid") or "").strip().lower()
+
+        # Candidate survivors: caller-supplied IDs are a HINT only, never
+        # authority (SEC-002 Wave 20 final review, "do not trust
+        # caller-supplied survivor_item_ids"). Same disc/track in the
+        # target album is also only a hint -- position alone never
+        # authorizes destructive retirement (finding #6).
+        detail = dup_details_map.get(iid) or {}
+        candidate_survivor_ids = [int(v) for v in (detail.get("survivor_item_ids") or []) if int(v or 0) > 0]
+        disc = int(row.get("disc") or 1)
+        track = int(row.get("track") or 0)
+        if track > 0:
+            cur.execute("SELECT id FROM items WHERE album_id=? AND disc=? AND track=?", (existing_album_id, disc, track))
+            candidate_survivor_ids.extend(int(r["id"]) for r in cur.fetchall())
+        candidate_survivor_ids = sorted(set(candidate_survivor_ids))
+
+        if not candidate_survivor_ids:
+            dup_requires_review.append({"item_id": iid, "path": path_str, "reason": "no_candidate_survivor"})
+            continue
+
+        # Independently establish, per candidate, whether it is actually a
+        # valid survivor: must exist, belong to the target album, be
+        # physically present AND readable (not merely Path.exists()), and
+        # -- the core identity requirement this review closes -- must
+        # carry the SAME Recording ID as the duplicate when both are known.
+        # A different known Recording ID fails closed for that candidate.
+        # Blank on either side is not enough evidence for automatic
+        # retirement either; such duplicates are excluded from dup_specs
+        # and surfaced for manual review instead of being silently
+        # skipped or silently approved.
+        identity_verified_survivors: List[Dict[str, Any]] = []
+        conflicting_candidates: List[int] = []
+        for s_id in candidate_survivor_ids:
+            cur.execute("SELECT * FROM items WHERE id=?", (s_id,))
+            s_item_row = cur.fetchone()
+            if not s_item_row:
+                continue
+            s_row = _row_to_dict(s_item_row)
+            if int(s_row.get("album_id") or 0) != existing_album_id:
+                continue
+            s_path_str = str(s_row.get("path") or "")
+            s_path = Path(s_path_str)
+            same_path = (s_path_str == path_str)
+
+            if not same_path:
+                # Same-path is a structural fact -- the duplicate row and
+                # this candidate are definitionally the same file, so no
+                # amount of Recording-ID/readability evidence could make
+                # this MORE certain. Every other case still needs the full
+                # identity + physical-usability gate below.
+                if _resolve_path_role(s_path_str, library_roots) is None:
+                    continue
+                if _path_has_symlink_under(s_path, library_roots[0] if library_roots else s_path):
+                    continue
+                if not s_path.exists():
+                    continue
+                s_read = _read_file_audio_tags(s_path)
+                if not s_read.get("ok"):
+                    # Survivor media is not verifiably usable (unreadable/
+                    # corrupt/zero-byte) -- SEC-002 Wave 20 final review,
+                    # "survivor must be readable / valid media". Do not
+                    # authorize deleting the duplicate on the strength of a
+                    # survivor we cannot actually confirm is good audio.
+                    continue
+
+            s_st = s_path.stat()
+            s_mbid = str(s_row.get("mb_trackid") or "").strip().lower()
+
+            if not same_path:
+                if dup_mbid and s_mbid:
+                    if dup_mbid != s_mbid:
+                        conflicting_candidates.append(s_id)
+                        continue
+                else:
+                    # Blank on one or both sides -- not enough evidence on
+                    # its own to authorize automatic retirement, and not a
+                    # hard conflict either. Skip this candidate; if no
+                    # candidate is ever added, the duplicate is surfaced
+                    # for manual review below (survivor_unverified) rather
+                    # than guessed either way.
+                    continue
+
+            is_hardlink = (not same_path) and (s_st.st_dev == st.st_dev and s_st.st_ino == st.st_ino)
+
+            identity_verified_survivors.append({
+                "item_id": s_id,
+                "path": s_path_str,
+                "title": str(s_row.get("title") or ""),
+                "mb_trackid": s_mbid,
+                "mb_albumid": str(s_row.get("mb_albumid") or "").strip().lower(),
+                "mb_releasegroupid": str(s_row.get("mb_releasegroupid") or "").strip().lower(),
+                "stat": {"dev": s_st.st_dev, "ino": s_st.st_ino, "size": s_st.st_size, "mtime_ns": s_st.st_mtime_ns},
+                "same_path_as_duplicate": same_path,
+                "is_hardlink": is_hardlink,
+                "identity_exact_match": bool(dup_mbid and s_mbid and dup_mbid == s_mbid),
+            })
+
+        if conflicting_candidates and not identity_verified_survivors:
+            # Every candidate had a DIFFERENT known Recording ID -- fail
+            # closed for this duplicate rather than guessing.
+            dup_requires_review.append({
+                "item_id": iid, "path": path_str, "reason": "identity_conflict",
+                "conflicting_survivor_ids": conflicting_candidates,
+            })
+            continue
+
+        if not identity_verified_survivors:
+            dup_requires_review.append({"item_id": iid, "path": path_str, "reason": "survivor_unverified"})
+            continue
+
+        # Classify physical handling: same-path rows must never be
+        # physically touched (the "duplicate" and the "survivor" are the
+        # same file on disk -- unlinking it would destroy the survivor
+        # too). Hardlinks and distinct files are both safely recoverable
+        # via quarantine (see Apply).
+        any_same_path = any(s["same_path_as_duplicate"] for s in identity_verified_survivors)
+        any_hardlink = any(s["is_hardlink"] for s in identity_verified_survivors)
+        physical_class = "db_only" if any_same_path else ("hardlink" if any_hardlink else "distinct_file")
+
+        spec = {
+            "item_id": iid,
+            "before": {
+                "album_id": imported_album_id,
+                "title": str(row.get("title") or ""),
+                "artist": str(row.get("artist") or ""),
+                "album": str(row.get("album") or ""),
+                "albumartist": str(row.get("albumartist") or ""),
+                "disc": disc,
+                "track": track,
+                "path": path_str,
+                "mb_trackid": dup_mbid,
+                "mb_albumid": str(row.get("mb_albumid") or "").strip().lower(),
+                "mb_releasegroupid": str(row.get("mb_releasegroupid") or "").strip().lower(),
+                "stat": stat_snapshot,
+                "full_row": row,
+            },
+            "survivors": identity_verified_survivors,
+            "physical_class": physical_class,
+            "identity_evidence": {
+                "duplicate_mb_trackid": dup_mbid,
+                "survivor_mb_trackids": [s["mb_trackid"] for s in identity_verified_survivors],
+                "exact_match": any(s["identity_exact_match"] for s in identity_verified_survivors),
+                "source": "recording_id_exact" if dup_mbid else "position_only_unverified_identity",
+            },
+        }
+        dup_specs.append(spec)
+        changes.append({
+            "id": f"item:{iid}",
+            "operation": "Delete Duplicate Item",
+            "item_id": iid,
+            "path": path_str,
+            "survivors": [s["item_id"] for s in identity_verified_survivors],
+            "physical_class": physical_class,
+            "identity_evidence": spec["identity_evidence"],
+        })
+
+    # Check if imported album will become empty -- exact set logic, not a
+    # count heuristic (SEC-002 Wave 20 final review, finding #26: a count
+    # comparison can be fooled by overlap/duplication in the affected ID
+    # sets; canonicalization above already rejects that, but comparing the
+    # actual affected ID set against actual current membership is the
+    # only version of this check that cannot be wrong).
+    cur.execute("SELECT id FROM items WHERE album_id=?", (imported_album_id,))
+    current_imported_ids = {int(r["id"]) for r in cur.fetchall()}
+    affected_ids = {m["item_id"] for m in move_specs} | {d["item_id"] for d in dup_specs}
+    will_retire_album = bool(current_imported_ids) and affected_ids >= current_imported_ids
+
+    album_before_snapshot = None
+    if will_retire_album:
+        album_before_snapshot = imported_alb
+        changes.append({
+            "id": f"album:{imported_album_id}",
+            "operation": "Retire Empty Album",
+            "album_id": imported_album_id,
+        })
+
+    con.close()
+
+    if not move_specs and not dup_specs:
+        return {
+            "ok": True,
+            "reconciled_moves": 0,
+            "reconciled_duplicates": 0,
+            "dup_requires_review": dup_requires_review,
+            "message": "No move or duplicate items could be safely reconciled.",
+        }
+
+    tx_payload = {
+        "imported_album_id": imported_album_id,
+        "existing_album_id": existing_album_id,
+        "source_folder": str(source_root_validated) if source_root_validated else "",
+        "move_specs": move_specs,
+        "dup_specs": dup_specs,
+        "dup_requires_review": dup_requires_review,
+        "retire_imported_album": will_retire_album,
+        "imported_album_before": album_before_snapshot,
+        "existing_album_rg_before": existing_rg,
+        "imported_album_rg_before": imported_rg,
+    }
+
+    summary = (
+        f"Reconcile imported album {imported_album_id} into existing album {existing_album_id}: "
+        f"{len(move_specs)} move(s), {len(dup_specs)} duplicate(s), {len(dup_requires_review)} requiring review"
+    )
+    tx = store.create(
+        operation_type="Merge Album",
+        status="Preview",
+        summary=summary,
+        changes=changes,
+        rollback_available=True,
+        rollback_reason="Can restore reassigned album membership, duplicate item rows, and quarantined duplicate files.",
+        metadata={
+            "mutation_family": "existing_album_reconcile_v1",
+            "payload": tx_payload,
+            "cancellable": False,
+            **tx_payload,
+        },
+    )
+    tx_res = dict(tx)
+    tx_res["payload"] = tx_payload
+
+    return {
+        "ok": True,
+        "operation_id": tx["id"],
+        "transaction": tx_res,
+        "reconciled_moves": len(move_specs),
+        "reconciled_duplicates": len(dup_specs),
+        "dup_requires_review": dup_requires_review,
+    }
+
+
+def execute_existing_album_reconcile_apply(
+    store: TransactionStore,
+    operation_id: str,
+    *,
+    db_path: Optional[str] = None,
+    music_allowed_roots: Optional[List[str]] = None,
+    staging_allowed_roots: Optional[List[str]] = None,
+    quarantine_base_root: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Execute Apply phase for existing_album_reconcile_v1 (SEC-002 Wave 20)."""
+    # Explicit, local format validation before operation_id is ever used to
+    # build a filesystem path (the quarantine directory) -- TransactionStore
+    # already enforces this same pattern internally, but that guarantee
+    # lives in a different function than the path construction below, which
+    # is not a dataflow relationship a static analyzer can see. Validating
+    # here closes that gap directly (CodeQL py/path-injection) rather than
+    # relying on an indirect cross-function invariant.
+    if not _TRANSACTION_ID_RE.fullmatch(str(operation_id or "")):
+        return {"ok": False, "error": "Malformed transaction id.", "code": "reconcile_not_found"}
+    op_lock = _get_apply_lock(operation_id)
+    with op_lock:
+        try:
+            tx = store.get(operation_id)
+        except KeyError:
+            return {"ok": False, "error": "Transaction not found.", "code": "reconcile_not_found"}
+
+        meta = tx.get("metadata") or {}
+        mutation_family = meta.get("mutation_family")
+        if mutation_family != "existing_album_reconcile_v1":
+            return {"ok": False, "error": "Transaction family mismatch.", "code": "reconcile_wrong_family"}
+
+        payload = meta.get("payload") or meta or tx.get("payload") or {}
+        move_specs: List[Dict[str, Any]] = payload.get("move_specs") or []
+        dup_specs: List[Dict[str, Any]] = payload.get("dup_specs") or []
+        imported_album_id = int(payload.get("imported_album_id") or 0)
+        existing_album_id = int(payload.get("existing_album_id") or 0)
+
+        if tx.get("status") == "Completed":
+            return {
+                "ok": True,
+                "status": "Completed",
+                "already_completed": True,
+                "operation_id": operation_id,
+                "reconciled_moves": len(move_specs),
+                "reconciled_duplicates": len(dup_specs),
+            }
+
+        all_item_ids = sorted(list({
+            *[int(m["item_id"]) for m in move_specs],
+            *[int(d["item_id"]) for d in dup_specs],
+            # SEC-002 Wave 20 final review: survivor state authorizes
+            # destructive deletion of the duplicate, so survivors are a
+            # resource too -- lock them so another transaction cannot
+            # mutate/retire a survivor while this Apply is relying on it.
+            *[int(s["item_id"]) for d in dup_specs for s in (d.get("survivors") or [])],
+        }))
+
+        # Resource locking: album locks + sorted item locks (incl. survivors)
+        alb_lock_1 = _get_resource_lock(f"album:{min(imported_album_id, existing_album_id)}")
+        alb_lock_2 = _get_resource_lock(f"album:{max(imported_album_id, existing_album_id)}")
+        item_locks = [_get_resource_lock(f"item:{iid}") for iid in all_item_ids]
+
+        with ExitStack() as stack:
+            stack.enter_context(alb_lock_1)
+            stack.enter_context(alb_lock_2)
+            for ilock in item_locks:
+                stack.enter_context(ilock)
+
+            # Re-read transaction state under locks
+            tx = store.get(operation_id)
+            if tx.get("status") == "Completed":
+                return {
+                    "ok": True,
+                    "status": "Completed",
+                    "already_completed": True,
+                    "operation_id": operation_id,
+                    "reconciled_moves": len(move_specs),
+                    "reconciled_duplicates": len(dup_specs),
+                }
+
+            lib_db = db_path or os.environ.get("BEETS_DB_PATH", os.path.expanduser("~/.config/beets/musiclibrary.blb"))
+            if not os.path.exists(lib_db):
+                LOG.error("Reconcile apply: Beets database not found at %s", lib_db)
+                return {"ok": False, "error": "Beets database unavailable.", "code": "db_not_found"}
+
+            library_roots: List[Path] = []
+            for r in (music_allowed_roots or [os.environ.get("MUSIC_ROOT", "/music")]):
+                try:
+                    p = Path(r).resolve()
+                    if p.exists():
+                        library_roots.append(p)
+                except Exception:
+                    pass
+            staging_roots: List[Path] = []
+            for r in (staging_allowed_roots or []):
+                try:
+                    p = Path(r).resolve()
+                    if p.exists():
+                        staging_roots.append(p)
+                except Exception:
+                    pass
+            imported_item_roots = library_roots + staging_roots or library_roots
+
+            curr_meta_snapshot = store.get(operation_id).get("metadata", {})
+            already_quarantined_ids = {int(qf["item_id"]) for qf in (curr_meta_snapshot.get("quarantined_files") or [])}
+            db_stage_done = any(
+                s.get("step") == "db_reassigned" and s.get("status") == "Completed"
+                for s in (curr_meta_snapshot.get("apply_steps") or [])
+            )
+
+            def _fail(err: str, code: str = "reconcile_toctou_mismatch") -> Dict[str, Any]:
+                store.update(operation_id, status="Failed", logs=[err])
+                return {"ok": False, "error": err, "code": code, "requires_new_plan": True}
+
+            # TOCTOU & Precondition Revalidation (ALL-OR-NOTHING, before any
+            # mutation). Items/album state already durably recorded as
+            # mutated by THIS transaction (crash-retry resume) are expected
+            # to look "gone" -- that is the correct already-applied outcome,
+            # not evidence of external tampering (SEC-002 Wave 20 final
+            # review, "Apply retry after partial filesystem/DB mutation").
+            if not db_stage_done:
+                try:
+                    con = sqlite3.connect(lib_db, timeout=10)
+                    con.row_factory = sqlite3.Row
+                    try:
+                        cur = con.cursor()
+
+                        cur.execute("SELECT id, mb_releasegroupid FROM albums WHERE id=?", (existing_album_id,))
+                        ex_alb = cur.fetchone()
+                        if not ex_alb:
+                            return _fail(f"Target album {existing_album_id} missing", "reconcile_album_missing")
+
+                        cur.execute("SELECT id, mb_releasegroupid FROM albums WHERE id=?", (imported_album_id,))
+                        imp_alb = cur.fetchone()
+                        if not imp_alb:
+                            return _fail(f"Source album {imported_album_id} missing", "reconcile_album_missing")
+
+                        # Album RGID TOCTOU: both albums' RGIDs must still
+                        # match what Plan captured, and their compatibility
+                        # relation must still hold (SEC-002 Wave 20 final
+                        # review, "Album Release Group TOCTOU is not
+                        # revalidated").
+                        live_ex_rg = str(ex_alb["mb_releasegroupid"] or "").strip().lower()
+                        live_imp_rg = str(imp_alb["mb_releasegroupid"] or "").strip().lower()
+                        expected_ex_rg = str(payload.get("existing_album_rg_before") or "")
+                        expected_imp_rg = str(payload.get("imported_album_rg_before") or "")
+                        if live_ex_rg != expected_ex_rg or live_imp_rg != expected_imp_rg:
+                            return _fail("Album Release Group ID changed since plan", "reconcile_identity_mismatch")
+                        if live_ex_rg and live_imp_rg and live_ex_rg != live_imp_rg:
+                            return _fail("Album Release Group IDs are no longer compatible", "reconcile_identity_mismatch")
+
+                        # Validate move_specs (full identity, not just path/stat)
+                        for mspec in move_specs:
+                            iid = int(mspec["item_id"])
+                            before = mspec["before"]
+                            cur.execute("SELECT id, album_id, path, mb_trackid, mb_albumid, mb_releasegroupid, disc, track FROM items WHERE id=?", (iid,))
+                            irow = cur.fetchone()
+                            if not irow:
+                                return _fail(f"Move item {iid} missing", "reconcile_item_missing")
+                            if int(irow["album_id"]) != imported_album_id:
+                                return _fail(f"Move item {iid} album membership changed", "reconcile_album_membership_changed")
+
+                            raw_path = irow["path"]
+                            path_str = raw_path.decode("utf-8", "replace") if isinstance(raw_path, bytes) else str(raw_path)
+                            if path_str != before["path"]:
+                                return _fail(f"Move item {iid} path changed", "reconcile_toctou_mismatch")
+                            if str(irow["mb_trackid"] or "").strip().lower() != before.get("mb_trackid", ""):
+                                return _fail(f"Move item {iid} Recording ID changed", "reconcile_toctou_mismatch")
+                            if str(irow["mb_albumid"] or "").strip().lower() != before.get("mb_albumid", ""):
+                                return _fail(f"Move item {iid} Release ID changed", "reconcile_toctou_mismatch")
+                            if str(irow["mb_releasegroupid"] or "").strip().lower() != before.get("mb_releasegroupid", ""):
+                                return _fail(f"Move item {iid} Release Group ID changed", "reconcile_toctou_mismatch")
+
+                            ipath = Path(path_str)
+                            base_root = _resolve_path_role(path_str, imported_item_roots)
+                            if base_root is None:
+                                return _fail(f"Move item {iid} path outside allowed roots", "reconcile_path_out_of_root")
+                            if _path_has_symlink_under(ipath, base_root):
+                                return _fail(f"Move item {iid} path contains symlink", "reconcile_symlink_rejected")
+                            if not ipath.exists():
+                                return _fail(f"Move item {iid} file missing", "reconcile_item_missing")
+
+                            st = ipath.stat()
+                            b_stat = before["stat"]
+                            if st.st_dev != b_stat["dev"] or st.st_ino != b_stat["ino"] or st.st_size != b_stat["size"] or st.st_mtime_ns != b_stat["mtime_ns"]:
+                                return _fail(f"Move item {iid} file stat changed", "reconcile_toctou_mismatch")
+
+                        # Validate dup_specs
+                        for dspec in dup_specs:
+                            iid = int(dspec["item_id"])
+                            before = dspec["before"]
+                            if iid in already_quarantined_ids:
+                                # This item's file was already durably
+                                # quarantined by a prior (crashed) Apply
+                                # attempt on this SAME transaction -- its
+                                # original path is expected to be gone.
+                                continue
+                            cur.execute("SELECT id, album_id, path, mb_trackid FROM items WHERE id=?", (iid,))
+                            irow = cur.fetchone()
+                            if not irow:
+                                return _fail(f"Duplicate item {iid} missing", "reconcile_item_missing")
+                            if int(irow["album_id"]) != imported_album_id:
+                                return _fail(f"Duplicate item {iid} album membership changed", "reconcile_album_membership_changed")
+
+                            raw_path = irow["path"]
+                            path_str = raw_path.decode("utf-8", "replace") if isinstance(raw_path, bytes) else str(raw_path)
+                            if path_str != before["path"]:
+                                return _fail(f"Duplicate item {iid} path changed", "reconcile_toctou_mismatch")
+                            if str(irow["mb_trackid"] or "").strip().lower() != before.get("mb_trackid", ""):
+                                return _fail(f"Duplicate item {iid} Recording ID changed", "reconcile_toctou_mismatch")
+
+                            ipath = Path(path_str)
+                            base_root = _resolve_path_role(path_str, imported_item_roots)
+                            if base_root is None:
+                                return _fail(f"Duplicate item {iid} path outside allowed roots", "reconcile_path_out_of_root")
+                            if _path_has_symlink_under(ipath, base_root):
+                                return _fail(f"Duplicate item {iid} path contains symlink", "reconcile_symlink_rejected")
+                            if not ipath.exists():
+                                return _fail(f"Duplicate item {iid} file missing", "reconcile_item_missing")
+
+                            st = ipath.stat()
+                            b_stat = before["stat"]
+                            if st.st_dev != b_stat["dev"] or st.st_ino != b_stat["ino"] or st.st_size != b_stat["size"] or st.st_mtime_ns != b_stat["mtime_ns"]:
+                                return _fail(f"Duplicate item {iid} file stat changed", "reconcile_toctou_mismatch")
+
+                            # Re-verify survivors: identity, membership,
+                            # path role, symlinks, physical + readable
+                            # state, and full stat signature.
+                            for surv in dspec.get("survivors") or []:
+                                s_id = int(surv["item_id"])
+                                cur.execute("SELECT id, album_id, path, mb_trackid FROM items WHERE id=?", (s_id,))
+                                s_row = cur.fetchone()
+                                if not s_row or int(s_row["album_id"]) != existing_album_id:
+                                    return _fail(f"Duplicate item {iid} survivor {s_id} changed or missing", "reconcile_survivor_stale")
+                                if str(s_row["mb_trackid"] or "").strip().lower() != surv.get("mb_trackid", ""):
+                                    return _fail(f"Duplicate item {iid} survivor {s_id} identity changed", "reconcile_survivor_stale")
+                                s_raw_path = s_row["path"]
+                                s_path_str = s_raw_path.decode("utf-8", "replace") if isinstance(s_raw_path, bytes) else str(s_raw_path)
+                                if s_path_str != surv.get("path"):
+                                    return _fail(f"Duplicate item {iid} survivor {s_id} path changed", "reconcile_survivor_stale")
+                                s_path = Path(s_path_str)
+                                if _resolve_path_role(s_path_str, library_roots) is None:
+                                    return _fail(f"Duplicate item {iid} survivor {s_id} path outside library root", "reconcile_path_out_of_root")
+                                if _path_has_symlink_under(s_path, library_roots[0] if library_roots else s_path):
+                                    return _fail(f"Duplicate item {iid} survivor {s_id} path contains symlink", "reconcile_symlink_rejected")
+                                if not s_path.exists():
+                                    return _fail(f"Duplicate item {iid} survivor {s_id} file missing on disk", "reconcile_survivor_stale")
+                                s_st = s_path.stat()
+                                exp_s_stat = surv.get("stat") or {}
+                                if exp_s_stat and (
+                                    s_st.st_dev != exp_s_stat.get("dev") or s_st.st_ino != exp_s_stat.get("ino")
+                                    or s_st.st_size != exp_s_stat.get("size") or s_st.st_mtime_ns != exp_s_stat.get("mtime_ns")
+                                ):
+                                    return _fail(f"Duplicate item {iid} survivor {s_id} file changed since plan", "reconcile_survivor_stale")
+                                s_read = _read_file_audio_tags(s_path)
+                                if not s_read.get("ok"):
+                                    return _fail(f"Duplicate item {iid} survivor {s_id} media no longer readable", "reconcile_survivor_stale")
+                    finally:
+                        con.close()
+                except sqlite3.Error as ex:
+                    LOG.error("Reconcile apply: TOCTOU query failed for op %s: %s", operation_id, ex)
+                    return _fail("Precondition verification failed.", "reconcile_verification_failed")
+
+            # Mutation is about to begin. `mutation_started` records intent
+            # durably before anything happens; `mutated`/`filesystem_mutated`/
+            # `db_mutated` are only set True immediately after each stage's
+            # first real mutation actually succeeds (SEC-002 Wave 20 final
+            # review, "mutated=True is set before mutation").
+            store.update(operation_id, status="Running", metadata={**meta, "mutation_started": True})
+
+            def _persist_step(step_name: str, step_status: str, **extra: Any) -> None:
+                curr_tx = store.get(operation_id)
+                steps = curr_tx.get("metadata", {}).get("apply_steps", [])
+                steps.append({
+                    "step": step_name,
+                    "status": step_status,
+                    "timestamp": _now(),
+                    **extra,
+                })
+                store.update(operation_id, metadata={**curr_tx.get("metadata", {}), "apply_steps": steps})
+
+            if not db_stage_done:
+                # Quarantine directory is only created once every
+                # precondition above has passed -- not claiming "zero
+                # filesystem mutation before validation" while actually
+                # creating a directory earlier (SEC-002 Wave 20 final
+                # review, "quarantine directory creation timing").
+                q_root_env = quarantine_base_root or os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
+                q_root_norm = os.path.normpath(q_root_env)
+                q_dir = Path(q_root_env) / operation_id
+                # Explicit normalize-then-prefix-check barrier (the exact
+                # idiom CodeQL's py/path-injection query documents as a
+                # sanitizer) on top of the _TRANSACTION_ID_RE format check
+                # already performed at function entry: operation_id can
+                # never actually escape q_root_env (no "/", "\", or ".."
+                # passes the id regex), but this makes that guarantee
+                # explicit and locally checkable rather than relying on a
+                # cross-function invariant a static analyzer cannot see.
+                if os.path.normpath(str(q_dir)) != os.path.join(q_root_norm, operation_id):
+                    LOG.error("Reconcile apply: quarantine path escaped root for op %s", operation_id)
+                    store.update(operation_id, status="Failed", logs=["Quarantine path validation failed."])
+                    return {"ok": False, "error": "Quarantine path validation failed.", "code": "reconcile_path_out_of_root", "mutated": True}
+
+                # Stage 1: Duplicate file quarantine. Every recoverable
+                # duplicate (hardlink or distinct file) is quarantined via
+                # the hardened rename/copy helper -- never permanently
+                # unlinked -- so rollback_available is never a lie
+                # (SEC-002 Wave 20 final review: "never claim rollback for
+                # unrecoverable unlinks"). `db_only` duplicates (the
+                # duplicate row and the survivor point at the SAME path)
+                # are never touched physically at all.
+                quarantined_files: List[Dict[str, Any]] = list(curr_meta_snapshot.get("quarantined_files") or [])
+                for dspec in dup_specs:
+                    iid = int(dspec["item_id"])
+                    if iid in already_quarantined_ids:
+                        continue
+                    physical_class = dspec.get("physical_class") or "distinct_file"
+                    if physical_class == "db_only":
+                        _persist_step("dup_file_preserved", "Completed", item_id=iid, reason="same_path_as_survivor")
+                        continue
+
+                    fpath = Path(dspec["before"]["path"])
+                    try:
+                        q_dir.mkdir(parents=True, exist_ok=True)
+                    except OSError as ex:
+                        LOG.error("Reconcile apply: quarantine dir creation failed for op %s: %s", operation_id, ex)
+                        store.update(operation_id, status="Failed", logs=["Quarantine directory creation failed."])
+                        return {"ok": False, "error": "Quarantine directory creation failed.", "code": "reconcile_filesystem_failed", "mutated": True}
+
+                    # fpath.name strips every directory component (no
+                    # "..", no "/") -- but make the containment guarantee
+                    # for target_q explicit and locally checkable too,
+                    # same normalize-then-prefix idiom as q_dir above.
+                    safe_leaf = fpath.name
+                    target_q = q_dir / f"{iid}_{safe_leaf}"
+                    q_dir_norm = os.path.normpath(str(q_dir))
+                    if os.path.dirname(os.path.normpath(str(target_q))) != q_dir_norm:
+                        store.update(operation_id, status="Failed", logs=[f"Quarantine target path validation failed for item {iid}."])
+                        return {"ok": False, "error": "Quarantine path validation failed.", "code": "reconcile_path_out_of_root", "mutated": True}
+                    if target_q.exists() or target_q.is_symlink():
+                        store.update(operation_id, status="Failed", logs=[f"Quarantine destination already exists for item {iid}."])
+                        return {"ok": False, "error": "Quarantine destination collision.", "code": "reconcile_filesystem_failed", "mutated": True}
+                    try:
+                        _safe_rename(fpath, target_q)
+                        entry = {"item_id": iid, "original_path": str(fpath), "quarantine_path": str(target_q), "physical_class": physical_class}
+                        quarantined_files.append(entry)
+                        store.update(operation_id, metadata={
+                            **store.get(operation_id).get("metadata", {}),
+                            "quarantined_files": quarantined_files,
+                            "filesystem_mutated": True,
+                            "mutated": True,
+                        })
+                        _persist_step("dup_file_quarantined", "Completed", item_id=iid)
+                    except OSError as ex:
+                        LOG.error("Reconcile apply: quarantine failed for item %s op %s: %s", iid, operation_id, ex)
+                        store.update(operation_id, status="Failed", logs=[f"File quarantine failed for item {iid}."])
+                        return {"ok": False, "error": "File quarantine failed.", "code": "reconcile_filesystem_failed", "mutated": True, "partial_mutation": True}
+
+                # Stage 2: Database operations (single connection/commit,
+                # exact rowcount verified for every statement).
+                try:
+                    con = sqlite3.connect(lib_db, timeout=10)
+                    try:
+                        cur = con.cursor()
+
+                        if dup_specs:
+                            dup_ids = [int(d["item_id"]) for d in dup_specs]
+                            cur.execute(f"DELETE FROM items WHERE id IN ({','.join('?' * len(dup_ids))})", dup_ids)
+                            if cur.rowcount != len(dup_ids):
+                                con.rollback()
+                                store.update(operation_id, status="Failed", logs=["DB delete rowcount mismatch for duplicate items."])
+                                return {"ok": False, "error": "DB delete rowcount mismatch.", "code": "reconcile_db_failed", "mutated": True, "partial_mutation": True}
+
+                        if move_specs:
+                            cur.execute("SELECT album, albumartist FROM albums WHERE id=?", (existing_album_id,))
+                            ex_alb_row = cur.fetchone()
+                            target_album_name = str(ex_alb_row[0] or "") if ex_alb_row and ex_alb_row[0] is not None else ""
+                            target_albumartist = str(ex_alb_row[1] or "") if ex_alb_row and ex_alb_row[1] is not None else ""
+
+                            move_ids = [int(m["item_id"]) for m in move_specs]
+                            cur.execute(
+                                f"UPDATE items SET album_id=?, album=?, albumartist=? WHERE id IN ({','.join('?' * len(move_ids))})",
+                                (existing_album_id, target_album_name, target_albumartist, *move_ids),
+                            )
+                            if cur.rowcount != len(move_ids):
+                                con.rollback()
+                                store.update(operation_id, status="Failed", logs=["DB update rowcount mismatch for moved items."])
+                                return {"ok": False, "error": "DB update rowcount mismatch.", "code": "reconcile_db_failed", "mutated": True, "partial_mutation": True}
+
+                        if payload.get("retire_imported_album"):
+                            cur.execute("SELECT COUNT(*) FROM items WHERE album_id=?", (imported_album_id,))
+                            left_cnt = cur.fetchone()[0]
+                            if left_cnt == 0:
+                                cur.execute("DELETE FROM albums WHERE id=?", (imported_album_id,))
+                                if cur.rowcount != 1:
+                                    con.rollback()
+                                    store.update(operation_id, status="Failed", logs=["Album retirement rowcount mismatch."])
+                                    return {"ok": False, "error": "Album retirement rowcount mismatch.", "code": "reconcile_db_failed", "mutated": True, "partial_mutation": True}
+
+                        con.commit()
+                    finally:
+                        con.close()
+                    store.update(operation_id, metadata={**store.get(operation_id).get("metadata", {}), "db_mutated": True, "mutated": True})
+                    _persist_step("db_reassigned", "Completed")
+                except sqlite3.Error as ex:
+                    LOG.error("Reconcile apply: database operations failed for op %s: %s", operation_id, ex)
+                    store.update(operation_id, status="Failed", logs=["Database operations failed."])
+                    return {"ok": False, "error": "Database operations failed.", "code": "reconcile_db_failed", "mutated": True, "partial_mutation": True}
+
+            # Stage 3: Verification -- DB state and final filesystem state.
+            try:
+                con = sqlite3.connect(lib_db, timeout=10)
+                try:
+                    cur = con.cursor()
+                    for mspec in move_specs:
+                        iid = int(mspec["item_id"])
+                        cur.execute("SELECT album_id FROM items WHERE id=?", (iid,))
+                        r = cur.fetchone()
+                        if not r or int(r[0]) != existing_album_id:
+                            store.update(operation_id, status="Failed", logs=[f"Verification failed for move item {iid}."])
+                            return {"ok": False, "error": "Post-write verification failed.", "code": "reconcile_verification_failed", "mutated": True}
+
+                    for dspec in dup_specs:
+                        iid = int(dspec["item_id"])
+                        cur.execute("SELECT COUNT(*) FROM items WHERE id=?", (iid,))
+                        if cur.fetchone()[0] != 0:
+                            store.update(operation_id, status="Failed", logs=[f"Verification failed: duplicate item {iid} still exists."])
+                            return {"ok": False, "error": "Post-write verification failed.", "code": "reconcile_verification_failed", "mutated": True}
+
+                    if payload.get("retire_imported_album"):
+                        cur.execute("SELECT COUNT(*) FROM albums WHERE id=?", (imported_album_id,))
+                        if cur.fetchone()[0] != 0:
+                            store.update(operation_id, status="Failed", logs=["Verification failed: imported album still exists."])
+                            return {"ok": False, "error": "Post-write verification failed.", "code": "reconcile_verification_failed", "mutated": True}
+                finally:
+                    con.close()
+
+                # Filesystem final-state verification: every quarantined
+                # duplicate's original path is gone and the quarantine copy
+                # exists; every survivor is still present.
+                curr_meta = store.get(operation_id).get("metadata", {})
+                for qf in (curr_meta.get("quarantined_files") or []):
+                    if Path(qf["original_path"]).exists():
+                        store.update(operation_id, status="Failed", logs=["Verification failed: quarantined original path still present."])
+                        return {"ok": False, "error": "Post-write verification failed.", "code": "reconcile_verification_failed", "mutated": True}
+                    if not Path(qf["quarantine_path"]).exists():
+                        store.update(operation_id, status="Failed", logs=["Verification failed: quarantine copy missing."])
+                        return {"ok": False, "error": "Post-write verification failed.", "code": "reconcile_verification_failed", "mutated": True}
+                for dspec in dup_specs:
+                    for surv in dspec.get("survivors") or []:
+                        if not Path(surv["path"]).exists():
+                            store.update(operation_id, status="Failed", logs=["Verification failed: survivor file missing after apply."])
+                            return {"ok": False, "error": "Post-write verification failed.", "code": "reconcile_verification_failed", "mutated": True}
+
+                _persist_step("result_verified", "Completed")
+            except sqlite3.Error as ex:
+                LOG.error("Reconcile apply: verification query failed for op %s: %s", operation_id, ex)
+                store.update(operation_id, status="Failed", logs=["Post-write verification query failed."])
+                return {"ok": False, "error": "Post-write verification query failed.", "code": "reconcile_verification_failed", "mutated": True}
+
+            store.update(operation_id, status="Completed", logs=["Existing album reconciliation applied successfully."])
+            return {
+                "ok": True,
+                "status": "Completed",
+                "operation_id": operation_id,
+                "reconciled_moves": len(move_specs),
+                "reconciled_duplicates": len(dup_specs),
+            }
+
+
+def rollback_existing_album_reconcile(
+    store: TransactionStore,
+    operation_id: str,
+    *,
+    db_path: Optional[str] = None,
+    music_allowed_roots: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Execute rollback for existing_album_reconcile_v1 (SEC-002 Wave 20)."""
+    if not _TRANSACTION_ID_RE.fullmatch(str(operation_id or "")):
+        return {"ok": False, "error": "Malformed transaction id.", "code": "reconcile_not_found"}
+    op_lock = _get_apply_lock(operation_id)
+    with op_lock:
+        try:
+            tx = store.get(operation_id)
+        except KeyError:
+            return {"ok": False, "error": "Transaction not found.", "code": "reconcile_not_found"}
+
+        meta = tx.get("metadata") or {}
+        mutation_family = meta.get("mutation_family")
+        if mutation_family != "existing_album_reconcile_v1":
+            return {"ok": False, "error": "Transaction family mismatch.", "code": "reconcile_wrong_family"}
+
+        status = tx.get("status")
+        if status == "Rolled Back":
+            return {"ok": False, "error": "This transaction has already been rolled back.", "code": "reconcile_already_rolled_back"}
+        db_mutated = bool(meta.get("db_mutated") or meta.get("mutated"))
+        if status not in ("Completed", "Failed", "Partially Rolled Back") or not db_mutated:
+            return {"ok": False, "error": "Rollback unavailable: transaction has not performed any mutations.", "code": "reconcile_not_mutated"}
+
+        payload = meta.get("payload") or meta or tx.get("payload") or {}
+        imported_album_id = int(payload.get("imported_album_id") or 0)
+        existing_album_id = int(payload.get("existing_album_id") or 0)
+        move_specs: List[Dict[str, Any]] = payload.get("move_specs") or []
+        dup_specs: List[Dict[str, Any]] = payload.get("dup_specs") or []
+        imported_alb_before = payload.get("imported_album_before")
+        quarantined_files: List[Dict[str, Any]] = meta.get("quarantined_files") or []
+
+        item_ids = sorted({int(m["item_id"]) for m in move_specs} | {int(d["item_id"]) for d in dup_specs})
+        alb_lock_1 = _get_resource_lock(f"album:{min(imported_album_id, existing_album_id)}")
+        alb_lock_2 = _get_resource_lock(f"album:{max(imported_album_id, existing_album_id)}")
+        item_locks = [_get_resource_lock(f"item:{iid}") for iid in item_ids]
+
+        with ExitStack() as stack:
+            stack.enter_context(alb_lock_1)
+            stack.enter_context(alb_lock_2)
+            for ilock in item_locks:
+                stack.enter_context(ilock)
+
+            lib_db = db_path or os.environ.get("BEETS_DB_PATH", os.path.expanduser("~/.config/beets/musiclibrary.blb"))
+            if not os.path.exists(lib_db):
+                LOG.error("Reconcile rollback: Beets database not found at %s", lib_db)
+                return {"ok": False, "error": "Beets database unavailable.", "code": "db_not_found"}
+
+            library_roots: List[Path] = []
+            for r in (music_allowed_roots or [os.environ.get("MUSIC_ROOT", "/music")]):
+                try:
+                    p = Path(r).resolve()
+                    if p.exists():
+                        library_roots.append(p)
+                except Exception:
+                    pass
+
+            # Precondition: current state must still match what THIS
+            # transaction actually produced -- refuse to clobber a later,
+            # unrelated legitimate change (SEC-002 Wave 20 final review,
+            # "rollback needs current-state validation").
+            try:
+                con = sqlite3.connect(lib_db, timeout=10)
+                con.row_factory = sqlite3.Row
+                try:
+                    cur = con.cursor()
+                    for mspec in move_specs:
+                        iid = int(mspec["item_id"])
+                        cur.execute("SELECT album_id FROM items WHERE id=?", (iid,))
+                        row = cur.fetchone()
+                        if not row:
+                            store.update(operation_id, logs=[f"Rollback precondition failed: item {iid} no longer exists."])
+                            return {"ok": False, "error": f"Item {iid} no longer exists.", "code": "reconcile_rollback_precondition_failed"}
+                        if int(row["album_id"]) != existing_album_id:
+                            store.update(operation_id, logs=[f"Rollback precondition failed: item {iid} was modified after this reconcile."])
+                            return {"ok": False, "error": f"Item {iid} was modified after this reconcile; refusing to overwrite a later change.", "code": "reconcile_rollback_stale"}
+                    for dspec in dup_specs:
+                        iid = int(dspec["item_id"])
+                        cur.execute("SELECT COUNT(*) FROM items WHERE id=?", (iid,))
+                        if cur.fetchone()[0] != 0:
+                            store.update(operation_id, logs=[f"Rollback precondition failed: duplicate item {iid} already exists."])
+                            return {"ok": False, "error": f"Item {iid} already exists; refusing to overwrite.", "code": "reconcile_rollback_stale"}
+                finally:
+                    con.close()
+            except sqlite3.Error as ex:
+                LOG.error("Reconcile rollback: precondition query failed for op %s: %s", operation_id, ex)
+                return {"ok": False, "error": "Rollback precondition check failed.", "code": "reconcile_verification_failed"}
+
+            # Stage 1: restore quarantined files FIRST -- never create a
+            # live DB row pointing at a file we have not yet confirmed
+            # exists (SEC-002 Wave 20 final review, "critical rollback
+            # ordering").
+            files_restored = 0
+            files_failed_ids: List[int] = []
+            restored_paths: Dict[int, str] = {}
+            for qf in quarantined_files:
+                iid = int(qf["item_id"])
+                orig_p = Path(qf["original_path"])
+                q_p = Path(qf["quarantine_path"])
+                base_root = _resolve_path_role(str(orig_p), library_roots)
+                if base_root is None:
+                    files_failed_ids.append(iid)
+                    continue
+                if orig_p.exists() or orig_p.is_symlink():
+                    # Destination collision -- something now occupies the
+                    # original path. Refuse rather than overwrite it.
+                    files_failed_ids.append(iid)
+                    continue
+                if not q_p.exists():
+                    files_failed_ids.append(iid)
+                    continue
+                try:
+                    orig_p.parent.mkdir(parents=True, exist_ok=True)
+                    if _path_has_symlink_under(orig_p.parent, base_root):
+                        files_failed_ids.append(iid)
+                        continue
+                    _safe_rename(q_p, orig_p)
+                    if not orig_p.exists() or orig_p.is_symlink():
+                        files_failed_ids.append(iid)
+                        continue
+                    files_restored += 1
+                    restored_paths[iid] = str(orig_p)
+                except OSError:
+                    files_failed_ids.append(iid)
+
+            # Stage 2: restore DB rows -- only for items whose file
+            # restoration just succeeded (or that never needed a file
+            # restored at all, e.g. db_only duplicates and moves).
+            db_restored = 0
+            db_failed_ids: List[int] = []
+            try:
+                con = sqlite3.connect(lib_db, timeout=10)
+                try:
+                    cur = con.cursor()
+
+                    if imported_alb_before:
+                        cur.execute("SELECT COUNT(*) FROM albums WHERE id=?", (imported_album_id,))
+                        if cur.fetchone()[0] == 0:
+                            cols = list(imported_alb_before.keys())
+                            placeholders = ",".join("?" * len(cols))
+                            cur.execute(
+                                f"INSERT INTO albums ({','.join(cols)}) VALUES ({placeholders})",
+                                [imported_alb_before[c] for c in cols],
+                            )
+
+                    for mspec in move_specs:
+                        iid = int(mspec["item_id"])
+                        before = mspec["before"]
+                        cur.execute(
+                            "UPDATE items SET album_id=?, album=?, albumartist=? WHERE id=?",
+                            (imported_album_id, before["album"], before["albumartist"], iid),
+                        )
+                        if cur.rowcount == 1:
+                            db_restored += 1
+                        else:
+                            db_failed_ids.append(iid)
+
+                    for dspec in dup_specs:
+                        iid = int(dspec["item_id"])
+                        physical_class = dspec.get("physical_class") or "distinct_file"
+                        if physical_class != "db_only" and iid not in restored_paths:
+                            # File restoration required but did not
+                            # succeed -- do not reinsert a DB row that
+                            # would point at a missing file.
+                            db_failed_ids.append(iid)
+                            continue
+                        before = dspec["before"]
+                        full_row = before.get("full_row") or {}
+                        cur.execute("SELECT COUNT(*) FROM items WHERE id=?", (iid,))
+                        if cur.fetchone()[0] == 0:
+                            if full_row:
+                                cols = list(full_row.keys())
+                                placeholders = ",".join("?" * len(cols))
+                                cur.execute(
+                                    f"INSERT INTO items ({','.join(cols)}) VALUES ({placeholders})",
+                                    [full_row[c] for c in cols],
+                                )
+                            else:
+                                cur.execute(
+                                    "INSERT INTO items (id, album_id, title, artist, album, albumartist, disc, track, path, mb_trackid, mb_albumid, mb_releasegroupid) "
+                                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                    (
+                                        iid, imported_album_id, before.get("title", ""), before.get("artist", ""),
+                                        before.get("album", ""), before.get("albumartist", ""), before.get("disc", 1),
+                                        before.get("track", 0), before.get("path", ""), before.get("mb_trackid", ""),
+                                        before.get("mb_albumid", ""), before.get("mb_releasegroupid", ""),
+                                    ),
+                                )
+                            if cur.rowcount == 1:
+                                db_restored += 1
+                            else:
+                                db_failed_ids.append(iid)
+                        else:
+                            db_failed_ids.append(iid)
+
+                    con.commit()
+                finally:
+                    con.close()
+            except sqlite3.Error as ex:
+                LOG.error("Reconcile rollback: DB restore failed for op %s: %s", operation_id, ex)
+                store.update(operation_id, logs=["Rollback database restore failed."])
+                return {"ok": False, "error": "Rollback database restore failed.", "code": "reconcile_rollback_db_failed"}
+
+            total_expected = len(move_specs) + len(dup_specs)
+            full_success = (not db_failed_ids) and (not files_failed_ids)
+            any_restored = db_restored > 0 or files_restored > 0
+            final_status = "Rolled Back" if full_success else ("Partially Rolled Back" if any_restored else "Failed")
+
+            store.update(
+                operation_id,
+                status=final_status,
+                logs=[f"Existing album reconcile rollback completed with status {final_status}."],
+                metadata={
+                    **meta,
+                    "rollback_available": False,
+                    "db_restored_count": db_restored,
+                    "files_restored_count": files_restored,
+                    "db_failed_items": db_failed_ids,
+                    "files_failed_items": files_failed_ids,
+                },
+            )
+            # SEC-002 Wave 20 final review, "rollback partial failure
+            # truthfulness": an incomplete recovery is not reported as a
+            # plain success.
+            return {
+                "ok": final_status == "Rolled Back",
+                "operation_id": operation_id,
+                "status": final_status,
+                "partial_mutation": final_status == "Partially Rolled Back",
+                "db_restored_count": db_restored,
+                "files_restored_count": files_restored,
+                "total_items": total_expected,
+            }
+

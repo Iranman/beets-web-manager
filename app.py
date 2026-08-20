@@ -6679,6 +6679,17 @@ def _merge_imported_album_into_existing(imported_album_id: int, existing_album_i
                 if key[1]:
                     existing_by_key.setdefault(key, []).append(row)
 
+            # SEC-002 Wave 20 final review: track whether each delegated
+            # engine operation actually succeeded so the function's return
+            # value is truthful. Previously this returned existing_album_id
+            # (implying reconciliation succeeded) whenever dup_rows/move_ids/
+            # replace_rows were non-empty, regardless of whether the engine
+            # Plan/Apply calls actually succeeded -- a caller relying on the
+            # returned album id as a success signal would be misled by a
+            # logged-and-swallowed engine failure.
+            replace_ok = True
+            reconcile_ok = True
+
             if replace_rows:
                 replace_ids = sorted({int(r["id"]) for r in replace_rows})
                 try:
@@ -6705,49 +6716,64 @@ def _merge_imported_album_into_existing(imported_album_id: int, existing_album_i
                             # identity-verified), those old rows remain in
                             # place -- both versions coexist rather than
                             # silently losing the only verified copy.
+                            replace_ok = False
                             log.append(f"  [merge] WARN bulk replacement apply failed, old rows left in place: {apply_res.get('error')}")
                     else:
+                        replace_ok = False
                         log.append(f"  [merge] WARN bulk replacement plan failed, old rows left in place: {plan_res.get('error')}")
                 except Exception as ex:
+                    replace_ok = False
                     log.append(f"  [merge] WARN exception delegating bulk replacement to engine, old rows left in place: {ex}")
 
-            if dup_rows:
-                source_root = Path(source_folder).resolve(strict=False)
-                for row in dup_rows:
-                    raw_path = _s(row["path"])
-                    fpath = Path(raw_path)
-                    if not fpath.is_absolute():
-                        fpath = MUSIC_ROOT / raw_path
-                    try:
-                        resolved = fpath.resolve(strict=False)
-                        resolved.relative_to(source_root)
-                        resolved.unlink(missing_ok=True)
-                        log.append(f"  [merge] Removed duplicate downloaded track {int(row['track'] or 0):02d}: {resolved.name}")
-                    except Exception:
-                        pass
-                con.execute(
-                    f"DELETE FROM items WHERE id IN ({','.join('?' * len(dup_rows))})",
-                    [int(r["id"]) for r in dup_rows],
-                )
+            if dup_rows or move_ids:
+                dup_item_ids = [int(r["id"]) for r in dup_rows]
+                dup_details = []
+                for r in dup_rows:
+                    key = (int(r["disc"] or 1), int(r["track"] or 0))
+                    survivor_ids = [int(ex["id"]) for ex in existing_by_key.get(key, []) if int(ex["id"] or 0)]
+                    dup_details.append({
+                        "dup_item_id": int(r["id"]),
+                        "survivor_item_ids": survivor_ids,
+                    })
 
-            if move_ids:
-                album_name = _s(existing["album"])
-                albumartist = _s(existing["albumartist"])
-                con.execute(
-                    f"UPDATE items SET album_id=?, album=?, albumartist=? "
-                    f"WHERE id IN ({','.join('?' * len(move_ids))})",
-                    [existing_album_id, album_name, albumartist, *move_ids],
-                )
-                log.append(f"  [merge] Merged {len(move_ids)} missing track(s) into existing album_id {existing_album_id}")
+                try:
+                    plan_res = beets_client.plan_existing_album_reconcile({
+                        "imported_album_id": imported_album_id,
+                        "existing_album_id": existing_album_id,
+                        "dup_item_ids": dup_item_ids,
+                        "dup_details": dup_details,
+                        "move_item_ids": move_ids,
+                        "source_folder": source_folder,
+                        "reason": "Existing album reconciliation",
+                    })
+                    if plan_res.get("ok"):
+                        op_id = plan_res.get("operation_id")
+                        apply_res = beets_client.apply_existing_album_reconcile(op_id)
+                        if apply_res.get("ok"):
+                            log.append(
+                                f"  [merge] Delegated reconciliation of {len(dup_item_ids)} duplicate(s) "
+                                f"and {len(move_ids)} move(s) to engine reconcile tx {op_id}."
+                            )
+                        else:
+                            reconcile_ok = False
+                            log.append(f"  [merge] WARN existing album reconcile apply failed: {apply_res.get('error')}")
+                    else:
+                        reconcile_ok = False
+                        log.append(f"  [merge] WARN existing album reconcile plan failed: {plan_res.get('error')}")
+                except Exception as ex:
+                    reconcile_ok = False
+                    log.append(f"  [merge] WARN exception delegating existing album reconcile to engine: {ex}")
 
-            left = con.execute(
-                "SELECT COUNT(*) FROM items WHERE album_id=?",
-                (imported_album_id,),
-            ).fetchone()[0]
-            if int(left or 0) == 0:
-                con.execute("DELETE FROM albums WHERE id=?", (imported_album_id,))
             con.commit()
-            return existing_album_id if move_ids or dup_rows or replace_rows else imported_album_id
+            # SEC-002 Wave 20 final review: only report existing_album_id
+            # (i.e. "reconciliation happened") when what was attempted
+            # actually succeeded. A failed delegation leaves the imported
+            # album's rows exactly where they were, so the truthful return
+            # value in that case is imported_album_id, not a claim of
+            # success upstream code would otherwise trust.
+            attempted = bool(move_ids or dup_rows or replace_rows)
+            succeeded = replace_ok and reconcile_ok
+            return existing_album_id if (attempted and succeeded) else imported_album_id
     except Exception as ex:
         log.append(f"  [merge] Warning: {ex}")
         return imported_album_id
@@ -52828,6 +52854,8 @@ def api_transaction_rollback(transaction_id):
                 res = beets_client.rollback_bulk_import_replacement(transaction_id)
             elif mutation_family == "album_mb_track_repair_v1":
                 res = beets_client.rollback_album_mb_track_repair(transaction_id)
+            elif mutation_family == "existing_album_reconcile_v1":
+                res = beets_client.rollback_existing_album_reconcile(transaction_id)
             elif mutation_family:
                 return jsonify({
                     "ok": False,
