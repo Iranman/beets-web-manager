@@ -90,7 +90,7 @@ explicit `BeetsClient` methods.
   accepts this as a `fingerprint_confirmed` flag on the candidate and
   requires it before treating a blank-identity merge as eligible -- but
   does **not** independently re-run fingerprinting itself. This remains a
-  caller-trust boundary, documented as remaining debt (section 11)
+  caller-trust boundary, documented as remaining debt (section 12)
   rather than claimed as independently re-verified.
 - **MusicBrainz text search**: a `musicbrainz.id` result from a folder-name
   text search is deliberately never treated as identity evidence on its
@@ -124,7 +124,7 @@ derivation (Artist-ID-only addressing) was not implemented this pass --
 containment plus the independent identity gate (section 5) is the actual
 safety boundary; paths are treated as expected evidence revalidated at
 every mutation step, not bare authority. Tracked as a narrower remaining
-improvement (section 11).
+improvement (section 12).
 
 ## 8. Corrected Defects (original submission)
 
@@ -219,7 +219,58 @@ artpaths, and every captured artist attribute; reports partial recovery
 truthfully; refuses a second rollback of an already-rolled-back
 transaction with an idempotent, non-mutating response.
 
-## 11. Known Remaining Debt (ARCH-003 stays In Progress)
+## 11. Independent Post-Correction CI Verification (second pass)
+
+The corrections in section 8 were pushed and CI was independently re-run
+(not trusted from the original head) rather than assumed green. That
+re-run surfaced two further genuine defects, both introduced by this
+review's own corrections and caught only because CI was actually watched
+to completion instead of stopping at "pushed the fix":
+
+- **CI-only regression: SQL `LIKE` against a BLOB path column is not a
+  reliable prefix match.** Three queries built the moves/artist-stamping
+  DB snapshot and `_derive_artist_folder_identity` using
+  `path LIKE (prefix_bytes + b"%")`, with both the column and the pattern
+  bound as raw bytes. This passed every local run but returned zero rows
+  on the CI runner's SQLite build, which silently made every folder look
+  identity-blank -- inverting five tests' expected outcomes (eligible
+  merges rejected, conflicting merges accepted, artist-attribute rollback
+  never actually restoring anything because Apply never touched the rows
+  in the first place). Fixed with a new `_rows_by_path_prefix()` helper:
+  a binary-collation range scan (`path >= prefix AND path < prefix +
+  0xFF`) narrows the query, and an exact Python `bytes.startswith()` check
+  confirms the match -- correct regardless of `LIKE`/BLOB quirks, and it
+  also avoids `LIKE`'s `%`/`_` wildcard-injection risk on real file names.
+  (`app.py`'s own pre-existing code for the same situation already works
+  around this by `CAST`ing to `TEXT` before `LIKE` -- this module's fix
+  takes a different, JOIN-friendly route to the same guarantee.)
+- **CodeQL (`py/path-injection`, 26 alerts) triage found two genuine
+  gaps** while confirming every flagged sink actually sits behind real
+  containment validation: Apply's quarantine-source loop called
+  `.exists()` on a path before its root/symlink validation ran (reordered
+  validation first); and Rollback trusted a moved-record's *destination*
+  path and a quarantined-record's *quarantine* path straight from
+  persisted transaction metadata with no TOCTOU-style recheck at all --
+  both are now independently revalidated (destination against
+  `allowed_roots`, quarantine path against the quarantine base root)
+  immediately before use, matching the recheck-before-every-mutation rule
+  already applied everywhere else in this function.
+- **CodeQL disposition**: added `_normpath_within_roots()` (the textual
+  `os.path.normpath` + prefix idiom CodeQL's query recognizes) alongside
+  every existing `resolve()`-based containment check; this did not by
+  itself clear the alerts on re-scan. All 26 were then individually
+  reviewed against the actual code (not blanket-dismissed) and confirmed
+  false positives -- each sits behind real root/symlink/TOCTOU validation,
+  operates on `iterdir()`-enumerated children of an already-validated
+  directory tree, reads back a path this same call just wrote, or (the
+  quarantine leaf name) is structurally a single path segment with no
+  separators by construction (`_artist_folder_quarantine_key` strips
+  `os.sep`/`/`) and cannot traverse regardless of its value. Dismissed via
+  the GitHub API with a specific, code-grounded justification per alert
+  (grouped by pattern, not a single blanket comment); 0 open alerts remain
+  at the final head.
+
+## 12. Known Remaining Debt (ARCH-003 stays In Progress)
 
 - **Fingerprint confirmation remains a caller-trust boundary.** The engine
   requires `fingerprint_confirmed` evidence for blank-identity merges but
