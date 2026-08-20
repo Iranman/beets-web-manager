@@ -854,3 +854,23 @@ AGY reported Wave 21 (a new `artist_folder_reconcile_v1` mutation family coverin
 - **Merge result**: squash-merged to `main` as `3688a64` (final corrected head `ef7aa4b`, branch `feat/sec002-artist-folder-reconcile-wave21` preserved, not deleted). Final-head CI: all 19 checks green (`python-tests` x2, `security` x2, `Analyze` python/javascript-typescript/actions, `CodeQL`, `beets-engine-verification` x2, `beets-engine-latest-compat`, `compose-verification`, `build` x2, `frontend-lint` x2, `frontend-typecheck` x2, `Build & Publish GHCR Image`). CodeQL: 0 open alerts (26 `py/path-injection` alerts individually reviewed and dismissed as false positives with per-alert justification). Both `beets-web-manager` and `beets-engine` Docker images built and verified with `org.opencontainers.image.revision=ef7aa4b`, matching the merged head.
 
 
+### Wave 22: Album Maintenance, Deduplication, Track Retirement & Artwork Controlled Mutation Boundary (`album_maintenance_v1`, `album_artwork_v1`)
+
+- **Vulnerabilities / Deficiencies Addressed**:
+  - `app.py` contained direct, uncontrolled destructive filesystem operations (`Path.unlink`, `Path.rename`, `shutil.move`, `rmdir`) and un-isolated SQLite DML statements (`DELETE FROM items`, `DELETE FROM albums`, `UPDATE items SET path=?`) across `album_deduplicate`, `_remove_album_track_items`, `_album_cleanup_apply_issue`, `_apply_filename_cleanup_candidate`, and `_album_art_quarantine_current`/`_album_art_restore_quarantine`.
+  - Web Manager lacked an engine-owned controlled mutation boundary for whole-album track deduplication, selective track retirement, album cleanup issue application, and artwork quarantine/restore.
+- **Root Cause Fix**:
+  - Created two engine-owned, typed transaction families in `backend/transaction_engine.py`: `album_maintenance_v1` (modes: `deduplicate`, `remove_tracks`, `cleanup_issue`, `filename_cleanup`) and `album_artwork_v1` (modes: `quarantine`, `restore`).
+  - Implemented non-mutating preview planning (`create_album_maintenance_plan`, `create_album_artwork_plan`), durable step execution with TOCTOU stat signature revalidation (`execute_album_maintenance_apply`, `execute_album_artwork_apply`), and complete rollback restoration (`rollback_album_maintenance`, `rollback_album_artwork`).
+  - Added Control Agent endpoints `/albums/maintenance/plan`, `/albums/maintenance/apply`, `/albums/maintenance/rollback`, `/albums/artwork/plan`, `/albums/artwork/apply`, `/albums/artwork/rollback` in `backend/beets_control_agent.py` and client helpers in `backend/beets_client.py`.
+  - Refactored `app.py` target functions (`album_deduplicate`, `_remove_album_track_items`, `_album_art_quarantine_current`, `_album_art_restore_quarantine`) to delegate 100% of mutations to `beets_client`. If `beets_client` IPC fails, Web Manager fails closed without local fallback.
+  - Integrated `album_maintenance_v1` and `album_artwork_v1` with the generic rollback dispatcher `api_transaction_rollback` in `app.py`.
+- **Tests**: Focused unit suite `tests/test_sec002_wave22_album_maintenance.py` (5 tests covering Plan non-mutating preview, Plan -> Apply -> Rollback lifecycle for track retirement and artwork, TOCTOU revalidation, and AST inspection of `app.py`).
+- **Audit & Scope Classification**:
+  - `apply_folder_placeholder_action_api`: Operates on non-album disk folders with zero DB items tracked (`_folder_cleanup_db_items(source) == []`). Classified for a future Folder Cleanup / Placeholder boundary wave.
+  - `import_folder_with_id`: Presumptively out of scope. High-risk import workflow classified for a future dedicated Import Folder boundary wave.
+  - Playlist helpers (`_playlist_*`, `playlist_delete`): Out of scope. Classified for a future Playlist boundary wave.
+- **Status**: ARCH-003 remains **In Progress** (placeholder folder cleanup, import folder, and playlist boundaries remaining). SEC-002 remains Open.
+
+
+

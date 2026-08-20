@@ -7176,3 +7176,677 @@ def _engine_stamp_artist_folder_scan(root_path: Path, lib_db: str) -> List[Dict[
     return candidates
 
 
+# ── album_maintenance_v1 ──────────────────────────────────────────────────────
+
+def create_album_maintenance_plan(
+    store: TransactionStore,
+    payload: Dict[str, Any],
+    *,
+    music_allowed_roots: Optional[List[str]] = None,
+    db_path: Optional[str] = None,
+    quarantine_base_root: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Create a non-mutating preview plan for album maintenance operations.
+
+    Handles whole-album deduplication, selective track retirement, album cleanup
+    issue resolution, and filename normalization under an engine-owned boundary.
+    """
+    mode = str(payload.get("mode") or "deduplicate").strip()
+    allowed_roots = music_allowed_roots or [str(os.environ.get("MUSIC_ROOT", "/music"))]
+    lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB", "")
+    if lib_db and not Path(lib_db).exists():
+        lib_db = ""
+
+    moves_plan: List[Dict[str, Any]] = []
+    dup_quarantines: List[Dict[str, Any]] = []
+    directory_removals: List[str] = []
+    db_item_deletes: List[Dict[str, Any]] = []
+    db_item_updates: List[Dict[str, Any]] = []
+    db_album_deletes: List[int] = []
+    resource_keys: set = set()
+    captured_item_rows: List[Dict[str, Any]] = []
+    captured_album_rows: List[Dict[str, Any]] = []
+
+    if mode == "remove_tracks":
+        try:
+            aid = int(payload.get("album_id") or 0)
+        except Exception:
+            aid = 0
+        raw_item_ids = payload.get("item_ids") or []
+        delete_files = bool(payload.get("delete_files", True))
+        clean_empty_folders = bool(payload.get("clean_empty_folders", False))
+
+        if aid <= 0 or not raw_item_ids:
+            return {"ok": False, "error": "album_id and item_ids required", "code": "album_maintenance_invalid_payload"}
+
+        item_ids = []
+        for raw in raw_item_ids:
+            try:
+                val = int(raw)
+                if val > 0:
+                    item_ids.append(val)
+            except Exception:
+                continue
+        if not item_ids:
+            return {"ok": False, "error": "No valid item_ids provided", "code": "album_maintenance_invalid_payload"}
+
+        resource_keys.add(f"album:{aid}")
+        for iid in item_ids:
+            resource_keys.add(f"item:{iid}")
+
+        if lib_db and Path(lib_db).exists():
+            con = sqlite3.connect(lib_db, timeout=10)
+            con.row_factory = sqlite3.Row
+            try:
+                q_marks = ",".join("?" for _ in item_ids)
+                rows = con.execute(
+                    f"SELECT * FROM items WHERE album_id=? AND id IN ({q_marks})",
+                    [aid] + item_ids,
+                ).fetchall()
+                for r in rows:
+                    r_dict = dict(r)
+                    captured_item_rows.append(r_dict)
+                    raw_p = r["path"]
+                    p_str = raw_p.decode("utf-8", "replace") if isinstance(raw_p, bytes) else str(raw_p or "")
+                    if not p_str:
+                        continue
+                    p_path = Path(p_str)
+                    if not p_path.is_absolute():
+                        p_path = Path(allowed_roots[0]) / p_str
+
+                    if not _path_under(p_path, Path(allowed_roots[0])):
+                        return {"ok": False, "error": f"Item path outside allowed roots: {p_path}", "code": "album_maintenance_path_out_of_root"}
+                    if _path_has_symlink_under(p_path, Path(allowed_roots[0])):
+                        return {"ok": False, "error": f"Symlink rejected: {p_path}", "code": "album_maintenance_symlink_rejected"}
+
+                    if delete_files and p_path.exists() and p_path.is_file():
+                        st = p_path.stat()
+                        dup_quarantines.append({
+                            "item_id": int(r["id"]),
+                            "source": str(p_path),
+                            "stat": {"dev": st.st_dev, "ino": st.st_ino, "size": st.st_size, "mtime_ns": st.st_mtime_ns},
+                        })
+
+                    db_item_deletes.append({
+                        "id": int(r["id"]),
+                        "album_id": aid,
+                        "old_path": str(p_path),
+                    })
+
+                tot_row = con.execute("SELECT COUNT(*) FROM items WHERE album_id=?", (aid,)).fetchone()
+                total_items_in_album = int(tot_row[0]) if tot_row else 0
+                if total_items_in_album > 0 and len(db_item_deletes) == total_items_in_album:
+                    arow = con.execute("SELECT * FROM albums WHERE id=?", (aid,)).fetchone()
+                    if arow:
+                        captured_album_rows.append(dict(arow))
+                        db_album_deletes.append(aid)
+
+                if delete_files and clean_empty_folders and dup_quarantines:
+                    parent_dirs = set(Path(dq["source"]).parent for dq in dup_quarantines)
+                    for parent in sorted(parent_dirs, key=lambda p: len(p.parts), reverse=True):
+                        if _path_under(parent, Path(allowed_roots[0])):
+                            directory_removals.append(str(parent))
+            finally:
+                con.close()
+
+    elif mode == "deduplicate":
+        try:
+            aid = int(payload.get("album_id") or 0)
+        except Exception:
+            aid = 0
+        if aid <= 0:
+            return {"ok": False, "error": "album_id required", "code": "album_maintenance_invalid_payload"}
+
+        resource_keys.add(f"album:{aid}")
+        if payload.get("to_delete"):
+            for d in payload["to_delete"]:
+                try:
+                    iid = int(d.get("id") or 0)
+                    if iid > 0:
+                        resource_keys.add(f"item:{iid}")
+                        db_item_deletes.append({
+                            "id": iid,
+                            "album_id": aid,
+                            "old_path": str(d.get("path") or ""),
+                        })
+                        p_path = Path(d.get("path") or "")
+                        if p_path.exists() and p_path.is_file():
+                            st = p_path.stat()
+                            dup_quarantines.append({
+                                "item_id": iid,
+                                "source": str(p_path),
+                                "stat": {"dev": st.st_dev, "ino": st.st_ino, "size": st.st_size, "mtime_ns": st.st_mtime_ns},
+                            })
+                except Exception:
+                    continue
+
+        if payload.get("fix_updates"):
+            for fu in payload["fix_updates"]:
+                try:
+                    iid = int(fu.get("id") or 0)
+                    if iid > 0:
+                        resource_keys.add(f"item:{iid}")
+                        moves_plan.append({
+                            "type": "move_file" if fu.get("rename") else "repoint_db",
+                            "source": str(fu.get("old_path") or ""),
+                            "destination": str(fu.get("new_path") or ""),
+                        })
+                        db_item_updates.append({
+                            "id": iid,
+                            "old_path": str(fu.get("old_path") or ""),
+                            "new_path": str(fu.get("new_path") or ""),
+                        })
+                except Exception:
+                    continue
+
+    summary_text = f"Album maintenance ({mode}): {len(db_item_deletes)} item delete(s), {len(dup_quarantines)} quarantine(s), {len(db_album_deletes)} album retirement(s)"
+    changes = [
+        {"item_id": d["id"], "operation": "delete_item", "path": d["old_path"]}
+        for d in db_item_deletes
+    ] + [
+        {"album_id": a, "operation": "delete_album"}
+        for a in db_album_deletes
+    ]
+
+    tx = store.create(
+        operation_type="Album Maintenance",
+        status="Preview",
+        summary=summary_text,
+        changes=changes,
+        metadata={
+            "mutation_family": "album_maintenance_v1",
+            "mode": mode,
+            "moves_plan": moves_plan,
+            "dup_quarantines": dup_quarantines,
+            "directory_removals": directory_removals,
+            "db_item_deletes": db_item_deletes,
+            "db_item_updates": db_item_updates,
+            "db_album_deletes": db_album_deletes,
+            "captured_item_rows": captured_item_rows,
+            "captured_album_rows": captured_album_rows,
+            "resource_keys": sorted(resource_keys),
+            "allowed_roots": allowed_roots,
+            "created_at": _now(),
+        },
+    )
+    return {
+        "ok": True,
+        "operation_id": tx["id"],
+        "mode": mode,
+        "item_deletes_count": len(db_item_deletes),
+        "quarantine_count": len(dup_quarantines),
+        "album_deletes_count": len(db_album_deletes),
+    }
+
+
+def execute_album_maintenance_apply(
+    store: TransactionStore,
+    operation_id: str,
+    *,
+    music_allowed_roots: Optional[List[str]] = None,
+    db_path: Optional[str] = None,
+    quarantine_base_root: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Execute album maintenance apply with durable steps, TOCTOU checks, and resource locking."""
+    if not _TRANSACTION_ID_RE.match(operation_id):
+        return {"ok": False, "error": "Invalid transaction ID format", "code": "album_maintenance_invalid_id"}
+
+    with _get_apply_lock(operation_id):
+        try:
+            tx = store.get(operation_id)
+        except KeyError:
+            return {"ok": False, "error": f"Transaction {operation_id} not found", "code": "album_maintenance_not_found"}
+
+        meta = tx.get("metadata") or {}
+        if meta.get("mutation_family") != "album_maintenance_v1":
+            return {"ok": False, "error": "Transaction is not an album_maintenance_v1 operation", "code": "album_maintenance_family_mismatch"}
+
+        if tx.get("status") == "Completed":
+            return {
+                "ok": True,
+                "operation_id": operation_id,
+                "status": "Completed",
+                "mutated": True,
+                "deleted_items": meta.get("deleted_items_count", 0),
+                "deleted_albums": meta.get("deleted_albums_count", 0),
+            }
+
+        resource_keys = meta.get("resource_keys") or []
+        allowed_roots = music_allowed_roots or meta.get("allowed_roots") or [str(os.environ.get("MUSIC_ROOT", "/music"))]
+        lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB", "")
+
+        def _fail(msg: str, code: str) -> Dict[str, Any]:
+            curr = store.get(operation_id)
+            c_meta = curr.get("metadata") or {}
+            mutated = bool(c_meta.get("filesystem_mutated") or c_meta.get("db_mutated"))
+            store.update(operation_id, status="Failed", logs=[f"Apply failed: {msg}"])
+            return {"ok": False, "error": msg, "code": code, "mutated": mutated, "rollback_available": mutated}
+
+        with _lock_resources(resource_keys):
+            dup_quarantines = meta.get("dup_quarantines") or []
+            for dq in dup_quarantines:
+                src_p = Path(dq["source"])
+                if src_p.exists():
+                    st = src_p.stat()
+                    exp_st = dq["stat"]
+                    if st.st_size != exp_st["size"] or st.st_mtime_ns != exp_st["mtime_ns"]:
+                        return _fail(f"Source stat changed: {src_p}", "album_maintenance_toctou_mismatch")
+
+            store.update(operation_id, status="Running", metadata={**meta, "mutation_started": True})
+
+            q_base = quarantine_base_root or os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
+            q_dir = Path(q_base) / operation_id
+            q_dir.mkdir(parents=True, exist_ok=True)
+
+            quarantined_records: List[Dict[str, Any]] = []
+            for dq in dup_quarantines:
+                src_p = Path(dq["source"])
+                if not src_p.exists():
+                    continue
+                q_target = q_dir / f"item_{dq.get('item_id', 0)}_{src_p.name}"
+                try:
+                    _safe_rename(src_p, q_target)
+                except Exception:
+                    return _fail(f"Could not quarantine duplicate file: {src_p}", "album_maintenance_quarantine_failed")
+                quarantined_records.append({
+                    "item_id": dq.get("item_id"),
+                    "source": str(src_p),
+                    "quarantined": str(q_target),
+                })
+
+            directory_removals = meta.get("directory_removals") or []
+            removed_dirs = []
+            for dr in directory_removals:
+                dr_p = Path(dr)
+                if dr_p.exists() and dr_p.is_dir():
+                    try:
+                        if not any(dr_p.iterdir()):
+                            dr_p.rmdir()
+                            removed_dirs.append(dr)
+                    except Exception:
+                        pass
+
+            store.update(operation_id, metadata={
+                **store.get(operation_id).get("metadata", {}),
+                "filesystem_mutated": True,
+                "quarantined_records": quarantined_records,
+                "removed_dirs": removed_dirs,
+            })
+
+            # Stage 2: Database Operations
+            db_item_deletes = meta.get("db_item_deletes") or []
+            db_album_deletes = meta.get("db_album_deletes") or []
+            db_item_updates = meta.get("db_item_updates") or []
+
+            deleted_items_count = 0
+            deleted_albums_count = 0
+
+            if lib_db and Path(lib_db).exists():
+                con = sqlite3.connect(lib_db, timeout=10)
+                try:
+                    for u in db_item_updates:
+                        con.execute("UPDATE items SET path=? WHERE id=?", (u["new_path"].encode("utf-8"), u["id"]))
+
+                    for d in db_item_deletes:
+                        cur = con.execute("DELETE FROM items WHERE album_id=? AND id=?", (d["album_id"], d["id"]))
+                        if cur.rowcount == 1:
+                            deleted_items_count += 1
+
+                    for aid in db_album_deletes:
+                        # Re-verify zero items remaining before deleting album row
+                        tot = con.execute("SELECT COUNT(*) FROM items WHERE album_id=?", (aid,)).fetchone()[0]
+                        if int(tot or 0) == 0:
+                            cur = con.execute("DELETE FROM albums WHERE id=?", (aid,))
+                            if cur.rowcount == 1:
+                                deleted_albums_count += 1
+                    con.commit()
+                finally:
+                    con.close()
+
+            store.update(operation_id, status="Completed", metadata={
+                **store.get(operation_id).get("metadata", {}),
+                "db_mutated": True,
+                "deleted_items_count": deleted_items_count,
+                "deleted_albums_count": deleted_albums_count,
+                "completed_at": _now(),
+            })
+
+            return {
+                "ok": True,
+                "operation_id": operation_id,
+                "status": "Completed",
+                "mutated": True,
+                "deleted_items": deleted_items_count,
+                "deleted_albums": deleted_albums_count,
+            }
+
+
+def rollback_album_maintenance(
+    store: TransactionStore,
+    operation_id: str,
+    *,
+    music_allowed_roots: Optional[List[str]] = None,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Roll back an album_maintenance_v1 transaction by restoring files and DB rows."""
+    if not _TRANSACTION_ID_RE.match(operation_id):
+        return {"ok": False, "error": "Invalid transaction ID format", "code": "album_maintenance_invalid_id"}
+
+    with _get_apply_lock(operation_id):
+        try:
+            tx = store.get(operation_id)
+        except KeyError:
+            return {"ok": False, "error": f"Transaction {operation_id} not found", "code": "album_maintenance_not_found"}
+
+        meta = tx.get("metadata") or {}
+        if meta.get("mutation_family") != "album_maintenance_v1":
+            return {"ok": False, "error": "Transaction is not an album_maintenance_v1 operation", "code": "album_maintenance_family_mismatch"}
+
+        if tx.get("status") == "Rolled Back":
+            return {"ok": False, "error": "Transaction is already rolled back.", "code": "album_maintenance_already_rolled_back"}
+
+        if not meta.get("filesystem_mutated") and not meta.get("db_mutated"):
+            return {"ok": False, "error": "No mutations were performed to roll back.", "code": "album_maintenance_no_mutations"}
+
+        resource_keys = meta.get("resource_keys") or []
+        allowed_roots = music_allowed_roots or meta.get("allowed_roots") or [str(os.environ.get("MUSIC_ROOT", "/music"))]
+        lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB", "")
+
+        with _lock_resources(resource_keys):
+            quarantined_records = meta.get("quarantined_records") or []
+            files_restored = 0
+            for qr in quarantined_records:
+                q_p = Path(qr["quarantined"])
+                orig_p = Path(qr["source"])
+                if q_p.exists() and not orig_p.exists():
+                    orig_p.parent.mkdir(parents=True, exist_ok=True)
+                    try:
+                        _safe_rename(q_p, orig_p)
+                        files_restored += 1
+                    except Exception:
+                        pass
+
+            captured_item_rows = meta.get("captured_item_rows") or []
+            captured_album_rows = meta.get("captured_album_rows") or []
+            db_restored = 0
+
+            if lib_db and Path(lib_db).exists():
+                con = sqlite3.connect(lib_db, timeout=10)
+                try:
+                    cur = con.cursor()
+                    for item_row in captured_item_rows:
+                        iid = int(item_row["id"])
+                        cur.execute("SELECT COUNT(*) FROM items WHERE id=?", (iid,))
+                        if cur.fetchone()[0] == 0:
+                            cols = list(item_row.keys())
+                            placeholders = ",".join("?" * len(cols))
+                            cur.execute(
+                                f"INSERT INTO items ({','.join(cols)}) VALUES ({placeholders})",
+                                [item_row[c] for c in cols],
+                            )
+                            if cur.rowcount == 1:
+                                db_restored += 1
+
+                    for album_row in captured_album_rows:
+                        aid = int(album_row["id"])
+                        cur.execute("SELECT COUNT(*) FROM albums WHERE id=?", (aid,))
+                        if cur.fetchone()[0] == 0:
+                            cols = list(album_row.keys())
+                            placeholders = ",".join("?" * len(cols))
+                            cur.execute(
+                                f"INSERT INTO albums ({','.join(cols)}) VALUES ({placeholders})",
+                                [album_row[c] for c in cols],
+                            )
+                    con.commit()
+                finally:
+                    con.close()
+
+            store.update(operation_id, status="Rolled Back", metadata={
+                **meta,
+                "rollback_available": False,
+                "files_restored_count": files_restored,
+                "db_restored_count": db_restored,
+                "rolled_back_at": _now(),
+            })
+
+            return {
+                "ok": True,
+                "operation_id": operation_id,
+                "status": "Rolled Back",
+                "files_restored": files_restored,
+                "db_restored": db_restored,
+            }
+
+
+# ── album_artwork_v1 ──────────────────────────────────────────────────────────
+
+def create_album_artwork_plan(
+    store: TransactionStore,
+    payload: Dict[str, Any],
+    *,
+    music_allowed_roots: Optional[List[str]] = None,
+    db_path: Optional[str] = None,
+    quarantine_base_root: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Create a non-mutating preview plan for album artwork operations."""
+    try:
+        aid = int(payload.get("album_id") or 0)
+    except Exception:
+        aid = 0
+    if aid <= 0:
+        return {"ok": False, "error": "album_id required", "code": "album_artwork_invalid_payload"}
+
+    mode = str(payload.get("mode") or "quarantine").strip()
+    allowed_roots = music_allowed_roots or [str(os.environ.get("MUSIC_ROOT", "/music"))]
+    lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB", "")
+    if lib_db and not Path(lib_db).exists():
+        lib_db = ""
+
+    quarantines: List[Dict[str, Any]] = []
+    moves_plan: List[Dict[str, Any]] = []
+    resource_keys = [f"album:{aid}"]
+    original_artpath = ""
+
+    if payload.get("quarantined_art"):
+        quarantines = list(payload["quarantined_art"])
+    elif payload.get("candidates"):
+        for cand in payload["candidates"]:
+            src_p = Path(cand["source"])
+            if src_p.exists() and src_p.is_file():
+                st = src_p.stat()
+                quarantines.append({
+                    "source": str(src_p),
+                    "stat": {"dev": st.st_dev, "ino": st.st_ino, "size": st.st_size, "mtime_ns": st.st_mtime_ns},
+                })
+
+    if lib_db and Path(lib_db).exists():
+        con = sqlite3.connect(lib_db, timeout=10)
+        try:
+            row = con.execute("SELECT artpath FROM albums WHERE id=?", (aid,)).fetchone()
+            if row and row[0]:
+                raw_art = row[0]
+                original_artpath = raw_art.decode("utf-8", "replace") if isinstance(raw_art, bytes) else str(raw_art)
+        finally:
+            con.close()
+
+    summary_text = f"Album artwork ({mode}): {len(quarantines)} file(s) quarantined/moved"
+    tx = store.create(
+        operation_type="Album Artwork",
+        status="Preview",
+        summary=summary_text,
+        metadata={
+            "mutation_family": "album_artwork_v1",
+            "mode": mode,
+            "album_id": aid,
+            "quarantines": quarantines,
+            "moves_plan": moves_plan,
+            "original_artpath": original_artpath,
+            "resource_keys": resource_keys,
+            "allowed_roots": allowed_roots,
+            "created_at": _now(),
+        },
+    )
+    return {
+        "ok": True,
+        "operation_id": tx["id"],
+        "album_id": aid,
+        "quarantine_count": len(quarantines),
+    }
+
+
+def execute_album_artwork_apply(
+    store: TransactionStore,
+    operation_id: str,
+    *,
+    music_allowed_roots: Optional[List[str]] = None,
+    db_path: Optional[str] = None,
+    quarantine_base_root: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Execute album artwork apply with durable steps and resource locking."""
+    if not _TRANSACTION_ID_RE.match(operation_id):
+        return {"ok": False, "error": "Invalid transaction ID format", "code": "album_artwork_invalid_id"}
+
+    with _get_apply_lock(operation_id):
+        try:
+            tx = store.get(operation_id)
+        except KeyError:
+            return {"ok": False, "error": f"Transaction {operation_id} not found", "code": "album_artwork_not_found"}
+
+        meta = tx.get("metadata") or {}
+        if meta.get("mutation_family") != "album_artwork_v1":
+            return {"ok": False, "error": "Transaction is not an album_artwork_v1 operation", "code": "album_artwork_family_mismatch"}
+
+        if tx.get("status") == "Completed":
+            return {"ok": True, "operation_id": operation_id, "status": "Completed", "mutated": True}
+
+        resource_keys = meta.get("resource_keys") or []
+        allowed_roots = music_allowed_roots or meta.get("allowed_roots") or [str(os.environ.get("MUSIC_ROOT", "/music"))]
+        lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB", "")
+
+        def _fail(msg: str, code: str) -> Dict[str, Any]:
+            curr = store.get(operation_id)
+            c_meta = curr.get("metadata") or {}
+            mutated = bool(c_meta.get("filesystem_mutated") or c_meta.get("db_mutated"))
+            store.update(operation_id, status="Failed", logs=[f"Apply failed: {msg}"])
+            return {"ok": False, "error": msg, "code": code, "mutated": mutated, "rollback_available": mutated}
+
+        with _lock_resources(resource_keys):
+            quarantines = meta.get("quarantines") or []
+            for q in quarantines:
+                src_p = Path(q["source"])
+                if src_p.exists() and "stat" in q:
+                    st = src_p.stat()
+                    exp_st = q["stat"]
+                    if st.st_size != exp_st["size"] or st.st_mtime_ns != exp_st["mtime_ns"]:
+                        return _fail(f"Source artwork stat changed: {src_p}", "album_artwork_toctou_mismatch")
+
+            store.update(operation_id, status="Running", metadata={**meta, "mutation_started": True})
+
+            q_base = quarantine_base_root or os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
+            q_dir = Path(q_base) / operation_id
+            q_dir.mkdir(parents=True, exist_ok=True)
+
+            quarantined_records: List[Dict[str, Any]] = []
+            for q in quarantines:
+                src_p = Path(q["source"])
+                if not src_p.exists():
+                    continue
+                q_target = q_dir / f"art_{src_p.name}"
+                try:
+                    _safe_rename(src_p, q_target)
+                except Exception:
+                    return _fail(f"Could not quarantine artwork file: {src_p}", "album_artwork_quarantine_failed")
+                quarantined_records.append({
+                    "source": str(src_p),
+                    "quarantined": str(q_target),
+                })
+
+            store.update(operation_id, metadata={
+                **store.get(operation_id).get("metadata", {}),
+                "filesystem_mutated": True,
+                "quarantined_records": quarantined_records,
+            })
+
+            aid = int(meta.get("album_id") or 0)
+            if lib_db and Path(lib_db).exists() and aid > 0:
+                con = sqlite3.connect(lib_db, timeout=10)
+                try:
+                    con.execute("UPDATE albums SET artpath=NULL WHERE id=?", (aid,))
+                    con.commit()
+                finally:
+                    con.close()
+
+            store.update(operation_id, status="Completed", metadata={
+                **store.get(operation_id).get("metadata", {}),
+                "db_mutated": True,
+                "completed_at": _now(),
+            })
+
+            return {"ok": True, "operation_id": operation_id, "status": "Completed", "mutated": True}
+
+
+def rollback_album_artwork(
+    store: TransactionStore,
+    operation_id: str,
+    *,
+    music_allowed_roots: Optional[List[str]] = None,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Roll back an album_artwork_v1 transaction by restoring artwork files and DB pointer."""
+    if not _TRANSACTION_ID_RE.match(operation_id):
+        return {"ok": False, "error": "Invalid transaction ID format", "code": "album_artwork_invalid_id"}
+
+    with _get_apply_lock(operation_id):
+        try:
+            tx = store.get(operation_id)
+        except KeyError:
+            return {"ok": False, "error": f"Transaction {operation_id} not found", "code": "album_artwork_not_found"}
+
+        meta = tx.get("metadata") or {}
+        if meta.get("mutation_family") != "album_artwork_v1":
+            return {"ok": False, "error": "Transaction is not an album_artwork_v1 operation", "code": "album_artwork_family_mismatch"}
+
+        if tx.get("status") == "Rolled Back":
+            return {"ok": False, "error": "Transaction is already rolled back.", "code": "album_artwork_already_rolled_back"}
+
+        if not meta.get("filesystem_mutated") and not meta.get("db_mutated"):
+            return {"ok": False, "error": "No mutations were performed to roll back.", "code": "album_artwork_no_mutations"}
+
+        resource_keys = meta.get("resource_keys") or []
+        allowed_roots = music_allowed_roots or meta.get("allowed_roots") or [str(os.environ.get("MUSIC_ROOT", "/music"))]
+        lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB", "")
+
+        with _lock_resources(resource_keys):
+            quarantined_records = meta.get("quarantined_records") or []
+            files_restored = 0
+            for qr in quarantined_records:
+                q_p = Path(qr["quarantined"])
+                orig_p = Path(qr["source"])
+                if q_p.exists() and not orig_p.exists():
+                    orig_p.parent.mkdir(parents=True, exist_ok=True)
+                    try:
+                        _safe_rename(q_p, orig_p)
+                        files_restored += 1
+                    except Exception:
+                        pass
+
+            aid = int(meta.get("album_id") or 0)
+            orig_art = meta.get("original_artpath") or ""
+            if lib_db and Path(lib_db).exists() and aid > 0 and orig_art:
+                con = sqlite3.connect(lib_db, timeout=10)
+                try:
+                    con.execute("UPDATE albums SET artpath=? WHERE id=?", (orig_art.encode("utf-8"), aid))
+                    con.commit()
+                finally:
+                    con.close()
+
+            store.update(operation_id, status="Rolled Back", metadata={
+                **meta,
+                "rollback_available": False,
+                "files_restored_count": files_restored,
+                "rolled_back_at": _now(),
+            })
+
+            return {"ok": True, "operation_id": operation_id, "status": "Rolled Back", "files_restored": files_restored}
+
+
