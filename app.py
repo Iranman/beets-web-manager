@@ -40344,8 +40344,16 @@ def _apply_artist_folder_groups(root: str, keys: Optional[List[str]],
             reconcile_candidates.append({
                 "source_path": str(src),
                 "target_path": str(canonical),
+                # Evidence only, not authority -- the engine independently
+                # re-derives each folder's established Artist ID(s) from
+                # Beets DB state before treating any merge as eligible (SEC-002
+                # Wave 21 final review, findings #4-#6). fingerprint_confirmed
+                # is safe to assert here because this loop iteration only
+                # reaches this point when fp_result was already checked True
+                # a few lines above.
                 "source_mbid": mb_artistid,
                 "target_mbid": mb_artistid,
+                "fingerprint_confirmed": True,
             })
 
     summary["files"] = len(all_moves)
@@ -40365,48 +40373,47 @@ def _apply_artist_folder_groups(root: str, keys: Optional[List[str]],
         "selected_keys": list(wanted) if wanted else [],
         "candidates": reconcile_candidates,
     }
+    # SEC-002 Wave 21 final review: the previous implementation fell back to
+    # importing and directly executing backend.transaction_engine's Plan/
+    # Apply functions IN-PROCESS inside the Web Manager whenever the
+    # beets_client IPC call raised any exception -- meaning the Web Manager
+    # silently became the mutation authority (bypassing every engine-side
+    # TOCTOU/root/symlink/identity check) any time the engine was
+    # unreachable, authentication failed, DNS failed, or the response
+    # failed to parse. That is exactly the architecture violation SEC-002/
+    # ARCH-003 exists to close. There is no local fallback: if the engine
+    # cannot be reached, this fails closed and reports a stable error --
+    # nothing is mutated locally, ever.
     try:
         plan_res = beets_client.plan_artist_folder_reconcile(op_payload)
-        if not plan_res.get("ok"):
-            log.append(f"Refusing to operate: {plan_res.get('error')}")
-            return summary
-
-        op_id = plan_res["operation_id"]
-        apply_res = beets_client.apply_artist_folder_reconcile(op_id)
-        if not apply_res.get("ok"):
-            log.append(f"Engine artist folder merge failed: {apply_res.get('error')}")
-            return summary
+    except (BeetsUnavailableError, BeetsError) as ex:
+        log.append("Engine unavailable; artist folder merge was not performed.")
+        app.logger.error("Artist folder merge: engine unavailable: %s", ex)
+        return summary
     except Exception as ex:
-        # Fall back to in-process transaction_engine execution if beets_client IPC is unreachable
-        try:
-            from backend.transaction_engine import (
-                TransactionStore,
-                create_artist_folder_reconcile_plan,
-                execute_artist_folder_reconcile_apply,
-            )
-            tx_store = TransactionStore(root=str(METADATA_CACHE_ROOT / "transactions"))
-            plan_res = create_artist_folder_reconcile_plan(
-                tx_store,
-                op_payload,
-                music_allowed_roots=[str(MUSIC_ROOT)],
-                db_path=str(LIB_PATH),
-            )
-            if not plan_res.get("ok"):
-                log.append(f"Refusing to operate: {plan_res.get('error')}")
-                return summary
-            op_id = plan_res["operation_id"]
-            apply_res = execute_artist_folder_reconcile_apply(
-                tx_store,
-                op_id,
-                music_allowed_roots=[str(MUSIC_ROOT)],
-                db_path=str(LIB_PATH),
-            )
-            if not apply_res.get("ok"):
-                log.append(f"Engine artist folder merge failed: {apply_res.get('error')}")
-                return summary
-        except Exception as inner_ex:
-            log.append(f"  WARN delegating artist folder merge to engine: {inner_ex}")
-            return summary
+        log.append("Engine communication failed; artist folder merge was not performed.")
+        app.logger.error("Artist folder merge: unexpected engine communication failure: %s", ex)
+        return summary
+
+    if not plan_res.get("ok"):
+        log.append(f"Refusing to operate: {plan_res.get('error')}")
+        return summary
+
+    op_id = plan_res["operation_id"]
+    try:
+        apply_res = beets_client.apply_artist_folder_reconcile(op_id)
+    except (BeetsUnavailableError, BeetsError) as ex:
+        log.append("Engine unavailable during Apply; artist folder merge was not completed.")
+        app.logger.error("Artist folder merge: engine unavailable during apply: %s", ex)
+        return summary
+    except Exception as ex:
+        log.append("Engine communication failed during Apply; artist folder merge was not completed.")
+        app.logger.error("Artist folder merge: unexpected engine communication failure during apply: %s", ex)
+        return summary
+
+    if not apply_res.get("ok"):
+        log.append(f"Engine artist folder merge failed: {apply_res.get('error')}")
+        return summary
 
     _invalidate_lib_cache()
     log.append(f"  [merge] Delegated artist folder merge to engine (op_id={op_id})")
@@ -41065,48 +41072,38 @@ def clean_artist_folders_stamp_mbid():
             "root": str(root_path),
             "mode": "stamp_mbid",
         }
+        # SEC-002 Wave 21 final review: no local in-process fallback -- see
+        # the identical correction and rationale in _apply_artist_folder_groups.
         try:
             plan_res = beets_client.plan_artist_folder_reconcile(payload)
-            if not plan_res.get("ok"):
-                log.append(f"Refusing to operate: {plan_res.get('error')}")
-                return {"renamed": 0, "merged": 0, "skipped": len(skipped)}
-
-            op_id = plan_res["operation_id"]
-            apply_res = beets_client.apply_artist_folder_reconcile(op_id)
-            if not apply_res.get("ok"):
-                log.append(f"Engine MBID stamping failed: {apply_res.get('error')}")
-                return {"renamed": 0, "merged": 0, "skipped": len(skipped)}
+        except (BeetsUnavailableError, BeetsError) as ex:
+            log.append("Engine unavailable; MBID stamping was not performed.")
+            app.logger.error("MBID stamping: engine unavailable: %s", ex)
+            return {"renamed": 0, "merged": 0, "skipped": len(skipped)}
         except Exception as ex:
-            # Fall back to in-process transaction_engine execution if beets_client IPC is unreachable
-            try:
-                from backend.transaction_engine import (
-                    TransactionStore,
-                    create_artist_folder_reconcile_plan,
-                    execute_artist_folder_reconcile_apply,
-                )
-                tx_store = TransactionStore(root=str(METADATA_CACHE_ROOT / "transactions"))
-                plan_res = create_artist_folder_reconcile_plan(
-                    tx_store,
-                    payload,
-                    music_allowed_roots=[str(MUSIC_ROOT)],
-                    db_path=str(LIB_PATH),
-                )
-                if not plan_res.get("ok"):
-                    log.append(f"Refusing to operate: {plan_res.get('error')}")
-                    return {"renamed": 0, "merged": 0, "skipped": len(skipped)}
-                op_id = plan_res["operation_id"]
-                apply_res = execute_artist_folder_reconcile_apply(
-                    tx_store,
-                    op_id,
-                    music_allowed_roots=[str(MUSIC_ROOT)],
-                    db_path=str(LIB_PATH),
-                )
-                if not apply_res.get("ok"):
-                    log.append(f"Engine MBID stamping failed: {apply_res.get('error')}")
-                    return {"renamed": 0, "merged": 0, "skipped": len(skipped)}
-            except Exception as inner_ex:
-                log.append(f"  WARN delegating MBID stamping to engine: {inner_ex}")
-                return {"renamed": 0, "merged": 0, "skipped": len(skipped)}
+            log.append("Engine communication failed; MBID stamping was not performed.")
+            app.logger.error("MBID stamping: unexpected engine communication failure: %s", ex)
+            return {"renamed": 0, "merged": 0, "skipped": len(skipped)}
+
+        if not plan_res.get("ok"):
+            log.append(f"Refusing to operate: {plan_res.get('error')}")
+            return {"renamed": 0, "merged": 0, "skipped": len(skipped)}
+
+        op_id = plan_res["operation_id"]
+        try:
+            apply_res = beets_client.apply_artist_folder_reconcile(op_id)
+        except (BeetsUnavailableError, BeetsError) as ex:
+            log.append("Engine unavailable during Apply; MBID stamping was not completed.")
+            app.logger.error("MBID stamping: engine unavailable during apply: %s", ex)
+            return {"renamed": 0, "merged": 0, "skipped": len(skipped)}
+        except Exception as ex:
+            log.append("Engine communication failed during Apply; MBID stamping was not completed.")
+            app.logger.error("MBID stamping: unexpected engine communication failure during apply: %s", ex)
+            return {"renamed": 0, "merged": 0, "skipped": len(skipped)}
+
+        if not apply_res.get("ok"):
+            log.append(f"Engine MBID stamping failed: {apply_res.get('error')}")
+            return {"renamed": 0, "merged": 0, "skipped": len(skipped)}
 
         _invalidate_lib_cache()
         log.append(f"  [stamp] Delegated MBID stamping to engine (op_id={op_id})")

@@ -295,23 +295,63 @@ class ArtistFolderMergeIdentityTests(unittest.TestCase):
         self.assertTrue((b / "track.mp3").exists())
 
     def test_name_only_group_merges_when_fingerprint_confirms(self):
+        # SEC-002 Wave 21 final review: _apply_artist_folder_groups no
+        # longer performs any mutation itself, in-process or otherwise --
+        # every real mutation is delegated to the engine via BeetsClient
+        # (see the removed production fallback, finding #2). This test now
+        # verifies the delegation contract -- Plan/Apply get called with
+        # the expected candidate once fingerprint evidence confirms the
+        # match -- via a mock, rather than relying on production code
+        # secretly mutating the filesystem itself to prove the same point.
         a = self.music / "Bob  Marley"
         b = self.music / "Bob Marley"
         a.mkdir()
         (a / "track.mp3").write_bytes(b"fake-audio")
         b.mkdir()
         log = []
-        with mock.patch.object(app_module, "_artist_folder_fingerprint_confirms", return_value=True) as fp:
+        plan_mock = mock.MagicMock(return_value={"ok": True, "operation_id": "op_1"})
+        apply_mock = mock.MagicMock(return_value={"ok": True, "moved_files": 1})
+        with mock.patch.object(app_module, "_artist_folder_fingerprint_confirms", return_value=True) as fp, \
+             mock.patch.object(app_module.beets_client, "plan_artist_folder_reconcile", plan_mock), \
+             mock.patch.object(app_module.beets_client, "apply_artist_folder_reconcile", apply_mock):
             summary = app_module._apply_artist_folder_groups(
                 str(self.music), None, False, log, use_musicbrainz=False,
             )
         self.assertTrue(fp.called)
+        plan_mock.assert_called_once()
+        apply_mock.assert_called_once_with("op_1")
+        sent_candidates = plan_mock.call_args[0][0]["candidates"]
+        self.assertEqual(len(sent_candidates), 1)
+        sent_paths = {Path(sent_candidates[0]["source_path"]), Path(sent_candidates[0]["target_path"])}
+        self.assertEqual(sent_paths, {a, b})
         self.assertEqual(summary["folders"], 1)
-        # Exactly one of the two variant folders survives as canonical, and
-        # the track that started in the source folder ends up inside it.
-        surviving = [p for p in (a, b) if p.exists()]
-        self.assertEqual(len(surviving), 1)
-        self.assertTrue((surviving[0] / "track.mp3").exists())
+        self.assertTrue(any("Delegated artist folder merge to engine" in line for line in log))
+        # Nothing was mutated locally -- both folders still exist, since
+        # the (mocked) engine is the only thing authorized to move them.
+        self.assertTrue(a.exists())
+        self.assertTrue(b.exists())
+
+    def test_name_only_group_no_local_fallback_on_engine_failure(self):
+        """SEC-002 Wave 21 final review, finding #2: if the engine is
+        unreachable, the Web Manager must fail closed -- never fall back to
+        mutating the filesystem itself."""
+        a = self.music / "Bob  Marley"
+        b = self.music / "Bob Marley"
+        a.mkdir()
+        (a / "track.mp3").write_bytes(b"fake-audio")
+        b.mkdir()
+        log = []
+        with mock.patch.object(app_module, "_artist_folder_fingerprint_confirms", return_value=True), \
+             mock.patch.object(app_module.beets_client, "plan_artist_folder_reconcile", side_effect=ConnectionError("engine unreachable")):
+            summary = app_module._apply_artist_folder_groups(
+                str(self.music), None, False, log, use_musicbrainz=False,
+            )
+        self.assertEqual(summary["files"], 0)
+        self.assertTrue(any("Engine communication failed" in line or "Engine unavailable" in line for line in log))
+        # Fail closed: nothing touched locally.
+        self.assertTrue(a.exists())
+        self.assertTrue(b.exists())
+        self.assertTrue((a / "track.mp3").exists())
 
     def test_group_with_musicbrainz_artist_id_still_requires_fingerprint_confirmation(self):
         # group["musicbrainz"]["id"] is derived from a MusicBrainz *text
@@ -319,12 +359,18 @@ class ArtistFolderMergeIdentityTests(unittest.TestCase):
         # from per-folder audio evidence -- two different real artists who
         # happen to share a folder name would produce the same search
         # result. It must not bypass fingerprint verification.
+        #
+        # SEC-002 Wave 21 final review: verifies the delegation contract
+        # (Plan/Apply called with the expected candidate) via a mock
+        # instead of relying on the removed local-fallback mutation path.
         src = self.music / "Bob  Marley"
         dst = self.music / "Bob Marley"
         src.mkdir()
         dst.mkdir()
         (src / "track.mp3").write_bytes(b"fake-audio")
         log = []
+        plan_mock = mock.MagicMock(return_value={"ok": True, "operation_id": "op_2"})
+        apply_mock = mock.MagicMock(return_value={"ok": True, "moved_files": 1})
         with mock.patch.object(
             app_module, "_scan_artist_folder_groups",
             return_value=[{
@@ -335,13 +381,25 @@ class ArtistFolderMergeIdentityTests(unittest.TestCase):
             }],
         ), mock.patch.object(
             app_module, "_artist_folder_fingerprint_confirms", return_value=True,
-        ) as fp:
+        ) as fp, mock.patch.object(
+            app_module.beets_client, "plan_artist_folder_reconcile", plan_mock,
+        ), mock.patch.object(
+            app_module.beets_client, "apply_artist_folder_reconcile", apply_mock,
+        ):
             summary = app_module._apply_artist_folder_groups(
                 str(self.music), None, False, log, use_musicbrainz=True,
             )
         fp.assert_called_once()
+        plan_mock.assert_called_once()
+        apply_mock.assert_called_once_with("op_2")
+        sent_candidates = plan_mock.call_args[0][0]["candidates"]
+        self.assertEqual(len(sent_candidates), 1)
+        self.assertEqual(sent_candidates[0]["source_mbid"], "9a70dc00-46ed-4b1b-a415-a4fb6dcb4d0f")
+        self.assertTrue(sent_candidates[0]["fingerprint_confirmed"])
         self.assertEqual(summary["folders"], 1)
-        self.assertFalse(src.exists())
+        # Nothing mutated locally -- the (mocked) engine is the only thing
+        # authorized to move it.
+        self.assertTrue(src.exists())
 
     def test_group_with_musicbrainz_artist_id_blocked_on_fingerprint_mismatch(self):
         src = self.music / "Bob  Marley"
