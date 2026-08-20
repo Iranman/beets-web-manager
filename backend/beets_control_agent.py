@@ -3958,6 +3958,52 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             self._send_json(code, res)
             return
 
+        if path == "/albums/existing-reconcile/plan":
+            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            quarantine_root = os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
+            res = transaction_engine.create_existing_album_reconcile_plan(
+                _txn_store, body,
+                music_allowed_roots=[music_root_env],
+                quarantine_base_root=quarantine_root,
+                db_path=MUSIC_LIBRARY_PATH,
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        if path == "/albums/existing-reconcile/apply":
+            op_id = str(body.get("operation_id") or "").strip()
+            if not op_id:
+                self._send_json(400, {"ok": False, "error": "operation_id required"})
+                return
+            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            quarantine_root = os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
+            res = transaction_engine.execute_existing_album_reconcile_apply(
+                _txn_store, op_id,
+                db_path=MUSIC_LIBRARY_PATH,
+                music_allowed_roots=[music_root_env],
+                quarantine_base_root=quarantine_root,
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        if path == "/albums/existing-reconcile/rollback":
+            op_id = str(body.get("operation_id") or "").strip()
+            if not op_id:
+                self._send_json(400, {"ok": False, "error": "operation_id required"})
+                return
+            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            res = transaction_engine.rollback_existing_album_reconcile(
+                _txn_store, op_id,
+                db_path=MUSIC_LIBRARY_PATH,
+                music_allowed_roots=[music_root_env],
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+
 
         if path == "/imports/source/inspect":
             # SEC-002 Wave 8 ARCH-003: read-only, bounded inspection of an
