@@ -1724,16 +1724,28 @@ def _repair_album_mbid_sticking_once(album_id: int, mb_albumid: str,
             if plan_res.get("ok"):
                 op_id = plan_res.get("operation_id")
                 updated_count = int(plan_res.get("updated") or 0)
-                if op_id and updated_count > 0:
-                    apply_res = beets_client.apply_album_mb_track_repair(op_id)
+                # SEC-002 Wave 19 final review: a Plan with zero recording-ID
+                # repairs can still have pending release-only stamping (the
+                # engine no longer returns a "release_rows_updated" field on
+                # Plan at all -- that check always silently discarded a real,
+                # unapplied transaction). Apply whenever the engine says
+                # there is anything to do, not just when updated_count > 0.
+                needs_apply = bool(op_id) and (
+                    updated_count > 0
+                    or bool(plan_res.get("release_stamping_needed"))
+                    or int(plan_res.get("release_stamp_rows") or 0) > 0
+                )
+                if needs_apply:
+                    apply_res = beets_client.apply_album_mb_track_repair(op_id, write_tags=write_tags)
                     if apply_res.get("ok"):
                         summary["track_rows"] = updated_count
+                        summary["release_item_rows"] = int(apply_res.get("release_stamp_rows") or 0)
                         album_changed = True
                         if log is not None:
-                            log.append(f"  [mbid] Auto-repaired {updated_count} recording ID(s) for album_id {aid}.")
-                elif plan_res.get("release_rows_updated"):
-                    summary["release_item_rows"] = int(plan_res.get("release_rows_updated") or 0)
-                    album_changed = True
+                            log.append(
+                                f"  [mbid] Auto-repaired {updated_count} recording ID(s), "
+                                f"stamped release ID on {summary['release_item_rows']} row(s) for album_id {aid}."
+                            )
         except Exception as ex:
             if log is not None:
                 log.append(f"  [mbid] WARN auto recording-ID repair skipped for album_id {aid}: {ex}")
@@ -33169,19 +33181,28 @@ def repair_album_mb_tracks(aid):
 
         op_id = plan_res.get("operation_id")
         updated_count = int(plan_res.get("updated") or 0)
+        conflicts = int(plan_res.get("conflicts") or 0)
+        # SEC-002 Wave 19 final review: the engine's Plan response never
+        # actually returns "release_rows_updated" -- checking for it here
+        # meant release-only stamping (updated_count == 0 but
+        # release_stamping_needed == True) silently produced an unapplied
+        # Preview transaction and reported "nothing to do". Use the real
+        # signal (release_stamping_needed / release_stamp_rows) instead.
+        needs_apply = bool(op_id) and (
+            updated_count > 0
+            or bool(plan_res.get("release_stamping_needed"))
+            or int(plan_res.get("release_stamp_rows") or 0) > 0
+        )
 
-        if not op_id or updated_count == 0:
-            stamped = int(plan_res.get("release_rows_updated") or 0)
-            if stamped:
-                _invalidate_lib_cache()
-                _trigger_plex_refresh(log)
+        if not needs_apply:
+            if conflicts:
                 log.append(
-                    "No MusicBrainz recording IDs needed safe repair; "
-                    f"stamped release ID on {stamped} item row(s)."
+                    f"No MusicBrainz recording IDs needed safe repair; {conflicts} "
+                    "conflicting recording ID(s) require manual review."
                 )
-                return {"ok": True, "updated": 0, "release_rows_updated": stamped}
-            log.append("No MusicBrainz recording IDs needed safe repair.")
-            return {"ok": True, "updated": 0}
+            else:
+                log.append("No MusicBrainz recording IDs needed safe repair.")
+            return {"ok": True, "updated": 0, "conflicts": conflicts, "operation_id": op_id}
 
         log.append(f"[2/3] Applying controlled repair transaction {op_id} for {updated_count} track(s)...")
         try:
@@ -33195,11 +33216,22 @@ def repair_album_mb_tracks(aid):
             log.append(f"  ERROR: {err_msg}")
             return {"ok": False, "error": err_msg, "code": apply_res.get("code"), "operation_id": op_id}
 
+        release_stamp_rows = int(apply_res.get("release_stamp_rows") or 0)
         log.append("[3/3] Finalizing repair and refreshing library cache...")
         _invalidate_lib_cache()
         _trigger_plex_refresh(log)
-        log.append(f"Done — repaired {updated_count} MusicBrainz recording ID(s).")
-        return {"ok": True, "updated": updated_count, "operation_id": op_id}
+        log.append(
+            f"Done — repaired {updated_count} MusicBrainz recording ID(s), "
+            f"stamped release ID on {release_stamp_rows} row(s)."
+            + (f" {conflicts} conflicting recording ID(s) require manual review." if conflicts else "")
+        )
+        return {
+            "ok": True,
+            "updated": updated_count,
+            "release_stamp_rows": release_stamp_rows,
+            "conflicts": conflicts,
+            "operation_id": op_id,
+        }
 
     job = jobs.start_python(
         _do,

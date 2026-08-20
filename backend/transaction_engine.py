@@ -9,6 +9,7 @@ import csv
 import errno
 import io
 import json
+import logging
 import os
 import re
 import shutil
@@ -21,6 +22,8 @@ from contextlib import ExitStack
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 import urllib.parse
+
+LOG = logging.getLogger("beets_web.transaction_engine")
 
 
 STATUSES = {
@@ -3439,75 +3442,132 @@ def rollback_bulk_import_replacement(
 # Mutation Family: album_mb_track_repair_v1
 # =========================================================================
 
+_AUDIO_TAG_FIELDS = ("mb_trackid", "mb_albumid", "title", "track", "disc")
+
+
 def _read_file_audio_tags(file_path: Path) -> Dict[str, Any]:
-    tags: Dict[str, Any] = {}
+    """Read the MusicBrainz-relevant tags actually stored on disk.
+
+    Returns a structured result -- {"ok": bool, "tags": dict|None,
+    "reason": str|None} -- so callers can distinguish "read succeeded,
+    tags are genuinely blank" from every failure mode: missing file,
+    unsupported/corrupt format, or an unexpected IO error. SEC-002 Wave
+    19 final review: the previous implementation swallowed every
+    exception and returned {} either way, which made "no tags" and
+    "could not read this file" indistinguishable -- and Plan/rollback
+    recovery safety depends on knowing which one actually happened.
+
+    Uses the `mediafile` package directly: the actively maintained,
+    Beets-owned tag abstraction (`beets.mediafile` is a deprecated shim
+    over the same implementation as of Beets 2.x). There is no secondary
+    Mutagen fallback -- a second, differently-behaved tag reader is
+    exactly the kind of parallel implementation the project architecture
+    says to avoid; `mediafile` already IS Beets' own tag layer.
+    """
+    path_str = str(file_path)
     try:
-        from beets.mediafile import MediaFile
-        mf = MediaFile(file_path)
-        return {
-            "mb_trackid": getattr(mf, "mb_trackid", "") or "",
-            "mb_albumid": getattr(mf, "mb_albumid", "") or "",
-            "title": getattr(mf, "title", "") or "",
+        exists = file_path.exists()
+    except OSError as ex:
+        LOG.warning("Audio tag read: stat failed for %s: %s", path_str, ex)
+        return {"ok": False, "tags": None, "reason": "io_error"}
+    if not exists:
+        return {"ok": False, "tags": None, "reason": "not_found"}
+
+    try:
+        import mediafile
+    except ImportError as ex:
+        LOG.error("Audio tag read: mediafile package unavailable: %s", ex)
+        return {"ok": False, "tags": None, "reason": "backend_unavailable"}
+
+    try:
+        mf = mediafile.MediaFile(file_path)
+        result_tags = {
+            "mb_trackid": str(getattr(mf, "mb_trackid", "") or "").strip(),
+            "mb_albumid": str(getattr(mf, "mb_albumid", "") or "").strip(),
+            "title": str(getattr(mf, "title", "") or ""),
             "track": int(getattr(mf, "track", 0) or 0),
             "disc": int(getattr(mf, "disc", 1) or 1),
         }
-    except Exception:
-        pass
-    try:
-        import mutagen
-        f = mutagen.File(file_path, easy=True)
-        if f is not None:
-            return {
-                "mb_trackid": (f.get("musicbrainz_trackid") or [""])[0],
-                "mb_albumid": (f.get("musicbrainz_albumid") or [""])[0],
-                "title": (f.get("title") or [""])[0],
-                "track": int((f.get("tracknumber") or [0])[0]),
-                "disc": int((f.get("discnumber") or [1])[0]),
-            }
-    except Exception:
-        pass
-    return tags
+    except mediafile.UnreadableFileError as ex:
+        LOG.warning("Audio tag read: unreadable file %s: %s", path_str, ex)
+        return {"ok": False, "tags": None, "reason": "unreadable"}
+    except OSError as ex:
+        LOG.warning("Audio tag read: io error for %s: %s", path_str, ex)
+        return {"ok": False, "tags": None, "reason": "io_error"}
+    except Exception as ex:
+        LOG.error("Audio tag read: unexpected error for %s: %s", path_str, ex)
+        return {"ok": False, "tags": None, "reason": "unknown_error"}
+    return {"ok": True, "tags": result_tags, "reason": None}
 
 
-def _write_file_audio_tags(file_path: Path, tags: Dict[str, Any]) -> bool:
-    written = False
+def _write_file_audio_tags(file_path: Path, tags: Dict[str, Any]) -> Dict[str, Any]:
+    """Write MusicBrainz-relevant tags to disk and verify by reading them
+    back through an independent read (not the writer's own in-memory
+    state).
+
+    Returns {"ok": bool, "reason": str|None, "mismatched_fields": [...]}.
+    There is NO fallback that can report success without an authoritative
+    writer actually writing the requested values. SEC-002 Wave 19 final
+    review: the removed `file_path.touch()` fallback only changed the
+    file's mtime -- not a metadata write -- and let unparseable fixtures
+    (and any real unsupported file) silently "succeed" while writing
+    nothing, with the transaction then reporting the repair as complete.
+    A write only counts as successful once the exact requested values are
+    independently read back from the file.
+    """
+    path_str = str(file_path)
     try:
-        from beets.mediafile import MediaFile
-        mf = MediaFile(file_path)
+        import mediafile
+    except ImportError as ex:
+        LOG.error("Audio tag write: mediafile package unavailable: %s", ex)
+        return {"ok": False, "reason": "backend_unavailable"}
+
+    try:
+        mf = mediafile.MediaFile(file_path)
         for k, v in tags.items():
             if hasattr(mf, k):
                 setattr(mf, k, v)
         mf.save()
-        written = True
-    except Exception:
-        pass
-    if not written:
-        try:
-            import mutagen
-            f = mutagen.File(file_path, easy=True)
-            if f is not None:
-                mapping = {
-                    "mb_trackid": "musicbrainz_trackid",
-                    "mb_albumid": "musicbrainz_albumid",
-                    "title": "title",
-                    "track": "tracknumber",
-                    "disc": "discnumber",
-                }
-                for k, v in tags.items():
-                    mk = mapping.get(k, k)
-                    f[mk] = str(v)
-                f.save()
-                written = True
-        except Exception:
-            pass
-    if not written:
-        try:
-            if file_path.exists():
-                file_path.touch()
-                written = True
-        except Exception:
-            pass
-    return written
+    except mediafile.UnreadableFileError as ex:
+        LOG.warning("Audio tag write: unreadable file %s: %s", path_str, ex)
+        return {"ok": False, "reason": "unreadable"}
+    except OSError as ex:
+        LOG.warning("Audio tag write: io error for %s: %s", path_str, ex)
+        return {"ok": False, "reason": "io_error"}
+    except Exception as ex:
+        LOG.error("Audio tag write: unexpected error for %s: %s", path_str, ex)
+        return {"ok": False, "reason": "unknown_error"}
+
+    readback = _read_file_audio_tags(file_path)
+    if not readback.get("ok"):
+        LOG.error(
+            "Audio tag write: readback failed for %s (reason=%s) -- write not verified",
+            path_str, readback.get("reason"),
+        )
+        return {"ok": False, "reason": "readback_failed"}
+
+    actual = readback["tags"] or {}
+    mismatched: List[str] = []
+    for k, expected in tags.items():
+        if k not in _AUDIO_TAG_FIELDS:
+            continue
+        if k in ("track", "disc"):
+            try:
+                expected_cmp, actual_cmp = int(expected or 0), int(actual.get(k) or 0)
+            except Exception:
+                expected_cmp, actual_cmp = expected, actual.get(k)
+        else:
+            expected_cmp = str(expected or "").strip()
+            actual_cmp = str(actual.get(k) or "").strip()
+            if k in ("mb_trackid", "mb_albumid"):
+                expected_cmp, actual_cmp = expected_cmp.lower(), actual_cmp.lower()
+        if expected_cmp != actual_cmp:
+            mismatched.append(k)
+    if mismatched:
+        LOG.error("Audio tag write: readback mismatch for %s: fields=%s", path_str, mismatched)
+        return {"ok": False, "reason": "readback_mismatch", "mismatched_fields": mismatched}
+
+    return {"ok": True, "reason": None}
 
 
 def create_album_mb_track_repair_plan(
@@ -3600,12 +3660,31 @@ def create_album_mb_track_repair_plan(
         return {"ok": False, "error": (mb.get("error") if isinstance(mb, dict) else None) or "MusicBrainz release lookup failed"}
 
     candidate_rg = str(mb.get("release_group") or "").strip().lower()
-    if caller_override and album_rg:
-        if candidate_rg and candidate_rg != album_rg:
+    # Release Group ID remains the canonical album-family identity; Release
+    # ID is edition/tracklist evidence. Refuse whenever the selected
+    # release's Release Group would conflict with (or silently establish,
+    # unreviewed) the album's identity -- never stamp a Release ID's
+    # Release Group into mb_releasegroupid as a side effect of a
+    # recording-ID repair. SEC-002 Wave 19 final review: this used to only
+    # check the conflict case when the caller passed an explicit
+    # mb_albumid override AND the album already had an established RG --
+    # a blank album_rg went completely unchecked.
+    if candidate_rg:
+        if album_rg and candidate_rg != album_rg:
             return {
                 "ok": False,
                 "error": "Requested release belongs to a different Release Group than this album's established identity; refusing repair.",
                 "code": "repair_identity_mismatch",
+            }
+        if not album_rg:
+            return {
+                "ok": False,
+                "error": (
+                    "This album has no established MusicBrainz Release Group identity "
+                    "(mb_releasegroupid is blank); refusing recording-ID repair until a "
+                    "canonical Release Group is established for this album."
+                ),
+                "code": "repair_rg_not_established",
             }
 
     mb_tracks = mb.get("tracks") or []
@@ -3681,7 +3760,9 @@ def create_album_mb_track_repair_plan(
         return {"ok": False, "error": f"Track alignment failed: {ex}"}
 
     tracks_to_repair: List[Dict[str, Any]] = []
+    conflicts_requiring_review: List[Dict[str, Any]] = []
     changes: List[Dict[str, Any]] = []
+    unreadable_items: List[Dict[str, Any]] = []
 
     for expected in alignment.get("tracks") or []:
         matched_item = expected.get("item") or {}
@@ -3698,6 +3779,23 @@ def create_album_mb_track_repair_plan(
             continue
 
         item_path = item_paths[iid]
+
+        # Capture the ACTUAL on-disk tag values before any mutation --
+        # separate from the Beets DB row read above. SEC-002 Wave 19 final
+        # review: rollback must restore what was really on the file, not
+        # assume the DB row and the file tags were identical. If the file
+        # cannot be read reliably, we cannot honestly promise recovery for
+        # it, so this item is excluded from automatic repair rather than
+        # applying a mutation we cannot truthfully roll back.
+        file_read = _read_file_audio_tags(item_path)
+        if not file_read.get("ok"):
+            unreadable_items.append({
+                "item_id": iid,
+                "path": str(item_path),
+                "reason": file_read.get("reason"),
+            })
+            continue
+
         before_state = {
             "title": str(matched_item.get("title") or ""),
             "artist": album_artist,
@@ -3711,6 +3809,7 @@ def create_album_mb_track_repair_plan(
             "path": str(item_path),
             "filename": item_path.name,
             "stat": item_stats[iid],
+            "file_tags": file_read["tags"],
         }
         after_state = {
             "title": str(expected.get("title") or ""),
@@ -3721,7 +3820,10 @@ def create_album_mb_track_repair_plan(
             "track": int(expected.get("track") or 0),
             "mb_trackid": target_mbid,
             "mb_albumid": target_mb_albumid,
-            "mb_releasegroupid": candidate_rg or album_rg,
+            # Apply never writes mb_releasegroupid (RGID stays canonical
+            # and is never mutated by this mutation family) -- show it
+            # unchanged rather than claiming a change that never happens.
+            "mb_releasegroupid": album_rg,
         }
         repair_spec = {
             "item_id": iid,
@@ -3734,43 +3836,134 @@ def create_album_mb_track_repair_plan(
                 "mb_trackid": target_mbid,
             },
         }
-        tracks_to_repair.append(repair_spec)
-        changes.append({
+        change_row = {
             "id": iid,
             "track": f"{after_state['disc']}-{after_state['track']} {after_state['title']}",
             "before": before_state,
             "after": after_state,
             "identity_evidence": repair_spec["identity_evidence"],
-        })
+        }
 
-    release_stamping_needed = False
-    if not tracks_to_repair:
+        if current_mbid:
+            # A nonblank Recording ID already on this item is existing
+            # identity evidence, not an empty slot. `best_album_track_match`
+            # only reaches this branch when the item's OWN Recording ID did
+            # NOT match anything in the selected tracklist -- i.e. the
+            # match came from title/position/duration fuzzy scoring alone
+            # (backend/mb_alignment.album_track_score), which is not
+            # sufficient evidence to overwrite an existing identity per
+            # project policy ("destructive actions require stronger
+            # evidence than suggestions"). Surface for manual review
+            # instead of silently repairing it.
+            change_row["status"] = "requires_review"
+            change_row["review_reason"] = (
+                "Existing MusicBrainz Recording ID conflicts with the tracklist-aligned "
+                "match; fuzzy title/position/duration evidence alone is not sufficient "
+                "to overwrite an established identity."
+            )
+            conflicts_requiring_review.append(repair_spec)
+        else:
+            change_row["status"] = "planned"
+            tracks_to_repair.append(repair_spec)
+        changes.append(change_row)
+
+    # Release-only stamping: every OTHER item in the album (not already
+    # covered by a recording-ID repair row above) whose mb_albumid does not
+    # match the target release. SEC-002 Wave 19 final review: Apply updates
+    # `items.mb_albumid` for the whole album, so Plan must show every row
+    # that will change -- not just the recording-ID repair subset -- and
+    # rollback must be able to restore each one individually (not just
+    # infer the album's original value from the first repaired track).
+    repair_item_ids = {t["item_id"] for t in tracks_to_repair}
+    album_release_stamp_rows: List[Dict[str, Any]] = []
+    if target_mb_albumid:
         for it in items_list:
-            if not it.get("mb_albumid") or it["mb_albumid"] != target_mb_albumid:
-                release_stamping_needed = True
-                break
+            iid = it["id"]
+            if iid in repair_item_ids:
+                continue
+            if it.get("mb_albumid") == target_mb_albumid:
+                continue
+            item_path = item_paths[iid]
+            file_read = _read_file_audio_tags(item_path)
+            if not file_read.get("ok"):
+                unreadable_items.append({
+                    "item_id": iid,
+                    "path": str(item_path),
+                    "reason": file_read.get("reason"),
+                })
+                continue
+            stamp_row = {
+                "item_id": iid,
+                "before": {
+                    "mb_albumid": it.get("mb_albumid") or "",
+                    "path": str(item_path),
+                    "stat": item_stats[iid],
+                    "file_tags": file_read["tags"],
+                },
+                "after": {"mb_albumid": target_mb_albumid},
+            }
+            album_release_stamp_rows.append(stamp_row)
+            changes.append({
+                "id": iid,
+                "track": f"release-stamp: {it.get('title') or item_path.name}",
+                "before": stamp_row["before"],
+                "after": stamp_row["after"],
+                "identity_evidence": {
+                    "source": "musicbrainz_release_stamp",
+                    "mb_albumid": target_mb_albumid,
+                },
+                "status": "planned",
+            })
 
-    if not tracks_to_repair and not release_stamping_needed:
-        return {"ok": True, "updated": 0, "message": "No MusicBrainz recording IDs needed safe repair."}
+    album_before = {
+        "mb_albumid": str(album_row["mb_albumid"] or "").strip().lower(),
+        "mb_releasegroupid": album_rg,
+    }
+    release_stamping_needed = bool(album_release_stamp_rows) or (
+        bool(target_mb_albumid) and target_mb_albumid != album_before["mb_albumid"]
+    )
 
-    summary = f"Repair MB track IDs for album {album_id}: {len(tracks_to_repair)} track(s)"
+    if not tracks_to_repair and not conflicts_requiring_review and not release_stamping_needed:
+        return {
+            "ok": True,
+            "updated": 0,
+            "conflicts": 0,
+            "message": "No MusicBrainz recording IDs needed safe repair.",
+            "unreadable_items": unreadable_items,
+        }
+
+    summary = (
+        f"Repair MB track IDs for album {album_id}: {len(tracks_to_repair)} track(s), "
+        f"{len(conflicts_requiring_review)} conflict(s) requiring review, "
+        f"release stamping {'needed' if release_stamping_needed else 'not needed'}"
+    )
     tx_payload = {
         "album_id": album_id,
         "mb_albumid": target_mb_albumid,
         "mb_releasegroupid": album_rg,
         "tracks_to_repair": tracks_to_repair,
+        "conflicts_requiring_review": conflicts_requiring_review,
+        "album_release_stamp_rows": album_release_stamp_rows,
+        "album_before": album_before,
         "release_stamping_needed": release_stamping_needed,
+        "unreadable_items": unreadable_items,
     }
+    # Rollback is only ever advertised for rows we actually captured full
+    # before-state for (DB row AND on-disk file tags); unreadable items
+    # were excluded above rather than included with an unrecoverable
+    # promise (SEC-002 Wave 19 final review, "rollback availability
+    # semantics").
     tx = store.create(
         operation_type="Repair",
         status="Preview",
         summary=summary,
         changes=changes,
         rollback_available=True,
-        rollback_reason="Can restore prior Beets DB track attributes and file tags",
+        rollback_reason="Can restore prior Beets DB track/album attributes and on-disk file tags for every repaired row.",
         metadata={
             "mutation_family": "album_mb_track_repair_v1",
             "payload": tx_payload,
+            "cancellable": False,
             **tx_payload,
         },
     )
@@ -3781,6 +3974,10 @@ def create_album_mb_track_repair_plan(
         "operation_id": tx["id"],
         "transaction": tx_res,
         "updated": len(tracks_to_repair),
+        "conflicts": len(conflicts_requiring_review),
+        "release_stamping_needed": release_stamping_needed,
+        "release_stamp_rows": len(album_release_stamp_rows),
+        "unreadable_items": unreadable_items,
     }
 
 
@@ -3790,22 +3987,32 @@ def execute_album_mb_track_repair_apply(
     *,
     db_path: Optional[str] = None,
     music_allowed_roots: Optional[List[str]] = None,
+    write_tags: bool = True,
 ) -> Dict[str, Any]:
-    """Execute Apply phase for album_mb_track_repair_v1 (SEC-002 Wave 19)."""
+    """Execute Apply phase for album_mb_track_repair_v1 (SEC-002 Wave 19).
+
+    `write_tags=False` performs the Beets DB update only and skips the
+    on-disk audio tag write stage entirely -- restoring the historical
+    `_repair_album_mbid_sticking_once(write_tags=False)` contract that the
+    original Wave 19 Apply silently dropped (every file mutation used to be
+    unconditional once tracks were repaired).
+    """
     op_lock = _get_apply_lock(operation_id)
     with op_lock:
         try:
             tx = store.get(operation_id)
         except KeyError:
-            return {"ok": False, "error": f"Transaction {operation_id} not found."}
+            return {"ok": False, "error": "Transaction not found.", "code": "repair_not_found"}
 
         meta = tx.get("metadata") or {}
         mutation_family = meta.get("mutation_family")
         if mutation_family != "album_mb_track_repair_v1":
-            return {"ok": False, "error": f"Transaction family mismatch: expected 'album_mb_track_repair_v1', got {mutation_family!r}"}
+            return {"ok": False, "error": "Transaction family mismatch.", "code": "repair_wrong_family"}
 
         payload = meta.get("payload") or meta or tx.get("payload") or {}
         tracks_to_repair: List[Dict[str, Any]] = payload.get("tracks_to_repair") or []
+        album_release_stamp_rows: List[Dict[str, Any]] = payload.get("album_release_stamp_rows") or []
+        album_before: Dict[str, Any] = payload.get("album_before") or {}
 
         if tx.get("status") == "Completed":
             return {
@@ -3814,14 +4021,17 @@ def execute_album_mb_track_repair_apply(
                 "already_completed": True,
                 "operation_id": operation_id,
                 "updated": len(tracks_to_repair),
+                "release_stamp_rows": len(album_release_stamp_rows),
             }
 
         album_id = int(payload.get("album_id") or 0)
         target_mb_albumid = str(payload.get("mb_albumid") or "").strip().lower()
 
-        item_ids = sorted([int(t["item_id"]) for t in tracks_to_repair])
+        item_ids = sorted({int(t["item_id"]) for t in tracks_to_repair} | {int(t["item_id"]) for t in album_release_stamp_rows})
 
-        # Resource locking: album lock + sorted item locks
+        # Resource locking: album lock + every item lock this Apply can
+        # touch, in deterministic order (album_mb_track_repair_v1's own
+        # rollback acquires the SAME locks -- see rollback_album_mb_track_repair).
         album_res_lock = _get_resource_lock(f"album:{album_id}")
         item_res_locks = [_get_resource_lock(f"item:{iid}") for iid in item_ids]
 
@@ -3839,11 +4049,13 @@ def execute_album_mb_track_repair_apply(
                     "already_completed": True,
                     "operation_id": operation_id,
                     "updated": len(tracks_to_repair),
+                    "release_stamp_rows": len(album_release_stamp_rows),
                 }
 
             lib_db = db_path or os.environ.get("BEETS_DB_PATH", os.path.expanduser("~/.config/beets/musiclibrary.blb"))
             if not os.path.exists(lib_db):
-                return {"ok": False, "error": f"Beets database file not found at {lib_db}"}
+                LOG.error("Repair apply: Beets database not found at %s", lib_db)
+                return {"ok": False, "error": "Beets database unavailable.", "code": "db_not_found"}
 
             roots = music_allowed_roots or [os.environ.get("MUSIC_ROOT", "/music")]
             roots_resolved: List[Path] = []
@@ -3857,102 +4069,120 @@ def execute_album_mb_track_repair_apply(
             if not roots_resolved:
                 roots_resolved = [Path(r) for r in roots]
 
-            # TOCTOU & Precondition Verification (ALL-OR-NOTHING)
+            def _fail(msg: str, code: str, *, mutated: bool = False) -> Dict[str, Any]:
+                store.update(operation_id, status="Failed", logs=[msg])
+                result = {"ok": False, "error": msg, "code": code}
+                if mutated:
+                    result["mutated"] = True
+                return result
+
+            def _check_item_toctou(cur: sqlite3.Cursor, iid: int, expected_path: str, expected_stat: Dict[str, Any],
+                                    *, expected_mbid: Optional[str] = None, expected_albumid: Optional[str] = None) -> Optional[Dict[str, Any]]:
+                cur.execute(
+                    "SELECT id, album_id, path, mb_trackid, mb_albumid FROM items WHERE id=?",
+                    (iid,),
+                )
+                irow = cur.fetchone()
+                if not irow:
+                    return _fail(f"Item no longer exists (id={iid}).", "repair_item_missing")
+                if int(irow["album_id"]) != album_id:
+                    return _fail(f"Item {iid} no longer belongs to this album.", "repair_album_membership_changed")
+                raw_path = irow["path"]
+                path_str = raw_path.decode("utf-8", "replace") if isinstance(raw_path, bytes) else str(raw_path)
+                if path_str != expected_path:
+                    return _fail(f"Item {iid} path changed since plan.", "repair_toctou_mismatch")
+                if expected_mbid is not None:
+                    live_mbid = str(irow["mb_trackid"] or "").strip().lower()
+                    if live_mbid != expected_mbid:
+                        return _fail(f"Item {iid} Recording ID changed since plan.", "repair_toctou_mismatch")
+                if expected_albumid is not None:
+                    live_albumid = str(irow["mb_albumid"] or "").strip().lower()
+                    if live_albumid != expected_albumid:
+                        return _fail(f"Item {iid} Release ID changed since plan.", "repair_toctou_mismatch")
+
+                item_path = Path(path_str)
+                contained = False
+                base_root = roots_resolved[0] if roots_resolved else Path(path_str).anchor
+                for root in roots_resolved:
+                    try:
+                        item_path.relative_to(root)
+                        contained = True
+                        base_root = root
+                        break
+                    except ValueError:
+                        pass
+                if not contained:
+                    return _fail(f"Item {iid} path outside allowed roots.", "repair_path_out_of_root")
+                if _path_has_symlink_under(item_path, base_root):
+                    return _fail(f"Item {iid} path contains a symlink component.", "repair_symlink_rejected")
+                if not item_path.exists():
+                    return _fail(f"Item {iid} file missing.", "repair_item_missing")
+                st = item_path.stat()
+                if (
+                    st.st_dev != expected_stat["dev"]
+                    or st.st_ino != expected_stat["ino"]
+                    or st.st_size != expected_stat["size"]
+                    or st.st_mtime_ns != expected_stat["mtime_ns"]
+                ):
+                    return _fail(f"Item {iid} file changed since plan.", "repair_toctou_mismatch")
+                return None
+
+            # TOCTOU & Precondition Verification (ALL-OR-NOTHING, before
+            # any mutation begins).
             try:
                 con = sqlite3.connect(lib_db, timeout=10)
                 con.row_factory = sqlite3.Row
-                cur = con.cursor()
-                cur.execute("SELECT id, mb_releasegroupid FROM albums WHERE id=?", (album_id,))
-                alb_row = cur.fetchone()
-                if not alb_row:
+                try:
+                    cur = con.cursor()
+                    cur.execute("SELECT id, mb_albumid, mb_releasegroupid FROM albums WHERE id=?", (album_id,))
+                    alb_row = cur.fetchone()
+                    if not alb_row:
+                        return _fail(f"Album {album_id} no longer exists.", "repair_album_missing")
+
+                    expected_rg = str(payload.get("mb_releasegroupid") or "").strip().lower()
+                    live_rg = str(alb_row["mb_releasegroupid"] or "").strip().lower()
+                    if expected_rg and live_rg and live_rg != expected_rg:
+                        return _fail("Album Release Group ID changed since plan.", "repair_identity_mismatch")
+
+                    live_album_mbid = str(alb_row["mb_albumid"] or "").strip().lower()
+                    expected_album_mbid = str(album_before.get("mb_albumid") or "").strip().lower()
+                    if live_album_mbid != expected_album_mbid:
+                        return _fail("Album Release ID changed since plan.", "repair_toctou_mismatch")
+
+                    for spec in tracks_to_repair:
+                        iid = int(spec["item_id"])
+                        before = spec["before"]
+                        failure = _check_item_toctou(
+                            cur, iid, before["path"], before["stat"],
+                            expected_mbid=before["mb_trackid"], expected_albumid=before.get("mb_albumid"),
+                        )
+                        if failure:
+                            return failure
+
+                    for spec in album_release_stamp_rows:
+                        iid = int(spec["item_id"])
+                        before = spec["before"]
+                        failure = _check_item_toctou(
+                            cur, iid, before["path"], before["stat"],
+                            expected_albumid=str(before.get("mb_albumid") or "").strip().lower(),
+                        )
+                        if failure:
+                            return failure
+                finally:
                     con.close()
-                    store.update(operation_id, status="Failed", logs=[f"TOCTOU failed: Album {album_id} missing"])
-                    return {"ok": False, "error": f"Album {album_id} no longer exists", "code": "repair_album_missing"}
+            except sqlite3.Error as ex:
+                LOG.error("Repair apply: TOCTOU verification query failed for op %s: %s", operation_id, ex)
+                return _fail("Precondition verification failed.", "repair_verification_failed")
 
-                expected_rg = str(payload.get("mb_releasegroupid") or "").strip().lower()
-                live_rg = str(alb_row["mb_releasegroupid"] or "").strip().lower()
-                if expected_rg and live_rg and live_rg != expected_rg:
-                    con.close()
-                    store.update(operation_id, status="Failed", logs=["TOCTOU failed: Album Release Group changed"])
-                    return {"ok": False, "error": "Album Release Group ID changed since plan", "code": "repair_identity_mismatch"}
-
-                for spec in tracks_to_repair:
-                    iid = int(spec["item_id"])
-                    before = spec["before"]
-                    cur.execute(
-                        "SELECT id, album_id, path, mb_trackid, mb_albumid, track, disc, title FROM items WHERE id=?",
-                        (iid,),
-                    )
-                    irow = cur.fetchone()
-                    if not irow:
-                        con.close()
-                        store.update(operation_id, status="Failed", logs=[f"TOCTOU failed: Item {iid} missing"])
-                        return {"ok": False, "error": f"Item {iid} no longer exists", "code": "repair_item_missing"}
-
-                    if int(irow["album_id"]) != album_id:
-                        con.close()
-                        store.update(operation_id, status="Failed", logs=[f"TOCTOU failed: Item {iid} album membership changed"])
-                        return {"ok": False, "error": f"Item {iid} no longer belongs to album {album_id}", "code": "repair_album_membership_changed"}
-
-                    raw_path = irow["path"]
-                    path_str = raw_path.decode("utf-8", "replace") if isinstance(raw_path, bytes) else str(raw_path)
-                    if path_str != before["path"]:
-                        con.close()
-                        store.update(operation_id, status="Failed", logs=[f"TOCTOU failed: Item {iid} path changed"])
-                        return {"ok": False, "error": f"Item {iid} path changed since plan", "code": "repair_toctou_mismatch"}
-
-                    live_mbid = str(irow["mb_trackid"] or "").strip().lower()
-                    if live_mbid != before["mb_trackid"]:
-                        con.close()
-                        store.update(operation_id, status="Failed", logs=[f"TOCTOU failed: Item {iid} Recording ID changed"])
-                        return {"ok": False, "error": f"Item {iid} Recording ID changed since plan", "code": "repair_toctou_mismatch"}
-
-                    item_path = Path(path_str)
-                    contained = False
-                    base_root = roots_resolved[0]
-                    for root in roots_resolved:
-                        try:
-                            item_path.relative_to(root)
-                            contained = True
-                            base_root = root
-                            break
-                        except ValueError:
-                            pass
-
-                    if not contained:
-                        con.close()
-                        store.update(operation_id, status="Failed", logs=[f"TOCTOU failed: Item {iid} path outside allowed roots"])
-                        return {"ok": False, "error": f"Item {iid} path outside allowed roots", "code": "repair_path_out_of_root"}
-
-                    if _path_has_symlink_under(item_path, base_root):
-                        con.close()
-                        store.update(operation_id, status="Failed", logs=[f"TOCTOU failed: Item {iid} path contains symlink"])
-                        return {"ok": False, "error": f"Item {iid} path contains symlink", "code": "repair_symlink_rejected"}
-
-                    if not item_path.exists():
-                        con.close()
-                        store.update(operation_id, status="Failed", logs=[f"TOCTOU failed: Item file {path_str} missing"])
-                        return {"ok": False, "error": f"Item file missing: {path_str}", "code": "repair_item_missing"}
-
-                    st = item_path.stat()
-                    expected_stat = before["stat"]
-                    if (
-                        st.st_dev != expected_stat["dev"]
-                        or st.st_ino != expected_stat["ino"]
-                        or st.st_size != expected_stat["size"]
-                        or st.st_mtime_ns != expected_stat["mtime_ns"]
-                    ):
-                        con.close()
-                        store.update(operation_id, status="Failed", logs=[f"TOCTOU failed: Item file {path_str} stat changed"])
-                        return {"ok": False, "error": f"Item file stat changed for {path_str}", "code": "repair_toctou_mismatch"}
-
-                con.close()
-            except Exception as ex:
-                store.update(operation_id, status="Failed", logs=[f"TOCTOU verification error: {ex}"])
-                return {"ok": False, "error": f"TOCTOU verification error: {ex}", "code": "repair_verification_failed"}
-
-            # Mark state as Running & Mutated
-            store.update(operation_id, status="Running", metadata={**meta, "mutated": True})
+            # Mutation is about to begin. `mutation_started` records intent
+            # durably before the first statement executes; `mutated` is
+            # only ever set True immediately after a mutation is actually
+            # committed (see Stage 1 below) -- SEC-002 Wave 19 final
+            # review: the previous implementation set `mutated: True`
+            # before Stage 1 even opened a connection, so a failure before
+            # the first successful commit still left the transaction
+            # falsely advertising itself as mutated/rollback-eligible.
+            store.update(operation_id, status="Running", metadata={**meta, "mutation_started": True})
 
             def _persist_step(step_name: str, step_status: str, **extra: Any) -> None:
                 curr_tx = store.get(operation_id)
@@ -3965,82 +4195,152 @@ def execute_album_mb_track_repair_apply(
                 })
                 store.update(operation_id, metadata={**curr_tx.get("metadata", {}), "apply_steps": steps})
 
-            # Stage 1: Database Updates
+            # Stage 1: Database updates -- exact rowcount verified for
+            # every row, and the whole stage rolls back atomically (single
+            # connection, single commit) if any expected row is missed.
             try:
                 con = sqlite3.connect(lib_db, timeout=10)
-                cur = con.cursor()
-                for spec in tracks_to_repair:
-                    after = spec["after"]
-                    cur.execute(
-                        "UPDATE items SET mb_trackid=?, track=?, disc=?, title=?, mb_albumid=? WHERE id=?",
-                        (after["mb_trackid"], after["track"], after["disc"], after["title"], after["mb_albumid"], spec["item_id"]),
-                    )
+                try:
+                    cur = con.cursor()
+                    for spec in tracks_to_repair:
+                        after = spec["after"]
+                        cur.execute(
+                            "UPDATE items SET mb_trackid=?, track=?, disc=?, title=?, mb_albumid=? WHERE id=?",
+                            (after["mb_trackid"], after["track"], after["disc"], after["title"], after["mb_albumid"], spec["item_id"]),
+                        )
+                        if cur.rowcount != 1:
+                            con.rollback()
+                            return _fail(f"Expected to update exactly 1 row for item {spec['item_id']}, updated {cur.rowcount}.", "repair_rowcount_mismatch")
 
-                if target_mb_albumid:
-                    cur.execute("UPDATE albums SET mb_albumid=? WHERE id=?", (target_mb_albumid, album_id))
-                    cur.execute("UPDATE items SET mb_albumid=? WHERE album_id=?", (target_mb_albumid, album_id))
-                con.commit()
-                con.close()
+                    for spec in album_release_stamp_rows:
+                        cur.execute(
+                            "UPDATE items SET mb_albumid=? WHERE id=?",
+                            (spec["after"]["mb_albumid"], spec["item_id"]),
+                        )
+                        if cur.rowcount != 1:
+                            con.rollback()
+                            return _fail(f"Expected to update exactly 1 row for item {spec['item_id']}, updated {cur.rowcount}.", "repair_rowcount_mismatch")
+
+                    if target_mb_albumid:
+                        cur.execute("UPDATE albums SET mb_albumid=? WHERE id=?", (target_mb_albumid, album_id))
+                        if cur.rowcount != 1:
+                            con.rollback()
+                            return _fail(f"Expected to update exactly 1 album row, updated {cur.rowcount}.", "repair_rowcount_mismatch")
+
+                    con.commit()
+                finally:
+                    con.close()
+                # This durably records that a real DB mutation was
+                # committed -- the truthful point at which rollback
+                # becomes meaningful for the DB side of this transaction.
+                store.update(operation_id, metadata={**store.get(operation_id).get("metadata", {}), "db_mutated": True, "mutated": True})
                 _persist_step("db_updated", "Completed")
-            except Exception as ex:
-                store.update(operation_id, status="Failed", logs=[f"Database update failed: {ex}"])
-                return {"ok": False, "error": f"Database update failed: {ex}", "code": "repair_apply_failed", "mutated": True}
+            except sqlite3.Error as ex:
+                LOG.error("Repair apply: database update failed for op %s: %s", operation_id, ex)
+                return _fail("Database update failed.", "repair_apply_failed")
 
-            # Stage 2: Audio Tag Writes
-            failed_tag_writes: List[int] = []
-            for spec in tracks_to_repair:
-                iid = spec["item_id"]
-                item_path = Path(spec["before"]["path"])
-                after = spec["after"]
-                tags_to_write = {
-                    "mb_trackid": after["mb_trackid"],
-                    "mb_albumid": after["mb_albumid"],
-                    "title": after["title"],
-                    "track": after["track"],
-                    "disc": after["disc"],
-                }
-                ok = _write_file_audio_tags(item_path, tags_to_write)
-                if ok:
-                    _persist_step("tags_applied", "Completed", item_id=iid)
-                else:
-                    failed_tag_writes.append(iid)
-                    _persist_step("tags_applied", "Failed", item_id=iid)
+            # Stage 2: Audio tag writes (skipped entirely when
+            # write_tags=False -- DB-only maintenance mode).
+            failed_tag_writes: List[Dict[str, Any]] = []
+            if write_tags:
+                for spec in tracks_to_repair:
+                    iid = spec["item_id"]
+                    item_path = Path(spec["before"]["path"])
+                    after = spec["after"]
+                    tags_to_write = {
+                        "mb_trackid": after["mb_trackid"],
+                        "mb_albumid": after["mb_albumid"],
+                        "title": after["title"],
+                        "track": after["track"],
+                        "disc": after["disc"],
+                    }
+                    result = _write_file_audio_tags(item_path, tags_to_write)
+                    if result.get("ok"):
+                        _persist_step("tags_applied", "Completed", item_id=iid)
+                    else:
+                        failed_tag_writes.append({"item_id": iid, "reason": result.get("reason")})
+                        _persist_step("tags_applied", "Failed", item_id=iid, reason=result.get("reason"))
+
+                for spec in album_release_stamp_rows:
+                    iid = spec["item_id"]
+                    item_path = Path(spec["before"]["path"])
+                    result = _write_file_audio_tags(item_path, {"mb_albumid": spec["after"]["mb_albumid"]})
+                    if result.get("ok"):
+                        _persist_step("release_tag_applied", "Completed", item_id=iid)
+                    else:
+                        failed_tag_writes.append({"item_id": iid, "reason": result.get("reason")})
+                        _persist_step("release_tag_applied", "Failed", item_id=iid, reason=result.get("reason"))
 
             if failed_tag_writes:
+                failed_ids = [f["item_id"] for f in failed_tag_writes]
+                curr_meta = store.get(operation_id).get("metadata", {})
                 store.update(
                     operation_id,
                     status="Failed",
-                    logs=[f"Audio tag writes failed for items: {failed_tag_writes}"],
-                    metadata={**store.get(operation_id).get("metadata", {}), "failed_tag_writes": failed_tag_writes},
+                    logs=[f"Audio tag writes failed for {len(failed_tag_writes)} item(s); DB was already committed -- rollback is available."],
+                    metadata={**curr_meta, "failed_tag_writes": failed_tag_writes, "partial_mutation": True},
                 )
+                LOG.error("Repair apply: tag writes failed for op %s items=%s", operation_id, failed_ids)
                 return {
                     "ok": False,
-                    "error": f"Audio tag writes failed for {len(failed_tag_writes)} track(s)",
+                    "error": f"Audio tag writes failed for {len(failed_tag_writes)} item(s). The database was already updated; rollback is available.",
                     "code": "repair_apply_failed",
                     "mutated": True,
                     "partial_mutation": True,
-                    "failed_items": failed_tag_writes,
+                    "failed_items": failed_ids,
                 }
 
-            # Stage 3: Verification
+            if write_tags:
+                store.update(operation_id, metadata={**store.get(operation_id).get("metadata", {}), "tags_mutated": True})
+
+            # Stage 3: Post-write DB verification -- every field this
+            # transaction claims to have changed, for every row (not just
+            # mb_trackid).
             try:
                 con = sqlite3.connect(lib_db, timeout=10)
                 con.row_factory = sqlite3.Row
-                cur = con.cursor()
-                for spec in tracks_to_repair:
-                    iid = spec["item_id"]
-                    after = spec["after"]
-                    cur.execute("SELECT mb_trackid, mb_albumid, title, track, disc FROM items WHERE id=?", (iid,))
-                    row = cur.fetchone()
-                    if not row or str(row["mb_trackid"] or "").strip().lower() != after["mb_trackid"].lower():
-                        con.close()
-                        store.update(operation_id, status="Failed", logs=[f"Post-write verification failed for item {iid}"])
-                        return {"ok": False, "error": f"Post-write verification failed for item {iid}", "code": "repair_verification_failed", "mutated": True}
-                con.close()
+                try:
+                    cur = con.cursor()
+                    for spec in tracks_to_repair:
+                        iid = spec["item_id"]
+                        after = spec["after"]
+                        cur.execute("SELECT mb_trackid, mb_albumid, title, track, disc FROM items WHERE id=?", (iid,))
+                        row = cur.fetchone()
+                        if not row:
+                            return _fail(f"Post-write verification failed for item {iid}: row missing.", "repair_verification_failed", mutated=True)
+                        mismatches = []
+                        if str(row["mb_trackid"] or "").strip().lower() != after["mb_trackid"].lower():
+                            mismatches.append("mb_trackid")
+                        if str(row["mb_albumid"] or "").strip().lower() != after["mb_albumid"]:
+                            mismatches.append("mb_albumid")
+                        if str(row["title"] or "") != after["title"]:
+                            mismatches.append("title")
+                        if int(row["track"] or 0) != int(after["track"]):
+                            mismatches.append("track")
+                        if int(row["disc"] or 0) != int(after["disc"]):
+                            mismatches.append("disc")
+                        if mismatches:
+                            LOG.error("Repair apply: post-write DB mismatch for item %s fields=%s", iid, mismatches)
+                            return _fail(f"Post-write verification failed for item {iid}.", "repair_verification_failed", mutated=True)
+
+                    for spec in album_release_stamp_rows:
+                        iid = spec["item_id"]
+                        cur.execute("SELECT mb_albumid FROM items WHERE id=?", (iid,))
+                        row = cur.fetchone()
+                        if not row or str(row["mb_albumid"] or "").strip().lower() != spec["after"]["mb_albumid"]:
+                            return _fail(f"Post-write verification failed for item {iid}.", "repair_verification_failed", mutated=True)
+
+                    if target_mb_albumid:
+                        cur.execute("SELECT mb_albumid FROM albums WHERE id=?", (album_id,))
+                        arow = cur.fetchone()
+                        if not arow or str(arow["mb_albumid"] or "").strip().lower() != target_mb_albumid:
+                            return _fail("Post-write verification failed for album row.", "repair_verification_failed", mutated=True)
+                finally:
+                    con.close()
                 _persist_step("result_verified", "Completed")
-            except Exception as ex:
-                store.update(operation_id, status="Failed", logs=[f"Verification query failed: {ex}"])
-                return {"ok": False, "error": f"Verification query failed: {ex}", "code": "repair_verification_failed", "mutated": True}
+            except sqlite3.Error as ex:
+                LOG.error("Repair apply: verification query failed for op %s: %s", operation_id, ex)
+                return _fail("Post-write verification query failed.", "repair_verification_failed", mutated=True)
 
             store.update(operation_id, status="Completed", logs=["Repair apply completed successfully."])
             return {
@@ -4048,6 +4348,8 @@ def execute_album_mb_track_repair_apply(
                 "status": "Completed",
                 "operation_id": operation_id,
                 "updated": len(tracks_to_repair),
+                "release_stamp_rows": len(album_release_stamp_rows),
+                "tags_written": bool(write_tags),
             }
 
 
@@ -4064,87 +4366,204 @@ def rollback_album_mb_track_repair(
         try:
             tx = store.get(operation_id)
         except KeyError:
-            return {"ok": False, "error": f"Transaction {operation_id} not found."}
+            return {"ok": False, "error": "Transaction not found.", "code": "repair_not_found"}
 
         meta = tx.get("metadata") or {}
         mutation_family = meta.get("mutation_family")
         if mutation_family != "album_mb_track_repair_v1":
-            return {"ok": False, "error": f"Transaction family mismatch: expected 'album_mb_track_repair_v1', got {mutation_family!r}"}
+            return {"ok": False, "error": "Transaction family mismatch.", "code": "repair_wrong_family"}
 
         status = tx.get("status")
-        mutated = bool(meta.get("mutated"))
-        if status not in ("Completed", "Failed") or not mutated:
-            return {"ok": False, "error": "Rollback unavailable: transaction has not performed any mutations"}
+        if status in ("Rolled Back",):
+            return {"ok": False, "error": "This transaction has already been rolled back.", "code": "repair_already_rolled_back"}
+        db_mutated = bool(meta.get("db_mutated") or meta.get("mutated"))
+        if status not in ("Completed", "Failed", "Partially Rolled Back") or not db_mutated:
+            return {"ok": False, "error": "Rollback unavailable: transaction has not performed any mutations.", "code": "repair_not_mutated"}
 
         payload = meta.get("payload") or meta or tx.get("payload") or {}
         album_id = int(payload.get("album_id") or 0)
         tracks_to_repair: List[Dict[str, Any]] = payload.get("tracks_to_repair") or []
+        album_release_stamp_rows: List[Dict[str, Any]] = payload.get("album_release_stamp_rows") or []
+        album_before: Dict[str, Any] = payload.get("album_before") or {}
+        tags_mutated = bool(meta.get("tags_mutated"))
 
-        lib_db = db_path or os.environ.get("BEETS_DB_PATH", os.path.expanduser("~/.config/beets/musiclibrary.blb"))
-        if not os.path.exists(lib_db):
-            return {"ok": False, "error": f"Beets database file not found at {lib_db}"}
+        item_ids = sorted({int(t["item_id"]) for t in tracks_to_repair} | {int(t["item_id"]) for t in album_release_stamp_rows})
 
-        db_restored = 0
-        db_failed = 0
-        try:
-            con = sqlite3.connect(lib_db, timeout=10)
-            cur = con.cursor()
-            for spec in tracks_to_repair:
-                iid = spec["item_id"]
-                before = spec["before"]
-                cur.execute(
-                    "UPDATE items SET mb_trackid=?, track=?, disc=?, title=?, mb_albumid=? WHERE id=?",
-                    (before["mb_trackid"], before["track"], before["disc"], before["title"], before["mb_albumid"], iid),
-                )
-                if cur.rowcount == 1:
-                    db_restored += 1
-                else:
-                    db_failed += 1
+        # Same resource-locking discipline as Apply (album lock + every
+        # item lock, deterministic order) -- SEC-002 Wave 19 final review:
+        # the previous rollback only took the operation-id lock, so a
+        # concurrent Apply of a DIFFERENT transaction on the same
+        # album/items could race with this rollback.
+        album_res_lock = _get_resource_lock(f"album:{album_id}")
+        item_res_locks = [_get_resource_lock(f"item:{iid}") for iid in item_ids]
 
-            if tracks_to_repair:
-                first_before = tracks_to_repair[0]["before"]
-                cur.execute("UPDATE albums SET mb_albumid=? WHERE id=?", (first_before["mb_albumid"], album_id))
-            con.commit()
-            con.close()
-        except Exception as ex:
-            store.update(operation_id, logs=[f"Rollback database restore failed: {ex}"])
-            return {"ok": False, "error": f"Rollback database restore failed: {ex}"}
+        with ExitStack() as stack:
+            stack.enter_context(album_res_lock)
+            for ilock in item_res_locks:
+                stack.enter_context(ilock)
 
-        tags_restored = 0
-        tags_failed = 0
-        for spec in tracks_to_repair:
-            item_path = Path(spec["before"]["path"])
-            before = spec["before"]
-            tags_to_write = {
-                "mb_trackid": before["mb_trackid"],
-                "mb_albumid": before["mb_albumid"],
-                "title": before["title"],
-                "track": before["track"],
-                "disc": before["disc"],
-            }
-            if _write_file_audio_tags(item_path, tags_to_write):
-                tags_restored += 1
-            else:
-                tags_failed += 1
+            lib_db = db_path or os.environ.get("BEETS_DB_PATH", os.path.expanduser("~/.config/beets/musiclibrary.blb"))
+            if not os.path.exists(lib_db):
+                LOG.error("Repair rollback: Beets database not found at %s", lib_db)
+                return {"ok": False, "error": "Beets database unavailable.", "code": "db_not_found"}
 
-        full_success = (db_failed == 0) and (tags_failed == 0)
-        final_status = "Rolled Back" if full_success else ("Partially Rolled Back" if (db_restored or tags_restored) else "Failed")
+            roots = music_allowed_roots or [os.environ.get("MUSIC_ROOT", "/music")]
+            roots_resolved: List[Path] = []
+            for r in roots:
+                try:
+                    p = Path(r).resolve()
+                    if p.exists():
+                        roots_resolved.append(p)
+                except Exception:
+                    pass
+            if not roots_resolved:
+                roots_resolved = [Path(r) for r in roots]
 
-        store.update(
-            operation_id,
-            status=final_status,
-            logs=[f"Album MB track repair rollback completed with status {final_status}."],
-            metadata={
-                **meta,
-                "rollback_available": not full_success,
+            def _path_ok(item_path: Path) -> bool:
+                base_root = roots_resolved[0] if roots_resolved else item_path.anchor
+                contained = False
+                for root in roots_resolved:
+                    try:
+                        item_path.relative_to(root)
+                        contained = True
+                        base_root = root
+                        break
+                    except ValueError:
+                        pass
+                if not contained:
+                    return False
+                if _path_has_symlink_under(item_path, base_root):
+                    return False
+                return True
+
+            # Precondition: current DB state must still match what THIS
+            # transaction actually wrote (its "after" state), unless it
+            # never got that far (a partial DB-only failure). Refuse to
+            # overwrite state that a later, unrelated edit produced --
+            # SEC-002 Wave 19 final review, "rollback must validate
+            # current state before overwriting it".
+            try:
+                con = sqlite3.connect(lib_db, timeout=10)
+                con.row_factory = sqlite3.Row
+                try:
+                    cur = con.cursor()
+                    for spec in tracks_to_repair:
+                        iid = int(spec["item_id"])
+                        after = spec["after"]
+                        cur.execute("SELECT mb_trackid, mb_albumid, path FROM items WHERE id=?", (iid,))
+                        row = cur.fetchone()
+                        if not row:
+                            store.update(operation_id, logs=[f"Rollback precondition failed: item {iid} no longer exists."])
+                            return {"ok": False, "error": f"Item {iid} no longer exists.", "code": "repair_rollback_precondition_failed"}
+                        live_mbid = str(row["mb_trackid"] or "").strip().lower()
+                        if live_mbid != after["mb_trackid"].lower():
+                            store.update(operation_id, logs=[f"Rollback precondition failed: item {iid} was modified after this repair."])
+                            return {"ok": False, "error": f"Item {iid} was modified after this repair; refusing to overwrite a later change.", "code": "repair_rollback_stale"}
+                    for spec in album_release_stamp_rows:
+                        iid = int(spec["item_id"])
+                        cur.execute("SELECT mb_albumid FROM items WHERE id=?", (iid,))
+                        row = cur.fetchone()
+                        if not row:
+                            store.update(operation_id, logs=[f"Rollback precondition failed: item {iid} no longer exists."])
+                            return {"ok": False, "error": f"Item {iid} no longer exists.", "code": "repair_rollback_precondition_failed"}
+                        live_albumid = str(row["mb_albumid"] or "").strip().lower()
+                        if live_albumid != spec["after"]["mb_albumid"]:
+                            store.update(operation_id, logs=[f"Rollback precondition failed: item {iid} was modified after this repair."])
+                            return {"ok": False, "error": f"Item {iid} was modified after this repair; refusing to overwrite a later change.", "code": "repair_rollback_stale"}
+                finally:
+                    con.close()
+            except sqlite3.Error as ex:
+                LOG.error("Repair rollback: precondition query failed for op %s: %s", operation_id, ex)
+                return {"ok": False, "error": "Rollback precondition check failed.", "code": "repair_verification_failed"}
+
+            db_restored = 0
+            db_failed_ids: List[int] = []
+            try:
+                con = sqlite3.connect(lib_db, timeout=10)
+                try:
+                    cur = con.cursor()
+                    for spec in tracks_to_repair:
+                        iid = spec["item_id"]
+                        before = spec["before"]
+                        cur.execute(
+                            "UPDATE items SET mb_trackid=?, track=?, disc=?, title=?, mb_albumid=? WHERE id=?",
+                            (before["mb_trackid"], before["track"], before["disc"], before["title"], before["mb_albumid"], iid),
+                        )
+                        if cur.rowcount == 1:
+                            db_restored += 1
+                        else:
+                            db_failed_ids.append(iid)
+
+                    for spec in album_release_stamp_rows:
+                        iid = spec["item_id"]
+                        before = spec["before"]
+                        cur.execute("UPDATE items SET mb_albumid=? WHERE id=?", (before["mb_albumid"], iid))
+                        if cur.rowcount == 1:
+                            db_restored += 1
+                        else:
+                            db_failed_ids.append(iid)
+
+                    # Restore the album's own original value -- captured
+                    # explicitly at Plan time, not inferred from the first
+                    # repaired track (which is not necessarily the same
+                    # value the album row itself held before Apply).
+                    if album_before.get("mb_albumid") is not None:
+                        cur.execute("UPDATE albums SET mb_albumid=? WHERE id=?", (album_before["mb_albumid"], album_id))
+                    con.commit()
+                finally:
+                    con.close()
+            except sqlite3.Error as ex:
+                LOG.error("Repair rollback: database restore failed for op %s: %s", operation_id, ex)
+                store.update(operation_id, logs=["Rollback database restore failed."])
+                return {"ok": False, "error": "Rollback database restore failed.", "code": "repair_rollback_db_failed"}
+
+            tags_restored = 0
+            tags_failed_ids: List[int] = []
+            if tags_mutated:
+                for spec in tracks_to_repair + album_release_stamp_rows:
+                    iid = spec["item_id"]
+                    before = spec["before"]
+                    item_path = Path(before["path"])
+                    file_before = before.get("file_tags")
+                    if not file_before:
+                        # No trustworthy on-disk snapshot was captured for
+                        # this row (should not happen -- Plan excludes
+                        # unreadable files) -- do not guess.
+                        tags_failed_ids.append(iid)
+                        continue
+                    if not _path_ok(item_path) or not item_path.exists():
+                        tags_failed_ids.append(iid)
+                        continue
+                    tags_to_write = {k: file_before.get(k) for k in _AUDIO_TAG_FIELDS if k in file_before}
+                    result = _write_file_audio_tags(item_path, tags_to_write)
+                    if result.get("ok"):
+                        tags_restored += 1
+                    else:
+                        tags_failed_ids.append(iid)
+
+            total_rows = len(tracks_to_repair) + len(album_release_stamp_rows)
+            full_success = (not db_failed_ids) and (not tags_failed_ids)
+            any_restored = db_restored > 0 or tags_restored > 0
+            final_status = "Rolled Back" if full_success else ("Partially Rolled Back" if any_restored else "Failed")
+
+            store.update(
+                operation_id,
+                status=final_status,
+                logs=[f"Album MB track repair rollback completed with status {final_status}."],
+                metadata={
+                    **meta,
+                    "rollback_available": False,
+                    "db_restored_count": db_restored,
+                    "tags_restored_count": tags_restored,
+                    "db_failed_items": db_failed_ids,
+                    "tags_failed_items": tags_failed_ids,
+                },
+            )
+            return {
+                "ok": final_status in ("Rolled Back", "Partially Rolled Back"),
+                "operation_id": operation_id,
+                "status": final_status,
                 "db_restored_count": db_restored,
                 "tags_restored_count": tags_restored,
-            },
-        )
-        return {
-            "ok": final_status in ("Rolled Back", "Partially Rolled Back"),
-            "operation_id": operation_id,
-            "status": final_status,
-            "db_restored_count": db_restored,
-            "tags_restored_count": tags_restored,
-        }
+                "total_rows": total_rows,
+            }

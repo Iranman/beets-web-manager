@@ -315,9 +315,18 @@ class BeetsClient:
         """Engine-side album MB track repair planning (SEC-002 Wave 19)."""
         return self._request("POST", "/albums/mb-track-repair/plan", payload, timeout=timeout)
 
-    def apply_album_mb_track_repair(self, operation_id: str, *, timeout: float = 60.0) -> Dict[str, Any]:
-        """Engine-side album MB track repair application (SEC-002 Wave 19)."""
-        return self._request("POST", "/albums/mb-track-repair/apply", {"operation_id": operation_id}, timeout=timeout)
+    def apply_album_mb_track_repair(self, operation_id: str, *, write_tags: bool = True, timeout: float = 60.0) -> Dict[str, Any]:
+        """Engine-side album MB track repair application (SEC-002 Wave 19).
+
+        `write_tags=False` performs the Beets DB update only and skips the
+        on-disk audio tag write stage -- preserves the
+        `_repair_album_mbid_sticking_once(write_tags=False)` contract.
+        """
+        return self._request(
+            "POST", "/albums/mb-track-repair/apply",
+            {"operation_id": operation_id, "write_tags": bool(write_tags)},
+            timeout=timeout,
+        )
 
     def rollback_album_mb_track_repair(self, operation_id: str, *, timeout: float = 60.0) -> Dict[str, Any]:
         """Engine-side album MB track repair rollback (SEC-002 Wave 19)."""

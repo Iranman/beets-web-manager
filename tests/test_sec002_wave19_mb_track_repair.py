@@ -3,13 +3,16 @@
 Comprehensive focused test suite for album_mb_track_repair_v1 mutation family.
 """
 import ast
+import math
 import os
 import shutil
 import sqlite3
+import struct
 import tempfile
 import threading
 import time
 import unittest
+import wave
 from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
@@ -19,6 +22,8 @@ from backend.transaction_engine import (
     create_album_mb_track_repair_plan,
     execute_album_mb_track_repair_apply,
     rollback_album_mb_track_repair,
+    _read_file_audio_tags,
+    _write_file_audio_tags,
 )
 from backend.beets_client import BeetsClient
 import app as app_module
@@ -86,6 +91,42 @@ def _fake_tracklist_a(rel_id=REL_A, rg_id=RG_A):
     }
 
 
+def _write_test_audio(path: Path, *, freq: float = 220.0, duration: float = 0.2,
+                       mb_trackid: str = "", mb_albumid: str = "", title: str = "",
+                       track: int = 0, disc: int = 1) -> None:
+    """Write a real, minimal, playable WAV file with real MusicBrainz tags.
+
+    SEC-002 Wave 19 final review: the original fixture wrote fake bytes
+    (b"FLAC_DATA_1") into a .flac-named file, which no real tag reader can
+    parse. That made every Apply/rollback test pass only because
+    `_write_file_audio_tags` had a `Path.touch()` fallback that reported
+    success without writing anything -- exactly the false-success defect
+    this review exists to close. Tests that exercise real tag writes need
+    real, independently-readable audio (self-synthesized sine wave, same
+    technique as `scripts/seed_demo_library.py`'s demo library -- no
+    copyrighted material, no external fixture download).
+    """
+    sample_rate = 8000
+    n_samples = max(1, int(sample_rate * duration))
+    with wave.open(str(path), "w") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sample_rate)
+        frames = bytearray()
+        for i in range(n_samples):
+            frames += struct.pack("<h", int(3000 * math.sin(2 * math.pi * freq * i / sample_rate)))
+        w.writeframes(bytes(frames))
+
+    import mediafile
+    mf = mediafile.MediaFile(path)
+    mf.mb_trackid = mb_trackid or ""
+    mf.mb_albumid = mb_albumid or ""
+    mf.title = title or ""
+    mf.track = track or 0
+    mf.disc = disc or 1
+    mf.save()
+
+
 class Wave19FixtureBase(unittest.TestCase):
     def setUp(self):
         self._tmpdir = tempfile.TemporaryDirectory()
@@ -112,7 +153,8 @@ class Wave19FixtureBase(unittest.TestCase):
         self._env_patch.start()
         self.addCleanup(self._env_patch.stop)
 
-    def _create_album_and_items(self, album_id=1, rg_id=RG_A, rel_id=REL_A, item_count=2, outside=False):
+    def _create_album_and_items(self, album_id=1, rg_id=RG_A, rel_id=REL_A, item_count=2, outside=False,
+                                 blank_recording_ids=True, mb_albumid_override=None):
         con = sqlite3.connect(self.db_path)
         con.execute(
             "INSERT INTO albums (id, album, albumartist, mb_albumid, mb_releasegroupid, year) VALUES (?, ?, ?, ?, ?, ?)",
@@ -123,17 +165,23 @@ class Wave19FixtureBase(unittest.TestCase):
             root = self.outside_root if outside else self.music_root
             album_dir = root / f"album_{album_id}"
             album_dir.mkdir(parents=True, exist_ok=True)
-            file_path = album_dir / f"track{i}.flac"
-            file_path.write_bytes(b"FLAC_DATA_" + str(i).encode())
+            file_path = album_dir / f"track{i}.wav"
 
-            rec_id = REC_1 if i == 1 else REC_2
+            rec_id = "" if blank_recording_ids else (REC_1 if i == 1 else REC_2)
+            title = f"Track {i} Old Title"
+            item_albumid = mb_albumid_override if mb_albumid_override is not None else rel_id
+            _write_test_audio(
+                file_path, freq=220.0 * i, duration=0.2,
+                mb_trackid=rec_id, mb_albumid=item_albumid, title=title, track=i, disc=1,
+            )
+
             con.execute(
                 "INSERT INTO items (id, album_id, title, artist, album, albumartist, disc, track, path, mb_trackid, mb_albumid, mb_releasegroupid, length) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     i + (album_id - 1) * 10,
                     album_id,
-                    f"Track {i} Old Title",
+                    title,
                     "Test Artist",
                     "Test Album Title",
                     "Test Artist",
@@ -141,7 +189,7 @@ class Wave19FixtureBase(unittest.TestCase):
                     i,
                     str(file_path),
                     rec_id,
-                    rel_id,
+                    item_albumid,
                     rg_id,
                     180.0 if i == 1 else 200.0,
                 ),
@@ -191,11 +239,18 @@ class PlanTests(Wave19FixtureBase):
         con.row_factory = sqlite3.Row
         rows = con.execute("SELECT mb_trackid FROM items WHERE album_id=1 ORDER BY id").fetchall()
         con.close()
-        self.assertEqual(rows[0]["mb_trackid"], REC_1)
-        self.assertEqual(rows[1]["mb_trackid"], REC_2)
+        self.assertEqual(rows[0]["mb_trackid"], "")
+        self.assertEqual(rows[1]["mb_trackid"], "")
 
         mtimes_after = [p.stat().st_mtime_ns for p in item_paths]
         self.assertEqual(mtimes_before, mtimes_after)
+
+        # File tags must be untouched too -- Plan reads on-disk tags to
+        # capture rollback state but must never write.
+        for p in item_paths:
+            tags = _read_file_audio_tags(p)
+            self.assertTrue(tags["ok"])
+            self.assertEqual(tags["tags"]["mb_trackid"], "")
 
     def test_plan_invalid_album(self):
         res = create_album_mb_track_repair_plan(
@@ -350,6 +405,19 @@ class ApplyTests(Wave19FixtureBase):
         tx = self.store.get(op_id)
         self.assertEqual(tx["status"], "Completed")
         self.assertTrue(tx["metadata"]["mutated"])
+        self.assertTrue(tx["metadata"]["db_mutated"])
+        self.assertTrue(tx["metadata"]["tags_mutated"])
+
+        # Verify the ACTUAL on-disk tags were written and are independently
+        # readable back -- proving there is no fake touch()-only success
+        # (SEC-002 Wave 19 final review).
+        tags1 = _read_file_audio_tags(item_paths[0])
+        self.assertTrue(tags1["ok"], tags1)
+        self.assertEqual(tags1["tags"]["mb_trackid"], REC_TARGET_1)
+        self.assertEqual(tags1["tags"]["title"], "Track 1 Fixed Title")
+        tags2 = _read_file_audio_tags(item_paths[1])
+        self.assertTrue(tags2["ok"], tags2)
+        self.assertEqual(tags2["tags"]["mb_trackid"], REC_TARGET_2)
 
     def test_apply_stale_item_recording_id(self):
         self._create_album_and_items(album_id=1)
@@ -492,8 +560,17 @@ class MatchingTests(Wave19FixtureBase):
         self.assertTrue(res.get("ok"))
         self.assertEqual(res["updated"], 0)
 
-    def test_matching_same_title_wrong_recording_id(self):
-        self._create_album_and_items(album_id=1)
+    def test_matching_conflicting_recording_id_requires_review(self):
+        """SEC-002 Wave 19 final review, matching authority policy: an
+        existing NONBLANK Recording ID is identity evidence. Title/
+        position/duration fuzzy scoring alone (backend/mb_alignment.
+        best_album_track_match's non-exact_mbid path) is not sufficient
+        evidence to overwrite it -- these rows must be surfaced for manual
+        review, never auto-applied. (Previously this test asserted the
+        opposite -- that a same-title, wrong-recording-id row got silently
+        repaired -- which is exactly the unsafe behavior this review
+        requires closing.)"""
+        self._create_album_and_items(album_id=1, blank_recording_ids=False)
         res = create_album_mb_track_repair_plan(
             self.store,
             {"album_id": 1},
@@ -501,8 +578,42 @@ class MatchingTests(Wave19FixtureBase):
             db_path=str(self.db_path),
             fetch_tracklist_fn=lambda _: _fake_tracklist_a(),
         )
-        self.assertTrue(res.get("ok"))
+        self.assertTrue(res.get("ok"), res)
+        self.assertEqual(res["updated"], 0)
+        self.assertEqual(res.get("conflicts"), 2)
+
+        tx = self.store.get(res["operation_id"])
+        payload = tx["metadata"]
+        self.assertEqual(payload["tracks_to_repair"], [])
+        self.assertEqual(len(payload["conflicts_requiring_review"]), 2)
+
+        # Applying this Plan must not touch the conflicting rows.
+        apply_res = execute_album_mb_track_repair_apply(
+            self.store, res["operation_id"], db_path=str(self.db_path),
+            music_allowed_roots=[str(self.music_root)],
+        )
+        self.assertTrue(apply_res.get("ok"), apply_res)
+        con = sqlite3.connect(self.db_path)
+        rows = con.execute("SELECT mb_trackid FROM items WHERE album_id=1 ORDER BY id").fetchall()
+        con.close()
+        self.assertEqual(rows[0][0], REC_1)
+        self.assertEqual(rows[1][0], REC_2)
+
+    def test_matching_blank_recording_id_safely_filled(self):
+        """The mirror case: a BLANK Recording ID is safe to fill from
+        tracklist alignment evidence -- no conflicting identity is being
+        overwritten."""
+        self._create_album_and_items(album_id=1, blank_recording_ids=True)
+        res = create_album_mb_track_repair_plan(
+            self.store,
+            {"album_id": 1},
+            music_allowed_roots=[str(self.music_root)],
+            db_path=str(self.db_path),
+            fetch_tracklist_fn=lambda _: _fake_tracklist_a(),
+        )
+        self.assertTrue(res.get("ok"), res)
         self.assertEqual(res["updated"], 2)
+        self.assertEqual(res.get("conflicts"), 0)
 
 
 class ConcurrencyTests(Wave19FixtureBase):
@@ -611,13 +722,83 @@ class RollbackTests(Wave19FixtureBase):
         self.assertTrue(rollback_res.get("ok"))
         self.assertEqual(rollback_res["status"], "Rolled Back")
 
-        # Verify DB restored to original recording IDs
+        # Verify DB restored to original (blank) recording IDs
         con = sqlite3.connect(self.db_path)
         con.row_factory = sqlite3.Row
-        rows = con.execute("SELECT mb_trackid FROM items WHERE album_id=1 ORDER BY id").fetchall()
+        rows = con.execute("SELECT mb_trackid, title FROM items WHERE album_id=1 ORDER BY id").fetchall()
         con.close()
-        self.assertEqual(rows[0]["mb_trackid"], REC_1)
-        self.assertEqual(rows[1]["mb_trackid"], REC_2)
+        self.assertEqual(rows[0]["mb_trackid"], "")
+        self.assertEqual(rows[1]["mb_trackid"], "")
+        self.assertEqual(rows[0]["title"], "Track 1 Old Title")
+
+        # Verify the actual ON-DISK file tags were restored too, not just
+        # the DB row (SEC-002 Wave 19 final review: rollback must restore
+        # the real file-tag snapshot, not the DB's before-state).
+        item_paths = sorted((self.music_root / "album_1").glob("*.wav"))
+        for p in item_paths:
+            tags = _read_file_audio_tags(p)
+            self.assertTrue(tags["ok"])
+            self.assertEqual(tags["tags"]["mb_trackid"], "")
+
+    def test_rollback_repeated_refused(self):
+        self._create_album_and_items(album_id=1)
+        plan_res = create_album_mb_track_repair_plan(
+            self.store, {"album_id": 1},
+            music_allowed_roots=[str(self.music_root)], db_path=str(self.db_path),
+            fetch_tracklist_fn=lambda _: _fake_tracklist_a(),
+        )
+        op_id = plan_res["operation_id"]
+        apply_res = execute_album_mb_track_repair_apply(
+            self.store, op_id, db_path=str(self.db_path), music_allowed_roots=[str(self.music_root)],
+        )
+        self.assertTrue(apply_res.get("ok"))
+
+        first = rollback_album_mb_track_repair(
+            self.store, op_id, db_path=str(self.db_path), music_allowed_roots=[str(self.music_root)],
+        )
+        self.assertTrue(first.get("ok"))
+        self.assertEqual(first["status"], "Rolled Back")
+
+        second = rollback_album_mb_track_repair(
+            self.store, op_id, db_path=str(self.db_path), music_allowed_roots=[str(self.music_root)],
+        )
+        self.assertFalse(second.get("ok"))
+        self.assertEqual(second.get("code"), "repair_already_rolled_back")
+
+    def test_rollback_stale_after_manual_edit_refused(self):
+        """A later, legitimate manual edit must not be silently overwritten
+        by a stale rollback of an earlier repair (SEC-002 Wave 19 final
+        review, "rollback must validate current state before overwriting
+        it")."""
+        self._create_album_and_items(album_id=1)
+        plan_res = create_album_mb_track_repair_plan(
+            self.store, {"album_id": 1},
+            music_allowed_roots=[str(self.music_root)], db_path=str(self.db_path),
+            fetch_tracklist_fn=lambda _: _fake_tracklist_a(),
+        )
+        op_id = plan_res["operation_id"]
+        apply_res = execute_album_mb_track_repair_apply(
+            self.store, op_id, db_path=str(self.db_path), music_allowed_roots=[str(self.music_root)],
+        )
+        self.assertTrue(apply_res.get("ok"))
+
+        # Simulate a later, legitimate manual edit to item 1's Recording ID.
+        con = sqlite3.connect(self.db_path)
+        con.execute("UPDATE items SET mb_trackid=? WHERE id=1", ("55555555-5555-5555-5555-555555555555",))
+        con.commit()
+        con.close()
+
+        res = rollback_album_mb_track_repair(
+            self.store, op_id, db_path=str(self.db_path), music_allowed_roots=[str(self.music_root)],
+        )
+        self.assertFalse(res.get("ok"))
+        self.assertEqual(res.get("code"), "repair_rollback_stale")
+
+        # The manual edit must survive untouched.
+        con = sqlite3.connect(self.db_path)
+        row = con.execute("SELECT mb_trackid FROM items WHERE id=1").fetchone()
+        con.close()
+        self.assertEqual(row[0], "55555555-5555-5555-5555-555555555555")
 
     def test_rollback_unmutated_refused(self):
         self._create_album_and_items(album_id=1)
@@ -639,6 +820,321 @@ class RollbackTests(Wave19FixtureBase):
         )
         self.assertFalse(res.get("ok"))
         self.assertIn("unavailable", res.get("error", "").lower())
+
+
+class TagWriteIntegrityTests(Wave19FixtureBase):
+    """SEC-002 Wave 19 final review: prove there is no fake touch()-only
+    success path, and that a genuinely unreadable file is refused rather
+    than silently marked repaired."""
+
+    def test_unreadable_file_excluded_from_repair_not_faked(self):
+        item_paths = self._create_album_and_items(album_id=1)
+        # Overwrite item 1's file with garbage that no real tag reader can
+        # parse -- this is exactly the old fake-fixture scenario. Content
+        # is a fixed byte string so mtime/size still stay valid/stable.
+        item_paths[0].write_bytes(b"NOT_REAL_AUDIO_DATA")
+
+        res = create_album_mb_track_repair_plan(
+            self.store, {"album_id": 1},
+            music_allowed_roots=[str(self.music_root)], db_path=str(self.db_path),
+            fetch_tracklist_fn=lambda _: _fake_tracklist_a(),
+        )
+        self.assertTrue(res.get("ok"), res)
+        # Only item 2 (still real audio) is safe to repair; item 1 is
+        # excluded with a truthful reason rather than "succeeding" via a
+        # touch()-only fallback.
+        self.assertEqual(res["updated"], 1)
+        unreadable = res.get("unreadable_items") or []
+        self.assertEqual(len(unreadable), 1)
+        self.assertEqual(unreadable[0]["reason"], "unreadable")
+
+        # The garbage file must be untouched -- no touch()-driven mtime
+        # bump, no fake "success".
+        before_bytes = item_paths[0].read_bytes()
+        self.assertEqual(before_bytes, b"NOT_REAL_AUDIO_DATA")
+
+    def test_write_file_audio_tags_rejects_unreadable_file(self):
+        bogus = self.music_root / "bogus.wav"
+        bogus.write_bytes(b"NOT_REAL_AUDIO_DATA")
+        result = _write_file_audio_tags(bogus, {"title": "New Title", "mb_trackid": REC_TARGET_1})
+        self.assertFalse(result.get("ok"))
+        self.assertNotEqual(result.get("reason"), None)
+        # Must not have touched the file at all.
+        self.assertEqual(bogus.read_bytes(), b"NOT_REAL_AUDIO_DATA")
+
+    def test_write_file_audio_tags_missing_file_not_faked(self):
+        missing = self.music_root / "does_not_exist.wav"
+        result = _write_file_audio_tags(missing, {"title": "X"})
+        self.assertFalse(result.get("ok"))
+        self.assertFalse(missing.exists())
+
+    def test_read_file_audio_tags_distinguishes_blank_from_unreadable(self):
+        real_path = self.music_root / "real.wav"
+        _write_test_audio(real_path, title="", mb_trackid="")
+        blank = _read_file_audio_tags(real_path)
+        self.assertTrue(blank["ok"])
+        self.assertEqual(blank["tags"]["mb_trackid"], "")
+
+        bogus_path = self.music_root / "bogus2.wav"
+        bogus_path.write_bytes(b"GARBAGE")
+        unreadable = _read_file_audio_tags(bogus_path)
+        self.assertFalse(unreadable["ok"])
+        self.assertIsNone(unreadable["tags"])
+        self.assertEqual(unreadable["reason"], "unreadable")
+
+        missing_path = self.music_root / "missing.wav"
+        missing = _read_file_audio_tags(missing_path)
+        self.assertFalse(missing["ok"])
+        self.assertEqual(missing["reason"], "not_found")
+
+    def test_rollback_restores_actual_file_tags_not_db_row(self):
+        """Rollback must restore what was really on the file, which can
+        legitimately differ from the Beets DB row (SEC-002 Wave 19 final
+        review, "rollback does not capture the actual original file
+        tags")."""
+        item_paths = self._create_album_and_items(album_id=1)
+        # Make the on-disk title diverge from the DB row's title, as could
+        # happen in a real library where the DB and file drifted.
+        import mediafile
+        mf = mediafile.MediaFile(item_paths[0])
+        mf.title = "Track 1 Old Title (Original Mix)"
+        mf.save()
+
+        plan_res = create_album_mb_track_repair_plan(
+            self.store, {"album_id": 1},
+            music_allowed_roots=[str(self.music_root)], db_path=str(self.db_path),
+            fetch_tracklist_fn=lambda _: _fake_tracklist_a(),
+        )
+        op_id = plan_res["operation_id"]
+        apply_res = execute_album_mb_track_repair_apply(
+            self.store, op_id, db_path=str(self.db_path), music_allowed_roots=[str(self.music_root)],
+        )
+        self.assertTrue(apply_res.get("ok"), apply_res)
+
+        rollback_res = rollback_album_mb_track_repair(
+            self.store, op_id, db_path=str(self.db_path), music_allowed_roots=[str(self.music_root)],
+        )
+        self.assertTrue(rollback_res.get("ok"), rollback_res)
+
+        restored = _read_file_audio_tags(item_paths[0])
+        self.assertTrue(restored["ok"])
+        # Restored to the ACTUAL prior file value, not the DB row's
+        # "Track 1 Old Title".
+        self.assertEqual(restored["tags"]["title"], "Track 1 Old Title (Original Mix)")
+
+    def test_apply_write_tags_false_skips_file_mutation(self):
+        """write_tags=False preserves the historical DB-only maintenance
+        contract (_repair_album_mbid_sticking_once(write_tags=False)) --
+        SEC-002 Wave 19 final review found this silently ignored."""
+        item_paths = self._create_album_and_items(album_id=1)
+        plan_res = create_album_mb_track_repair_plan(
+            self.store, {"album_id": 1},
+            music_allowed_roots=[str(self.music_root)], db_path=str(self.db_path),
+            fetch_tracklist_fn=lambda _: _fake_tracklist_a(),
+        )
+        op_id = plan_res["operation_id"]
+
+        apply_res = execute_album_mb_track_repair_apply(
+            self.store, op_id, db_path=str(self.db_path),
+            music_allowed_roots=[str(self.music_root)], write_tags=False,
+        )
+        self.assertTrue(apply_res.get("ok"), apply_res)
+        self.assertFalse(apply_res.get("tags_written"))
+
+        con = sqlite3.connect(self.db_path)
+        rows = con.execute("SELECT mb_trackid FROM items WHERE album_id=1 ORDER BY id").fetchall()
+        con.close()
+        self.assertEqual(rows[0][0], REC_TARGET_1)
+
+        # File tags must remain exactly as they started -- untouched.
+        tags = _read_file_audio_tags(item_paths[0])
+        self.assertTrue(tags["ok"])
+        self.assertEqual(tags["tags"]["mb_trackid"], "")
+
+        tx = self.store.get(op_id)
+        self.assertTrue(tx["metadata"]["db_mutated"])
+        self.assertFalse(tx["metadata"].get("tags_mutated"))
+
+
+class ReleaseOnlyStampingTests(Wave19FixtureBase):
+    """SEC-002 Wave 19 final review: zero Recording-ID changes plus
+    pending release stamping must still actually Apply -- this was a
+    concrete regression (Plan created a real transaction that both
+    Web Manager callers silently never Applied)."""
+
+    def test_plan_reports_release_stamping_needed(self):
+        # Recording IDs already exact-match the target tracklist, but the
+        # item rows still carry the OLD release id -- classic release-only
+        # stamping scenario.
+        self._create_album_and_items(album_id=1, mb_albumid_override="99999999-0000-0000-0000-000000000000")
+        con = sqlite3.connect(self.db_path)
+        con.execute("UPDATE items SET mb_trackid=? WHERE id=1", (REC_TARGET_1,))
+        con.execute("UPDATE items SET mb_trackid=? WHERE id=2", (REC_TARGET_2,))
+        con.commit()
+        con.close()
+
+        res = create_album_mb_track_repair_plan(
+            self.store, {"album_id": 1},
+            music_allowed_roots=[str(self.music_root)], db_path=str(self.db_path),
+            fetch_tracklist_fn=lambda _: _fake_tracklist_a(),
+        )
+        self.assertTrue(res.get("ok"), res)
+        self.assertEqual(res["updated"], 0)
+        self.assertTrue(res.get("release_stamping_needed"))
+        self.assertEqual(res.get("release_stamp_rows"), 2)
+
+    def test_apply_actually_stamps_release_id_when_updated_is_zero(self):
+        self._create_album_and_items(album_id=1, mb_albumid_override="99999999-0000-0000-0000-000000000000")
+        con = sqlite3.connect(self.db_path)
+        con.execute("UPDATE items SET mb_trackid=? WHERE id=1", (REC_TARGET_1,))
+        con.execute("UPDATE items SET mb_trackid=? WHERE id=2", (REC_TARGET_2,))
+        con.commit()
+        con.close()
+
+        plan_res = create_album_mb_track_repair_plan(
+            self.store, {"album_id": 1},
+            music_allowed_roots=[str(self.music_root)], db_path=str(self.db_path),
+            fetch_tracklist_fn=lambda _: _fake_tracklist_a(),
+        )
+        self.assertEqual(plan_res["updated"], 0)
+        self.assertTrue(plan_res.get("release_stamping_needed"))
+        op_id = plan_res["operation_id"]
+
+        apply_res = execute_album_mb_track_repair_apply(
+            self.store, op_id, db_path=str(self.db_path), music_allowed_roots=[str(self.music_root)],
+        )
+        self.assertTrue(apply_res.get("ok"), apply_res)
+        self.assertEqual(apply_res["status"], "Completed")
+        self.assertEqual(apply_res.get("release_stamp_rows"), 2)
+
+        con = sqlite3.connect(self.db_path)
+        con.row_factory = sqlite3.Row
+        album_row = con.execute("SELECT mb_albumid FROM albums WHERE id=1").fetchone()
+        item_rows = con.execute("SELECT mb_albumid FROM items WHERE album_id=1").fetchall()
+        con.close()
+        self.assertEqual(album_row["mb_albumid"], REL_A)
+        for row in item_rows:
+            self.assertEqual(row["mb_albumid"], REL_A)
+
+    def test_rollback_restores_every_stamped_item_and_album(self):
+        self._create_album_and_items(album_id=1, mb_albumid_override="99999999-0000-0000-0000-000000000000")
+        con = sqlite3.connect(self.db_path)
+        con.execute("UPDATE items SET mb_trackid=? WHERE id=1", (REC_TARGET_1,))
+        con.execute("UPDATE items SET mb_trackid=? WHERE id=2", (REC_TARGET_2,))
+        con.commit()
+        con.close()
+
+        plan_res = create_album_mb_track_repair_plan(
+            self.store, {"album_id": 1},
+            music_allowed_roots=[str(self.music_root)], db_path=str(self.db_path),
+            fetch_tracklist_fn=lambda _: _fake_tracklist_a(),
+        )
+        op_id = plan_res["operation_id"]
+        apply_res = execute_album_mb_track_repair_apply(
+            self.store, op_id, db_path=str(self.db_path), music_allowed_roots=[str(self.music_root)],
+        )
+        self.assertTrue(apply_res.get("ok"), apply_res)
+
+        rollback_res = rollback_album_mb_track_repair(
+            self.store, op_id, db_path=str(self.db_path), music_allowed_roots=[str(self.music_root)],
+        )
+        self.assertTrue(rollback_res.get("ok"), rollback_res)
+        self.assertEqual(rollback_res["status"], "Rolled Back")
+
+        # The album row's OWN mb_albumid was already REL_A the whole time
+        # (only the item rows had drifted) -- confirm it is unchanged, and
+        # confirm every item row is back to its actual original value.
+        con = sqlite3.connect(self.db_path)
+        con.row_factory = sqlite3.Row
+        album_row = con.execute("SELECT mb_albumid FROM albums WHERE id=1").fetchone()
+        item_rows = con.execute("SELECT mb_albumid FROM items WHERE album_id=1").fetchall()
+        con.close()
+        self.assertEqual(album_row["mb_albumid"], REL_A)
+        for row in item_rows:
+            self.assertEqual(row["mb_albumid"], "99999999-0000-0000-0000-000000000000")
+
+    def test_rollback_restores_album_rows_own_original_value(self):
+        """SEC-002 Wave 19 final review, Problem A: when release-only
+        stamping happens with ZERO repaired tracks, rollback must still
+        restore the album row's own original mb_albumid -- not silently
+        skip it for lack of a `tracks_to_repair[0]` to infer from."""
+        self._create_album_and_items(album_id=1, rel_id=REL_B, rg_id=RG_A, mb_albumid_override=REL_B)
+        con = sqlite3.connect(self.db_path)
+        con.execute("UPDATE items SET mb_trackid=? WHERE id=1", (REC_TARGET_1,))
+        con.execute("UPDATE items SET mb_trackid=? WHERE id=2", (REC_TARGET_2,))
+        con.commit()
+        con.close()
+
+        plan_res = create_album_mb_track_repair_plan(
+            self.store, {"album_id": 1, "mb_albumid": REL_A},
+            music_allowed_roots=[str(self.music_root)], db_path=str(self.db_path),
+            fetch_tracklist_fn=lambda _: _fake_tracklist_a(rel_id=REL_A, rg_id=RG_A),
+        )
+        self.assertTrue(plan_res.get("ok"), plan_res)
+        self.assertEqual(plan_res["updated"], 0)
+        self.assertTrue(plan_res.get("release_stamping_needed"))
+        op_id = plan_res["operation_id"]
+
+        apply_res = execute_album_mb_track_repair_apply(
+            self.store, op_id, db_path=str(self.db_path), music_allowed_roots=[str(self.music_root)],
+        )
+        self.assertTrue(apply_res.get("ok"), apply_res)
+
+        con = sqlite3.connect(self.db_path)
+        row = con.execute("SELECT mb_albumid FROM albums WHERE id=1").fetchone()
+        con.close()
+        self.assertEqual(row[0], REL_A)
+
+        rollback_res = rollback_album_mb_track_repair(
+            self.store, op_id, db_path=str(self.db_path), music_allowed_roots=[str(self.music_root)],
+        )
+        self.assertTrue(rollback_res.get("ok"), rollback_res)
+
+        con = sqlite3.connect(self.db_path)
+        row = con.execute("SELECT mb_albumid FROM albums WHERE id=1").fetchone()
+        con.close()
+        self.assertEqual(row[0], REL_B)
+
+    def test_repair_album_mbid_sticking_once_applies_release_only_stamping(self):
+        """Exercise the actual app.py production caller
+        (_repair_album_mbid_sticking_once), not just the engine directly --
+        this is the exact function the original regression was found in."""
+        self._create_album_and_items(album_id=1, mb_albumid_override="99999999-0000-0000-0000-000000000000")
+        con = sqlite3.connect(self.db_path)
+        con.execute("UPDATE items SET mb_trackid=? WHERE id=1", (REC_TARGET_1,))
+        con.execute("UPDATE items SET mb_trackid=? WHERE id=2", (REC_TARGET_2,))
+        con.commit()
+        con.close()
+
+        plan_res = create_album_mb_track_repair_plan(
+            self.store, {"album_id": 1},
+            music_allowed_roots=[str(self.music_root)], db_path=str(self.db_path),
+            fetch_tracklist_fn=lambda _: _fake_tracklist_a(),
+        )
+
+        def _mock_plan(payload, **kwargs):
+            return plan_res
+
+        def _mock_apply(operation_id, write_tags=True, **kwargs):
+            return execute_album_mb_track_repair_apply(
+                self.store, operation_id, db_path=str(self.db_path),
+                music_allowed_roots=[str(self.music_root)], write_tags=write_tags,
+            )
+
+        with mock.patch.object(app_module, "beets_client") as mock_client:
+            mock_client.plan_album_mb_track_repair.side_effect = _mock_plan
+            mock_client.apply_album_mb_track_repair.side_effect = _mock_apply
+            summary = app_module._repair_album_mbid_sticking_once(
+                1, REL_A, [], repair_tracks=True, write_tags=True,
+            )
+
+        self.assertTrue(summary["changed"])
+        mock_client.apply_album_mb_track_repair.assert_called_once()
+
+        con = sqlite3.connect(self.db_path)
+        row = con.execute("SELECT mb_albumid FROM albums WHERE id=1").fetchone()
+        con.close()
+        self.assertEqual(row[0], REL_A)
 
 
 class RealProductionPathIntegrationTests(Wave19FixtureBase):
@@ -706,27 +1202,38 @@ class RealProductionPathIntegrationTests(Wave19FixtureBase):
 
 
 class WebManagerMutationProhibitionTests(unittest.TestCase):
-    def test_app_py_repair_endpoint_contains_no_direct_mutations(self):
+    """SEC-002 Wave 19 final review: AGY's own architecture scan only
+    inspected `repair_album_mb_tracks`, but `_repair_album_mbid_sticking_once`
+    is a second, automatic production caller of the same mutation family --
+    it must be held to the identical no-local-mutation standard."""
+
+    PROHIBITED_STRINGS = [
+        "Path.unlink", "os.unlink", "os.remove", "os.rename", "os.replace",
+        "shutil.move", "shutil.rmtree", "UPDATE items SET", "UPDATE albums SET",
+        "_beet_run", "MediaFile(", "mutagen.File(",
+    ]
+
+    def _fn_source(self, name):
         app_path = Path(app_module.__file__)
         source = app_path.read_text(encoding="utf-8")
         tree = ast.parse(source)
-
-        repair_fn_def = None
+        fn_def = None
         for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name == "repair_album_mb_tracks":
-                repair_fn_def = node
+            if isinstance(node, ast.FunctionDef) and node.name == name:
+                fn_def = node
                 break
+        self.assertIsNotNone(fn_def, f"{name} not found in app.py")
+        return ast.get_source_segment(source, fn_def)
 
-        self.assertIsNotNone(repair_fn_def, "repair_album_mb_tracks not found in app.py")
-        fn_source = ast.get_source_segment(source, repair_fn_def)
-
-        # Verify no direct file unlink / rename / remove / move or SQL write calls in repair_album_mb_tracks
-        prohibited_strings = [
-            "Path.unlink", "os.unlink", "os.remove", "os.rename", "os.replace",
-            "shutil.move", "shutil.rmtree", "UPDATE items SET", "_beet_run",
-        ]
-        for p in prohibited_strings:
+    def test_app_py_repair_endpoint_contains_no_direct_mutations(self):
+        fn_source = self._fn_source("repair_album_mb_tracks")
+        for p in self.PROHIBITED_STRINGS:
             self.assertNotIn(p, fn_source, f"Prohibited call '{p}' found in repair_album_mb_tracks")
+
+    def test_app_py_automatic_repair_helper_contains_no_direct_mutations(self):
+        fn_source = self._fn_source("_repair_album_mbid_sticking_once")
+        for p in self.PROHIBITED_STRINGS:
+            self.assertNotIn(p, fn_source, f"Prohibited call '{p}' found in _repair_album_mbid_sticking_once")
 
 
 if __name__ == "__main__":

@@ -3932,10 +3932,12 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 self._send_json(400, {"ok": False, "error": "operation_id required"})
                 return
             music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            write_tags = bool(body.get("write_tags", True))
             res = transaction_engine.execute_album_mb_track_repair_apply(
                 _txn_store, op_id,
                 db_path=MUSIC_LIBRARY_PATH,
                 music_allowed_roots=[music_root_env],
+                write_tags=write_tags,
             )
             code = 200 if res.get("ok") else 400
             self._send_json(code, res)
