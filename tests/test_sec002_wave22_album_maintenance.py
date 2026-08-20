@@ -139,8 +139,7 @@ class Wave22AlbumMaintenanceTests(unittest.TestCase):
             db_path=self.db_path,
             quarantine_base_root=str(self.quarantine_dir),
         )
-        print("APPLY_RES:", apply_res)
-        self.assertTrue(apply_res.get("ok"))
+        self.assertTrue(apply_res.get("ok"), msg=apply_res.get("error"))
         self.assertTrue(apply_res.get("mutated"))
         self.assertFalse(file1.exists())  # Quarantined
 

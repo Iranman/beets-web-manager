@@ -4119,10 +4119,12 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
 
         if path == "/albums/artwork/plan":
             music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            stg_roots = [os.environ.get("DOWNLOADS_ROOT", "/downloads"), os.environ.get("STAGING_ROOT", "/staging")]
             quarantine_root = os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
             res = transaction_engine.create_album_artwork_plan(
                 _txn_store, body,
                 music_allowed_roots=[music_root_env],
+                staging_allowed_roots=stg_roots,
                 quarantine_base_root=quarantine_root,
                 db_path=MUSIC_LIBRARY_PATH,
             )

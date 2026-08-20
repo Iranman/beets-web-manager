@@ -10399,75 +10399,68 @@ def _move_artwork_to_target(src_dir: Path, album_ids: list, log: list) -> Option
     except Exception:
         pass
 
+    # Engine-controlled relocation only (SEC-002 Wave 22 final review,
+    # findings #9/#11): the previous local `shutil.move`-based fallback
+    # ran whenever the engine call raised or reported non-ok, which meant
+    # the engine path (which, before this review, always silently
+    # quarantined instead of moving while still reporting success) could
+    # mask real artwork loss behind a truthful-looking log line, AND kept
+    # a second, parallel, unmigrated local mutation path alive in
+    # production. Engine unavailable or Plan/Apply failure now fails
+    # closed -- artwork is left in place in src_dir and the caller is
+    # told nothing was moved, never silently mutated locally.
+    top_level_files = [f for f in src_dir.iterdir() if f.is_file() and f.suffix.lower() in _ART_EXTS]
+    subdirs = [d for d in src_dir.iterdir() if d.is_dir() and d.name.lower() in _ART_SUBDIR_NAMES]
+    candidates = [{"source": str(f)} for f in top_level_files]
+    for d in subdirs:
+        candidates.extend({"source": str(f)} for f in sorted(d.rglob("*")) if f.is_file() and f.suffix.lower() in _ART_EXTS)
+
+    if not candidates:
+        return target_dir
+
     try:
         aid = album_ids[0] if album_ids else 0
         plan_res = beets_client.plan_album_artwork({
             "mode": "move",
             "album_id": aid,
-            "candidates": [{"source": str(f)} for f in src_dir.iterdir() if f.is_file() and f.suffix.lower() in _ART_EXTS],
+            "target_dir": str(target_dir),
+            "candidates": candidates,
         })
-        if plan_res.get("ok"):
-            apply_res = beets_client.apply_album_artwork(plan_res["operation_id"])
-            if apply_res.get("ok"):
-                log.append(f"  [artwork] Engine controlled artwork relocation applied: {target_dir}")
-                return target_dir
+        if not plan_res.get("ok"):
+            log.append(f"  [artwork] Engine relocation plan rejected: {plan_res.get('error')} — artwork left in source.")
+            return target_dir
+        op_id = plan_res.get("operation_id")
+        if not op_id:
+            return target_dir  # nothing eligible to move
+        apply_res = beets_client.apply_album_artwork(op_id)
+        if not apply_res.get("ok"):
+            log.append(f"  [artwork] Engine relocation apply failed: {apply_res.get('error')} — artwork left in source.")
+            return target_dir
+        log.append(
+            f"  [artwork] Engine controlled artwork relocation applied: {target_dir} "
+            f"(moved={apply_res.get('moved_count')}, deduped={apply_res.get('quarantined_count')})"
+        )
+    except (BeetsUnavailableError, BeetsError) as ex:
+        log.append(f"  [artwork] Engine unreachable — artwork relocation not performed: {ex}")
+        return target_dir
     except Exception as ex:
-        log.append(f"  [artwork] Engine artwork relocation failed: {ex}")
+        app.logger.error("Artwork relocation: unexpected engine communication failure: %s", ex)
+        log.append("  [artwork] Unexpected engine communication failure — artwork relocation not performed.")
+        return target_dir
 
-    def _file_md5(p: Path) -> str:
-        h = hashlib.md5()
-        with open(p, "rb") as fh:
-            for chunk in iter(lambda: fh.read(65536), b""):
-                h.update(chunk)
-        return h.hexdigest()
-
-    def _safe_move(src_file: Path, dst_dir: Path) -> None:
-        dst = dst_dir / src_file.name
-        if dst.exists():
-            try:
-                if (src_file.stat().st_size == dst.stat().st_size
-                        and _file_md5(src_file) == _file_md5(dst)):
-                    log.append(f"  [artwork] {src_file.name}: identical at target — removed source copy.")
-                    src_file.unlink(missing_ok=True)
-                    return
-            except Exception:
-                pass
-            stem, sfx = src_file.stem, src_file.suffix
-            free_dst: Optional[Path] = None
-            for n in range(1, 200):
-                candidate = dst_dir / f"{stem}-{n}{sfx}"
-                if not candidate.exists():
-                    free_dst = candidate
-                    break
-            if free_dst is None:
-                log.append(f"  [artwork] {src_file.name}: no free name at target — left in source.")
-                return
-            dst = free_dst
+    # Empty subdirectories the engine emptied out are cosmetic cleanup
+    # only (not a Beets-library mutation); safe to remove locally.
+    for d in subdirs:
+        for sub in sorted(d.rglob("*"), reverse=True):
+            if sub.is_dir():
+                try:
+                    sub.rmdir()
+                except OSError:
+                    pass
         try:
-            shutil.move(str(src_file), str(dst))
-            log.append(f"  [artwork] Moved {src_file.name} → {dst.name}")
-        except Exception as ex:
-            log.append(f"  [artwork] {src_file.name}: move failed — {ex}")
-
-    for entry in sorted(src_dir.iterdir()):
-        if entry.is_file() and entry.suffix.lower() in _ART_EXTS:
-            _safe_move(entry, target_dir)
-        elif entry.is_dir() and entry.name.lower() in _ART_SUBDIR_NAMES:
-            dst_sub = target_dir / entry.name
-            dst_sub.mkdir(exist_ok=True)
-            for art_file in sorted(entry.rglob("*")):
-                if art_file.is_file() and art_file.suffix.lower() in _ART_EXTS:
-                    _safe_move(art_file, dst_sub)
-            for sub in sorted(entry.rglob("*"), reverse=True):
-                if sub.is_dir():
-                    try:
-                        sub.rmdir()
-                    except Exception:
-                        pass
-            try:
-                entry.rmdir()
-            except Exception:
-                pass
+            d.rmdir()
+        except OSError:
+            pass
 
     return target_dir
 
@@ -21893,6 +21886,24 @@ def import_folder_with_id():
         t_before = time.time() - 5
         import_timeout = _beet_import_timeout(import_folder_path)
 
+        # SEC-002 / ARCH-003 Wave 22 final review, findings #3-#6 (CRITICAL,
+        # merge-blocking, not fully closed): the actual Beets import for
+        # this workflow still runs locally below via `subprocess.run`, not
+        # through this engine call. The Control Agent's `/import/apply`
+        # route does not (and, as of this review, safely cannot -- see
+        # finding #6 and the Wave 22 design doc) supply a real
+        # `beets_import_runner`, so `execute_import_folder_apply` now
+        # correctly fails closed here every time (it no longer lies about
+        # having imported anything, per finding #3's fix) rather than
+        # silently no-op-succeeding as it did before this review. This is
+        # NOT a working fallback pattern -- it is the plan/verify half of
+        # a transaction boundary that is not yet wired to the real
+        # mutation, kept only for its non-mutating preview/audit value
+        # until the native-Beets-import-inside-the-engine work described
+        # in the design doc is done. Removing the local import below
+        # before that work lands would delete the only code path that
+        # currently performs imports at all; it is intentionally still
+        # here, not a regression.
         try:
             plan_res = beets_client.plan_import_folder({
                 "source_folder": import_folder_path,
@@ -21907,8 +21918,13 @@ def import_folder_with_id():
                 apply_res = beets_client.apply_import_folder(plan_res["operation_id"])
                 if apply_res.get("ok"):
                     log.append(f"[import] Engine controlled import completed: {import_folder_path}")
+                else:
+                    log.append(f"  [import] Engine transaction not yet mutation-capable ({apply_res.get('code')}); import proceeds locally below.")
+        except (BeetsUnavailableError, BeetsError) as ex:
+            log.append(f"  [import] Engine unreachable ({ex}); import proceeds locally below.")
         except Exception as ex:
-            log.append(f"  [import] Engine import fallback: {ex}")
+            app.logger.error("Import folder: unexpected engine communication failure: %s", ex)
+            log.append("  [import] Unexpected engine communication failure; import proceeds locally below.")
 
         try:
             r = subprocess.run(
