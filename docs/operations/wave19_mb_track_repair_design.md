@@ -190,16 +190,30 @@ because `db_mutated` is already `true`.
 Both discovered callers use the identical Plan -> Apply(write_tags) contract via
 `BeetsClient` (never local mutation):
 
-- `repair_album_mb_tracks` (`app.py`, `POST /api/albums/<id>/repair-mb-tracks`) --
-  **manual**, user-triggered by the explicit "Repair MusicBrainz Tracks" UI action.
-  Plan -> immediate Apply is acceptable here because the button click is the
-  authorization event. Always `write_tags=true` (unchanged).
-- `_repair_album_mbid_sticking_once` (`app.py`) -- **automatic**, called from several
-  import/cleanup/relink code paths, always with `write_tags=True` today. Automatic
-  repair is safety-bounded by the conflict policy in section 3: it can only ever fill
-  blank Recording IDs or stamp release IDs -- it can never silently overwrite an
-  existing nonblank Recording ID, which is the property that makes running it without
-  a human review step defensible. No AI involvement.
+- `repair_album_mb_tracks` (`app.py`, `POST /api/albums/<id>/repair-mb-tracks`) -- a
+  standalone route with a `frontend/src/api/client.ts::repairAlbumMbTracks()` client
+  wrapper already defined, **but no frontend component currently calls that wrapper**
+  (verified by search -- it is not referenced anywhere in `frontend/src/views` or
+  `frontend/src/components`). In its current, corrected state, this is a
+  network-reachable API endpoint gated by the app's standard bearer/session
+  authentication, not a UI-mediated action with a visible Review step -- prior
+  drafts of this document (and the review brief) assumed a "Repair MusicBrainz
+  Tracks" button exists; it does not, as of this wave. Plan -> immediate Apply
+  remains structurally reasonable given the route requires the same authenticated
+  session as every other mutating endpoint, but there is no operator-facing preview
+  of album/target-release/conflicting-ID information before Apply runs, because
+  there is no UI surface at all yet. Tracked as a documentation/UI gap in section 11.
+  Always `write_tags=true`.
+- `_repair_album_mbid_sticking_once` (`app.py`) -- called from two kinds of sites:
+  (a) `_start_library_mbid_sticking_repair`, reachable from a real, wired UI action
+  (`startMbidStickingRepair()` in `frontend/src/views/Jobs.tsx`) that loops it over
+  many albums as one user-initiated bulk job; and (b) several fully automatic
+  import/cleanup/relink code paths with no per-repair user interaction at all.
+  Always `write_tags=True` from every current call site today. Regardless of which
+  trigger path, repair safety is bounded by the conflict policy in section 3: it can
+  only ever fill blank Recording IDs or stamp release IDs -- it can never silently
+  overwrite an existing nonblank Recording ID, which is the property that makes
+  running it without a per-instance human review step defensible. No AI involvement.
 
 Both callers previously used `updated == 0` from Plan as a proxy for "nothing to
 apply", which silently dropped release-only-stamping transactions (Plan created a
@@ -302,11 +316,14 @@ stage. Tracked as remaining ARCH-003 debt.
   and is exercised indirectly by every TOCTOU test, but there is no dedicated test
   that forces a real mid-Apply rowcount mismatch (would require white-box mocking of
   `sqlite3.Cursor`).
-- **UI**: no frontend changes shipped with this family. The existing "Repair
-  MusicBrainz Tracks" action does not show a distinct preview step for
-  `conflicts_requiring_review` rows (which are never auto-applied, but are also not
-  yet surfaced to the operator as "needs your review" in the UI). Tracked in
-  `docs/TECHNICAL_DEBT.md`.
+- **UI**: no frontend changes shipped with this family, and -- corrected during this
+  review -- `repair_album_mb_tracks`'s client wrapper
+  (`frontend/src/api/client.ts::repairAlbumMbTracks`) is not called from any
+  component; there is no wired button for the single-album manual endpoint at all.
+  The only real UI path to this mutation family is the bulk
+  `startMbidStickingRepair()` action in `frontend/src/views/Jobs.tsx`. Neither path
+  surfaces `conflicts_requiring_review` rows to the operator as "needs your review."
+  Tracked in `docs/TECHNICAL_DEBT.md`.
 - Broader ARCH-003 audit: `_merge_imported_album_into_existing`'s `dup_rows` /
   `move_ids` paths remain outside a controlled engine boundary (carried over from
   before Wave 19; not touched by this wave).
