@@ -107,14 +107,119 @@ def _duplicate_recording_groups(
     return groups
 
 
+def album_track_norm(text: Any) -> str:
+    import re
+    t = _s(text).lower()
+    t = re.sub(r"[\(\[\{].*?[\)\]\}]", "", t)
+    t = re.sub(r"[^\w\s]", "", t)
+    return " ".join(t.split())
+
+
+def album_track_title_variants(title: str, path: str = "") -> List[str]:
+    import re
+    from pathlib import Path
+    variants = [album_track_norm(title)]
+    if path:
+        stem = Path(_s(path)).stem
+        variants.append(album_track_norm(stem))
+        cleaned_stem = re.sub(r"^\d+[\s\._\-]+", "", stem)
+        variants.append(album_track_norm(cleaned_stem))
+    return [v for v in variants if v]
+
+
+def album_item_position_hints(item: Dict[str, Any]) -> tuple:
+    import re
+    from pathlib import Path
+    disc = int(item.get("disc") or 1)
+    track = int(item.get("track") or 0)
+    if track > 0:
+        return disc, track
+    path = _s(item.get("path") or "")
+    filename = Path(path).name if path else ""
+    m = re.search(r"(\d+)[_\-\s.]+(\d+)", filename)
+    if m:
+        try:
+            return int(m.group(1)), int(m.group(2))
+        except Exception:
+            pass
+    m = re.search(r"(?:track|trk|#)?\s*(\d+)", filename, re.IGNORECASE)
+    if m:
+        try:
+            return disc, int(m.group(1))
+        except Exception:
+            pass
+    return disc, 0
+
+
+def album_track_score(item: Dict[str, Any], mb_trk: Dict[str, Any]) -> float:
+    from difflib import SequenceMatcher
+    mb_norm = mb_trk.get("title_norm") or album_track_norm(mb_trk.get("title", ""))
+    variants = album_track_title_variants(item.get("title", ""), item.get("path", ""))
+    title_score = max(
+        (SequenceMatcher(None, v, mb_norm).ratio() for v in variants if v and mb_norm),
+        default=0.0,
+    )
+    pos_bonus = 0.0
+    item_disc, item_track = album_item_position_hints(item)
+    if item_track == int(mb_trk.get("track") or 0):
+        pos_bonus += 0.04
+        if item_disc == int(mb_trk.get("disc") or 1):
+            pos_bonus += 0.02
+    dur_bonus = 0.0
+    item_ms = int(float(item.get("length") or 0) * 1000)
+    mb_ms = int(mb_trk.get("duration_ms") or 0)
+    if item_ms and mb_ms:
+        diff_s = abs(item_ms - mb_ms) / 1000.0
+        dur_bonus = 0.04 if diff_s <= 4 else (0.02 if diff_s <= 10 else 0.0)
+    return min(1.0, title_score + pos_bonus + dur_bonus)
+
+
+def best_album_track_match(item: Dict[str, Any], mb_tracks: List[Dict[str, Any]]) -> Dict[str, Any]:
+    item_mbid = _s(item.get("mb_trackid", "")).strip().lower()
+    if item_mbid:
+        for idx, trk in enumerate(mb_tracks):
+            if item_mbid and item_mbid == _s(trk.get("mb_trackid", "")).strip().lower():
+                title_score = album_track_score(item, trk)
+                return {
+                    "idx": idx,
+                    "track": trk,
+                    "score": max(0.98, title_score),
+                    "title_score": title_score,
+                    "exact_mbid": True,
+                }
+    best_idx = -1
+    best_score = -1.0
+    best_rank = (-1.0, -1, -1)
+    item_disc, item_track = album_item_position_hints(item)
+    for idx, trk in enumerate(mb_tracks):
+        score = album_track_score(item, trk)
+        exact_pos = int(
+            bool(item_track and item_track == int(trk.get("track") or 0))
+            and bool(item_disc == int(trk.get("disc") or 1))
+        )
+        track_pos = int(bool(item_track and item_track == int(trk.get("track") or 0)))
+        rank = (score, exact_pos, track_pos)
+        if rank > best_rank:
+            best_rank = rank
+            best_score = score
+            best_idx = idx
+    return {
+        "idx": best_idx,
+        "track": mb_tracks[best_idx] if best_idx >= 0 else {},
+        "score": max(best_score, 0.0),
+        "title_score": max(best_score, 0.0),
+        "exact_mbid": False,
+    }
+
+
 def summarize_mb_track_alignment(
     items: List[Dict[str, Any]],
     mb_tracks: List[Dict[str, Any]],
     *,
-    match_fn: MatchFn,
+    match_fn: MatchFn = best_album_track_match,
     file_exists_fn: ExistsFn | None = None,
-    threshold: float,
-    repair_threshold: float,
+    threshold: float = 0.72,
+    repair_threshold: float = 0.65,
 ) -> Dict[str, Any]:
     """Align local items to a selected MB release and classify gaps/extras.
 
@@ -209,3 +314,4 @@ def summarize_mb_track_alignment(
         "mb_duplicate_recording_id_count": duplicate_recording_count,
         "duplicate_recording_groups": duplicate_recording_groups,
     }
+

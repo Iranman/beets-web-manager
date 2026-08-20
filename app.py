@@ -1717,68 +1717,40 @@ def _repair_album_mbid_sticking_once(album_id: int, mb_albumid: str,
     if aid <= 0 or not _MB_UUID_RE.match(mbid):
         return summary
 
-    changed = _stamp_album_release_id(aid, mbid, log)
-    summary["release_item_rows"] = int(changed or 0)
-    album_changed = changed > 0
-
+    album_changed = False
     if repair_tracks:
         try:
-            data = _album_mb_completeness(aid, mbid, [])
-            track_updates: List[tuple] = []
-            for expected in data.get("tracks") or []:
-                item = expected.get("item") or {}
-                try:
-                    item_id = int(item.get("id") or 0)
-                except Exception:
-                    item_id = 0
-                if item_id <= 0:
-                    continue
-                current_mbid = _s(item.get("mb_trackid") or "").strip().lower()
-                target_mbid = _s(expected.get("mb_trackid") or "").strip()
-                if not target_mbid or current_mbid == target_mbid.lower():
-                    continue
-                track_updates.append((
-                    target_mbid,
-                    int(expected.get("track") or 0),
-                    int(expected.get("disc") or 1),
-                    _s(expected.get("title") or ""),
-                    mbid,
-                    item_id,
-                ))
-            if track_updates:
-                with _db() as con:
-                    con.executemany(
-                        "UPDATE items SET mb_trackid=?, track=?, disc=?, title=?, mb_albumid=? "
-                        "WHERE id=?",
-                        track_updates,
-                    )
-                    con.execute("UPDATE albums SET mb_albumid=? WHERE id=?", (mbid, aid))
-                    con.commit()
-                summary["track_rows"] = len(track_updates)
-                album_changed = True
-                if log is not None:
-                    log.append(
-                        f"  [mbid] Auto-repaired {len(track_updates)} recording ID(s) "
-                        f"for album_id {aid}."
-                    )
+            plan_res = beets_client.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mbid})
+            if plan_res.get("ok"):
+                op_id = plan_res.get("operation_id")
+                updated_count = int(plan_res.get("updated") or 0)
+                # SEC-002 Wave 19 final review: a Plan with zero recording-ID
+                # repairs can still have pending release-only stamping (the
+                # engine no longer returns a "release_rows_updated" field on
+                # Plan at all -- that check always silently discarded a real,
+                # unapplied transaction). Apply whenever the engine says
+                # there is anything to do, not just when updated_count > 0.
+                needs_apply = bool(op_id) and (
+                    updated_count > 0
+                    or bool(plan_res.get("release_stamping_needed"))
+                    or int(plan_res.get("release_stamp_rows") or 0) > 0
+                )
+                if needs_apply:
+                    apply_res = beets_client.apply_album_mb_track_repair(op_id, write_tags=write_tags)
+                    if apply_res.get("ok"):
+                        summary["track_rows"] = updated_count
+                        summary["release_item_rows"] = int(apply_res.get("release_stamp_rows") or 0)
+                        album_changed = True
+                        if log is not None:
+                            log.append(
+                                f"  [mbid] Auto-repaired {updated_count} recording ID(s), "
+                                f"stamped release ID on {summary['release_item_rows']} row(s) for album_id {aid}."
+                            )
         except Exception as ex:
             if log is not None:
                 log.append(f"  [mbid] WARN auto recording-ID repair skipped for album_id {aid}: {ex}")
 
     summary["changed"] = bool(album_changed)
-    if album_changed and write_tags:
-        job_cfg = f"/tmp/beets-auto-mbid-sticking-{aid}-{uuid.uuid4().hex}.yaml"
-        base = [BEET_BIN, "-c", _write_job_beets_config(job_cfg)]
-        proc = _beet_run(
-            base + ["write", f"album_id:{aid}"],
-            log if log is not None else [],
-            timeout=180,
-            env=_beet_env(),
-            cancel=cancel_event,
-        )
-        summary["write_returncode"] = proc.returncode
-        if proc.returncode != 0 and log is not None:
-            log.append(f"  [mbid] WARN beet write failed for album_id {aid} (rc={proc.returncode})")
     return summary
 
 
@@ -33195,93 +33167,71 @@ def repair_album_mb_tracks(aid):
         return jsonify({"ok": False, "error": f"Album {aid} not found"}), 404
 
     def _do(log, cancel_event=None):
-        log.append(f"[1/3] Checking MusicBrainz track matches for album_id {aid}...")
-        data = _album_mb_completeness(aid, mbid, log)
-        updates: List[tuple] = []
-        blank_count = 0
-        mismatched_count = 0
+        log.append(f"[1/3] Planning MusicBrainz track repair for album_id {aid}...")
+        try:
+            plan_res = beets_client.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mbid})
+        except Exception as ex:
+            log.append(f"  ERROR: Plan request failed: {ex}")
+            return {"ok": False, "error": f"Repair plan failed: {ex}"}
 
-        for expected in data.get("tracks") or []:
-            item = expected.get("item") or {}
-            try:
-                item_id = int(item.get("id") or 0)
-            except Exception:
-                item_id = 0
-            if item_id <= 0:
-                continue
+        if not plan_res.get("ok"):
+            err_msg = plan_res.get("error") or "Repair planning failed."
+            log.append(f"  ERROR: {err_msg}")
+            return {"ok": False, "error": err_msg, "code": plan_res.get("code")}
 
-            current_mbid = _s(item.get("mb_trackid") or "").strip()
-            target_mbid = _s(expected.get("mb_trackid") or "").strip()
-            if not target_mbid or current_mbid.lower() == target_mbid.lower():
-                continue
-            if current_mbid:
-                mismatched_count += 1
-            else:
-                blank_count += 1
+        op_id = plan_res.get("operation_id")
+        updated_count = int(plan_res.get("updated") or 0)
+        conflicts = int(plan_res.get("conflicts") or 0)
+        # SEC-002 Wave 19 final review: the engine's Plan response never
+        # actually returns "release_rows_updated" -- checking for it here
+        # meant release-only stamping (updated_count == 0 but
+        # release_stamping_needed == True) silently produced an unapplied
+        # Preview transaction and reported "nothing to do". Use the real
+        # signal (release_stamping_needed / release_stamp_rows) instead.
+        needs_apply = bool(op_id) and (
+            updated_count > 0
+            or bool(plan_res.get("release_stamping_needed"))
+            or int(plan_res.get("release_stamp_rows") or 0) > 0
+        )
 
-            updates.append((
-                target_mbid,
-                int(expected.get("track") or 0),
-                int(expected.get("disc") or 1),
-                _s(expected.get("title") or ""),
-                item_id,
-            ))
-
-        if not updates:
-            stamped = _stamp_album_release_id(aid, data.get("mb_albumid", ""), log)
-            if stamped:
-                _invalidate_lib_cache()
-                _trigger_plex_refresh(log)
+        if not needs_apply:
+            if conflicts:
                 log.append(
-                    "No MusicBrainz recording IDs needed safe repair; "
-                    f"stamped release ID on {stamped} item row(s)."
+                    f"No MusicBrainz recording IDs needed safe repair; {conflicts} "
+                    "conflicting recording ID(s) require manual review."
                 )
-                return {"ok": True, "updated": 0, "release_rows_updated": stamped}
-            log.append("No MusicBrainz recording IDs needed safe repair.")
-            return {"ok": True, "updated": 0}
-
-        detail = []
-        if blank_count:
-            detail.append(f"{blank_count} blank")
-        if mismatched_count:
-            detail.append(f"{mismatched_count} mismatched")
-        detail_text = f" ({', '.join(detail)})" if detail else ""
-        log.append(f"[2/3] Writing {len(updates)} MusicBrainz recording ID(s) to Beets DB{detail_text}...")
-        with _db() as con:
-            con.executemany(
-                "UPDATE items SET mb_trackid=?, track=?, disc=?, title=? WHERE id=?",
-                updates,
-            )
-            if data.get("mb_albumid"):
-                con.execute(
-                    "UPDATE albums SET mb_albumid=? WHERE id=?",
-                    (_s(data.get("mb_albumid")), aid),
-                )
-                con.execute(
-                    "UPDATE items SET mb_albumid=? WHERE album_id=?",
-                    (_s(data.get("mb_albumid")), aid),
-                )
-            con.commit()
-
-        job_cfg = f"/tmp/beets-repair-mb-tracks-{aid}-{uuid.uuid4().hex}.yaml"
-        base = [BEET_BIN, "-c", _write_job_beets_config(job_cfg)]
-        env = _beet_env()
-
-        log.append("[3/3] Writing updated MusicBrainz IDs to audio tags...")
-        for _, _, _, title, item_id in updates:
-            if cancel_event is not None and cancel_event.is_set():
-                raise RuntimeError("cancelled")
-            proc = _beet_run(base + ["write", f"id:{item_id}"], log, timeout=60,
-                             env=env, cancel=cancel_event)
-            if proc.returncode != 0:
-                log.append(f"  WARN: beet write failed for item {item_id} (rc={proc.returncode})")
             else:
-                log.append(f"  fixed item {item_id}: {title}")
+                log.append("No MusicBrainz recording IDs needed safe repair.")
+            return {"ok": True, "updated": 0, "conflicts": conflicts, "operation_id": op_id}
 
+        log.append(f"[2/3] Applying controlled repair transaction {op_id} for {updated_count} track(s)...")
+        try:
+            apply_res = beets_client.apply_album_mb_track_repair(op_id)
+        except Exception as ex:
+            log.append(f"  ERROR: Apply request failed: {ex}")
+            return {"ok": False, "error": f"Repair apply failed: {ex}", "operation_id": op_id}
+
+        if not apply_res.get("ok"):
+            err_msg = apply_res.get("error") or "Repair apply failed."
+            log.append(f"  ERROR: {err_msg}")
+            return {"ok": False, "error": err_msg, "code": apply_res.get("code"), "operation_id": op_id}
+
+        release_stamp_rows = int(apply_res.get("release_stamp_rows") or 0)
+        log.append("[3/3] Finalizing repair and refreshing library cache...")
         _invalidate_lib_cache()
         _trigger_plex_refresh(log)
-        log.append(f"Done — repaired {len(updates)} MusicBrainz recording ID(s).")
-        return {"ok": True, "updated": len(updates)}
+        log.append(
+            f"Done — repaired {updated_count} MusicBrainz recording ID(s), "
+            f"stamped release ID on {release_stamp_rows} row(s)."
+            + (f" {conflicts} conflicting recording ID(s) require manual review." if conflicts else "")
+        )
+        return {
+            "ok": True,
+            "updated": updated_count,
+            "release_stamp_rows": release_stamp_rows,
+            "conflicts": conflicts,
+            "operation_id": op_id,
+        }
 
     job = jobs.start_python(
         _do,
@@ -52876,6 +52826,8 @@ def api_transaction_rollback(transaction_id):
                 # SEC-002 Wave 18 final review: explicit, known dispatch --
                 # no "unknown family -> try bulk replacement" fallback.
                 res = beets_client.rollback_bulk_import_replacement(transaction_id)
+            elif mutation_family == "album_mb_track_repair_v1":
+                res = beets_client.rollback_album_mb_track_repair(transaction_id)
             elif mutation_family:
                 return jsonify({
                     "ok": False,

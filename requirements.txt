@@ -18,3 +18,15 @@ bgutil-ytdlp-pot-provider==1.3.1
 
 # Tag reading & demo-mode metadata helper
 mutagen==1.48.1
+
+# SEC-002 Wave 19: authoritative MusicBrainz tag read/write for
+# backend/transaction_engine.py's album_mb_track_repair_v1 mutation family.
+# This is the standalone package Beets itself depends on for tag I/O
+# (beets.mediafile is a deprecated shim over the same code as of Beets
+# 2.x) -- installing it directly here, rather than pulling in the whole
+# `beets` package, keeps the Web Manager image dependency-light while
+# still letting the shared unit-test suite (which runs
+# backend/transaction_engine.py's tests without the full `beets` engine
+# installed) exercise the real reader/writer instead of only reaching a
+# silent ImportError fallback.
+mediafile==0.17.0

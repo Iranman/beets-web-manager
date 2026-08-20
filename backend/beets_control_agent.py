@@ -3915,6 +3915,50 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             self._send_json(code, res)
             return
 
+        if path == "/albums/mb-track-repair/plan":
+            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            res = transaction_engine.create_album_mb_track_repair_plan(
+                _txn_store, body,
+                music_allowed_roots=[music_root_env],
+                db_path=MUSIC_LIBRARY_PATH,
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        if path == "/albums/mb-track-repair/apply":
+            op_id = str(body.get("operation_id") or "").strip()
+            if not op_id:
+                self._send_json(400, {"ok": False, "error": "operation_id required"})
+                return
+            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            write_tags = bool(body.get("write_tags", True))
+            res = transaction_engine.execute_album_mb_track_repair_apply(
+                _txn_store, op_id,
+                db_path=MUSIC_LIBRARY_PATH,
+                music_allowed_roots=[music_root_env],
+                write_tags=write_tags,
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        if path == "/albums/mb-track-repair/rollback":
+            op_id = str(body.get("operation_id") or "").strip()
+            if not op_id:
+                self._send_json(400, {"ok": False, "error": "operation_id required"})
+                return
+            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            res = transaction_engine.rollback_album_mb_track_repair(
+                _txn_store, op_id,
+                db_path=MUSIC_LIBRARY_PATH,
+                music_allowed_roots=[music_root_env],
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+
         if path == "/imports/source/inspect":
             # SEC-002 Wave 8 ARCH-003: read-only, bounded inspection of an
             # import/reimport source -- the engine-side counterpart to
