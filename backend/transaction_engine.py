@@ -4681,16 +4681,21 @@ def create_existing_album_reconcile_plan(
 
     # Only trust source_folder for classification once it is itself
     # contained under a SERVER-configured staging root -- an arbitrary
-    # client-supplied directory is never authorized on its own.
+    # client-supplied directory is never authorized on its own. This is a
+    # pure string/lexical check (os.path.normpath, no filesystem access)
+    # against already-server-resolved roots -- the raw client-supplied
+    # string is never itself passed to a filesystem-touching call
+    # (Path.resolve()/exists()/etc.), so there is no path-injection sink
+    # to reach even for an unvalidated value (CodeQL py/path-injection).
     source_folder_str = str(payload.get("source_folder") or "").strip()
     source_root_validated: Optional[Path] = None
-    if source_folder_str:
-        try:
-            candidate = Path(source_folder_str).resolve(strict=False)
-            if _resolve_path_role(str(candidate), staging_roots) is not None:
-                source_root_validated = candidate
-        except Exception:
-            source_root_validated = None
+    if source_folder_str and staging_roots:
+        normalized = os.path.normpath(source_folder_str)
+        for sroot in staging_roots:
+            sroot_str = str(sroot)
+            if normalized == sroot_str or normalized.startswith(sroot_str + os.sep):
+                source_root_validated = sroot / os.path.relpath(normalized, sroot_str) if normalized != sroot_str else sroot
+                break
 
     # imported_item_roots: what move/duplicate items (already Beets rows
     # under the imported album) may legitimately live under.
@@ -5074,6 +5079,15 @@ def execute_existing_album_reconcile_apply(
     quarantine_base_root: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Execute Apply phase for existing_album_reconcile_v1 (SEC-002 Wave 20)."""
+    # Explicit, local format validation before operation_id is ever used to
+    # build a filesystem path (the quarantine directory) -- TransactionStore
+    # already enforces this same pattern internally, but that guarantee
+    # lives in a different function than the path construction below, which
+    # is not a dataflow relationship a static analyzer can see. Validating
+    # here closes that gap directly (CodeQL py/path-injection) rather than
+    # relying on an indirect cross-function invariant.
+    if not _TRANSACTION_ID_RE.fullmatch(str(operation_id or "")):
+        return {"ok": False, "error": "Malformed transaction id.", "code": "reconcile_not_found"}
     op_lock = _get_apply_lock(operation_id)
     with op_lock:
         try:
@@ -5511,6 +5525,8 @@ def rollback_existing_album_reconcile(
     music_allowed_roots: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Execute rollback for existing_album_reconcile_v1 (SEC-002 Wave 20)."""
+    if not _TRANSACTION_ID_RE.fullmatch(str(operation_id or "")):
+        return {"ok": False, "error": "Malformed transaction id.", "code": "reconcile_not_found"}
     op_lock = _get_apply_lock(operation_id)
     with op_lock:
         try:

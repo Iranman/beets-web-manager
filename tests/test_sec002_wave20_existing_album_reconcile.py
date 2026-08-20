@@ -720,6 +720,19 @@ class ApplyTests(Wave20FixtureBase):
         self.assertFalse(res.get("ok"))
         self.assertEqual(res.get("code"), "reconcile_wrong_family")
 
+    def test_apply_malformed_transaction_id(self):
+        """SEC-002 Wave 20 final review, CodeQL py/path-injection: reject a
+        malformed operation_id before it is ever used to build a filesystem
+        path (the quarantine directory)."""
+        res = self._apply("../../etc/passwd")
+        self.assertFalse(res.get("ok"))
+        self.assertEqual(res.get("code"), "reconcile_not_found")
+
+    def test_rollback_malformed_transaction_id(self):
+        res = self._rollback("../../etc/passwd")
+        self.assertFalse(res.get("ok"))
+        self.assertEqual(res.get("code"), "reconcile_not_found")
+
     def test_apply_album_rgid_changed_since_plan(self):
         self._create_album(1, "Existing Album", rg_id=RG_A)
         self._create_album(2, "Imported Temp Album", rg_id=RG_A)
