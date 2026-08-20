@@ -5955,7 +5955,7 @@ def create_artist_folder_reconcile_plan(
                 dst_p = m["destination"]
                 if m["type"] == "rename_dir":
                     old_prefix = src_p.encode("utf-8") + os.sep.encode("utf-8")
-                    rows = con.execute("SELECT id, path, album_id FROM items WHERE path LIKE ?", (old_prefix + b"%",)).fetchall()
+                    rows = _rows_by_path_prefix(con, "items", "id, path, album_id", "path", old_prefix)
                     for r in rows:
                         iid = int(r["id"])
                         raw_p = r["path"]
@@ -5970,7 +5970,7 @@ def create_artist_folder_reconcile_plan(
                             candidate_album_ids.setdefault(idx, set()).add(aid)
                         db_item_updates.append({"candidate_idx": idx, "id": iid, "old_path": p_str, "new_path": new_p})
 
-                    arows = con.execute("SELECT id, path, artpath FROM albums WHERE path LIKE ?", (old_prefix + b"%",)).fetchall()
+                    arows = _rows_by_path_prefix(con, "albums", "id, path, artpath", "path", old_prefix)
                     for r in arows:
                         aid = int(r["id"])
                         raw_p = r["path"]
@@ -6681,6 +6681,43 @@ _ART_EXTS = frozenset({".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"})
 _MB_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
 
 
+def _rows_by_path_prefix(
+    con: sqlite3.Connection, table: str, cols: str, path_col: str, prefix: bytes,
+    *, path_result_col: str = "path",
+) -> List[sqlite3.Row]:
+    """Return rows from `table` whose `path_col` starts with `prefix` (bytes).
+
+    SEC-002 Wave 21 final review, CI-only regression: SQL `LIKE` against a
+    BLOB-stored path column with a BLOB pattern is not a reliable prefix
+    match -- its behavior (textual vs. binary comparison, implicit
+    type handling) is undocumented and version-dependent, and it silently
+    returned zero rows on the CI runner's SQLite build while appearing to
+    work locally. A `LIKE` pattern also mistreats literal `%`/`_` bytes in
+    real folder/file names as wildcards. Avoid both problems: narrow with a
+    binary-collation range scan (`path_col >= prefix AND path_col < prefix +
+    0xFF`, safe because prefix is valid UTF-8 and 0xFF never appears in
+    valid UTF-8), then confirm the exact byte-prefix match in Python.
+
+    `path_col` is the (possibly table-qualified) column used in the WHERE
+    clause; `path_result_col` is the column/alias name to read the path back
+    from in the result rows (defaults to `path_col` itself when unqualified
+    and unaliased -- callers that alias or table-qualify the select must
+    pass it explicitly).
+    """
+    upper = prefix + b"\xff\xff\xff\xff"
+    rows = con.execute(
+        f"SELECT {cols} FROM {table} WHERE {path_col} >= ? AND {path_col} < ?",
+        (prefix, upper),
+    ).fetchall()
+    out = []
+    for r in rows:
+        raw_p = r[path_result_col]
+        pb = raw_p if isinstance(raw_p, bytes) else str(raw_p or "").encode("utf-8", "replace")
+        if pb.startswith(prefix):
+            out.append(r)
+    return out
+
+
 def _unique_dest(path: Path) -> Path:
     if not path.exists():
         return path
@@ -6753,12 +6790,11 @@ def _derive_artist_folder_identity(folder_path: Path, lib_db: str) -> Dict[str, 
         con = sqlite3.connect(lib_db, timeout=10)
         con.row_factory = sqlite3.Row
         try:
-            rows = con.execute(
-                "SELECT DISTINCT a.id AS album_id, a.mb_albumartistid "
-                "FROM albums a JOIN items i ON i.album_id = a.id "
-                "WHERE i.path LIKE ?",
-                (prefix + b"%",),
-            ).fetchall()
+            rows = _rows_by_path_prefix(
+                con, "items JOIN albums ON items.album_id = albums.id",
+                "DISTINCT albums.id AS album_id, albums.mb_albumartistid, items.path AS item_path",
+                "items.path", prefix, path_result_col="item_path",
+            )
         finally:
             con.close()
     except sqlite3.Error as ex:
