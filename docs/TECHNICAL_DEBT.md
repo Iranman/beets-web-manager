@@ -28,7 +28,7 @@ Statuses: Open, In Progress, Blocked, Done.
 - Evidence: The `beets` control agent now owns Beets CLI execution, direct SQLite compatibility queries, tag writes, and file move/delete endpoints inside the authoritative engine container. `app.py` still contains many legacy command-array call sites and residual direct filesystem operations (`shutil.move`, `shutil.rmtree`, `Path.unlink`, `os.replace`, copies, and directory removals) that are not all planned, audited, and verified through one transaction boundary. `backend/transaction_engine.py` exists but is not universal.
 - Current risk: Preview/audit/rollback behavior varies by workflow. Partial failure can be hard to recover or may be reported inconsistently. Residual filesystem call sites also make it easy to accidentally depend on web-manager media mounts that the supported two-service Compose files intentionally do not provide.
 - Desired state: Mutating workflows use shared plan/apply/verify/recover semantics with root validation, diffs, audit records, and recovery information, and all media/Beets mutations execute in the `beets` engine boundary.
-- Safe migration approach: Wrap one high-risk mutation family at a time using `TransactionStore` and explicit control-agent/BeetsClient APIs rather than replacing all callers. Wave 15 established the controlled mutation boundary for Import Review + cleanup mutations via engine-side `TransactionStore` (`/imports/review/cleanup/plan`, `/imports/review/cleanup/apply`, `/albums/cleanup/plan`, `/albums/cleanup/apply`). Wave 17 (PR #90) added the `track_replacement_v1` mutation family for single-track file replacement (original-file quarantine + DB row removal); see the Wave 17 entry below and `docs/operations/wave17_track_replacement_design.md` for the corrected caller matrix and what remains unmigrated (`_import_and_tag_disk`/`replace_existing_item_ids`, `repair_album_mb_tracks`). Wave 18 (PR #91) added the `bulk_import_replacement_v1` mutation family for the one real case in `_merge_imported_album_into_existing` where importing into an existing album retires some of its current tracks in favor of newly-imported ones; see the Wave 18 entry below and `docs/operations/wave18_bulk_import_replacement_design.md` for the corrected caller matrix (`replace_existing_item_ids`/the automatic music-format retry pipeline deliberately remains on Wave 17's `track_replacement_v1`, not this family) and what remains unmigrated (`repair_album_mb_tracks`, plus `_merge_imported_album_into_existing`'s own `dup_rows`/`move_ids` bookkeeping). Wave 19 added the `album_mb_track_repair_v1` mutation family for MusicBrainz album track repair (`repair_album_mb_tracks`), placing all SQLite track attribute updates and audio file tag writes under engine ownership with full TOCTOU revalidation, resource locking, and rollback support; see `docs/operations/wave19_mb_track_repair_design.md`. Wave 20 (PR #93) added the `existing_album_reconcile_v1` mutation family for `_merge_imported_album_into_existing`'s `dup_rows`/`move_ids`/empty-album-retirement bookkeeping; see the Wave 20 entry below and `docs/operations/wave20_existing_album_reconcile_design.md` for the corrected identity/path-authorization model and a fresh repo-wide audit that found substantially more uncontrolled `app.py` mutation surface than just this one site (artist-folder cleanup, playlist staging/deletion -- see that doc's section 15 and the Wave 20 entry below for specifics). Wave 21 (PR #94) added the `artist_folder_reconcile_v1` mutation family for artist-folder merging and MBID-folder-stamping; see the Wave 21 entry below and `docs/operations/wave21_artist_folder_reconcile_design.md` for the corrected identity/majority-rule-stamping model and a further-refreshed audit showing the remaining uncontrolled surface is broader than "playlist staging/deletion" alone (import/album-cleanup/artwork/dedup clusters, see that doc's section 12). Wave 22 (PR #95) added `album_maintenance_v1` (whole-album deduplication, track retirement, filename cleanup), `album_artwork_v1` (artwork quarantine and real relocation), `folder_cleanup_v1`, and `playlist_media_cleanup_v1`; see the Wave 22 entry below and `docs/operations/wave22_album_maintenance_design.md`. PR #96 ("ARCH-003 Final Closure") fixed a fail-open local-mutation fallback that had survived in `_album_cleanup_apply_issue` despite Wave 22's own migration, preserved the one genuinely correct change in that PR (engine-owned import via `reimport_source_atomic`), and replaced the hand-written, self-validating `security/arch003_mutation_inventory.json` with one derived from real AST-based mutation-sink discovery -- which found 372 real candidate sinks repository-wide, 189 of them still unresolved. See the PR #96 entry below and `docs/operations/arch003_final_closure_design.md` for the full accounting; ARCH-003 is **not** closed.
+- Safe migration approach: Wrap one high-risk mutation family at a time using `TransactionStore` and explicit control-agent/BeetsClient APIs rather than replacing all callers. Wave 15 established the controlled mutation boundary for Import Review + cleanup mutations via engine-side `TransactionStore` (`/imports/review/cleanup/plan`, `/imports/review/cleanup/apply`, `/albums/cleanup/plan`, `/albums/cleanup/apply`). Wave 17 (PR #90) added the `track_replacement_v1` mutation family for single-track file replacement (original-file quarantine + DB row removal); see the Wave 17 entry below and `docs/operations/wave17_track_replacement_design.md` for the corrected caller matrix and what remains unmigrated (`_import_and_tag_disk`/`replace_existing_item_ids`, `repair_album_mb_tracks`). Wave 18 (PR #91) added the `bulk_import_replacement_v1` mutation family for the one real case in `_merge_imported_album_into_existing` where importing into an existing album retires some of its current tracks in favor of newly-imported ones; see the Wave 18 entry below and `docs/operations/wave18_bulk_import_replacement_design.md` for the corrected caller matrix (`replace_existing_item_ids`/the automatic music-format retry pipeline deliberately remains on Wave 17's `track_replacement_v1`, not this family) and what remains unmigrated (`repair_album_mb_tracks`, plus `_merge_imported_album_into_existing`'s own `dup_rows`/`move_ids` bookkeeping). Wave 19 added the `album_mb_track_repair_v1` mutation family for MusicBrainz album track repair (`repair_album_mb_tracks`), placing all SQLite track attribute updates and audio file tag writes under engine ownership with full TOCTOU revalidation, resource locking, and rollback support; see `docs/operations/wave19_mb_track_repair_design.md`. Wave 20 (PR #93) added the `existing_album_reconcile_v1` mutation family for `_merge_imported_album_into_existing`'s `dup_rows`/`move_ids`/empty-album-retirement bookkeeping; see the Wave 20 entry below and `docs/operations/wave20_existing_album_reconcile_design.md` for the corrected identity/path-authorization model and a fresh repo-wide audit that found substantially more uncontrolled `app.py` mutation surface than just this one site (artist-folder cleanup, playlist staging/deletion -- see that doc's section 15 and the Wave 20 entry below for specifics). Wave 21 (PR #94) added the `artist_folder_reconcile_v1` mutation family for artist-folder merging and MBID-folder-stamping; see the Wave 21 entry below and `docs/operations/wave21_artist_folder_reconcile_design.md` for the corrected identity/majority-rule-stamping model and a further-refreshed audit showing the remaining uncontrolled surface is broader than "playlist staging/deletion" alone (import/album-cleanup/artwork/dedup clusters, see that doc's section 12). Wave 22 (PR #95) added `album_maintenance_v1` (whole-album deduplication, track retirement, filename cleanup), `album_artwork_v1` (artwork quarantine and real relocation), `folder_cleanup_v1`, and `playlist_media_cleanup_v1`; see the Wave 22 entry below and `docs/operations/wave22_album_maintenance_design.md`. PR #96 ("ARCH-003 Final Closure") fixed a fail-open local-mutation fallback that had survived in `_album_cleanup_apply_issue` despite Wave 22's own migration, preserved the one genuinely correct change in that PR (engine-owned import via `reimport_source_atomic`), and replaced the hand-written, self-validating `security/arch003_mutation_inventory.json` with one derived from real AST-based mutation-sink discovery. Wave 23 ("Mutation Surface Truth Pass," PR #97) expanded AST discovery (covering `mkdir`, `open(..., 'w')`, file handle writes, `Path.rename`/`replace` variable tracking, SQL DML variables, Beets command wrappers) and removed local media `mkdir` from `_album_cleanup_apply_issue`, but its "491 sinks, `NEEDS_REVIEW = 0`, 180 blockers, 100% triaged" claim did not hold: three real scanner bugs (bare-name `_beet_run(...)` wrapper calls never detected at all, a path-like-name regex so broad it matched almost any identifier, nested-function scope pollution) meant the scanner was silently missing and misclassifying real sinks, and `NEEDS_REVIEW = 0` was reached mainly through blanket file-level defaults (e.g. "every sink in `backend/beets_control_agent.py` is engine-native") rather than individual triage. Independent review fixed the scanner bugs, replaced the blanket file-level classifications with per-function investigation (including confirming a genuine, currently-active generic bypass -- `_handle_delete_album`/`_replace_album_art_locked`/`_delete_album_art_locked`, reachable from real `/api/albums/<id>/remove` and `/art` routes with zero transaction boundary -- and removing MusicBrainz identity fields from the generic `PATCH /items`/`/albums` endpoints, which had zero production callers), and re-clustered the (now larger, honestly-counted) blocker list by production workflow domain rather than sink technology. Real numbers: 535 candidate sinks, 293 unresolved (224 confirmed blockers, 53 honestly left `NEEDS_REVIEW`, 16 confirmed active generic-bypass sinks). See the PR #97 entry below and `docs/operations/wave23_mutation_surface_truth_design.md` for the full accounting.
 - Priority: P0.
 - Status: In Progress.
 
@@ -1067,6 +1067,141 @@ Full detail: `docs/operations/arch003_final_closure_design.md`.
   for bypass risk. SEC-002 remains Open (main-branch backlog, unrelated to
   this PR).
 - **Merge result**: squash-merged to `main` as `491e5a2` (final corrected head `6cc3b25`, branch `feat/sec002-arch003-final-closure` preserved, not deleted). Final-head CI: all 19 checks green, including `CodeQL` passing directly (not just the transient-stale marker seen in some prior waves). CodeQL API confirmed 0 open alerts. Both `beets-web-manager` and `beets-engine` Docker images built and verified with `org.opencontainers.image.revision=6cc3b25`, matching the merged head.
+
+### SEC-002 / ARCH-003 Wave 23: Mutation Surface Truth Pass (PR #97) -- Claude final independent review, correction, and merge authority
+
+AGY submitted PR #97 claiming a complete, trustworthy mutation map: 491
+discovered sinks, `NEEDS_REVIEW = 0` (100% triaged), 180 confirmed blockers,
+CI green on the starting head. Independent review found "100% triaged" was
+not true and the scanner itself had real correctness bugs. Full detail:
+`docs/operations/wave23_mutation_surface_truth_design.md`.
+
+- **Preserved**: removal of local `.mkdir()` calls from `_album_cleanup_
+  apply_issue`; the ratchet-gate concept (discovered sink must match an
+  inventory key; unresolved count must not grow); honest `In Progress`
+  status.
+- **CRITICAL scanner bug (finding #9)**: `_beet_run(...)` called bare-name
+  (not `module._beet_run(...)`) was never detected at all -- the
+  detection rule compared `_attr_chain(node.func)` against a tuple
+  containing `"_beet_run"`, but `_attr_chain()` only resolves
+  `ast.Attribute` targets and always returns `None` for a bare-name call.
+  `_beet_run` is called this way roughly a dozen times in `app.py`
+  (modify/mbsync/write/move/fetchart/lastgenre/mbsubmit/import), none of
+  which were ever being discovered. Fixed with a dedicated bare-name
+  wrapper set; regression-tested.
+- **CRITICAL scanner bug (finding #11)**: the path-like-name regex used to
+  decide whether `x.rename(...)`/`x.replace(...)` is a real filesystem
+  operation carried bare `p`, `f`, `d` as ordinary regex alternatives
+  inside a substring search -- matching almost any identifier containing
+  those letters anywhere (`data`, `config`, `added`, `id`, ...) and
+  destroying real signal in the classification. Fixed: single-letter
+  path variables are now matched as the whole identifier, never a
+  substring.
+- **Scanner bug (finding #13)**: nested-function scope pollution -- the
+  local-variable pre-scan used `ast.walk()`, which descends into nested
+  `def`/`class` bodies, so an inner function's own `Path(...)` variable
+  could leak into the outer function's tracking. Fixed with a scope-
+  limited walker.
+- **New bug found by this review's own test-writing**: `Path(...).open
+  (mode)` was never detected -- the mode-argument-position logic used
+  `args[1]` for both the builtin `open(path, mode)` form and the
+  `Path(...).open(mode)` method form, but for the method form mode is
+  `args[0]`. Fixed by branching on call shape.
+- **The "100% triaged" claim (finding #3, most important correction)**:
+  `NEEDS_REVIEW = 0` was reached mainly through blanket file-level
+  defaults -- every sink in `backend/beets_control_agent.py` classified
+  `ENGINE_NATIVE_BEETS` regardless of what it actually did, and similarly
+  for `beets_client.py`, `routes_jobs.py`, `routes_lidarr.py`, `routes_
+  submissions.py`, and other `backend/` support modules. This is exactly
+  the pattern the wave was supposed to eliminate. Removed; replaced with
+  per-function classification derived from actually tracing production
+  callers (see below) -- and an honest `NEEDS_REVIEW` fallback (not a
+  forced label either direction) for the two giant HTTP dispatcher
+  functions (`do_POST`/`do_DELETE`, ~40+ sinks each) where accurate
+  classification needs per-endpoint context the scanner does not
+  currently track. Also removed AGY's hardcoded `NEEDS_REVIEW must be 0`
+  CI gate check (finding #21: that number should be earned through real
+  triage, not mechanically forced to zero -- the ratchet baseline already
+  prevents it from silently growing).
+- **CRITICAL, found and fixed with code, not just a label (findings
+  #6/#7/#38)**: `PATCH /items/<id>` and `PATCH /albums/<id>` allowed
+  direct, untransacted SQL writes to MusicBrainz identity fields
+  (`mb_trackid`/`mb_albumid`/`mb_artistid`/`mb_releasegroupid` on items;
+  `mb_albumid`/`mb_albumartistid`/`mb_releasegroupid` on albums) -- no
+  Plan/Apply/Verify/Rollback, no TOCTOU, no identity-conflict check.
+  Repo-wide search confirmed zero current production callers of the
+  `beets_client` wrapper methods that reach this endpoint. Removed the
+  identity fields from both allowlists now rather than deferring the
+  policy decision.
+- **CRITICAL, confirmed ACTIVE, documented not migrated (new finding, not
+  in the original review brief)**: traced the real caller chain for
+  `_handle_delete_album`, `_replace_album_art_locked`, and `_delete_
+  album_art_locked` and found `app.py`'s `POST /api/albums/<id>/remove`
+  and the artwork routes call them directly -- genuine, currently-active
+  album deletion and artwork replacement with zero transaction boundary,
+  running in parallel with the already-existing, correctly-controlled
+  `album_maintenance_v1`/`album_artwork_v1` families. Classified with a
+  new `ENGINE_GENERIC_BYPASS` category (counted toward the unresolved
+  ratchet) rather than migrated this pass -- named as the top Wave 24
+  recommendation (migrating two live destructive endpoints deserves its
+  own focused cycle, not folding into an already-large scanner-correction
+  pass; reuses existing, already-tested transaction families rather than
+  needing new ones).
+- **New taxonomy (finding #4)**: added `ENGINE_CONTROLLED_TRANSACTION`,
+  `ENGINE_NATIVE_READ_ONLY`, `ENGINE_ADMIN_MUTATION`, `ENGINE_GENERIC_
+  BYPASS`, `ENGINE_CONFIG_STATE` -- "engine-owned" is not automatically
+  "architecture-safe."
+- **`human_reviewed` now means something (finding #20)**: added
+  `machine_classified` (always true) as distinct from `human_reviewed`
+  (true only for the specific rules this pass actually investigated via
+  production-caller tracing, route reading, or function-body review --
+  named `reviewed-*`/`confirmed-*` in the rule field, traceable rather than
+  a blanket claim).
+- **Domain re-clustering (findings #28-#30, #42)**: the 240 confirmed
+  blocker/bypass sinks were re-clustered by production workflow (album
+  identity/metadata repair: 55; import reconciliation: 42; album rename/
+  move/merge: 24; album deletion/retirement/dedup: 27; artwork generic
+  bypass: 14; library/folder cleanup: 17; AI batch import: 7) instead of
+  by sink technology (filesystem/SQL/subprocess/tag-write). Highest-risk
+  ranking: the artwork generic bypass ranks above the larger identity-
+  repair cluster because it is confirmed *currently active* with *zero*
+  transaction boundary and has existing, reusable transaction families
+  ready to receive it -- named as the Wave 24 recommendation.
+- **`ALLOWED_COMMANDS` audited with real usage evidence, not restricted
+  this pass (finding #5)**: real call-site evidence shows `move`/`write`/
+  `mbsync`/`modify` each backing multiple established features; several
+  other allowed commands (`embedart`, `lastimport`, `alt`, `remove`, `rm`)
+  were not found invoked by any traced call site. Not restricted without
+  individually re-verifying every dependent feature still works -- the
+  same risk-averse judgment call as Wave 22's decision not to rip out the
+  local import subprocess without a verified working replacement.
+- **Tests**: `tests/test_discover_mutation_sinks.py` added (38 scanner
+  self-tests: positive/negative/scope-isolation coverage for every
+  detection rule and every defect this review found and fixed --
+  representative, not the full enumerated matrix the review brief listed).
+  `tests/test_arch003_boundary_enforcement.py`'s new cleanup-issue test
+  rewritten from source-text substring markers to real AST call-node
+  checks. `tests/test_control_agent_field_allowlist.py` updated for the
+  identity-field removal, plus a new regression proving those fields stay
+  non-editable. Full repository suite: 2553 tests, 0 failures, 128
+  skipped, 2 consecutive clean runs.
+- **Real final numbers**: 535 candidate sinks discovered (up from AGY's
+  491 -- entirely explained by the scanner bug fixes catching previously-
+  invisible sinks, not new debt). 293 unresolved: 224 confirmed
+  `ARCH003_BLOCKER`, 53 honest `NEEDS_REVIEW`, 16 confirmed-active
+  `ENGINE_GENERIC_BYPASS`. 89 `CONTROLLED_MEDIA_MUTATION`, 10 `ENGINE_
+  CONTROLLED_TRANSACTION`, 3 `ENGINE_ADMIN_MUTATION`, 3 `ENGINE_NATIVE_
+  BEETS`, 2 `ENGINE_NATIVE_READ_ONLY`, 10 `ENGINE_CONFIG_STATE`, remainder
+  app/config/cache/staging/transaction state.
+- **Status**: ARCH-003 remains **In Progress**. Not Done. Named remaining
+  blockers: (1) 224 confirmed `ARCH003_BLOCKER` + 16 `ENGINE_GENERIC_
+  BYPASS` sinks, individually listed in `security/arch003_mutation_
+  inventory.json`, clustered by domain in the design doc; (2) 53 `NEEDS_
+  REVIEW` sinks (mostly `backend/beets_control_agent.py`'s two giant HTTP
+  dispatcher functions, needing per-endpoint scanner context this review's
+  tooling does not yet have); (3) `ALLOWED_COMMANDS` not restricted
+  despite several apparently-unused mutating commands remaining allowed.
+  SEC-002 remains Open (main-branch backlog, unrelated to this PR).
 
 
 

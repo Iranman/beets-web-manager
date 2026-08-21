@@ -154,14 +154,29 @@ ALLOWED_COMMANDS = {
 # PATCH /items/<id> and /albums/<id> build SQL from caller-supplied field
 # keys. SQL parameters can only bind values, never column names, so every
 # accepted key must come from these fixed allowlists.
+#
+# SEC-002 / ARCH-003 Wave 23 final review, findings #6/#7/#38: MusicBrainz
+# identity fields (mb_trackid/mb_albumid/mb_artistid/mb_releasegroupid on
+# items; mb_albumid/mb_albumartistid/mb_releasegroupid on albums) were
+# previously editable through this generic, untransacted endpoint -- no
+# Plan/Apply/Verify/Rollback, no TOCTOU, no identity-conflict check, direct
+# SQL UPDATE under nothing but a filesystem lock. Independently verified
+# (repo-wide search) that no current production caller -- not app.py, not
+# any routes_*.py module, not the frontend API client -- ever calls
+# `beets_client.update_item_fields`/`update_album_fields` at all; this
+# capability is real and reachable but was not being exercised by any
+# feature. Per finding #38 ("decide the policy now, not while classifying
+# it safe"), removed identity fields from the generic allowlist rather
+# than leaving an unrestricted bypass in place for a future caller to
+# find. Canonical identity mutation must go through a controlled
+# transaction family (album_mb_track_repair_v1, artist_folder_
+# reconcile_v1, etc.) -- never this endpoint.
 ITEM_EDITABLE_FIELDS = {
     "title", "artist", "album", "albumartist", "year", "genre", "track",
     "tracktotal", "disc", "disctotal", "label", "comments",
-    "mb_trackid", "mb_albumid", "mb_artistid", "mb_releasegroupid",
 }
 ALBUM_EDITABLE_FIELDS = {
     "album", "albumartist", "year", "genre", "label", "comments",
-    "mb_albumid", "mb_albumartistid", "mb_releasegroupid",
 }
 _ITEM_UPDATE_STATEMENTS = {name: f"UPDATE items SET {name} = ? WHERE id = ?" for name in ITEM_EDITABLE_FIELDS}
 _ALBUM_UPDATE_STATEMENTS = {name: f"UPDATE albums SET {name} = ? WHERE id = ?" for name in ALBUM_EDITABLE_FIELDS}
