@@ -1066,6 +1066,7 @@ Full detail: `docs/operations/arch003_final_closure_design.md`.
   control_agent.py`'s generic mutation endpoints not individually audited
   for bypass risk. SEC-002 remains Open (main-branch backlog, unrelated to
   this PR).
+- **Merge result**: squash-merged to `main` as `491e5a2` (final corrected head `6cc3b25`, branch `feat/sec002-arch003-final-closure` preserved, not deleted). Final-head CI: all 19 checks green, including `CodeQL` passing directly (not just the transient-stale marker seen in some prior waves). CodeQL API confirmed 0 open alerts. Both `beets-web-manager` and `beets-engine` Docker images built and verified with `org.opencontainers.image.revision=6cc3b25`, matching the merged head.
 
 
 
