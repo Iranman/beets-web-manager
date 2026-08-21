@@ -11543,22 +11543,30 @@ def album_rename(aid):
 
     def _do(log, cancel_event=None):
         log.append("Executing album rename via engine transaction…")
-        try:
-            plan_res = beets_client.plan_album_maintenance({
-                "mode": "filename_cleanup",
-                "album_id": aid,
-            })
-            if plan_res.get("ok") and plan_res.get("operation_id"):
-                apply_res = beets_client.apply_album_maintenance(plan_res["operation_id"])
-                if not apply_res.get("ok"):
-                    log.append(f"WARN: album rename apply returned: {apply_res.get('error')}")
-            else:
-                log.append(f"Album rename plan note: {plan_res.get('message') or plan_res.get('error') or 'no changes needed'}")
-        except Exception as ex:
-            log.append(f"WARN: engine rename failed: {ex}")
-
-        _invalidate_lib_cache()
-        _trigger_plex_refresh(log)
+        # SEC-002 / ARCH-003 Wave 24 final review: album_maintenance_v1's
+        # "filename_cleanup" mode is a caller-supplied-candidate move
+        # primitive -- it renames each {item_id, source, destination}
+        # triple the caller hands it; it does not itself compute the
+        # correct destination from Beets' path template (that logic is
+        # not implemented anywhere in this container: the web-manager
+        # image has no local Beets install, and the engine-side function
+        # has no beets library import). Calling it with no "candidates"
+        # at all (as this route previously did) always plans zero moves
+        # and silently reports success while renaming nothing -- worse
+        # than the old local `beet write && beet move` implementation,
+        # which at least actually ran (even though that too could never
+        # succeed in the standard container deployment; see the removed
+        # comment this review found on album_replace_art_from_url). Fail
+        # closed and say so, rather than report a job success that did
+        # nothing. Tracked in docs/TECHNICAL_DEBT.md as needing a real
+        # engine-side path-template candidate computation before this
+        # route can do anything.
+        raise RuntimeError(
+            "Album rename is not implemented: the engine-side "
+            "filename_cleanup transaction requires explicit per-item "
+            "move candidates that nothing currently computes. See "
+            "docs/TECHNICAL_DEBT.md (ARCH-003 Wave 24)."
+        )
 
     job = jobs.start_python(_do, label=label)
     return jsonify({"ok": True, "job_id": job.job_id})
@@ -11576,33 +11584,31 @@ def album_move_to_library(aid):
         album_obj = lib.get_album(aid)
         if not album_obj:
             raise RuntimeError(f"Album {aid} not found")
-        before = _album_path_repair_summary(album_obj)
 
-        log.append("[1/2] Reconciling album location via engine transaction...")
-        try:
-            plan_res = beets_client.plan_existing_album_reconcile({"album_id": aid})
-            if plan_res.get("ok") and plan_res.get("operation_id"):
-                apply_res = beets_client.apply_existing_album_reconcile(plan_res["operation_id"])
-                if not apply_res.get("ok"):
-                    log.append(f"  WARN reconcile apply: {apply_res.get('error')}")
-        except Exception as ex:
-            log.append(f"  WARN engine reconcile failed: {ex}")
-
-        _invalidate_lib_cache()
-        album_after = lib.get_album(aid)
-        after = _album_path_repair_summary(album_after)
-
-        log.append("[2/2] Repairing album art...")
-        art_result = _repair_album_art(aid, log, cancel_event)
-
-        _invalidate_lib_cache()
-        _trigger_plex_refresh(log)
-        return {
-            "ok": True,
-            "before": before,
-            "after": after,
-            "art": art_result,
-        }
+        # SEC-002 / ARCH-003 Wave 24 final review: existing_album_reconcile_v1
+        # (create_existing_album_reconcile_plan in transaction_engine.py)
+        # requires two *distinct* album ids -- `imported_album_id` (the
+        # duplicate being merged away) and `existing_album_id` (the
+        # canonical target) -- and its own validation explicitly rejects
+        # the call when either is missing or they're equal. Calling it
+        # with only `{"album_id": aid}` (as this route previously did)
+        # means imported_album_id/existing_album_id both default to 0,
+        # so the plan call fails on every single invocation, 100% of the
+        # time -- yet the route continued on to art-repair and reported
+        # job success regardless, silently doing nothing to relocate the
+        # album. That family models "merge duplicate album A into
+        # existing album B"; it does not model "move this one album's
+        # files onto its own correct library path", which is what this
+        # route needs and no existing transaction family implements.
+        # Fail closed rather than silently report success. Tracked in
+        # docs/TECHNICAL_DEBT.md as needing a real move-to-library
+        # transaction family.
+        raise RuntimeError(
+            "Move-to-library is not implemented: existing_album_reconcile_v1 "
+            "requires a distinct source and target album (duplicate-merge "
+            "semantics) and cannot relocate a single album's own files. "
+            "See docs/TECHNICAL_DEBT.md (ARCH-003 Wave 24)."
+        )
 
     job = jobs.start_python(
         _do,
@@ -11622,13 +11628,23 @@ def album_fix_metadata(aid):
     new_mbid = (payload.get("mb_albumid") or "").strip()
 
     def _do(log, cancel_event=None):
+        # SEC-002 / ARCH-003 Wave 24 final review: mb_albumid is deliberately
+        # NOT included in this dict. ALBUM_EDITABLE_FIELDS
+        # (backend/beets_control_agent.py) had MusicBrainz identity fields
+        # removed from the generic PATCH allowlist in Wave 23 -- canonical
+        # identity mutation must go through a controlled transaction, never
+        # this untransacted endpoint. The PATCH handler rejects the *entire*
+        # request (HTTP 403) if any field in the payload is not in the
+        # allowlist, so bundling mb_albumid in here silently broke the
+        # album/albumartist/year updates too, every time a caller supplied a
+        # new mb_albumid alongside them. mb_albumid is instead handled below,
+        # on its own, via the dedicated album_mb_track_repair_v1 transaction.
         updates = {}
         if new_album: updates["album"] = new_album
         if new_aa: updates["albumartist"] = new_aa
         if new_year:
             try: updates["year"] = int(new_year)
             except Exception: pass
-        if new_mbid: updates["mb_albumid"] = new_mbid
 
         if updates:
             try:
@@ -11660,14 +11676,33 @@ def album_fix_metadata(aid):
 
 @app.post("/api/albums/<int:aid>/deduplicate")
 def album_deduplicate(aid):
-    """Deduplicate an album's tracks via engine controlled album_maintenance_v1 transaction family."""
+    """Deduplicate an album's tracks against its MusicBrainz release.
+
+    SEC-002 / ARCH-003 Wave 24 final review: despite an intermediate
+    docstring claiming this route runs "via engine controlled
+    album_maintenance_v1 transaction family", its `_do` body below still
+    reads/writes the library DB directly through `_db()` and runs local
+    `beet mbsync`/matching logic -- it was never actually migrated onto
+    the transaction boundary in this PR. Docstring corrected to describe
+    actual behavior rather than claimed behavior; the real migration onto
+    album_maintenance_v1's "deduplicate" mode is tracked in
+    docs/TECHNICAL_DEBT.md, not attempted this pass (this is a working,
+    tested, legacy path -- not swapped out for an unverified replacement
+    under review time pressure).
+
+    For every track number that has more than one file (collision duplicates like
+    "Song.1.flac", "Song.2.flac"), keep the primary file and delete the extras.
+    Tracks with track=0 (never matched to MB) are re-matched first; any that still
+    can't be matched are deleted unless keep_extras=true.
+
+    Body (optional): { mb_albumid: "uuid", keep_extras: false }
+    """
     payload = request.get_json(silent=True) or {}
     mb_override = payload.get("mb_albumid", "").strip()
     keep_extras = bool(payload.get("keep_extras", False))
 
     album = lib.get_album(aid)
     if not album:
-        return jsonify({"ok": False, "error": "Album not found"}), 404
         return jsonify({"ok": False, "error": "Album not found"}), 404
 
     label = f"Dedup: {_s(getattr(album,'albumartist',''))} — {_s(getattr(album,'album',''))}"

@@ -39,6 +39,44 @@ class TestArch003BoundaryEnforcement(unittest.TestCase):
         self.assertIn("BeetsUnavailableError", self.beets_client_source)
         self.assertIn("BeetsAuthError", self.beets_client_source)
 
+    def test_beets_client_class_has_no_local_filesystem_mutation_calls(self):
+        """SEC-002 / ARCH-003 Wave 24 final review (CRITICAL): a submitted
+        revision of replace_album_art()/delete_album_art() decoded image
+        bytes and wrote a staging file directly to this container's own
+        local disk (`stg_base.mkdir()`, `temp_art.write_bytes()`), then
+        probed local `Path.exists()`/`Path.is_file()` for candidate art
+        files -- both silently reintroducing exactly the local-mutation
+        fallback test_beets_client_is_pure_http_proxy's substring checks
+        above were never actually strong enough to catch (it only checks
+        that `_request`/error classes exist *somewhere* in the file, not
+        that every method actually routes through them). This walks the
+        real `BeetsClient` class body and proves no filesystem mutation
+        call shape appears anywhere in it -- every method must be pure
+        computation plus HTTP, matching the two-service architecture
+        where only the engine container touches the media filesystem."""
+        tree = ast.parse(self.beets_client_source)
+        client_class = next(
+            (n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == "BeetsClient"),
+            None,
+        )
+        self.assertIsNotNone(client_class, "BeetsClient class not found in beets_client.py")
+
+        banned_calls = {
+            "mkdir", "makedirs", "unlink", "remove", "rename", "replace",
+            "move", "rmdir", "removedirs", "rmtree", "copy", "copy2",
+            "copyfile", "copytree", "write_text", "write_bytes", "touch",
+        }
+        found = []
+        for node in ast.walk(client_class):
+            if isinstance(node, ast.Call):
+                name = node.func.attr if isinstance(node.func, ast.Attribute) else (
+                    node.func.id if isinstance(node.func, ast.Name) else None)
+                if name in banned_calls:
+                    found.append(f"call:{name}@{node.lineno}")
+                elif isinstance(node.func, ast.Name) and node.func.id == "open":
+                    found.append(f"call:open@{node.lineno}")
+        self.assertEqual(found, [], f"found prohibited local-filesystem-mutation call node(s) in BeetsClient: {found}")
+
     def test_app_delegates_folder_cleanup_to_beets_client(self):
         self.assertIn("beets_client.plan_folder_cleanup(", self.app_source)
         self.assertIn("beets_client.apply_folder_cleanup(", self.app_source)

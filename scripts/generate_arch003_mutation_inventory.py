@@ -1,8 +1,23 @@
 """Generate security/arch003_mutation_inventory.json from real AST discovery.
 
-SEC-002 / ARCH-003 Wave 24: Complete rule-based classification and domain assignment
-derived from real AST discovery with 0 NEEDS_REVIEW entries. Every entry records its
-classification rule, transaction family, and explicit domain.
+SEC-002 / ARCH-003 Wave 24 final review: rule-based classification and
+explicit domain assignment derived from real AST discovery. This does NOT
+claim 0 NEEDS_REVIEW entries -- an earlier revision of this docstring made
+that claim while a submitted PR (#98) simultaneously reintroduced several
+blanket per-file "everything unmapped in this file gets classification X"
+fallbacks (routes_setup.py, routes_submissions.py, job_engine.py,
+backend/*.py support modules, and unmapped backend/beets_control_agent.py
+functions all defaulted to a specific non-NEEDS_REVIEW label instead of
+NEEDS_REVIEW) plus a brittle hardcoded line-number-range guesser for
+ControlAgentHandler's ~40-branch HTTP dispatcher methods -- exactly the
+"fake precision to make NEEDS_REVIEW disappear" failure mode Wave 23's
+review fixed and documented. Restored here: every one of those defaults
+goes back to NEEDS_REVIEW, and the dispatcher methods are NEEDS_REVIEW
+again pending real per-branch semantic classification (a genuine future
+capability gap in discover_mutation_sinks.py, not something to guess at
+via line numbers that silently rot on the next unrelated edit to that
+file). Every entry still records its classification rule, transaction
+family, and explicit domain.
 """
 
 from __future__ import annotations
@@ -107,57 +122,6 @@ _CONTROL_AGENT_FUNCTION_CLASSIFICATION = {
 }
 
 
-def _classify_control_agent_handler_line(line: int, kind: str, call_text: str) -> tuple[str, str, str]:
-    """Line-range scanner for ControlAgentHandler dispatcher methods."""
-    # do_POST line ranges
-    if 3544 <= line <= 3602:
-        return "ENGINE_CONFIG_STATE", "", "control-agent-config-route"
-    if 3603 <= line <= 3628:
-        return "ENGINE_GENERIC_BYPASS", "", "control-agent-generic-artwork-replace-route"
-    if 3629 <= line <= 3714:
-        return "ENGINE_GENERIC_BYPASS", "", "control-agent-generic-path-rewrite-route"
-    if 3715 <= line <= 3753:
-        return "ENGINE_GENERIC_BYPASS", "", "control-agent-generic-artpath-route"
-    if 3754 <= line <= 4332:
-        return "ENGINE_CONTROLLED_TRANSACTION", "", "control-agent-controlled-transaction-route"
-    if 4333 <= line <= 4414:
-        return "ENGINE_CONTROLLED_TRANSACTION", "", "control-agent-import-source-route"
-    if 4415 <= line <= 4494:
-        return "ENGINE_GENERIC_BYPASS", "", "control-agent-generic-command-execute-route"
-    if 4495 <= line <= 4550:
-        return "ENGINE_CONFIG_STATE", "", "control-agent-jobs-route"
-    if 4551 <= line <= 4567:
-        return "ENGINE_NATIVE_READ_ONLY", "", "control-agent-tags-read-route"
-    if 4568 <= line <= 4625:
-        return "ENGINE_GENERIC_BYPASS", "", "control-agent-generic-tags-write-route"
-    if 4626 <= line <= 4660:
-        return "ENGINE_GENERIC_BYPASS", "", "control-agent-generic-files-move-route"
-    if 4661 <= line <= 4694:
-        return "ENGINE_GENERIC_BYPASS", "", "control-agent-generic-files-delete-route"
-    if 4695 <= line <= 4719:
-        return "ENGINE_GENERIC_BYPASS", "", "control-agent-generic-files-mkdir-route"
-    if 4720 <= line <= 4866:
-        return "ENGINE_GENERIC_BYPASS", "", "control-agent-generic-files-hardlink-route"
-    if 4867 <= line <= 5808:
-        return "ENGINE_NATIVE_BEETS", "", "control-agent-playlist-staging-route"
-    if 5809 <= line <= 6000:
-        return "ENGINE_CONFIG_STATE", "", "control-agent-m3u-route"
-
-    # do_PATCH line ranges
-    if 6009 <= line <= 6110:
-        return "ENGINE_GENERIC_BYPASS", "", "control-agent-generic-patch-route"
-
-    # do_DELETE line ranges
-    if 6126 <= line <= 6151:
-        return "ENGINE_GENERIC_BYPASS", "", "control-agent-generic-artwork-delete-route"
-    if 6152 <= line <= 6178:
-        return "ENGINE_GENERIC_BYPASS", "", "control-agent-generic-artpath-delete-route"
-    if 6179 <= line <= 6240:
-        return "ENGINE_GENERIC_BYPASS", "", "control-agent-generic-album-delete-route"
-
-    return "ENGINE_NATIVE_BEETS", "", "control-agent-dispatcher-handler"
-
-
 def _classify(sink: MutationSink) -> tuple[str, str, str]:
     text = sink.call_text
     file = sink.file
@@ -177,19 +141,31 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
             return "CONTROLLED_MEDIA_MUTATION", "", "engine-transaction-filesystem-mutation"
         return "TRANSACTION_STATE", "", "engine-transaction-internal"
 
-    # 2. backend/beets_control_agent.py
+    # 2. backend/beets_control_agent.py -- function-level classification
+    # only, never a blanket file-level exemption (Wave 23 finding #3,
+    # reintroduced and reverted again in Wave 24).
     if file == "backend/beets_control_agent.py":
         mapped = _CONTROL_AGENT_FUNCTION_CLASSIFICATION.get(func)
         if mapped:
             classification, rule = mapped
             return classification, "", rule
         if func in ("ControlAgentHandler.do_POST", "ControlAgentHandler.do_DELETE", "ControlAgentHandler.do_PATCH", "ControlAgentHandler.do_GET"):
-            return _classify_control_agent_handler_line(sink.lineno, sink.kind, text)
-        return "ENGINE_NATIVE_BEETS", "", "control-agent-native-beets"
+            # Giant multi-endpoint HTTP dispatchers (~40+ sinks each)
+            # where the discovery scanner cannot currently tell which
+            # `if path == "/...":` branch a given sink sits in --
+            # accurate per-endpoint classification needs that context,
+            # which is a real scanner capability gap, not something
+            # safe to guess at via source line-number ranges (those
+            # rot silently on the next unrelated edit to this file).
+            # Left NEEDS_REVIEW rather than force a label either way.
+            return "NEEDS_REVIEW", "", "generic-http-dispatcher-needs-per-endpoint-triage"
+        return "NEEDS_REVIEW", "", "control-agent-function-not-individually-reviewed"
 
-    # 3. backend/beets_client.py
-    if file == "backend/beets_client.py":
-        return "ENGINE_NATIVE_BEETS", "", "beets-client-proxy"
+    # 3. backend/beets_client.py -- pure HTTP proxy (verified by
+    # test_beets_client_is_pure_http_proxy; real discovery finds 0 sinks
+    # in this file as of this review). No blanket rule; an unexpected
+    # future sink here falls through to NEEDS_REVIEW/ARCH003_BLOCKER
+    # below rather than an unearned exemption.
 
     # 4. routes_setup.py
     if file == "routes_setup.py":
@@ -197,7 +173,7 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
             return "CONFIG_STATE", "", "setup-config-state"
         if func == "_check_path" or "probe" in text:
             return "NON_MEDIA_FILESYSTEM", "", "setup-path-permission-probe"
-        return "CONFIG_STATE", "", "setup-module-default"
+        return "NEEDS_REVIEW", "", "setup-module-sink-not-individually-reviewed"
 
     # 5. routes_submissions.py
     if file == "routes_submissions.py":
@@ -207,7 +183,7 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
             return "APP_STATE", "", "submission-json-state-file"
         if func == "_start_acoustid_submit_job._do":
             return "ENGINE_NATIVE_BEETS", "", "acoustid-external-submit-no-local-mutation"
-        return "APP_STATE", "", "submissions-app-state"
+        return "NEEDS_REVIEW", "", "submissions-sink-not-individually-reviewed"
 
     # 6. job_engine.py
     if file == "job_engine.py":
@@ -217,7 +193,7 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
             return "ENGINE_NATIVE_BEETS", "", "job-engine-beet-runner"
         if sink.kind == "filesystem" and ("replace(" in text or "rename(" in text) and not _text_looks_path_like(text):
             return "READ_ONLY_FALSE_POSITIVE", "", "string-replace-false-positive"
-        return "APP_STATE", "", "job-engine-state"
+        return "NEEDS_REVIEW", "", "job-engine-sink-not-individually-reviewed"
 
     # 7. helpers_mb.py
     if file == "helpers_mb.py":
@@ -225,7 +201,8 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
             return "READ_ONLY_FALSE_POSITIVE", "", "fpcalc-read-only-audio-probe"
         return "NON_MEDIA_FILESYSTEM", "", "mb-helper-non-media"
 
-    # 8. backend/ support modules
+    # 8. backend/ support modules -- content-based per module, not a
+    # blanket "any backend/ file gets X" rule.
     if file.startswith("backend/"):
         if file == "backend/audio_preferences.py":
             return "CONFIG_STATE", "", "audio-preferences-config"
@@ -235,7 +212,7 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
             return "CONFIG_STATE", "", "beets-config-state"
         if file == "backend/security.py":
             return "NON_MEDIA_FILESYSTEM", "", "security-module"
-        return "NON_MEDIA_FILESYSTEM", "", "backend-support-module"
+        return "NEEDS_REVIEW", "", "backend-support-module-not-individually-reviewed"
 
     # 9. app.py (Web Manager main module)
     if sink.kind == "subprocess":
@@ -356,6 +333,21 @@ def generate(write: bool = True) -> dict:
 
     entries = []
     for s in sinks:
+        # SEC-002 / ARCH-003 Wave 23 final review, finding #20 (dropped by
+        # a submitted PR #98 and restored here): a sink already carrying a
+        # genuine `human_reviewed` entry from a prior pass keeps that
+        # entry verbatim (apart from refreshing its file/function/line in
+        # case of harmless drift) instead of being silently re-classified
+        # by this run's rule table. `human_reviewed` records that an
+        # actual human looked at THIS specific sink and confirmed the
+        # classification; blindly recomputing it every run would let a
+        # rule-table change quietly overwrite that provenance.
+        prior_entry = existing_by_key.get(s.key)
+        if prior_entry and prior_entry.get("human_reviewed"):
+            entry = dict(prior_entry)
+            entry["file"], entry["function"], entry["line"] = s.file, s.function, s.lineno
+            entries.append(entry)
+            continue
         classification, family, rule = _classify(s)
         domain = _determine_domain(s, classification, family, rule)
         human_reviewed = rule.startswith(("reviewed-", "confirmed-"))
@@ -372,8 +364,8 @@ def generate(write: bool = True) -> dict:
             "rule": rule,
             "machine_classified": True,
             "human_reviewed": human_reviewed,
-            "review_reason": "individually investigated during SEC-002/ARCH-003 review" if human_reviewed else "",
-            "reviewed_in_pr": 97 if human_reviewed else None,
+            "review_reason": "individually investigated during SEC-002/ARCH-003 Wave 24 review (production caller search, route tracing, function-body read)" if human_reviewed else "",
+            "reviewed_in_pr": 98 if human_reviewed else None,
         })
 
     counts = Counter(e["classification"] for e in entries)

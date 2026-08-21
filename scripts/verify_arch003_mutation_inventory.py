@@ -148,9 +148,19 @@ def verify_mutation_inventory(repo_root: Path, check_mode: bool = True) -> bool:
             errors.append(f"    NEW: {s.file}:{s.function}:{s.lineno} -- {s.call_text[:90]}")
         errors.append("  Run `python scripts/generate_arch003_mutation_inventory.py` and classify the new entries.")
 
+    # SEC-002 / ARCH-003 Wave 23 final review, finding #21 (dropped by a
+    # submitted PR #98 and restored here): NEEDS_REVIEW=0 must be
+    # *earned* through real triage, not mechanically enforced as a hard
+    # gate -- a hard "NEEDS_REVIEW must be 0" check creates exactly the
+    # pressure that produces fake precision (force every ambiguous sink
+    # into some other bucket just to make the number disappear, which is
+    # indistinguishable from guessing -- see the blanket per-file
+    # fallbacks and the line-number-range dispatcher guesser this same
+    # review pass found and reverted in generate_arch003_mutation_inventory.py).
+    # NEEDS_REVIEW is included in the ratchet's unresolved-count baseline
+    # below, so it still can't silently grow -- it just isn't required to
+    # hit zero before merge.
     needs_review_count = sum(1 for e in inventory if e.get("classification") == "NEEDS_REVIEW")
-    if needs_review_count > 0:
-        errors.append(f"{needs_review_count} NEEDS_REVIEW entry(ies) found in inventory. Wave 24 requires NEEDS_REVIEW = 0. Triage all entries.")
 
     unresolved_count = sum(1 for e in inventory if e.get("classification") in _UNRESOLVED)
     baseline = data.get("unresolved_baseline", data.get("classification_counts", {}).get("ARCH003_BLOCKER", 0)
