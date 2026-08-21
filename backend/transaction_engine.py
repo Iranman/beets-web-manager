@@ -57,6 +57,7 @@ TRANSACTION_TYPES = {
     "AcoustID Match",
     "MusicBrainz Match",
     "AI Suggestion",
+    "Playlist Match",
     "Repair",
     "Rescan",
 }
