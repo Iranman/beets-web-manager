@@ -1202,6 +1202,7 @@ not true and the scanner itself had real correctness bugs. Full detail:
   tooling does not yet have); (3) `ALLOWED_COMMANDS` not restricted
   despite several apparently-unused mutating commands remaining allowed.
   SEC-002 remains Open (main-branch backlog, unrelated to this PR).
+- **Merge result**: squash-merged to `main` as `6ea7c3e` (final corrected head `0ae8024`, branch `feat/sec002-mutation-surface-truth-wave23` preserved, not deleted). Final-head CI: all 19 checks green, `CodeQL` passing directly, API-confirmed 0 open alerts. Frontend gates (typecheck, lint, 48/48 tests, build, `npm audit --audit-level=high` -- 0 vulnerabilities) all clean. Both `beets-web-manager` and `beets-engine` Docker images built and verified with `org.opencontainers.image.revision=0ae8024`, matching the merged head.
 
 
 
