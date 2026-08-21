@@ -28,7 +28,7 @@ Statuses: Open, In Progress, Blocked, Done.
 - Evidence: The `beets` control agent now owns Beets CLI execution, direct SQLite compatibility queries, tag writes, and file move/delete endpoints inside the authoritative engine container. `app.py` still contains many legacy command-array call sites and residual direct filesystem operations (`shutil.move`, `shutil.rmtree`, `Path.unlink`, `os.replace`, copies, and directory removals) that are not all planned, audited, and verified through one transaction boundary. `backend/transaction_engine.py` exists but is not universal.
 - Current risk: Preview/audit/rollback behavior varies by workflow. Partial failure can be hard to recover or may be reported inconsistently. Residual filesystem call sites also make it easy to accidentally depend on web-manager media mounts that the supported two-service Compose files intentionally do not provide.
 - Desired state: Mutating workflows use shared plan/apply/verify/recover semantics with root validation, diffs, audit records, and recovery information, and all media/Beets mutations execute in the `beets` engine boundary.
-- Safe migration approach: Wrap one high-risk mutation family at a time using `TransactionStore` and explicit control-agent/BeetsClient APIs rather than replacing all callers. Wave 15 established the controlled mutation boundary for Import Review + cleanup mutations via engine-side `TransactionStore` (`/imports/review/cleanup/plan`, `/imports/review/cleanup/apply`, `/albums/cleanup/plan`, `/albums/cleanup/apply`). Wave 17 (PR #90) added the `track_replacement_v1` mutation family for single-track file replacement (original-file quarantine + DB row removal); see the Wave 17 entry below and `docs/operations/wave17_track_replacement_design.md` for the corrected caller matrix and what remains unmigrated (`_import_and_tag_disk`/`replace_existing_item_ids`, `repair_album_mb_tracks`). Wave 18 (PR #91) added the `bulk_import_replacement_v1` mutation family for the one real case in `_merge_imported_album_into_existing` where importing into an existing album retires some of its current tracks in favor of newly-imported ones; see the Wave 18 entry below and `docs/operations/wave18_bulk_import_replacement_design.md` for the corrected caller matrix (`replace_existing_item_ids`/the automatic music-format retry pipeline deliberately remains on Wave 17's `track_replacement_v1`, not this family) and what remains unmigrated (`repair_album_mb_tracks`, plus `_merge_imported_album_into_existing`'s own `dup_rows`/`move_ids` bookkeeping). Wave 19 added the `album_mb_track_repair_v1` mutation family for MusicBrainz album track repair (`repair_album_mb_tracks`), placing all SQLite track attribute updates and audio file tag writes under engine ownership with full TOCTOU revalidation, resource locking, and rollback support; see `docs/operations/wave19_mb_track_repair_design.md`. Wave 20 (PR #93) added the `existing_album_reconcile_v1` mutation family for `_merge_imported_album_into_existing`'s `dup_rows`/`move_ids`/empty-album-retirement bookkeeping; see the Wave 20 entry below and `docs/operations/wave20_existing_album_reconcile_design.md` for the corrected identity/path-authorization model and a fresh repo-wide audit that found substantially more uncontrolled `app.py` mutation surface than just this one site (artist-folder cleanup, playlist staging/deletion -- see that doc's section 15 and the Wave 20 entry below for specifics). Wave 21 (PR #94) added the `artist_folder_reconcile_v1` mutation family for artist-folder merging and MBID-folder-stamping; see the Wave 21 entry below and `docs/operations/wave21_artist_folder_reconcile_design.md` for the corrected identity/majority-rule-stamping model and a further-refreshed audit showing the remaining uncontrolled surface is broader than "playlist staging/deletion" alone (import/album-cleanup/artwork/dedup clusters, see that doc's section 12). Wave 22 (PR #95) added `album_maintenance_v1` (whole-album deduplication, track retirement, filename cleanup), `album_artwork_v1` (artwork quarantine and, newly, real relocation), `folder_cleanup_v1`, and `playlist_media_cleanup_v1`; the real Beets import for `import_folder_with_id` still runs locally (`import_folder_v1`'s engine-side Apply has no working import mechanism wired in yet) -- see the Wave 22 entry below and `docs/operations/wave22_album_maintenance_design.md` for the full corrected accounting and the specific remaining blockers.
+- Safe migration approach: Wrap one high-risk mutation family at a time using `TransactionStore` and explicit control-agent/BeetsClient APIs rather than replacing all callers. Wave 15 established the controlled mutation boundary for Import Review + cleanup mutations via engine-side `TransactionStore` (`/imports/review/cleanup/plan`, `/imports/review/cleanup/apply`, `/albums/cleanup/plan`, `/albums/cleanup/apply`). Wave 17 (PR #90) added the `track_replacement_v1` mutation family for single-track file replacement (original-file quarantine + DB row removal); see the Wave 17 entry below and `docs/operations/wave17_track_replacement_design.md` for the corrected caller matrix and what remains unmigrated (`_import_and_tag_disk`/`replace_existing_item_ids`, `repair_album_mb_tracks`). Wave 18 (PR #91) added the `bulk_import_replacement_v1` mutation family for the one real case in `_merge_imported_album_into_existing` where importing into an existing album retires some of its current tracks in favor of newly-imported ones; see the Wave 18 entry below and `docs/operations/wave18_bulk_import_replacement_design.md` for the corrected caller matrix (`replace_existing_item_ids`/the automatic music-format retry pipeline deliberately remains on Wave 17's `track_replacement_v1`, not this family) and what remains unmigrated (`repair_album_mb_tracks`, plus `_merge_imported_album_into_existing`'s own `dup_rows`/`move_ids` bookkeeping). Wave 19 added the `album_mb_track_repair_v1` mutation family for MusicBrainz album track repair (`repair_album_mb_tracks`), placing all SQLite track attribute updates and audio file tag writes under engine ownership with full TOCTOU revalidation, resource locking, and rollback support; see `docs/operations/wave19_mb_track_repair_design.md`. Wave 20 (PR #93) added the `existing_album_reconcile_v1` mutation family for `_merge_imported_album_into_existing`'s `dup_rows`/`move_ids`/empty-album-retirement bookkeeping; see the Wave 20 entry below and `docs/operations/wave20_existing_album_reconcile_design.md` for the corrected identity/path-authorization model and a fresh repo-wide audit that found substantially more uncontrolled `app.py` mutation surface than just this one site (artist-folder cleanup, playlist staging/deletion -- see that doc's section 15 and the Wave 20 entry below for specifics). Wave 21 (PR #94) added the `artist_folder_reconcile_v1` mutation family for artist-folder merging and MBID-folder-stamping; see the Wave 21 entry below and `docs/operations/wave21_artist_folder_reconcile_design.md` for the corrected identity/majority-rule-stamping model and a further-refreshed audit showing the remaining uncontrolled surface is broader than "playlist staging/deletion" alone (import/album-cleanup/artwork/dedup clusters, see that doc's section 12). Wave 22 (PR #95) added `album_maintenance_v1` (whole-album deduplication, track retirement, filename cleanup), `album_artwork_v1` (artwork quarantine and real relocation), `folder_cleanup_v1`, and `playlist_media_cleanup_v1`; see the Wave 22 entry below and `docs/operations/wave22_album_maintenance_design.md`. PR #96 ("ARCH-003 Final Closure") fixed a fail-open local-mutation fallback that had survived in `_album_cleanup_apply_issue` despite Wave 22's own migration, preserved the one genuinely correct change in that PR (engine-owned import via `reimport_source_atomic`), and replaced the hand-written, self-validating `security/arch003_mutation_inventory.json` with one derived from real AST-based mutation-sink discovery -- which found 372 real candidate sinks repository-wide, 189 of them still unresolved. See the PR #96 entry below and `docs/operations/arch003_final_closure_design.md` for the full accounting; ARCH-003 is **not** closed.
 - Priority: P0.
 - Status: In Progress.
 
@@ -974,6 +974,98 @@ disclose. Full detail in `docs/operations/wave22_album_maintenance_design.md`.
   (3) no completed repo-wide mutation-site classification exists yet. SEC-002
   remains Open (main-branch backlog, unrelated to this wave).
 - **Merge result**: squash-merged to `main` as `d106be3` (final corrected head `fe966a5`, branch `feat/sec002-album-maintenance-wave22` preserved, not deleted). Final-head CI: all 19 checks green (one transient CI segfault on `python-tests` confirmed non-reproducing on rerun before merge). CodeQL: 0 open alerts (30 `py/path-injection` alerts individually reviewed; one genuine gap fixed along the way, the rest dismissed as false positives with per-alert justification). Both `beets-web-manager` and `beets-engine` Docker images built and verified with `org.opencontainers.image.revision=fe966a5`, matching the merged head.
+
+### SEC-002 / ARCH-003 "Final Closure" (PR #96) -- Claude final independent review, correction, and merge authority
+
+AGY submitted PR #96 as "ARCH-003 Final Closure," claiming the Web Manager
+is "100% orchestration-only with zero local filesystem, database, or Beets
+mutation bypasses" backed by a machine-checked `security/arch003_mutation_
+inventory.json`. CI on the starting head was genuinely green (unlike prior
+waves). Neither closure claim held up under independent code inspection.
+Full detail: `docs/operations/arch003_final_closure_design.md`.
+
+- **Preserved (genuinely correct)**: `import_folder_with_id` no longer runs
+  a local `beet import` subprocess; it delegates through `beets_client.plan_
+  import_folder`/`apply_import_folder`, and the Control Agent's `/import/
+  apply` route now supplies a real `_beets_import_runner` that invokes the
+  engine's existing `reimport_source_atomic`. Unchanged by this review.
+- **CRITICAL, found and fixed**: `_album_cleanup_apply_issue` was fail-open,
+  not fail-closed, on every mutating branch. Four compounding bugs meant the
+  `except Exception: pass` -> local-fallback path ran on every real
+  invocation, not occasionally: duplicate quarantine and filename-cleanup
+  candidates hardcoded `item_id`/`"id"` to `0` (`album_maintenance_v1`
+  cannot bind that to any row, so Apply never did anything), the artwork
+  move call omitted the now-required `target_dir` (Plan always rejected
+  it), and empty-folder removal fell back to a local recursive delete on
+  any engine failure. Fixed: a new `_album_cleanup_item_id_for_path()`
+  resolves the real Beets item id for every candidate; artwork moves send
+  the already-resolved `canonical` folder as `target_dir`; every branch now
+  fails closed (blocked/error) on engine failure instead of silently
+  mutating locally; the dead local-fallback code (`_album_cleanup_remove_
+  empty_tree`'s caller here, the trash-path `shutil.move`, `_album_cleanup_
+  update_db_path`, `_album_cleanup_trash_path`) was removed, not left "just
+  in case." The ancestor-empty-folder-removal loop (a local `rmdir()` walk
+  not named in the review brief but the same class of gap) was also
+  migrated to `folder_cleanup_v1`.
+- **Real mutation-inventory discovery, not a hand-written list.** The
+  submitted inventory had 8 entries and its "verify" script only validated
+  that JSON's own internal consistency -- it never looked at the source
+  code. Replaced with `scripts/discover_mutation_sinks.py` (a real AST
+  walker finding filesystem/SQL/subprocess/tag-write call sites across
+  `app.py`, `routes_*.py`, and `backend/*.py`) and `scripts/generate_
+  arch003_mutation_inventory.py` (rule-based classification, each entry
+  recording which rule produced it). `scripts/verify_arch003_mutation_
+  inventory.py` now re-runs discovery against the current source and fails
+  if any discovered sink has no matching inventory entry -- proven by three
+  self-tests in `tests/test_arch003_final_closure.py` using synthetic
+  source (new unclassified sink fails; classified-and-baselined sink
+  passes; unresolved count growing past baseline fails even with every sink
+  matched).
+- **Real numbers, not a claim**: the first honest discovery pass found
+  **372 candidate mutation sinks** repository-wide. 61 are the engine's own
+  `CONTROLLED_MEDIA_MUTATION` implementation (`backend/transaction_engine.
+  py`, mapped by function name to family); 63 are `ENGINE_NATIVE_BEETS`
+  (`backend/beets_control_agent.py`, by architectural definition); 52 are
+  Web Manager app/config/cache/staging/transaction state, not library
+  media. **189 are unresolved**: 97 confirmed `ARCH003_BLOCKER` (real,
+  unmigrated raw Beets-library SQL DML or local `beet` subprocess calls --
+  `album_fix_metadata`, `match_album`, `album_rename`, `_delete_album_ids_
+  from_db`, and others, each named in the inventory) and 92 `NEEDS_REVIEW`
+  (discovered, not yet triaged with confidence -- mostly smaller support
+  modules not reviewed this pass). The CI gate is a ratchet: it fails on any
+  genuinely new/unmatched sink or if the unresolved count grows past 189,
+  but does not require the entire pre-existing backlog to be resolved in
+  this PR -- failing on the full historical debt would only make the gate
+  unlandable, not the repository safer.
+- **Test fallout from removing the fail-open fallback**: two existing test
+  files (`tests/test_album_folder_cleanup.py`, `tests/test_sec002_app_path_
+  album_folder_repair.py`) had been silently relying on the local fallback
+  to perform real file moves in their isolated/mocked harnesses. Both were
+  updated with proper fake/mock `beets_client` doubles that perform the
+  equivalent engine effect, so they keep testing this function's real
+  orchestration logic instead of a bypass that no longer exists.
+- **Not attempted this review**: classifying/fixing the full 189-entry
+  unresolved bucket (a real, multi-function migration effort -- each
+  blocked function needs its own transaction-family design, not a rushed
+  pass); a line-by-line audit of `backend/beets_control_agent.py`'s generic
+  mutation surface (`run_command`, `PATCH` endpoints) for bypass risk; live
+  two-service import acceptance testing (only unit-level `BeetsClient`/
+  Control-Agent tests were run).
+- **Tests**: `tests/test_arch003_final_closure.py` rewritten -- AST-based
+  absence checks for `_album_cleanup_apply_issue` (finding #49's actual
+  ask, not another `assertIn`), the four targeted bug regressions above,
+  and the three mutation-gate self-tests. Full repository suite: 2513
+  tests, 0 failures, 128 skipped, 2 consecutive clean runs. Security gates
+  (secret scan, compose validation, endpoint inventory, and the rewritten
+  `verify_arch003_mutation_inventory.py --check`) all clean at their
+  current (honest, non-zero) baselines.
+- **Status**: ARCH-003 remains **In Progress**. Not Done. Named remaining
+  blockers: (1) 97 confirmed `ARCH003_BLOCKER` sinks, individually listed in
+  `security/arch003_mutation_inventory.json`; (2) 92 `NEEDS_REVIEW` sinks
+  needing a confidence-raising human triage pass; (3) `backend/beets_
+  control_agent.py`'s generic mutation endpoints not individually audited
+  for bypass risk. SEC-002 remains Open (main-branch backlog, unrelated to
+  this PR).
 
 
 

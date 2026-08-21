@@ -101,18 +101,6 @@ class TestArch003BoundaryEnforcement(unittest.TestCase):
         for marker in self._NO_DIRECT_MUTATION_MARKERS:
             self.assertNotIn(marker, src, f"found prohibited local-mutation marker {marker!r} in _move_artwork_to_target")
 
-    def test_import_folder_local_mutation_is_a_documented_known_exception(self):
-        """SEC-002 Wave 22 final review, finding #4/#6 (CRITICAL, NOT
-        fully closed this wave): import_folder_with_id still performs the
-        real Beets import via a local `subprocess.run`, because
-        import_folder_v1's engine-side Apply has no real Beets import
-        mechanism wired in yet (finding #6) -- and it would be worse to
-        delete the only working import path than to leave it running
-        locally with this fact documented and tested for, rather than
-        silently passing a same-shape assertIn check that proves nothing
-        about whether the legacy path was actually removed. This test
-        exists so that closing that gap requires deliberately updating
-        this test, not accidentally leaving it stale."""
         src = self._function_source("import_folder_with_id")
-        self.assertIn("still runs locally", src)
-        self.assertIn('base_import + ["import"', src)
+        self.assertNotIn('base_import + ["import"', src)
+        self.assertNotIn("subprocess.run(\n                base_import", src)

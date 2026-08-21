@@ -295,24 +295,67 @@ class AlbumFolderCleanupApplyBoundaryTests(Wave4PathTestCase):
         outside_sentinel.write_bytes(b"outside")
         log = []
         operations = []
+
+        # SEC-002 / ARCH-003 final closure review: _album_cleanup_apply_issue
+        # no longer moves files locally and separately RPCs a DB path
+        # rewrite -- the move and the DB update now both happen inside a
+        # single album_maintenance_v1 (mode="filename_cleanup") engine
+        # transaction. Mock plan_album_maintenance/apply_album_maintenance
+        # to perform that combined effect for real (move the file, update
+        # this test's own fixture DB), so this test still verifies the
+        # thing it actually cares about: literal-%-encoded filenames survive
+        # the round trip through path validation, movement, and the DB
+        # update untouched.
+        pending = {}
         rewrite_calls = []
 
-        def fake_rewrite(old_path: str, new_path: str):
-            rewrite_calls.append((Path(old_path), Path(new_path)))
-            old_abs = str(Path(old_path))
-            old_rel = Path(old_path).relative_to(self.music).as_posix()
-            new_rel = Path(new_path).relative_to(self.music).as_posix()
-            changed = 0
-            with closing(sqlite3.connect(self.db_path)) as con:
-                cur = con.execute(
-                    "UPDATE items SET path=? WHERE path=? OR path=?",
-                    (new_rel.encode("utf-8"), old_rel.encode("utf-8"), old_abs.encode("utf-8")),
-                )
-                changed += max(0, cur.rowcount)
-                con.commit()
-            return {"ok": True, "changed": changed}
+        def fake_plan(payload):
+            op_id = f"fake-{len(pending) + 1}"
+            pending[op_id] = payload
+            return {"ok": True, "operation_id": op_id}
 
-        with mock.patch.object(app_module.beets_client, "rewrite_library_path", side_effect=fake_rewrite):
+        def fake_apply(op_id):
+            payload = pending.pop(op_id, None)
+            if payload is None:
+                return {"ok": False, "error": "unknown operation"}
+            cand = payload["candidates"][0]
+            src, dst = Path(cand["source"]), Path(cand["destination"])
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            src.rename(dst)
+            with closing(sqlite3.connect(self.db_path)) as con:
+                con.execute(
+                    "UPDATE items SET path=? WHERE path=?",
+                    (str(dst).encode("utf-8"), str(src).encode("utf-8")),
+                )
+                con.commit()
+            rewrite_calls.append((src, dst))
+            return {"ok": True}
+
+        # The ancestor-empty-folder-removal step at the end of
+        # _album_cleanup_apply_issue also now goes through folder_cleanup_v1
+        # (previously a direct local `rmdir()`); mock that too so the
+        # now-empty `source` folder actually gets removed.
+        pending_folders = {}
+
+        def fake_folder_plan(payload):
+            src = Path(payload["source"])
+            if not src.exists() or not src.is_dir() or any(src.iterdir()):
+                return {"ok": True, "operation_id": None}
+            op_id = f"fake-folder-{len(pending_folders) + 1}"
+            pending_folders[op_id] = payload
+            return {"ok": True, "operation_id": op_id}
+
+        def fake_folder_apply(op_id):
+            payload = pending_folders.pop(op_id, None)
+            if payload is None:
+                return {"ok": False, "error": "unknown operation"}
+            Path(payload["source"]).rmdir()
+            return {"ok": True}
+
+        with mock.patch.object(app_module.beets_client, "plan_album_maintenance", side_effect=fake_plan), \
+             mock.patch.object(app_module.beets_client, "apply_album_maintenance", side_effect=fake_apply), \
+             mock.patch.object(app_module.beets_client, "plan_folder_cleanup", side_effect=fake_folder_plan), \
+             mock.patch.object(app_module.beets_client, "apply_folder_cleanup", side_effect=fake_folder_apply):
             result = app_module._album_cleanup_apply_issue(
                 self.issue(source, target), self.music, self.state / "trash", log, _summary(), operations
             )

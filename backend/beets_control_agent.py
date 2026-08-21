@@ -4187,11 +4187,23 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 return
             music_root_env = os.environ.get("MUSIC_ROOT", "/music")
             quarantine_root = os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
+
+            def _beets_import_runner(payload: dict) -> dict:
+                src_folder = str(payload.get("source_folder") or payload.get("folder_path") or "").strip()
+                mb_albumid = str(payload.get("mb_albumid") or "").strip()
+                selected_releasegroupid = str(payload.get("mb_releasegroupid") or "").strip()
+                beets_options = {
+                    "mb_albumid": mb_albumid,
+                    "mb_releasegroupid": selected_releasegroupid,
+                }
+                return reimport_source_atomic(src_folder, beets_options=beets_options)
+
             res = transaction_engine.execute_import_folder_apply(
                 _txn_store, op_id,
                 db_path=MUSIC_LIBRARY_PATH,
                 music_allowed_roots=[music_root_env],
                 quarantine_base_root=quarantine_root,
+                beets_import_runner=_beets_import_runner,
             )
             code = 200 if res.get("ok") else 400
             self._send_json(code, res)
