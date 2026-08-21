@@ -973,6 +973,7 @@ disclose. Full detail in `docs/operations/wave22_album_maintenance_design.md`.
   next dedicated piece of work; (2) `cleanup_issue` mode is unimplemented;
   (3) no completed repo-wide mutation-site classification exists yet. SEC-002
   remains Open (main-branch backlog, unrelated to this wave).
+- **Merge result**: squash-merged to `main` as `d106be3` (final corrected head `fe966a5`, branch `feat/sec002-album-maintenance-wave22` preserved, not deleted). Final-head CI: all 19 checks green (one transient CI segfault on `python-tests` confirmed non-reproducing on rerun before merge). CodeQL: 0 open alerts (30 `py/path-injection` alerts individually reviewed; one genuine gap fixed along the way, the rest dismissed as false positives with per-alert justification). Both `beets-web-manager` and `beets-engine` Docker images built and verified with `org.opencontainers.image.revision=fe966a5`, matching the merged head.
 
 
 
