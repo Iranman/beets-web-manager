@@ -804,16 +804,70 @@ class BeetsClient:
         source: str = "user",
         expected_mb_releasegroupid: str = "",
     ) -> Dict[str, Any]:
-        """Atomically replace album artwork inside the Beets engine."""
-        return self._request("POST", f"/albums/{album_id}/art", {
-            "image_data_b64": image_data_b64,
-            "source": source,
-            "expected_mb_releasegroupid": expected_mb_releasegroupid,
-        })
+        """Atomically replace album artwork through the album_artwork_v1 transaction family."""
+        import base64
+        data = base64.b64decode(image_data_b64)
+        items = self.get_album_items(album_id)
+        if not items:
+            return {"ok": False, "error": "Album has no items"}
+        first_path = Path(str(items[0].get("path") or ""))
+        target_dir = first_path.parent
+
+        stg_base = Path(os.environ.get("STAGING_ROOT", "/config/staging"))
+        stg_base.mkdir(parents=True, exist_ok=True)
+        temp_art = stg_base / f"staged_art_{album_id}_{uuid.uuid4().hex[:8]}.jpg"
+        temp_art.write_bytes(data)
+
+        try:
+            plan_res = self.plan_album_artwork({
+                "mode": "move",
+                "album_id": album_id,
+                "target_dir": str(target_dir),
+                "candidates": [{"source": str(temp_art)}],
+            })
+            if not plan_res.get("ok"):
+                return {"ok": False, "error": plan_res.get("error") or "Artwork plan rejected"}
+            op_id = plan_res.get("operation_id")
+            if not op_id:
+                return {"ok": False, "error": "Artwork plan produced no operation_id"}
+            apply_res = self.apply_album_artwork(op_id)
+            if not apply_res.get("ok"):
+                return {"ok": False, "error": apply_res.get("error") or "Artwork apply failed"}
+        finally:
+            if temp_art.exists():
+                try:
+                    temp_art.unlink()
+                except Exception:
+                    pass
+        return {"ok": True, "artpath": str(target_dir / "cover.jpg")}
 
     def delete_album_art(self, album_id: int) -> Dict[str, Any]:
-        """Quarantine local album artwork and clear artpath inside the Beets engine."""
-        return self._request("DELETE", f"/albums/{album_id}/art")
+        """Quarantine local album artwork through the album_artwork_v1 transaction family."""
+        items = self.get_album_items(album_id)
+        candidates = []
+        if items:
+            album_dir = Path(str(items[0].get("path") or "")).parent
+            for art_name in ("cover.jpg", "cover.png", "folder.jpg", "folder.png", "albumart.jpg", "albumart.png"):
+                art_p = album_dir / art_name
+                if art_p.exists() and art_p.is_file():
+                    candidates.append({"source": str(art_p)})
+        if not candidates:
+            return {"ok": True, "removed": [], "removed_count": 0, "quarantined_art": []}
+
+        plan_res = self.plan_album_artwork({
+            "mode": "quarantine",
+            "album_id": album_id,
+            "quarantined_art": candidates,
+        })
+        if not plan_res.get("ok"):
+            return {"ok": False, "error": plan_res.get("error") or "Artwork deletion plan rejected"}
+        op_id = plan_res.get("operation_id")
+        if not op_id:
+            return {"ok": True, "removed": [], "removed_count": 0, "quarantined_art": []}
+        apply_res = self.apply_album_artwork(op_id)
+        if not apply_res.get("ok"):
+            return {"ok": False, "error": apply_res.get("error") or "Artwork deletion apply failed"}
+        return {"ok": True, "removed": [c["source"] for c in candidates], "removed_count": len(candidates)}
 
     def rewrite_library_path(self, old_path: str, new_path: str) -> Dict[str, Any]:
         """Rewrite Beets item/art paths after a validated library file move."""
@@ -827,8 +881,34 @@ class BeetsClient:
         return self._request("POST", "/files/hardlink", payload)
 
     def delete_album(self, album_id: int, delete_files: bool = True) -> Dict[str, Any]:
-        """Perform transactional single-writer album deletion under lock."""
-        return self._request("DELETE", f"/albums/{album_id}", {"delete_files": delete_files})
+        """Perform transaction-controlled album removal through album_maintenance_v1 family."""
+        items = self.get_album_items(album_id)
+        item_ids = [int(it.get("id") or 0) for it in items if int(it.get("id") or 0) > 0]
+        if not item_ids:
+            return {"ok": False, "error": f"Album {album_id} has no track items"}
+
+        plan_res = self.plan_album_maintenance({
+            "mode": "remove_tracks",
+            "album_id": album_id,
+            "item_ids": item_ids,
+            "delete_files": delete_files,
+            "clean_empty_folders": True,
+        })
+        if not plan_res.get("ok"):
+            return {"ok": False, "error": plan_res.get("error") or "Album removal plan rejected", "database_deleted": False, "status": "failed"}
+        op_id = plan_res.get("operation_id")
+        if not op_id:
+            return {"ok": True, "database_deleted": True, "items_deleted": 0, "files_deleted": 0, "status": "completed"}
+        apply_res = self.apply_album_maintenance(op_id)
+        if not apply_res.get("ok"):
+            return {"ok": False, "error": apply_res.get("error") or "Album removal apply failed", "database_deleted": False, "status": "failed"}
+        return {
+            "ok": True,
+            "status": "completed",
+            "database_deleted": True,
+            "items_deleted": len(item_ids),
+            "files_deleted": len(item_ids) if delete_files else 0,
+        }
 
 
 class RemoteSQLiteCursor:

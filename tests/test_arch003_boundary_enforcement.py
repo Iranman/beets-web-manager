@@ -141,3 +141,31 @@ class TestArch003BoundaryEnforcement(unittest.TestCase):
                     if isinstance(ctx, ast.Call) and isinstance(ctx.func, ast.Name) and ctx.func.id == "_db":
                         found.append(f"with:_db@{node.lineno}")
         self.assertEqual(found, [], f"found prohibited local-mutation call node(s) in _album_cleanup_apply_issue: {found}")
+
+    def test_mutation_inventory_domain_accounting_gate(self):
+        """Wave 24: Verify every inventory entry carries a domain field and missing domain fails CI."""
+        import json, tempfile
+        from scripts.verify_arch003_mutation_inventory import verify_mutation_inventory
+
+        self.assertTrue(verify_mutation_inventory(self.repo_root, check_mode=True))
+
+        inv_path = self.repo_root / "security" / "arch003_mutation_inventory.json"
+        data = json.loads(inv_path.read_text(encoding="utf-8"))
+        for entry in data.get("inventory", []):
+            self.assertTrue(bool(entry.get("domain")), f"entry {entry.get('key')} has missing or empty domain field")
+
+        # Prove domain gate fails if domain is stripped from an ARCH003_BLOCKER sink
+        if data.get("inventory"):
+            test_data = dict(data)
+            test_data["inventory"] = [dict(e) for e in data["inventory"]]
+            blocker = next((e for e in test_data["inventory"] if e.get("classification") == "ARCH003_BLOCKER"), test_data["inventory"][0])
+            blocker["classification"] = "ARCH003_BLOCKER"
+            blocker["domain"] = ""
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                tmp_path = Path(tmp_dir)
+                sec_dir = tmp_path / "security"
+                sec_dir.mkdir()
+                (sec_dir / "arch003_mutation_inventory.json").write_text(json.dumps(test_data), encoding="utf-8")
+                (tmp_path / "backend").mkdir()
+                (tmp_path / "backend" / "transaction_engine.py").write_text((self.repo_root / "backend" / "transaction_engine.py").read_text(encoding="utf-8"), encoding="utf-8")
+                self.assertFalse(verify_mutation_inventory(tmp_path, check_mode=True))
