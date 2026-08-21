@@ -44,6 +44,17 @@ from discover_mutation_sinks import discover_all  # noqa: E402
 ALLOWED_CLASSIFICATIONS = {
     "CONTROLLED_MEDIA_MUTATION",
     "ENGINE_NATIVE_BEETS",
+    # SEC-002 / ARCH-003 Wave 23 final review, finding #4: "engine-owned"
+    # is not automatically "architecture-safe" -- an operation that
+    # executes inside the engine container can still bypass Plan/Review/
+    # Apply/Verify/TransactionStore/Rollback entirely. These four
+    # narrower classifications replace treating ENGINE_NATIVE_BEETS as a
+    # universal exemption for anything inside the Control Agent.
+    "ENGINE_CONTROLLED_TRANSACTION",  # backs a real _v1 Plan/Apply family
+    "ENGINE_NATIVE_READ_ONLY",        # genuinely read-only (diagnostics, lookups)
+    "ENGINE_ADMIN_MUTATION",          # deliberate, explicit, verified admin-style action -- not a transaction family, but not a silent bypass either
+    "ENGINE_GENERIC_BYPASS",          # confirmed real production mutation with NO transaction boundary at all
+    "ENGINE_CONFIG_STATE",            # engine-side config/job-state files, not library media
     "APP_STATE",
     "CONFIG_STATE",
     "CACHE_STATE",
@@ -56,7 +67,13 @@ ALLOWED_CLASSIFICATIONS = {
     "NEEDS_REVIEW",
     "ARCH003_BLOCKER",
 }
-_UNRESOLVED = {"NEEDS_REVIEW", "ARCH003_BLOCKER"}
+# Classifications that represent a genuine, real architectural gap and
+# should count toward the unresolved/ratchet total alongside
+# NEEDS_REVIEW/ARCH003_BLOCKER (finding #27: Control-Agent risks were
+# previously invisible to the blocker count because everything there was
+# blanket-classified as an exemption).
+_UNRESOLVED_EXTRA = {"ENGINE_GENERIC_BYPASS"}
+_UNRESOLVED = {"NEEDS_REVIEW", "ARCH003_BLOCKER"} | _UNRESOLVED_EXTRA
 
 
 def _real_transaction_families(repo_root: Path) -> set:
@@ -125,9 +142,15 @@ def verify_mutation_inventory(repo_root: Path, check_mode: bool = True) -> bool:
             errors.append(f"    NEW: {s.file}:{s.function}:{s.lineno} -- {s.call_text[:90]}")
         errors.append("  Run `python scripts/generate_arch003_mutation_inventory.py` and classify the new entries.")
 
+    # SEC-002 / ARCH-003 Wave 23 final review, finding #21: NEEDS_REVIEW=0
+    # must be *earned* through real triage, not mechanically enforced as a
+    # hard gate -- a hard "NEEDS_REVIEW must be 0" check creates exactly
+    # the pressure that produces fake precision (force every ambiguous
+    # sink into some other bucket just to make the number disappear,
+    # which is indistinguishable from guessing). NEEDS_REVIEW is included
+    # in the ratchet's unresolved-count baseline below, so it still can't
+    # silently grow -- it just isn't required to hit zero before merge.
     needs_review_count = sum(1 for e in inventory if e.get("classification") == "NEEDS_REVIEW")
-    if needs_review_count > 0:
-        errors.append(f"{needs_review_count} NEEDS_REVIEW entry(ies) found in inventory. Wave 23 requires NEEDS_REVIEW = 0. Triage all entries.")
 
     unresolved_count = sum(1 for e in inventory if e.get("classification") in _UNRESOLVED)
     baseline = data.get("unresolved_baseline", data.get("classification_counts", {}).get("ARCH003_BLOCKER", 0)

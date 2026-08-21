@@ -106,16 +106,38 @@ class TestArch003BoundaryEnforcement(unittest.TestCase):
         self.assertNotIn("subprocess.run(\n                base_import", src)
 
     def test_album_cleanup_apply_issue_has_no_direct_mutation_calls(self):
-        """Wave 23: _album_cleanup_apply_issue must perform zero local library media/folder mutations."""
+        """Wave 23 final review, finding #23: the original version of this
+        test used source-text substring markers (`.mkdir(`, `shutil.move(`,
+        ...), which is exactly the pattern the review brief flags as easy
+        to evade (aliasing, helper indirection, getattr, reformatting) and
+        also structurally fragile to false positives from comment prose
+        (see the Wave 21/22 review history of this same test file, where an
+        explanatory comment mentioning "shutil.move" in prose tripped a
+        substring check). Rewritten to walk the actual AST: real `ast.Call`
+        nodes matching the mutation call shapes, a real `ast.Name` load of
+        `BEET_BIN`, and a real `with _db(...)` statement -- not text."""
         src = self._function_source("_album_cleanup_apply_issue")
-        prohibited_markers = (
-            ".mkdir(", "os.makedirs(", "os.mkdir(",
-            ".unlink(", "os.unlink(", "os.remove(",
-            ".rename(", "os.rename(", ".replace(", "os.replace(",
-            "shutil.move(", ".rmdir(", "os.rmdir(", "os.removedirs(", "shutil.rmtree(",
-            "shutil.copy(", "shutil.copy2(", "shutil.copyfile(", "shutil.copytree(",
-            ".write_text(", ".write_bytes(", "open(",
-            "with _db(", "BEET_BIN",
-        )
-        for marker in prohibited_markers:
-            self.assertNotIn(marker, src, f"found prohibited direct-mutation marker {marker!r} in _album_cleanup_apply_issue")
+        tree = ast.parse(src)
+        found = []
+
+        banned_calls = {
+            "mkdir", "makedirs", "unlink", "remove", "rename", "replace",
+            "move", "rmdir", "removedirs", "rmtree", "copy", "copy2",
+            "copyfile", "copytree", "write_text", "write_bytes",
+        }
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                name = node.func.attr if isinstance(node.func, ast.Attribute) else (
+                    node.func.id if isinstance(node.func, ast.Name) else None)
+                if name in banned_calls:
+                    found.append(f"call:{name}@{node.lineno}")
+                elif isinstance(node.func, ast.Name) and node.func.id == "open":
+                    found.append(f"call:open@{node.lineno}")
+            elif isinstance(node, ast.Name) and node.id == "BEET_BIN":
+                found.append(f"name:BEET_BIN@{node.lineno}")
+            elif isinstance(node, ast.With):
+                for item in node.items:
+                    ctx = item.context_expr
+                    if isinstance(ctx, ast.Call) and isinstance(ctx.func, ast.Name) and ctx.func.id == "_db":
+                        found.append(f"with:_db@{node.lineno}")
+        self.assertEqual(found, [], f"found prohibited local-mutation call node(s) in _album_cleanup_apply_issue: {found}")

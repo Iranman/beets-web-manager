@@ -28,8 +28,26 @@ from backend.beets_control_agent import (  # noqa: E402
 
 class FieldAllowlistTests(unittest.TestCase):
     def test_known_item_fields_pass(self):
-        fields = {"title": "New Title", "year": 2020, "mb_trackid": "abc"}
+        # SEC-002 / ARCH-003 Wave 23 final review, findings #6/#38:
+        # mb_trackid (and the other MusicBrainz identity fields) were
+        # removed from this allowlist -- canonical identity mutation must
+        # go through a controlled transaction family, never this generic,
+        # untransacted endpoint. See test_identity_fields_are_not_editable
+        # below for the regression coverage of that removal.
+        fields = {"title": "New Title", "year": 2020, "genre": "Rock"}
         self.assertEqual(_invalid_field_names(fields, ITEM_EDITABLE_FIELDS), [])
+
+    def test_identity_fields_are_not_editable(self):
+        """SEC-002 / ARCH-003 Wave 23 final review, findings #6/#7/#38:
+        MusicBrainz identity fields must never be editable through this
+        generic, untransacted PATCH endpoint -- no Plan/Apply/Verify/
+        Rollback, no TOCTOU, no identity-conflict check, just a direct SQL
+        UPDATE under a filesystem lock. Canonical identity mutation must go
+        through a controlled transaction family instead."""
+        item_identity_fields = {"mb_trackid", "mb_albumid", "mb_artistid", "mb_releasegroupid"}
+        album_identity_fields = {"mb_albumid", "mb_albumartistid", "mb_releasegroupid"}
+        self.assertEqual(item_identity_fields & ITEM_EDITABLE_FIELDS, set())
+        self.assertEqual(album_identity_fields & ALBUM_EDITABLE_FIELDS, set())
 
     def test_known_album_fields_pass(self):
         fields = {"album": "New Album", "genre": "Rock"}

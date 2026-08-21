@@ -42,11 +42,30 @@ _FS_MODULE_FUNCS = {
 }
 
 _SQL_DML_RE = re.compile(r"^\s*(INSERT|UPDATE|DELETE|REPLACE)\s", re.IGNORECASE)
+# Bare-name (ast.Name) wrapper calls -- `_beet_run(...)`, not
+# `module._beet_run(...)`. SEC-002 / ARCH-003 Wave 23 final review,
+# finding #9: `_attr_chain()` only resolves `ast.Attribute` call targets
+# (`module.attr(...)`), so a bare-name call's `.func` is an `ast.Name` and
+# `_attr_chain()` returns None for it -- `_beet_run` was listed in the
+# subprocess-detection tuple but could never actually match. Handled via a
+# dedicated bare-name set (finding #10: audited for other project wrapper
+# functions called the same way, not just `_beet_run`).
+_BARE_SUBPROCESS_WRAPPER_NAMES = {"_beet_run"}
 _TAG_WRITE_METHODS = {"save", "write_tags"}
 _PATH_LIKE_NAME_RE = re.compile(
-    r"(path|file|dir|folder|target|dest|dst|src|tmp|temp|cfg|config|cover|art|canonical|trash|source|p|f|d|root)",
+    r"(path|file|dir|folder|target|dest|dst|src|tmp|temp|cfg|config|cover|art|canonical|trash|source|root)",
     re.IGNORECASE,
 )
+# SEC-002 / ARCH-003 Wave 23 final review, finding #11: the descriptive
+# pattern above previously also carried bare `p`/`f`/`d` as ordinary
+# regex alternatives -- since it's matched with `search()` (substring,
+# not full-match), those matched almost any identifier containing that
+# letter anywhere ("data", "config", "id", "added", ...), destroying any
+# real signal in rename/replace classification. Single-letter
+# conventional path variable names are real (`p = Path(...)`) but must be
+# matched as the *whole* identifier, not a substring -- checked
+# separately.
+_PATH_LIKE_SHORT_NAME_RE = re.compile(r"^(?:p|f|d)$")
 _FILE_HANDLE_NAME_RE = re.compile(
     r"(fh|file|handle|f_out|out|writer|fp|stream)",
     re.IGNORECASE,
@@ -125,7 +144,8 @@ def _is_path_expr(node: ast.AST) -> bool:
 
 def _looks_like_path_receiver(receiver: ast.AST, path_vars: Set[str]) -> bool:
     if isinstance(receiver, ast.Name):
-        if receiver.id in path_vars or bool(_PATH_LIKE_NAME_RE.search(receiver.id)):
+        if (receiver.id in path_vars or _PATH_LIKE_NAME_RE.search(receiver.id)
+                or _PATH_LIKE_SHORT_NAME_RE.match(receiver.id)):
             return True
     if isinstance(receiver, ast.Attribute):
         if bool(_PATH_LIKE_NAME_RE.search(receiver.attr)):
@@ -135,6 +155,29 @@ def _looks_like_path_receiver(receiver: ast.AST, path_vars: Set[str]) -> bool:
         if chain in ("Path", "pathlib.Path") or (isinstance(receiver.func, ast.Name) and receiver.func.id == "Path"):
             return True
     return False
+
+
+def _walk_own_scope_only(node: ast.AST):
+    """Like `ast.walk`, but does not descend into nested function/class
+    scopes. SEC-002 / ARCH-003 Wave 23 final review, finding #13: the
+    pre-scan that collects a function's local `path_vars`/`sql_vars`/
+    `file_handle_vars` used plain `ast.walk(node)`, which visits every
+    descendant including nested `def`/`class`/lambda bodies -- an inner
+    function's own local `Path(...)` assignment would pollute the outer
+    function's scope for the rest of its body, and (for a name reused in
+    both scopes) can silently persist into places it does not belong.
+    Yields `node` itself and everything in its immediate scope; stops at
+    (does not yield into) any nested `FunctionDef`/`AsyncFunctionDef`/
+    `ClassDef`/`Lambda`."""
+    stack = [node]
+    seen_root = True
+    while stack:
+        current = stack.pop()
+        yield current
+        if not seen_root and isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue  # do not descend into a nested scope
+        seen_root = False
+        stack.extend(ast.iter_child_nodes(current))
 
 
 def discover_sinks_in_file(path: Path, rel_path: str) -> List[MutationSink]:
@@ -167,7 +210,7 @@ def discover_sinks_in_file(path: Path, rel_path: str) -> List[MutationSink]:
             self.file_handle_vars = set()
 
             # Pre-scan function body to gather local assignments
-            for child in ast.walk(node):
+            for child in _walk_own_scope_only(node):
                 if isinstance(child, ast.Assign):
                     target_names = [t.id for t in child.targets if isinstance(t, ast.Name)]
                     val = child.value
@@ -250,11 +293,30 @@ def discover_sinks_in_file(path: Path, rel_path: str) -> List[MutationSink]:
                   and _looks_like_path_receiver(node.func.value, self.path_vars)):
                 kind = "filesystem"
 
-            # 4. open(...) or Path.open(...) with writable mode
-            elif (isinstance(node.func, ast.Name) and node.func.id == "open") or (isinstance(node.func, ast.Attribute) and node.func.attr == "open"):
+            # 4. open(...) or Path.open(...) with writable mode. The mode
+            # argument's position differs between the two forms: builtin
+            # `open(path, mode)` takes mode as args[1]; `Path(...).open
+            # (mode)` takes it as args[0] (no separate path argument --
+            # the receiver already is the path). Using args[1] for both
+            # meant `Path(...).open("wb")` (a single-arg call) always fell
+            # back to the "r" default and was silently never flagged.
+            elif isinstance(node.func, ast.Name) and node.func.id == "open":
                 mode = "r"
                 if len(node.args) > 1:
                     m_val = _extract_string_const(node.args[1])
+                    if m_val:
+                        mode = m_val
+                for kw in node.keywords:
+                    if kw.arg == "mode":
+                        m_val = _extract_string_const(kw.value)
+                        if m_val:
+                            mode = m_val
+                if _is_writable_open_mode(mode):
+                    kind = "filesystem"
+            elif isinstance(node.func, ast.Attribute) and node.func.attr == "open":
+                mode = "r"
+                if node.args:
+                    m_val = _extract_string_const(node.args[0])
                     if m_val:
                         mode = m_val
                 for kw in node.keywords:
@@ -276,14 +338,22 @@ def discover_sinks_in_file(path: Path, rel_path: str) -> List[MutationSink]:
             elif isinstance(node.func, ast.Attribute) and node.func.attr in _TAG_WRITE_METHODS:
                 kind = "tag_write"
 
-            # 7. Subprocess and Beets command execution
+            # 7. Subprocess and Beets command execution (module.attr form)
             elif chain in (
                 "subprocess.run", "subprocess.Popen", "subprocess.call",
                 "subprocess.check_call", "subprocess.check_output",
-                "_beet_run", "beets_client.run_command", "beets_client.reimport_source",
+                "beets_client.run_command", "beets_client.reimport_source",
                 "beets_client.reimport_disk", "beets_client.modify", "beets_client.retag",
                 "beets_client.write_tags",
             ):
+                kind = "subprocess"
+
+            # 7b. Bare-name wrapper calls -- `_beet_run(...)`, not
+            # `module._beet_run(...)`. `chain` (from `_attr_chain`) is only
+            # ever set for `ast.Attribute` call targets, so it is always
+            # None here and can never match a name in this tuple; that was
+            # the actual bug (finding #9).
+            elif isinstance(node.func, ast.Name) and node.func.id in _BARE_SUBPROCESS_WRAPPER_NAMES:
                 kind = "subprocess"
 
             # 8. SQL DML execution (direct string literal or local variable reference)
