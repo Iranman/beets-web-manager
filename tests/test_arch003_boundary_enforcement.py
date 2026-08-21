@@ -104,3 +104,18 @@ class TestArch003BoundaryEnforcement(unittest.TestCase):
         src = self._function_source("import_folder_with_id")
         self.assertNotIn('base_import + ["import"', src)
         self.assertNotIn("subprocess.run(\n                base_import", src)
+
+    def test_album_cleanup_apply_issue_has_no_direct_mutation_calls(self):
+        """Wave 23: _album_cleanup_apply_issue must perform zero local library media/folder mutations."""
+        src = self._function_source("_album_cleanup_apply_issue")
+        prohibited_markers = (
+            ".mkdir(", "os.makedirs(", "os.mkdir(",
+            ".unlink(", "os.unlink(", "os.remove(",
+            ".rename(", "os.rename(", ".replace(", "os.replace(",
+            "shutil.move(", ".rmdir(", "os.rmdir(", "os.removedirs(", "shutil.rmtree(",
+            "shutil.copy(", "shutil.copy2(", "shutil.copyfile(", "shutil.copytree(",
+            ".write_text(", ".write_bytes(", "open(",
+            "with _db(", "BEET_BIN",
+        )
+        for marker in prohibited_markers:
+            self.assertNotIn(marker, src, f"found prohibited direct-mutation marker {marker!r} in _album_cleanup_apply_issue")

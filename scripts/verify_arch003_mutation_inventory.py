@@ -125,6 +125,10 @@ def verify_mutation_inventory(repo_root: Path, check_mode: bool = True) -> bool:
             errors.append(f"    NEW: {s.file}:{s.function}:{s.lineno} -- {s.call_text[:90]}")
         errors.append("  Run `python scripts/generate_arch003_mutation_inventory.py` and classify the new entries.")
 
+    needs_review_count = sum(1 for e in inventory if e.get("classification") == "NEEDS_REVIEW")
+    if needs_review_count > 0:
+        errors.append(f"{needs_review_count} NEEDS_REVIEW entry(ies) found in inventory. Wave 23 requires NEEDS_REVIEW = 0. Triage all entries.")
+
     unresolved_count = sum(1 for e in inventory if e.get("classification") in _UNRESOLVED)
     baseline = data.get("unresolved_baseline", data.get("classification_counts", {}).get("ARCH003_BLOCKER", 0)
                          + data.get("classification_counts", {}).get("NEEDS_REVIEW", 0))

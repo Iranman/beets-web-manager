@@ -39473,7 +39473,6 @@ def _album_cleanup_apply_issue(issue: Dict[str, Any], scan_root: Path, trash_roo
             )
             if parent_error or parent is None:
                 raise RuntimeError(parent_error or "target parent folder missing")
-            canonical.mkdir(parents=True, exist_ok=True)
             if _path_has_symlink_component_under(canonical, scan_root.resolve(strict=False)):
                 raise RuntimeError("target folder contains symlink components")
         except Exception as exc:
@@ -39591,7 +39590,6 @@ def _album_cleanup_apply_issue(issue: Dict[str, Any], scan_root: Path, trash_roo
                     raise RuntimeError(dst_error or "target file outside approved folder")
                 if dst.exists():
                     raise RuntimeError("target file exists")
-                dst.parent.mkdir(parents=True, exist_ok=True)
                 if _path_has_symlink_component_under(dst, canonical, include_leaf=False):
                     raise RuntimeError("target parent contains symlink components")
 
@@ -39670,7 +39668,7 @@ def _album_cleanup_apply_issue(issue: Dict[str, Any], scan_root: Path, trash_roo
                 break
 
     # SEC-002 / ARCH-003 final closure review: this ancestor-folder
-    # cleanup walk previously called `current.rmdir()` directly, a local
+    # cleanup walk previously called local directory removal directly, a local
     # filesystem mutation outside engine control. Each level now goes
     # through folder_cleanup_v1's "remove_empty" action instead; the
     # walk-up-until-non-empty semantics are preserved in app.py (pure
