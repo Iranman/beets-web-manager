@@ -356,6 +356,68 @@ class BeetsClient:
         """Engine-side artist-folder merge & MBID stamping rollback (SEC-002 Wave 21)."""
         return self._request("POST", "/artists/reconcile/rollback", {"operation_id": operation_id}, timeout=timeout)
 
+    def plan_album_maintenance(self, payload: Dict[str, Any], *, timeout: float = 30.0) -> Dict[str, Any]:
+        """Engine-side album maintenance planning (SEC-002 Wave 22)."""
+        return self._request("POST", "/albums/maintenance/plan", payload, timeout=timeout)
+
+    def apply_album_maintenance(self, operation_id: str, *, timeout: float = 60.0) -> Dict[str, Any]:
+        """Engine-side album maintenance application (SEC-002 Wave 22)."""
+        return self._request("POST", "/albums/maintenance/apply", {"operation_id": operation_id}, timeout=timeout)
+
+    def rollback_album_maintenance(self, operation_id: str, *, timeout: float = 60.0) -> Dict[str, Any]:
+        """Engine-side album maintenance rollback (SEC-002 Wave 22)."""
+        return self._request("POST", "/albums/maintenance/rollback", {"operation_id": operation_id}, timeout=timeout)
+
+    def plan_album_artwork(self, payload: Dict[str, Any], *, timeout: float = 30.0) -> Dict[str, Any]:
+        """Engine-side album artwork planning (SEC-002 Wave 22)."""
+        return self._request("POST", "/albums/artwork/plan", payload, timeout=timeout)
+
+    def apply_album_artwork(self, operation_id: str, *, timeout: float = 60.0) -> Dict[str, Any]:
+        """Engine-side album artwork application (SEC-002 Wave 22)."""
+        return self._request("POST", "/albums/artwork/apply", {"operation_id": operation_id}, timeout=timeout)
+
+    def rollback_album_artwork(self, operation_id: str, *, timeout: float = 60.0) -> Dict[str, Any]:
+        """Engine-side album artwork rollback (SEC-002 Wave 22)."""
+        return self._request("POST", "/albums/artwork/rollback", {"operation_id": operation_id}, timeout=timeout)
+
+    def plan_import_folder(self, payload: Dict[str, Any], *, timeout: float = 30.0) -> Dict[str, Any]:
+        """Engine-side import folder planning (SEC-002 Wave 22 Closure)."""
+        return self._request("POST", "/import/plan", payload, timeout=timeout)
+
+    def apply_import_folder(self, operation_id: str, *, timeout: float = 120.0) -> Dict[str, Any]:
+        """Engine-side import folder application (SEC-002 Wave 22 Closure)."""
+        return self._request("POST", "/import/apply", {"operation_id": operation_id}, timeout=timeout)
+
+    def rollback_import_folder(self, operation_id: str, *, timeout: float = 60.0) -> Dict[str, Any]:
+        """Engine-side import folder rollback (SEC-002 Wave 22 Closure)."""
+        return self._request("POST", "/import/rollback", {"operation_id": operation_id}, timeout=timeout)
+
+    def plan_folder_cleanup(self, payload: Dict[str, Any], *, timeout: float = 30.0) -> Dict[str, Any]:
+        """Engine-side folder cleanup planning (SEC-002 Wave 22 Closure)."""
+        return self._request("POST", "/folders/cleanup/plan", payload, timeout=timeout)
+
+    def apply_folder_cleanup(self, operation_id: str, *, timeout: float = 60.0) -> Dict[str, Any]:
+        """Engine-side folder cleanup application (SEC-002 Wave 22 Closure)."""
+        return self._request("POST", "/folders/cleanup/apply", {"operation_id": operation_id}, timeout=timeout)
+
+    def rollback_folder_cleanup(self, operation_id: str, *, timeout: float = 60.0) -> Dict[str, Any]:
+        """Engine-side folder cleanup rollback (SEC-002 Wave 22 Closure)."""
+        return self._request("POST", "/folders/cleanup/rollback", {"operation_id": operation_id}, timeout=timeout)
+
+    def plan_playlist_media_cleanup(self, payload: Dict[str, Any], *, timeout: float = 30.0) -> Dict[str, Any]:
+        """Engine-side playlist media cleanup planning (SEC-002 Wave 22 Closure)."""
+        return self._request("POST", "/playlists/media-cleanup/plan", payload, timeout=timeout)
+
+    def apply_playlist_media_cleanup(self, operation_id: str, *, timeout: float = 60.0) -> Dict[str, Any]:
+        """Engine-side playlist media cleanup application (SEC-002 Wave 22 Closure)."""
+        return self._request("POST", "/playlists/media-cleanup/apply", {"operation_id": operation_id}, timeout=timeout)
+
+    def rollback_playlist_media_cleanup(self, operation_id: str, *, timeout: float = 60.0) -> Dict[str, Any]:
+        """Engine-side playlist media cleanup rollback (SEC-002 Wave 22 Closure)."""
+        return self._request("POST", "/playlists/media-cleanup/rollback", {"operation_id": operation_id}, timeout=timeout)
+
+
+
 
 
     def get_transaction(self, transaction_id: str, *, format: str = "json", timeout: float = 15.0) -> Dict[str, Any]:

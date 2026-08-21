@@ -57,30 +57,47 @@ class ArtworkHelperDefinitionTests(unittest.TestCase):
         helper = _artwork_helper_source(self._src)
         self.assertIn("os.fsdecode(raw)", helper)
 
-    def test_identical_file_check_uses_md5(self):
-        helper = _artwork_helper_source(self._src)
-        self.assertIn("hashlib.md5()", helper)
-        self.assertIn("_file_md5(src_file) == _file_md5(dst)", helper)
+    # SEC-002 / ARCH-003 Wave 22 final review, findings #9/#11: the
+    # helper's own local `shutil.move`-based implementation (md5 dedup
+    # check, "stem-N" collision naming, per-file move logging) was a
+    # silent-fallback mutation path that ran whenever the engine call
+    # failed -- including the common case where the engine's "move" mode
+    # didn't actually move anything but reported success. It has been
+    # removed entirely; the helper now delegates exclusively to
+    # `album_artwork_v1` (mode="move") and fails closed (artwork left in
+    # place, nothing moved locally) on any engine failure. The equivalent
+    # dedup/naming logic now lives engine-side -- see
+    # test_beets_transaction_engine.py's album_artwork_v1 coverage and
+    # transaction_engine._album_cleanup_verified_same_file / _unique_dest.
 
-    def test_identical_file_removed_from_source(self):
+    def test_no_local_mutation_fallback(self):
         helper = _artwork_helper_source(self._src)
-        self.assertIn("src_file.unlink(missing_ok=True)", helper)
-        self.assertIn("identical at target", helper)
+        self.assertNotIn("shutil.move(", helper)
+        self.assertNotIn("hashlib.md5(", helper)
+        for banned in ("def _safe_move", "def _file_md5"):
+            self.assertNotIn(banned, helper)
 
-    def test_conflict_naming_uses_stem_n_suffix(self):
+    def test_engine_move_call_includes_target_dir(self):
         helper = _artwork_helper_source(self._src)
-        self.assertIn('f"{stem}-{n}{sfx}"', helper)
+        self.assertIn('"mode": "move"', helper)
+        self.assertIn('"target_dir": str(target_dir)', helper)
 
-    def test_artwork_subdirs_moved_individually(self):
+    def test_engine_failure_fails_closed_not_locally(self):
+        helper = _artwork_helper_source(self._src)
+        self.assertIn("artwork left in source", helper)
+        # Every non-ok branch returns target_dir without moving anything
+        # locally -- there is no local move statement left to fall
+        # through to.
+        self.assertNotIn("_safe_move(", helper)
+
+    def test_artwork_subdirs_still_scanned_for_candidates(self):
         helper = _artwork_helper_source(self._src)
         self.assertIn("_ART_SUBDIR_NAMES", helper)
-        self.assertIn("dst_sub.mkdir(exist_ok=True)", helper)
-        self.assertIn("entry.rglob", helper)
+        self.assertIn("d.rglob(", helper)
 
-    def test_move_logged_per_file(self):
+    def test_engine_relocation_logged(self):
         helper = _artwork_helper_source(self._src)
-        self.assertIn("[artwork] Moved", helper)
-        self.assertIn("→", helper)
+        self.assertIn("Engine controlled artwork relocation applied", helper)
 
 
 class CleanupBlockIntegrationTests(unittest.TestCase):

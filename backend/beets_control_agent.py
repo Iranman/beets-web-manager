@@ -4072,6 +4072,235 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             self._send_json(code, res)
             return
 
+        if path == "/albums/maintenance/plan":
+            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            quarantine_root = os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
+            res = transaction_engine.create_album_maintenance_plan(
+                _txn_store, body,
+                music_allowed_roots=[music_root_env],
+                quarantine_base_root=quarantine_root,
+                db_path=MUSIC_LIBRARY_PATH,
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        if path == "/albums/maintenance/apply":
+            op_id = str(body.get("operation_id") or "").strip()
+            if not op_id:
+                self._send_json(400, {"ok": False, "error": "operation_id required"})
+                return
+            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            quarantine_root = os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
+            res = transaction_engine.execute_album_maintenance_apply(
+                _txn_store, op_id,
+                db_path=MUSIC_LIBRARY_PATH,
+                music_allowed_roots=[music_root_env],
+                quarantine_base_root=quarantine_root,
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        if path == "/albums/maintenance/rollback":
+            op_id = str(body.get("operation_id") or "").strip()
+            if not op_id:
+                self._send_json(400, {"ok": False, "error": "operation_id required"})
+                return
+            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            res = transaction_engine.rollback_album_maintenance(
+                _txn_store, op_id,
+                db_path=MUSIC_LIBRARY_PATH,
+                music_allowed_roots=[music_root_env],
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        if path == "/albums/artwork/plan":
+            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            stg_roots = [os.environ.get("DOWNLOADS_ROOT", "/downloads"), os.environ.get("STAGING_ROOT", "/staging")]
+            quarantine_root = os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
+            res = transaction_engine.create_album_artwork_plan(
+                _txn_store, body,
+                music_allowed_roots=[music_root_env],
+                staging_allowed_roots=stg_roots,
+                quarantine_base_root=quarantine_root,
+                db_path=MUSIC_LIBRARY_PATH,
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        if path == "/albums/artwork/apply":
+            op_id = str(body.get("operation_id") or "").strip()
+            if not op_id:
+                self._send_json(400, {"ok": False, "error": "operation_id required"})
+                return
+            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            quarantine_root = os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
+            res = transaction_engine.execute_album_artwork_apply(
+                _txn_store, op_id,
+                db_path=MUSIC_LIBRARY_PATH,
+                music_allowed_roots=[music_root_env],
+                quarantine_base_root=quarantine_root,
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        if path == "/albums/artwork/rollback":
+            op_id = str(body.get("operation_id") or "").strip()
+            if not op_id:
+                self._send_json(400, {"ok": False, "error": "operation_id required"})
+                return
+            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            res = transaction_engine.rollback_album_artwork(
+                _txn_store, op_id,
+                db_path=MUSIC_LIBRARY_PATH,
+                music_allowed_roots=[music_root_env],
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        # ── import_folder_v1 ──────────────────────────────────────────────────
+        if path == "/import/plan":
+            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            stg_roots = [os.environ.get("DOWNLOADS_ROOT", "/downloads"), os.environ.get("STAGING_ROOT", "/staging"), music_root_env]
+            quarantine_root = os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
+            res = transaction_engine.create_import_folder_plan(
+                _txn_store, body,
+                db_path=MUSIC_LIBRARY_PATH,
+                music_allowed_roots=[music_root_env],
+                staging_allowed_roots=stg_roots,
+                quarantine_base_root=quarantine_root,
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        if path == "/import/apply":
+            op_id = str(body.get("operation_id") or "").strip()
+            if not op_id:
+                self._send_json(400, {"ok": False, "error": "operation_id required"})
+                return
+            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            quarantine_root = os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
+            res = transaction_engine.execute_import_folder_apply(
+                _txn_store, op_id,
+                db_path=MUSIC_LIBRARY_PATH,
+                music_allowed_roots=[music_root_env],
+                quarantine_base_root=quarantine_root,
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        if path == "/import/rollback":
+            op_id = str(body.get("operation_id") or "").strip()
+            if not op_id:
+                self._send_json(400, {"ok": False, "error": "operation_id required"})
+                return
+            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            res = transaction_engine.rollback_import_folder(
+                _txn_store, op_id,
+                db_path=MUSIC_LIBRARY_PATH,
+                music_allowed_roots=[music_root_env],
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        # ── folder_cleanup_v1 ─────────────────────────────────────────────────
+        if path == "/folders/cleanup/plan":
+            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            res = transaction_engine.create_folder_cleanup_plan(
+                _txn_store, body,
+                db_path=MUSIC_LIBRARY_PATH,
+                music_allowed_roots=[music_root_env],
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        if path == "/folders/cleanup/apply":
+            op_id = str(body.get("operation_id") or "").strip()
+            if not op_id:
+                self._send_json(400, {"ok": False, "error": "operation_id required"})
+                return
+            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            res = transaction_engine.execute_folder_cleanup_apply(
+                _txn_store, op_id,
+                db_path=MUSIC_LIBRARY_PATH,
+                music_allowed_roots=[music_root_env],
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        if path == "/folders/cleanup/rollback":
+            op_id = str(body.get("operation_id") or "").strip()
+            if not op_id:
+                self._send_json(400, {"ok": False, "error": "operation_id required"})
+                return
+            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            res = transaction_engine.rollback_folder_cleanup(
+                _txn_store, op_id,
+                music_allowed_roots=[music_root_env],
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        # ── playlist_media_cleanup_v1 ──────────────────────────────────────────
+        if path == "/playlists/media-cleanup/plan":
+            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            quarantine_root = os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
+            res = transaction_engine.create_playlist_media_cleanup_plan(
+                _txn_store, body,
+                db_path=MUSIC_LIBRARY_PATH,
+                music_allowed_roots=[music_root_env],
+                quarantine_base_root=quarantine_root,
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        if path == "/playlists/media-cleanup/apply":
+            op_id = str(body.get("operation_id") or "").strip()
+            if not op_id:
+                self._send_json(400, {"ok": False, "error": "operation_id required"})
+                return
+            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            quarantine_root = os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
+            res = transaction_engine.execute_playlist_media_cleanup_apply(
+                _txn_store, op_id,
+                db_path=MUSIC_LIBRARY_PATH,
+                music_allowed_roots=[music_root_env],
+                quarantine_base_root=quarantine_root,
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        if path == "/playlists/media-cleanup/rollback":
+            op_id = str(body.get("operation_id") or "").strip()
+            if not op_id:
+                self._send_json(400, {"ok": False, "error": "operation_id required"})
+                return
+            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            res = transaction_engine.rollback_playlist_media_cleanup(
+                _txn_store, op_id,
+                db_path=MUSIC_LIBRARY_PATH,
+                music_allowed_roots=[music_root_env],
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+
+
 
 
         if path == "/imports/source/inspect":

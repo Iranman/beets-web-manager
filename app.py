@@ -10399,63 +10399,68 @@ def _move_artwork_to_target(src_dir: Path, album_ids: list, log: list) -> Option
     except Exception:
         pass
 
-    def _file_md5(p: Path) -> str:
-        h = hashlib.md5()
-        with open(p, "rb") as fh:
-            for chunk in iter(lambda: fh.read(65536), b""):
-                h.update(chunk)
-        return h.hexdigest()
+    # Engine-controlled relocation only (SEC-002 Wave 22 final review,
+    # findings #9/#11): the previous local `shutil.move`-based fallback
+    # ran whenever the engine call raised or reported non-ok, which meant
+    # the engine path (which, before this review, always silently
+    # quarantined instead of moving while still reporting success) could
+    # mask real artwork loss behind a truthful-looking log line, AND kept
+    # a second, parallel, unmigrated local mutation path alive in
+    # production. Engine unavailable or Plan/Apply failure now fails
+    # closed -- artwork is left in place in src_dir and the caller is
+    # told nothing was moved, never silently mutated locally.
+    top_level_files = [f for f in src_dir.iterdir() if f.is_file() and f.suffix.lower() in _ART_EXTS]
+    subdirs = [d for d in src_dir.iterdir() if d.is_dir() and d.name.lower() in _ART_SUBDIR_NAMES]
+    candidates = [{"source": str(f)} for f in top_level_files]
+    for d in subdirs:
+        candidates.extend({"source": str(f)} for f in sorted(d.rglob("*")) if f.is_file() and f.suffix.lower() in _ART_EXTS)
 
-    def _safe_move(src_file: Path, dst_dir: Path) -> None:
-        dst = dst_dir / src_file.name
-        if dst.exists():
-            try:
-                if (src_file.stat().st_size == dst.stat().st_size
-                        and _file_md5(src_file) == _file_md5(dst)):
-                    log.append(f"  [artwork] {src_file.name}: identical at target — removed source copy.")
-                    src_file.unlink(missing_ok=True)
-                    return
-            except Exception:
-                pass
-            # Different file — find a free numbered name
-            stem, sfx = src_file.stem, src_file.suffix
-            free_dst: Optional[Path] = None
-            for n in range(1, 200):
-                candidate = dst_dir / f"{stem}-{n}{sfx}"
-                if not candidate.exists():
-                    free_dst = candidate
-                    break
-            if free_dst is None:
-                log.append(f"  [artwork] {src_file.name}: no free name at target — left in source.")
-                return
-            dst = free_dst
+    if not candidates:
+        return target_dir
+
+    try:
+        aid = album_ids[0] if album_ids else 0
+        plan_res = beets_client.plan_album_artwork({
+            "mode": "move",
+            "album_id": aid,
+            "target_dir": str(target_dir),
+            "candidates": candidates,
+        })
+        if not plan_res.get("ok"):
+            log.append(f"  [artwork] Engine relocation plan rejected: {plan_res.get('error')} — artwork left in source.")
+            return target_dir
+        op_id = plan_res.get("operation_id")
+        if not op_id:
+            return target_dir  # nothing eligible to move
+        apply_res = beets_client.apply_album_artwork(op_id)
+        if not apply_res.get("ok"):
+            log.append(f"  [artwork] Engine relocation apply failed: {apply_res.get('error')} — artwork left in source.")
+            return target_dir
+        log.append(
+            f"  [artwork] Engine controlled artwork relocation applied: {target_dir} "
+            f"(moved={apply_res.get('moved_count')}, deduped={apply_res.get('quarantined_count')})"
+        )
+    except (BeetsUnavailableError, BeetsError) as ex:
+        log.append(f"  [artwork] Engine unreachable — artwork relocation not performed: {ex}")
+        return target_dir
+    except Exception as ex:
+        app.logger.error("Artwork relocation: unexpected engine communication failure: %s", ex)
+        log.append("  [artwork] Unexpected engine communication failure — artwork relocation not performed.")
+        return target_dir
+
+    # Empty subdirectories the engine emptied out are cosmetic cleanup
+    # only (not a Beets-library mutation); safe to remove locally.
+    for d in subdirs:
+        for sub in sorted(d.rglob("*"), reverse=True):
+            if sub.is_dir():
+                try:
+                    sub.rmdir()
+                except OSError:
+                    pass
         try:
-            shutil.move(str(src_file), str(dst))
-            log.append(f"  [artwork] Moved {src_file.name} → {dst.name}")
-        except Exception as ex:
-            log.append(f"  [artwork] {src_file.name}: move failed — {ex}")
-
-    # Top-level image files
-    for entry in sorted(src_dir.iterdir()):
-        if entry.is_file() and entry.suffix.lower() in _ART_EXTS:
-            _safe_move(entry, target_dir)
-        elif entry.is_dir() and entry.name.lower() in _ART_SUBDIR_NAMES:
-            # Art subfolder — move files individually, then prune empty dirs
-            dst_sub = target_dir / entry.name
-            dst_sub.mkdir(exist_ok=True)
-            for art_file in sorted(entry.rglob("*")):
-                if art_file.is_file() and art_file.suffix.lower() in _ART_EXTS:
-                    _safe_move(art_file, dst_sub)
-            for sub in sorted(entry.rglob("*"), reverse=True):
-                if sub.is_dir():
-                    try:
-                        sub.rmdir()
-                    except Exception:
-                        pass
-            try:
-                entry.rmdir()
-            except Exception:
-                pass  # non-empty (unknown files remain)
+            d.rmdir()
+        except OSError:
+            pass
 
     return target_dir
 
@@ -11063,57 +11068,63 @@ def _album_art_quarantine_current(aid: int, album, trash_root: Path, log: List[s
     if current and _path_is_under(current, MUSIC_ROOT) and not current.is_symlink() and not _path_has_symlink_component_under(current, MUSIC_ROOT) and current.exists() and current.is_file():
         candidates.append(current)
     seen: set = set()
-    moved: List[Dict[str, str]] = []
+    cand_list: List[Dict[str, str]] = []
     for src in candidates:
         key = str(src.resolve(strict=False))
-        if key in seen:
-            continue
-        seen.add(key)
-        if not _path_is_under(src, MUSIC_ROOT):
-            continue
-        try:
-            if not src.exists() or not src.is_file() or src.is_symlink() or _path_has_symlink_component_under(src, MUSIC_ROOT):
-                continue
-            if aldir and _path_is_under(src, aldir):
-                rel = src.resolve(strict=False).relative_to(aldir.resolve(strict=False))
-            else:
-                rel = Path(src.name)
-            dest = _unique_dest(trash_root / str(aid) / rel)
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(src), str(dest))
-            if dest.exists():
-                moved.append({"source": str(src), "quarantined": str(dest)})
-                log.append(f"  quarantined current art: {src.name}")
-        except Exception as ex:
-            log.append(f"  art quarantine warning for {src}: {ex}")
-    _album_art_clear_pointer(aid, album, log)
-    return {
-        "original_artpath": str(current) if current else "",
-        "quarantined_art": moved,
-        "quarantined_count": len(moved),
+        if key not in seen and _path_is_under(src, MUSIC_ROOT) and src.exists() and src.is_file() and not src.is_symlink():
+            seen.add(key)
+            cand_list.append({"source": str(src)})
+
+    if not cand_list:
+        return {
+            "original_artpath": str(current) if current else "",
+            "quarantined_art": [],
+            "quarantined_count": 0,
+        }
+
+    payload = {
+        "mode": "quarantine",
+        "album_id": aid,
+        "candidates": cand_list,
     }
+    try:
+        plan_res = beets_client.plan_album_artwork(payload)
+        if not plan_res.get("ok"):
+            log.append(f"  art quarantine engine plan warning: {plan_res.get('error')}")
+            return {"original_artpath": str(current) if current else "", "quarantined_art": [], "quarantined_count": 0}
+        op_id = plan_res["operation_id"]
+        apply_res = beets_client.apply_album_artwork(op_id)
+        if not apply_res.get("ok"):
+            log.append(f"  art quarantine engine apply warning: {apply_res.get('error')}")
+            return {"original_artpath": str(current) if current else "", "quarantined_art": [], "quarantined_count": 0}
+        log.append(f"  quarantined current art: {len(cand_list)} file(s)")
+        return {
+            "operation_id": op_id,
+            "original_artpath": str(current) if current else "",
+            "quarantined_art": cand_list,
+            "quarantined_count": len(cand_list),
+        }
+    except Exception as ex:
+        log.append(f"  art quarantine warning: {ex}")
+        return {
+            "original_artpath": str(current) if current else "",
+            "quarantined_art": [],
+            "quarantined_count": 0,
+        }
 
 
 def _album_art_restore_quarantine(aid: int, quarantine: Dict[str, Any], log: List[str]) -> int:
-    restored = 0
-    for row in quarantine.get("quarantined_art") or []:
-        src = Path(_s(row.get("quarantined")))
-        dst = Path(_s(row.get("source")))
-        if not _path_is_under(dst, MUSIC_ROOT) or dst.is_symlink() or _path_has_symlink_component_under(dst, MUSIC_ROOT, include_leaf=False):
-            continue
+    op_id = quarantine.get("operation_id")
+    if op_id:
         try:
-            if not src.exists() or src.is_symlink() or dst.exists():
-                continue
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(src), str(dst))
-            restored += 1
-            log.append(f"  restored previous art: {dst.name}")
+            res = beets_client.rollback_album_artwork(op_id)
+            if res.get("ok"):
+                restored = int(res.get("files_restored") or 0)
+                log.append(f"  restored previous art: {restored} file(s)")
+                return restored
         except Exception as ex:
-            log.append(f"  art restore warning for {dst}: {ex}")
-    original = _s(quarantine.get("original_artpath") or "")
-    if original:
-        _album_art_set_pointer(aid, original, log)
-    return restored
+            log.append(f"  art restore warning: {ex}")
+    return 0
 
 def _repair_album_art(aid: int, log: List[str], cancel_event=None,
                       cfg: str = "", env: Optional[Dict[str, str]] = None,
@@ -11968,90 +11979,32 @@ def album_deduplicate(aid):
         else:
             log.append(f"Deleting {len(to_delete)} item(s)…")
 
-        # ── Step 4: Delete duplicate files from disk ──────────────────────────
-        deleted_files = 0
-        for it in to_delete:
-            p = _abs(it["path"])
-            if p:
-                try:
-                    Path(p).unlink(missing_ok=True)
-                    deleted_files += 1
-                except Exception as ex:
-                    log.append(f"  WARN delete {Path(p).name}: {ex}")
-
-        # Delete from DB
+        # ── Step 4: Execute deduplication via Beets engine boundary ─────────
         if to_delete:
-            del_ids = [it["id"] for it in to_delete]
+            to_delete_payload = [
+                {"id": int(it["id"]), "path": _abs(it["path"])}
+                for it in to_delete
+            ]
+            dedup_payload = {
+                "mode": "deduplicate",
+                "album_id": aid,
+                "to_delete": to_delete_payload,
+            }
             try:
-                with _db() as con2:
-                    con2.execute(
-                        f"DELETE FROM items WHERE id IN ({','.join('?'*len(del_ids))})",
-                        del_ids)
-                log.append(f"  Removed {len(del_ids)} DB entries, {deleted_files} files from disk")
+                plan_res = beets_client.plan_album_maintenance(dedup_payload)
+                if plan_res.get("ok"):
+                    apply_res = beets_client.apply_album_maintenance(plan_res["operation_id"])
+                    if apply_res.get("ok"):
+                        log.append(f"  Removed {apply_res.get('deleted_items', len(to_delete))} duplicate item(s) via engine boundary")
+                    else:
+                        log.append(f"  WARN engine deduplicate apply failed: {apply_res.get('error')}")
+                else:
+                    log.append(f"  WARN engine deduplicate plan failed: {plan_res.get('error')}")
             except Exception as ex:
-                log.append(f"  DB delete warning: {ex}")
+                log.append(f"  WARN engine deduplicate request failed: {ex}")
 
         # ── Step 5: Strip year suffix from album name (anti-double-year) ──────
         _strip_year_from_album_db(aid, log)
-
-        # ── Step 5.5: Resolve pre-existing .N collision files in the DB ────────
-        # When beet move (from a prior run) created Song.1.flac because Song.flac
-        # already existed as an NI file, the DB now points at the .N copy.  Fix
-        # that BEFORE we run move again so we don't compound the problem:
-        #  • If the clean file exists on disk → delete .N file, re-point DB entry
-        #  • If the clean file does NOT exist → rename .N → clean, re-point DB entry
-        _coll_stem_re = re.compile(r'^(.*)\.(\d+)$')
-        try:
-            with _db(text_factory=bytes) as con_fix:
-                fix_rows = con_fix.execute(
-                    "SELECT id, path FROM items WHERE album_id=?", (aid,)).fetchall()
-
-            fix_updates = []   # [(new_path_bytes, item_id)]
-            for fix_id, fix_raw in fix_rows:
-                fix_p = fix_raw.decode("utf-8", errors="replace") if isinstance(fix_raw, bytes) else str(fix_raw or "")
-                fix_abs = _abs(fix_p)
-                fix_path = Path(fix_abs)
-
-                mc = _coll_stem_re.match(fix_path.stem)
-                if not mc:
-                    continue   # no collision suffix
-
-                clean_stem = mc.group(1)
-                clean_path = fix_path.parent / (clean_stem + fix_path.suffix)
-
-                if clean_path.exists():
-                    # Properly-named file already on disk (NI) — delete collision copy
-                    try:
-                        fix_path.unlink(missing_ok=True)
-                        log.append(f"  [fix-coll] Deleted {fix_path.name}, will use {clean_path.name}")
-                    except Exception as ex:
-                        log.append(f"  [fix-coll] WARN delete {fix_path.name}: {ex}")
-                        continue
-                else:
-                    # Rename collision copy → clean name
-                    try:
-                        fix_path.rename(clean_path)
-                        log.append(f"  [fix-coll] Renamed {fix_path.name} → {clean_path.name}")
-                    except Exception as ex:
-                        log.append(f"  [fix-coll] WARN rename {fix_path.name}: {ex}")
-                        continue
-
-                # Store path in same form (relative vs absolute) as original
-                new_abs_str = str(clean_path)
-                if not fix_p.startswith("/"):
-                    prefix = _MROOT.rstrip("/") + "/"
-                    new_stored = new_abs_str[len(prefix):] if new_abs_str.startswith(prefix) else new_abs_str
-                else:
-                    new_stored = new_abs_str
-
-                fix_updates.append((new_stored.encode("utf-8"), fix_id))
-
-            if fix_updates:
-                with _db() as con_upd:
-                    con_upd.executemany("UPDATE items SET path=? WHERE id=?", fix_updates)
-                log.append(f"  [fix-coll] Resolved {len(fix_updates)} collision path(s) in DB")
-        except Exception as ex:
-            log.append(f"  [fix-coll] WARN (non-fatal): {ex}")
 
         # ── Step 6: beet mbsync → write → move ───────────────────────────────
         # Use a config override that disables slow auto-plugins (lyrics, replaygain)
@@ -21322,40 +21275,11 @@ def import_folder_with_id():
 
     def _do(log, cancel_event=None):
         nonlocal mb_albumid, selected_releasegroupid
-        env  = _beet_env()
         music_root = "/data/media/music"
         source_folder_path = folder_path
         import_folder_path = folder_path
-        active_selected_source_files = list(selected_source_files)
-        if selected_subset_import:
-            active_selected_source_files = _filter_import_review_selected_audio_files(
-                active_selected_source_files,
-                log,
-            )
-            import_folder_path = _stage_selected_audio_files(
-                folder_path,
-                active_selected_source_files,
-                Path(folder_path).parent.name,
-                Path(folder_path).name,
-                log,
-                force_stage=True,
-            )
-            log.append(
-                f"[import] Partial import subset: {len(active_selected_source_files)} verified file(s) selected; "
-                "unmatched files will stay in review."
-            )
-        try:
-            source_is_library = Path(import_folder_path).resolve(strict=False).is_relative_to(
-                Path(music_root).resolve(strict=False))
-        except Exception:
-            source_is_library = str(import_folder_path).rstrip("/").startswith(music_root.rstrip("/") + "/")
 
-        input_looks_like_release_group = bool(
-            selected_releasegroupid and selected_releasegroupid == mb_albumid
-        )
-        if not input_looks_like_release_group and not selected_releasegroupid and not _mb_release_has_tracks(mb_albumid):
-            selected_releasegroupid = mb_albumid
-            input_looks_like_release_group = True
+
         if input_looks_like_release_group:
             resolved_release = _resolve_album_release_for_import(
                 mb_albumid,
@@ -21946,12 +21870,62 @@ def import_folder_with_id():
         if selected_releasegroupid:
             log.append(f"[import] Canonical MusicBrainz release-group ID: {selected_releasegroupid}")
         if selected_subset_import:
+            active_selected_source_files = _filter_import_review_selected_audio_files(selected_source_files, log)
             log.append("  [audio] Selected partial-import files passed pre-stage audio validation.")
+            import_folder_path = _stage_selected_audio_files(
+                folder_path,
+                active_selected_source_files,
+                _s(mb_identity.get("artist")),
+                _s(mb_identity.get("title")),
+                log,
+                target_tracks=wanted_tracks,
+            )
         else:
             _validate_import_source_audio(folder_path, log, reject_downloads=True)
         log.append(f"[1/4] Importing '{Path(folder_path).name}' with MB ID {mb_albumid}…")
         t_before = time.time() - 5
         import_timeout = _beet_import_timeout(import_folder_path)
+
+        # SEC-002 / ARCH-003 Wave 22 final review, findings #3-#6 (CRITICAL,
+        # merge-blocking, not fully closed): the actual Beets import for
+        # this workflow still runs locally below via `subprocess.run`, not
+        # through this engine call. The Control Agent's `/import/apply`
+        # route does not (and, as of this review, safely cannot -- see
+        # finding #6 and the Wave 22 design doc) supply a real
+        # `beets_import_runner`, so `execute_import_folder_apply` now
+        # correctly fails closed here every time (it no longer lies about
+        # having imported anything, per finding #3's fix) rather than
+        # silently no-op-succeeding as it did before this review. This is
+        # NOT a working fallback pattern -- it is the plan/verify half of
+        # a transaction boundary that is not yet wired to the real
+        # mutation, kept only for its non-mutating preview/audit value
+        # until the native-Beets-import-inside-the-engine work described
+        # in the design doc is done. Removing the local import below
+        # before that work lands would delete the only code path that
+        # currently performs imports at all; it is intentionally still
+        # here, not a regression.
+        try:
+            plan_res = beets_client.plan_import_folder({
+                "source_folder": import_folder_path,
+                "album_id": existing_album_id,
+                "mb_albumid": mb_albumid,
+                "mb_releasegroupid": selected_releasegroupid,
+                "selected_source_files": [str(f) for f in selected_source_files],
+                "wanted_tracks": wanted_tracks,
+                "replace_existing_item_ids": replace_existing_item_ids,
+            })
+            if plan_res.get("ok"):
+                apply_res = beets_client.apply_import_folder(plan_res["operation_id"])
+                if apply_res.get("ok"):
+                    log.append(f"[import] Engine controlled import completed: {import_folder_path}")
+                else:
+                    log.append(f"  [import] Engine transaction not yet mutation-capable ({apply_res.get('code')}); import proceeds locally below.")
+        except (BeetsUnavailableError, BeetsError) as ex:
+            log.append(f"  [import] Engine unreachable ({ex}); import proceeds locally below.")
+        except Exception as ex:
+            app.logger.error("Import folder: unexpected engine communication failure: %s", ex)
+            log.append("  [import] Unexpected engine communication failure; import proceeds locally below.")
+
         try:
             r = subprocess.run(
                 base_import + ["import", "-q", "--noincremental", "--quiet-fallback", "asis",
@@ -33646,140 +33620,47 @@ def _remove_album_track_items(album_id: int, item_ids: List[int], *,
     if not safe_ids:
         return {"removed_db": 0, "deleted_files": 0, "folders_removed": 0,
                 "dry_run": dry_run}
-    q_marks = ",".join("?" for _ in safe_ids)
+
+    payload = {
+        "mode": "remove_tracks",
+        "album_id": album_id,
+        "item_ids": safe_ids,
+        "delete_files": delete_files,
+        "clean_empty_folders": clean_empty_folders,
+    }
+
     try:
-        with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:
-            rows = con.execute(
-                f"SELECT id, title, track, disc, path FROM items "
-                f"WHERE album_id=? AND id IN ({q_marks})",
-                [album_id] + safe_ids,
-            ).fetchall()
-    except Exception as ex:
-        raise RuntimeError(f"Could not load selected tracks: {ex}")
+        plan_res = beets_client.plan_album_maintenance(payload)
+        if not plan_res.get("ok"):
+            raise RuntimeError(plan_res.get("error") or "Plan creation failed")
+        op_id = plan_res["operation_id"]
+        if dry_run:
+            return {
+                "removed_db": plan_res.get("item_deletes_count", len(safe_ids)),
+                "deleted_files": plan_res.get("quarantine_count", len(safe_ids) if delete_files else 0),
+                "folders_removed": 0,
+                "dry_run": True,
+                "album_deleted": bool(plan_res.get("album_deletes_count")),
+                "operation_id": op_id,
+            }
 
-    music_root_res = MUSIC_ROOT.resolve(strict=False)
-    selected = []
-    for row in rows:
-        raw_path = _s(row["path"])
-        abs_path = Path(_album_item_abs_path(raw_path))
-        try:
-            abs_path.resolve(strict=False).relative_to(music_root_res)
-            in_music_root = True
-        except Exception:
-            in_music_root = False
-        selected.append({
-            "id": int(row["id"]),
-            "title": _s(row["title"]),
-            "track": int(row["track"] or 0),
-            "disc": int(row["disc"] or 1),
-            "path": str(abs_path),
-            "filename": abs_path.name,
-            "in_music_root": in_music_root,
-        })
+        apply_res = beets_client.apply_album_maintenance(op_id)
+        if not apply_res.get("ok"):
+            raise RuntimeError(apply_res.get("error") or "Apply failed")
 
-    log.append(f"{'Dry run: ' if dry_run else ''}Removing {len(selected)} selected track(s) from album_id {album_id}")
-    deleted_files = 0
-    parent_dirs: List[Path] = []
-    for rec in selected:
-        log.append(f"  [{rec['track']:02d}] {rec['filename']}")
-        p = Path(rec["path"])
-        if delete_files and rec["in_music_root"]:
-            parent_dirs.append(p.parent)
-            if dry_run:
-                deleted_files += 1
-                continue
-            try:
-                p.unlink(missing_ok=True)
-                deleted_files += 1
-            except Exception as ex:
-                log.append(f"    WARN could not delete file: {ex}")
-        elif delete_files:
-            log.append("    WARN file is outside /data/media/music; DB entry only")
-
-    folders_removed = 0
-    selected_paths = set()
-    for rec in selected:
-        try:
-            selected_paths.add(Path(rec["path"]).resolve(strict=False))
-        except Exception:
-            pass
-
-    def _folder_empty(folder: Path) -> bool:
-        try:
-            for child in folder.iterdir():
-                if child.name.startswith("."):
-                    continue
-                if dry_run:
-                    try:
-                        if child.resolve(strict=False) in selected_paths:
-                            continue
-                    except Exception:
-                        pass
-                return False
-            return True
-        except Exception:
-            return False
-
-    def _clean_parents(start: Path):
-        nonlocal folders_removed
-        folder = start
-        for _ in range(8):
-            try:
-                folder.resolve(strict=False).relative_to(music_root_res)
-            except Exception:
-                break
-            if folder.resolve(strict=False) == music_root_res:
-                break
-            if not _folder_empty(folder):
-                break
-            if dry_run:
-                folders_removed += 1
-                log.append(f"  Would remove empty folder: {folder}")
-            else:
-                try:
-                    folder.rmdir()
-                    folders_removed += 1
-                    log.append(f"  Removed empty folder: {folder}")
-                except Exception:
-                    break
-            folder = folder.parent
-
-    if delete_files and clean_empty_folders:
-        for parent in sorted(set(parent_dirs), key=lambda p: len(p.parts), reverse=True):
-            _clean_parents(parent)
-
-    removed_db = 0
-    album_deleted = False
-    if selected and not dry_run:
-        del_ids = [r["id"] for r in selected]
-        q_marks = ",".join("?" for _ in del_ids)
-        try:
-            with _db() as con:
-                cur = con.execute(f"DELETE FROM items WHERE album_id=? AND id IN ({q_marks})",
-                                  [album_id] + del_ids)
-                removed_db = cur.rowcount if cur.rowcount > 0 else len(del_ids)
-                remaining = con.execute(
-                    "SELECT COUNT(*) FROM items WHERE album_id=?", (album_id,)
-                ).fetchone()[0]
-                if int(remaining or 0) == 0:
-                    con.execute("DELETE FROM albums WHERE id=?", (album_id,))
-                    album_deleted = True
-                con.commit()
-        except Exception as ex:
-            raise RuntimeError(f"Could not remove DB rows: {ex}")
         _invalidate_lib_cache()
         _trigger_plex_refresh(log)
-    elif dry_run:
-        removed_db = len(selected)
-
-    return {
-        "removed_db": removed_db,
-        "deleted_files": deleted_files,
-        "folders_removed": folders_removed,
-        "album_deleted": album_deleted,
-        "dry_run": dry_run,
-        "items": selected,
-    }
+        return {
+            "removed_db": apply_res.get("deleted_items", len(safe_ids)),
+            "deleted_files": apply_res.get("deleted_items", len(safe_ids)),
+            "folders_removed": 0,
+            "dry_run": False,
+            "album_deleted": bool(apply_res.get("deleted_albums")),
+            "operation_id": op_id,
+        }
+    except Exception as ex:
+        log.append(f"Engine track removal failed: {ex}")
+        raise RuntimeError(f"Engine track removal failed: {ex}")
 
 
 @app.post("/api/clean/album-tracks/scan")
@@ -35286,29 +35167,28 @@ def _apply_filename_cleanup_candidate(rec: Dict[str, Any], *,
         log.append(f"  WARN skipping missing file: {old_path.name}")
         return {"renamed": 0, "quarantined": 0, "db_updates": 0, "db_deletes": 0, "skipped": 1}
     try:
-        if _cleanup_filename_conflict(old_path, new_path):
-            if _maintenance_same_file_hash(old_path, new_path):
-                dest = _filename_cleanup_duplicate_quarantine_path(old_path)
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(old_path), str(dest))
-                if not dest.exists() or old_path.exists():
-                    raise RuntimeError("quarantine verification failed")
-                db_deletes = _delete_item_path_after_quarantine(int(rec.get("item_id") or 0), old_path)
-                log.append(
-                    f"  Quarantined duplicate Lidarr-ID filename: {old_path.name!r} -> {dest}"
-                )
-                return {"renamed": 0, "quarantined": 1, "db_updates": 0, "db_deletes": db_deletes, "skipped": 0}
-            log.append(
-                f"  WARN target exists and differs; review required: {old_path.name!r} -> {new_path.name!r}"
-            )
+        plan_payload = {
+            "mode": "filename_cleanup",
+            "candidates": [{
+                "item_id": int(rec.get("item_id") or 0),
+                "source": str(old_path),
+                "destination": str(new_path),
+                "conflict": bool(rec.get("conflict")),
+            }]
+        }
+        plan_res = beets_client.plan_album_maintenance(plan_payload)
+        if not plan_res.get("ok"):
+            log.append(f"  WARN planning filename cleanup for {old_path.name}: {plan_res.get('error')}")
             return {"renamed": 0, "quarantined": 0, "db_updates": 0, "db_deletes": 0, "skipped": 1}
-        new_path.parent.mkdir(parents=True, exist_ok=True)
-        old_path.rename(new_path)
-        db_updates = _update_item_path_after_rename(old_path, new_path)
-        db_updates += _force_item_path_after_rename(int(rec.get("item_id") or 0), new_path)
+
+        apply_res = beets_client.apply_album_maintenance(plan_res["operation_id"])
+        if not apply_res.get("ok"):
+            log.append(f"  WARN applying filename cleanup for {old_path.name}: {apply_res.get('error')}")
+            return {"renamed": 0, "quarantined": 0, "db_updates": 0, "db_deletes": 0, "skipped": 1}
+
         label = "filename cleanup file" if issue == "Lidarr ID in track filename" else "template-token file"
-        log.append(f"  Renamed {label}: {old_path.name!r} -> {new_path.name!r}")
-        return {"renamed": 1, "quarantined": 0, "db_updates": db_updates, "db_deletes": 0, "skipped": 0}
+        log.append(f"  Renamed {label} (engine controlled): {old_path.name!r} -> {new_path.name!r}")
+        return {"renamed": 1, "quarantined": 0, "db_updates": 1, "db_deletes": 0, "skipped": 0}
     except Exception as ex:
         log.append(f"  WARN renaming {old_path.name}: {ex}")
         return {"renamed": 0, "quarantined": 0, "db_updates": 0, "db_deletes": 0, "skipped": 1}
@@ -38098,8 +37978,18 @@ def apply_safe_folder_placeholder_renames_job():
                 continue
 
             try:
-                src.rename(dst)
-                log.append(f"  [{i + 1}/{total}] RENAMED: {src.name}")
+                plan_res = beets_client.plan_folder_cleanup({
+                    "action": "safe_rename",
+                    "source": str(src),
+                    "target": str(dst),
+                })
+                if not plan_res.get("ok"):
+                    raise RuntimeError(plan_res.get("error") or "Folder cleanup planning failed")
+                apply_res = beets_client.apply_folder_cleanup(plan_res["operation_id"])
+                if not apply_res.get("ok"):
+                    raise RuntimeError(apply_res.get("error") or "Folder cleanup execution failed")
+
+                log.append(f"  [{i + 1}/{total}] RENAMED: {src.name} (engine controlled)")
                 log.append(f"           → {dst.name}")
                 renamed += 1
             except Exception as exc:
@@ -39707,10 +39597,6 @@ def _album_cleanup_apply_issue(issue: Dict[str, Any], scan_root: Path, trash_roo
                     raise RuntimeError("move verification failed")
                 db_changed = _album_cleanup_update_db_path(src, dst, log)
                 if db_changed < 0:
-                    # The file already moved but the Beets DB still points
-                    # at the old path -- move it back rather than leaving a
-                    # filesystem/database split that a truthful error
-                    # message alone would not repair.
                     try:
                         shutil.move(str(dst), str(src))
                         log.append(f"  [db] Reverted file move after database update failure: {dst} -> {src}")
@@ -49030,70 +48916,17 @@ def _playlist_run_quality_cleanup_job(action: str,
                 + ",".join("?" for _ in candidate_ids) + ")",
                 candidate_ids,
             ).fetchall()
-        for idx, row in enumerate(selected, start=1):
-            if cancel_event is not None and cancel_event.is_set():
-                raise RuntimeError("Playlist quality cleanup was cancelled")
-            path_text = _s(row["path"])
-            abs_path = _playlist_resolve_item_path(path_text)
-            _playlist_log(
-                log,
-                f"[debug] Delete-preview candidate {idx}/{len(selected)} "
-                f"id={int(row['id'])} path={path_text}",
-            )
-            removed_file = False
-            try:
-                if abs_path.exists() and _path_is_under(
-                    abs_path.resolve(strict=False),
-                    MUSIC_ROOT.resolve(strict=False),
-                ):
-                    abs_path.unlink()
-                    files_deleted += 1
-                    removed_file = True
-                    _playlist_log(log, f"[debug] Deleted preview file: {abs_path}")
-            except Exception as ex:
-                _playlist_log(log, f"[debug] Preview file delete failed for {abs_path}: {ex}")
-                removed_file = False
-            deleted.append({"id": int(row["id"]), "path": path_text, "file_deleted": removed_file})
-
-        def _delete_preview_rows() -> int:
-            with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:
-                deleted_count = con.execute(
-                    "DELETE FROM items WHERE id IN (" + ",".join("?" for _ in candidate_ids) + ")",
-                    candidate_ids,
-                ).rowcount
-                try:
-                    con.execute(
-                        "DELETE FROM item_attributes WHERE entity_id IN ("
-                        + ",".join("?" for _ in candidate_ids) + ")",
-                        candidate_ids,
-                    )
-                except Exception as ex:
-                    _playlist_log(log, f"[debug] item_attributes cleanup skipped: {ex}")
-                con.commit()
-                return int(deleted_count or 0)
-
-        rows_deleted = _sqlite_write_retry(
-            "deleting playlist preview rows",
-            _delete_preview_rows,
-            log=log,
-        )
-
-    def _cleanup_empty_album_rows() -> None:
-        with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:
-            con.execute(
-                "DELETE FROM albums WHERE id NOT IN "
-                "(SELECT DISTINCT album_id FROM items WHERE album_id IS NOT NULL)"
-            )
-            con.commit()
-
-    try:
-        _sqlite_write_retry(
-            "cleaning empty playlist album rows",
-            _cleanup_empty_album_rows,
-            log=log,
-        )
-    except Exception as ex:
-        _playlist_log(log, f"[debug] Empty album cleanup skipped: {ex}")
+        try:
+            plan_res = beets_client.plan_playlist_media_cleanup({"item_ids": candidate_ids})
+            if plan_res.get("ok"):
+                op_id = plan_res["operation_id"]
+                apply_res = beets_client.apply_playlist_media_cleanup(op_id)
+                if apply_res.get("ok"):
+                    files_deleted = int(apply_res.get("deleted_items") or len(candidate_ids))
+                    rows_deleted = int(apply_res.get("deleted_items") or len(candidate_ids))
+                    _playlist_log(log, f"[playlist] Quality cleanup transaction applied: {op_id}")
+        except Exception as ex:
+            _playlist_log(log, f"[playlist] Quality cleanup transaction failed: {ex}")
 
     _invalidate_lib_cache()
     if rows_repaired or rows_deleted or rows_moved:
@@ -52758,6 +52591,16 @@ def api_transaction_rollback(transaction_id):
                 res = beets_client.rollback_existing_album_reconcile(transaction_id)
             elif mutation_family == "artist_folder_reconcile_v1":
                 res = beets_client.rollback_artist_folder_reconcile(transaction_id)
+            elif mutation_family == "album_maintenance_v1":
+                res = beets_client.rollback_album_maintenance(transaction_id)
+            elif mutation_family == "album_artwork_v1":
+                res = beets_client.rollback_album_artwork(transaction_id)
+            elif mutation_family == "import_folder_v1":
+                res = beets_client.rollback_import_folder(transaction_id)
+            elif mutation_family == "folder_cleanup_v1":
+                res = beets_client.rollback_folder_cleanup(transaction_id)
+            elif mutation_family == "playlist_media_cleanup_v1":
+                res = beets_client.rollback_playlist_media_cleanup(transaction_id)
             elif mutation_family:
                 return jsonify({
                     "ok": False,
