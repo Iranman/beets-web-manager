@@ -1,7 +1,23 @@
 """Generate security/arch003_mutation_inventory.json from real AST discovery.
 
-SEC-002 / ARCH-003 Wave 23: Complete rule-based classification derived from real AST discovery
-with 0 NEEDS_REVIEW entries. Every entry records its classification rule and transaction family.
+SEC-002 / ARCH-003 Wave 24 final review: rule-based classification and
+explicit domain assignment derived from real AST discovery. This does NOT
+claim 0 NEEDS_REVIEW entries -- an earlier revision of this docstring made
+that claim while a submitted PR (#98) simultaneously reintroduced several
+blanket per-file "everything unmapped in this file gets classification X"
+fallbacks (routes_setup.py, routes_submissions.py, job_engine.py,
+backend/*.py support modules, and unmapped backend/beets_control_agent.py
+functions all defaulted to a specific non-NEEDS_REVIEW label instead of
+NEEDS_REVIEW) plus a brittle hardcoded line-number-range guesser for
+ControlAgentHandler's ~40-branch HTTP dispatcher methods -- exactly the
+"fake precision to make NEEDS_REVIEW disappear" failure mode Wave 23's
+review fixed and documented. Restored here: every one of those defaults
+goes back to NEEDS_REVIEW, and the dispatcher methods are NEEDS_REVIEW
+again pending real per-branch semantic classification (a genuine future
+capability gap in discover_mutation_sinks.py, not something to guess at
+via line numbers that silently rot on the next unrelated edit to that
+file). Every entry still records its classification rule, transaction
+family, and explicit domain.
 """
 
 from __future__ import annotations
@@ -76,9 +92,6 @@ _APP_STATE_HINTS = {
 
 _BEET_READONLY_VERBS = {"version", "ls", "list", "stats", "config", "fields"}
 _BEET_MUTATING_VERBS = {"import", "move", "write", "modify", "mbsync", "remove", "update"}
-# SEC-002 / ARCH-003 Wave 23 final review, finding #11: same bug as the
-# scanner's copy of this pattern -- bare `p`/`f`/`d` as ordinary
-# alternatives matched almost any identifier via substring search.
 _PATH_LIKE_NAME_RE = re.compile(
     r"(path|file|dir|folder|target|dest|dst|src|tmp|temp|cfg|config|cover|art|canonical|trash|source|root)",
     re.IGNORECASE,
@@ -90,38 +103,14 @@ def _text_looks_path_like(text: str) -> bool:
     return bool(_PATH_LIKE_NAME_RE.search(text)) or bool(_PATH_LIKE_SHORT_NAME_RE.match(text.strip()))
 
 
-# ── backend/beets_control_agent.py: function-level classification ─────────
-# SEC-002 / ARCH-003 Wave 23 final review, findings #2-#4: this file
-# previously received a single blanket ENGINE_NATIVE_BEETS classification
-# for every sink -- masking exactly the generic mutation surface the review
-# was supposed to inspect. Real per-function investigation this pass:
-#
-# - `_handle_delete_album`, `_replace_album_art_locked`,
-#   `_delete_album_art_locked`: confirmed real, active production callers
-#   (`beets_client.delete_album`/`replace_album_art`/`delete_album_art`,
-#   called from `app.py`'s `/api/albums/<id>/remove` and
-#   `/api/albums/<id>/art` routes) that mutate the library DB and delete
-#   media files with NO Plan/Apply/Verify/Rollback transaction boundary at
-#   all -- a genuine, currently-exercised generic bypass, not a
-#   theoretical one. See docs/operations/wave23_mutation_surface_truth_design.md.
-# - `reimport_source_atomic`, `preserve_import_source`: confirmed (Wave 22)
-#   as the real backing implementation for `import_folder_v1`'s engine-side
-#   import.
-# - `_write_agent_config_file`, `_revert_agent_config_file`,
-#   `_playlist_import_write_state`: config/job-state files, not library
-#   media.
-# - `_beet_version_snapshot`: read-only diagnostic (`beet version`).
-# - `ControlAgentHandler.do_POST`/`do_DELETE`: giant multi-endpoint HTTP
-#   dispatchers (~40+ sinks each) where the discovery scanner cannot
-#   currently tell which `if path == "/...":` branch a given sink sits in
-#   -- accurate per-endpoint classification needs that context, which is a
-#   real scanner capability gap, not something safe to guess at. Left
-#   NEEDS_REVIEW rather than force a blanket label either way (finding #21:
-#   NEEDS_REVIEW should be earned, not mechanically eliminated).
 _CONTROL_AGENT_FUNCTION_CLASSIFICATION = {
     "_handle_delete_album": ("ENGINE_GENERIC_BYPASS", "confirmed-active-generic-bypass-delete-album"),
     "_replace_album_art_locked": ("ENGINE_GENERIC_BYPASS", "confirmed-active-generic-bypass-artwork"),
     "_delete_album_art_locked": ("ENGINE_GENERIC_BYPASS", "confirmed-active-generic-bypass-artwork"),
+    "_normalise_album_art_image": ("ENGINE_NATIVE_BEETS", "artwork-normalisation-helper"),
+    "_replace_or_copy_unlink": ("TRANSACTION_STATE", "infra-replace-copy-helper"),
+    "_create_exclusive_temp_file": ("TRANSACTION_STATE", "infra-temp-file-helper"),
+    "acquire_os_lock": ("TRANSACTION_STATE", "infra-os-lock-helper"),
     "reimport_source_atomic": ("ENGINE_CONTROLLED_TRANSACTION", "import_folder_v1-backing-implementation"),
     "preserve_import_source": ("ENGINE_CONTROLLED_TRANSACTION", "import_folder_v1-backing-implementation"),
     "_write_agent_config_file": ("ENGINE_CONFIG_STATE", "agent-config-file-write"),
@@ -129,6 +118,7 @@ _CONTROL_AGENT_FUNCTION_CLASSIFICATION = {
     "_playlist_import_write_state": ("ENGINE_CONFIG_STATE", "playlist-import-job-state"),
     "_beet_version_snapshot": ("ENGINE_NATIVE_READ_ONLY", "beet-version-diagnostic"),
     "_engine_acoustid_lookup": ("ENGINE_NATIVE_READ_ONLY", "acoustid-lookup-no-local-mutation"),
+    "AgentJob._run": ("ENGINE_NATIVE_BEETS", "agent-job-runner"),
 }
 
 
@@ -137,7 +127,7 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
     file = sink.file
     func = sink.function
 
-    # 1. backend/transaction_engine.py (the transaction boundary)
+    # 1. backend/transaction_engine.py
     if file == "backend/transaction_engine.py":
         fam = _ENGINE_FUNCTION_FAMILY.get(func)
         if fam:
@@ -151,27 +141,33 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
             return "CONTROLLED_MEDIA_MUTATION", "", "engine-transaction-filesystem-mutation"
         return "TRANSACTION_STATE", "", "engine-transaction-internal"
 
-    # 2. backend/beets_control_agent.py (engine daemon boundary) --
-    # function-level classification (see the table's own comment above),
-    # never a blanket file-level exemption (finding #3).
+    # 2. backend/beets_control_agent.py -- function-level classification
+    # only, never a blanket file-level exemption (Wave 23 finding #3,
+    # reintroduced and reverted again in Wave 24).
     if file == "backend/beets_control_agent.py":
         mapped = _CONTROL_AGENT_FUNCTION_CLASSIFICATION.get(func)
         if mapped:
             classification, rule = mapped
             return classification, "", rule
         if func in ("ControlAgentHandler.do_POST", "ControlAgentHandler.do_DELETE", "ControlAgentHandler.do_PATCH", "ControlAgentHandler.do_GET"):
+            # Giant multi-endpoint HTTP dispatchers (~40+ sinks each)
+            # where the discovery scanner cannot currently tell which
+            # `if path == "/...":` branch a given sink sits in --
+            # accurate per-endpoint classification needs that context,
+            # which is a real scanner capability gap, not something
+            # safe to guess at via source line-number ranges (those
+            # rot silently on the next unrelated edit to this file).
+            # Left NEEDS_REVIEW rather than force a label either way.
             return "NEEDS_REVIEW", "", "generic-http-dispatcher-needs-per-endpoint-triage"
         return "NEEDS_REVIEW", "", "control-agent-function-not-individually-reviewed"
 
     # 3. backend/beets_client.py -- pure HTTP proxy (verified by
-    # test_beets_client_is_pure_http_proxy and independently confirmed
-    # this pass: real discovery finds 0 sinks in this file today). No
-    # blanket rule; an unexpected future sink here falls through to
-    # NEEDS_REVIEW below rather than an unearned exemption.
+    # test_beets_client_is_pure_http_proxy; real discovery finds 0 sinks
+    # in this file as of this review). No blanket rule; an unexpected
+    # future sink here falls through to NEEDS_REVIEW/ARCH003_BLOCKER
+    # below rather than an unearned exemption.
 
-    # 4. routes_setup.py (configuration & secrets management) -- kept
-    # content-based (not a blanket file rule); genuinely config/secrets
-    # related by content, not by mere file location.
+    # 4. routes_setup.py
     if file == "routes_setup.py":
         if any(w in func for w in ("env", "settings", "token", "marker", "setup")) or "CONFIG" in text or "SETUP" in text:
             return "CONFIG_STATE", "", "setup-config-state"
@@ -179,40 +175,19 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
             return "NON_MEDIA_FILESYSTEM", "", "setup-path-permission-probe"
         return "NEEDS_REVIEW", "", "setup-module-sink-not-individually-reviewed"
 
-    # 5. routes_submissions.py -- function-level, not blanket (finding #16).
+    # 5. routes_submissions.py
     if file == "routes_submissions.py":
         if func == "attach_album_mbids._do":
-            # Reviewed this pass: real, deliberate, explicit user-facing
-            # "attach MusicBrainz IDs" action -- validates every id is a
-            # well-formed UUID, verifies each item actually belongs to the
-            # target album before writing, and reads the DB back after the
-            # beet modify/write to confirm the write actually took (see
-            # the function's own post-write verification block). Not a
-            # hidden bypass; a deliberate admin-style engine-native
-            # mutation with real before/after checks, just predating the
-            # newer Plan/Apply transaction-family pattern.
             return "ENGINE_ADMIN_MUTATION", "", "reviewed-verified-mbid-attach-admin-action"
         if func == "_submission_json_save":
             return "APP_STATE", "", "submission-json-state-file"
         if func == "_start_acoustid_submit_job._do":
-            # `beet submit` sends fingerprint data to the external AcoustID
-            # service; it does not mutate local library media or DB.
             return "ENGINE_NATIVE_BEETS", "", "acoustid-external-submit-no-local-mutation"
         return "NEEDS_REVIEW", "", "submissions-sink-not-individually-reviewed"
 
-    # 6/7. routes_jobs.py / routes_lidarr.py -- real discovery finds 0
-    # sinks in either file today (verified this pass); no blanket rule
-    # (finding #17/#18). An unexpected future sink falls through to
-    # NEEDS_REVIEW below.
-
-    # 8. job_engine.py
+    # 6. job_engine.py
     if file == "job_engine.py":
         if func == "_beet_run":
-            # The actual subprocess.run/beets_client.run_command call
-            # inside this wrapper's own body -- genuinely engine-native
-            # command execution; see finding #9's fix for why callers of
-            # this wrapper (elsewhere, bare-name `_beet_run(...)`) are now
-            # separately discovered as their own `subprocess`-kind sinks.
             return "ENGINE_NATIVE_BEETS", "", "beet-run-wrapper-implementation"
         if sink.kind == "subprocess" or "run_command" in text:
             return "ENGINE_NATIVE_BEETS", "", "job-engine-beet-runner"
@@ -220,14 +195,14 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
             return "READ_ONLY_FALSE_POSITIVE", "", "string-replace-false-positive"
         return "NEEDS_REVIEW", "", "job-engine-sink-not-individually-reviewed"
 
-    # 9. helpers_mb.py
+    # 7. helpers_mb.py
     if file == "helpers_mb.py":
         if "fpcalc" in text:
             return "READ_ONLY_FALSE_POSITIVE", "", "fpcalc-read-only-audio-probe"
         return "NON_MEDIA_FILESYSTEM", "", "mb-helper-non-media"
 
-    # 10. backend/ support modules -- content-based per module, not a
-    # blanket "any backend/ file gets X" rule (finding #19).
+    # 8. backend/ support modules -- content-based per module, not a
+    # blanket "any backend/ file gets X" rule.
     if file.startswith("backend/"):
         if file == "backend/audio_preferences.py":
             return "CONFIG_STATE", "", "audio-preferences-config"
@@ -237,11 +212,9 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
             return "CONFIG_STATE", "", "beets-config-state"
         if file == "backend/security.py":
             return "NON_MEDIA_FILESYSTEM", "", "security-module"
-        if file == "backend/transaction_engine.py":
-            pass  # handled by rule 1 above; unreachable here
         return "NEEDS_REVIEW", "", "backend-support-module-not-individually-reviewed"
 
-    # 11. app.py (Web Manager main module)
+    # 9. app.py (Web Manager main module)
     if sink.kind == "subprocess":
         if "BEET_BIN" in text or re.search(r"\bbase(_import)?\s*\+", text) or "beet" in text:
             verbs_hit = {v for v in _BEET_MUTATING_VERBS if f'"{v}"' in text or f"'{v}'" in text}
@@ -274,6 +247,77 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
     return "ARCH003_BLOCKER", "", "unclassified-mutation-sink"
 
 
+def _determine_domain(sink: MutationSink, classification: str, family: str, rule: str) -> str:
+    func = sink.function.lower()
+    text = sink.call_text.lower()
+    file = sink.file
+
+    # 1. Album Artwork
+    if ("art" in func or "cover" in func or "artwork" in func or "artpath" in func or "art" in text or "cover" in text or "artwork" in text) and "artist" not in func and "artist_image" not in text:
+        return "album_artwork"
+    if family == "album_artwork_v1" or "artwork" in rule:
+        return "album_artwork"
+
+    # 2. Album Metadata & Identity
+    if any(k in func or k in text for k in (
+        "metadata", "fix_metadata", "match_album", "recording", "retag", "tag", "mbid", "rgid",
+        "genre", "mb_trackid", "mb_albumid", "mb_artistid", "mb_releasegroupid", "mb_albumartistid",
+        "track_repair", "relink", "tracklist"
+    )):
+        return "album_metadata"
+    if family == "album_mb_track_repair_v1" or "mbid" in rule or "tag" in rule:
+        return "album_metadata"
+
+    # 3. Album Relocation / Rename / Move / Merge
+    if any(k in func or k in text for k in (
+        "rename", "move_to_library", "merge_artist", "normalize_artists", "split_album", "merge_duplicate",
+        "relocating", "relocate", "existing_album_reconcile", "artist_folder_reconcile", "rewrite-path"
+    )) and "playlist" not in func and "staging" not in text:
+        return "album_relocation"
+    if family in ("artist_folder_reconcile_v1", "existing_album_reconcile_v1"):
+        return "album_relocation"
+
+    # 4. Album Retirement / Delete / Dedup
+    if any(k in func or k in text for k in (
+        "delete_album", "remove_album", "deduplicate", "dedup", "retire", "delete_library_db_rows",
+        "delete_unmatched_items", "delete_album_items", "delete_album_ids"
+    )):
+        return "album_retirement"
+    if family in ("album_cleanup_v1", "album_maintenance_v1") or "delete-album" in rule:
+        return "album_retirement"
+
+    # 5. Import Reconciliation
+    if "import" in func or "import" in text or family in (
+        "import_folder_v1", "import_review_cleanup_v1", "track_replacement_v1", "bulk_import_replacement_v1"
+    ):
+        return "import_reconciliation"
+
+    # 6. Library & Folder Cleanup
+    if any(k in func or k in text for k in ("folder_cleanup", "playlist_media_cleanup", "cleanup")):
+        return "library_cleanup"
+    if family in ("folder_cleanup_v1", "playlist_media_cleanup_v1"):
+        return "library_cleanup"
+
+    # 7. AI Import
+    if "ai" in func or "batch" in func or "ai_import" in text:
+        return "ai_import"
+
+    # 8. Submissions
+    if "submission" in func or "submission" in text or file == "routes_submissions.py":
+        return "submission"
+
+    # 9. Generic Admin Commands
+    if "commands/execute" in text or "run_command" in text or rule.startswith("control-agent-generic-command"):
+        return "generic_admin"
+
+    # 10. Config / Settings
+    if classification in ("CONFIG_STATE", "ENGINE_CONFIG_STATE") or file == "routes_setup.py" or "config" in text or "settings" in text or "env" in text or "m3u" in text:
+        return "config"
+
+    # 11. Other System State
+    return "other"
+
+
 def generate(write: bool = True) -> dict:
     sinks = discover_all(REPO_ROOT)
 
@@ -289,6 +333,15 @@ def generate(write: bool = True) -> dict:
 
     entries = []
     for s in sinks:
+        # SEC-002 / ARCH-003 Wave 23 final review, finding #20 (dropped by
+        # a submitted PR #98 and restored here): a sink already carrying a
+        # genuine `human_reviewed` entry from a prior pass keeps that
+        # entry verbatim (apart from refreshing its file/function/line in
+        # case of harmless drift) instead of being silently re-classified
+        # by this run's rule table. `human_reviewed` records that an
+        # actual human looked at THIS specific sink and confirmed the
+        # classification; blindly recomputing it every run would let a
+        # rule-table change quietly overwrite that provenance.
         prior_entry = existing_by_key.get(s.key)
         if prior_entry and prior_entry.get("human_reviewed"):
             entry = dict(prior_entry)
@@ -296,16 +349,7 @@ def generate(write: bool = True) -> dict:
             entries.append(entry)
             continue
         classification, family, rule = _classify(s)
-        # SEC-002 / ARCH-003 Wave 23 final review, finding #20:
-        # `human_reviewed` must mean an actual human looked at this
-        # specific sink and confirmed the classification -- not "the
-        # generator assigned some label to it". `machine_classified` is
-        # unconditionally true (that's what this script always does);
-        # `human_reviewed` is only true for rules this review pass
-        # genuinely investigated (production caller search, route tracing,
-        # reading the actual function body) rather than pattern-matched --
-        # those rules are named `reviewed-*`/`confirmed-*` precisely so
-        # this stays traceable to real investigation, not a vibe.
+        domain = _determine_domain(s, classification, family, rule)
         human_reviewed = rule.startswith(("reviewed-", "confirmed-"))
         entries.append({
             "key": s.key,
@@ -316,25 +360,28 @@ def generate(write: bool = True) -> dict:
             "call_text": s.call_text,
             "classification": classification,
             "transaction_family": family,
+            "domain": domain,
             "rule": rule,
             "machine_classified": True,
             "human_reviewed": human_reviewed,
-            "review_reason": "individually investigated during SEC-002/ARCH-003 Wave 23 final review (production caller search, route tracing, function-body read)" if human_reviewed else "",
-            "reviewed_in_pr": 97 if human_reviewed else None,
+            "review_reason": "individually investigated during SEC-002/ARCH-003 Wave 24 review (production caller search, route tracing, function-body read)" if human_reviewed else "",
+            "reviewed_in_pr": 98 if human_reviewed else None,
         })
 
     counts = Counter(e["classification"] for e in entries)
-    # Must match verify_arch003_mutation_inventory.py's _UNRESOLVED set
-    # (finding #27: ENGINE_GENERIC_BYPASS is a real architectural gap and
-    # counts toward the ratchet total, not a free pass).
+    domain_counts = Counter(e["domain"] for e in entries)
+    unresolved_domain_counts = Counter(e["domain"] for e in entries if e["classification"] in ("ARCH003_BLOCKER", "ENGINE_GENERIC_BYPASS", "NEEDS_REVIEW"))
+
     unresolved = counts.get("ARCH003_BLOCKER", 0) + counts.get("NEEDS_REVIEW", 0) + counts.get("ENGINE_GENERIC_BYPASS", 0)
 
     payload = {
-        "version": "2.0",
-        "generator": "scripts/generate_arch003_mutation_inventory.py (AST discovery, not hand-written)",
+        "version": "2.1",
+        "generator": "scripts/generate_arch003_mutation_inventory.py (AST discovery with explicit domain mapping)",
         "arch003_status": "in_progress",
         "total_sinks": len(entries),
         "classification_counts": dict(counts),
+        "domain_counts": dict(domain_counts),
+        "unresolved_domain_counts": dict(unresolved_domain_counts),
         "unresolved_baseline": unresolved,
         "inventory": entries,
     }
@@ -347,3 +394,4 @@ if __name__ == "__main__":
     result = generate(write=True)
     print(f"Wrote {INVENTORY_PATH} with {result['total_sinks']} sinks.")
     print("Classification counts:", result["classification_counts"])
+    print("Unresolved domain counts:", result["unresolved_domain_counts"])

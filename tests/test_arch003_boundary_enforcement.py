@@ -39,6 +39,44 @@ class TestArch003BoundaryEnforcement(unittest.TestCase):
         self.assertIn("BeetsUnavailableError", self.beets_client_source)
         self.assertIn("BeetsAuthError", self.beets_client_source)
 
+    def test_beets_client_class_has_no_local_filesystem_mutation_calls(self):
+        """SEC-002 / ARCH-003 Wave 24 final review (CRITICAL): a submitted
+        revision of replace_album_art()/delete_album_art() decoded image
+        bytes and wrote a staging file directly to this container's own
+        local disk (`stg_base.mkdir()`, `temp_art.write_bytes()`), then
+        probed local `Path.exists()`/`Path.is_file()` for candidate art
+        files -- both silently reintroducing exactly the local-mutation
+        fallback test_beets_client_is_pure_http_proxy's substring checks
+        above were never actually strong enough to catch (it only checks
+        that `_request`/error classes exist *somewhere* in the file, not
+        that every method actually routes through them). This walks the
+        real `BeetsClient` class body and proves no filesystem mutation
+        call shape appears anywhere in it -- every method must be pure
+        computation plus HTTP, matching the two-service architecture
+        where only the engine container touches the media filesystem."""
+        tree = ast.parse(self.beets_client_source)
+        client_class = next(
+            (n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == "BeetsClient"),
+            None,
+        )
+        self.assertIsNotNone(client_class, "BeetsClient class not found in beets_client.py")
+
+        banned_calls = {
+            "mkdir", "makedirs", "unlink", "remove", "rename", "replace",
+            "move", "rmdir", "removedirs", "rmtree", "copy", "copy2",
+            "copyfile", "copytree", "write_text", "write_bytes", "touch",
+        }
+        found = []
+        for node in ast.walk(client_class):
+            if isinstance(node, ast.Call):
+                name = node.func.attr if isinstance(node.func, ast.Attribute) else (
+                    node.func.id if isinstance(node.func, ast.Name) else None)
+                if name in banned_calls:
+                    found.append(f"call:{name}@{node.lineno}")
+                elif isinstance(node.func, ast.Name) and node.func.id == "open":
+                    found.append(f"call:open@{node.lineno}")
+        self.assertEqual(found, [], f"found prohibited local-filesystem-mutation call node(s) in BeetsClient: {found}")
+
     def test_app_delegates_folder_cleanup_to_beets_client(self):
         self.assertIn("beets_client.plan_folder_cleanup(", self.app_source)
         self.assertIn("beets_client.apply_folder_cleanup(", self.app_source)
@@ -141,3 +179,31 @@ class TestArch003BoundaryEnforcement(unittest.TestCase):
                     if isinstance(ctx, ast.Call) and isinstance(ctx.func, ast.Name) and ctx.func.id == "_db":
                         found.append(f"with:_db@{node.lineno}")
         self.assertEqual(found, [], f"found prohibited local-mutation call node(s) in _album_cleanup_apply_issue: {found}")
+
+    def test_mutation_inventory_domain_accounting_gate(self):
+        """Wave 24: Verify every inventory entry carries a domain field and missing domain fails CI."""
+        import json, tempfile
+        from scripts.verify_arch003_mutation_inventory import verify_mutation_inventory
+
+        self.assertTrue(verify_mutation_inventory(self.repo_root, check_mode=True))
+
+        inv_path = self.repo_root / "security" / "arch003_mutation_inventory.json"
+        data = json.loads(inv_path.read_text(encoding="utf-8"))
+        for entry in data.get("inventory", []):
+            self.assertTrue(bool(entry.get("domain")), f"entry {entry.get('key')} has missing or empty domain field")
+
+        # Prove domain gate fails if domain is stripped from an ARCH003_BLOCKER sink
+        if data.get("inventory"):
+            test_data = dict(data)
+            test_data["inventory"] = [dict(e) for e in data["inventory"]]
+            blocker = next((e for e in test_data["inventory"] if e.get("classification") == "ARCH003_BLOCKER"), test_data["inventory"][0])
+            blocker["classification"] = "ARCH003_BLOCKER"
+            blocker["domain"] = ""
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                tmp_path = Path(tmp_dir)
+                sec_dir = tmp_path / "security"
+                sec_dir.mkdir()
+                (sec_dir / "arch003_mutation_inventory.json").write_text(json.dumps(test_data), encoding="utf-8")
+                (tmp_path / "backend").mkdir()
+                (tmp_path / "backend" / "transaction_engine.py").write_text((self.repo_root / "backend" / "transaction_engine.py").read_text(encoding="utf-8"), encoding="utf-8")
+                self.assertFalse(verify_mutation_inventory(tmp_path, check_mode=True))
