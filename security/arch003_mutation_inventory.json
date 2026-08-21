@@ -1,0 +1,95 @@
+{
+  "version": "1.0",
+  "arch003_status": "DONE",
+  "generated_at": "2026-08-21T07:22:00Z",
+  "inventory": [
+    {
+      "file": "app.py",
+      "symbol": "apply_safe_folder_placeholder_renames_job",
+      "line_pattern": "beets_client.plan_folder_cleanup",
+      "mutation_kind": "folder_rename",
+      "target_domain": "library_folders",
+      "owner": "Engine",
+      "classification": "CONTROLLED_MEDIA_MUTATION",
+      "transaction_family": "folder_cleanup_v1",
+      "rationale": "Folder placeholder renames routed through beets_client.plan_folder_cleanup / apply_folder_cleanup"
+    },
+    {
+      "file": "app.py",
+      "symbol": "_playlist_run_quality_cleanup_job",
+      "line_pattern": "beets_client.plan_playlist_media_cleanup",
+      "mutation_kind": "media_unlink_db_prune",
+      "target_domain": "playlist_media",
+      "owner": "Engine",
+      "classification": "CONTROLLED_MEDIA_MUTATION",
+      "transaction_family": "playlist_media_cleanup_v1",
+      "rationale": "Playlist library media cleanup routed through beets_client.plan_playlist_media_cleanup / apply_playlist_media_cleanup"
+    },
+    {
+      "file": "app.py",
+      "symbol": "_album_cleanup_apply_issue",
+      "line_pattern": "beets_client.plan_album_maintenance",
+      "mutation_kind": "track_album_maintenance",
+      "target_domain": "library_albums",
+      "owner": "Engine",
+      "classification": "CONTROLLED_MEDIA_MUTATION",
+      "transaction_family": "album_maintenance_v1",
+      "rationale": "Album cleanup issues routed through beets_client.plan_album_maintenance / apply_album_maintenance"
+    },
+    {
+      "file": "app.py",
+      "symbol": "_move_artwork_to_target",
+      "line_pattern": "beets_client.plan_album_artwork",
+      "mutation_kind": "artwork_relocate",
+      "target_domain": "album_artwork",
+      "owner": "Engine",
+      "classification": "CONTROLLED_MEDIA_MUTATION",
+      "transaction_family": "album_artwork_v1",
+      "rationale": "Album artwork relocation routed through beets_client.plan_album_artwork / apply_album_artwork"
+    },
+    {
+      "file": "app.py",
+      "symbol": "import_folder_with_id",
+      "line_pattern": "beets_client.plan_import_folder",
+      "mutation_kind": "import_folder",
+      "target_domain": "import_staging",
+      "owner": "Engine",
+      "classification": "CONTROLLED_MEDIA_MUTATION",
+      "transaction_family": "import_folder_v1",
+      "rationale": "Folder import routed through beets_client.plan_import_folder / apply_import_folder"
+    },
+    {
+      "file": "app.py",
+      "symbol": "_stage_selected_audio_files",
+      "line_pattern": "shutil.copy2",
+      "mutation_kind": "file_copy",
+      "target_domain": "staging_cache",
+      "owner": "Web Manager",
+      "classification": "STAGING_ONLY",
+      "transaction_family": "N/A",
+      "rationale": "Pre-import review staging copy strictly under protected staging roots outside library root"
+    },
+    {
+      "file": "app.py",
+      "symbol": "save_playlist_manifest",
+      "line_pattern": "write_text",
+      "mutation_kind": "json_write",
+      "target_domain": "app_state",
+      "owner": "Web Manager",
+      "classification": "APP_STATE",
+      "transaction_family": "N/A",
+      "rationale": "Playlist manifests and job metadata stored in WEB_MANAGER_DATA_DIR"
+    },
+    {
+      "file": "backend/beets_control_agent.py",
+      "symbol": "reimport_source_atomic",
+      "line_pattern": "subprocess.run",
+      "mutation_kind": "beet_import",
+      "target_domain": "library_media",
+      "owner": "Engine",
+      "classification": "ENGINE_NATIVE_BEETS",
+      "transaction_family": "import_folder_v1",
+      "rationale": "Native Beets import execution boundary inside Control Agent daemon"
+    }
+  ]
+}

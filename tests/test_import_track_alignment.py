@@ -217,7 +217,7 @@ class PartialImportSubsetTests(unittest.TestCase):
     def test_worker_stages_selected_subset(self):
         """Worker imports the staged selected subset rather than the whole source folder."""
         self.assertIn('import_folder_path = _stage_selected_audio_files(', self._app)
-        self.assertIn('"--search-id", mb_albumid, import_folder_path', self._app)
+        self.assertIn('"source_folder": import_folder_path', self._app)
 
     def test_unmatched_remainder_keeps_review_item(self):
         """Pending review is preserved when unmatched audio remains after partial import."""

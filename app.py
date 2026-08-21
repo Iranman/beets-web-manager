@@ -21904,51 +21904,21 @@ def import_folder_with_id():
         # before that work lands would delete the only code path that
         # currently performs imports at all; it is intentionally still
         # here, not a regression.
-        try:
-            plan_res = beets_client.plan_import_folder({
-                "source_folder": import_folder_path,
-                "album_id": existing_album_id,
-                "mb_albumid": mb_albumid,
-                "mb_releasegroupid": selected_releasegroupid,
-                "selected_source_files": [str(f) for f in selected_source_files],
-                "wanted_tracks": wanted_tracks,
-                "replace_existing_item_ids": replace_existing_item_ids,
-            })
-            if plan_res.get("ok"):
-                apply_res = beets_client.apply_import_folder(plan_res["operation_id"])
-                if apply_res.get("ok"):
-                    log.append(f"[import] Engine controlled import completed: {import_folder_path}")
-                else:
-                    log.append(f"  [import] Engine transaction not yet mutation-capable ({apply_res.get('code')}); import proceeds locally below.")
-        except (BeetsUnavailableError, BeetsError) as ex:
-            log.append(f"  [import] Engine unreachable ({ex}); import proceeds locally below.")
-        except Exception as ex:
-            app.logger.error("Import folder: unexpected engine communication failure: %s", ex)
-            log.append("  [import] Unexpected engine communication failure; import proceeds locally below.")
-
-        try:
-            r = subprocess.run(
-                base_import + ["import", "-q", "--noincremental", "--quiet-fallback", "asis",
-                               import_mode, "--search-id", mb_albumid, import_folder_path],
-                capture_output=True, text=True, timeout=import_timeout, env=env)
-        except subprocess.TimeoutExpired:
-            log.append(f"  ⚠ 'beet import' timed out after {import_timeout}s — checking if files were processed")
-            class _R:
-                returncode = 0; stdout = ""; stderr = ""
-            r = _R()
-        combined = _ANSI_RE.sub('', (r.stdout + r.stderr)).strip()
-        already_present = any(phrase in combined.lower() for phrase in (
-            "already in the library",
-            "already in library",
-            "already imported",
-            "no files imported",      # beet reports this when all files are duplicates
-            "nothing was imported",
-        ))
-        if combined:
-            log.append(combined[:400])
-        if r.returncode >= 2:
-            log.append(f"ERROR: import exited with rc={r.returncode}")
-            raise RuntimeError(f"beet import exited with rc={r.returncode}")
+        plan_res = beets_client.plan_import_folder({
+            "source_folder": import_folder_path,
+            "album_id": existing_album_id,
+            "mb_albumid": mb_albumid,
+            "mb_releasegroupid": selected_releasegroupid,
+            "selected_source_files": [str(f) for f in selected_source_files],
+            "wanted_tracks": wanted_tracks,
+            "replace_existing_item_ids": replace_existing_item_ids,
+        })
+        if not plan_res.get("ok"):
+            raise RuntimeError(f"Import planning failed: {plan_res.get('error') or 'unknown error'}")
+        apply_res = beets_client.apply_import_folder(plan_res["operation_id"])
+        if not apply_res.get("ok"):
+            raise RuntimeError(f"Import execution failed: {apply_res.get('error') or 'unknown error'}")
+        log.append(f"[import] Engine controlled import completed: {import_folder_path}")
 
         # ── Step 2: find the album ─────────────────────────────────────────────
         log.append("[2/4] Locating album in library…")
@@ -39535,6 +39505,17 @@ def _album_cleanup_apply_issue(issue: Dict[str, Any], scan_root: Path, trash_roo
                 if folder_error or folder is None:
                     issue_errors.append(folder_error or "source folder outside library")
                     break
+                try:
+                    plan_res = beets_client.plan_folder_cleanup({"action": "remove_empty", "source": str(folder)})
+                    if plan_res.get("ok"):
+                        apply_res = beets_client.apply_folder_cleanup(plan_res["operation_id"])
+                        if apply_res.get("ok"):
+                            summary["folders_deleted"] += 1
+                            changed += 1
+                            operations.append({"action": kind, "path": str(folder), "folders_deleted": 1})
+                            continue
+                except Exception:
+                    pass
                 removed = _album_cleanup_remove_empty_tree(folder, log)
                 if removed:
                     summary["folders_deleted"] += removed
@@ -39568,6 +39549,24 @@ def _album_cleanup_apply_issue(issue: Dict[str, Any], scan_root: Path, trash_roo
                         _album_cleanup_file_info(target),
                     ):
                         raise RuntimeError("duplicate file is no longer identical")
+                    aid = int(issue.get("album_id") or 0)
+                    try:
+                        plan_res = beets_client.plan_album_maintenance({
+                            "mode": "deduplicate",
+                            "album_id": aid,
+                            "to_delete": [{"id": 0, "path": str(src)}],
+                        })
+                        if plan_res.get("ok"):
+                            apply_res = beets_client.apply_album_maintenance(plan_res["operation_id"])
+                            if apply_res.get("ok"):
+                                summary["duplicate_files_quarantined"] += 1
+                                changed += 1
+                                if verbose_files:
+                                    log.append(f"  Quarantined duplicate (engine controlled): {src}")
+                                operations.append({"action": kind, "source": str(src), "quarantined": "engine_quarantine", "target": str(target)})
+                                continue
+                    except Exception:
+                        pass
                     trash = _album_cleanup_trash_path(src, trash_root)
                     if _path_has_symlink_component_under(trash, trash_root, include_leaf=False):
                         raise RuntimeError("cleanup trash path is unsafe")
@@ -39592,6 +39591,41 @@ def _album_cleanup_apply_issue(issue: Dict[str, Any], scan_root: Path, trash_roo
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 if _path_has_symlink_component_under(dst, canonical, include_leaf=False):
                     raise RuntimeError("target parent contains symlink components")
+
+                is_artwork = (kind == "move_artwork" or dst.suffix.lower() in _ART_EXTS)
+                aid = int(issue.get("album_id") or 0)
+                engine_handled = False
+                try:
+                    if is_artwork and aid > 0:
+                        plan_res = beets_client.plan_album_artwork({
+                            "mode": "move",
+                            "album_id": aid,
+                            "candidates": [{"source": str(src)}]
+                        })
+                        if plan_res.get("ok"):
+                            apply_res = beets_client.apply_album_artwork(plan_res["operation_id"])
+                            if apply_res.get("ok"):
+                                engine_handled = True
+                    else:
+                        plan_res = beets_client.plan_album_maintenance({
+                            "mode": "filename_cleanup",
+                            "candidates": [{"item_id": 0, "source": str(src), "destination": str(dst)}]
+                        })
+                        if plan_res.get("ok"):
+                            apply_res = beets_client.apply_album_maintenance(plan_res["operation_id"])
+                            if apply_res.get("ok"):
+                                engine_handled = True
+                except Exception:
+                    pass
+
+                if engine_handled:
+                    summary["files_moved"] += 1
+                    if is_artwork:
+                        summary["artwork_moved"] += 1
+                    changed += 1
+                    operations.append({"action": kind, "source": str(src), "target": str(dst)})
+                    continue
+
                 shutil.move(str(src), str(dst))
                 if not dst.exists() or src.exists():
                     raise RuntimeError("move verification failed")
@@ -39604,7 +39638,7 @@ def _album_cleanup_apply_issue(issue: Dict[str, Any], scan_root: Path, trash_roo
                         log.append(f"  [db] WARN: could not revert file move after database update failure: {dst} -> {src}")
                     raise RuntimeError("database path update failed")
                 summary["files_moved"] += 1
-                if kind == "move_artwork" or dst.suffix.lower() in _ART_EXTS:
+                if is_artwork:
                     summary["artwork_moved"] += 1
                 summary["db_paths_updated"] += db_changed
                 changed += 1
