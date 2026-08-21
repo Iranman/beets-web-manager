@@ -19,6 +19,117 @@ JOBS_SOURCE = (ROOT / "frontend" / "src" / "views" / "Jobs.tsx").read_text(encod
 CLIENT_SOURCE = (ROOT / "frontend" / "src" / "api" / "client.ts").read_text(encoding="utf-8")
 
 
+class _FakeBeetsError(Exception):
+    pass
+
+
+class _FakeBeetsUnavailableError(_FakeBeetsError):
+    pass
+
+
+class _FakeEngineClient:
+    """Minimal in-test double for `beets_client`, used only by this
+    isolated-namespace harness (`_load_album_cleanup_helpers` execs
+    `_album_cleanup_apply_issue` outside the real app.py module, so there
+    is no real BeetsClient/HTTP server to talk to).
+
+    SEC-002 / ARCH-003 final closure review: `_album_cleanup_apply_issue`
+    no longer has any local mutation fallback -- every real move/
+    quarantine/delete now genuinely happens through `beets_client.plan_*`
+    / `apply_*`. This fake performs the equivalent filesystem effect a
+    real `album_maintenance_v1`/`album_artwork_v1`/`folder_cleanup_v1`
+    Apply call would produce, so these tests keep validating
+    `_album_cleanup_apply_issue`'s own orchestration logic (path
+    resolution, blocker detection, summary/operation bookkeeping)
+    end-to-end without needing a real engine process."""
+
+    def __init__(self):
+        self._ops: Dict[str, Dict[str, Any]] = {}
+        self._next_id = 1
+        # Real album_maintenance_v1 quarantines to an engine-owned
+        # RECONCILE_QUARANTINE_DIR, never the caller's own trash_root
+        # parameter -- this fake mirrors that (a private, engine-owned
+        # location the Web Manager doesn't control), not whatever
+        # `trash_root` a given test happened to pass to `apply_issue`.
+        self._quarantine_dir = Path(tempfile.mkdtemp(prefix="fake_engine_quarantine_"))
+
+    def _new_op(self, kind: str, payload: Dict[str, Any]) -> str:
+        op_id = f"fake-{kind}-{self._next_id}"
+        self._next_id += 1
+        self._ops[op_id] = {"kind": kind, "payload": payload}
+        return op_id
+
+    def plan_folder_cleanup(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        src = Path(payload["source"])
+        if not src.exists() or not src.is_dir() or any(src.iterdir()):
+            return {"ok": True, "operation_id": None}
+        return {"ok": True, "operation_id": self._new_op("folder_cleanup", payload)}
+
+    def apply_folder_cleanup(self, op_id: str) -> Dict[str, Any]:
+        op = self._ops.pop(op_id, None)
+        if not op:
+            return {"ok": False, "error": "unknown operation"}
+        src = Path(op["payload"]["source"])
+        try:
+            src.rmdir()
+        except OSError as ex:
+            return {"ok": False, "error": str(ex)}
+        return {"ok": True}
+
+    def plan_album_maintenance(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        mode = payload.get("mode")
+        if mode == "deduplicate":
+            to_delete = payload.get("to_delete") or []
+            if not to_delete or int(to_delete[0].get("id") or 0) <= 0:
+                return {"ok": True, "operation_id": None}
+        elif mode == "filename_cleanup":
+            cands = payload.get("candidates") or []
+            if not cands or int(cands[0].get("item_id") or 0) <= 0:
+                return {"ok": True, "operation_id": None}
+        return {"ok": True, "operation_id": self._new_op("album_maintenance", payload)}
+
+    def apply_album_maintenance(self, op_id: str) -> Dict[str, Any]:
+        op = self._ops.pop(op_id, None)
+        if not op:
+            return {"ok": False, "error": "unknown operation"}
+        payload = op["payload"]
+        if payload.get("mode") == "deduplicate":
+            item = payload["to_delete"][0]
+            src = Path(item["path"])
+            dest = _test_unique_dest(self._quarantine_dir / src.name)
+            src.rename(dest)
+            return {"ok": True}
+        if payload.get("mode") == "filename_cleanup":
+            cand = payload["candidates"][0]
+            src, dst = Path(cand["source"]), Path(cand["destination"])
+            if dst.exists():
+                return {"ok": False, "error": "destination exists"}
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            src.rename(dst)
+            return {"ok": True}
+        return {"ok": False, "error": "unsupported mode"}
+
+    def plan_album_artwork(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if payload.get("mode") == "move" and not payload.get("target_dir"):
+            return {"ok": False, "error": "target_dir is required for move mode"}
+        return {"ok": True, "operation_id": self._new_op("album_artwork", payload)}
+
+    def apply_album_artwork(self, op_id: str) -> Dict[str, Any]:
+        op = self._ops.pop(op_id, None)
+        if not op:
+            return {"ok": False, "error": "unknown operation"}
+        payload = op["payload"]
+        target_dir = Path(payload["target_dir"])
+        target_dir.mkdir(parents=True, exist_ok=True)
+        for cand in payload.get("candidates") or []:
+            src = Path(cand["source"])
+            dest = target_dir / src.name
+            if dest.exists():
+                dest = _test_unique_dest(dest)
+            src.rename(dest)
+        return {"ok": True}
+
+
 def _load_album_cleanup_helpers() -> Dict[str, Any]:
     names = {
         "_ALBUM_FOLDER_UUID_IN_BRACES_RE",
@@ -99,6 +210,19 @@ def _load_album_cleanup_helpers() -> Dict[str, Any]:
         "_path_under": lambda path, root: _test_path_under(Path(path), Path(root)),
         "_folder_cleanup_db_items": lambda folder: [],
         "_album_cleanup_update_db_path": lambda old, new, log: 0,
+        # SEC-002 / ARCH-003 final closure review: _album_cleanup_apply_issue
+        # now delegates every real mutation to beets_client, so this
+        # isolated-namespace harness needs a working double for it (there is
+        # no real BeetsClient/HTTP server here) plus the exception types its
+        # except-clauses reference. _album_cleanup_item_id_for_path does a
+        # real Beets-DB lookup in production; these tests aren't exercising
+        # DB-tracked-item-membership logic, so a fixed positive id is enough
+        # to let the (already content/path-verified above this call)
+        # candidate through.
+        "beets_client": _FakeEngineClient(),
+        "BeetsUnavailableError": _FakeBeetsUnavailableError,
+        "BeetsError": _FakeBeetsError,
+        "_album_cleanup_item_id_for_path": lambda path: 1,
     }
     tree = get_app_ast()
     for node in tree.body:
@@ -626,7 +750,14 @@ class AlbumFolderCleanupPlannerTests(unittest.TestCase):
             result = apply_issue(self._issue(source, target), root, Path(tmp) / "trash", [], summary, [])
             self.assertEqual(result["status"], "Completed")
             self.assertFalse((source / "01 Intro.flac").exists())
-            self.assertTrue((Path(tmp) / "trash" / "01 Intro.flac").exists())
+            # SEC-002 / ARCH-003 final closure review: the duplicate is now
+            # quarantined by album_maintenance_v1 inside the engine's own
+            # RECONCILE_QUARANTINE_DIR, not the caller's `trash_root`
+            # parameter -- _album_cleanup_apply_issue no longer controls
+            # (or needs to know) exactly where the engine puts it. What it
+            # can still verify: the source copy is gone and exactly the
+            # target's copy remains, matching what actually happened.
+            self.assertTrue((target / "01 Intro.flac").exists())
             self.assertEqual(summary["duplicate_files_quarantined"], 1)
 
     def test_target_track_with_different_audio_blocks_that_file(self):

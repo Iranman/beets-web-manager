@@ -1,32 +1,45 @@
-"""CI Gate Script verifying repository-wide ARCH-003 mutation inventory compliance.
+"""CI gate for the ARCH-003 mutation inventory.
 
-Enforces:
-1. Every production mutation sink in app.py, backend/, routes/ is classified in security/arch003_mutation_inventory.json.
-2. 0 UNCLASSIFIED mutation sinks exist.
-3. Every CONTROLLED_MEDIA_MUTATION entry references a valid, existing transaction family in backend/transaction_engine.py.
-4. Zero local mutating beet subprocess execution or un-wrapped local media unlinks exist in app.py.
+SEC-002 / ARCH-003 final closure review, findings #15-#27: the previous
+version of this script only validated the hand-written inventory JSON's
+internal consistency (spelling of classifications, existence of named
+transaction families) and one hardcoded literal-string check for the old
+`beet import` subprocess pattern -- it never looked at the actual source
+code, so an inventory that only listed 8 entries passed as "0 unclassified"
+regardless of what the repository actually contained.
+
+This version re-runs the real AST discovery (`discover_mutation_sinks.py`)
+against the current source and compares it against the checked-in
+`security/arch003_mutation_inventory.json` by stable key. The gate is a
+*ratchet*, not an all-or-nothing switch, because a first honest discovery
+pass across this codebase found several hundred real candidate sinks and a
+large fraction of them are genuine pre-existing ARCH-003 debt this single
+review cannot respons­ibly migrate in one pass (see the design doc). Failing
+CI on that entire pre-existing backlog would not make the repository safer
+today; it would just make the gate impossible to land, which is how these
+gates rot into `--no-verify` habits. Instead:
+
+  - Every sink discovered in the current source MUST have a matching entry
+    in the inventory (by exact key: file + enclosing function + a hash of
+    the call text). A discovered sink with NO matching key at all is a
+    genuinely NEW, completely unreviewed mutation site and fails the gate
+    outright -- this is the real regression protection (finding #26).
+  - The *count* of ARCH003_BLOCKER + NEEDS_REVIEW entries must not exceed
+    the baseline recorded in the inventory file. It is fine to fix one and
+    add a new (still-unclassified) one elsewhere in the same PR as long as
+    the total doesn't grow; it is not fine to silently accumulate more
+    unreviewed debt than existed before.
+  - Every CONTROLLED_MEDIA_MUTATION entry must reference a transaction
+    family that actually exists in `backend/transaction_engine.py`.
 """
 
 import ast
 import json
-import os
 import sys
 from pathlib import Path
 
-VALID_TRANSACTION_FAMILIES = {
-    "track_replacement_v1",
-    "import_review_cleanup_v1",
-    "bulk_import_replacement_v1",
-    "album_mb_track_repair_v1",
-    "existing_album_reconcile_v1",
-    "artist_folder_reconcile_v1",
-    "album_maintenance_v1",
-    "album_artwork_v1",
-    "folder_cleanup_v1",
-    "playlist_media_cleanup_v1",
-    "import_folder_v1",
-    "album_cleanup_v1",
-}
+sys.path.insert(0, str(Path(__file__).parent))
+from discover_mutation_sinks import discover_all  # noqa: E402
 
 ALLOWED_CLASSIFICATIONS = {
     "CONTROLLED_MEDIA_MUTATION",
@@ -40,7 +53,30 @@ ALLOWED_CLASSIFICATIONS = {
     "READ_ONLY_FALSE_POSITIVE",
     "TEST_ONLY",
     "DEAD_CODE",
+    "NEEDS_REVIEW",
+    "ARCH003_BLOCKER",
 }
+_UNRESOLVED = {"NEEDS_REVIEW", "ARCH003_BLOCKER"}
+
+
+def _real_transaction_families(repo_root: Path) -> set:
+    path = repo_root / "backend" / "transaction_engine.py"
+    if not path.exists():
+        return set()
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except SyntaxError:
+        return set()
+    families = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == "mutation_family" and isinstance(node.value, ast.Constant):
+                    families.add(node.value.value)
+        # Also catch string literals assigned to a "mutation_family" dict key.
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value.endswith("_v1"):
+            families.add(node.value)
+    return families
 
 
 def verify_mutation_inventory(repo_root: Path, check_mode: bool = True) -> bool:
@@ -57,28 +93,50 @@ def verify_mutation_inventory(repo_root: Path, check_mode: bool = True) -> bool:
 
     inventory = data.get("inventory") or []
     errors = []
+    warnings = []
 
-    # 1. Check all inventory classifications and transaction families
+    by_key = {}
     for entry in inventory:
+        key = entry.get("key")
         classification = entry.get("classification")
         family = entry.get("transaction_family")
-        symbol = entry.get("symbol")
+        symbol = entry.get("function")
         file_path = entry.get("file")
 
         if classification not in ALLOWED_CLASSIFICATIONS:
             errors.append(f"Invalid classification '{classification}' for {symbol} in {file_path}")
-
         if classification == "CONTROLLED_MEDIA_MUTATION":
-            if family not in VALID_TRANSACTION_FAMILIES:
-                errors.append(f"Unknown transaction family '{family}' for controlled entry {symbol} in {file_path}")
+            real_families = _real_transaction_families(repo_root)
+            if family not in real_families:
+                errors.append(f"Unknown/stale transaction family '{family}' for controlled entry {symbol} in {file_path}")
+        if key:
+            by_key[key] = entry
 
-    # 2. Verify app.py has zero local mutating subprocess beet import execution
-    app_py_path = repo_root / "app.py"
-    if app_py_path.exists():
-        app_source = app_py_path.read_text(encoding="utf-8")
-        # Check that import_folder_with_id does not call subprocess.run with "import"
-        if "subprocess.run" in app_source and "base_import + [\"import\"" in app_source:
-            errors.append("Forbidden local mutating 'beet import' subprocess call found in app.py")
+    # Real discovery: every current sink must have a matching inventory key.
+    discovered = discover_all(repo_root)
+    new_unreviewed = []
+    for sink in discovered:
+        if sink.key not in by_key:
+            new_unreviewed.append(sink)
+
+    if new_unreviewed:
+        errors.append(f"{len(new_unreviewed)} newly discovered mutation sink(s) have no inventory entry at all:")
+        for s in new_unreviewed[:20]:
+            errors.append(f"    NEW: {s.file}:{s.function}:{s.lineno} -- {s.call_text[:90]}")
+        errors.append("  Run `python scripts/generate_arch003_mutation_inventory.py` and classify the new entries.")
+
+    unresolved_count = sum(1 for e in inventory if e.get("classification") in _UNRESOLVED)
+    baseline = data.get("unresolved_baseline", data.get("classification_counts", {}).get("ARCH003_BLOCKER", 0)
+                         + data.get("classification_counts", {}).get("NEEDS_REVIEW", 0))
+    if unresolved_count > baseline:
+        errors.append(f"Unresolved sink count grew: {unresolved_count} now vs baseline {baseline}. "
+                       f"Classify/fix at least enough entries to keep the total from increasing.")
+    elif unresolved_count < baseline:
+        warnings.append(f"Unresolved sink count improved: {unresolved_count} vs baseline {baseline} "
+                         f"-- update 'unresolved_baseline' in the inventory to lock in the improvement.")
+
+    for w in warnings:
+        print(f"NOTE: {w}")
 
     if errors:
         print("ARCH-003 Mutation Inventory Check Failed:")
@@ -86,7 +144,9 @@ def verify_mutation_inventory(repo_root: Path, check_mode: bool = True) -> bool:
             print(f" - {err}")
         return False
 
-    print(f"ARCH-003 Mutation Inventory Check Passed: {len(inventory)} entries verified (0 unclassified).")
+    print(f"ARCH-003 Mutation Inventory Check Passed: {len(inventory)} entries, "
+          f"{unresolved_count} unresolved (baseline {baseline}), "
+          f"{len(discovered)} sinks discovered in current source, all matched to inventory.")
     return True
 
 
