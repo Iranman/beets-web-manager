@@ -7371,25 +7371,35 @@ def create_album_maintenance_plan(
             for fu in payload["fix_updates"]:
                 try:
                     iid = int(fu.get("id") or 0)
-                    if iid > 0:
-                        resource_keys.add(f"item:{iid}")
-                        entry = {
-                            "item_id": iid,
-                            "type": "move_file" if fu.get("rename") else "repoint_db",
-                            "source": str(fu.get("old_path") or ""),
-                            "destination": str(fu.get("new_path") or ""),
-                        }
-                        if fu.get("rename"):
-                            src_p = Path(entry["source"])
-                            if src_p.exists() and src_p.is_file():
-                                st = src_p.stat()
-                                entry["stat"] = {"dev": st.st_dev, "ino": st.st_ino, "size": st.st_size, "mtime_ns": st.st_mtime_ns}
-                        moves_plan.append(entry)
-                        db_item_updates.append({
-                            "id": iid,
-                            "old_path": str(fu.get("old_path") or ""),
-                            "new_path": str(fu.get("new_path") or ""),
-                        })
+                    if iid <= 0:
+                        continue
+                    old_path_str = str(fu.get("old_path") or "")
+                    new_path_str = str(fu.get("new_path") or "")
+                    entry = {
+                        "item_id": iid,
+                        "type": "move_file" if fu.get("rename") else "repoint_db",
+                        "source": old_path_str,
+                        "destination": new_path_str,
+                    }
+                    if fu.get("rename"):
+                        # SEC-002 Wave 22 final review, CodeQL triage: this
+                        # caller-supplied old_path/new_path pair reached a
+                        # filesystem stat() with no root/symlink validation
+                        # at all -- unlike the filename_cleanup mode added
+                        # this same review just below, which does validate.
+                        # Close the same gap here.
+                        src_p = Path(old_path_str)
+                        dst_p = Path(new_path_str)
+                        if not _path_under(src_p, Path(allowed_roots[0])) or not _path_under(dst_p, Path(allowed_roots[0])):
+                            return {"ok": False, "error": f"Path outside allowed roots: {src_p}", "code": "album_maintenance_path_out_of_root"}
+                        if _path_has_symlink_under(src_p, Path(allowed_roots[0])) or _path_has_symlink_under(dst_p, Path(allowed_roots[0])):
+                            return {"ok": False, "error": f"Symlink rejected: {src_p}", "code": "album_maintenance_symlink_rejected"}
+                        if src_p.exists() and src_p.is_file():
+                            st = src_p.stat()
+                            entry["stat"] = {"dev": st.st_dev, "ino": st.st_ino, "size": st.st_size, "mtime_ns": st.st_mtime_ns}
+                    resource_keys.add(f"item:{iid}")
+                    moves_plan.append(entry)
+                    db_item_updates.append({"id": iid, "old_path": old_path_str, "new_path": new_path_str})
                 except Exception:
                     continue
 
