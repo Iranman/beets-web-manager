@@ -4137,9 +4137,11 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
 
         if path == "/albums/relocation/plan":
             music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            stg_roots = [os.environ.get("DOWNLOADS_ROOT", "/downloads"), os.environ.get("STAGING_ROOT", "/staging")]
             res = transaction_engine.create_album_relocation_plan(
                 _txn_store, body,
                 music_allowed_roots=[music_root_env],
+                staging_allowed_roots=stg_roots,
                 db_path=MUSIC_LIBRARY_PATH,
             )
             code = 200 if res.get("ok") else 400
@@ -4177,8 +4179,10 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/albums/metadata/plan":
+            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
             res = transaction_engine.create_album_metadata_plan(
                 _txn_store, body,
+                music_allowed_roots=[music_root_env],
                 db_path=MUSIC_LIBRARY_PATH,
             )
             code = 200 if res.get("ok") else 400
@@ -4190,8 +4194,10 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             if not op_id:
                 self._send_json(400, {"ok": False, "error": "operation_id required"})
                 return
+            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
             res = transaction_engine.execute_album_metadata_apply(
                 _txn_store, op_id,
+                music_allowed_roots=[music_root_env],
                 db_path=MUSIC_LIBRARY_PATH,
             )
             code = 200 if res.get("ok") else 400

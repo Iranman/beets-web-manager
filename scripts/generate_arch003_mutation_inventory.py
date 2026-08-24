@@ -137,6 +137,15 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
     # 1. backend/transaction_engine.py
     if file == "backend/transaction_engine.py":
         fam = _ENGINE_FUNCTION_FAMILY.get(func)
+        if not fam and "." in func:
+            # A sink inside a nested closure (e.g. a "_restore_one" helper
+            # defined inline inside rollback_album_relocation) is qualified
+            # as "outer.inner" -- it belongs to the SAME controlled family
+            # as its enclosing Plan/Apply/Rollback function, not an empty
+            # one (Wave 24 review: verified via
+            # scripts/verify_arch003_mutation_inventory.py, which requires
+            # a real family for every CONTROLLED_MEDIA_MUTATION entry).
+            fam = _ENGINE_FUNCTION_FAMILY.get(func.split(".", 1)[0])
         if fam:
             return "CONTROLLED_MEDIA_MUTATION", fam, "engine-function-family-map"
         infra = _ENGINE_INFRA_FUNCTIONS.get(func)

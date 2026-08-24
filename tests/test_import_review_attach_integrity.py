@@ -131,6 +131,15 @@ class _AttachIntegrityTestCase(unittest.TestCase):
         self.stage_rc = {}
         self.suppress_mutation = set()
         self.persist_override = {}
+        # Forward-path (engine transaction) failure/gating injection --
+        # Wave 24 review section 31: the forward attach mutation runs only
+        # through beets_client.plan/apply_album_mb_track_repair now, not a
+        # local subprocess with per-stage return codes. Keyed by item id.
+        self.engine_gates = {}
+        self.engine_plan_fail = set()
+        self.engine_apply_fail = set()
+        self.engine_apply_raise = {}
+        self._track_repair_payloads = []
         self.addCleanup(APP._ATTACH_RECORDING_RESERVED_ITEMS.clear)
 
         def get_item(iid):
@@ -145,6 +154,9 @@ class _AttachIntegrityTestCase(unittest.TestCase):
         def fetch_details(mbid, *a, **k):
             return self.mb_details.get(mbid) or _mb_details_for(mbid, RELEASE_ID, RGID)
 
+        # _beet_run still runs for real via the UNDO path
+        # (_run_item_recording_id_restore, unchanged by Wave 24) -- this
+        # fake stays in place for rollback-side tests.
         def fake_beet_run(cmd, log, **kwargs):
             self.beet_calls.append(cmd)
             iid = _iid_from_cmd(cmd)
@@ -166,13 +178,59 @@ class _AttachIntegrityTestCase(unittest.TestCase):
             stderr = "" if rc == 0 else f"{stage} boom Authorization: Bearer subprocess-stderr-secret"
             return SimpleNamespace(returncode=rc, stdout="", stderr=stderr)
 
+        def fake_plan_track_repair(payload):
+            self._track_repair_payloads.append(payload)
+            iid = self._iid_from_track_repair_payload(payload)
+            if iid in self.engine_plan_fail:
+                return {"ok": False, "error": "engine plan rejected (test-injected failure)"}
+            return {"ok": True, "operation_id": f"txn_fake_{len(self._track_repair_payloads)}"}
+
+        def fake_apply_track_repair(op_id, write_tags=True):
+            payload = self._track_repair_payloads[-1] if self._track_repair_payloads else {}
+            iid = self._iid_from_track_repair_payload(payload)
+            gate = self.engine_gates.get(iid)
+            if gate is not None:
+                gate.wait(timeout=10)
+            if iid in self.engine_apply_raise:
+                raise self.engine_apply_raise[iid]
+            if iid in self.engine_apply_fail:
+                return {"ok": False, "error": "engine apply failed (test-injected failure)"}
+            item = self.items.get(iid)
+            track_mbids = payload.get("track_mbids") or {}
+            mb_trackid = track_mbids.get(str(iid)) or track_mbids.get(iid)
+            if item is not None and mb_trackid and iid not in self.suppress_mutation:
+                item.mb_trackid = mb_trackid
+                details = self.mb_details.get(mb_trackid) or {}
+                release = details.get("selected_release") or {}
+                new_albumid = str(release.get("mb_albumid") or details.get("mb_albumid") or item.mb_albumid or "")
+                new_rgid = str(release.get("mb_releasegroupid") or details.get("mb_releasegroupid") or item.mb_releasegroupid or "")
+                if iid in self.persist_override:
+                    forced = self.persist_override[iid]
+                    new_albumid = forced.get("mb_albumid", new_albumid)
+                    new_rgid = forced.get("mb_releasegroupid", new_rgid)
+                item.mb_albumid = new_albumid
+                item.mb_releasegroupid = new_rgid
+            return {"ok": True}
+
         self._patch(mock.patch.object(APP.lib, "get_item", side_effect=get_item))
         self._patch(mock.patch.object(APP, "_acoustid_lookup_cached", side_effect=acoustid_lookup))
         self._patch(mock.patch.object(APP, "_mb_recording_search", side_effect=mb_search))
         self._patch(mock.patch.object(APP, "_fetch_mb_recording_details", side_effect=fetch_details))
         self._patch(mock.patch.object(APP, "_beet_run", side_effect=fake_beet_run))
+        self._patch(mock.patch.object(APP.beets_client, "plan_album_mb_track_repair", side_effect=fake_plan_track_repair))
+        self._patch(mock.patch.object(APP.beets_client, "apply_album_mb_track_repair", side_effect=fake_apply_track_repair))
         self._patch(mock.patch.object(APP, "_invalidate_lib_cache", return_value=None))
         self._patch(mock.patch.object(APP, "_trigger_plex_refresh", return_value=None))
+
+    @staticmethod
+    def _iid_from_track_repair_payload(payload):
+        track_mbids = (payload or {}).get("track_mbids") or {}
+        if track_mbids:
+            try:
+                return int(next(iter(track_mbids.keys())))
+            except (TypeError, ValueError):
+                return None
+        return None
 
     def _patch(self, patcher):
         obj = patcher.start()
@@ -212,13 +270,22 @@ class _AttachIntegrityTestCase(unittest.TestCase):
                 out.append(_stage_of(cmd))
         return out
 
+    def _engine_calls_for(self, iid):
+        """Number of forward-path engine transaction attempts for this
+        item (Wave 24 review section 31 replacement for the old per-stage
+        _beet_run call counting -- there is one atomic engine call now,
+        not four independently-countable subprocess stages)."""
+        return sum(1 for p in self._track_repair_payloads if self._iid_from_track_repair_payload(p) == iid)
+
 
 # ── Step 12: per-item reservation / concurrency ───────────────────────────────
 
 class ConcurrencyReservationTests(_AttachIntegrityTestCase):
     def _block_item(self, iid):
+        # Wave 24 review section 31: the forward attach path blocks on the
+        # engine transaction call now, not a local subprocess stage.
         gate = threading.Event()
-        self.gates[iid] = gate
+        self.engine_gates[iid] = gate
         return gate
 
     def test_a_safe_plus_safe_same_item_second_gets_409(self):
@@ -241,9 +308,8 @@ class ConcurrencyReservationTests(_AttachIntegrityTestCase):
         txs, _total = APP.transactions.list(limit=500)
         matching = [t for t in txs if t.get("metadata", {}).get("item_id") == 9101]
         self.assertEqual(len(matching), 1, "exactly one transaction must exist for this item")
-        # Exactly one transaction/job's worth of modify calls ran for this item.
-        modify_calls = [s for s in self._stages_called_for(9101) if s == "modify"]
-        self.assertEqual(len(modify_calls), 1)
+        # Exactly one transaction/job's worth of engine calls ran for this item.
+        self.assertEqual(self._engine_calls_for(9101), 1)
 
     def test_b_safe_plus_confirmed_review_same_item_second_gets_409(self):
         self.add_item(9102)
@@ -274,8 +340,7 @@ class ConcurrencyReservationTests(_AttachIntegrityTestCase):
         gate.set()
         job1 = _wait_job(job1_id)
         self.assertEqual(job1.status, "success")
-        modify_calls = [s for s in self._stages_called_for(9103) if s == "modify"]
-        self.assertEqual(len(modify_calls), 1)
+        self.assertEqual(self._engine_calls_for(9103), 1)
 
     def test_d_different_items_proceed_concurrently_lock_is_not_global(self):
         self.add_item(9104)
@@ -313,19 +378,19 @@ class ConcurrencyReservationTests(_AttachIntegrityTestCase):
 
     def test_f_release_after_ordinary_failure(self):
         self.add_item(9107)
-        self.stage_rc[(9107, "modify")] = 1
+        self.engine_apply_fail.add(9107)
         resp1 = self._post_safe(9107)
         job1 = _wait_job(resp1.get_json()["job_id"])
         self.assertEqual(job1.status, "failed")
         self.assertNotIn(9107, APP._ATTACH_RECORDING_RESERVED_ITEMS)
 
-        del self.stage_rc[(9107, "modify")]
+        self.engine_apply_fail.discard(9107)
         resp2 = self._post_safe(9107)
         self.assertNotEqual(resp2.status_code, 409)
 
     def test_g_release_after_cancellation(self):
         self.add_item(9108)
-        self.stage_rc[(9108, "modify")] = -9
+        self.engine_apply_raise[9108] = APP.AttachRecordingCancelled("test-injected cancellation")
         resp1 = self._post_safe(9108)
         audit_id = resp1.get_json()["audit_id"]
         job1 = _wait_job(resp1.get_json()["job_id"])
@@ -334,7 +399,7 @@ class ConcurrencyReservationTests(_AttachIntegrityTestCase):
         self.assertEqual(tx["status"], "Cancelled")
         self.assertNotIn(9108, APP._ATTACH_RECORDING_RESERVED_ITEMS)
 
-        del self.stage_rc[(9108, "modify")]
+        del self.engine_apply_raise[9108]
         resp2 = self._post_safe(9108)
         self.assertNotEqual(resp2.status_code, 409)
 
@@ -353,32 +418,57 @@ class ConcurrencyReservationTests(_AttachIntegrityTestCase):
 # ── Step 13: strict beet subprocess outcomes ──────────────────────────────────
 
 class SubprocessOutcomeTests(_AttachIntegrityTestCase):
-    def test_attach_stage_outcomes_stop_immediately_and_are_truthful(self):
-        stages = ["modify", "mbsync", "write", "move"]
-        outcomes = [(-9, "Cancelled"), (124, "Failed"), (1, "Failed")]
-        for stage_idx, stage in enumerate(stages):
-            for rc_idx, (rc, expected_status) in enumerate(outcomes):
-                iid = 40000 + stage_idx * 10 + rc_idx
-                with self.subTest(stage=stage, rc=rc):
-                    self.add_item(iid)
-                    self.stage_rc[(iid, stage)] = rc
-                    resp = self._post_safe(iid)
-                    self.assertEqual(resp.status_code, 200)
-                    audit_id = resp.get_json()["audit_id"]
-                    job = _wait_job(resp.get_json()["job_id"])
-                    self.assertEqual(job.status, "failed")
+    """Wave 24 review section 31: the forward attach path is a single
+    atomic engine transaction now, not four independently-failable local
+    subprocess stages -- there is no "stage" left to enumerate. This
+    covers the equivalent outcome space for that one call: the engine
+    rejecting the Plan, the engine reporting Apply failure, the engine
+    call raising an ordinary exception, and the engine call raising a
+    real cancellation -- and proves each fails closed with no local
+    fallback mutation and no leaked secrets."""
 
-                    tx = APP.transactions.get(audit_id)
-                    self.assertEqual(tx["status"], expected_status)
-                    self.assertNotEqual(tx["status"], "Completed")
+    def test_engine_transaction_failure_modes_fail_closed_and_are_truthful(self):
+        cases = [
+            ("plan_rejected", "Failed"),
+            ("apply_failed", "Failed"),
+            ("apply_raised", "Failed"),
+            ("apply_cancelled", "Cancelled"),
+        ]
+        for idx, (mode, expected_status) in enumerate(cases):
+            iid = 40000 + idx
+            with self.subTest(mode=mode):
+                self.add_item(iid)
+                if mode == "plan_rejected":
+                    self.engine_plan_fail.add(iid)
+                elif mode == "apply_failed":
+                    self.engine_apply_fail.add(iid)
+                elif mode == "apply_raised":
+                    self.engine_apply_raise[iid] = RuntimeError(
+                        "engine boom Authorization: Bearer subprocess-stderr-secret"
+                    )
+                elif mode == "apply_cancelled":
+                    self.engine_apply_raise[iid] = APP.AttachRecordingCancelled("test-injected cancellation")
 
-                    called = self._stages_called_for(iid)
-                    self.assertEqual(called, stages[:stage_idx + 1], "a later stage ran after a fatal outcome")
-                    self.assertNotIn(iid, APP._ATTACH_RECORDING_RESERVED_ITEMS)
+                resp = self._post_safe(iid)
+                self.assertEqual(resp.status_code, 200)
+                audit_id = resp.get_json()["audit_id"]
+                job = _wait_job(resp.get_json()["job_id"])
+                self.assertEqual(job.status, "failed")
 
-                    rendered = json.dumps(tx)
-                    self.assertNotIn("subprocess-stderr-secret", rendered)
-                    self.assertNotIn("Bearer", rendered)
+                tx = APP.transactions.get(audit_id)
+                self.assertEqual(tx["status"], expected_status)
+                self.assertNotEqual(tx["status"], "Completed")
+
+                # No local fallback mutation: the fake item's identity
+                # must be untouched, and no _beet_run call was made at all
+                # for this item's forward path.
+                self.assertEqual(self.items[iid].mb_trackid, "")
+                self.assertEqual(self._stages_called_for(iid), [])
+                self.assertNotIn(iid, APP._ATTACH_RECORDING_RESERVED_ITEMS)
+
+                rendered = json.dumps(tx)
+                self.assertNotIn("subprocess-stderr-secret", rendered)
+                self.assertNotIn("Bearer", rendered)
 
     def test_rollback_stage_outcomes_never_report_success(self):
         stages = ["modify", "write", "move"]

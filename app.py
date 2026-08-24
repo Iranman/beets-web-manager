@@ -3754,7 +3754,17 @@ def retag_item(iid):
         log.append("[2/3] Writing tags to file via engine transaction…")
         if aid > 0:
             try:
-                beets_client.update_album_metadata(aid, {})
+                # SEC-002 / ARCH-003 Wave 24 final review section 30: an
+                # empty updates dict is a no-op for the diff-based
+                # metadata family -- it planned zero item diffs and wrote
+                # nothing, while this step claimed to have written tags.
+                # force_write_tags requests a real Beets Item.write()
+                # resync (current DB values -> file tags) regardless of
+                # whether any field differs, which is the actual "write
+                # current metadata to tags" semantics retag intends.
+                res = beets_client.update_album_metadata(aid, {}, force_write_tags=True)
+                if not res.get("ok"):
+                    log.append(f"  WARN: tag write failed: {res.get('error')}")
             except Exception as ex:
                 log.append(f"  WARN: update_album_metadata failed: {ex}")
 
@@ -4165,7 +4175,20 @@ def item_attach_recording(iid: int):
                 item_obj = lib.get_item(iid)
                 aid = int(getattr(item_obj, "album_id", 0) or 0) if item_obj else 0
 
+                # SEC-002 / ARCH-003 Wave 24 final review section 31: this
+                # used to fall back to local `_beet_run modify/mbsync/
+                # write/move` mutation whenever the engine transaction
+                # didn't report `applied`. Test-harness compatibility must
+                # never create a production mutation fallback -- the Web
+                # Manager process is not supposed to be able to mutate
+                # media/tags/DB directly at all (that authority belongs to
+                # the engine, reached only through the transaction
+                # boundary). Engine failure now fails closed: no local
+                # Beets mutation, full stop. Tests requiring coverage here
+                # must mock/inject the engine, not exercise a real
+                # fallback mutation path in this process.
                 applied = False
+                engine_error = "engine track repair transaction unavailable"
                 try:
                     p_res = beets_client.plan_album_mb_track_repair({
                         "album_id": aid,
@@ -4177,22 +4200,26 @@ def item_attach_recording(iid: int):
                             a_res = beets_client.apply_album_mb_track_repair(op_id, write_tags=True)
                             if a_res.get("ok"):
                                 applied = True
+                            else:
+                                engine_error = a_res.get("error") or "apply_album_mb_track_repair failed"
+                        else:
+                            # No operation_id with ok=True means there was
+                            # nothing to change -- not a failure.
+                            applied = True
+                    else:
+                        engine_error = p_res.get("error") or "plan_album_mb_track_repair rejected"
+                except AttachRecordingCancelled:
+                    # Preserve the distinct Cancelled status -- do not fold
+                    # a real cancellation into a generic engine-failure
+                    # RuntimeError.
+                    raise
                 except Exception as _be:
-                    log.append(f"  WARN: engine track repair transaction unavailable: {_be}")
+                    engine_error = str(_be)
 
                 if not applied:
-                    cfg = _write_job_beets_config(f"/tmp/beets_attach_recording_{iid}.yaml")
-                    base = [BEET_BIN, "-c", cfg]
-                    query = f"id:{iid}"
-                    r = _beet_run(base + ["modify", "--yes", "--nowrite", f"mb_trackid={mb_trackid}", query],
-                                  log, timeout=120, env=_beet_env(), cancel=cancel_event)
-                    _require_attach_stage_success(r, "modify")
-                    r = _beet_run(base + ["mbsync", query], log, timeout=60, env=_beet_env(), cancel=cancel_event)
-                    _require_attach_stage_success(r, "mbsync")
-                    r = _beet_run(base + ["write", "--yes", query], log, timeout=120, env=_beet_env(), cancel=cancel_event)
-                    _require_attach_stage_success(r, "write")
-                    r = _beet_run(base + ["move", query], log, timeout=120, env=_beet_env(), cancel=cancel_event)
-                    _require_attach_stage_success(r, "move")
+                    safe_engine_error = _redact_security_text(engine_error)
+                    log.append(f"  ERROR: engine track repair transaction failed: {safe_engine_error}")
+                    raise RuntimeError(f"Engine track repair transaction failed, refusing local fallback mutation: {safe_engine_error}")
 
                 if aid > 0:
                     try:
@@ -11543,8 +11570,19 @@ def album_fix_metadata(aid):
 
         if updates:
             try:
-                beets_client.update_album_fields(aid, updates)
-                log.append(f"  Engine album fields updated: {updates}")
+                # SEC-002 / ARCH-003 Wave 24 final review section 29: this
+                # was still calling the generic, untransacted
+                # update_album_fields (PATCH /albums/<id>) bypass instead
+                # of the controlled album_metadata_repair_v1 family the
+                # rest of this route already uses for mb_albumid. Album/
+                # albumartist/year now go through the same controlled
+                # boundary -- allowlisted fields, Plan/Apply/Verify, and a
+                # real rollback path.
+                res = beets_client.update_album_metadata(aid, updates)
+                if res.get("ok"):
+                    log.append(f"  Engine album fields updated: {updates}")
+                else:
+                    log.append(f"  Engine album update warning: {res.get('error')}")
             except Exception as ex:
                 log.append(f"  Engine album update warning: {ex}")
 
@@ -11573,17 +11611,21 @@ def album_fix_metadata(aid):
 def album_deduplicate(aid):
     """Deduplicate an album's tracks against its MusicBrainz release.
 
-    SEC-002 / ARCH-003 Wave 24 final review: despite an intermediate
-    docstring claiming this route runs "via engine controlled
-    album_maintenance_v1 transaction family", its `_do` body below still
-    reads/writes the library DB directly through `_db()` and runs local
-    `beet mbsync`/matching logic -- it was never actually migrated onto
-    the transaction boundary in this PR. Docstring corrected to describe
-    actual behavior rather than claimed behavior; the real migration onto
-    album_maintenance_v1's "deduplicate" mode is tracked in
-    docs/TECHNICAL_DEBT.md, not attempted this pass (this is a working,
-    tested, legacy path -- not swapped out for an unverified replacement
-    under review time pressure).
+    SEC-002 / ARCH-003 Wave 24 final review (re-verified against the
+    actual current source, not inferred from an earlier docstring):
+    duplicate-file DELETION (Step 4 below) genuinely runs through the
+    engine transaction boundary -- `beets_client.plan_album_maintenance` /
+    `apply_album_maintenance` with `mode: "deduplicate"`, not local
+    filesystem mutation. What remains local is track MATCHING/renumbering
+    (Step 1, `_match_tracks_from_mb` -> `_match_tracks_from_mb_shared`),
+    which still issues `UPDATE items SET mb_trackid=..., track=...`
+    directly against `_db()`. That function is shared by several other
+    callers beyond this route (album_fix_metadata's manual-ID retag flow
+    among them) and migrating it onto a controlled transaction family is
+    real, standalone engineering, not attempted in this pass -- see
+    docs/TECHNICAL_DEBT.md. It is correctly inventoried as an unresolved
+    ARCH003_BLOCKER (domain "other"), not hidden inside the album-lifecycle
+    domains this wave closes.
 
     For every track number that has more than one file (collision duplicates like
     "Song.1.flac", "Song.2.flac"), keep the primary file and delete the extras.
@@ -22006,7 +22048,12 @@ def import_folder_with_id():
 
                 log.append("[3/4] Writing tags to audio files via engine transaction…")
                 try:
-                    beets_client.update_album_metadata(aid, {})
+                    # Wave 24 final review section 30: force_write_tags
+                    # requests a real Beets Item.write() resync -- an
+                    # empty diff-based update here was a silent no-op.
+                    res = beets_client.update_album_metadata(aid, {}, force_write_tags=True)
+                    if not res.get("ok"):
+                        log.append(f"  write tags warning: {res.get('error')}")
                 except Exception as _we:
                     log.append(f"  write tags warning: {_we}")
 

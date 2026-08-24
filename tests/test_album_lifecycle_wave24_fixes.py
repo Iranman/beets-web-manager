@@ -70,8 +70,14 @@ class AlbumFixMetadataIdentityFieldSplitTests(unittest.TestCase):
         self.assertEqual(offending, [], "updates['mb_albumid'] must not be assigned -- it would be "
                                          "bundled into the generic PATCH payload and rejected wholesale")
 
-    def test_update_album_fields_is_still_called_for_the_editable_fields(self):
-        self.assertIn("beets_client.update_album_fields(aid, updates)", self.src)
+    def test_editable_fields_go_through_the_controlled_metadata_family(self):
+        """Wave 24 final review section 29: album/albumartist/year used to
+        go through the generic, untransacted update_album_fields (PATCH
+        /albums/<id>) bypass instead of the controlled
+        album_metadata_repair_v1 family the rest of this route already
+        uses for mb_albumid."""
+        self.assertIn("beets_client.update_album_metadata(aid, updates)", self.src)
+        self.assertNotIn("beets_client.update_album_fields(aid, updates)", self.src)
 
     def test_mb_albumid_is_still_synced_via_the_dedicated_transaction(self):
         self.assertIn("plan_album_mb_track_repair", self.src)
