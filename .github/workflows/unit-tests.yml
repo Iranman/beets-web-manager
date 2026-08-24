@@ -16,6 +16,22 @@ jobs:
         with:
           python-version: "3.13"
       - run: pip install -r requirements.txt
+      - name: Install real Beets for engine-side native path-formatting tests
+        # backend/transaction_engine.py's album_relocation_v1 /
+        # album_metadata_repair_v1 families ask the REAL installed Beets
+        # for path/tag decisions (Wave 24 final review section 7/8/28) --
+        # deliberately not a hand-rolled duplicate formatter. That code
+        # only runs where `beets` is genuinely importable, matching the
+        # beets-engine container (Dockerfile.beets, built FROM
+        # lscr.io/linuxserver/beets:2.13.1) it actually executes in.
+        # requirements.txt intentionally omits the full `beets` package to
+        # keep the Web Manager image itself dependency-light (only
+        # `mediafile`, its tag-I/O component, is a real dependency there);
+        # this step is CI-test-only, pinned to the exact version the
+        # engine container bundles, so this suite exercises the real
+        # native-Beets code path instead of only ever hitting its
+        # explicit, fail-closed "unavailable" branch.
+        run: pip install beets==2.13.1
       - name: Set a fake CI-only web auth token
         # Prevents _bootstrap_auth_token_if_missing() from generating and
         # attempting to persist a token to the (unwritable, non-container)
