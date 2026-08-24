@@ -45,7 +45,7 @@ jobs:
       - run: docker compose -f docker-compose.dev.yml config
       - run: docker compose -f docker-compose.full.yml config
       - run: docker compose config
-      - run: docker build --pull=false --build-arg VCS_REF="${{ github.sha }}" -t beets-web-manager:ci .
+      - run: docker build --pull=false --build-arg VCS_REF="${{ github.event.pull_request.head.sha || github.sha }}" -t beets-web-manager:ci .
       - name: Installation smoke test
         run: |
           set -e
@@ -103,7 +103,7 @@ jobs:
         run: |
           docker build --pull=false \
             --build-arg BEETS_BASE_IMAGE="lscr.io/linuxserver/beets:${{ matrix.beets_version }}" \
-            --build-arg VCS_REF="${{ github.sha }}" \
+            --build-arg VCS_REF="${{ github.event.pull_request.head.sha || github.sha }}" \
             -f Dockerfile.beets -t beets-engine:ci .
       - name: Verify Beets engine image
         run: |
@@ -111,7 +111,7 @@ jobs:
           python scripts/verify_beets_engine_image.py \
             --image beets-engine:ci \
             --require-version "${{ matrix.beets_version }}" \
-            --require-revision "${{ github.sha }}" \
+            --require-revision "${{ github.event.pull_request.head.sha || github.sha }}" \
             --require-plugin chroma \
             --forbid-duplicate-plugin musicbrainz \
             --require-command-help mbsubmit \
@@ -179,7 +179,7 @@ jobs:
           tags: ${{ steps.meta_webmanager.outputs.tags }}
           labels: ${{ steps.meta_webmanager.outputs.labels }}
           build-args: |
-            VCS_REF=${{ github.sha }}
+            VCS_REF=${{ github.event.pull_request.head.sha || github.sha }}
             VERSION=${{ steps.meta_webmanager.outputs.version }}
             BUILD_DATE=${{ steps.build_date.outputs.date }}
           cache-from: type=gha
@@ -194,7 +194,7 @@ jobs:
           tags: ${{ steps.meta_engine.outputs.tags }}
           labels: ${{ steps.meta_engine.outputs.labels }}
           build-args: |
-            VCS_REF=${{ github.sha }}
+            VCS_REF=${{ github.event.pull_request.head.sha || github.sha }}
             VERSION=${{ steps.meta_engine.outputs.version }}
             BUILD_DATE=${{ steps.build_date.outputs.date }}
           cache-from: type=gha

@@ -3,6 +3,7 @@
 Replaces local subprocess execution and direct SQLite access with authenticated API calls.
 """
 
+import base64
 import json
 import os
 import urllib.error
@@ -834,6 +835,8 @@ class BeetsClient:
         for real requires first teaching that family's "move" mode to
         also update `albums.artpath` -- tracked in
         docs/TECHNICAL_DEBT.md, not attempted this pass."""
+        if isinstance(image_data_b64, bytes):
+            image_data_b64 = base64.b64encode(image_data_b64).decode("utf-8")
         return self._request("POST", f"/albums/{album_id}/art", {
             "image_data_b64": image_data_b64,
             "source": source,
@@ -864,7 +867,8 @@ class BeetsClient:
 
     def delete_album(self, album_id: int, delete_files: bool = True) -> Dict[str, Any]:
         """Perform transaction-controlled album removal through album_maintenance_v1 family."""
-        items = self.get_album_items(album_id)
+        album_data = self.get_album(album_id) or {}
+        items = album_data.get("items") or []
         item_ids = [int(it.get("id") or 0) for it in items if int(it.get("id") or 0) > 0]
         if not item_ids:
             return {"ok": False, "error": f"Album {album_id} has no track items"}
