@@ -4165,18 +4165,34 @@ def item_attach_recording(iid: int):
                 item_obj = lib.get_item(iid)
                 aid = int(getattr(item_obj, "album_id", 0) or 0) if item_obj else 0
 
-                p_res = beets_client.plan_album_mb_track_repair({
-                    "album_id": aid,
-                    "track_mbids": {str(iid): mb_trackid},
-                })
-                if not p_res.get("ok"):
-                    raise RuntimeError(p_res.get("error") or "Attach recording plan failed")
+                applied = False
+                try:
+                    p_res = beets_client.plan_album_mb_track_repair({
+                        "album_id": aid,
+                        "track_mbids": {str(iid): mb_trackid},
+                    })
+                    if p_res.get("ok"):
+                        op_id = p_res.get("operation_id")
+                        if op_id:
+                            a_res = beets_client.apply_album_mb_track_repair(op_id, write_tags=True)
+                            if a_res.get("ok"):
+                                applied = True
+                except Exception as _be:
+                    log.append(f"  WARN: engine track repair transaction unavailable: {_be}")
 
-                op_id = p_res.get("operation_id")
-                if op_id:
-                    a_res = beets_client.apply_album_mb_track_repair(op_id, write_tags=True)
-                    if not a_res.get("ok"):
-                        raise RuntimeError(a_res.get("error") or "Attach recording apply failed")
+                if not applied:
+                    cfg = _write_job_beets_config(f"/tmp/beets_attach_recording_{iid}.yaml")
+                    base = [BEET_BIN, "-c", cfg]
+                    query = f"id:{iid}"
+                    r = _beet_run(base + ["modify", "--yes", "--nowrite", f"mb_trackid={mb_trackid}", query],
+                                  log, timeout=120, env=_beet_env(), cancel=cancel_event)
+                    _require_attach_stage_success(r, "modify")
+                    r = _beet_run(base + ["mbsync", query], log, timeout=60, env=_beet_env(), cancel=cancel_event)
+                    _require_attach_stage_success(r, "mbsync")
+                    r = _beet_run(base + ["write", "--yes", query], log, timeout=120, env=_beet_env(), cancel=cancel_event)
+                    _require_attach_stage_success(r, "write")
+                    r = _beet_run(base + ["move", query], log, timeout=120, env=_beet_env(), cancel=cancel_event)
+                    _require_attach_stage_success(r, "move")
 
                 if aid > 0:
                     try:

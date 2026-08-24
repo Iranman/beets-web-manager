@@ -282,9 +282,11 @@ def _determine_domain(sink: MutationSink, classification: str, family: str, rule
         return "album_artwork"
 
     # 2. Album Metadata & Identity
+    if "attach_recording" in func:
+        return "import_reconciliation"
     if family in ("album_metadata_repair_v1", "album_mb_track_repair_v1") or "mbid" in rule or "tag" in rule:
         return "album_metadata"
-    if any(k in func for k in ("fix_metadata", "retag", "attach_recording", "stamp_album", "apply_genre")) and "ytdlp" not in func and "cookie" not in text:
+    if any(k in func for k in ("fix_metadata", "retag", "stamp_album", "apply_genre")) and "ytdlp" not in func and "cookie" not in text:
         return "album_metadata"
 
     # 3. Album Relocation / Rename / Move / Merge
