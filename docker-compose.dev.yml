@@ -59,6 +59,12 @@ services:
 
       BEETS_WEB_AUTH_TOKEN: ${BEETS_WEB_AUTH_TOKEN:-}
       BEETS_WEB_AUTH_TOKEN_FILE: /web-manager-data/.auth_token
+      # Wave 24 final review round 3, section 21-24: same gap as the other
+      # two compose files -- app.py's module-level `transactions =
+      # TransactionStore()` otherwise defaults to /config/transactions,
+      # not writable under this service's read_only:true +
+      # /web-manager-data-only filesystem.
+      BEETS_TRANSACTION_DIR: /web-manager-data/transactions
       BEETS_WEB_USERNAME: ${BEETS_WEB_USERNAME:-admin}
       BEETS_WEB_PASSWORD: ${BEETS_WEB_PASSWORD:-}
       BEETS_WEB_AUTH_DISABLED: ${BEETS_WEB_AUTH_DISABLED:-0}
