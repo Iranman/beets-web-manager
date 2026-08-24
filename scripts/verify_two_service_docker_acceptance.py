@@ -304,6 +304,22 @@ def main() -> int:
     webdata_dir = tmp / "webdata"
     for d in (downloads_dir, webdata_dir):
         d.mkdir(parents=True, exist_ok=True)
+    # Wave 24 final review round 3, section 21-24 (found only by actually
+    # running this against real Docker): the beets-web-manager image runs
+    # as a fixed non-root `beets` user (Dockerfile ARG PUID/PGID=1000,
+    # baked in at image build time, USER beets) with no root-then-drop-
+    # privilege entrypoint to fix ownership at container start. A host
+    # bind mount's on-disk permissions come entirely from the HOST
+    # directory, not the image's own build-time `chown` of its baked-in
+    # /web-manager-data -- that chown only ever applied to an anonymous/
+    # named volume, never to this host bind mount. This directory, freshly
+    # created here by this script's own (arbitrary, non-1000) CI-runner
+    # uid, must be writable by the container's uid 1000 for the web
+    # manager's own on-disk state (its transaction audit ledger, its
+    # bootstrapped auth-token file) to work at all -- a real operator
+    # deploying via the documented compose files has this exact same
+    # host-directory-ownership responsibility.
+    os.chmod(webdata_dir, 0o777)
 
     token = f"acceptance-{uuid.uuid4().hex}"
     web_token = f"acceptance-web-{uuid.uuid4().hex}"

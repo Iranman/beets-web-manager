@@ -70,6 +70,7 @@ To embed `beets-web-manager` into an existing Compose stack (such as `/srv/media
    volumes:
      - ${BEETS_WEB_MANAGER_DATA_PATH:-./web-manager-data}:/web-manager-data
    ```
+   The published image runs as a fixed non-root user (UID/GID 1000, baked in at build time -- unlike the Beets engine image, this is not something a runtime `PUID`/`PGID` environment variable can change), and a host bind mount's on-disk permissions come entirely from the host directory itself. Before first start, make sure that directory is writable by UID 1000, e.g. `mkdir -p web-manager-data && chmod 777 web-manager-data` (or `chown 1000:1000 web-manager-data` if you'd rather not use world-writable permissions) -- otherwise the container cannot create its own state there (its bootstrapped auth-token file, its transaction audit ledger) and every mutating request will fail with a generic server error.
 5. Configure `BEETS_API_URL` and `BEETS_API_TOKEN`.
 6. Choose the connection mode that matches your setup -- see [Beets Connection Modes](EXAMPLES.md#2-beets-connection-modes) for whether `depends_on` applies.
 

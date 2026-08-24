@@ -26,6 +26,21 @@ fi
 
 echo "==> Creating persistent data directories..."
 mkdir -p web-manager-data
+# Wave 24 final review round 3, section 21-24 (found only by actually
+# booting the real container against a freshly-created host directory,
+# not by unit tests, which never run inside the read_only container at
+# all): the published image runs as a fixed non-root `beets` user (build-
+# time UID/GID, default 1000 -- the runtime PUID/PGID in .env only affect
+# a locally-built image, never the published ghcr.io one), and a host
+# bind mount's on-disk permissions come entirely from THIS directory as
+# just created, not from anything baked into the image. Left at the
+# default mkdir mode, a container UID that doesn't happen to match
+# whoever ran this script cannot write its own state here (the auth-
+# token bootstrap file, the transaction audit ledger, and more) --
+# world-writable is the simplest correct fix for a directory that holds
+# no data yet and exists solely to become this one container's own
+# volume.
+chmod 777 web-manager-data
 if [ "$DEV_MODE" -eq 1 ]; then
   mkdir -p config data/music data/downloads
 fi
