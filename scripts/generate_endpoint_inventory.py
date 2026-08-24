@@ -18,12 +18,24 @@ ground truth: the actual _AUTH_PUBLIC_ENDPOINTS/_FIRST_RUN_PUBLIC_ENDPOINTS
 allowlists parsed out of app.py (not a second hand-maintained guess) and
 HTTP method. Richer judgment fields that need a human/AI reader to actually
 understand what a route does (security_classification, purpose, destructive_or_high_impact,
-rate_limit_required, existing_security_tests, ...) are carried forward
-unchanged from the previous inventory entry for any route that already
-existed there (matched by method+endpoint), and left as explicit
-"NEEDS_REVIEW" placeholders for routes that are new since the last
-inventory -- so nothing is silently guessed, and `grep NEEDS_REVIEW` finds
+rate_limit_required, existing_security_tests, ...) are carried forward from
+security/endpoint_review_manifest.json -- a SEPARATE, hand-reviewed file,
+keyed by method+endpoint -- for any route that already exists there, and
+left as explicit "NEEDS_REVIEW" placeholders for routes that are not in the
+manifest, so nothing is silently guessed and `grep NEEDS_REVIEW` finds
 exactly what a follow-up review pass still owes.
+
+Wave 24 final review round 3, section 15: this file previously read its own
+prior *generated output* (security/endpoint_inventory.json itself) as the
+"previous review" source for the carry-forward. That makes the check
+self-referential -- if the generated file is ever produced from a stale or
+corrupted starting point (as happened once: a run against a checkout whose
+inventory had already lost its review data regenerated a fresh, fully
+NEEDS_REVIEW file, and `--check` then passed against that same corrupted
+file forever after). The human-reviewed judgment fields now live only in
+endpoint_review_manifest.json, a file this script only ever reads from, never
+writes to -- regenerating security/endpoint_inventory.json can no longer
+destroy or launder review history, by construction.
 
 Usage:
     python scripts/generate_endpoint_inventory.py [--check]
@@ -43,6 +55,7 @@ from typing import Any, Dict, List, Tuple
 
 ROOT = Path(__file__).resolve().parents[1]
 INVENTORY_PATH = ROOT / "security" / "endpoint_inventory.json"
+REVIEW_MANIFEST_PATH = ROOT / "security" / "endpoint_review_manifest.json"
 ROUTE_FILES = [
     "app.py",
     "routes_jobs.py",
@@ -115,15 +128,19 @@ def _extract_routes(filename: str) -> List[Dict[str, Any]]:
     return routes
 
 
-def _load_previous_entries() -> Dict[Tuple[str, str], Dict[str, Any]]:
-    if not INVENTORY_PATH.exists():
+def _load_review_manifest() -> Dict[Tuple[str, str], Dict[str, Any]]:
+    """Load the human-reviewed judgment fields from the separate review
+    manifest -- never from this script's own prior generated output (see
+    the module docstring for why that self-reference was a real incident,
+    not a hypothetical)."""
+    if not REVIEW_MANIFEST_PATH.exists():
         return {}
     try:
-        data = json.loads(INVENTORY_PATH.read_text(encoding="utf-8"))
+        data = json.loads(REVIEW_MANIFEST_PATH.read_text(encoding="utf-8"))
     except Exception:
         return {}
     out = {}
-    for entry in data.get("routes", []):
+    for entry in data.get("entries", []):
         out[(entry.get("method"), entry.get("endpoint"))] = entry
     return out
 
@@ -140,7 +157,7 @@ _NEEDS_REVIEW = "NEEDS_REVIEW"
 def build_inventory() -> Dict[str, Any]:
     app_source = (ROOT / "app.py").read_text(encoding="utf-8")
     public_endpoints, first_run_public = _extract_public_endpoint_sets(app_source)
-    previous = _load_previous_entries()
+    reviewed = _load_review_manifest()
 
     all_routes: List[Dict[str, Any]] = []
     for filename in ROUTE_FILES:
@@ -152,7 +169,7 @@ def build_inventory() -> Dict[str, Any]:
         key = (route["method"], route["endpoint"])
         is_public = key in public_endpoints
         changes_state = route["method"] not in ("GET", "HEAD", "OPTIONS")
-        prev = previous.get(key)
+        prev = reviewed.get(key)
         entry: Dict[str, Any] = {
             "method": route["method"],
             "route": route["route"],
@@ -186,8 +203,9 @@ def build_inventory() -> Dict[str, Any]:
             "real allowlist constants in app.py -- auth_required/csrf_required/changes_state are "
             "ground truth, not estimates.",
             "security_classification/purpose/destructive_or_high_impact/rate_limit_required/existing_security_tests are "
-            "carried forward from the previous manual review for routes that already existed there; "
-            "routes new since the last review are marked 'NEEDS_REVIEW' in those fields rather than "
+            "read from security/endpoint_review_manifest.json (a separate, hand-reviewed file this "
+            "script only ever reads, never writes) for routes that already exist there; "
+            "routes not yet in that manifest are marked 'NEEDS_REVIEW' in those fields rather than "
             "guessed -- see needs_review_route_count below.",
             "Static inventory does not prove object-level authorization or every helper a route calls.",
         ],

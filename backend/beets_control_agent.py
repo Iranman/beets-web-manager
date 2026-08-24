@@ -3788,7 +3788,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 _txn_store, body,
                 original_allowed_roots=original_allowed_roots,
                 candidate_allowed_roots=candidate_allowed_roots,
-                db_path=MUSIC_LIBRARY_PATH,
+                db_path=LIB_PATH,
             )
             code = 200 if res.get("ok") else 400
             self._send_json(code, res)
@@ -3809,7 +3809,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 tempfile.gettempdir(),
             ]
             res = transaction_engine.execute_track_replacement_apply(
-                _txn_store, op_id, db_path=MUSIC_LIBRARY_PATH,
+                _txn_store, op_id, db_path=LIB_PATH,
                 original_allowed_roots=original_allowed_roots,
                 candidate_allowed_roots=candidate_allowed_roots,
                 quarantine_allowed_root=quarantine_root,
@@ -3825,7 +3825,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 return
             quarantine_root = os.environ.get("REPLACEMENT_QUARANTINE_DIR", "/config/track_replacement_quarantine")
             res = transaction_engine.rollback_track_replacement(
-                _txn_store, op_id, db_path=MUSIC_LIBRARY_PATH, quarantine_allowed_root=quarantine_root,
+                _txn_store, op_id, db_path=LIB_PATH, quarantine_allowed_root=quarantine_root,
             )
             code = 200 if res.get("ok") else 400
             self._send_json(code, res)
@@ -3845,7 +3845,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             res = transaction_engine.create_bulk_import_replacement_plan(
                 _txn_store, body,
                 original_allowed_roots=[music_root_env],
-                db_path=MUSIC_LIBRARY_PATH,
+                db_path=LIB_PATH,
                 quarantine_base_root=quarantine_root,
             )
             code = 200 if res.get("ok") else 400
@@ -3861,7 +3861,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             quarantine_root = os.environ.get("REPLACEMENT_QUARANTINE_DIR", "/config/track_replacement_quarantine")
             res = transaction_engine.execute_bulk_import_replacement_apply(
                 _txn_store, op_id,
-                db_path=MUSIC_LIBRARY_PATH,
+                db_path=LIB_PATH,
                 original_allowed_roots=[music_root_env],
                 quarantine_base_root=quarantine_root,
             )
@@ -3878,7 +3878,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             quarantine_root = os.environ.get("REPLACEMENT_QUARANTINE_DIR", "/config/track_replacement_quarantine")
             res = transaction_engine.rollback_bulk_import_replacement(
                 _txn_store, op_id,
-                db_path=MUSIC_LIBRARY_PATH,
+                db_path=LIB_PATH,
                 original_allowed_roots=[music_root_env],
                 quarantine_base_root=quarantine_root,
             )
@@ -3891,7 +3891,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             res = transaction_engine.create_album_mb_track_repair_plan(
                 _txn_store, body,
                 music_allowed_roots=[music_root_env],
-                db_path=MUSIC_LIBRARY_PATH,
+                db_path=LIB_PATH,
             )
             code = 200 if res.get("ok") else 400
             self._send_json(code, res)
@@ -3906,7 +3906,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             write_tags = bool(body.get("write_tags", True))
             res = transaction_engine.execute_album_mb_track_repair_apply(
                 _txn_store, op_id,
-                db_path=MUSIC_LIBRARY_PATH,
+                db_path=LIB_PATH,
                 music_allowed_roots=[music_root_env],
                 write_tags=write_tags,
             )
@@ -3922,7 +3922,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             music_root_env = os.environ.get("MUSIC_ROOT", "/music")
             res = transaction_engine.rollback_album_mb_track_repair(
                 _txn_store, op_id,
-                db_path=MUSIC_LIBRARY_PATH,
+                db_path=LIB_PATH,
                 music_allowed_roots=[music_root_env],
             )
             code = 200 if res.get("ok") else 400
@@ -3953,7 +3953,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 music_allowed_roots=[music_root_env],
                 staging_allowed_roots=staging_allowed_roots,
                 quarantine_base_root=quarantine_root,
-                db_path=MUSIC_LIBRARY_PATH,
+                db_path=LIB_PATH,
             )
             code = 200 if res.get("ok") else 400
             self._send_json(code, res)
@@ -3974,7 +3974,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             ]
             res = transaction_engine.execute_existing_album_reconcile_apply(
                 _txn_store, op_id,
-                db_path=MUSIC_LIBRARY_PATH,
+                db_path=LIB_PATH,
                 music_allowed_roots=[music_root_env],
                 staging_allowed_roots=staging_allowed_roots,
                 quarantine_base_root=quarantine_root,
@@ -3991,7 +3991,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             music_root_env = os.environ.get("MUSIC_ROOT", "/music")
             res = transaction_engine.rollback_existing_album_reconcile(
                 _txn_store, op_id,
-                db_path=MUSIC_LIBRARY_PATH,
+                db_path=LIB_PATH,
                 music_allowed_roots=[music_root_env],
             )
             code = 200 if res.get("ok") else 400
@@ -4005,7 +4005,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 _txn_store, body,
                 music_allowed_roots=[music_root_env],
                 quarantine_base_root=quarantine_root,
-                db_path=MUSIC_LIBRARY_PATH,
+                db_path=LIB_PATH,
             )
             code = 200 if res.get("ok") else 400
             self._send_json(code, res)
@@ -4020,7 +4020,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             quarantine_root = os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
             res = transaction_engine.execute_artist_folder_reconcile_apply(
                 _txn_store, op_id,
-                db_path=MUSIC_LIBRARY_PATH,
+                db_path=LIB_PATH,
                 music_allowed_roots=[music_root_env],
                 quarantine_base_root=quarantine_root,
             )
@@ -4036,7 +4036,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             music_root_env = os.environ.get("MUSIC_ROOT", "/music")
             res = transaction_engine.rollback_artist_folder_reconcile(
                 _txn_store, op_id,
-                db_path=MUSIC_LIBRARY_PATH,
+                db_path=LIB_PATH,
                 music_allowed_roots=[music_root_env],
             )
             code = 200 if res.get("ok") else 400
@@ -4224,7 +4224,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             quarantine_root = os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
             res = transaction_engine.create_import_folder_plan(
                 _txn_store, body,
-                db_path=MUSIC_LIBRARY_PATH,
+                db_path=LIB_PATH,
                 music_allowed_roots=[music_root_env],
                 staging_allowed_roots=stg_roots,
                 quarantine_base_root=quarantine_root,
@@ -4253,7 +4253,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
 
             res = transaction_engine.execute_import_folder_apply(
                 _txn_store, op_id,
-                db_path=MUSIC_LIBRARY_PATH,
+                db_path=LIB_PATH,
                 music_allowed_roots=[music_root_env],
                 quarantine_base_root=quarantine_root,
                 beets_import_runner=_beets_import_runner,
@@ -4270,7 +4270,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             music_root_env = os.environ.get("MUSIC_ROOT", "/music")
             res = transaction_engine.rollback_import_folder(
                 _txn_store, op_id,
-                db_path=MUSIC_LIBRARY_PATH,
+                db_path=LIB_PATH,
                 music_allowed_roots=[music_root_env],
             )
             code = 200 if res.get("ok") else 400
@@ -4282,7 +4282,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             music_root_env = os.environ.get("MUSIC_ROOT", "/music")
             res = transaction_engine.create_folder_cleanup_plan(
                 _txn_store, body,
-                db_path=MUSIC_LIBRARY_PATH,
+                db_path=LIB_PATH,
                 music_allowed_roots=[music_root_env],
             )
             code = 200 if res.get("ok") else 400
@@ -4297,7 +4297,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             music_root_env = os.environ.get("MUSIC_ROOT", "/music")
             res = transaction_engine.execute_folder_cleanup_apply(
                 _txn_store, op_id,
-                db_path=MUSIC_LIBRARY_PATH,
+                db_path=LIB_PATH,
                 music_allowed_roots=[music_root_env],
             )
             code = 200 if res.get("ok") else 400
@@ -4324,7 +4324,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             quarantine_root = os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
             res = transaction_engine.create_playlist_media_cleanup_plan(
                 _txn_store, body,
-                db_path=MUSIC_LIBRARY_PATH,
+                db_path=LIB_PATH,
                 music_allowed_roots=[music_root_env],
                 quarantine_base_root=quarantine_root,
             )
@@ -4341,7 +4341,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             quarantine_root = os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
             res = transaction_engine.execute_playlist_media_cleanup_apply(
                 _txn_store, op_id,
-                db_path=MUSIC_LIBRARY_PATH,
+                db_path=LIB_PATH,
                 music_allowed_roots=[music_root_env],
                 quarantine_base_root=quarantine_root,
             )
@@ -4357,7 +4357,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             music_root_env = os.environ.get("MUSIC_ROOT", "/music")
             res = transaction_engine.rollback_playlist_media_cleanup(
                 _txn_store, op_id,
-                db_path=MUSIC_LIBRARY_PATH,
+                db_path=LIB_PATH,
                 music_allowed_roots=[music_root_env],
             )
             code = 200 if res.get("ok") else 400
@@ -6168,26 +6168,30 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             except (ValueError, IndexError):
                 self._send_json(400, {"error": "Invalid album ID"})
                 return
+            # SEC-002 / ARCH-003 Wave 24 final review round 3, section 11:
+            # this used to read albums.artpath from the database and
+            # append its parent directory into m_roots -- a database value
+            # enlarging the server-configured allowed-root boundary,
+            # exactly the trust inversion create_album_artwork_plan()
+            # itself already refuses internally (Wave 24 round 2, section
+            # 3/6). Doing it here, one layer up, undermined that fix
+            # completely: whatever this appended to m_roots would then be
+            # passed to the Plan call below as music_allowed_roots, so the
+            # Plan's own containment check would trivially pass against a
+            # boundary this code had just silently expanded to match.
+            # Allowed roots come only from server/operator configuration --
+            # MUSIC_ROOT and MUSIC_LIBRARY_PATH are both genuinely
+            # operator-configured environment variables, not database
+            # values, so including them here is fine; the database-derived
+            # append above is what was removed.
             m_roots = _allowed_root_paths(["music"])
             if MUSIC_ROOT and MUSIC_ROOT not in m_roots:
                 m_roots.append(MUSIC_ROOT)
             if MUSIC_LIBRARY_PATH:
                 p_lib = Path(MUSIC_LIBRARY_PATH)
-                m_db_p = str(p_lib.parent if p_lib.suffix or (p_lib.exists() and not p_lib.is_dir()) else p_lib)
-                if m_db_p and m_db_p not in m_roots:
-                    m_roots.append(m_db_p)
-            if LIB_PATH and Path(LIB_PATH).exists():
-                try:
-                    con_tmp = sqlite3.connect(LIB_PATH, timeout=5)
-                    row_art = con_tmp.execute("SELECT artpath FROM albums WHERE id=?", (album_id,)).fetchone()
-                    con_tmp.close()
-                    if row_art and row_art[0]:
-                        p_art_str = row_art[0].decode("utf-8", "replace") if isinstance(row_art[0], bytes) else str(row_art[0])
-                        p_art_dir = str(Path(p_art_str).parent)
-                        if p_art_dir and p_art_dir not in m_roots:
-                            m_roots.append(p_art_dir)
-                except Exception:
-                    pass
+                m_lib_p = str(p_lib.parent if p_lib.suffix or (p_lib.exists() and not p_lib.is_dir()) else p_lib)
+                if m_lib_p and m_lib_p not in m_roots:
+                    m_roots.append(m_lib_p)
             s_roots = _allowed_root_paths(["staging"])
             raw_q = getattr(sys.modules[__name__], "ALBUM_ART_TRASH_ROOT", None)
             q_root = os.environ.get("TRASH_ROOT") or os.environ.get("RECONCILE_QUARANTINE_DIR") or (str(raw_q) if raw_q else None) or (m_roots[0] if m_roots else "/config/reconcile_quarantine")
@@ -6242,43 +6246,59 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             return
 
         if path.startswith("/albums/") and path.endswith("/artpath"):
+            # SEC-002 / ARCH-003 Wave 24 final review round 3, section 12:
+            # BeetsClient.clear_album_artpath()'s public contract (and its
+            # only caller, _album_art_clear_pointer() in app.py) is "clear
+            # the DB artpath COLUMN only" -- mirroring the sibling POST
+            # .../artpath (set) handler just above, which is exactly that:
+            # a locked, verified SQLite UPDATE with no filesystem mutation.
+            # This handler used to route through album_artwork_v1's
+            # "quarantine" mode instead, which PHYSICALLY MOVES the art
+            # file -- a different, more destructive operation than its own
+            # name and docstring promise -- and then ignored
+            # execute_album_artwork_apply's result entirely, always
+            # returning 200 regardless of whether Apply actually
+            # succeeded. Neither defect is acceptable: this must never
+            # silently delete a file the caller only asked to be
+            # unreferenced, and it must never report success it didn't
+            # verify.
             parts = path.split("/")
             try:
                 album_id = int(parts[2])
             except ValueError:
                 self._send_json(400, {"error": "Invalid album ID"})
                 return
-            m_roots = _allowed_root_paths(["music"])
-            s_roots = _allowed_root_paths(["staging"])
-            q_root = os.environ.get("TRASH_ROOT") or os.environ.get("RECONCILE_QUARANTINE_DIR") or (m_roots[0] if m_roots else "/config/reconcile_quarantine")
-            plan_res = transaction_engine.create_album_artwork_plan(
-                _txn_store,
-                {"album_id": album_id, "mode": "quarantine"},
-                music_allowed_roots=m_roots,
-                staging_allowed_roots=s_roots,
-                quarantine_base_root=q_root,
-                db_path=LIB_PATH,
-            )
-            if not plan_res.get("ok"):
-                code = 400
-                c_str = str(plan_res.get("code") or "")
-                err_msg = plan_res.get("error") or "Artpath plan rejected"
-                if any(k in c_str for k in ("out_of_root", "symlink_rejected", "access_denied", "trash_root_out_of_config")):
-                    code = 403
-                    err_msg = "Access denied for album artwork path"
-                self._send_json(code, {"error": err_msg})
-                return
 
-            op_id = plan_res.get("operation_id")
-            if op_id:
-                transaction_engine.execute_album_artwork_apply(
-                    _txn_store,
-                    op_id,
-                    music_allowed_roots=m_roots,
-                    quarantine_base_root=q_root,
-                    db_path=LIB_PATH,
-                )
-            self._send_json(200, {"ok": True, "album_id": album_id, "artpath": ""})
+            lock_file = acquire_os_lock(read_only=False)
+            try:
+                con = sqlite3.connect(LIB_PATH, timeout=10)
+                con.row_factory = sqlite3.Row
+                try:
+                    cur = con.cursor()
+                    cur.execute("SELECT * FROM albums WHERE id = ?", (album_id,))
+                    if not cur.fetchone():
+                        self._send_json(404, {"error": f"Album {album_id} not found"})
+                        return
+                    cur.execute("UPDATE albums SET artpath = NULL WHERE id = ?", (album_id,))
+                    if cur.rowcount != 1:
+                        con.rollback()
+                        self._send_json(500, {"error": f"Expected to clear artpath for exactly 1 album row, affected {cur.rowcount}"})
+                        return
+                    con.commit()
+                    # Verify before reporting success -- never trust that
+                    # the UPDATE call not raising means the DB now reflects
+                    # what was asked for.
+                    verify_row = con.execute("SELECT artpath FROM albums WHERE id = ?", (album_id,)).fetchone()
+                    if verify_row and verify_row["artpath"]:
+                        self._send_json(500, {"error": "Post-write verification failed: artpath not cleared"})
+                        return
+                finally:
+                    con.close()
+                self._send_json(200, {"ok": True, "album_id": album_id, "artpath": ""})
+            except Exception:
+                self._send_json(500, {"error": "Failed to clear artpath"})
+            finally:
+                release_os_lock(lock_file)
             return
 
         if path.startswith("/albums/"):

@@ -1,0 +1,4323 @@
+{
+  "manifest_version": 1,
+  "entries": [
+    {
+      "method": "DELETE",
+      "endpoint": "album_delete_art",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Remove local art files from this album folder and clear the artpath.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "DELETE",
+      "endpoint": "clear_ai_pending_review",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "clear ai pending review",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "DELETE",
+      "endpoint": "clear_jobs",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "clear jobs",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "DELETE",
+      "endpoint": "playlist_delete",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "playlist delete",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "DELETE",
+      "endpoint": "reset_submission_draft",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Delete persisted submission draft metadata for an album, item, or allowed folder target.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_submissions_page.py"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "acquisition_download_all_active",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "acquisition download all active",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "acquisition_queue",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "acquisition queue",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "ai_batch_import_status",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "ai batch import status",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "album_art",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Serve local album art or redirect to Cover Art Archive.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "album_art_status",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "album art status",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "album_art_url_api",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Return Discogs cover art URL for an artist+album (cached).",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "album_duplicate_resolver",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "album duplicate resolver",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "album_mb_candidates",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Search MusicBrainz for release candidates for a library album.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "album_mb_completeness",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "album mb completeness",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "album_mb_format",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Return album tracks formatted for MusicBrainz track parser + submission URL.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "album_tracks",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "album tracks",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "albums",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "albums",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "api_ai_matching_regressions",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "api ai matching regressions",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "api_auth_me",
+      "security_classification": "PUBLIC",
+      "purpose": "Return current authentication and first-run setup state without exposing credentials.",
+      "required_role_or_privilege": "public status endpoint; username returned only when the request is authenticated",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_auth_and_setup.py::AuthAndSetupTests::test_login_logout_session_flow"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "api_plex_status",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "api plex status",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": true,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_config_and_status_responses_are_redacted"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "api_plugins_install_log",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Return the background plugin installer log.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "api_plugins_installed",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Return which optional plugins are installed in the Python env.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "api_transaction_detail",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Read one transaction/audit record by generated transaction ID with bounded change pagination.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_transaction_engine.py",
+        "tests/test_sec002_nonapp_backend.py::TransactionStoreIdContainmentTests"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "api_transaction_export",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Export one transaction/audit record as JSON, Markdown, or CSV.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_transaction_engine.py",
+        "tests/test_sec002_nonapp_backend.py::TransactionStoreIdContainmentTests"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "api_transaction_settings",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Return transaction/audit workflow settings.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_transaction_engine.py",
+        "tests/test_transaction_integration.py"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "api_transactions_list",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "List transaction/audit summaries from the transaction store with bounded pagination.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_transaction_engine.py",
+        "tests/test_transaction_integration.py"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "artist_discography",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Start (or return cached) discography check. Returns job_id while running, result when done.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "artist_discography_discogs",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Fetch artist discography from Discogs and compare against library.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": true,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_config_and_status_responses_are_redacted"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "artist_image_cache",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "artist image cache",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": true,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_config_and_status_responses_are_redacted"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "artist_image_url_api",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Return a local cached artist image URL, downloading it if needed.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "browse",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "List subdirectories of a path for the path picker.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "candidate_tracks",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Return per-track comparison between a MusicBrainz release and a local folder.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "clean_album_folders_report",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "clean album folders report",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "clean_library_health",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "clean library health",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "clean_rgid_group_detail",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Fetch full cluster details for one release-group-ID cluster (fetch-cluster-details).",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "clean_root_folders_report",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Return the last persisted root-folder cleanup report from application metadata cache.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_root_folder_repair.py"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "dedup_scan_status",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Poll the status of a running dedup scan.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "disk_art_serve",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Serve an album art image from /data/media/music (security: path must be under music root).",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "favicon",
+      "security_classification": "PUBLIC",
+      "purpose": "Serve favicon from fixed application static locations, or 204 when absent.",
+      "required_role_or_privilege": "public static asset",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::SecurityHardeningTests::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "get_ai_match_history",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "get ai match history",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "get_ai_pending_review",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "get ai pending review",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "get_ai_review_decisions",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "get ai review decisions",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "get_config",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "get config",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": true,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_config_and_status_responses_are_redacted"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "get_item",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "get item",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "get_job",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "get job",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "get_music_format_preferences",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "get music format preferences",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": true,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_config_and_status_responses_are_redacted"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "get_recent_imports",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Return the list of recently imported albums (from reimport-disk).",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "health",
+      "security_classification": "PUBLIC",
+      "purpose": "health",
+      "required_role_or_privilege": "public",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": []
+    },
+    {
+      "method": "GET",
+      "endpoint": "health_detail",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Return authenticated dependency diagnostics, including configured/not-configured booleans for integrations.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::SecurityHardeningTests::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "health_live",
+      "security_classification": "PUBLIC",
+      "purpose": "Liveness probe: process is up and answering HTTP; no dependency checks.",
+      "required_role_or_privilege": "public",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_routes_setup.py"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "health_ready",
+      "security_classification": "PUBLIC",
+      "purpose": "Readiness probe: reports blocking_reasons when dependencies (paths, Beets engine) are not OK.",
+      "required_role_or_privilege": "public",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_routes_setup.py"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "health_root",
+      "security_classification": "PUBLIC",
+      "purpose": "Alias for /health/live.",
+      "required_role_or_privilege": "public",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_routes_setup.py"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "import_folder_stats",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Count audio/art/other files below a validated import-review folder before a destructive delete confirmation.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_sec002_app_path_import_review_cleanup.py"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "import_log",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "import log",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "import_review_queue",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "import review queue",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "import_skipped",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Return folder paths that were skipped (no MusicBrainz match) from the beet import log.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "index",
+      "security_classification": "PUBLIC",
+      "purpose": "index",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "item_mb_candidates",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Search MusicBrainz for recording candidates for a library track.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "items",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "items",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "jobs_feed",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "jobs feed",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "library_art_repair_report",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "library art repair report",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "library_artist_id_groups",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "library artist id groups",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "library_full",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Walk /data/media/music on disk + inject library items whose files are missing (shown in red).",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "library_genre_stats",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Genre coverage: how many albums have / are missing a genre tag.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "library_import_all_last",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "library import all last",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "library_mbid_status",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "MusicBrainz coverage for albums/tracks already under /data/media/music.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "library_scan_status",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "library scan status",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "lidarr_artist_albums_by_name",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Fetch configured Lidarr artist/album data and locally match by artist name; not a generic proxy.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": true,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_routes_lidarr.py"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "list_jobs",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "list jobs",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "list_playlists",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "list playlists",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "maintenance_runner_report",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "maintenance runner report",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "music_format_replacement_statuses",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "music format replacement statuses",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "playlist_download_status",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "playlist download status",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "playlist_suggestions",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "playlist suggestions",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "playlist_sync_status",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "playlist sync status",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "playlist_tracks_detail",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "playlist tracks detail",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "qbit_status",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "qbit status",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "react_assets",
+      "security_classification": "PUBLIC",
+      "purpose": "Serve Vite-built JS/CSS chunks at /assets/<file>.",
+      "required_role_or_privilege": "public",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_public_static_routes_cannot_traverse"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "react_next_static",
+      "security_classification": "PUBLIC",
+      "purpose": "Serve Next static-export chunks from frontend/dist/_next/static.",
+      "required_role_or_privilege": "public",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_public_static_routes_cannot_traverse"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "react_spa_fallback",
+      "security_classification": "PUBLIC",
+      "purpose": "Let direct browser loads of React routes resolve to the SPA entrypoint.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "recent",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "recent",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "release_art_api",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Fetch/cache release-group cover art from fixed Cover Art Archive or Discogs endpoints, then return the local cache URL.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": true,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_discogs_fallback.py"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "release_art_cache",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Serve a locally cached release-art image for a validated MusicBrainz release-group MBID.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::SecurityHardeningTests::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "review_folder_placeholder_api",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "review folder placeholder api",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "setup_diagnostics",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Forces a fresh (non-cached) Beets diagnostics rebuild; same data as setup_status but bypasses the TTL cache.",
+      "required_role_or_privilege": "owner/admin (session, bearer token, or Basic)",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_routes_setup.py"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "setup_get_env",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Return editable .env variable metadata with secret values masked.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": true,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_routes_setup.py",
+        "tests/test_auth_and_setup.py"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "setup_get_settings",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Return wizard-recorded non-secret preferences (e.g. selected AI model); key/token-named fields masked defensively.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_routes_setup.py"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "setup_status",
+      "security_classification": "PUBLIC",
+      "purpose": "Readiness/setup-status snapshot polled by the frontend bootstrap flow before auth state is known.",
+      "required_role_or_privilege": "public (deliberately, so the pre-auth React boot screen can tell setup-required from setup-complete)",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_routes_setup.py",
+        "tests/test_library_pagination_and_status_cache.py"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "stats",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "stats",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "submission_target",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Resolve an album/item/allowed-folder submission target and return readiness/preflight data.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_sec002_nonapp_backend.py::SubmissionFolderPathContainmentTests",
+        "tests/test_sec002_nonapp_backend.py::SubmissionExceptionSanitizationTests"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "unmatched_tracks",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Tracks with no mb_trackid whose album also has no mb_albumid.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "wanted_lidarr",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Fetch the configured Lidarr wanted list through a specific integration helper; not a generic proxy.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": true,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_routes_lidarr.py",
+        "tests/test_sec002_nonapp_backend.py::LidarrErrorSanitizationTests"
+      ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "ytdlp_status",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "ytdlp status",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": true,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_config_and_status_responses_are_redacted"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "acquisition_download_all",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "acquisition download all",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "add_ai_pending_review",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "add ai pending review",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "ai_batch_import_recover",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "ai batch import recover",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "ai_batch_pause",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "ai batch pause",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "ai_batch_reconcile_artwork",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Re-read an AI-batch folder and completed artwork job, then reconcile persisted artwork state with actual album art status.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_artwork_retry_reconciliation.py"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "ai_batch_skip",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "ai batch skip",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "ai_batch_stop",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "ai batch stop",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "ai_suggest",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "ai suggest",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "ai_suggest_album",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "ai suggest album",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "ai_suggest_folder",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Identify an unimported folder using AI + MusicBrainz.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "album_acoustid_submit",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Start a Beets chroma/acoustid submission job for one album after readiness and MBID preflight checks.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": true,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_external_beets_architecture.py",
+        "tests/test_submissions_page.py"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "album_add_mbids",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Attach real MusicBrainz IDs to an album and move it to the MBID-stamped path.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "album_deduplicate",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Deduplicate an album's tracks against its MusicBrainz release.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "album_fetch_art",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Run beet fetchart for a specific album, then fallback if needed.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "album_fix_genre",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Fix genre for a single album: run lastgenre, fall back to AI if nothing found.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "album_fix_metadata",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Directly patch album name / albumartist / year in the DB, then optionally",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "album_mbsubmit",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Run beet mbsubmit for an album; return submission text.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "album_merge_split_album",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Merge visible split-album item rows into the selected album without touching audio files.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "album_move_to_library",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Move an imported album whose DB paths point outside MUSIC_ROOT back into",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "album_remove",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Remove an album from the beets library (optionally delete files from disk).",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "album_rename",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Write tags then rename/move files for an album into the correct library path structure.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "album_replace_art_from_url",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Download a user-provided cover image URL and set it as this album's art.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "album_upload_art",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Accept a user-uploaded cover image and set it as this album's art.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "api_download_album",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Start a background job to download an album via slskd (primary)",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "api_login",
+      "security_classification": "PUBLIC",
+      "purpose": "Authenticate browser users with username/password and create a Flask session.",
+      "required_role_or_privilege": "public login endpoint; valid administrator credentials required to authenticate",
+      "handles_secrets": true,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_auth_and_setup.py::AuthAndSetupTests::test_login_logout_session_flow",
+        "tests/test_auth_and_setup.py::AuthAndSetupTests::test_failed_login_rate_limit_returns_429_and_valid_login_recovers"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "api_login",
+      "security_classification": "PUBLIC",
+      "purpose": "Authenticate browser users with username/password and create a Flask session.",
+      "required_role_or_privilege": "public login endpoint; valid administrator credentials required to authenticate",
+      "handles_secrets": true,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_auth_and_setup.py::AuthAndSetupTests::test_login_logout_session_flow",
+        "tests/test_auth_and_setup.py::AuthAndSetupTests::test_failed_login_rate_limit_returns_429_and_valid_login_recovers"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "api_logout",
+      "security_classification": "PUBLIC",
+      "purpose": "Clear the Flask browser session for the current client.",
+      "required_role_or_privilege": "public logout endpoint; CSRF header still required for cookie-authenticated browser requests",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_auth_and_setup.py::AuthAndSetupTests::test_login_logout_session_flow"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "api_logout",
+      "security_classification": "PUBLIC",
+      "purpose": "Clear the Flask browser session for the current client.",
+      "required_role_or_privilege": "public logout endpoint; CSRF header still required for cookie-authenticated browser requests",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_auth_and_setup.py::AuthAndSetupTests::test_login_logout_session_flow"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "api_plex_refresh",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "api plex refresh",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": true,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced",
+        "tests/test_security_hardening.py::test_config_and_status_responses_are_redacted"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "api_plugins_run",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Run a whitelisted beet plugin command as a background job.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "api_transaction_apply",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Apply an approved metadata transaction through the existing Beets mutation workflow.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_transaction_integration.py",
+        "tests/test_import_review_attach_enforcement.py"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "api_transaction_approve",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Mark a transaction/audit record approved before apply.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_transaction_integration.py"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "api_transaction_cancel",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Mark a transaction/audit record cancelled.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_transaction_integration.py"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "api_transaction_rollback",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Rollback supported transaction operations through recorded rollback executors and background jobs.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_import_review_attach_enforcement.py",
+        "tests/test_import_review_attach_integrity.py"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "api_transaction_settings_save",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Persist transaction/audit workflow settings with type coercion and bounds clamping.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_transaction_engine.py"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "apply_album_cleanup_route",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Execute an engine album cleanup transaction apply.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_sec002_wave16_album_cleanup_ui_flow.py"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "apply_album_duplicate_resolver",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "apply album duplicate resolver",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "apply_folder_placeholder_action_api",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "apply folder placeholder action api",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "apply_safe_folder_placeholder_renames_job",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Start a background job to rename all safe folder placeholder rows.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "attach_album_mbids",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Start a Beets modify/write/move job to attach validated MusicBrainz album and recording IDs.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_submissions_page.py"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "batch_ai_suggest",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "batch ai suggest",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "clean_album_folders_apply_issue",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "clean album folders apply issue",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "clean_album_folders_apply_safe",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "clean album folders apply safe",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "clean_album_folders_scan",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "clean album folders scan",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "clean_album_tracks_remove",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "clean album tracks remove",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "clean_album_tracks_remove_batch",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "clean album tracks remove batch",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "clean_album_tracks_scan",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "clean album tracks scan",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "clean_artist_folders_merge",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "clean artist folders merge",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "clean_artist_folders_scan",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "clean artist folders scan",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "clean_artist_folders_stamp_mbid",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Rename or merge artist folders to the canonical MB artist UUID name.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "clean_library_health_scan",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "clean library health scan",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "clean_merge_duplicate_album",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Merge source album rows into target album (DB only, audio untouched).",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "clean_no_audio_folders_delete",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "clean no audio folders delete",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "clean_no_audio_folders_scan",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "clean no audio folders scan",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "clean_remove_empty_albums",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "clean remove empty albums",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "clean_remove_orphaned_items",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "clean remove orphaned items",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "clean_rgid_group_assign_release",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Assign a specific candidate MusicBrainz release as an album row's representative release.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "clean_rgid_group_keep_separate",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Persist a 'these are valid separate editions' decision so the warning doesn't return.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "clean_rgid_group_merge",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Merge two album rows that share a release-group id (regardless of title text).",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "clean_rgid_group_relink",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Search MusicBrainz and relink a wrongly-grouped row to a different release/release-group.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "clean_rgid_group_send_to_repair",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Route a 1-2-track partial-import row into the existing MBID repair machinery.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "clean_rgid_group_undo_resolution",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Clear a previously persisted keep-separate/resolved decision for a release-group id.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "clean_root_folders_apply_safe",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Start a background repair that removes empty root folders, queues orphaned folders for review, and re-homes known Beets items.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_root_folder_repair.py"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "clean_root_folders_scan",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Start a background scan for misplaced root-level music-library folders and save a report.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_root_folder_repair.py"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "cleanup_import_review_files",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "cleanup import review files",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "clear_recent_imports",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Clear the recent imports log.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "create_unmatched_draft",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Create a local album draft for releases not found in MusicBrainz/Discogs.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "dedup_ai_review",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Second-pass duplicate detection using GPT-4o-mini for files the standard scan missed.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "dedup_cleanup",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "dedup cleanup",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "dedup_scan",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Start a background dedup scan; returns job_id immediately.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "delete_import_review_folder",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "delete import review folder",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "fetch_missing_art",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Background job: find albums missing usable local art and repair them.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "fix_leaked_db_paths",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Fix leaked path DB rows (DB-only update \u2014 no files are moved).",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "import_cleanup_stale",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "import cleanup stale",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "import_folder_with_id",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Two-step import for a skipped folder:",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "import_preflight",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "import preflight",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "import_reconcile_job",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "import reconcile job",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "import_review_auto_enqueue",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "import review auto enqueue",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "import_review_auto_enqueue_ready",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "import review auto enqueue ready",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "import_review_auto_enqueue_ready_job",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "import review auto enqueue ready job",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "import_review_auto_enqueue_reconcile",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "import review auto enqueue reconcile",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "import_review_manual_id_validate",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Validate a user-entered MusicBrainz UUID/URL and compare it with the selected import-review target.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_import_review_manual_id_workflow.py",
+        "tests/test_import_review_attach_enforcement.py"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "import_review_revalidate",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "import review revalidate",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "import_target_preview",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Read-only target path preview for Import Review selected matches.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "item_acoustid_submit",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Start a Beets chroma/acoustid submission job for one item or its album after readiness and MBID preflight checks.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": true,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_external_beets_architecture.py",
+        "tests/test_submissions_page.py"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "item_attach_recording",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Attach a backend-validated MusicBrainz Recording ID to one item via the controlled album_mb_track_repair_v1 engine transaction (HTTP to the Beets Control Agent), in a background job. Wave 24 review section 31: no longer falls back to local beet modify/mbsync/write/move subprocess calls when the engine transaction does not succeed -- fails closed instead.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_import_review_attach_enforcement.py",
+        "tests/test_import_review_attach_integrity.py"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "item_mbsubmit",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Run beet mbsubmit for the album containing this item; return submission text.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "item_replacement_apply",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "SEC-002 Wave 17: applies a previously reviewed track_replacement_v1 plan -- quarantines the original file under a server-derived quarantine root and removes its Beets DB row after full TOCTOU/root/identity re-verification. Requires an operation_id from item_replacement_plan; there is no path to mutation without a prior Plan.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_sec002_wave17_track_replacement.py"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "item_replacement_plan",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "SEC-002 Wave 17: manual, human-reviewed counterpart to the automatic music-format replacement job. Verifies a user-supplied replacement candidate against the existing track via real AcoustID fingerprint matching, then creates a track_replacement_v1 engine transaction plan (Plan step only -- no mutation).",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_sec002_wave17_track_replacement.py"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "kill_job",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "kill job",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "library_confirm_artist_alias",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "library confirm artist alias",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "library_fix_genres",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Background job: run beet lastgenre for albums missing genre, then optionally",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "library_import_all",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Queue a single parent job that repairs/imports selected library albums.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "library_import_all_retry_failed",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "library import all retry failed",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "library_mb_full_sync",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "library mb full sync",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "library_mbid_sticking_repair",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "library mbid sticking repair",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "library_mbsync_all",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Sync all library tracks against MusicBrainz metadata (beet mbsync).",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "library_merge_artist",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Rename an artist (albumartist) across all albums + items, then move files.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "library_merge_artist_id",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "library merge artist id",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "library_move_all",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Rename/move all library files to match the current path template (beet move).",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "library_normalize_artists",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Normalize Unicode punctuation (fancy hyphens, smart quotes, etc.) in all",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "library_reject_artist_id_group",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "library reject artist id group",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "library_scan",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "library scan",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "library_sync_deleted",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Remove beets DB entries for albums/tracks whose files no longer exist on disk.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "library_template_token_cleanup",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "library template token cleanup",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": true,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced",
+        "tests/test_security_hardening.py::test_config_and_status_responses_are_redacted"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "lidarr_command",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Submit the allowlisted Lidarr AlbumSearch command for positive integer album IDs only.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": true,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_routes_lidarr.py"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "match_album",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Set mb_albumid, sync full metadata from MusicBrainz, write tags, then move files",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "modify_item",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "modify item",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "plan_album_cleanup_route",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Create an engine album cleanup transaction plan.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_sec002_wave16_album_cleanup_ui_flow.py"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "plan_album_cleanup_route",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Create an engine album cleanup transaction plan.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_sec002_wave16_album_cleanup_ui_flow.py"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "playlist_apply_safe_suggestions",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "playlist apply safe suggestions",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "playlist_create",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "playlist create",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "playlist_download",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "playlist download",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "playlist_parse",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "playlist parse",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "playlist_pipeline_action",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "playlist pipeline action",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "playlist_quality_cleanup",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "playlist quality cleanup",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "playlist_quality_place",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "playlist quality place",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "playlist_resolve_track",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "playlist resolve track",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "playlist_sync_start",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "playlist sync start",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "playlist_track_action",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "playlist track action",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "preview_folder_placeholder_merge_api",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "preview folder placeholder merge api",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "qbit_hardlink_missing",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "qbit hardlink missing",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "rebuild_album_art",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Background job: rebuild album art for every actionable album.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "reimport_disk",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Tag & import audio files that are already in the music folder but not in the beets DB.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "repair_album_mb_tracks",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "repair album mb tracks",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "restart_app",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Restart the app process by re-executing the current command.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "retag_item",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Sync metadata from MusicBrainz (if item has mb_trackid/mb_albumid),",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "revert_config",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "revert config",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": true,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced",
+        "tests/test_security_hardening.py::test_config_and_status_responses_are_redacted"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "save_album_art",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Fetch art from Discogs and save to disk for one album.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "save_config",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "save config",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": true,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced",
+        "tests/test_security_hardening.py::test_config_and_status_responses_are_redacted"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "save_music_format_preferences_route",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "save music format preferences route",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": true,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced",
+        "tests/test_security_hardening.py::test_config_and_status_responses_are_redacted"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "save_submission_draft",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Persist bounded submission draft metadata for an album, item, or allowed folder target.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_submissions_page.py"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "scan_folder_placeholders_job",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Start a background scan for album folders with unresolved placeholder names.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "scan_leaked_db_paths_job",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Start a background scan for DB rows with leaked template-token paths.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "setup_first_run",
+      "security_classification": "SETUP_ONLY",
+      "purpose": "Narrow first-run bootstrap: create the administrator username+password (hashed at rest) and an authenticated session. Cross-process-safe via _FIRST_RUN_LOCK; rejects once setup state is 'claimed'.",
+      "required_role_or_privilege": "public pre-setup only (this IS the credential-creation step)",
+      "handles_secrets": true,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_routes_setup.py",
+        "tests/test_auth_and_setup.py",
+        "tests/test_first_run_browser_auth.py",
+        "tests/test_first_run_browser_bootstrap.py"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "setup_mark_complete",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Atomically finalize first-run setup (O_CREAT|O_EXCL completion marker; verifies Beets reachability and credential usability first) and establish an authenticated session. Idempotent: 409 on repeat/concurrent calls.",
+      "required_role_or_privilege": "owner/admin (session established by setup_first_run satisfies this immediately after credential creation)",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_routes_setup.py",
+        "tests/test_auth_and_setup.py",
+        "tests/test_v0110_upgrade_and_matched_stack.py"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "setup_regenerate_auth_token",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Generate and persist a fresh BEETS_WEB_AUTH_TOKEN; plaintext returned exactly once in this response only.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": true,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_routes_setup.py"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "setup_save_env",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Persist .env-style runtime configuration; BEETS_WEB_PASSWORD is hashed before storage, never written plaintext.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": true,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_routes_setup.py",
+        "tests/test_auth_and_setup.py"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "setup_save_settings",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Persist wizard-recorded non-secret preferences; not a secret store.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_routes_setup.py"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "setup_test_acoustid",
+      "security_classification": "SETUP_ONLY",
+      "purpose": "Distinguishes fpcalc/chroma/pyacoustid dependency gaps from an invalid AcoustID API key via the Beets engine.",
+      "required_role_or_privilege": "public pre-setup only, then owner/admin",
+      "handles_secrets": true,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_routes_setup.py"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "setup_test_ai",
+      "security_classification": "SETUP_ONLY",
+      "purpose": "Live connectivity test against the configured/posted AI provider credential.",
+      "required_role_or_privilege": "public pre-setup only, then owner/admin",
+      "handles_secrets": true,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_routes_setup.py"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "setup_test_beets",
+      "security_classification": "SETUP_ONLY",
+      "purpose": "Live connectivity test against the Beets control agent (required, not optional, dependency).",
+      "required_role_or_privilege": "public pre-setup only, then owner/admin",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_routes_setup.py"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "setup_test_musicbrainz",
+      "security_classification": "SETUP_ONLY",
+      "purpose": "Live reachability test against musicbrainz.org (no credential; core capability, not an optional plugin).",
+      "required_role_or_privilege": "public pre-setup only, then owner/admin",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_routes_setup.py"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "setup_test_plex",
+      "security_classification": "SETUP_ONLY",
+      "purpose": "Live connectivity test against the configured/posted Plex server URL+token.",
+      "required_role_or_privilege": "public pre-setup only, then owner/admin",
+      "handles_secrets": true,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_routes_setup.py"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "start_ai_batch_import",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Start or reconnect the durable AI batch import worker.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "start_import",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "start import",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "start_maintenance_runner",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Start the Clean All parent job using the existing maintenance framework.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "start_music_format_library_scan",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "start music format library scan",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": true,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "start_music_format_replacement_retry",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "start music format replacement retry",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "submission_reference_url",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Validate and fetch metadata for a user-supplied reference URL under the global outbound SSRF policy, then save it to the submission draft.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": true,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_sec002_nonapp_backend.py::SubmissionExceptionSanitizationTests",
+        "tests/test_submissions_page.py"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "validate_musicbrainz_release",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Validate a MusicBrainz release MBID/URL and compare remote tracklist to the local submission target.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_submissions_page.py"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "ytdlp_test_youtube",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "ytdlp test youtube",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": true,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced",
+        "tests/test_security_hardening.py::test_config_and_status_responses_are_redacted"
+      ]
+    }
+  ]
+}

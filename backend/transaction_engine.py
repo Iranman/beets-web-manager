@@ -3710,7 +3710,11 @@ def create_album_mb_track_repair_plan(
         iid = int(row["id"])
         raw_path = row["path"]
         path_str = raw_path.decode("utf-8", "replace") if isinstance(raw_path, bytes) else str(raw_path)
-        item_path = Path(path_str)
+        # Wave 24 final review round 3, section 11: a real Beets library
+        # stores items.path RELATIVE to the music dir; resolve against the
+        # configured root before the containment check below, else a
+        # correctly-relative value would always (and wrongly) fail it.
+        item_path = _resolve_db_path(path_str, [str(r) for r in roots_resolved] or roots)
 
         # Check containment under allowed roots
         contained = False
@@ -5818,6 +5822,34 @@ def _lock_resources(resource_keys: List[str]):
         for l in locks:
             stack.enter_context(l)
         yield
+
+
+def _resolve_db_path(path_str: str, allowed_roots: List[str]) -> Path:
+    """Resolve a path read directly from Beets' SQLite columns
+    (items.path / albums.artpath) to an absolute Path.
+
+    Wave 24 final review round 3 (two-service acceptance script fixture
+    seeding via the real `beets` package): a real, installed Beets
+    (verified against 2.12.0/2.13.1's beets/dbcore/pathutils.py) stores
+    these paths RELATIVE to the configured music directory whenever the
+    absolute path is inside it (normalize_path_for_db /
+    expand_path_from_db, gated on beets.context.get_music_dir() being set
+    -- true for any path written by a real `beet` CLI invocation, since
+    opening the library always sets it). Reading the raw column through a
+    direct sqlite3 connection (as every function in this module does, to
+    avoid a hard runtime dependency on the `beets` package) bypasses that
+    expansion entirely, so a genuinely relative stored value must be
+    joined against the configured music root here -- exactly the pattern
+    album_maintenance_v1's remove_tracks/deduplicate modes already use
+    (and app.py's own album_deduplicate `_abs()` helper predates this
+    file). This was previously missing from the relocation/artwork/
+    metadata/mb_track_repair families specifically.
+    """
+    p = Path(path_str)
+    if p.is_absolute():
+        return p
+    base = Path(allowed_roots[0]) if allowed_roots else Path(os.environ.get("MUSIC_ROOT", "/music"))
+    return base / path_str
 
 
 def _path_under(child: Path, parent: Path) -> bool:
@@ -8270,6 +8302,15 @@ def create_album_artwork_plan(
                     # roots is not silently trusted for source discovery or
                     # replace-target matching below; it is only kept as an
                     # informational value for logging/rollback bookkeeping.
+                    #
+                    # Wave 24 final review round 3, section 11: a real Beets
+                    # library stores this column RELATIVE to the music dir
+                    # (see _resolve_db_path); resolve it before using it as a
+                    # filesystem path, but the trust decision below is
+                    # unaffected -- a relative value resolves under
+                    # allowed_roots[0], which is itself one of the
+                    # already-configured roots, so it cannot expand trust.
+                    original_artpath = str(_resolve_db_path(original_artpath, allowed_roots))
                     p_orig_dir = Path(original_artpath).parent
                     original_artpath_trusted = any(_path_under(p_orig_dir, r) for r in source_roots)
             if row and row[1]:
@@ -8284,7 +8325,11 @@ def create_album_artwork_plan(
                 if irow[0]:
                     ipath_str = irow[0].decode("utf-8", "replace") if isinstance(irow[0], bytes) else str(irow[0])
                     if ipath_str:
-                        item_dirs.add(str(Path(ipath_str).parent))
+                        # Wave 24 final review round 3, section 11: same
+                        # relative-path normalization as original_artpath
+                        # above -- items.path is subject to the identical
+                        # real-Beets relative-storage behavior.
+                        item_dirs.add(str(_resolve_db_path(ipath_str, allowed_roots).parent))
             if item_dirs:
                 parents = {str(Path(d).parent if re.search(r"^(disc|cd|disk)\s*\d+$", Path(d).name, re.I) else Path(d)) for d in item_dirs}
                 if len(parents) > 1:
@@ -8709,9 +8754,26 @@ def execute_album_artwork_apply(
                     rollback_album_artwork(store, operation_id, music_allowed_roots=allowed_roots, db_path=lib_db)
                     return _fail("Post-write verification failed for artwork move.", "album_artwork_verification_failed")
             for qr in quarantined_records:
-                if Path(qr["source"]).exists() or not Path(qr["quarantined"]).exists():
+                if not Path(qr["quarantined"]).exists():
                     rollback_album_artwork(store, operation_id, music_allowed_roots=allowed_roots, db_path=lib_db)
                     return _fail("Post-write verification failed for artwork quarantine.", "album_artwork_verification_failed")
+                if Path(qr["source"]).exists():
+                    # Wave 24 final review round 3 (surfaced by a relative-
+                    # DB-path replace-over-existing-artwork test -- no prior
+                    # test exercised replace against a non-blank artpath):
+                    # a "replaced_artwork" quarantine's source path is the
+                    # OLD art's location, which "replace" mode legitimately
+                    # reoccupies moments later with the NEW art (same path,
+                    # new content) via its own moved_records entry above --
+                    # that is the intended outcome, not a failed quarantine.
+                    # Any other kind (verified_duplicate / plain quarantine)
+                    # must never see its source path exist afterward.
+                    reoccupied = qr.get("kind") == "replaced_artwork" and any(
+                        mr.get("destination") == qr["source"] for mr in moved_records
+                    )
+                    if not reoccupied:
+                        rollback_album_artwork(store, operation_id, music_allowed_roots=allowed_roots, db_path=lib_db)
+                        return _fail("Post-write verification failed for artwork quarantine.", "album_artwork_verification_failed")
             if lib_db and Path(lib_db).exists() and aid > 0 and db_mutated:
                 con = sqlite3.connect(lib_db, timeout=10)
                 try:
@@ -8742,6 +8804,25 @@ def execute_album_artwork_apply(
                         fn_fsync(new_artpath)
                     except OSError:
                         is_durable = False
+                    except Exception as ex:
+                        # Wave 24 final review round 3 (surfaced once the
+                        # Stage-3 verification false-positive above was
+                        # fixed -- a prior revision of that check always
+                        # failed first on any replace-over-existing-art,
+                        # which coincidentally masked this call ever being
+                        # reached). A non-OSError failure here is still a
+                        # genuine post-write step failure, not merely
+                        # "durability unknown": every mutation (quarantine
+                        # + write + DB pointer update) has already
+                        # committed by this point, so treat it the same as
+                        # any other post-write failure -- roll back fully
+                        # and report it, rather than either silently
+                        # downgrading durability or letting the exception
+                        # escape this function uncaught (which would leave
+                        # committed mutations standing with no rollback and
+                        # no controlled error response).
+                        rollback_album_artwork(store, operation_id, music_allowed_roots=allowed_roots, db_path=lib_db)
+                        return _fail(f"Post-write durability check failed: {ex}", "album_artwork_durability_check_failed")
 
             store.update(operation_id, status="Completed", metadata={
                 **store.get(operation_id).get("metadata", {}),
@@ -9793,19 +9874,30 @@ def create_album_relocation_plan(
         if not item_rows:
             return {"ok": False, "error": f"Album {aid} has no track items", "code": "album_relocation_no_items"}
 
-        source_check_roots = stg_roots if mode == "move_to_library" else (allowed_roots + stg_roots)
+        # Section 10/11: source-root validation is unconditional now (the
+        # original bug was skipping it *entirely* for move_to_library, not
+        # merely using the wrong root set). Both modes accept a source
+        # already inside the authoritative music root OR a configured
+        # staging/import/download root -- "another explicitly configured
+        # server-authorized role root" per the review's own wording --
+        # never an arbitrary, unauthorized host path. A move_to_library
+        # item that turns out to already be correctly placed (e.g. a
+        # partially-completed prior import) is legitimately a same-
+        # location no-op, not a rejection.
+        source_check_roots = allowed_roots + stg_roots
         dest_seen: set = set()
 
         for irow in item_rows:
             iid = int(irow["id"])
             orig_path_str = irow["path"].decode("utf-8", "replace") if isinstance(irow["path"], bytes) else str(irow["path"])
-            orig_p = Path(orig_path_str)
+            # Wave 24 final review round 3, section 11: a real Beets
+            # library stores items.path RELATIVE to the music dir; resolve
+            # against the configured music root (allowed_roots[0]) before
+            # treating it as absolute -- source_check_roots validation
+            # below still requires the resolved path land under one of the
+            # already-configured roots, so this cannot expand trust.
+            orig_p = _resolve_db_path(orig_path_str, allowed_roots)
 
-            # Section 10/11: source-root validation is unconditional now.
-            # move_to_library must land inside a configured staging/
-            # import/download root -- an arbitrary DB path pointing
-            # anywhere on the host is not sufficient authority to be
-            # pulled into the authoritative library.
             matched_root = next((Path(r) for r in source_check_roots if _path_under(orig_p, Path(r))), None)
             if matched_root is None:
                 code = "album_relocation_source_root_not_authorized" if mode == "move_to_library" else "album_relocation_path_out_of_root"
@@ -9872,7 +9964,9 @@ def create_album_relocation_plan(
 
         orig_art = _s(arow["artpath"] or "").strip()
         if orig_art:
-            art_p = Path(orig_art)
+            # Wave 24 final review round 3, section 11: same relative-path
+            # normalization as items.path above.
+            art_p = _resolve_db_path(orig_art, allowed_roots)
             art_root = next((Path(r) for r in (allowed_roots + stg_roots) if _path_under(art_p, Path(r))), None)
             if art_root is not None and not _path_has_symlink_under(art_p, art_root) and art_p.exists() and art_p.is_file():
                 st = art_p.stat()
@@ -10063,6 +10157,23 @@ def execute_album_relocation_apply(
                         if not tw.get("ok"):
                             raise RuntimeError(f"Tag write failed for item {iid}: {tw.get('error')}")
                         tags_written.append(iid)
+                        # A real IPC regression test caught this: a tag
+                        # write legitimately changes the file's size (tag
+                        # frames grow/shrink), so Stage 3's post-move size
+                        # check must compare against the size AFTER the tag
+                        # write, not the stale pre-write size captured at
+                        # Plan time -- otherwise every successful, correct
+                        # rename-with-retag would fail its own integrity
+                        # check.
+                        try:
+                            post_tag_st = Path(item["old_path"]).stat()
+                            item["stat"] = {
+                                **(item.get("stat") or {}),
+                                "size": post_tag_st.st_size,
+                                "mtime_ns": post_tag_st.st_mtime_ns,
+                            }
+                        except OSError:
+                            pass
 
                     if item["move_type"] == "same_location":
                         moved_items.append(item)
@@ -10459,6 +10570,9 @@ def create_album_metadata_plan(
         for irow in item_rows:
             iid = int(irow["id"])
             ipath = irow["path"].decode("utf-8", "replace") if isinstance(irow["path"], bytes) else str(irow["path"])
+            # Wave 24 final review round 3, section 11: same relative-path
+            # normalization as the relocation/artwork families above.
+            ipath = str(_resolve_db_path(ipath, allowed_roots))
             raw_i_up = raw_item_updates.get(str(iid)) or raw_item_updates.get(iid) or {}
             i_up, rejected_item = _normalize_metadata_fields(raw_i_up, ITEM_METADATA_FIELDS)
             if rejected_item:
