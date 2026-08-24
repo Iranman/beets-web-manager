@@ -226,6 +226,7 @@ class Wave22AlbumMaintenanceTests(unittest.TestCase):
         plan_res = create_album_artwork_plan(
             self.store, payload,
             music_allowed_roots=[str(self.music_root)],
+            staging_allowed_roots=[str(self.quarantine_dir)],
             db_path=self.db_path,
             quarantine_base_root=str(self.quarantine_dir),
         )

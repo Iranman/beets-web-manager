@@ -892,6 +892,66 @@ class BeetsClient:
             "files_deleted": len(item_ids) if delete_files else 0,
         }
 
+    # ── album_relocation_v1 Pure HTTP Client Methods ────────────────────────────
+
+    def plan_album_relocation(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Request preview plan for album relocation via HTTP."""
+        return self._request("POST", "/albums/relocation/plan", payload)
+
+    def apply_album_relocation(self, operation_id: str) -> Dict[str, Any]:
+        """Execute album relocation apply via HTTP."""
+        return self._request("POST", "/albums/relocation/apply", {"operation_id": operation_id})
+
+    def rollback_album_relocation(self, operation_id: str) -> Dict[str, Any]:
+        """Roll back album relocation via HTTP."""
+        return self._request("POST", "/albums/relocation/rollback", {"operation_id": operation_id})
+
+    def relocate_album(self, album_id: int, mode: str = "rename", **kwargs) -> Dict[str, Any]:
+        """Perform relocation (rename or move-to-library) through album_relocation_v1 family via HTTP."""
+        payload = {"album_id": album_id, "mode": mode, **kwargs}
+        plan_res = self.plan_album_relocation(payload)
+        if not plan_res.get("ok"):
+            return {"ok": False, "error": plan_res.get("error") or "Relocation plan rejected"}
+        op_id = plan_res.get("operation_id")
+        if not op_id:
+            return {"ok": True, "dest_dir": plan_res.get("dest_dir") or "", "moved_count": 0}
+        apply_res = self.apply_album_relocation(op_id)
+        if not apply_res.get("ok"):
+            return {"ok": False, "error": apply_res.get("error") or "Relocation apply failed"}
+        return {"ok": True, "dest_dir": apply_res.get("dest_dir") or plan_res.get("dest_dir") or "", "moved_count": apply_res.get("moved_count", 0)}
+
+    def move_album_to_library(self, album_id: int) -> Dict[str, Any]:
+        """Move imported album items into authoritative MUSIC_ROOT through album_relocation_v1 family via HTTP."""
+        return self.relocate_album(album_id, mode="move_to_library")
+
+    # ── album_metadata_repair_v1 Pure HTTP Client Methods ──────────────────────
+
+    def plan_album_metadata(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Request preview plan for album metadata update via HTTP."""
+        return self._request("POST", "/albums/metadata/plan", payload)
+
+    def apply_album_metadata(self, operation_id: str) -> Dict[str, Any]:
+        """Execute album metadata apply via HTTP."""
+        return self._request("POST", "/albums/metadata/apply", {"operation_id": operation_id})
+
+    def rollback_album_metadata(self, operation_id: str) -> Dict[str, Any]:
+        """Roll back album metadata update via HTTP."""
+        return self._request("POST", "/albums/metadata/rollback", {"operation_id": operation_id})
+
+    def update_album_metadata(self, album_id: int, updates: Dict[str, Any], item_updates: Optional[Dict[str, Any]] = None, **kwargs) -> Dict[str, Any]:
+        """Update album metadata & audio tags through album_metadata_repair_v1 family via HTTP."""
+        payload = {"album_id": album_id, "updates": updates, "item_updates": item_updates or {}, **kwargs}
+        plan_res = self.plan_album_metadata(payload)
+        if not plan_res.get("ok"):
+            return {"ok": False, "error": plan_res.get("error") or "Metadata plan rejected"}
+        op_id = plan_res.get("operation_id")
+        if not op_id:
+            return {"ok": True, "album_fields_changed": 0, "items_changed": 0}
+        apply_res = self.apply_album_metadata(op_id)
+        if not apply_res.get("ok"):
+            return {"ok": False, "error": apply_res.get("error") or "Metadata apply failed"}
+        return {"ok": True, "album_fields_changed": plan_res.get("album_fields_changed", 0), "items_changed": plan_res.get("items_changed", 0)}
+
 
 class RemoteSQLiteCursor:
     def __init__(self, client: BeetsClient):

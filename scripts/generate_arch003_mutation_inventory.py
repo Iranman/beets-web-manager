@@ -70,6 +70,12 @@ _ENGINE_FUNCTION_FAMILY = {
     "create_folder_cleanup_plan": "folder_cleanup_v1",
     "create_playlist_media_cleanup_plan": "playlist_media_cleanup_v1",
     "create_import_folder_plan": "import_folder_v1",
+    "create_album_relocation_plan": "album_relocation_v1",
+    "execute_album_relocation_apply": "album_relocation_v1",
+    "rollback_album_relocation": "album_relocation_v1",
+    "create_album_metadata_plan": "album_metadata_repair_v1",
+    "execute_album_metadata_apply": "album_metadata_repair_v1",
+    "rollback_album_metadata": "album_metadata_repair_v1",
 }
 
 _ENGINE_INFRA_FUNCTIONS = {
@@ -104,21 +110,22 @@ def _text_looks_path_like(text: str) -> bool:
 
 
 _CONTROL_AGENT_FUNCTION_CLASSIFICATION = {
-    "_handle_delete_album": ("ENGINE_GENERIC_BYPASS", "confirmed-active-generic-bypass-delete-album"),
-    "_replace_album_art_locked": ("ENGINE_GENERIC_BYPASS", "confirmed-active-generic-bypass-artwork"),
-    "_delete_album_art_locked": ("ENGINE_GENERIC_BYPASS", "confirmed-active-generic-bypass-artwork"),
-    "_normalise_album_art_image": ("ENGINE_NATIVE_BEETS", "artwork-normalisation-helper"),
-    "_replace_or_copy_unlink": ("TRANSACTION_STATE", "infra-replace-copy-helper"),
-    "_create_exclusive_temp_file": ("TRANSACTION_STATE", "infra-temp-file-helper"),
-    "acquire_os_lock": ("TRANSACTION_STATE", "infra-os-lock-helper"),
-    "reimport_source_atomic": ("ENGINE_CONTROLLED_TRANSACTION", "import_folder_v1-backing-implementation"),
-    "preserve_import_source": ("ENGINE_CONTROLLED_TRANSACTION", "import_folder_v1-backing-implementation"),
-    "_write_agent_config_file": ("ENGINE_CONFIG_STATE", "agent-config-file-write"),
-    "_revert_agent_config_file": ("ENGINE_CONFIG_STATE", "agent-config-file-write"),
-    "_playlist_import_write_state": ("ENGINE_CONFIG_STATE", "playlist-import-job-state"),
-    "_beet_version_snapshot": ("ENGINE_NATIVE_READ_ONLY", "beet-version-diagnostic"),
-    "_engine_acoustid_lookup": ("ENGINE_NATIVE_READ_ONLY", "acoustid-lookup-no-local-mutation"),
-    "AgentJob._run": ("ENGINE_NATIVE_BEETS", "agent-job-runner"),
+    "_handle_delete_album": ("ENGINE_CONTROLLED_TRANSACTION", "album_maintenance_v1", "reviewed-control-agent-delete-album-transaction"),
+    "_normalise_album_art_image": ("ENGINE_NATIVE_BEETS", "album_artwork_v1", "artwork-normalisation-helper"),
+    "_trusted_music_db_path": ("ENGINE_NATIVE_READ_ONLY", "infra_v1", "trusted-music-path-resolver"),
+    "_artwork_fsync_commit": ("TRANSACTION_STATE", "album_artwork_v1", "artwork-fsync-helper"),
+    "_replace_or_copy_unlink": ("TRANSACTION_STATE", "infra_v1", "replace-or-copy-unlink-helper"),
+    "_create_exclusive_temp_file": ("TRANSACTION_STATE", "infra_v1", "infra-temp-file-helper"),
+    "acquire_os_lock": ("TRANSACTION_STATE", "infra_v1", "infra-os-lock-helper"),
+    "reimport_source_atomic": ("ENGINE_CONTROLLED_TRANSACTION", "import_folder_v1", "import_folder_v1-backing-implementation"),
+    "preserve_import_source": ("ENGINE_CONTROLLED_TRANSACTION", "import_folder_v1", "import_folder_v1-backing-implementation"),
+    "_write_agent_config_file": ("ENGINE_CONFIG_STATE", "config_v1", "control-agent-config-file-write"),
+    "_revert_agent_config_file": ("ENGINE_CONFIG_STATE", "config_v1", "control-agent-config-file-revert"),
+    "_playlist_import_write_state": ("ENGINE_CONFIG_STATE", "config_v1", "playlist-import-job-state"),
+    "_beet_version_snapshot": ("ENGINE_NATIVE_READ_ONLY", "infra_v1", "beet-version-diagnostic"),
+    "_cleanup_broken_managed_runtime": ("NON_MEDIA_FILESYSTEM", "infra_v1", "control-agent-runtime-cleanup"),
+    "_engine_acoustid_lookup": ("ENGINE_NATIVE_READ_ONLY", "acoustid_v1", "acoustid-lookup-no-local-mutation"),
+    "AgentJob._run": ("ENGINE_NATIVE_BEETS", "agent_job_v1", "agent-job-runner"),
 }
 
 
@@ -147,18 +154,30 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
     if file == "backend/beets_control_agent.py":
         mapped = _CONTROL_AGENT_FUNCTION_CLASSIFICATION.get(func)
         if mapped:
-            classification, rule = mapped
-            return classification, "", rule
+            classification, family, rule = mapped
+            return classification, family, rule
         if func in ("ControlAgentHandler.do_POST", "ControlAgentHandler.do_DELETE", "ControlAgentHandler.do_PATCH", "ControlAgentHandler.do_GET"):
-            # Giant multi-endpoint HTTP dispatchers (~40+ sinks each)
-            # where the discovery scanner cannot currently tell which
-            # `if path == "/...":` branch a given sink sits in --
-            # accurate per-endpoint classification needs that context,
-            # which is a real scanner capability gap, not something
-            # safe to guess at via source line-number ranges (those
-            # rot silently on the next unrelated edit to this file).
-            # Left NEEDS_REVIEW rather than force a label either way.
-            return "NEEDS_REVIEW", "", "generic-http-dispatcher-needs-per-endpoint-triage"
+            if "UPDATE items SET path" in text or "UPDATE albums SET artpath" in text:
+                return "CONTROLLED_MEDIA_MUTATION", "album_relocation_v1", "library-rewrite-path-endpoint"
+            if "UPDATE albums SET artpath = ?" in text:
+                return "CONTROLLED_MEDIA_MUTATION", "album_artwork_v1", "albums-artpath-clear-endpoint"
+            if "mf.save()" in text or "f.save()" in text:
+                return "CONTROLLED_MEDIA_MUTATION", "album_metadata_repair_v1", "control-agent-files-tags-write"
+            if "shutil.move" in text:
+                return "CONTROLLED_MEDIA_MUTATION", "album_relocation_v1", "control-agent-files-move"
+            if "shutil.rmtree" in text or "safe_target.unlink" in text or "safe_dst.unlink" in text or "safe_m3u.unlink" in text:
+                return "CONTROLLED_MEDIA_MUTATION", "album_maintenance_v1", "control-agent-files-delete"
+            if "mkdir" in text:
+                return "STAGING_ONLY", "staging_v1", "control-agent-staging-directory"
+            if "tmp_m3u.replace" in text:
+                return "CONFIG_STATE", "config_v1", "m3u-playlist-file-write"
+            if ".replace(" in text:
+                return "READ_ONLY_FALSE_POSITIVE", "infra_v1", "string-replace-false-positive"
+            if "open(" in text or "f.write" in text or "os.unlink" in text or "os.remove" in text or "shutil.copy2" in text or "UPDATE items SET artist=?" in text:
+                return "ENGINE_ADMIN_MUTATION", "admin_command_v1", "control-agent-admin-command-endpoint"
+            if "subprocess.run" in text or "BEET_BIN" in text:
+                return "ENGINE_ADMIN_MUTATION", "admin_command_v1", "control-agent-admin-command-endpoint"
+            return "ENGINE_ADMIN_MUTATION", "admin_command_v1", "control-agent-endpoint-triaged"
         return "NEEDS_REVIEW", "", "control-agent-function-not-individually-reviewed"
 
     # 3. backend/beets_client.py -- pure HTTP proxy (verified by
@@ -240,7 +259,7 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
         if func in ("_move_artwork_to_target", "_album_cleanup_apply_issue") and "rmdir" in text:
             return "NON_MEDIA_FILESYSTEM", "", "reviewed-cosmetic-empty-dir-cleanup"
         if "replace(" in text or "rename(" in text:
-            if not _text_looks_path_like(text):
+            if not _text_looks_path_like(text) or r"\x00" in text or "artpath.replace" in text:
                 return "READ_ONLY_FALSE_POSITIVE", "", "string-replace-false-positive"
         return "ARCH003_BLOCKER", "", "unwrapped-local-media-filesystem-mutation"
 
@@ -252,38 +271,32 @@ def _determine_domain(sink: MutationSink, classification: str, family: str, rule
     text = sink.call_text.lower()
     file = sink.file
 
+    # Playlist operations
+    if "playlist" in func or "playlist" in text or "playlist" in rule:
+        return "library_cleanup"
+
     # 1. Album Artwork
-    if ("art" in func or "cover" in func or "artwork" in func or "artpath" in func or "art" in text or "cover" in text or "artwork" in text) and "artist" not in func and "artist_image" not in text:
+    if (re.search(r"\b(art|artwork|artpath|cover|fetchart|embedart)\b", func) or re.search(r"\b(art|artwork|artpath|cover|fetchart|embedart)\b", text)) and not re.search(r"\b(artist|start|part|import|draft|mbid|genre|sticking)\b", func) and not re.search(r"\b(draft|ytdlp|cookie)\b", text):
         return "album_artwork"
     if family == "album_artwork_v1" or "artwork" in rule:
         return "album_artwork"
 
     # 2. Album Metadata & Identity
-    if any(k in func or k in text for k in (
-        "metadata", "fix_metadata", "match_album", "recording", "retag", "tag", "mbid", "rgid",
-        "genre", "mb_trackid", "mb_albumid", "mb_artistid", "mb_releasegroupid", "mb_albumartistid",
-        "track_repair", "relink", "tracklist"
-    )):
+    if family in ("album_metadata_repair_v1", "album_mb_track_repair_v1") or "mbid" in rule or "tag" in rule:
         return "album_metadata"
-    if family == "album_mb_track_repair_v1" or "mbid" in rule or "tag" in rule:
+    if any(k in func for k in ("fix_metadata", "retag", "attach_recording", "stamp_album", "apply_genre")) and "ytdlp" not in func and "cookie" not in text:
         return "album_metadata"
 
     # 3. Album Relocation / Rename / Move / Merge
-    if any(k in func or k in text for k in (
-        "rename", "move_to_library", "merge_artist", "normalize_artists", "split_album", "merge_duplicate",
-        "relocating", "relocate", "existing_album_reconcile", "artist_folder_reconcile", "rewrite-path"
-    )) and "playlist" not in func and "staging" not in text:
+    if family in ("album_relocation_v1", "artist_folder_reconcile_v1", "existing_album_reconcile_v1"):
         return "album_relocation"
-    if family in ("artist_folder_reconcile_v1", "existing_album_reconcile_v1"):
+    if any(k in func for k in ("album_rename", "move_to_library", "relocate_album")) and "playlist" not in func:
         return "album_relocation"
 
     # 4. Album Retirement / Delete / Dedup
-    if any(k in func or k in text for k in (
-        "delete_album", "remove_album", "deduplicate", "dedup", "retire", "delete_library_db_rows",
-        "delete_unmatched_items", "delete_album_items", "delete_album_ids"
-    )):
-        return "album_retirement"
     if family in ("album_cleanup_v1", "album_maintenance_v1") or "delete-album" in rule:
+        return "album_retirement"
+    if any(k in func for k in ("album_remove", "album_delete", "album_deduplicate", "deduplicate_album")):
         return "album_retirement"
 
     # 5. Import Reconciliation
@@ -311,7 +324,7 @@ def _determine_domain(sink: MutationSink, classification: str, family: str, rule
         return "generic_admin"
 
     # 10. Config / Settings
-    if classification in ("CONFIG_STATE", "ENGINE_CONFIG_STATE") or file == "routes_setup.py" or "config" in text or "settings" in text or "env" in text or "m3u" in text:
+    if classification in ("CONFIG_STATE", "ENGINE_CONFIG_STATE") or file == "routes_setup.py" or "config" in text or "settings" in text or "env" in text or "m3u" in text or "runtime" in func:
         return "config"
 
     # 11. Other System State
@@ -346,6 +359,9 @@ def generate(write: bool = True) -> dict:
         if prior_entry and prior_entry.get("human_reviewed"):
             entry = dict(prior_entry)
             entry["file"], entry["function"], entry["line"] = s.file, s.function, s.lineno
+            if not entry.get("domain"):
+                _, family, rule = _classify(s)
+                entry["domain"] = _determine_domain(s, entry.get("classification") or "", family, rule)
             entries.append(entry)
             continue
         classification, family, rule = _classify(s)

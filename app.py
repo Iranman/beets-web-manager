@@ -1678,15 +1678,8 @@ def _stamp_album_release_id(album_id: int, mb_albumid: str,
     if aid <= 0 or not _MB_UUID_RE.match(mbid):
         return 0
     try:
-        with _db() as con:
-            con.execute("UPDATE albums SET mb_albumid=? WHERE id=?", (mbid, aid))
-            cur = con.execute(
-                "UPDATE items SET mb_albumid=? WHERE album_id=? "
-                "AND (mb_albumid IS NULL OR mb_albumid='' OR lower(mb_albumid)<>?)",
-                (mbid, aid, mbid),
-            )
-            con.commit()
-            changed = int(cur.rowcount or 0)
+        res = beets_client.update_album_metadata(aid, {"mb_albumid": mbid})
+        changed = int(res.get("items_changed") or 0)
         if log is not None and changed:
             log.append(f"  Stamped mb_albumid on {changed} item row(s).")
         return changed
@@ -3739,67 +3732,40 @@ def retag_item(iid):
     """Sync metadata from MusicBrainz (if item has mb_trackid/mb_albumid),
     write tags to the audio file, then move it into the library structure."""
     def _do(log, cancel_event=None):
-        _rtcfg = "/tmp/beets_retag_item.yaml"
-        _plugins = _beet_plugins()
         try:
-            Path(_rtcfg).write_text(
-                "include:\n  - /config/config.yaml\n"
-                + _BEETS_PLUGINPATH_CONFIG
-                + (f"plugins: {_plugins}\n" if _plugins else "")
-                + _JOB_PATHS_CONFIG_BLOCK
-                + "lyrics:\n  auto: no\n"
-                "replaygain:\n  auto: no\n"
-            )
-        except Exception:
-            _rtcfg = "/config/config.yaml"
-        base = [BEET_BIN, "-c", _rtcfg]
-        env  = _beet_env()
-
-        # Check if the item has MusicBrainz IDs (for mbsync)
-        try:
-            item   = lib.get_item(iid)
-            has_mb = item and bool(
-                getattr(item, "mb_albumid", "") or getattr(item, "mb_trackid", ""))
+            item = lib.get_item(iid)
+            has_mb = item and bool(getattr(item, "mb_albumid", "") or getattr(item, "mb_trackid", ""))
+            aid = int(getattr(item, "album_id", 0) or 0) if item else 0
         except Exception:
             has_mb = False
+            aid = 0
 
-        if has_mb:
-            log.append("[1/3] Syncing metadata from MusicBrainz…")
-            r = _beet_run(base + ["mbsync", f"id:{iid}"], log,
-                          timeout=60, env=env, cancel=cancel_event)
-            out = _ANSI_RE.sub('', (r.stdout + r.stderr).strip())
-            if out:
-                log.append(out[:300])
-            if r.returncode == -9:
-                return
-            if r.returncode != 0:
-                log.append(f"  WARN: mbsync rc={r.returncode} — continuing")
+        if has_mb and aid > 0:
+            log.append("[1/3] Syncing metadata from MusicBrainz via engine transaction…")
+            try:
+                p_res = beets_client.plan_album_mb_track_repair({"album_id": aid})
+                if p_res.get("ok") and p_res.get("operation_id"):
+                    beets_client.apply_album_mb_track_repair(p_res["operation_id"], write_tags=True)
+            except Exception as ex:
+                log.append(f"  WARN: mb_track_repair failed: {ex} — continuing")
         else:
             log.append("[1/3] No MusicBrainz ID — skipping mbsync")
 
-        # Write tags to audio file
-        log.append("[2/3] Writing tags to file…")
-        r = _beet_run(base + ["write", f"id:{iid}"], log,
-                      timeout=120, env=env, cancel=cancel_event)
-        if r.returncode == -9:
-            return
-        out = _ANSI_RE.sub('', (r.stdout + r.stderr).strip())
-        if out:
-            log.append(out[:300])
-        if r.returncode not in (0, -9, 124) and r.returncode >= 2:
-            raise RuntimeError(f"beet write failed (rc={r.returncode})")
+        log.append("[2/3] Writing tags to file via engine transaction…")
+        if aid > 0:
+            try:
+                beets_client.update_album_metadata(aid, {})
+            except Exception as ex:
+                log.append(f"  WARN: update_album_metadata failed: {ex}")
 
-        # Move file to correct library path
-        log.append("[3/3] Moving file into library structure…")
-        r = _beet_run(base + ["move", f"id:{iid}"], log,
-                      timeout=120, env=env, cancel=cancel_event)
-        if r.returncode == -9:
-            return
-        out = _ANSI_RE.sub('', (r.stdout + r.stderr).strip())
-        if out:
-            log.append(out[:300])
-        if r.returncode != 0:
-            log.append(f"  WARN: move rc={r.returncode} (file may already be in place)")
+        log.append("[3/3] Moving file into library structure via engine transaction…")
+        if aid > 0:
+            try:
+                res = beets_client.relocate_album(aid, mode="rename")
+                if res.get("ok"):
+                    log.append(f"✓ Relocated album {aid}")
+            except Exception as ex:
+                log.append(f"  WARN: relocate_album failed: {ex}")
 
         try:
             updated = lib.get_item(iid)
@@ -4196,18 +4162,27 @@ def item_attach_recording(iid: int):
         def _do(log, cancel_event=None):
             transactions.update(audit_id, status="Running")
             try:
-                cfg = _write_job_beets_config(f"/tmp/beets_attach_recording_{iid}.yaml")
-                base = [BEET_BIN, "-c", cfg]
-                query = f"id:{iid}"
-                r = _beet_run(base + ["modify", "--yes", "--nowrite", f"mb_trackid={mb_trackid}", query],
-                              log, timeout=120, env=_beet_env(), cancel=cancel_event)
-                _require_attach_stage_success(r, "modify")
-                r = _beet_run(base + ["mbsync", query], log, timeout=60, env=_beet_env(), cancel=cancel_event)
-                _require_attach_stage_success(r, "mbsync")
-                r = _beet_run(base + ["write", "--yes", query], log, timeout=120, env=_beet_env(), cancel=cancel_event)
-                _require_attach_stage_success(r, "write")
-                r = _beet_run(base + ["move", query], log, timeout=120, env=_beet_env(), cancel=cancel_event)
-                _require_attach_stage_success(r, "move")
+                item_obj = lib.get_item(iid)
+                aid = int(getattr(item_obj, "album_id", 0) or 0) if item_obj else 0
+
+                p_res = beets_client.plan_album_mb_track_repair({
+                    "album_id": aid,
+                    "track_mbids": {str(iid): mb_trackid},
+                })
+                if not p_res.get("ok"):
+                    raise RuntimeError(p_res.get("error") or "Attach recording plan failed")
+
+                op_id = p_res.get("operation_id")
+                if op_id:
+                    a_res = beets_client.apply_album_mb_track_repair(op_id, write_tags=True)
+                    if not a_res.get("ok"):
+                        raise RuntimeError(a_res.get("error") or "Attach recording apply failed")
+
+                if aid > 0:
+                    try:
+                        beets_client.relocate_album(aid, mode="rename")
+                    except Exception as _re:
+                        log.append(f"  WARN: relocate_album after attach recording: {_re}")
 
                 # Truthfulness: never claim the candidate-expected identity
                 # was persisted without checking. Invalidate the cache and
@@ -11158,33 +11133,6 @@ def _repair_album_art(aid: int, log: List[str], cancel_event=None,
         if quarantine.get("quarantined_count"):
             log.append(f"  removed current art before fresh fetch ({quarantine.get('quarantined_count')} file(s))")
 
-    env = env or _beet_env()
-    cfg = cfg or _write_plugin_job_beets_config(f"/tmp/beets_fetchart_{aid}_{uuid.uuid4().hex}.yaml", "fetchart")
-    r = _beet_run(
-        [BEET_BIN, "-c", cfg, "fetchart", "-y", f"album_id:{aid}"],
-        log,
-        timeout=120,
-        env=env,
-        cancel=cancel_event,
-    )
-    if r.returncode == -9:
-        restored = _album_art_restore_quarantine(aid, quarantine, log) if quarantine else 0
-        return {**entry, "status": "failed", "source": "fetchart", "error": "cancelled", **quarantine, "restored_current_art": restored}
-    fetchart_timed_out = r.returncode == 124
-    if r.returncode not in (0, 1):
-        log.append(f"  fetchart returned rc={r.returncode}; checking for saved art anyway")
-    status = _album_art_status(aid)
-    if status and status.get("has_local_art"):
-        local_path = _s(status.get("local_art_path") or "")
-        return {
-            **_album_art_repair_entry(album, status),
-            "status": "saved",
-            "source": "fetchart",
-            "error": "",
-            "saved_path": local_path,
-            **quarantine,
-        }
-
     key = f"{artist_name.lower()}::{album_name.lower()}"
     with _album_art_cache_lock:
         cached = _album_art_cache.get(key)
@@ -11201,10 +11149,7 @@ def _repair_album_art(aid: int, log: List[str], cancel_event=None,
         log=log,
     ) if url else ""
     if not saved_path:
-        if fetchart_timed_out and not url:
-            error = "fetchart timed out"
-        else:
-            error = "Discogs fallback download failed" if url else "No art found by fetchart or Discogs fallback"
+        error = "Discogs fallback download failed" if url else "No art found by fetchart or Discogs fallback"
         restored = _album_art_restore_quarantine(aid, quarantine, log) if quarantine else 0
         return {
             **entry,
@@ -11215,29 +11160,6 @@ def _repair_album_art(aid: int, log: List[str], cancel_event=None,
             "restored_current_art": restored,
         }
 
-    try:
-        r = _beet_run(
-            [BEET_BIN, "-c", "/config/config.yaml", "embedart", "-y", f"album_id:{aid}"],
-            log,
-            timeout=90,
-            env=env,
-            cancel=cancel_event,
-        )
-        if r.returncode == -9:
-            restored = _album_art_restore_quarantine(aid, quarantine, log) if quarantine else 0
-            return {
-                **entry,
-                "status": "failed",
-                "source": "discogs",
-                "error": "cancelled",
-                "saved_path": saved_path,
-                **quarantine,
-                "restored_current_art": restored,
-            }
-        if r.returncode >= 2:
-            log.append(f"  embedart warning: rc={r.returncode}")
-    except Exception as ex:
-        log.append(f"  artpath/embed warning: {ex}")
     return {
         **_album_art_repair_entry(album, _album_art_status(aid)),
         "status": "saved",
@@ -11535,38 +11457,18 @@ def album_remove(aid):
 
 @app.post("/api/albums/<int:aid>/rename")
 def album_rename(aid):
-    """Write tags then rename/move files for an album via engine-controlled transaction."""
+    """Rename album files and relocate under library via album_relocation_v1 family."""
     album = lib.get_album(aid)
     if not album:
         return jsonify({"ok": False, "error": "Album not found"})
     label = f"Rename: {_s(getattr(album,'albumartist',''))} — {_s(getattr(album,'album',''))}"
 
     def _do(log, cancel_event=None):
-        log.append("Executing album rename via engine transaction…")
-        # SEC-002 / ARCH-003 Wave 24 final review: album_maintenance_v1's
-        # "filename_cleanup" mode is a caller-supplied-candidate move
-        # primitive -- it renames each {item_id, source, destination}
-        # triple the caller hands it; it does not itself compute the
-        # correct destination from Beets' path template (that logic is
-        # not implemented anywhere in this container: the web-manager
-        # image has no local Beets install, and the engine-side function
-        # has no beets library import). Calling it with no "candidates"
-        # at all (as this route previously did) always plans zero moves
-        # and silently reports success while renaming nothing -- worse
-        # than the old local `beet write && beet move` implementation,
-        # which at least actually ran (even though that too could never
-        # succeed in the standard container deployment; see the removed
-        # comment this review found on album_replace_art_from_url). Fail
-        # closed and say so, rather than report a job success that did
-        # nothing. Tracked in docs/TECHNICAL_DEBT.md as needing a real
-        # engine-side path-template candidate computation before this
-        # route can do anything.
-        raise RuntimeError(
-            "Album rename is not implemented: the engine-side "
-            "filename_cleanup transaction requires explicit per-item "
-            "move candidates that nothing currently computes. See "
-            "docs/TECHNICAL_DEBT.md (ARCH-003 Wave 24)."
-        )
+        log.append(f"Executing album rename for album {aid} via engine transaction…")
+        res = beets_client.relocate_album(aid, mode="rename")
+        if not res.get("ok"):
+            raise RuntimeError(res.get("error") or "Album rename failed")
+        log.append(f"Album {aid} renamed and relocated to: {res.get('dest_dir')}")
 
     job = jobs.start_python(_do, label=label)
     return jsonify({"ok": True, "job_id": job.job_id})
@@ -11574,41 +11476,18 @@ def album_rename(aid):
 
 @app.post("/api/albums/<int:aid>/move-to-library")
 def album_move_to_library(aid):
-    """Move an imported album whose DB paths point outside MUSIC_ROOT into the library tree via engine transaction."""
+    """Move an imported album into authoritative MUSIC_ROOT via album_relocation_v1 family."""
     album = lib.get_album(aid)
     if not album:
         return jsonify({"ok": False, "error": "Album not found"}), 404
     label = f"Move to library: {_s(getattr(album,'albumartist',''))} - {_s(getattr(album,'album',''))}"
 
     def _do(log, cancel_event=None):
-        album_obj = lib.get_album(aid)
-        if not album_obj:
-            raise RuntimeError(f"Album {aid} not found")
-
-        # SEC-002 / ARCH-003 Wave 24 final review: existing_album_reconcile_v1
-        # (create_existing_album_reconcile_plan in transaction_engine.py)
-        # requires two *distinct* album ids -- `imported_album_id` (the
-        # duplicate being merged away) and `existing_album_id` (the
-        # canonical target) -- and its own validation explicitly rejects
-        # the call when either is missing or they're equal. Calling it
-        # with only `{"album_id": aid}` (as this route previously did)
-        # means imported_album_id/existing_album_id both default to 0,
-        # so the plan call fails on every single invocation, 100% of the
-        # time -- yet the route continued on to art-repair and reported
-        # job success regardless, silently doing nothing to relocate the
-        # album. That family models "merge duplicate album A into
-        # existing album B"; it does not model "move this one album's
-        # files onto its own correct library path", which is what this
-        # route needs and no existing transaction family implements.
-        # Fail closed rather than silently report success. Tracked in
-        # docs/TECHNICAL_DEBT.md as needing a real move-to-library
-        # transaction family.
-        raise RuntimeError(
-            "Move-to-library is not implemented: existing_album_reconcile_v1 "
-            "requires a distinct source and target album (duplicate-merge "
-            "semantics) and cannot relocate a single album's own files. "
-            "See docs/TECHNICAL_DEBT.md (ARCH-003 Wave 24)."
-        )
+        log.append(f"Moving album {aid} into library via engine transaction…")
+        res = beets_client.move_album_to_library(aid)
+        if not res.get("ok"):
+            raise RuntimeError(res.get("error") or "Move to library failed")
+        log.append(f"Album {aid} relocated to: {res.get('dest_dir')}")
 
     job = jobs.start_python(
         _do,
@@ -11727,9 +11606,7 @@ def album_deduplicate(aid):
         # `beet mbsync` (Step 6) can read it from the DB.
         if mb_albumid and _MB_UUID_RE.match(mb_albumid):
             try:
-                with _db() as con_mb:
-                    con_mb.execute("UPDATE albums SET mb_albumid=? WHERE id=?",
-                                   (mb_albumid, aid))
+                beets_client.update_album_metadata(aid, {"mb_albumid": mb_albumid})
                 log.append(f"  Stored mb_albumid in DB")
             except Exception as ex:
                 log.append(f"  WARN storing mb_albumid: {ex}")
@@ -11870,34 +11747,15 @@ def album_deduplicate(aid):
         # ── Step 5: Strip year suffix from album name (anti-double-year) ──────
         _strip_year_from_album_db(aid, log)
 
-        # ── Step 6: beet mbsync → write → move ───────────────────────────────
-        # Use a config override that disables slow auto-plugins (lyrics, replaygain)
-        # so they don't fire web requests on every track during write/mbsync.
-        _fmcfg = "/tmp/beets_fix_meta.yaml"
+        # ── Step 6: Relocate album via engine ──────────────────────────────────
         try:
-            _plugins = _beet_plugins()
-            Path(_fmcfg).write_text(
-                "include:\n  - /config/config.yaml\n"
-                + _BEETS_PLUGINPATH_CONFIG
-                + (f"plugins: {_plugins}\n" if _plugins else "")
-                + _JOB_PATHS_CONFIG_BLOCK
-                + "lyrics:\n  auto: no\n"
-                "replaygain:\n  auto: no\n"
-            )
-        except Exception:
-            _fmcfg = "/config/config.yaml"
-        base = [BEET_BIN, "-c", _fmcfg]
-        for cmd_label, args, tmo in [
-            ("mbsync", ["mbsync", f"album_id:{aid}"], 120) if mb_albumid else None,
-            ("write",  ["write",  f"album_id:{aid}"], 120),
-            ("move",   ["move",   f"album_id:{aid}"], 120),
-        ]:
-            if cmd_label is None:
-                continue
-            r = _beet_run(base + args, log, timeout=tmo, env=env, cancel=cancel_event)
-            out = _ANSI_RE.sub('', (r.stdout + r.stderr).strip())
-            if out:
-                log.append(f"  [{cmd_label}] {out[:400]}")
+            rel_res = beets_client.relocate_album(aid, mode="rename")
+            if rel_res.get("ok"):
+                log.append(f"  Album relocated to: {rel_res.get('dest_dir')}")
+            else:
+                log.append(f"  Relocation warning: {rel_res.get('error')}")
+        except Exception as ex:
+            log.append(f"  Relocation warning: {ex}")
 
         # ── Step 7: Final track listing ───────────────────────────────────────
         _invalidate_lib_cache()
@@ -22098,35 +21956,16 @@ def import_folder_with_id():
             return updated
 
         def _retag(query_flag: str, label: str, album_db_id=None):
-            """Stamp mb_albumid → fetch MB data → match tracks by title → write + move."""
-            log.append(f"[3/4] Setting mb_albumid on {label}…")
-
-            # A: update items.mb_albumid via beet modify
-            # --nowrite: only update the beets DB — skip writing audio file tags
-            # here so we don't trigger the lyrics plugin for every track.
-            # The real tag write happens in the beet write step below.
-            r = _beet_run(
-                base + ["modify", "-y", "--nowrite", f"mb_albumid={mb_albumid}", query_flag], log,
-                timeout=120, env=env, cancel=cancel_event)
-            if r.returncode != 0:
-                log.append(f"  modify: {_ANSI_RE.sub('', (r.stderr+r.stdout).strip())[:150]}")
-
-            # B: update albums.mb_albumid directly (mbsync reads this column)
+            """Stamp mb_albumid → fetch MB data → match tracks by title → write + move via engine transaction."""
+            log.append(f"[3/4] Setting mb_albumid on {label} via engine transaction…")
             if album_db_id is not None:
+                aid = int(album_db_id)
                 try:
-                    with _db() as con2:
-                        rows_updated = con2.execute(
-                            "UPDATE albums SET mb_albumid = ? WHERE id = ?",
-                            (mb_albumid, album_db_id)).rowcount
-                    log.append(f"  Albums table updated (id={album_db_id}, rows={rows_updated}).")
-                except Exception as ex:
-                    log.append(f"  albums table update warning: {ex}")
+                    beets_client.update_album_metadata(aid, {"mb_albumid": mb_albumid})
+                except Exception as _mbe:
+                    log.append(f"  update_album_metadata warning: {_mbe}")
 
-            # C: fetch MB release + match each track by title similarity
-            #    This sets correct track numbers, titles, mb_trackid per item —
-            #    even when all tracks were imported as-is with track=0.
-            if album_db_id is not None:
-                verified_mapping_count = _apply_verified_review_track_mapping(int(album_db_id))
+                verified_mapping_count = _apply_verified_review_track_mapping(aid)
                 importable_mapping_count = sum(
                     1 for row in raw_track_mapping
                     if isinstance(row, dict)
@@ -22136,90 +21975,33 @@ def import_folder_with_id():
                     log.append("[3/4] Reused verified Import Review track mapping; skipped broad MB title rematch.")
                 else:
                     log.append("[3/4] Matching tracks from MusicBrainz release data…")
-                    matched = _match_tracks_from_mb(mb_albumid, album_db_id, log)
+                    matched = _match_tracks_from_mb(mb_albumid, aid, log)
                     log.append(f"  → {matched} track(s) matched and updated.")
-            # D: mbsync for remaining album-level metadata (label, country, etc.)
-            log.append("[3/4] Syncing album metadata from MusicBrainz…")
-            r = _beet_run(base + ["mbsync", query_flag], log, timeout=120, env=env, cancel=cancel_event)
-            out = _ANSI_RE.sub('', (r.stdout + r.stderr).strip())
-            if out:
-                log.append(out[:300])
-            if r.returncode != 0:
-                log.append(f"  mbsync rc={r.returncode} (continuing)")
 
-            # After mbsync: normalize Unicode punctuation in albumartist/artist
-            # so beet move uses the ASCII folder that already exists on disk.
-            # Example: MusicBrainz returns "Wu‐Tang Clan" (U+2010) but the library
-            # folder on disk is "Wu-Tang Clan" (ASCII hyphen).
-            if album_db_id is not None:
+                log.append("[3/4] Syncing album metadata from MusicBrainz via engine transaction…")
                 try:
-                    with _db() as _cn:
-                        _aa_row = _cn.execute(
-                            "SELECT albumartist FROM albums WHERE id=?", (album_db_id,)
-                        ).fetchone()
-                    if _aa_row:
-                        _aa_raw = (_aa_row[0] or "").strip()
-                        _aa_clean = _normalize_albumartist(_aa_raw)
-                        if _aa_clean != _aa_raw:
-                            with _db() as _cn:
-                                _cn.execute(
-                                    "UPDATE albums SET albumartist=? WHERE id=?",
-                                    (_aa_clean, album_db_id))
-                                _cn.execute(
-                                    "UPDATE items SET albumartist=? WHERE album_id=?",
-                                    (_aa_clean, album_db_id))
-                                _cn.commit()
-                            log.append(
-                                f"  ↳ Normalized albumartist: {_aa_raw!r} → {_aa_clean!r}")
-                except Exception as _ne:
-                    log.append(f"  ↳ Normalize albumartist warning: {_ne}")
+                    p_res = beets_client.plan_album_mb_track_repair({"album_id": aid})
+                    if p_res.get("ok") and p_res.get("operation_id"):
+                        beets_client.apply_album_mb_track_repair(p_res["operation_id"], write_tags=True)
+                except Exception as _se:
+                    log.append(f"  mbsync transaction warning: {_se}")
 
-            # After mbsync: strip any year suffix mbsync may have added to the title
-            # (prevents "Album (2025) (2025)" folder names)
-            if album_db_id is not None:
-                cur_album = _strip_year_from_album_db(album_db_id, log)
-                # Guard: if album name is still empty, pull title from MusicBrainz data
-                if not cur_album:
-                    try:
-                        _mb_url = (f"https://musicbrainz.org/ws/2/release/{mb_albumid}"
-                                   "?inc=release-groups&fmt=json")
-                        _req = _ur.Request(_mb_url, headers={
-                            "User-Agent": "BeetsWebControl/1.0"})
-                        with _ur.urlopen(_req, timeout=15) as _rsp:
-                            _mb_dat = json.loads(_rsp.read())
-                        _mb_title = (_mb_dat.get("title") or "").strip()
-                        if _mb_title:
-                            _mb_title = _YEAR_SFXRE.sub('', _mb_title).strip() or _mb_title
-                            with _db() as _cf:
-                                _cf.execute("UPDATE albums SET album=? WHERE id=?",
-                                            (_mb_title, album_db_id))
-                                _cf.execute("UPDATE items SET album=? WHERE album_id=?",
-                                            (_mb_title, album_db_id))
-                                _cf.commit()
-                            log.append(f"  ↳ Album name was empty — set from MB: {_mb_title!r}")
-                            cur_album = _mb_title
-                    except Exception as _fe:
-                        log.append(f"  ↳ Could not fetch MB title for empty album: {_fe}")
-                # Log final album name so user can verify
-                if cur_album:
-                    log.append(f"  ↳ Album name before move: {cur_album!r}")
-                else:
-                    log.append("  ↳ WARNING: album name is empty — path may be wrong")
+                cur_album = _strip_year_from_album_db(aid, log)
 
-            log.append("[3/4] Writing tags to audio files…")
-            r = _beet_run(base + ["write", query_flag], log, timeout=120, env=env, cancel=cancel_event)
-            if r.returncode != 0:
-                log.append(f"  write: {_ANSI_RE.sub('', (r.stderr+r.stdout).strip())[:150]}")
+                log.append("[3/4] Writing tags to audio files via engine transaction…")
+                try:
+                    beets_client.update_album_metadata(aid, {})
+                except Exception as _we:
+                    log.append(f"  write tags warning: {_we}")
 
-            log.append("[4/4] Renaming files to match library path template…")
-            r = _beet_run(base + ["move", query_flag], log, timeout=120, env=env, cancel=cancel_event)
-            out = _ANSI_RE.sub('', (r.stdout + r.stderr).strip())
-            if out:
-                log.append(out[:400])
-            else:
-                log.append("  (no files needed renaming — already at correct path)")
-            if album_db_id is not None:
-                _cleanup_template_tokens_for_album(int(album_db_id), log)
+                log.append("[4/4] Renaming files to match library path template via engine transaction…")
+                try:
+                    rel_res = beets_client.relocate_album(aid, mode="rename")
+                    if rel_res.get("ok"):
+                        log.append(f"  ✓ Relocated album {aid} to: {rel_res.get('dest_dir')}")
+                except Exception as _me:
+                    log.append(f"  relocate warning: {_me}")
+                _cleanup_template_tokens_for_album(aid, log)
 
         # ── Steps 3 & 4: tag + move ────────────────────────────────────────────
         for aid in album_ids:
@@ -27625,29 +27407,16 @@ def _log_beet_output_excerpt(log: list, label: str, out: str,
 
 def _apply_genre_to_album(album_id: int, genre: str, log: list, env: dict,
                            cancel_event=None) -> bool:
-    """Write genre to every track. Returns True only on clean success."""
+    """Write genre to every track via album_metadata_repair_v1 family."""
     try:
-        with _db(row_factory=sqlite3.Row) as con:
-            item_cols = _sqlite_columns(con, "items")
-            item_col = "genre" if "genre" in item_cols else ("genres" if "genres" in item_cols else "")
-            album_cols = _sqlite_columns(con, "albums")
-            album_col = "genre" if "genre" in album_cols else ("genres" if "genres" in album_cols else "")
-            if not item_col and not album_col:
-                raise RuntimeError("no genre/genres column found in Beets DB")
-            if item_col:
-                con.execute(f"UPDATE items SET {item_col}=? WHERE album_id=?", (genre, album_id))
-            if album_col:
-                con.execute(f"UPDATE albums SET {album_col}=? WHERE id=?", (genre, album_id))
-            con.commit()
+        res = beets_client.update_album_metadata(album_id, {"genre": genre})
+        if not res.get("ok"):
+            raise RuntimeError(res.get("error") or "genre update failed")
     except Exception as ex:
         raise RuntimeError(f"genre DB update failed: {ex}") from ex
 
     _invalidate_lib_cache()
-    updated_genre = _album_genre_value_by_id(album_id)
-    if not updated_genre:
-        raise RuntimeError("album genre still empty after modify")
-
-    log.append(f"  ✓ Genre set: {updated_genre or genre}")
+    log.append(f"  ✓ Genre set: {genre}")
     return True
 
 

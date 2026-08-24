@@ -21,6 +21,7 @@ import shutil
 import signal
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -2435,7 +2436,7 @@ def _fsync_file(path: Path) -> bool:
             os.fsync(handle.fileno())
         return True
     except Exception as exc:
-        print(f"[BeetsControlAgent] WARNING: fsync failed for {path.name}: {type(exc).__name__}")
+        print(f"[BeetsControlAgent] WARNING: fsync failed for {Path(path).name}: {type(exc).__name__}")
         return False
 
 
@@ -2480,172 +2481,6 @@ def _album_art_trash_root() -> Path:
     if _path_has_symlink_component(trash_root, beets_root, include_leaf=False):
         raise UnsafePathError("album artwork trash root cannot contain symlink components")
     return trash_root
-
-
-def _replace_album_art_locked(con: sqlite3.Connection, album_id: int, body: dict[str, Any]) -> dict[str, Any]:
-    cur = con.cursor()
-    album, album_dir = _album_art_album_dir(cur, album_id)
-    rgid = _check_album_art_identity(album, body.get("expected_mb_releasegroupid"))
-    image_bytes, image_info = _decode_album_art_payload(body)
-    music_root = Path(os.path.realpath(MUSIC_LIBRARY_PATH))
-    if _path_has_symlink_component(album_dir, music_root, include_leaf=True):
-        raise UnsafePathError("album folder cannot contain symlink components")
-    dest = _require_album_art_path(album_dir / ALBUM_ART_FILENAME, album_dir, require_exists=False)
-    tmp_path: Path | None = None
-    backup_path: Path | None = None
-    replaced_existing = False
-    dest_replaced = False
-    try:
-        fd, tmp_name = tempfile.mkstemp(prefix=".albumart-", suffix=".tmp", dir=str(album_dir))
-        tmp_path = Path(tmp_name)
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(image_bytes)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(tmp_path, 0o644)
-        _require_album_art_path(dest, album_dir, require_exists=False)
-        if dest.exists():
-            if dest.is_symlink() or not dest.is_file():
-                raise UnsafePathError("existing artwork is not a regular file")
-            backup_path = album_dir / f".albumart-backup-{uuid.uuid4().hex}.jpg"
-            os.replace(dest, backup_path)
-            replaced_existing = True
-        os.replace(tmp_path, dest)
-        tmp_path = None
-        dest_replaced = True
-        # Best-effort durability for the already-successful rename -- a
-        # failure here does not undo an otherwise-correct replace (the
-        # content itself was already fsync'd above before the rename), but
-        # must not be silently reported as a fully durable write either.
-        durable = _fsync_file(dest) and _fsync_directory(album_dir)
-        cur.execute("UPDATE albums SET artpath = ? WHERE id = ?", (str(dest), album_id))
-        if cur.rowcount != 1:
-            raise AlbumArtOperationError("Album artpath update did not affect exactly one row", 500)
-        con.commit()
-        if backup_path and backup_path.exists():
-            try:
-                backup_path.unlink()
-            except Exception:
-                pass
-        return {
-            "ok": True,
-            "album_id": album_id,
-            "artpath": str(dest),
-            "album_dir": str(album_dir),
-            "mb_releasegroupid": rgid,
-            "source": _db_text(body.get("source") or "user")[:40],
-            "replaced_existing": replaced_existing,
-            "durable": durable,
-            "image": image_info,
-        }
-    except Exception:
-        con.rollback()
-        if dest_replaced:
-            try:
-                if dest.exists():
-                    dest.unlink()
-            except Exception:
-                pass
-        if backup_path and backup_path.exists():
-            try:
-                os.replace(backup_path, dest)
-            except Exception:
-                pass
-        raise
-    finally:
-        if tmp_path and tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except Exception:
-                pass
-
-
-def _album_art_delete_candidates(album: sqlite3.Row, album_dir: Path) -> list[Path]:
-    seen: set[str] = set()
-    candidates: list[Path] = []
-    raw_art = _db_text(album["artpath"]).replace("\x00", "").strip()
-    if raw_art:
-        current = _trusted_music_db_path(raw_art, require_exists=False)
-        current = _require_album_art_path(current, album_dir, require_exists=False)
-        if current.exists():
-            candidates.append(current)
-            seen.add(str(current.resolve(strict=False)))
-    for name in _ALBUM_ART_FIXED_NAMES:
-        candidate = _require_album_art_path(album_dir / name, album_dir, require_exists=False)
-        key = str(candidate.resolve(strict=False))
-        if key in seen:
-            continue
-        if candidate.exists():
-            candidates.append(candidate)
-            seen.add(key)
-    return candidates
-
-
-def _claim_trash_target_exclusive(target: Path) -> None:
-    """Atomically claim `target` as a brand-new, exclusively-created empty
-    file. Raises FileExistsError if anything is already there.
-
-    This exists because the obvious check-then-act pattern (`if
-    target.exists(): ... ; if target.exists(): raise`) leaves a real race
-    window between the check and the later os.replace()/shutil.copy2() in
-    _replace_or_copy_unlink() -- both of those silently overwrite an
-    existing destination and must never be relied on as a no-clobber
-    primitive by themselves. O_CREAT|O_EXCL is the actual atomic
-    "create-if-absent" operation; a random UUID in the path name only
-    reduces collision probability, it is not itself a security boundary.
-    """
-    fd = os.open(str(target), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    os.close(fd)
-
-
-def _delete_album_art_locked(con: sqlite3.Connection, album_id: int) -> dict[str, Any]:
-    cur = con.cursor()
-    album, album_dir = _album_art_album_dir(cur, album_id)
-    candidates = _album_art_delete_candidates(album, album_dir)
-    op_id = uuid.uuid4().hex
-    moved: list[dict[str, str]] = []
-    try:
-        trash_root = _album_art_trash_root()
-        for src in candidates:
-            _require_album_art_path(src, album_dir, require_exists=True)
-            target = trash_root / op_id / src.name
-            target.parent.mkdir(parents=True, exist_ok=True)
-            if _path_has_symlink_component(target.parent, trash_root, include_leaf=True):
-                raise UnsafePathError("album artwork trash path cannot contain symlink components")
-            try:
-                _claim_trash_target_exclusive(target)
-            except FileExistsError:
-                target = target.with_name(f"{target.stem}-{uuid.uuid4().hex[:8]}{target.suffix}")
-                try:
-                    _claim_trash_target_exclusive(target)
-                except FileExistsError as exc:
-                    raise UnsafePathError("album artwork trash target already exists") from exc
-            _replace_or_copy_unlink(src, target)
-            moved.append({"source": str(src), "quarantined": str(target)})
-        cur.execute("UPDATE albums SET artpath = '' WHERE id = ?", (album_id,))
-        if cur.rowcount != 1:
-            raise AlbumArtOperationError("Album artpath clear did not affect exactly one row", 500)
-        con.commit()
-        return {
-            "ok": True,
-            "album_id": album_id,
-            "album_dir": str(album_dir),
-            "removed": [row["source"] for row in moved],
-            "removed_count": len(moved),
-            "quarantined_art": moved,
-        }
-    except Exception:
-        con.rollback()
-        for row in reversed(moved):
-            src = Path(row["quarantined"])
-            dst = Path(row["source"])
-            try:
-                if src.exists() and not dst.exists():
-                    dst.parent.mkdir(parents=True, exist_ok=True)
-                    _replace_or_copy_unlink(src, dst)
-            except Exception:
-                pass
-        raise
 
 
 def is_safe_path(path: object, allowed_types: list = None) -> bool:
@@ -2986,6 +2821,70 @@ def _engine_playlist_quality_for_item(item, path_text: str) -> dict[str, Any]:
         or "/playlist imports/" in path_l
     ):
         flags.append("bad_playlist_path")
+
+
+def _claim_trash_target_exclusive(target: Path) -> None:
+    fd = os.open(str(target), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    os.close(fd)
+    try:
+        os.chmod(str(target), 0o600)
+    except OSError:
+        pass
+
+
+def _handle_delete_album(album_id: int, delete_files: bool = True) -> tuple:
+    item_ids = []
+    if os.path.exists(LIB_PATH):
+        con = sqlite3.connect(LIB_PATH, timeout=10)
+        try:
+            rows = con.execute("SELECT id FROM items WHERE album_id=?", (album_id,)).fetchall()
+            item_ids = [int(r[0]) for r in rows if r[0]]
+        finally:
+            con.close()
+
+    m_roots = _allowed_root_paths(["music"])
+    if MUSIC_ROOT and MUSIC_ROOT not in m_roots:
+        m_roots.append(MUSIC_ROOT)
+    if MUSIC_LIBRARY_PATH:
+        p_lib = Path(MUSIC_LIBRARY_PATH)
+        m_db_p = str(p_lib.parent if p_lib.suffix or (p_lib.exists() and not p_lib.is_dir()) else p_lib)
+        if m_db_p and m_db_p not in m_roots:
+            m_roots.append(m_db_p)
+
+    plan_res = transaction_engine.create_album_maintenance_plan(_txn_store, {
+        "mode": "remove_tracks",
+        "album_id": album_id,
+        "item_ids": item_ids,
+        "delete_files": delete_files,
+        "clean_empty_folders": True,
+    }, music_allowed_roots=m_roots, db_path=LIB_PATH)
+    if not plan_res.get("ok"):
+        return 400, {"error": plan_res.get("error") or "Album deletion plan rejected", "status": "failed", "database_deleted": False}
+
+    op_id = plan_res.get("operation_id")
+    if not op_id:
+        return 200, {"success": True, "status": "success", "database_deleted": True, "album_id": album_id, "items_deleted": 0, "albums_deleted": 1, "files_deleted": 0, "files_failed": 0, "file_errors": []}
+
+    apply_res = transaction_engine.execute_album_maintenance_apply(_txn_store, op_id, music_allowed_roots=m_roots, db_path=LIB_PATH)
+    if not apply_res.get("ok"):
+        return 500, {"error": apply_res.get("error") or "Album deletion apply failed", "status": "failed", "database_deleted": False}
+
+    files_failed = apply_res.get("files_failed", 0)
+    file_errors = apply_res.get("file_errors", [])
+    success = (files_failed == 0)
+    status = "success" if success else "partial_failure"
+
+    return 200, {
+        "success": success,
+        "status": status,
+        "database_deleted": True,
+        "album_id": album_id,
+        "items_deleted": len(item_ids),
+        "albums_deleted": 1,
+        "files_deleted": apply_res.get("quarantined_count", 0) if delete_files else 0,
+        "files_failed": files_failed,
+        "file_errors": file_errors,
+    }
 
     try:
         if path_text and not Path(path_text).exists():
@@ -3607,23 +3506,80 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             except (ValueError, IndexError):
                 self._send_json(400, {"error": "Invalid album ID"})
                 return
-            lock_file = acquire_os_lock(read_only=False)
-            con = None
-            try:
-                con = sqlite3.connect(LIB_PATH, timeout=10)
-                con.row_factory = sqlite3.Row
-                result = _replace_album_art_locked(con, album_id, body if isinstance(body, dict) else {})
-                self._send_json(200, result)
-            except AlbumArtOperationError as exc:
-                self._send_json(exc.status, {"error": exc.message})
-            except UnsafePathError:
-                self._send_json(403, {"error": "Access denied for album artwork path"})
-            except Exception:
-                self._send_json(500, {"error": "Failed to replace album artwork"})
-            finally:
-                if con is not None:
-                    con.close()
-                release_os_lock(lock_file)
+            payload = dict(body) if isinstance(body, dict) else {}
+            payload["album_id"] = album_id
+            payload["mode"] = "replace"
+            m_roots = _allowed_root_paths(["music"])
+            if MUSIC_ROOT and MUSIC_ROOT not in m_roots:
+                m_roots.append(MUSIC_ROOT)
+            if MUSIC_LIBRARY_PATH:
+                p_lib = Path(MUSIC_LIBRARY_PATH)
+                m_db_p = str(p_lib.parent if p_lib.suffix or (p_lib.exists() and not p_lib.is_dir()) else p_lib)
+                if m_db_p and m_db_p not in m_roots:
+                    m_roots.append(m_db_p)
+            s_roots = _allowed_root_paths(["staging"])
+            raw_q = getattr(sys.modules[__name__], "ALBUM_ART_TRASH_ROOT", None)
+            q_root = os.environ.get("TRASH_ROOT") or os.environ.get("RECONCILE_QUARANTINE_DIR") or (str(raw_q) if raw_q else None) or (m_roots[0] if m_roots else "/config/reconcile_quarantine")
+            plan_res = transaction_engine.create_album_artwork_plan(
+                _txn_store,
+                payload,
+                music_allowed_roots=m_roots,
+                staging_allowed_roots=s_roots + [BEETSDIR, "/config"],
+                quarantine_base_root=q_root,
+                db_path=LIB_PATH,
+            )
+            if not plan_res.get("ok"):
+                code = 400
+                c_str = str(plan_res.get("code") or "")
+                err_msg = plan_res.get("error") or "Artwork plan rejected"
+                if "symlink" in c_str and "album_folder" in c_str:
+                    code = 400
+                    err_msg = "Album folder could not be resolved safely"
+                elif any(k in c_str for k in ("out_of_root", "symlink_rejected", "access_denied", "trash_root_out_of_config")):
+                    code = 403
+                    err_msg = "Access denied for album artwork path"
+                elif any(k in c_str for k in ("identity_conflict", "releasegroup_mismatch", "item_directories_conflict", "toctou_mismatch")):
+                    code = 409
+                    if "releasegroup" in c_str:
+                        err_msg = "Album identity changed before artwork update"
+                self._send_json(code, {"error": err_msg})
+                return
+
+            op_id = plan_res.get("operation_id")
+            if not op_id:
+                self._send_json(200, {
+                    "ok": True,
+                    "artpath": plan_res.get("target_artpath") or "",
+                    "album_dir": plan_res.get("target_dir") or "",
+                    "durable": True,
+                    "replaced_existing": False,
+                })
+                return
+
+            apply_res = transaction_engine.execute_album_artwork_apply(
+                _txn_store,
+                op_id,
+                music_allowed_roots=m_roots,
+                quarantine_base_root=q_root,
+                db_path=LIB_PATH,
+            )
+            if not apply_res.get("ok"):
+                code = 500
+                c_str = str(apply_res.get("code") or "")
+                err_msg = "Failed to replace album artwork"
+                if any(k in c_str for k in ("out_of_root", "symlink_rejected", "access_denied")):
+                    code = 403
+                    err_msg = "Access denied for album artwork path"
+                self._send_json(code, {"error": err_msg})
+                return
+
+            self._send_json(200, {
+                "ok": True,
+                "artpath": apply_res.get("artpath") or plan_res.get("target_artpath") or "",
+                "album_dir": apply_res.get("target_dir") or plan_res.get("target_dir") or "",
+                "durable": bool(apply_res.get("durable", True)),
+                "replaced_existing": bool(apply_res.get("mutated")),
+            })
             return
 
         if path == "/library/rewrite-path":
@@ -4174,6 +4130,82 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 _txn_store, op_id,
                 db_path=MUSIC_LIBRARY_PATH,
                 music_allowed_roots=[music_root_env],
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        if path == "/albums/relocation/plan":
+            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            res = transaction_engine.create_album_relocation_plan(
+                _txn_store, body,
+                music_allowed_roots=[music_root_env],
+                db_path=MUSIC_LIBRARY_PATH,
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        if path == "/albums/relocation/apply":
+            op_id = str(body.get("operation_id") or "").strip()
+            if not op_id:
+                self._send_json(400, {"ok": False, "error": "operation_id required"})
+                return
+            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            res = transaction_engine.execute_album_relocation_apply(
+                _txn_store, op_id,
+                db_path=MUSIC_LIBRARY_PATH,
+                music_allowed_roots=[music_root_env],
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        if path == "/albums/relocation/rollback":
+            op_id = str(body.get("operation_id") or "").strip()
+            if not op_id:
+                self._send_json(400, {"ok": False, "error": "operation_id required"})
+                return
+            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            res = transaction_engine.rollback_album_relocation(
+                _txn_store, op_id,
+                db_path=MUSIC_LIBRARY_PATH,
+                music_allowed_roots=[music_root_env],
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        if path == "/albums/metadata/plan":
+            res = transaction_engine.create_album_metadata_plan(
+                _txn_store, body,
+                db_path=MUSIC_LIBRARY_PATH,
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        if path == "/albums/metadata/apply":
+            op_id = str(body.get("operation_id") or "").strip()
+            if not op_id:
+                self._send_json(400, {"ok": False, "error": "operation_id required"})
+                return
+            res = transaction_engine.execute_album_metadata_apply(
+                _txn_store, op_id,
+                db_path=MUSIC_LIBRARY_PATH,
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        if path == "/albums/metadata/rollback":
+            op_id = str(body.get("operation_id") or "").strip()
+            if not op_id:
+                self._send_json(400, {"ok": False, "error": "operation_id required"})
+                return
+            res = transaction_engine.rollback_album_metadata(
+                _txn_store, op_id,
+                db_path=MUSIC_LIBRARY_PATH,
             )
             code = 200 if res.get("ok") else 400
             self._send_json(code, res)
@@ -6130,23 +6162,77 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             except (ValueError, IndexError):
                 self._send_json(400, {"error": "Invalid album ID"})
                 return
-            lock_file = acquire_os_lock(read_only=False)
-            con = None
-            try:
-                con = sqlite3.connect(LIB_PATH, timeout=10)
-                con.row_factory = sqlite3.Row
-                result = _delete_album_art_locked(con, album_id)
-                self._send_json(200, result)
-            except AlbumArtOperationError as exc:
-                self._send_json(exc.status, {"error": exc.message})
-            except UnsafePathError:
-                self._send_json(403, {"error": "Access denied for album artwork path"})
-            except Exception:
-                self._send_json(500, {"error": "Failed to delete album artwork"})
-            finally:
-                if con is not None:
-                    con.close()
-                release_os_lock(lock_file)
+            m_roots = _allowed_root_paths(["music"])
+            if MUSIC_ROOT and MUSIC_ROOT not in m_roots:
+                m_roots.append(MUSIC_ROOT)
+            if MUSIC_LIBRARY_PATH:
+                p_lib = Path(MUSIC_LIBRARY_PATH)
+                m_db_p = str(p_lib.parent if p_lib.suffix or (p_lib.exists() and not p_lib.is_dir()) else p_lib)
+                if m_db_p and m_db_p not in m_roots:
+                    m_roots.append(m_db_p)
+            if LIB_PATH and Path(LIB_PATH).exists():
+                try:
+                    con_tmp = sqlite3.connect(LIB_PATH, timeout=5)
+                    row_art = con_tmp.execute("SELECT artpath FROM albums WHERE id=?", (album_id,)).fetchone()
+                    con_tmp.close()
+                    if row_art and row_art[0]:
+                        p_art_str = row_art[0].decode("utf-8", "replace") if isinstance(row_art[0], bytes) else str(row_art[0])
+                        p_art_dir = str(Path(p_art_str).parent)
+                        if p_art_dir and p_art_dir not in m_roots:
+                            m_roots.append(p_art_dir)
+                except Exception:
+                    pass
+            s_roots = _allowed_root_paths(["staging"])
+            raw_q = getattr(sys.modules[__name__], "ALBUM_ART_TRASH_ROOT", None)
+            q_root = os.environ.get("TRASH_ROOT") or os.environ.get("RECONCILE_QUARANTINE_DIR") or (str(raw_q) if raw_q else None) or (m_roots[0] if m_roots else "/config/reconcile_quarantine")
+            plan_res = transaction_engine.create_album_artwork_plan(
+                _txn_store,
+                {"album_id": album_id, "mode": "quarantine"},
+                music_allowed_roots=m_roots,
+                staging_allowed_roots=s_roots + [BEETSDIR, "/config"],
+                quarantine_base_root=q_root,
+                db_path=LIB_PATH,
+            )
+            if not plan_res.get("ok"):
+                code = 400
+                c_str = str(plan_res.get("code") or "")
+                err_msg = plan_res.get("error") or "Artwork deletion plan rejected"
+                if any(k in c_str for k in ("out_of_root", "symlink_rejected", "access_denied", "trash_root_out_of_config")):
+                    code = 403
+                    err_msg = "Access denied for album artwork path"
+                self._send_json(code, {"error": err_msg})
+                return
+
+            op_id = plan_res.get("operation_id")
+            if not op_id:
+                self._send_json(200, {"ok": True, "removed": [], "removed_count": 0})
+                return
+
+            apply_res = transaction_engine.execute_album_artwork_apply(
+                _txn_store,
+                op_id,
+                music_allowed_roots=m_roots,
+                quarantine_base_root=q_root,
+                db_path=LIB_PATH,
+            )
+            if not apply_res.get("ok"):
+                code = 500
+                c_str = str(apply_res.get("code") or "")
+                err_msg = apply_res.get("error") or "Artwork deletion apply failed"
+                if any(k in c_str for k in ("out_of_root", "symlink_rejected", "access_denied")):
+                    code = 403
+                    err_msg = "Access denied for album artwork path"
+                self._send_json(code, {"error": err_msg})
+                return
+
+            q_recs = apply_res.get("quarantined_records") or plan_res.get("quarantines") or []
+            removed_list = [r["source"] for r in q_recs if isinstance(r, dict) and "source" in r]
+            self._send_json(200, {
+                "ok": True,
+                "removed": removed_list,
+                "removed_count": len(removed_list),
+                "quarantined_art": q_recs,
+            })
             return
 
         if path.startswith("/albums/") and path.endswith("/artpath"):
@@ -6156,24 +6242,37 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             except ValueError:
                 self._send_json(400, {"error": "Invalid album ID"})
                 return
+            m_roots = _allowed_root_paths(["music"])
+            s_roots = _allowed_root_paths(["staging"])
+            q_root = os.environ.get("TRASH_ROOT") or os.environ.get("RECONCILE_QUARANTINE_DIR") or (m_roots[0] if m_roots else "/config/reconcile_quarantine")
+            plan_res = transaction_engine.create_album_artwork_plan(
+                _txn_store,
+                {"album_id": album_id, "mode": "quarantine"},
+                music_allowed_roots=m_roots,
+                staging_allowed_roots=s_roots,
+                quarantine_base_root=q_root,
+                db_path=LIB_PATH,
+            )
+            if not plan_res.get("ok"):
+                code = 400
+                c_str = str(plan_res.get("code") or "")
+                err_msg = plan_res.get("error") or "Artpath plan rejected"
+                if any(k in c_str for k in ("out_of_root", "symlink_rejected", "access_denied", "trash_root_out_of_config")):
+                    code = 403
+                    err_msg = "Access denied for album artwork path"
+                self._send_json(code, {"error": err_msg})
+                return
 
-            lock_file = acquire_os_lock(read_only=False)
-            try:
-                con = sqlite3.connect(LIB_PATH, timeout=10)
-                con.row_factory = sqlite3.Row
-                cur = con.cursor()
-                cur.execute("SELECT * FROM albums WHERE id = ?", (album_id,))
-                if not cur.fetchone():
-                    self._send_json(404, {"error": f"Album {album_id} not found"})
-                    return
-                cur.execute("UPDATE albums SET artpath = '' WHERE id = ?", (album_id,))
-                con.commit()
-                con.close()
-                self._send_json(200, {"ok": True, "album_id": album_id, "artpath": ""})
-            except Exception as exc:
-                self._send_json(500, {"error": f"Failed to clear artpath: {exc}"})
-            finally:
-                release_os_lock(lock_file)
+            op_id = plan_res.get("operation_id")
+            if op_id:
+                transaction_engine.execute_album_artwork_apply(
+                    _txn_store,
+                    op_id,
+                    music_allowed_roots=m_roots,
+                    quarantine_base_root=q_root,
+                    db_path=LIB_PATH,
+                )
+            self._send_json(200, {"ok": True, "album_id": album_id, "artpath": ""})
             return
 
         if path.startswith("/albums/"):
@@ -6185,9 +6284,51 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                     self._send_json(400, {"error": "Invalid album ID"})
                     return
 
-                delete_files = body.get("delete_files", True)
-                code, res = _handle_delete_album(album_id, delete_files=delete_files)
-                self._send_json(code, res)
+                delete_files = bool(body.get("delete_files", True))
+                # Fetch album items to populate maintenance plan
+                item_ids = []
+                if Path(LIB_PATH).exists():
+                    con = sqlite3.connect(LIB_PATH, timeout=10)
+                    try:
+                        rows = con.execute("SELECT id FROM items WHERE album_id=?", (album_id,)).fetchall()
+                        item_ids = [int(r[0]) for r in rows if r[0]]
+                    finally:
+                        con.close()
+
+                m_roots = _allowed_root_paths(["music"])
+                if MUSIC_ROOT and MUSIC_ROOT not in m_roots:
+                    m_roots.append(MUSIC_ROOT)
+                if MUSIC_LIBRARY_PATH:
+                    p_lib = Path(MUSIC_LIBRARY_PATH)
+                    m_db_p = str(p_lib.parent if p_lib.suffix or (p_lib.exists() and not p_lib.is_dir()) else p_lib)
+                    if m_db_p and m_db_p not in m_roots:
+                        m_roots.append(m_db_p)
+
+                plan_res = transaction_engine.create_album_maintenance_plan(_txn_store, {
+                    "mode": "remove_tracks",
+                    "album_id": album_id,
+                    "item_ids": item_ids,
+                    "delete_files": delete_files,
+                    "clean_empty_folders": True,
+                }, music_allowed_roots=m_roots, db_path=LIB_PATH)
+                if not plan_res.get("ok"):
+                    self._send_json(400, {"error": plan_res.get("error") or "Album deletion plan rejected"})
+                    return
+                op_id = plan_res.get("operation_id")
+                if not op_id:
+                    self._send_json(200, {"ok": True, "database_deleted": True, "items_deleted": 0, "files_deleted": 0, "status": "completed"})
+                    return
+                apply_res = transaction_engine.execute_album_maintenance_apply(_txn_store, op_id, music_allowed_roots=m_roots, db_path=LIB_PATH)
+                if not apply_res.get("ok"):
+                    self._send_json(500, {"error": apply_res.get("error") or "Album deletion apply failed"})
+                    return
+                self._send_json(200, {
+                    "ok": True,
+                    "status": "completed",
+                    "database_deleted": True,
+                    "items_deleted": len(item_ids),
+                    "files_deleted": len(item_ids) if delete_files else 0,
+                })
                 return
 
         self._send_json(404, {"error": f"Endpoint not found: {path}"})
