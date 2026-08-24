@@ -9,10 +9,23 @@
 # beets-web-manager from local source at an exact commit instead of pulling
 # a published GHCR tag, and a host port mapping the acceptance script can
 # reach from outside the Docker network.
+#
+# Wave 24 final review round 3, section 25-27 (found by actually running
+# this in CI -- no Docker daemon was available in the environment this was
+# first authored in): `docker compose -f docker-compose.full.yml -f
+# docker/acceptance/docker-compose.acceptance.yml ...` resolves every
+# merged file's relative build.context against ONE project directory (the
+# first/base -f file's directory -- repo root), not against each override
+# file's own directory. `context: .` here means the same repo root that
+# docker-compose.full.yml's own `beets` build context ("." in that file,
+# also repo root) means -- a context written relative to THIS file's own
+# location (docker/acceptance/, e.g. "../..") silently built against a
+# directory two levels above repo root instead and failed with "open
+# Dockerfile: no such file or directory".
 services:
   beets-web-manager:
     build:
-      context: ../..
+      context: .
       dockerfile: Dockerfile
       args:
         VCS_REF: ${VCS_REF:?set VCS_REF}
