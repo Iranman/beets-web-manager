@@ -491,6 +491,16 @@ def main() -> int:
             print(f"\n[SUMMARY] {len(FAILURES)} failure(s):")
             for f in FAILURES:
                 print(f"  - {f}")
+            # Wave 24 final review round 3, section 21-24: a bare pass/fail
+            # summary with no container output is not diagnosable from CI
+            # alone -- print both services' logs before teardown discards
+            # them, same as compose-verification's existing Docker job
+            # already does for its own single-container smoke test.
+            for c in (web_container, engine_container):
+                print(f"\n==> docker logs {c} (tail 200) ==>")
+                logs_res = run(["docker", "logs", "--tail", "200", c])
+                print(logs_res.stdout or "")
+                print(logs_res.stderr or "")
             return 1
 
         print("\n[SUCCESS] Two-service Docker acceptance passed.")
