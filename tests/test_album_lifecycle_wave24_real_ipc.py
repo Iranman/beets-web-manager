@@ -108,13 +108,20 @@ class TestWave24RealHTTPIPC(unittest.TestCase):
         """)
         self.item1_dir = self.music_dir / "IPC Artist" / "IPC Album"
         self.item1_dir.mkdir(parents=True, exist_ok=True)
-        self.item1_path = self.item1_dir / "01 - Track 1.mp3"
-        # Write valid MP3 audio header magic bytes
-        self.item1_path.write_bytes(b"ID3\x03\x00\x00\x00\x00\x00\x00TEST_IPC_AUDIO_DATA_TRACK_1")
+        self.item1_path = self.item1_dir / "01 - Track 1.wav"
+
+        import io, wave, struct
+        buf_wav = io.BytesIO()
+        with wave.open(buf_wav, 'wb') as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(44100)
+            wf.writeframes(struct.pack('<h', 0) * 44100)
+        self.item1_path.write_bytes(buf_wav.getvalue())
 
         con.execute("""
             INSERT INTO items (id, album_id, title, artist, albumartist, album, track, disc, year, genre, format, path, mb_trackid, mb_albumid)
-            VALUES (1, 1, 'Track 1', 'IPC Artist', 'IPC Artist', 'IPC Album', 1, 1, 2024, 'Rock', 'MP3', ?, '33333333-3333-3333-3333-333333333333', '11111111-1111-1111-1111-111111111111')
+            VALUES (1, 1, 'Track 1', 'IPC Artist', 'IPC Artist', 'IPC Album', 1, 1, 2024, 'Rock', 'WAV', ?, '33333333-3333-3333-3333-333333333333', '11111111-1111-1111-1111-111111111111')
         """, (str(self.item1_path),))
 
         con.commit()
@@ -171,7 +178,13 @@ class TestWave24RealHTTPIPC(unittest.TestCase):
 
     def test_real_ipc_artwork_replace_and_delete_with_rollback(self):
         """Exercise POST replace artwork & DELETE artwork over real HTTP socket."""
-        jpeg_bytes = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x01\x00\x48\x00\x48\x00\x00\xff\xd9"
+        import io
+        from PIL import Image
+        buf_jpg = io.BytesIO()
+        img = Image.new('RGB', (10, 10), color='blue')
+        img.save(buf_jpg, format='JPEG')
+        jpeg_bytes = buf_jpg.getvalue()
+
         res = self.client.replace_album_art(1, jpeg_bytes)
         self.assertTrue(res.get("ok"), f"Replace art HTTP failed: {res}")
         self.assertIsNotNone(res.get("artpath"))
@@ -204,7 +217,10 @@ class TestWave24RealHTTPIPC(unittest.TestCase):
 
     def test_real_ipc_relocation_rename_and_rollback(self):
         """Exercise album relocation over real HTTP socket with rollback."""
-        plan_res = self.client.plan_album_relocation({"album_id": 1, "mode": "rename", "new_artist": "Renamed IPC Artist", "new_title": "Renamed IPC Album"})
+        plan_res = self.client.plan_album_relocation({
+            "album_id": 1,
+            "mode": "rename",
+        })
         self.assertTrue(plan_res.get("ok"), f"Plan relocation failed: {plan_res}")
         op_id = plan_res.get("operation_id")
         self.assertIsNotNone(op_id)
