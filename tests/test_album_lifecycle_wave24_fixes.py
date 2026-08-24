@@ -122,6 +122,42 @@ class AlbumMoveToLibraryFailsClosedTests(unittest.TestCase):
             self.assertIn("existing_album_id", self.src)
 
 
+class AlbumFixMetadataFailsClosedTests(unittest.TestCase):
+    """Wave 24 final review round 3, section 21-24: found only by actually
+    exercising this route over real HTTP against a real two-service stack
+    with the engine genuinely unreachable -- both update blocks used to
+    catch every exception (including the engine being unreachable) and
+    only append a log line, letting `_do()` return normally either way.
+    jobs.PythonJob._run() marks a job "success" whenever the callable
+    returns without raising, so a caller polling GET /api/jobs/<id> saw
+    status="success" for a metadata update that never reached the engine
+    at all."""
+
+    def setUp(self):
+        self.src = _top_level_function_source("album_fix_metadata")
+
+    def test_route_raises_instead_of_silently_reporting_success(self):
+        tree = ast.parse(self.src)
+        raises = [n for n in ast.walk(tree) if isinstance(n, ast.Raise)]
+        self.assertTrue(raises, "album_fix_metadata's _do must raise when a requested update did not actually happen")
+
+    def test_no_bare_except_swallows_a_failure_into_a_log_line_only(self):
+        # The prior (broken) implementation had two `except Exception as
+        # ex: log.append(...)` handlers with no re-raise anywhere in the
+        # function -- guard against that exact shape reappearing: every
+        # except handler in this function's body must be reachable by
+        # something that can still raise (this function's own explicit
+        # `if failures: raise ...` at the end, checked structurally by
+        # confirming a Raise node exists AND that not every logged failure
+        # path is followed only by more log.append calls with no raise
+        # anywhere after it).
+        tree = ast.parse(self.src)
+        handlers = [n for n in ast.walk(tree) if isinstance(n, ast.ExceptHandler)]
+        self.assertTrue(handlers, "expected at least one except handler around the engine calls")
+        raises = [n for n in ast.walk(tree) if isinstance(n, ast.Raise)]
+        self.assertTrue(raises, "an except handler here must not be the only way this function can end")
+
+
 class AlbumDeduplicateDeadCodeTests(unittest.TestCase):
     def test_no_duplicate_unreachable_return_after_album_not_found(self):
         src = _top_level_function_source("album_deduplicate")

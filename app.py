@@ -11568,6 +11568,24 @@ def album_fix_metadata(aid):
             try: updates["year"] = int(new_year)
             except Exception: pass
 
+        # Wave 24 final review round 3, section 21-24 (found only by
+        # actually exercising this route over real HTTP against a real
+        # two-service stack with the engine genuinely unreachable -- no
+        # prior test drove this route's own engine call to fail): both
+        # blocks below used to catch every exception (including
+        # BeetsUnavailableError -- the engine being unreachable) and only
+        # append a log line, letting `_do()` return normally either way.
+        # jobs.PythonJob._run() marks the job "success" whenever the
+        # callable returns without raising -- so a caller polling
+        # GET /api/jobs/<id> saw status="success" for a metadata update
+        # that never reached the engine at all, with the only trace of
+        # the real failure buried in a free-text log line nobody parses.
+        # Collect failures from both independent updates and raise once,
+        # after attempting both, so a truthful "failed" status is the only
+        # way this job ever completes when a requested change did not
+        # actually happen.
+        failures: List[str] = []
+
         if updates:
             try:
                 # SEC-002 / ARCH-003 Wave 24 final review section 29: this
@@ -11582,9 +11600,11 @@ def album_fix_metadata(aid):
                 if res.get("ok"):
                     log.append(f"  Engine album fields updated: {updates}")
                 else:
-                    log.append(f"  Engine album update warning: {res.get('error')}")
+                    log.append(f"  Engine album update failed: {res.get('error')}")
+                    failures.append(f"album fields: {res.get('error')}")
             except Exception as ex:
-                log.append(f"  Engine album update warning: {ex}")
+                log.append(f"  Engine album update failed: {ex}")
+                failures.append(f"album fields: {ex}")
 
         if new_mbid:
             log.append("Syncing metadata from MusicBrainz via engine transaction…")
@@ -11596,11 +11616,19 @@ def album_fix_metadata(aid):
                 if plan_res.get("ok") and plan_res.get("operation_id"):
                     apply_res = beets_client.apply_album_mb_track_repair(plan_res["operation_id"])
                     if not apply_res.get("ok"):
-                        log.append(f"  MB track repair warning: {apply_res.get('error')}")
+                        log.append(f"  MB track repair failed: {apply_res.get('error')}")
+                        failures.append(f"mb track repair: {apply_res.get('error')}")
+                elif not plan_res.get("ok"):
+                    log.append(f"  MB track repair plan failed: {plan_res.get('error')}")
+                    failures.append(f"mb track repair: {plan_res.get('error')}")
             except Exception as ex:
-                log.append(f"  MB track repair warning: {ex}")
+                log.append(f"  MB track repair failed: {ex}")
+                failures.append(f"mb track repair: {ex}")
 
         _invalidate_lib_cache()
+
+        if failures:
+            raise RuntimeError("; ".join(failures))
 
     label = f"Fix metadata: album_id={aid}"
     job = jobs.start_python(_do, label=label)
