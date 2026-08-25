@@ -196,6 +196,39 @@ class AiImportFolderSequenceTests(unittest.TestCase):
 
         self.fake_beet_run = fake_beet_run
         self._patch(mock.patch.object(APP, "_beet_run", side_effect=fake_beet_run))
+
+        def fake_reimport(folder_path, beets_options=None, timeout=None, **kwargs):
+            self.call_order.append(("beet_run", ("import", "-q", "--noincremental", "--quiet-fallback", "asis", "copy", "--search-id", MB_ALBUMID, folder_path)))
+            return {"ok": True, "album_id": self.aid}
+
+        def fake_plan_mb_track(payload, **kwargs):
+            aid = payload.get("album_id", self.aid)
+            self.call_order.append(("beet_run", ("mbsync", f"album_id:{aid}")))
+            return {"ok": True, "operation_id": "op-fake-123"}
+
+        def fake_apply_mb_track(op_id, **kwargs):
+            return {"ok": True}
+
+        def fake_update_meta(aid, opts, **kwargs):
+            self.call_order.append(("beet_run", ("write", f"album_id:{aid}")))
+            return {"ok": True}
+
+        def fake_relocate(aid, **kwargs):
+            self.call_order.append(("beet_run", ("move", f"album_id:{aid}")))
+            return {"ok": True, "dest_dir": "/data/media/music/artist/album"}
+
+        self.fake_reimport = fake_reimport
+        self.fake_plan_mb_track = fake_plan_mb_track
+        self.fake_apply_mb_track = fake_apply_mb_track
+        self.fake_update_meta = fake_update_meta
+        self.fake_relocate = fake_relocate
+
+        self._patch(mock.patch.object(APP.beets_client, "reimport_source", side_effect=fake_reimport))
+        self._patch(mock.patch.object(APP.beets_client, "plan_album_mb_track_repair", side_effect=fake_plan_mb_track))
+        self._patch(mock.patch.object(APP.beets_client, "apply_album_mb_track_repair", side_effect=fake_apply_mb_track))
+        self._patch(mock.patch.object(APP.beets_client, "update_album_metadata", side_effect=fake_update_meta))
+        self._patch(mock.patch.object(APP.beets_client, "relocate_album", side_effect=fake_relocate))
+
         self._patch(mock.patch.object(APP, "_preserve_torrent_source_path", return_value=False))
         self._patch(mock.patch.object(APP, "_validate_import_source_audio", return_value=None))
         self._patch(mock.patch.object(APP, "_prefer_album_mb_release", side_effect=lambda mbid, log: mbid))
@@ -316,7 +349,8 @@ class AiImportFolderSequenceTests(unittest.TestCase):
         self.assertEqual(result["artwork_status"], "skipped_identity_unverified")
 
     def test_no_album_found_reports_contract_and_skips_artwork(self):
-        with mock.patch.object(APP.lib, "get_album", side_effect=lambda aid: None), \
+        with mock.patch.object(APP.beets_client, "reimport_source", return_value={"ok": True, "album_id": None}), \
+             mock.patch.object(APP.lib, "get_album", side_effect=lambda aid: None), \
              mock.patch("sqlite3.connect") as connect_mock:
             fake_con = mock.MagicMock()
             fake_con.execute.return_value.fetchone.return_value = None
@@ -331,11 +365,7 @@ class AiImportFolderSequenceTests(unittest.TestCase):
     # ---- prior-stage failure gating -----------------------------------------
 
     def test_import_failure_raises_before_any_later_stage(self):
-        def failing_import(cmd, log, **kwargs):
-            if "import" in cmd:
-                return SimpleNamespace(returncode=2, stdout="", stderr="boom")
-            return SimpleNamespace(returncode=0, stdout="", stderr="")
-        with mock.patch.object(APP, "_beet_run", side_effect=failing_import), \
+        with mock.patch.object(APP.beets_client, "reimport_source", return_value={"ok": False, "error": "boom"}), \
              mock.patch.object(APP, "_repair_album_art") as repair:
             with self.assertRaises(RuntimeError):
                 APP._ai_import_folder("/tmp/incidents", MB_ALBUMID, {}, self.log)
@@ -343,62 +373,35 @@ class AiImportFolderSequenceTests(unittest.TestCase):
 
     def test_mbsync_cancellation_prevents_artwork_and_propagates(self):
         cancel_event = threading.Event()
-
-        def cancel_on_mbsync(cmd, log, **kwargs):
-            if "mbsync" in cmd:
-                return SimpleNamespace(returncode=-9, stdout="", stderr="")
-            return SimpleNamespace(returncode=0, stdout="", stderr="")
-        with mock.patch.object(APP, "_beet_run", side_effect=cancel_on_mbsync), \
+        with mock.patch.object(APP.beets_client, "plan_album_mb_track_repair", return_value={"ok": False, "error": "cancelled"}), \
              mock.patch.object(APP, "_repair_album_art") as repair:
             with self.assertRaises(RuntimeError):
                 APP._ai_import_folder("/tmp/incidents", MB_ALBUMID, {}, self.log, cancel_event)
         repair.assert_not_called()
 
     def test_write_timeout_returncode_raises_and_never_reaches_artwork(self):
-        # 124 (timeout) must never be silently treated as success for
-        # mbsync/write/move -- the persisted tag state for this album is
-        # unverified, so this must stop immediately rather than continue on
-        # to recording-ID repair or artwork fetching.
-        def timeout_on_write(cmd, log, **kwargs):
-            if "write" in cmd:
-                return SimpleNamespace(returncode=124, stdout="", stderr="")
-            return SimpleNamespace(returncode=0, stdout="", stderr="")
-        with mock.patch.object(APP, "_beet_run", side_effect=timeout_on_write), \
+        with mock.patch.object(APP.beets_client, "update_album_metadata", return_value={"ok": False, "error": "write failed"}), \
              mock.patch.object(APP, "_repair_album_art") as repair:
             with self.assertRaises(RuntimeError):
                 APP._ai_import_folder("/tmp/incidents", MB_ALBUMID, {}, self.log)
         repair.assert_not_called()
 
     def test_mbsync_timeout_returncode_raises_and_never_reaches_artwork(self):
-        def timeout_on_mbsync(cmd, log, **kwargs):
-            if "mbsync" in cmd:
-                return SimpleNamespace(returncode=124, stdout="", stderr="")
-            return SimpleNamespace(returncode=0, stdout="", stderr="")
-        with mock.patch.object(APP, "_beet_run", side_effect=timeout_on_mbsync), \
+        with mock.patch.object(APP.beets_client, "plan_album_mb_track_repair", return_value={"ok": False, "error": "mbsync timeout"}), \
              mock.patch.object(APP, "_repair_album_art") as repair:
             with self.assertRaises(RuntimeError):
                 APP._ai_import_folder("/tmp/incidents", MB_ALBUMID, {}, self.log)
         repair.assert_not_called()
 
     def test_move_timeout_returncode_raises_and_never_reaches_artwork(self):
-        def timeout_on_move(cmd, log, **kwargs):
-            if "move" in cmd:
-                return SimpleNamespace(returncode=124, stdout="", stderr="")
-            return SimpleNamespace(returncode=0, stdout="", stderr="")
-        with mock.patch.object(APP, "_beet_run", side_effect=timeout_on_move), \
+        with mock.patch.object(APP.beets_client, "relocate_album", return_value={"ok": False, "error": "move failed"}), \
              mock.patch.object(APP, "_repair_album_art") as repair:
             with self.assertRaises(RuntimeError):
                 APP._ai_import_folder("/tmp/incidents", MB_ALBUMID, {}, self.log)
         repair.assert_not_called()
 
     def test_import_timeout_returncode_raises_before_any_later_stage(self):
-        # Step 1 (the "import" beet_run call) already raises for any
-        # returncode >= 2, which includes 124 -- confirm that still holds.
-        def timeout_on_import(cmd, log, **kwargs):
-            if "import" in cmd:
-                return SimpleNamespace(returncode=124, stdout="", stderr="")
-            return SimpleNamespace(returncode=0, stdout="", stderr="")
-        with mock.patch.object(APP, "_beet_run", side_effect=timeout_on_import), \
+        with mock.patch.object(APP.beets_client, "reimport_source", return_value={"ok": False, "error": "timeout"}), \
              mock.patch.object(APP, "_repair_album_art") as repair:
             with self.assertRaises(RuntimeError):
                 APP._ai_import_folder("/tmp/incidents", MB_ALBUMID, {}, self.log)
