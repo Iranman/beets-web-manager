@@ -184,6 +184,17 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/iranman/beets-web-manager
+          # Wave 24 round 4 (CodeQL/provenance closure): metadata-action's
+          # git context derives org.opencontainers.image.revision from the
+          # GITHUB_SHA env var, which on a pull_request-triggered run is
+          # the ephemeral base+head merge commit -- NOT the actual PR head
+          # every other provenance check in this workflow (VCS_REF build
+          # args, the two-service-acceptance job's own image inspection)
+          # is built against. A custom label with the same key overrides
+          # the auto-generated one, keeping this the single source of
+          # truth for "what commit actually built this image."
+          labels: |
+            org.opencontainers.image.revision=${{ github.event.pull_request.head.sha || github.sha }}
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -196,6 +207,9 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/iranman/beets-engine
+          # See the identical note on the Web Manager metadata step above.
+          labels: |
+            org.opencontainers.image.revision=${{ github.event.pull_request.head.sha || github.sha }}
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
