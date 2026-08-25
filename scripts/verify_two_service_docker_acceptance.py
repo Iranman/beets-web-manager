@@ -208,6 +208,26 @@ def seed_disposable_library(config_dir: Path, music_dir: Path) -> dict:
         length=1.0,
     )
     cleanup_item.add(lib)
+
+    offline_dir = music_dir / "Offline Artist" / "Offline Album"
+    offline_dir.mkdir(parents=True, exist_ok=True)
+    offline_path = offline_dir / "99 - Offline Cleanup.wav"
+    offline_path.write_bytes(_real_wav_bytes(freq=550))
+    offline_album = bl.Album(
+        lib, albumartist="Offline Artist", album="Offline Album",
+        year=2024, mb_albumid="66666666-6666-6666-6666-666666666666",
+        mb_releasegroupid="77777777-7777-7777-7777-777777777777",
+    )
+    offline_album.add(lib)
+    offline_item = bl.Item(
+        albumartist="Offline Artist", album="Offline Album",
+        artist="Offline Artist", title="Offline Cleanup",
+        track=99, disc=1, year=2024, album_id=offline_album.id,
+        path=str(offline_path).encode("utf-8"),
+        mb_trackid="55555555-5555-5555-5555-555555555555",
+        length=1.0,
+    )
+    offline_item.add(lib)
     lib._close()
 
     return {
@@ -217,6 +237,9 @@ def seed_disposable_library(config_dir: Path, music_dir: Path) -> dict:
         "cleanup_item_id": int(cleanup_item.id),
         "cleanup_item_path": str(cleanup_path),
         "cleanup_container_path": "/data/media/music/" + cleanup_path.relative_to(music_dir).as_posix(),
+        "offline_item_id": int(offline_item.id),
+        "offline_item_path": str(offline_path),
+        "offline_container_path": "/data/media/music/" + offline_path.relative_to(music_dir).as_posix(),
         "db_path": str(db_path),
     }
 
@@ -512,20 +535,8 @@ def main() -> int:
             _fail(f"could not verify host-mounted DB state: {ex}")
 
         print("==> Engine-offline fail-closed proof...")
-        offline_host_path = Path(fixture["item_path"]).parent / "99 - Offline Cleanup.wav"
-        offline_host_path.parent.mkdir(parents=True, exist_ok=True)
-        offline_host_path.write_bytes(_real_wav_bytes(freq=550))
-        offline_item_id = 9999
-        offline_container_path = "/data/media/music/" + offline_host_path.relative_to(music_dir).as_posix()
-        con = sqlite3.connect(db_path)
-        try:
-            con.execute(
-                "INSERT INTO items (id, album_id, title, artist, albumartist, album, track, disc, year, path, mb_trackid) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (offline_item_id, aid, "Offline Cleanup", "Acceptance Artist", "Acceptance Artist", "Acceptance Album", 99, 1, 2024, str(offline_host_path).encode("utf-8"), "55555555-5555-5555-5555-555555555555"),
-            )
-            con.commit()
-        finally:
-            con.close()
+        offline_host_path = Path(fixture["offline_item_path"])
+        offline_container_path = fixture["offline_container_path"]
         stop_res = run(["docker", "stop", engine_container])
         if stop_res.returncode != 0:
             _fail("could not stop the engine container for the offline proof")
