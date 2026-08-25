@@ -33,7 +33,7 @@ from discover_mutation_sinks import MutationSink, discover_all  # noqa: E402
 
 REPO_ROOT = Path(__file__).parent.parent.resolve()
 INVENTORY_PATH = REPO_ROOT / "security" / "arch003_mutation_inventory.json"
-LIBRARY_CLEANUP_CLOSURE_PR = 0
+LIBRARY_CLEANUP_CLOSURE_PR = 99
 
 _ENGINE_FUNCTION_FAMILY = {
     "_execute_album_cleanup_apply_locked": "album_cleanup_v1",
@@ -410,8 +410,16 @@ def generate(write: bool = True) -> dict:
         if prior_entry and prior_entry.get("human_reviewed"):
             entry = dict(prior_entry)
             entry["file"], entry["function"], entry["line"] = s.file, s.function, s.lineno
-            if not entry.get("domain"):
-                _, family, rule = _classify(s)
+            classification, family, rule = _classify(s)
+            review = _REVIEWED_RULE_DETAILS.get(rule)
+            if review:
+                entry["classification"] = classification
+                entry["transaction_family"] = family
+                entry["domain"] = _determine_domain(s, classification, family, rule)
+                entry["rule"] = rule
+                entry["review_reason"] = str(review["review_reason"])
+                entry["reviewed_in_pr"] = int(review["reviewed_in_pr"])
+            elif not entry.get("domain"):
                 entry["domain"] = _determine_domain(s, entry.get("classification") or "", family, rule)
             entries.append(entry)
             continue

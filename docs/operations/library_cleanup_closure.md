@@ -1,6 +1,6 @@
 # SEC-002 / ARCH-003 Library Cleanup Closure
 
-Status: Draft PR pending. Overall ARCH-003 remains In Progress.
+Status: Draft PR #99. Overall ARCH-003 remains In Progress.
 
 Starting baseline: `b9a96bdfa6b9bf478dd111a8eb038d77cee5be38`.
 Starting inventory: 506 total sinks, 185 unresolved, `library_cleanup` unresolved = 9.
