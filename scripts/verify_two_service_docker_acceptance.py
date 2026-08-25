@@ -445,23 +445,6 @@ def main() -> int:
         else:
             _ok("artwork delete succeeded")
 
-        print("==> Exercising fix-metadata...")
-        status, body = client.request("POST", f"/api/albums/{aid}/fix-metadata",
-                                       json_body={"album": "Acceptance Album Renamed", "year": 2025})
-        if status != 200 or not body.get("ok"):
-            _fail(f"fix-metadata request failed: {status} {body}")
-        else:
-            client.wait_job(body["job_id"])
-            _ok("fix-metadata job dispatched and completed")
-
-        print("==> Exercising retag...")
-        status, body = client.request("POST", f"/api/items/{iid}/retag")
-        if status != 200 or not body.get("ok"):
-            _fail(f"retag request failed: {status} {body}")
-        else:
-            client.wait_job(body["job_id"])
-            _ok("retag job dispatched and completed")
-
         print("==> Exercising library duplicate cleanup...")
         status, body = client.request(
             "POST", "/api/dedup/cleanup",
@@ -481,6 +464,23 @@ def main() -> int:
                 _fail("library duplicate cleanup did not quarantine the file and retire the DB row")
             else:
                 _ok("library duplicate cleanup succeeded through Web Manager -> Beets engine IPC")
+
+        print("==> Exercising fix-metadata...")
+        status, body = client.request("POST", f"/api/albums/{aid}/fix-metadata",
+                                       json_body={"album": "Acceptance Album Renamed", "year": 2025})
+        if status != 200 or not body.get("ok"):
+            _fail(f"fix-metadata request failed: {status} {body}")
+        else:
+            client.wait_job(body["job_id"])
+            _ok("fix-metadata job dispatched and completed")
+
+        print("==> Exercising retag...")
+        status, body = client.request("POST", f"/api/items/{iid}/retag")
+        if status != 200 or not body.get("ok"):
+            _fail(f"retag request failed: {status} {body}")
+        else:
+            client.wait_job(body["job_id"])
+            _ok("retag job dispatched and completed")
 
         print("==> Exercising rename...")
         status, body = client.request("POST", f"/api/albums/{aid}/rename")
