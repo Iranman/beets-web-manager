@@ -5874,6 +5874,64 @@ def _path_under(child: Path, parent: Path) -> bool:
         return False
 
 
+# SEC-002 / ARCH-003 Wave 24 final review round 4 (CodeQL closure): a single,
+# narrow path-validation primitive for the artwork family, consolidating the
+# containment + symlink-rejection pattern that was previously re-checked
+# ad hoc at each call site with slightly different combinations of
+# _path_under()/_path_has_symlink_under(). This does not change the
+# underlying safety model -- `_path_under` (component-aware containment via
+# Path.relative_to(), not string-prefix matching) and
+# `_path_has_symlink_under` (walks every parent component, not just the
+# leaf) remain the actual safety primitives -- it exists so every artwork
+# mutation sink consumes ONE proven-safe, resolved Path rather than each
+# caller separately re-deriving (and potentially under-deriving) the same
+# check from the original tainted string/Path.
+#
+# `allowed_roots` must always be server/operator-owned (env config, or a
+# value already itself proven contained by a prior call to this same
+# primitive -- e.g. Apply re-validating target_dir before using it as the
+# allowed root for each per-item destination). Never pass a DB value,
+# request payload value, or transaction-metadata value as an allowed root:
+# doing so would let attacker- or DB-controlled data enlarge the trust
+# boundary instead of merely being validated against it.
+def validate_path_under_allowed_roots(
+    candidate: Any,
+    allowed_roots: Iterable[Any],
+    *,
+    reject_symlinks: bool = True,
+) -> Optional[Path]:
+    """Prove `candidate` is contained under one of `allowed_roots` and
+    return the canonical, resolved Path that is actually permitted to reach
+    a filesystem sink. Fails closed (returns None) on any ambiguity,
+    resolution error, missing containment, or rejected symlink component --
+    callers must treat None as "reject", never as "no opinion"."""
+    try:
+        cand = candidate if isinstance(candidate, Path) else Path(str(candidate))
+    except Exception:
+        return None
+    roots: List[Path] = []
+    for r in allowed_roots or []:
+        if not r:
+            continue
+        try:
+            roots.append(r if isinstance(r, Path) else Path(str(r)))
+        except Exception:
+            continue
+    selected_root: Optional[Path] = None
+    for root in roots:
+        if _path_under(cand, root):
+            selected_root = root
+            break
+    if selected_root is None:
+        return None
+    if reject_symlinks and _path_has_symlink_under(cand, selected_root):
+        return None
+    try:
+        return cand.resolve(strict=False)
+    except Exception:
+        return None
+
+
 # ── artist_folder_reconcile_v1 ────────────────────────────────────────────────
 
 def create_artist_folder_reconcile_plan(
@@ -8417,12 +8475,23 @@ def create_album_artwork_plan(
                     target_dir = cand
                     break
 
+        # Wave 24 round 4 CodeQL audit note: this is.symlink() call is a
+        # deliberate metadata-only read, kept BEFORE full root-containment
+        # proof so a symlinked album folder produces its own distinct
+        # "could not be resolved safely" (400) response rather than the
+        # generic "access denied" (403) one -- app.py's caller (and its
+        # regression test) depend on that specific code/message pair.
+        # Reordering this after containment would collapse the two cases;
+        # see the alert-913 dismissal rationale in the Round 4 PR body for
+        # why the read itself has no attacker-controlled escape (it only
+        # returns a bool, and the containment check immediately below
+        # fails closed regardless of the answer).
         if target_dir.is_symlink():
             return {"ok": False, "error": f"Symlink rejected: {target_dir}", "code": "album_artwork_symlink_album_folder"}
-        if not any(_path_under(target_dir, r) for r in [Path(r) for r in allowed_roots]):
-            return {"ok": False, "error": f"Artwork target outside allowed roots: {target_dir}", "code": "album_artwork_path_out_of_root"}
-        if _path_has_symlink_under(target_dir, Path(allowed_roots[0])):
-            return {"ok": False, "error": f"Symlink rejected: {target_dir}", "code": "album_artwork_symlink_rejected"}
+        validated_target_dir = validate_path_under_allowed_roots(target_dir, allowed_roots)
+        if validated_target_dir is None:
+            return {"ok": False, "error": f"Artwork target outside allowed roots or symlinked: {target_dir}", "code": "album_artwork_path_out_of_root"}
+        target_dir = validated_target_dir
 
         candidate_list: List[Dict[str, Any]] = [{"kind": "file", "rec": rec} for rec in src_records]
         if pending_upload:
@@ -8610,18 +8679,26 @@ def execute_album_artwork_apply(
                     return _fail(f"Artwork replace target changed since plan: {dest_p}", "album_artwork_stale_destination")
 
             target_dir_str = meta.get("target_dir") or ""
+            validated_target_dir: Optional[Path] = None
             if mode in ("move", "replace"):
-                target_dir = Path(target_dir_str)
+                target_dir_candidate = Path(target_dir_str)
                 if allowed_roots:
                     for r in [Path(ar) for ar in allowed_roots]:
-                        cand = Path(r.drive + str(target_dir)) if r.drive and not target_dir.drive else target_dir
+                        cand = Path(r.drive + str(target_dir_candidate)) if r.drive and not target_dir_candidate.drive else target_dir_candidate
                         if _path_under(cand, r):
-                            target_dir = cand
+                            target_dir_candidate = cand
                             break
-                if not any(_path_under(target_dir, Path(r)) for r in allowed_roots):
-                    return _fail(f"Artwork target outside allowed roots: {target_dir}", "album_artwork_path_out_of_root")
-                if _path_has_symlink_under(target_dir, Path(allowed_roots[0])):
-                    return _fail(f"Symlink detected on artwork target: {target_dir}", "album_artwork_symlink_rejected")
+                # Wave 24 round 4: revalidate target_dir fresh at Apply
+                # (transaction metadata is never trusted as its own root of
+                # authority -- only music_allowed_roots, which is always
+                # server/operator-configured, ever is) and keep the ONE
+                # resolved, proven-safe Path for every sink below, instead
+                # of the previous pattern where this validated value was
+                # discarded and target_dir was rebuilt from the raw string
+                # again just before the mkdir/rename calls.
+                validated_target_dir = validate_path_under_allowed_roots(target_dir_candidate, allowed_roots)
+                if validated_target_dir is None:
+                    return _fail(f"Artwork target outside allowed roots or symlinked: {target_dir_candidate}", "album_artwork_path_out_of_root")
 
             store.update(operation_id, status="Running", metadata={**meta, "mutation_started": True})
 
@@ -8643,7 +8720,7 @@ def execute_album_artwork_apply(
 
             try:
                 if mode in ("move", "replace"):
-                    target_dir = Path(target_dir_str)
+                    target_dir = validated_target_dir
                     target_dir.mkdir(parents=True, exist_ok=True)
                     for idx, m in enumerate(moves_plan):
                         if m["type"] == "pending_upload":
@@ -8691,7 +8768,17 @@ def execute_album_artwork_apply(
                             os.chmod(str(q_target), 0o600)
                             quarantined_records.append({"source": str(src_p), "quarantined": str(q_target), "kind": "verified_duplicate"})
                         else:
-                            dest_p = Path(m["destination"])
+                            # Wave 24 round 4: re-derive the per-item
+                            # destination through the validated_target_dir
+                            # (already proven contained/symlink-free above)
+                            # rather than trusting the stored metadata
+                            # string on its own -- defense in depth against
+                            # transaction-record tampering, even though no
+                            # current route lets a request body overwrite
+                            # moves_plan directly.
+                            dest_p = validate_path_under_allowed_roots(Path(m["destination"]), [target_dir])
+                            if dest_p is None:
+                                return _fail(f"Artwork destination outside validated target directory: {m['destination']}", "album_artwork_path_out_of_root")
                             if dest_p.exists() and mode == "replace" and dest_p.resolve(strict=False) != src_p.resolve(strict=False):
                                 q_dir.mkdir(parents=True, exist_ok=True)
                                 q_target = _safe_quarantine_target(q_dir, dest_p, idx)
