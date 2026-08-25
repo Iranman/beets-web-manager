@@ -181,7 +181,7 @@ jobs:
 
       - name: Extract Docker metadata for Web Manager
         id: meta_webmanager
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ghcr.io/iranman/beets-web-manager
           # Wave 24 round 4 (CodeQL/provenance closure): metadata-action's
@@ -204,7 +204,7 @@ jobs:
 
       - name: Extract Docker metadata for Beets Engine
         id: meta_engine
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ghcr.io/iranman/beets-engine
           # See the identical note on the Web Manager metadata step above.
