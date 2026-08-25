@@ -381,6 +381,43 @@ class BeetsClient:
         """Engine-side album artwork rollback (SEC-002 Wave 22)."""
         return self._request("POST", "/albums/artwork/rollback", {"operation_id": operation_id}, timeout=timeout)
 
+    def fetch_and_embed_album_art(self, album_id: int, *, timeout: float = 60.0) -> Dict[str, Any]:
+        """Fetch cover art for an album from configured online sources
+        (MusicBrainz/Cover Art Archive etc.) and embed it into the album's
+        media files, using Beets' own `fetchart`/`embedart` plugins inside
+        the engine container.
+
+        Wave 25 round (independent review): this is deliberately NOT routed
+        through album_artwork_v1's Plan/Apply/Rollback contract -- that
+        family manages moving/quarantining an ALREADY-SUPPLIED image (a
+        local file candidate or base64 upload); fetchart/embedart instead
+        perform a network lookup and write directly into each track's
+        embedded tag data via Beets' own plugins, which is not a filesystem
+        move/quarantine operation with a meaningful rollback target. This
+        is a thin composition over the pre-existing, allow-listed,
+        capability-gated, locked `run_command()` -> POST /commands/execute
+        engine endpoint (`fetchart` and `embedart` are both already in
+        ALLOWED_COMMANDS and both already classified as mutating there) --
+        the same mechanism the equivalent local `beet fetchart`/`beet
+        embedart` subprocess calls used before this module existed. Prior
+        to this fix, the caller referenced a nonexistent
+        `repair_album_artwork` method, so artwork fetch/embed silently
+        never ran (AttributeError swallowed by the caller's own try/except)
+        for every import.
+
+        Returns {"ok": bool, "fetchart": {...}, "embedart": {...}}. A
+        nonzero returncode from either subcommand yields ok=False with the
+        subcommand's stderr as "error" -- callers must check "ok" rather
+        than assume success, consistent with every other engine call in
+        this client."""
+        fetch_res = self.run_command("fetchart", [f"album_id:{album_id}"], timeout=timeout)
+        if fetch_res.get("returncode") not in (0, None) or "error" in fetch_res:
+            return {"ok": False, "error": fetch_res.get("error") or fetch_res.get("stderr") or "fetchart failed", "fetchart": fetch_res, "embedart": None}
+        embed_res = self.run_command("embedart", ["-y", f"album_id:{album_id}"], timeout=timeout)
+        if embed_res.get("returncode") not in (0, None) or "error" in embed_res:
+            return {"ok": False, "error": embed_res.get("error") or embed_res.get("stderr") or "embedart failed", "fetchart": fetch_res, "embedart": embed_res}
+        return {"ok": True, "fetchart": fetch_res, "embedart": embed_res}
+
     def plan_import_folder(self, payload: Dict[str, Any], *, timeout: float = 30.0) -> Dict[str, Any]:
         """Engine-side import folder planning (SEC-002 Wave 22 Closure)."""
         return self._request("POST", "/import/plan", payload, timeout=timeout)

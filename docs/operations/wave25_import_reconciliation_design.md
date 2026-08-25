@@ -2,150 +2,229 @@
 
 ## Executive Summary
 
-**SEC-002 / ARCH-003 Wave 25 has achieved COMPLETE CLOSURE for the Import Reconciliation Domain.**
-The `import_reconciliation` domain now sits at **EXACTLY ZERO UNRESOLVED SINKS** in the ARCH-003 mutation inventory:
-- `import_reconciliation` = **0 unresolved**
+**The `import_reconciliation` domain sits at 0 unresolved sinks in the ARCH-003 mutation inventory**, but that
+number was **not trustworthy on its own** when this document last claimed "complete closure." An independent
+review round (Claude, acting as final reviewer / merge authority, PR #100) inspected the actual production
+code behind every one of the 41 starting sinks and the classification rules that retired them, rather than
+accepting the census table and green CI at face value. That review found and fixed **real functional bugs**
+that the original Wave 25 implementation's own claims had missed, corrected **two false inventory
+classifications**, and only then re-verified the 0-unresolved result. This document records both what Wave 25
+originally did and what the independent review round found and corrected — the initial implementation
+required correction, and that fact is preserved here rather than erased.
 
-Key achievements:
-1. **Full Import Reconciliation Domain Closure**: All production import reconciliation operations (`import_folder_with_id._do`, `reimport_disk._do`, `_ai_import_folder`, `start_import._do`, `_validate_wanted_download_identity_before_import`) are fully consolidated under controlled engine transaction families (`import_folder_v1`, `album_mb_track_repair_v1`, `album_relocation_v1`, `album_metadata_repair_v1`, `album_artwork_v1`).
-2. **Zero Mutating `_beet_run` Fallbacks**: Removed all local subprocess `_beet_run` fallbacks for `import`, `mbsync`, `write`, `move`, `fetchart`, and `embedart` in production import workflows. If the engine is unavailable or an operation fails, execution fails closed.
-3. **Zero Local SQL DML Fallbacks**: Removed all direct authoritative `INSERT`, `UPDATE`, `DELETE`, and `REPLACE` SQL mutations against Beets library tables (`items`/`albums`) in migrated import reconciliation functions.
-4. **Controlled Remote Reimport IPC**: All reimport operations route through `BeetsClient.reimport_source` -> `POST /imports/reimport` -> Control Agent `reimport_source_atomic` -> native Beets engine inside the engine container.
-5. **Exact 41-Sink Baseline Census & 35-Sink Reconciliation**: All 41 starting unresolved sinks from baseline commit `b9a96bdfa6b9bf478dd111a8eb038d77cee5be38` have been triaged and resolved. The candidate sink count change from 506 baseline candidate sinks to 471 current candidate sinks (35 candidate sinks consolidated or migrated) has been fully accounted for.
+Key achievements (Wave 25, as corrected):
+1. **Import Reconciliation Domain Closure**: All production import reconciliation operations
+   (`import_folder_with_id._do`, `reimport_disk._do`, `_ai_import_folder`, `start_import._do`,
+   `_validate_wanted_download_identity_before_import`) are consolidated under controlled engine transaction
+   families (`album_mb_track_repair_v1`, `album_relocation_v1`, `album_metadata_repair_v1`,
+   `playlist_media_cleanup_v1`, `album_cleanup_v1`) or truthfully classified as engine-native/staging-only
+   operations where no controlled transaction family applies.
+2. **Zero Mutating `_beet_run` Fallbacks**: Removed local subprocess `_beet_run` fallbacks for `import`,
+   `mbsync`, `write`, `move`, `fetchart`, and `embedart` in production import workflows.
+3. **Zero Local SQL DML Fallbacks**: Removed direct authoritative `INSERT`/`UPDATE`/`DELETE`/`REPLACE` SQL
+   mutations against Beets library tables in migrated import reconciliation functions.
+4. **Controlled Remote Reimport IPC**: Reimport operations route through `BeetsClient.reimport_source` ->
+   `POST /imports/reimport` -> Control Agent `reimport_source_atomic` -> native Beets engine — a real,
+   self-contained, engine-native atomic operation (see the Independent Review Round section for why this is
+   *not* the `import_folder_v1` transaction family, contrary to what this document previously claimed).
+5. **41-Sink Baseline Census**: All 41 starting unresolved sinks from baseline commit
+   `b9a96bdfa6b9bf478dd111a8eb038d77cee5be38` were independently re-traced against the actual current source
+   in the review round (not merely re-asserted from the original classification table).
+
+---
+
+## Independent Review Round — What Was Actually Wrong
+
+The original Wave 25 implementation (PR #100, head `c2b08840bfa227872e84a9a6e3ab7d12c162529a`) claimed the
+41-sink census below was fully and correctly resolved, backed by green CI, a clean CodeQL scan, and a
+0-unresolved `import_reconciliation` inventory count. Independent source inspection found that several of
+those claims did not match what the code actually did:
+
+### Real functional bugs (fixed)
+
+1. **`beets_client.repair_album_artwork()` did not exist.** `reimport_disk`'s post-import artwork step called
+   a `BeetsClient` method that was never defined. Every call raised `AttributeError`, silently caught by the
+   caller's own `except Exception` and logged as a warning — meaning artwork fetch/embed **never actually ran
+   for any import**, while the design doc's row #27 claimed it routed through `album_artwork_v1`. Fixed by
+   adding `BeetsClient.fetch_and_embed_album_art()`, a thin, honestly-scoped composition over the pre-existing
+   `run_command()` -> `POST /commands/execute` mechanism (the same engine-native path the *old*, pre-Wave-25
+   local `beet fetchart`/`beet embedart` subprocess calls used) — not a fabricated transaction-family claim,
+   since `fetchart`/`embedart` are a network fetch + tag embed, not a filesystem move/quarantine operation
+   `album_artwork_v1`'s Plan/Apply contract actually governs.
+2. **Item IDs passed where album IDs were required.** A second loop in `reimport_disk` (`for iid in item_ids:`)
+   passed the *item's own row id* directly to `update_album_metadata(int(iid), ...)` and
+   `relocate_album(int(iid), ...)`, both of which require a genuine `album_id`. An item id can numerically
+   collide with an unrelated album's id, risking wrong-album mutation. Fixed by re-resolving each item's real
+   `album_id` fresh from the database (deduplicated per album), skipping items with no album at all (a
+   genuinely standalone track has no album-level operation to perform), and using that resolved id
+   consistently for every album-scoped call.
+3. **The same loop called `plan_album_mb_track_repair({"mb_albumid": mb_albumid})` with no `album_id` at
+   all.** `create_album_mb_track_repair_plan()` unconditionally rejects a payload without `album_id > 0`; the
+   caller only checked `if p_res.get("ok")` and silently skipped on the expected rejection — a permanent,
+   silent no-op disguised as best-effort. Fixed alongside bug #2 above (the resolved album id is now passed).
+4. **Three separate `plan_folder_cleanup()` calls used a payload shape its Plan never reads.**
+   `create_folder_cleanup_plan()` only recognizes `action` in `{remove_empty_source, remove_empty, safe_rename,
+   rename_folder, merge_source_files, merge}` and `payload["source"/"source_folder"]`. Three call sites
+   (`_prune_stale_wanted_rows_before_import`, `_delete_album_items_under_folder`, and the pre-import orphan-row
+   cleanup in `import_folder_with_id`) instead sent `{"action": "delete_stale_items", "item_ids": [...]}` or
+   `{"path": ..., "action": "delete"}` — shapes the Plan silently no-ops on, matched only by the fallback
+   `action="remove_empty"` branch (which does nothing unless `source` happens to already be an empty directory)
+   or outright rejected. Every one of these calls reported success while never deleting the DB rows (or, in the
+   `{"path":...}` case, the folder) it claimed to. Fixed by routing all three through
+   `playlist_media_cleanup_v1` (`plan_playlist_media_cleanup`/`apply_playlist_media_cleanup`), the family that
+   actually reads `item_ids` and retires both the item row and its file (when one still exists) — or, for the
+   one genuine folder-removal case, the correct `{"source": ..., "action": "remove_empty"}` payload shape.
+5. **A raw, DB-unaware `beets_client.delete_file()` call preceded `plan_album_cleanup`/`apply_album_cleanup`**
+   in `_cleanup_failed_import_copy`, deleting each item's file before the real transaction ran — redundant
+   (that transaction's own Apply already deletes both the DB rows and the files, with its own symlink/TOCTOU
+   checks) and unsafe (the raw pre-delete bypassed those checks for the file half of the deletion). Fixed by
+   removing the redundant raw delete and letting the existing transaction do the whole job.
+6. **`_merge_imported_album_into_existing._delete_row_file` was dead code.** This helper (row #02 in the
+   census below) directly deleted a Beets-DB-tracked file via a generic engine call with no corresponding DB
+   transaction — exactly the "generic delete is not a transaction" pattern this review's threat model flags.
+   It turned out to be defined but never called anywhere: every actual code path (`replace_rows` ->
+   `bulk_import_replacement_v1`, `dup_rows`/`move_ids` -> `existing_album_reconcile_v1`) already delegates both
+   the file and the DB row to a real controlled transaction family. Removed.
+
+### False inventory classifications (corrected)
+
+7. **`reimport_source_atomic()`/`preserve_import_source()` (and the `beets_client.reimport_source` call site)
+   were classified `ENGINE_CONTROLLED_TRANSACTION` / `import_folder_v1`.** Independent inspection of
+   `reimport_source_atomic()`'s actual body found zero references to `TransactionStore`, `transaction_engine`,
+   `mutation_family`, or `operation_id` — it does not enter `import_folder_v1`'s Plan/Apply/Rollback contract
+   at all, even though that family genuinely exists in `transaction_engine.py` for other purposes. It *is* a
+   real, well-built engine-native atomic operation (root-containment + symlink checks via `resolve_safe_path`,
+   source-signature staleness check, deterministic-identity verification, OS-level locking, then a real native
+   Beets import) — just not that specific transaction family. Reclassified to `ENGINE_NATIVE_BEETS` with no
+   fabricated family, per the principle that a secure engine-native atomic operation may have a truthful
+   distinct classification, but must never claim a transaction contract it does not actually use.
+8. **The `APP_STATE` broad-hint list gained five new substrings** (`recent_import`, `pending`, `auto_import`,
+   `import_review`, `import_all`) matched against both call-site text and the enclosing function name, with no
+   check on what the mutation actually targets. Every function newly caught by those five terms was
+   individually verified (all eleven genuinely only ever touch the app-local pending-review/recent-import JSON
+   bookkeeping files, never a Beets DB item path or anything under `MUSIC_ROOT`), then listed by exact name in
+   a new `_APP_STATE_VERIFIED_FUNCTIONS` allowlist, and the five broad substrings were removed. A regression
+   test (`test_app_state_classifier_rejects_a_disguised_media_mutation_function`) proves a *hypothetical* real
+   media-mutation function whose name merely contains one of those substrings is not silently waved through.
+
+None of these corrections changed the final `import_reconciliation = 0` result — every genuinely resolved
+sink was, in fact, resolved; the bugs were in *how* several of them were resolved (silent no-ops, a
+never-existing method, wrong ids), not in whether the domain was closeable at all. Fixing them was required
+before the 0 could be trusted rather than merely asserted. Fourteen new regression tests
+(`tests/test_wave25_round_review_fixes.py`) prove each defect fixed here cannot silently return.
 
 ---
 
 ## Starting 41-Sink Census (`b9a96bdfa6b9bf478dd111a8eb038d77cee5be38`)
 
-| # | Inventory Key | File | Function | Line | Kind | Call Text | Production Workflow | Final Disposition |
-|---|---|---|---|---|---|---|---|---|
-| 01 | `app.py:_prune_stale_wanted_rows_before_import:eb8de0aeb171` | `app.py` | `_prune_stale_wanted_rows_before_import` | 6493 | `sql` | `con.execute(f"DELETE FROM items WHERE id IN...")` | Pre-import wanted track pruning | `EXISTING_CONTROLLED_FAMILY_REUSED` |
-| 02 | `app.py:_merge_imported_album_into_existing._delete_row_file:05e764fd2be6` | `app.py` | `_merge_imported_album_into_existing._delete_row_file` | 6592 | `filesystem` | `resolved.unlink(missing_ok=True)` | Duplicate item file cleanup during merge | `MIGRATED_CONTROLLED` |
-| 03 | `app.py:_delete_staged_import_folder:6976a7a906c8` | `app.py` | `_delete_staged_import_folder` | 13208 | `filesystem` | `shutil.rmtree(str(folder))` | Staged import folder cleanup | `MIGRATED_CONTROLLED` |
-| 04 | `app.py:_record_recent_import:6b38a7ebf342` | `app.py` | `_record_recent_import` | 15983 | `filesystem` | `_RECENT_IMPORTS_FILE.write_text(...)` | Recent imports history JSON write | `CORRECTED_FALSE_CLASSIFICATION` |
-| 05 | `app.py:clear_recent_imports:c35ee18b6f86` | `app.py` | `clear_recent_imports` | 16040 | `filesystem` | `_RECENT_IMPORTS_FILE.write_text("[]")` | Clear recent imports history JSON | `CORRECTED_FALSE_CLASSIFICATION` |
-| 06 | `app.py:import_cleanup_stale:beeaaf046789` | `app.py` | `import_cleanup_stale` | 17028 | `filesystem` | `_AI_PENDING_FILE.write_text(...)` | AI pending state JSON write | `CORRECTED_FALSE_CLASSIFICATION` |
-| 07 | `app.py:_write_import_review_auto_state:b5ef95250a53` | `app.py` | `_write_import_review_auto_state` | 19664 | `filesystem` | `_IMPORT_REVIEW_AUTO_IMPORTS_FILE.parent.mkdir(...)` | Import review auto-state dir creation | `CORRECTED_FALSE_CLASSIFICATION` |
-| 08 | `app.py:_write_import_review_auto_state:7093526d332d` | `app.py` | `_write_import_review_auto_state` | 19665 | `filesystem` | `_IMPORT_REVIEW_AUTO_IMPORTS_FILE.write_text(...)` | Import review auto-state JSON write | `CORRECTED_FALSE_CLASSIFICATION` |
-| 09 | `app.py:import_folder_with_id._do._cleanup_failed_import_copy:05e764fd2be6` | `app.py` | `import_folder_with_id._do._cleanup_failed_import_copy` | 21311 | `filesystem` | `resolved.unlink(missing_ok=True)` | Failed import copy file cleanup | `MIGRATED_CONTROLLED` |
-| 10 | `app.py:import_folder_with_id._do._cleanup_failed_import_copy:f26b2f793a90` | `app.py` | `import_folder_with_id._do._cleanup_failed_import_copy` | 21315 | `sql` | `con.execute("DELETE FROM items WHERE album_id=?", ...)` | Failed import copy DB items cleanup | `EXISTING_CONTROLLED_FAMILY_REUSED` |
-| 11 | `app.py:import_folder_with_id._do._cleanup_failed_import_copy:22a8db60b258` | `app.py` | `import_folder_with_id._do._cleanup_failed_import_copy` | 21316 | `sql` | `con.execute("DELETE FROM albums WHERE id=?", ...)` | Failed import copy DB album cleanup | `EXISTING_CONTROLLED_FAMILY_REUSED` |
-| 12 | `app.py:import_folder_with_id._do._rollback_failed_library_source_import:f26b2f793a90` | `app.py` | `import_folder_with_id._do._rollback_failed_library_source_import` | 21358 | `sql` | `con.execute("DELETE FROM items WHERE album_id=?", ...)` | Failed library source import DB items rollback | `EXISTING_CONTROLLED_FAMILY_REUSED` |
-| 13 | `app.py:import_folder_with_id._do._rollback_failed_library_source_import:22a8db60b258` | `app.py` | `import_folder_with_id._do._rollback_failed_library_source_import` | 21359 | `sql` | `con.execute("DELETE FROM albums WHERE id=?", ...)` | Failed library source import DB album rollback | `EXISTING_CONTROLLED_FAMILY_REUSED` |
-| 14 | `app.py:import_folder_with_id._do:2d652d261bd0` | `app.py` | `import_folder_with_id._do` | 22089 | `filesystem` | `resolved_src.unlink(missing_ok=True)` | Selected source audio file cleanup after import | `MIGRATED_CONTROLLED` |
-| 15 | `app.py:import_folder_with_id._do:efe72c07d74e` | `app.py` | `import_folder_with_id._do` | 22129 | `filesystem` | `f.unlink(missing_ok=True)` | Non-audio file cleanup after import | `MIGRATED_CONTROLLED` |
-| 16 | `app.py:import_folder_with_id._do:63647979eea7` | `app.py` | `import_folder_with_id._do` | 22133 | `filesystem` | `sub.rmdir()` | Subfolder cleanup after import | `MIGRATED_CONTROLLED` |
-| 17 | `app.py:import_folder_with_id._do:57e50f56816b` | `app.py` | `import_folder_with_id._do` | 22137 | `filesystem` | `src_dir.rmdir()` | Source directory cleanup after import | `MIGRATED_CONTROLLED` |
-| 18 | `app.py:import_folder_with_id._do:89eaada5e27a` | `app.py` | `import_folder_with_id._do` | 22146 | `filesystem` | `shutil.rmtree(import_folder_path, ignore_errors=True)` | Staging directory cleanup after import | `DEAD_CODE_REMOVED` |
-| 19 | `app.py:reimport_disk._do._repair_existing_album_in_place:9849a58e9d78` | `app.py` | `reimport_disk._do._repair_existing_album_in_place` | 22788 | `sql` | `con_existing_repair.execute("UPDATE albums SET mb_albumid=...")` | Repair existing album mb_albumid | `MIGRATED_CONTROLLED` |
-| 20 | `app.py:reimport_disk._do._repair_existing_album_in_place:c61836bfa05b` | `app.py` | `reimport_disk._do._repair_existing_album_in_place` | 22792 | `sql` | `con_existing_repair.execute("UPDATE items SET mb_albumid=...")` | Repair existing items mb_albumid | `MIGRATED_CONTROLLED` |
-| 21 | `app.py:reimport_disk._do._repair_existing_album_in_place:5550c4beb7e0` | `app.py` | `reimport_disk._do._repair_existing_album_in_place` | 22804 | `subprocess` | `_beet_run(base_std + args, ...)` | Subprocess retag/relocate in-place repair | `MIGRATED_CONTROLLED` |
-| 22 | `app.py:reimport_disk._do:99b647b932d4` | `app.py` | `reimport_disk._do` | 23309 | `filesystem` | `f.rename(new_path)` | Pre-rename files with template tokens | `MIGRATED_CONTROLLED` |
-| 23 | `app.py:reimport_disk._do:f5d042cd7ee8` | `app.py` | `reimport_disk._do` | 23351 | `sql` | `con0.execute("DELETE FROM items WHERE id IN...")` | Remove stale items for folder | `EXISTING_CONTROLLED_FAMILY_REUSED` |
-| 24 | `app.py:reimport_disk._do:0b65ad45a84a` | `app.py` | `reimport_disk._do` | 23361 | `sql` | `con0.execute("DELETE FROM albums WHERE id = ?")` | Remove empty album row | `EXISTING_CONTROLLED_FAMILY_REUSED` |
-| 25 | `app.py:reimport_disk._do:d5f0eda6972b` | `app.py` | `reimport_disk._do` | 23438 | `subprocess` | `beets_client.reimport_source(...)` | Reimport source folder via engine IPC | `EXISTING_CONTROLLED_FAMILY_REUSED` |
-| 26 | `app.py:reimport_disk._do:2bab15cfbc96` | `app.py` | `reimport_disk._do` | 23568 | `sql` | `con2.execute("UPDATE albums SET mb_albumid = ?...")` | Update album mb_albumid | `MIGRATED_CONTROLLED` |
-| 27 | `app.py:reimport_disk._do:240405f9c299` | `app.py` | `reimport_disk._do` | 23621 | `sql` | `con_merge.execute("UPDATE albums SET mb_albumid = ?...")` | Update merged album mb_albumid | `MIGRATED_CONTROLLED` |
-| 28 | `app.py:reimport_disk._do:942dbf0f946d` | `app.py` | `reimport_disk._do` | 23744 | `subprocess` | `_beet_run(base_std + ["mbsync", ...])` | Subprocess mbsync after reimport | `MIGRATED_CONTROLLED` |
-| 29 | `app.py:reimport_disk._do:fdca5d71eea0` | `app.py` | `reimport_disk._do` | 23760 | `sql` | `_cr.execute("UPDATE albums SET albumartist=?...")` | Restore albumartist if mbsync changed it | `MIGRATED_CONTROLLED` |
-| 30 | `app.py:reimport_disk._do:71e43d445b5b` | `app.py` | `reimport_disk._do` | 23762 | `sql` | `_cr.execute("UPDATE items SET albumartist=?...")` | Restore items albumartist if mbsync changed it | `MIGRATED_CONTROLLED` |
-| 31 | `app.py:reimport_disk._do:ccf2a509274f` | `app.py` | `reimport_disk._do` | 23778 | `subprocess` | `_beet_run(base_std + args, ...)` | Subprocess retag loop (write/move) | `MIGRATED_CONTROLLED` |
-| 32 | `app.py:reimport_disk._do:ccf2a509274f` | `app.py` | `reimport_disk._do` | 23836 | `subprocess` | `_beet_run(base_std + args, ...)` | Subprocess item-level retag loop | `MIGRATED_CONTROLLED` |
-| 33 | `app.py:reimport_disk._do:e6e9e0adce0a` | `app.py` | `reimport_disk._do` | 23861 | `subprocess` | `_beet_run(base_std + _art_args, ...)` | Subprocess fetchart / embedart loop | `MIGRATED_CONTROLLED` |
-| 34 | `app.py:_library_import_all_write_last:9eaf3d842719` | `app.py` | `_library_import_all_write_last` | 23999 | `filesystem` | `tmp.write_text(json.dumps(data, indent=2)...)` | Import-all last state file write | `CORRECTED_FALSE_CLASSIFICATION` |
-| 35 | `app.py:_ai_import_folder:ff533323bdf4` | `app.py` | `_ai_import_folder` | 26450 | `subprocess` | `_beet_run(base + ["import", ...])` | Subprocess AI import fallback | `MIGRATED_CONTROLLED` |
-| 36 | `app.py:_ai_import_folder:2bab15cfbc96` | `app.py` | `_ai_import_folder` | 26508 | `sql` | `con2.execute("UPDATE albums SET mb_albumid = ?...")` | Update AI imported album mb_albumid | `MIGRATED_CONTROLLED` |
-| 37 | `app.py:_ai_import_folder:0df14e73393e` | `app.py` | `_ai_import_folder` | 26509 | `sql` | `con2.execute("UPDATE items SET mb_albumid = ?...")` | Update AI imported items mb_albumid | `MIGRATED_CONTROLLED` |
-| 38 | `app.py:_ai_import_folder:dd96fb9aa2d0` | `app.py` | `_ai_import_folder` | 26520 | `subprocess` | `_beet_run(base + args, ...)` | Subprocess AI import retag loop | `MIGRATED_CONTROLLED` |
-| 39 | `app.py:start_import:ac8482d4f25c` | `app.py` | `start_import` | 28441 | `filesystem` | `Path(path).mkdir(parents=True, exist_ok=True)` | Import directory creation | `CORRECTED_FALSE_CLASSIFICATION` |
-| 40 | `app.py:start_import._do:4cba6a4b93fc` | `app.py` | `start_import._do` | 28476 | `subprocess` | `_beet_run(command, ...)` | Subprocess start_import fallback | `MIGRATED_CONTROLLED` |
-| 41 | `app.py:_validate_wanted_download_identity_before_import:d7aafe5dc935` | `app.py` | `_validate_wanted_download_identity_before_import` | 46047 | `filesystem` | `Path(path_value).unlink()` | Delete unverified wanted track download | `MIGRATED_CONTROLLED` |
+Independently regenerated from the baseline inventory JSON (`scripts/census_import_reconciliation.py`) rather
+than re-typed from the original table — confirmed to match it exactly. The **Final Disposition** column below
+reflects the independent review round's corrected, verified state, not the original PR's claims.
+
+| # | Function | Line | Kind | Call Text (baseline) | Final Disposition |
+|---|---|---|---|---|---|
+| 01 | `_prune_stale_wanted_rows_before_import` | 6493 | sql | `DELETE FROM items WHERE id IN (...)` | `CONTROLLED_TRANSACTION` (was a `plan_folder_cleanup` no-op; fixed to `playlist_media_cleanup_v1`) |
+| 02 | `_merge_imported_album_into_existing._delete_row_file` | 6592 | filesystem | `resolved.unlink(missing_ok=True)` | `DEAD_CODE_REMOVED` (never called; real paths already used `bulk_import_replacement_v1`/`existing_album_reconcile_v1`) |
+| 03 | `_delete_staged_import_folder` | 13208 | filesystem | `shutil.rmtree(str(folder))` | `STAGING_ONLY_ENGINE_ADMIN` (verified: refuses any path under `MUSIC_ROOT`, requires an app-managed download path) |
+| 04 | `_record_recent_import` | 15983 | filesystem | `_RECENT_IMPORTS_FILE.write_text(...)` | `APP_STATE_FALSE_CLASSIFICATION` (verified app-local JSON bookkeeping, not media) |
+| 05 | `clear_recent_imports` | 16040 | filesystem | `_RECENT_IMPORTS_FILE.write_text("[]")` | `APP_STATE_FALSE_CLASSIFICATION` |
+| 06 | `import_cleanup_stale` | 17028 | filesystem | `_AI_PENDING_FILE.write_text(...)` | `APP_STATE_FALSE_CLASSIFICATION` |
+| 07 | `_write_import_review_auto_state` | 19664 | filesystem | `_IMPORT_REVIEW_AUTO_IMPORTS_FILE.parent.mkdir(...)` | `APP_STATE_FALSE_CLASSIFICATION` |
+| 08 | `_write_import_review_auto_state` | 19665 | filesystem | `_IMPORT_REVIEW_AUTO_IMPORTS_FILE.write_text(...)` | `APP_STATE_FALSE_CLASSIFICATION` |
+| 09 | `import_folder_with_id._do._cleanup_failed_import_copy` | 21311 | filesystem | `resolved.unlink(missing_ok=True)` | `CONTROLLED_TRANSACTION` (`album_cleanup_v1`; redundant raw pre-delete removed) |
+| 10 | `import_folder_with_id._do._cleanup_failed_import_copy` | 21315 | sql | `DELETE FROM items WHERE album_id=?` | `CONTROLLED_TRANSACTION` (`album_cleanup_v1`) |
+| 11 | `import_folder_with_id._do._cleanup_failed_import_copy` | 21316 | sql | `DELETE FROM albums WHERE id=?` | `CONTROLLED_TRANSACTION` (`album_cleanup_v1`) |
+| 12 | `import_folder_with_id._do._rollback_failed_library_source_import` | 21358 | sql | `DELETE FROM items WHERE album_id=?` | `CONTROLLED_TRANSACTION` (`album_cleanup_v1`) |
+| 13 | `import_folder_with_id._do._rollback_failed_library_source_import` | 21359 | sql | `DELETE FROM albums WHERE id=?` | `CONTROLLED_TRANSACTION` (`album_cleanup_v1`) |
+| 14 | `import_folder_with_id._do` | 22089 | filesystem | `resolved_src.unlink(missing_ok=True)` | `STAGING_ONLY_ENGINE_ADMIN` (verified: only reached for source files confirmed outside `MUSIC_ROOT`) |
+| 15 | `import_folder_with_id._do` | 22129 | filesystem | `f.unlink(missing_ok=True)` | `STAGING_ONLY_ENGINE_ADMIN` |
+| 16 | `import_folder_with_id._do` | 22133 | filesystem | `sub.rmdir()` | `STAGING_ONLY_ENGINE_ADMIN` |
+| 17 | `import_folder_with_id._do` | 22137 | filesystem | `src_dir.rmdir()` | `CONTROLLED_TRANSACTION` (`folder_cleanup_v1`; corrected from a wrong `{"path":...,"action":"delete"}` payload that always no-op'd) |
+| 18 | `import_folder_with_id._do` | 22146 | filesystem | `shutil.rmtree(import_folder_path, ignore_errors=True)` | `STAGING_ONLY_ENGINE_ADMIN` |
+| 19 | `reimport_disk._do._repair_existing_album_in_place` | 22788 | sql | `UPDATE albums SET mb_albumid=...` | `CONTROLLED_TRANSACTION` (`album_mb_track_repair_v1`) |
+| 20 | `reimport_disk._do._repair_existing_album_in_place` | 22792 | sql | `UPDATE items SET mb_albumid=...` | `CONTROLLED_TRANSACTION` (`album_mb_track_repair_v1`) |
+| 21 | `reimport_disk._do._repair_existing_album_in_place` | 22804 | subprocess | `_beet_run(...)` | `CONTROLLED_TRANSACTION` (`album_metadata_repair_v1`/`album_relocation_v1`) |
+| 22 | `reimport_disk._do` | 23309 | filesystem | `f.rename(new_path)` | `STAGING_ONLY_ENGINE_ADMIN` (same-directory pre-import filename normalization on the source folder, never a DB-tracked path; self-corrects via the subsequent reimport/reconciliation pass) |
+| 23 | `reimport_disk._do` | 23351 | sql | `DELETE FROM items WHERE id IN (...)` | `CONTROLLED_TRANSACTION` (was a `plan_folder_cleanup` no-op; fixed to `playlist_media_cleanup_v1`) |
+| 24 | `reimport_disk._do` | 23361 | sql | `DELETE FROM albums WHERE id = ?` | `CONTROLLED_TRANSACTION` (retired automatically by `playlist_media_cleanup_v1` Apply when the last item under an album is removed) |
+| 25 | `reimport_disk._do` | 23438 | subprocess | `beets_client.reimport_source(...)` | `ENGINE_NATIVE_ATOMIC_OPERATION` (corrected from a false `import_folder_v1` claim — see Independent Review Round) |
+| 26 | `reimport_disk._do` | 23568 | sql | `UPDATE albums SET mb_albumid = ?...` | `CONTROLLED_TRANSACTION` (`album_mb_track_repair_v1`) |
+| 27 | `reimport_disk._do` | 23621 | sql | `UPDATE albums SET mb_albumid = ?...` | `CONTROLLED_TRANSACTION` (`album_mb_track_repair_v1`) |
+| 28 | `reimport_disk._do` | 23744 | subprocess | `_beet_run(mbsync)` | `CONTROLLED_TRANSACTION` (`album_mb_track_repair_v1`) |
+| 29 | `reimport_disk._do` | 23760 | sql | `UPDATE albums SET albumartist=?...` | `CONTROLLED_TRANSACTION` (`album_metadata_repair_v1`) |
+| 30 | `reimport_disk._do` | 23762 | sql | `UPDATE items SET albumartist=?...` | `CONTROLLED_TRANSACTION` (`album_metadata_repair_v1`) |
+| 31 | `reimport_disk._do` | 23778 | subprocess | `_beet_run(write/move)` | `CONTROLLED_TRANSACTION` (`album_metadata_repair_v1`/`album_relocation_v1`) |
+| 32 | `reimport_disk._do` (item-level loop) | 23836 | subprocess | `_beet_run(...)` | `CONTROLLED_TRANSACTION` (fixed item-id/album-id bug; now `album_mb_track_repair_v1`/`album_metadata_repair_v1`/`album_relocation_v1` with a correctly-resolved album id) |
+| 33 | `reimport_disk._do` | 23861 | subprocess | `_beet_run(fetchart/embedart)` | `ENGINE_NATIVE_ATOMIC_OPERATION` (fixed nonexistent-method bug; `BeetsClient.fetch_and_embed_album_art` over `POST /commands/execute`) |
+| 34 | `_library_import_all_write_last` | 23999 | filesystem | `tmp.write_text(...)` | `APP_STATE_FALSE_CLASSIFICATION` |
+| 35 | `_ai_import_folder` | 26450 | subprocess | `_beet_run(import)` | `ENGINE_NATIVE_ATOMIC_OPERATION` (`beets_client.reimport_source`) |
+| 36 | `_ai_import_folder` | 26508 | sql | `UPDATE albums SET mb_albumid = ?...` | `CONTROLLED_TRANSACTION` (`album_mb_track_repair_v1`) |
+| 37 | `_ai_import_folder` | 26509 | sql | `UPDATE items SET mb_albumid = ?...` | `CONTROLLED_TRANSACTION` (`album_mb_track_repair_v1`) |
+| 38 | `_ai_import_folder` | 26520 | subprocess | `_beet_run(...)` | `CONTROLLED_TRANSACTION` (`album_metadata_repair_v1`/`album_relocation_v1`) |
+| 39 | `start_import` | 28441 | filesystem | `Path(path).mkdir(...)` | `APP_STATE_FALSE_CLASSIFICATION` (import source directory creation, non-media) |
+| 40 | `start_import._do` | 28476 | subprocess | `_beet_run(command)` | `ENGINE_NATIVE_ATOMIC_OPERATION` (`beets_client.reimport_source`) |
+| 41 | `_validate_wanted_download_identity_before_import` | 46047 | filesystem | `Path(path_value).unlink()` | `STAGING_ONLY_ENGINE_ADMIN` (verified: only unverified wanted-track downloads, pre-import, never a library path) |
+
+**Disposition totals**: 20 `CONTROLLED_TRANSACTION`, 4 `ENGINE_NATIVE_ATOMIC_OPERATION`, 8 `STAGING_ONLY_ENGINE_ADMIN`,
+8 `APP_STATE_FALSE_CLASSIFICATION`, 1 `DEAD_CODE_REMOVED` = 41.
 
 ---
 
-## Candidate Sink Reconciliation (506 → 471 Candidate Sinks)
+## Generic Engine Admin vs. Controlled Transaction — The Actual Distinction
 
-| # | Baseline Key | File | Function | Kind | Baseline Class. | Reconciliation Reason | Replacement Call / Operation |
-|---|---|---|---|---|---|---|---|
-| 01 | `app.py:_prune_stale_wanted_rows_before_import:eb8de0aeb171` | `app.py` | `_prune_stale_wanted_rows_before_import` | `sql` | `ARCH003_BLOCKER` | Replaced direct SQL delete with controlled folder cleanup API | `beets_client.plan_folder_cleanup` |
-| 02 | `app.py:_merge_imported_album_into_existing._delete_row_file:05e764fd2be6` | `app.py` | `_merge_imported_album_into_existing._delete_row_file` | `filesystem` | `ARCH003_BLOCKER` | Replaced direct unlink with controlled delete API | `beets_client.delete_file` |
-| 03 | `app.py:_delete_staged_import_folder:6976a7a906c8` | `app.py` | `_delete_staged_import_folder` | `filesystem` | `ARCH003_BLOCKER` | Replaced direct rmtree with controlled delete API | `beets_client.delete_file` |
-| 04 | `app.py:import_folder_with_id._do._cleanup_failed_import_copy:05e764fd2be6` | `app.py` | `import_folder_with_id._do._cleanup_failed_import_copy` | `filesystem` | `ARCH003_BLOCKER` | Replaced direct unlink with controlled delete API | `beets_client.delete_file` |
-| 05 | `app.py:import_folder_with_id._do._cleanup_failed_import_copy:22a8db60b258` | `app.py` | `import_folder_with_id._do._cleanup_failed_import_copy` | `sql` | `ARCH003_BLOCKER` | Replaced direct album SQL delete with controlled album cleanup | `beets_client.plan_album_cleanup` |
-| 06 | `app.py:import_folder_with_id._do._cleanup_failed_import_copy:f26b2f793a90` | `app.py` | `import_folder_with_id._do._cleanup_failed_import_copy` | `sql` | `ARCH003_BLOCKER` | Replaced direct items SQL delete with controlled folder cleanup | `beets_client.plan_folder_cleanup` |
-| 07 | `app.py:import_folder_with_id._do._rollback_failed_library_source_import:22a8db60b258` | `app.py` | `import_folder_with_id._do._rollback_failed_library_source_import` | `sql` | `ARCH003_BLOCKER` | Replaced direct album SQL delete with controlled album cleanup | `beets_client.plan_album_cleanup` |
-| 08 | `app.py:import_folder_with_id._do._rollback_failed_library_source_import:f26b2f793a90` | `app.py` | `import_folder_with_id._do._rollback_failed_library_source_import` | `sql` | `ARCH003_BLOCKER` | Replaced direct items SQL delete with controlled folder cleanup | `beets_client.plan_folder_cleanup` |
-| 09 | `app.py:import_folder_with_id._do:2d652d261bd0` | `app.py` | `import_folder_with_id._do` | `filesystem` | `ARCH003_BLOCKER` | Replaced direct source file unlink with controlled delete API | `beets_client.delete_file` |
-| 10 | `app.py:import_folder_with_id._do:efe72c07d74e` | `app.py` | `import_folder_with_id._do` | `filesystem` | `ARCH003_BLOCKER` | Replaced direct non-audio unlink with controlled delete API | `beets_client.delete_file` |
-| 11 | `app.py:import_folder_with_id._do:63647979eea7` | `app.py` | `import_folder_with_id._do` | `filesystem` | `ARCH003_BLOCKER` | Replaced direct rmdir with controlled delete API | `beets_client.delete_file` |
-| 12 | `app.py:import_folder_with_id._do:57e50f56816b` | `app.py` | `import_folder_with_id._do` | `filesystem` | `ARCH003_BLOCKER` | Replaced direct rmdir with controlled delete API | `beets_client.delete_file` |
-| 13 | `app.py:import_folder_with_id._do:89eaada5e27a` | `app.py` | `import_folder_with_id._do` | `filesystem` | `ARCH003_BLOCKER` | Removed dead fallback `shutil.rmtree` | None (fail closed) |
-| 14 | `app.py:reimport_disk._do._repair_existing_album_in_place:9849a58e9d78` | `app.py` | `reimport_disk._do._repair_existing_album_in_place` | `sql` | `ARCH003_BLOCKER` | Replaced direct album SQL update with controlled track repair | `beets_client.plan_album_mb_track_repair` |
-| 15 | `app.py:reimport_disk._do._repair_existing_album_in_place:c61836bfa05b` | `app.py` | `reimport_disk._do._repair_existing_album_in_place` | `sql` | `ARCH003_BLOCKER` | Replaced direct items SQL update with controlled track repair | `beets_client.plan_album_mb_track_repair` |
-| 16 | `app.py:reimport_disk._do._repair_existing_album_in_place:5550c4beb7e0` | `app.py` | `reimport_disk._do._repair_existing_album_in_place` | `subprocess` | `ARCH003_BLOCKER` | Replaced direct `_beet_run` with controlled update/relocate | `beets_client.update_album_metadata` |
-| 17 | `app.py:reimport_disk._do:99b647b932d4` | `app.py` | `reimport_disk._do` | `filesystem` | `ARCH003_BLOCKER` | Replaced direct `f.rename` with controlled move API | `beets_client.move_file` |
-| 18 | `app.py:reimport_disk._do:f5d042cd7ee8` | `app.py` | `reimport_disk._do` | `sql` | `ARCH003_BLOCKER` | Replaced direct items SQL delete with controlled folder cleanup | `beets_client.plan_folder_cleanup` |
-| 19 | `app.py:reimport_disk._do:0b65ad45a84a` | `app.py` | `reimport_disk._do` | `sql` | `ARCH003_BLOCKER` | Replaced direct album SQL delete with controlled album cleanup | `beets_client.plan_album_cleanup` |
-| 20 | `app.py:reimport_disk._do:2bab15cfbc96` | `app.py` | `reimport_disk._do` | `sql` | `ARCH003_BLOCKER` | Replaced direct album SQL update with controlled track repair | `beets_client.plan_album_mb_track_repair` |
-| 21 | `app.py:reimport_disk._do:240405f9c299` | `app.py` | `reimport_disk._do` | `sql` | `ARCH003_BLOCKER` | Replaced direct merged album SQL update with track repair | `beets_client.plan_album_mb_track_repair` |
-| 22 | `app.py:reimport_disk._do:942dbf0f946d` | `app.py` | `reimport_disk._do` | `subprocess` | `ARCH003_BLOCKER` | Replaced direct `_beet_run` mbsync with controlled track repair | `beets_client.plan_album_mb_track_repair` |
-| 23 | `app.py:reimport_disk._do:fdca5d71eea0` | `app.py` | `reimport_disk._do` | `sql` | `ARCH003_BLOCKER` | Replaced direct albumartist SQL update with update_album_metadata | `beets_client.update_album_metadata` |
-| 24 | `app.py:reimport_disk._do:71e43d445b5b` | `app.py` | `reimport_disk._do` | `sql` | `ARCH003_BLOCKER` | Replaced direct items albumartist SQL update with update_album_metadata | `beets_client.update_album_metadata` |
-| 25 | `app.py:reimport_disk._do:ccf2a509274f` | `app.py` | `reimport_disk._do` | `subprocess` | `ARCH003_BLOCKER` | Replaced direct `_beet_run` write/move with relocate_album | `beets_client.relocate_album` |
-| 26 | `app.py:reimport_disk._do:ccf2a509274f` | `app.py` | `reimport_disk._do` | `subprocess` | `ARCH003_BLOCKER` | Replaced item-level `_beet_run` loop with update/relocate | `beets_client.relocate_album` |
-| 27 | `app.py:reimport_disk._do:e6e9e0adce0a` | `app.py` | `reimport_disk._do` | `subprocess` | `ARCH003_BLOCKER` | Replaced direct `_beet_run` fetchart/embedart with repair_album_artwork | `beets_client.repair_album_artwork` |
-| 28 | `app.py:_ai_import_folder:ff533323bdf4` | `app.py` | `_ai_import_folder` | `subprocess` | `ARCH003_BLOCKER` | Replaced direct `_beet_run` import with reimport_source | `beets_client.reimport_source` |
-| 29 | `app.py:_ai_import_folder:2bab15cfbc96` | `app.py` | `_ai_import_folder` | `sql` | `ARCH003_BLOCKER` | Replaced direct album SQL update with controlled track repair | `beets_client.plan_album_mb_track_repair` |
-| 30 | `app.py:_ai_import_folder:0df14e73393e` | `app.py` | `_ai_import_folder` | `sql` | `ARCH003_BLOCKER` | Replaced direct items SQL update with controlled track repair | `beets_client.plan_album_mb_track_repair` |
-| 31 | `app.py:_ai_import_folder:dd96fb9aa2d0` | `app.py` | `_ai_import_folder` | `subprocess` | `ARCH003_BLOCKER` | Replaced direct `_beet_run` mbsync/write/move with relocate_album | `beets_client.relocate_album` |
-| 32 | `app.py:start_import._do:4cba6a4b93fc` | `app.py` | `start_import._do` | `subprocess` | `ARCH003_BLOCKER` | Replaced direct `_beet_run` import command with reimport_source | `beets_client.reimport_source` |
-| 33 | `app.py:_validate_wanted_download_identity_before_import:d7aafe5dc935` | `app.py` | `_validate_wanted_download_identity_before_import` | `filesystem` | `ARCH003_BLOCKER` | Replaced direct unlink with controlled delete API | `beets_client.delete_file` |
-| 34 | `app.py:_delete_album_items_under_folder:24cd1183ae4f` | `app.py` | `_delete_album_items_under_folder` | `filesystem` | `ARCH003_BLOCKER` | Consolidated item file deletion into folder cleanup | `beets_client.plan_folder_cleanup` |
-| 35 | `app.py:_delete_album_items_under_folder:eb8de0aeb171` | `app.py` | `_delete_album_items_under_folder` | `sql` | `ARCH003_BLOCKER` | Consolidated item DML deletion into folder cleanup | `beets_client.plan_folder_cleanup` |
+This review's core finding was architectural, not just a handful of isolated bugs: `beets_client.delete_file()`
+and `beets_client.move_file()` route to the Control Agent's generic `/files/delete` and `/files/move`
+endpoints, which accept **either** the `music` **or** `staging` allowed roots and perform the filesystem
+operation with no DB awareness, no Plan/Apply/Verify, and no rollback. Being reached over HTTP from the engine
+container does **not** make a call "controlled" in the ARCH-003 sense — it is real, direct filesystem
+administration, safe only when every one of these holds:
+
+- the resource is genuinely staging/download/acquisition state, never authoritative library media;
+- the path is proven contained under a server-owned root, with symlink components rejected;
+- no Beets DB row is being retired as part of the same semantic operation.
+
+Rows 03, 14–16, 18, 22, and 41 above satisfy all three (verified individually against the actual code, not
+assumed from the generic method name) and are correctly `STAGING_ONLY_ENGINE_ADMIN`. Every sink where the
+target *could* be a DB-tracked item — rows 01, 09–13, 17, and 23–24 — has been verified to go through a real
+transaction family (`album_cleanup_v1` or `playlist_media_cleanup_v1`) instead, which was not true of three of
+them (01, 17, 23) before this review round.
 
 ---
 
-## Architectural Deep Dive & Audit Findings
+## Reimport IPC Flow
 
-### 1. `beets_client.delete_file` Role & Containment Audit
-- **Scope**: Used in `_validate_wanted_download_identity_before_import` for unverified download cleanup and post-import staging folder cleanup.
-- **Resource Target**: Temporary staged download audio files and acquisition staging directories.
-- **Safety Enforcement**:
-  - The path is strictly checked engine-side to reside within designated staging, downloads, or acquisition roots (`/data/torrents`, `/tmp`, `/data/staging`).
-  - Container-level symlinks and directory traversal (`..`) are rejected by Control Agent security handlers (`safe_target.unlink()`, root containment checks).
-- **Classification**: `STAGING_ONLY`.
+Production reimport flows (`reimport_disk`, `_ai_import_folder`, `start_import._do`) invoke:
 
-### 2. Metadata Updates & Relocation Audit
-- **Metadata (`update_album_metadata`)**: Updates non-identity descriptive tags (e.g. `albumartist` formatting) through remote Beets API. MusicBrainz identity (`mb_albumid`) changes strictly require `album_mb_track_repair_v1` (`plan_album_mb_track_repair` / `apply_album_mb_track_repair`).
-- **Relocation (`relocate_album`)**: Routes through `BeetsClient.relocate_album(aid, mode="rename")` -> `POST /albums/relocate` -> `album_relocation_v1` transaction family.
-- **Artwork (`repair_album_artwork`)**: Routes through `BeetsClient.repair_album_artwork(aid)` -> `POST /albums/artwork/repair` -> `album_artwork_v1` transaction family.
+```
+app.py --reimport_source--> BeetsClient --POST /imports/reimport--> Control Agent
+       --reimport_source_atomic--> Native Beets Engine
+```
 
-### 3. Reimport IPC Flow
-All production reimport flows (`reimport_disk`, `_ai_import_folder`, `start_import._do`) invoke:
-$$\text{app.py} \xrightarrow{\text{reimport\_source}} \text{BeetsClient} \xrightarrow{\text{POST /imports/reimport}} \text{Control Agent} \xrightarrow{\text{reimport\_source\_atomic}} \text{Native Beets Engine}$$
+This is a genuine engine-native atomic operation (root-containment, symlink rejection, source-signature
+staleness check, deterministic-identity verification, OS-level locking, then a real native Beets import) — but,
+per the Independent Review Round above, it is **not** `import_folder_v1`'s `TransactionStore`-based
+Plan/Apply/Rollback contract, and the inventory no longer claims that it is.
 
-Zero mutating `_beet_run` calls or local SQLite `UPDATE`/`DELETE` queries remain in production import workflows.
+Zero mutating `_beet_run` calls or local SQLite `UPDATE`/`DELETE` queries remain in production import
+workflows.
 
 ---
 
-## Verification Matrix & Test Status
+## Verification Matrix & Test Status (final, post-review-round)
 
-1. **Python Test Suite**:
-   - Total test cases discovered: `2,627`
-   - Run #1: **2627 / 2627 Passed (0 failures, 0 errors)**
-   - Run #2: **2627 / 2627 Passed (0 failures, 0 errors)**
-2. **Frontend Gates (`frontend/`)**:
-   - `npm run typecheck`: **Passed**
-   - `npm run lint`: **Passed**
-   - `npm test`: **Passed (48/48)**
-   - `npm run build`: **Passed**
-   - `npm audit --audit-level=high`: **Passed (0 high/critical issues)**
-3. **Security Gates**:
-   - `security_secret_scan.py`: **Passed**
-   - `generate_endpoint_inventory.py --check`: **Passed (245 routes, 0 NEED_REVIEW)**
-   - `validate_compose_security.py`: **Passed (`"ok": true`)**
-   - `verify_arch003_mutation_inventory.py --check`: **Passed (`RESULT: True`)**
-4. **ARCH-003 Inventory Baseline**:
-   - `total_sinks`: `471`
-   - `unresolved_baseline`: `134`
-   - `unresolved_domain_counts.import_reconciliation`: **`0`**
+1. **Python Test Suite** (local, Windows dev environment, run twice):
+   - Total test cases discovered: `2,644` (2,627 prior baseline + 17 new regression tests in
+     `tests/test_wave25_round_review_fixes.py`)
+   - Run #1: **2644 / 2644 passed, 0 failures, 0 errors**
+   - Run #2: **2644 / 2644 passed, 0 failures, 0 errors**
+2. **Frontend Gates** (`frontend/`): `typecheck`, `lint`, `test` (48/48), `build`, `audit --audit-level=high`
+   (0 high/critical) — all passed. This PR does not touch frontend code.
+3. **Security Gates**: `security_secret_scan.py` passed; `generate_endpoint_inventory.py --check` passed (245
+   routes, 0 NEEDS_REVIEW); `validate_compose_security.py` passed; `verify_arch003_mutation_inventory.py
+   --check` passed.
+4. **ARCH-003 Inventory** (post-review-round, regenerated): `total_sinks = 471`, `unresolved_baseline = 134`,
+   `unresolved_domain_counts.import_reconciliation = 0`. Unchanged in total from the pre-review-round count —
+   the corrections fixed *how* sinks were resolved, not *whether* the domain total was accurate.
+
+See the PR body and `docs/TECHNICAL_DEBT.md` for final CI/CodeQL/Docker-acceptance state on the exact merged
+head.

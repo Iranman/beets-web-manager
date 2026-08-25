@@ -93,8 +93,37 @@ _APP_STATE_HINTS = {
     "CACHE_STATE": ("_cache", "cache_dir", "CACHE_DIR", ".cache", "artist_image", "release_art"),
     "CONFIG_STATE": ("config.yaml", "_cfg", "bootstrap_secret", "beets_config", "settings", "auth_token", "/config/config", "PREFERENCES"),
     "STAGING_ONLY": ("staging", "preview_download", "cookie_rejected", "ytdlp", "slskd"),
-    "APP_STATE": ("job", "manifest", "report", "_last_", "playlist", "wanted_row", "submission", "history", "recent_import", "pending", "auto_import", "import_review", "import_all"),
+    "APP_STATE": ("job", "manifest", "report", "_last_", "playlist", "wanted_row", "submission", "history"),
 }
+
+# Wave 25 round (independent review): "recent_import"/"pending"/
+# "auto_import"/"import_review"/"import_all" were added to the broad
+# APP_STATE substring-hint tuple above, matched against BOTH call-site
+# text and the enclosing function name. That is dangerous specifically
+# for import-adjacent code: a real media-mutation function landing in
+# this file with one of those substrings in its name (e.g. a future
+# import_review_delete_media()) would be silently classified as
+# non-blocking app state with no path-context check at all. Each
+# function actually caught by those five terms was individually verified
+# (every mutation it performs targets the app-local pending-review/
+# recent-import JSON bookkeeping file, never a Beets DB item path or
+# anything under MUSIC_ROOT) and is listed here by exact name instead --
+# "prefer exact function mapping ... over broad substring classification."
+# A new function must be added here explicitly, on the same individual-
+# verification basis, never picked up implicitly by a name substring.
+_APP_STATE_VERIFIED_FUNCTIONS = frozenset({
+    "_add_to_pending",
+    "_library_import_all_write_last",
+    "_load_pending_reviews",
+    "_mark_pending_review_status",
+    "_record_recent_import",
+    "_remove_pending_review_for_path",
+    "_update_pending_review_revalidation",
+    "_write_import_review_auto_state",
+    "clear_ai_pending_review",
+    "clear_recent_imports",
+    "import_cleanup_stale",
+})
 
 _BEET_READONLY_VERBS = {"version", "ls", "list", "stats", "config", "fields"}
 _BEET_MUTATING_VERBS = {"import", "move", "write", "modify", "mbsync", "remove", "update"}
@@ -117,8 +146,21 @@ _CONTROL_AGENT_FUNCTION_CLASSIFICATION = {
     "_replace_or_copy_unlink": ("TRANSACTION_STATE", "infra_v1", "replace-or-copy-unlink-helper"),
     "_create_exclusive_temp_file": ("TRANSACTION_STATE", "infra_v1", "infra-temp-file-helper"),
     "acquire_os_lock": ("TRANSACTION_STATE", "infra_v1", "infra-os-lock-helper"),
-    "reimport_source_atomic": ("ENGINE_CONTROLLED_TRANSACTION", "import_folder_v1", "import_folder_v1-backing-implementation"),
-    "preserve_import_source": ("ENGINE_CONTROLLED_TRANSACTION", "import_folder_v1", "import_folder_v1-backing-implementation"),
+    # Wave 25 round (independent review): reimport_source_atomic() and
+    # preserve_import_source() were previously claimed as
+    # ENGINE_CONTROLLED_TRANSACTION / import_folder_v1 -- but neither one
+    # references TransactionStore, transaction_engine, mutation_family, or
+    # an operation_id anywhere in its body. They do not enter
+    # import_folder_v1's Plan/Apply/Rollback contract at all; that family
+    # exists in transaction_engine.py but is a genuinely separate code
+    # path. reimport_source_atomic is a real, self-contained engine-native
+    # atomic operation instead (root-containment + symlink checks via
+    # resolve_safe_path, source-signature staleness check, deterministic-
+    # identity verification, OS-level locking, then a real native Beets
+    # import) -- truthfully ENGINE_NATIVE_BEETS, with no fabricated
+    # transaction family.
+    "reimport_source_atomic": ("ENGINE_NATIVE_BEETS", "", "engine-native-atomic-reimport-not-import-folder-v1"),
+    "preserve_import_source": ("ENGINE_NATIVE_BEETS", "", "engine-native-atomic-reimport-not-import-folder-v1"),
     "_write_agent_config_file": ("ENGINE_CONFIG_STATE", "config_v1", "control-agent-config-file-write"),
     "_revert_agent_config_file": ("ENGINE_CONFIG_STATE", "config_v1", "control-agent-config-file-revert"),
     "_playlist_import_write_state": ("ENGINE_CONFIG_STATE", "config_v1", "playlist-import-job-state"),
@@ -245,7 +287,13 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
     # 9. app.py (Web Manager main module)
     if sink.kind == "subprocess":
         if "beets_client.reimport_source" in text:
-            return "ENGINE_CONTROLLED_TRANSACTION", "import_folder_v1", "beets-client-reimport-source-ipc"
+            # Wave 25 round (independent review): see the matching note on
+            # the reimport_source_atomic/preserve_import_source entries in
+            # _ENGINE_INFRA_FUNCTIONS above -- this call reaches a real,
+            # self-contained engine-native atomic operation, not
+            # import_folder_v1's Plan/Apply/Rollback contract. Do not claim
+            # a transaction family this call never enters.
+            return "ENGINE_NATIVE_BEETS", "", "beets-client-reimport-source-ipc-native-atomic"
         if "BEET_BIN" in text or re.search(r"\bbase(_import)?\s*\+", text) or "beet" in text:
             verbs_hit = {v for v in _BEET_MUTATING_VERBS if f'"{v}"' in text or f"'{v}'" in text}
             if verbs_hit:
@@ -264,6 +312,8 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
         return "ARCH003_BLOCKER", "", "local-tag-write"
 
     if sink.kind == "filesystem":
+        if func in _APP_STATE_VERIFIED_FUNCTIONS:
+            return "APP_STATE", "", "verified-app-state-function"
         for classification, hints in _APP_STATE_HINTS.items():
             if any(h.lower() in text.lower() or h.lower() in func.lower() for h in hints):
                 return classification, "", f"path-hint:{classification.lower()}"
