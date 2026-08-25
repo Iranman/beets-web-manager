@@ -81,11 +81,23 @@ class AttachRecordingEndpointTests(unittest.TestCase):
     def test_validates_mb_trackid_is_a_real_uuid(self):
         self.assertIn("if not _MB_UUID_RE.match(mb_trackid):", self._fn)
 
-    def test_mirrors_album_add_mbids_direct_modify_write_move_pattern(self):
-        self.assertIn('"modify", "--yes", "--nowrite", f"mb_trackid={mb_trackid}"', self._fn)
-        self.assertIn('["mbsync", query]', self._fn)
-        self.assertIn('["write", "--yes", query]', self._fn)
-        self.assertIn('["move", query]', self._fn)
+    def test_mutates_only_through_the_engine_transaction_boundary(self):
+        """Wave 24 final review section 31: this endpoint used to mirror
+        album_add_mbids's direct local modify+mbsync+write+move subprocess
+        pattern as a fallback whenever the engine transaction didn't
+        report `applied` -- a production mutation fallback that test
+        compatibility must never justify. It now mutates only through
+        beets_client.plan_album_mb_track_repair /
+        apply_album_mb_track_repair, and fails closed (raises, no local
+        subprocess call) when the engine transaction does not succeed.
+        """
+        self.assertIn("beets_client.plan_album_mb_track_repair(", self._fn)
+        self.assertIn("beets_client.apply_album_mb_track_repair(", self._fn)
+        self.assertIn("refusing local fallback mutation", self._fn)
+        self.assertNotIn('"modify", "--yes", "--nowrite", f"mb_trackid={mb_trackid}"', self._fn)
+        self.assertNotIn('["mbsync", query]', self._fn)
+        self.assertNotIn('["write", "--yes", query]', self._fn)
+        self.assertNotIn('["move", query]', self._fn)
 
     def test_runs_as_a_background_job_not_inline(self):
         self.assertIn("jobs.start_python(_do,", self._fn)

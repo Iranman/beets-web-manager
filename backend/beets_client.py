@@ -3,6 +3,7 @@
 Replaces local subprocess execution and direct SQLite access with authenticated API calls.
 """
 
+import base64
 import json
 import os
 import urllib.error
@@ -804,7 +805,38 @@ class BeetsClient:
         source: str = "user",
         expected_mb_releasegroupid: str = "",
     ) -> Dict[str, Any]:
-        """Atomically replace album artwork inside the Beets engine."""
+        """Atomically replace album artwork inside the Beets engine.
+
+        SEC-002 / ARCH-003 Wave 24 final review: a prior revision of this
+        method routed through album_artwork_v1's "move" mode by base64-
+        decoding the image and writing a staging file to a local
+        `STAGING_ROOT` path *on this (web-manager) container*, then
+        referencing that local path as a "source" candidate in the HTTP
+        request to the engine. That is broken on two independent levels:
+        (1) the standard web-manager deployment (docker-compose.yml) runs
+        this container with `read_only: true` and no `/config` volume
+        mount at all, so the local `stg_base.mkdir()`/`write_bytes()`
+        calls raise immediately in production; (2) even with a writable
+        filesystem, the engine is a *separate container/process* per the
+        two-service architecture -- a path written to this container's
+        disk is not visible to the engine's filesystem unless explicitly
+        bind-mounted identically into both, which is not part of this
+        architecture. Independently, `album_artwork_v1`'s "move"-mode
+        apply (`execute_album_artwork_apply`, in the engine's own
+        transaction module) never writes the album's `artpath` DB column
+        for mode=="move" --
+        only mode=="quarantine" updates the DB -- so even a
+        same-container deployment would silently leave the album's
+        artwork pointer stale after a "successful" replace. Restored to
+        the pure single-call HTTP proxy: the engine already implements
+        replace as an atomic tempfile+fsync+os.replace with DB update and
+        rollback-on-failure (`_replace_album_art_locked`), entirely
+        within its own container. Migrating this onto album_artwork_v1
+        for real requires first teaching that family's "move" mode to
+        also update `albums.artpath` -- tracked in
+        docs/TECHNICAL_DEBT.md, not attempted this pass."""
+        if isinstance(image_data_b64, bytes):
+            image_data_b64 = base64.b64encode(image_data_b64).decode("utf-8")
         return self._request("POST", f"/albums/{album_id}/art", {
             "image_data_b64": image_data_b64,
             "source": source,
@@ -812,7 +844,14 @@ class BeetsClient:
         })
 
     def delete_album_art(self, album_id: int) -> Dict[str, Any]:
-        """Quarantine local album artwork and clear artpath inside the Beets engine."""
+        """Quarantine local album artwork and clear artpath inside the Beets engine.
+
+        See the note on replace_album_art above: a prior revision of this
+        method probed `album_dir / art_name` paths directly from this
+        container via `Path.exists()`/`Path.is_file()`, which requires
+        this container to have direct filesystem access to the media
+        library -- it does not, by design (two-service architecture,
+        engine owns the filesystem). Restored to the pure HTTP proxy."""
         return self._request("DELETE", f"/albums/{album_id}/art")
 
     def rewrite_library_path(self, old_path: str, new_path: str) -> Dict[str, Any]:
@@ -827,8 +866,95 @@ class BeetsClient:
         return self._request("POST", "/files/hardlink", payload)
 
     def delete_album(self, album_id: int, delete_files: bool = True) -> Dict[str, Any]:
-        """Perform transactional single-writer album deletion under lock."""
-        return self._request("DELETE", f"/albums/{album_id}", {"delete_files": delete_files})
+        """Perform transaction-controlled album removal through album_maintenance_v1 family."""
+        album_data = self.get_album(album_id) or {}
+        items = album_data.get("items") or []
+        item_ids = [int(it.get("id") or 0) for it in items if int(it.get("id") or 0) > 0]
+        if not item_ids:
+            return {"ok": False, "error": f"Album {album_id} has no track items"}
+
+        plan_res = self.plan_album_maintenance({
+            "mode": "remove_tracks",
+            "album_id": album_id,
+            "item_ids": item_ids,
+            "delete_files": delete_files,
+            "clean_empty_folders": True,
+        })
+        if not plan_res.get("ok"):
+            return {"ok": False, "error": plan_res.get("error") or "Album removal plan rejected", "database_deleted": False, "status": "failed"}
+        op_id = plan_res.get("operation_id")
+        if not op_id:
+            return {"ok": True, "database_deleted": True, "items_deleted": 0, "files_deleted": 0, "status": "completed"}
+        apply_res = self.apply_album_maintenance(op_id)
+        if not apply_res.get("ok"):
+            return {"ok": False, "error": apply_res.get("error") or "Album removal apply failed", "database_deleted": False, "status": "failed"}
+        return {
+            "ok": True,
+            "status": "completed",
+            "database_deleted": True,
+            "items_deleted": len(item_ids),
+            "files_deleted": len(item_ids) if delete_files else 0,
+        }
+
+    # ── album_relocation_v1 Pure HTTP Client Methods ────────────────────────────
+
+    def plan_album_relocation(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Request preview plan for album relocation via HTTP."""
+        return self._request("POST", "/albums/relocation/plan", payload)
+
+    def apply_album_relocation(self, operation_id: str) -> Dict[str, Any]:
+        """Execute album relocation apply via HTTP."""
+        return self._request("POST", "/albums/relocation/apply", {"operation_id": operation_id})
+
+    def rollback_album_relocation(self, operation_id: str) -> Dict[str, Any]:
+        """Roll back album relocation via HTTP."""
+        return self._request("POST", "/albums/relocation/rollback", {"operation_id": operation_id})
+
+    def relocate_album(self, album_id: int, mode: str = "rename", **kwargs) -> Dict[str, Any]:
+        """Perform relocation (rename or move-to-library) through album_relocation_v1 family via HTTP."""
+        payload = {"album_id": album_id, "mode": mode, **kwargs}
+        plan_res = self.plan_album_relocation(payload)
+        if not plan_res.get("ok"):
+            return {"ok": False, "error": plan_res.get("error") or "Relocation plan rejected"}
+        op_id = plan_res.get("operation_id")
+        if not op_id:
+            return {"ok": True, "dest_dir": plan_res.get("dest_dir") or "", "moved_count": 0}
+        apply_res = self.apply_album_relocation(op_id)
+        if not apply_res.get("ok"):
+            return {"ok": False, "error": apply_res.get("error") or "Relocation apply failed"}
+        return {"ok": True, "dest_dir": apply_res.get("dest_dir") or plan_res.get("dest_dir") or "", "moved_count": apply_res.get("moved_count", 0)}
+
+    def move_album_to_library(self, album_id: int) -> Dict[str, Any]:
+        """Move imported album items into authoritative MUSIC_ROOT through album_relocation_v1 family via HTTP."""
+        return self.relocate_album(album_id, mode="move_to_library")
+
+    # ── album_metadata_repair_v1 Pure HTTP Client Methods ──────────────────────
+
+    def plan_album_metadata(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Request preview plan for album metadata update via HTTP."""
+        return self._request("POST", "/albums/metadata/plan", payload)
+
+    def apply_album_metadata(self, operation_id: str) -> Dict[str, Any]:
+        """Execute album metadata apply via HTTP."""
+        return self._request("POST", "/albums/metadata/apply", {"operation_id": operation_id})
+
+    def rollback_album_metadata(self, operation_id: str) -> Dict[str, Any]:
+        """Roll back album metadata update via HTTP."""
+        return self._request("POST", "/albums/metadata/rollback", {"operation_id": operation_id})
+
+    def update_album_metadata(self, album_id: int, updates: Dict[str, Any], item_updates: Optional[Dict[str, Any]] = None, **kwargs) -> Dict[str, Any]:
+        """Update album metadata & audio tags through album_metadata_repair_v1 family via HTTP."""
+        payload = {"album_id": album_id, "updates": updates, "item_updates": item_updates or {}, **kwargs}
+        plan_res = self.plan_album_metadata(payload)
+        if not plan_res.get("ok"):
+            return {"ok": False, "error": plan_res.get("error") or "Metadata plan rejected"}
+        op_id = plan_res.get("operation_id")
+        if not op_id:
+            return {"ok": True, "album_fields_changed": 0, "items_changed": 0}
+        apply_res = self.apply_album_metadata(op_id)
+        if not apply_res.get("ok"):
+            return {"ok": False, "error": apply_res.get("error") or "Metadata apply failed"}
+        return {"ok": True, "album_fields_changed": plan_res.get("album_fields_changed", 0), "items_changed": plan_res.get("items_changed", 0)}
 
 
 class RemoteSQLiteCursor:

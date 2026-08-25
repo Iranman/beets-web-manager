@@ -129,6 +129,12 @@ def verify_mutation_inventory(repo_root: Path, check_mode: bool = True) -> bool:
         if key:
             by_key[key] = entry
 
+        # Wave 24 Domain Accounting Enforcement
+        domain = entry.get("domain")
+        if classification in ("ARCH003_BLOCKER", "ENGINE_GENERIC_BYPASS"):
+            if not domain or not isinstance(domain, str) or not domain.strip():
+                errors.append(f"Missing domain field for {symbol} in {file_path}")
+
     # Real discovery: every current sink must have a matching inventory key.
     discovered = discover_all(repo_root)
     new_unreviewed = []
@@ -142,18 +148,23 @@ def verify_mutation_inventory(repo_root: Path, check_mode: bool = True) -> bool:
             errors.append(f"    NEW: {s.file}:{s.function}:{s.lineno} -- {s.call_text[:90]}")
         errors.append("  Run `python scripts/generate_arch003_mutation_inventory.py` and classify the new entries.")
 
-    # SEC-002 / ARCH-003 Wave 23 final review, finding #21: NEEDS_REVIEW=0
-    # must be *earned* through real triage, not mechanically enforced as a
-    # hard gate -- a hard "NEEDS_REVIEW must be 0" check creates exactly
-    # the pressure that produces fake precision (force every ambiguous
-    # sink into some other bucket just to make the number disappear,
-    # which is indistinguishable from guessing). NEEDS_REVIEW is included
-    # in the ratchet's unresolved-count baseline below, so it still can't
-    # silently grow -- it just isn't required to hit zero before merge.
+    # SEC-002 / ARCH-003 Wave 23 final review, finding #21 (dropped by a
+    # submitted PR #98 and restored here): NEEDS_REVIEW=0 must be
+    # *earned* through real triage, not mechanically enforced as a hard
+    # gate -- a hard "NEEDS_REVIEW must be 0" check creates exactly the
+    # pressure that produces fake precision (force every ambiguous sink
+    # into some other bucket just to make the number disappear, which is
+    # indistinguishable from guessing -- see the blanket per-file
+    # fallbacks and the line-number-range dispatcher guesser this same
+    # review pass found and reverted in generate_arch003_mutation_inventory.py).
+    # NEEDS_REVIEW is included in the ratchet's unresolved-count baseline
+    # below, so it still can't silently grow -- it just isn't required to
+    # hit zero before merge.
     needs_review_count = sum(1 for e in inventory if e.get("classification") == "NEEDS_REVIEW")
 
     unresolved_count = sum(1 for e in inventory if e.get("classification") in _UNRESOLVED)
     baseline = data.get("unresolved_baseline", data.get("classification_counts", {}).get("ARCH003_BLOCKER", 0)
+                         + data.get("classification_counts", {}).get("ENGINE_GENERIC_BYPASS", 0)
                          + data.get("classification_counts", {}).get("NEEDS_REVIEW", 0))
     if unresolved_count > baseline:
         errors.append(f"Unresolved sink count grew: {unresolved_count} now vs baseline {baseline}. "

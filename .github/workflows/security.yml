@@ -28,6 +28,15 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
+      - name: Install real Beets for engine-side native path-formatting tests
+        # See unit-tests.yml for the full explanation: this suite tests
+        # backend/transaction_engine.py's real-Beets integration
+        # (Wave 24 final review section 7/8/28), which only runs where
+        # `beets` is genuinely importable -- CI-test-only, not part of the
+        # Web Manager image's own requirements.txt, pinned to the exact
+        # version the beets-engine container bundles (Dockerfile.beets).
+        run: pip install beets==2.13.1
+
       - name: Set a fake CI-only web auth token
         # See unit-tests.yml for why this is a $GITHUB_ENV append rather
         # than a workflow `env:` assignment.

@@ -161,6 +161,10 @@ class AttachRecordingEnforcementTests(unittest.TestCase):
         self.beet_calls = []
         self.addCleanup(APP._ATTACH_RECORDING_RESERVED_ITEMS.clear)
 
+        # _beet_run is still exercised for real by the UNDO path
+        # (_run_item_recording_id_restore) -- only the forward attach path
+        # was migrated off local subprocess mutation (Wave 24 review
+        # section 31), so this fake stays in place for rollback tests.
         def fake_beet_run(cmd, log, **kwargs):
             self.beet_calls.append(cmd)
             _apply_fake_beet_mutation(self.item, cmd, self._mb_details_payload)
@@ -170,6 +174,41 @@ class AttachRecordingEnforcementTests(unittest.TestCase):
         self._acoustid_candidates = [_acoustid_candidate()]
         self._mb_details_payload = _mb_details()
 
+        # Forward attach path (Wave 24 review section 31): mock the engine
+        # boundary (beets_client), not a reactivated local subprocess.
+        self._track_repair_payloads = []
+        self.engine_plan_fails = False
+        self.engine_apply_fails = False
+        self.engine_apply_raises = None
+        self.suppress_engine_mutation = False
+
+        def fake_plan_track_repair(payload):
+            self._track_repair_payloads.append(payload)
+            if self.engine_plan_fails:
+                return {"ok": False, "error": "engine plan rejected (test-injected failure)"}
+            return {"ok": True, "operation_id": f"txn_fake_{len(self._track_repair_payloads)}"}
+
+        def fake_apply_track_repair(op_id, write_tags=True):
+            if self.engine_apply_raises:
+                raise self.engine_apply_raises
+            if self.engine_apply_fails:
+                return {"ok": False, "error": "engine apply failed (test-injected failure)"}
+            payload = self._track_repair_payloads[-1] if self._track_repair_payloads else {}
+            track_mbids = payload.get("track_mbids") or {}
+            if track_mbids and not self.suppress_engine_mutation:
+                mb_trackid = next(iter(track_mbids.values()))
+                self.item.mb_trackid = mb_trackid
+                details = self._mb_details_payload or {}
+                release = details.get("selected_release") or {}
+                self.item.mb_albumid = str(release.get("mb_albumid") or details.get("mb_albumid") or self.item.mb_albumid or "")
+                self.item.mb_releasegroupid = str(
+                    release.get("mb_releasegroupid") or details.get("mb_releasegroupid") or self.item.mb_releasegroupid or ""
+                )
+            return {"ok": True}
+
+        self.fake_plan_track_repair = fake_plan_track_repair
+        self.fake_apply_track_repair = fake_apply_track_repair
+
         self._patch(mock.patch.object(APP.lib, "get_item", side_effect=lambda iid: self.item))
         self._patch(mock.patch.object(APP, "_acoustid_lookup_cached",
                                        side_effect=lambda path: self._acoustid_candidates))
@@ -177,6 +216,8 @@ class AttachRecordingEnforcementTests(unittest.TestCase):
         self._patch(mock.patch.object(APP, "_fetch_mb_recording_details",
                                        side_effect=lambda *a, **k: self._mb_details_payload))
         self._patch(mock.patch.object(APP, "_beet_run", side_effect=fake_beet_run))
+        self._patch(mock.patch.object(APP.beets_client, "plan_album_mb_track_repair", side_effect=fake_plan_track_repair))
+        self._patch(mock.patch.object(APP.beets_client, "apply_album_mb_track_repair", side_effect=fake_apply_track_repair))
         self._patch(mock.patch.object(APP, "_invalidate_lib_cache", return_value=None))
         self._patch(mock.patch.object(APP, "_trigger_plex_refresh", return_value=None))
 
@@ -214,8 +255,13 @@ class AttachRecordingEnforcementTests(unittest.TestCase):
         self.assertEqual(tx["rollback"]["operations"][0]["type"], "recording_id_restore")
         self.assertEqual(tx["rollback"]["operations"][0]["fields"]["mb_trackid"], "")
 
-        modify_calls = [c for c in self.beet_calls if "modify" in c]
-        self.assertTrue(any(f"mb_trackid={RECORDING_ID}" in c for c in modify_calls))
+        # Wave 24 review section 31: the forward attach path mutates only
+        # through the engine transaction boundary now -- assert the engine
+        # was asked to write this Recording ID, not a local subprocess call.
+        self.assertTrue(any(
+            (p.get("track_mbids") or {}).get(str(9001)) == RECORDING_ID
+            for p in self._track_repair_payloads
+        ))
 
         # Simulate the mutation having landed, then repeat the identical
         # request: must report no-op success, no new transaction/job.
@@ -390,20 +436,17 @@ class AttachRecordingEnforcementTests(unittest.TestCase):
     # ---- failure / rollback --------------------------------------------------
 
     def test_tag_write_failure_marks_transaction_failed_not_completed(self):
-        def failing_beet_run(cmd, log, **kwargs):
-            self.beet_calls.append(cmd)
-            if "modify" in cmd:
-                return SimpleNamespace(returncode=1, stdout="", stderr="boom")
-            return SimpleNamespace(returncode=0, stdout="", stderr="")
-
-        with mock.patch.object(APP, "_beet_run", side_effect=failing_beet_run):
-            resp = self._post(9001, {"mb_trackid": RECORDING_ID, "mode": "safe"})
-            body = resp.get_json()
-            self.assertTrue(body["ok"])  # job accepted, outcome is async
-            job = _wait_job(body["job_id"])
-            self.assertEqual(job.status, "failed")
-            tx = APP.transactions.get(body["audit_id"])
-            self.assertEqual(tx["status"], "Failed")
+        # Wave 24 review section 31: the engine transaction is the only
+        # mutation path now -- inject its failure directly rather than a
+        # local subprocess failure that no longer runs.
+        self.engine_apply_fails = True
+        resp = self._post(9001, {"mb_trackid": RECORDING_ID, "mode": "safe"})
+        body = resp.get_json()
+        self.assertTrue(body["ok"])  # job accepted, outcome is async
+        job = _wait_job(body["job_id"])
+        self.assertEqual(job.status, "failed")
+        tx = APP.transactions.get(body["audit_id"])
+        self.assertEqual(tx["status"], "Failed")
 
     # ---- undo ------------------------------------------------------------
 
@@ -475,6 +518,9 @@ class ManualIdAttachIntegrationTests(unittest.TestCase):
         self.beet_calls = []
         self.addCleanup(APP._ATTACH_RECORDING_RESERVED_ITEMS.clear)
 
+        # _beet_run still runs for real via the UNDO path; the forward
+        # attach path uses the engine-client mocks below (Wave 24 review
+        # section 31).
         def fake_beet_run(cmd, log, **kwargs):
             self.beet_calls.append(cmd)
             _apply_fake_beet_mutation(self.item, cmd, self._mb_details_payload)
@@ -483,6 +529,26 @@ class ManualIdAttachIntegrationTests(unittest.TestCase):
         self._acoustid_candidates = [_acoustid_candidate()]
         self._mb_details_payload = _mb_details()
 
+        self._track_repair_payloads = []
+
+        def fake_plan_track_repair(payload):
+            self._track_repair_payloads.append(payload)
+            return {"ok": True, "operation_id": f"txn_fake_{len(self._track_repair_payloads)}"}
+
+        def fake_apply_track_repair(op_id, write_tags=True):
+            payload = self._track_repair_payloads[-1] if self._track_repair_payloads else {}
+            track_mbids = payload.get("track_mbids") or {}
+            if track_mbids:
+                mb_trackid = next(iter(track_mbids.values()))
+                self.item.mb_trackid = mb_trackid
+                details = self._mb_details_payload or {}
+                release = details.get("selected_release") or {}
+                self.item.mb_albumid = str(release.get("mb_albumid") or details.get("mb_albumid") or self.item.mb_albumid or "")
+                self.item.mb_releasegroupid = str(
+                    release.get("mb_releasegroupid") or details.get("mb_releasegroupid") or self.item.mb_releasegroupid or ""
+                )
+            return {"ok": True}
+
         self._patch(mock.patch.object(APP.lib, "get_item", side_effect=lambda iid: self.item))
         self._patch(mock.patch.object(APP, "_acoustid_lookup_cached",
                                        side_effect=lambda path: self._acoustid_candidates))
@@ -490,6 +556,8 @@ class ManualIdAttachIntegrationTests(unittest.TestCase):
         self._patch(mock.patch.object(APP, "_fetch_mb_recording_details",
                                        side_effect=lambda *a, **k: self._mb_details_payload))
         self._patch(mock.patch.object(APP, "_beet_run", side_effect=fake_beet_run))
+        self._patch(mock.patch.object(APP.beets_client, "plan_album_mb_track_repair", side_effect=fake_plan_track_repair))
+        self._patch(mock.patch.object(APP.beets_client, "apply_album_mb_track_repair", side_effect=fake_apply_track_repair))
         self._patch(mock.patch.object(APP, "_invalidate_lib_cache", return_value=None))
         self._patch(mock.patch.object(APP, "_trigger_plex_refresh", return_value=None))
 

@@ -306,7 +306,7 @@ class ControlAgentAlbumArtMutationTests(unittest.TestCase):
         self.assertEqual(code, 200, data)
         self.assertEqual(data["removed_count"], 1)
         self.assertFalse(existing.exists())
-        self.assertEqual(self._artpath(), "")
+        self.assertTrue(self._artpath() in (None, "", b""))
         quarantined = Path(data["quarantined_art"][0]["quarantined"])
         self.assertEqual(quarantined.read_bytes(), b"previous-cover")
         self.assertTrue(quarantined.resolve(strict=False).is_relative_to(self.trash.resolve(strict=False)))

@@ -1,0 +1,41 @@
+# SEC-002 / ARCH-003 Wave 24 final review round 3, section 17-24: override
+# for docker-compose.full.yml used ONLY by
+# scripts/verify_two_service_docker_acceptance.py. docker-compose.full.yml
+# already implements the correct two-service filesystem isolation this
+# review requires (the `beets` engine service gets /config, the music
+# library, and the download/torrent root; `beets-web-manager` gets only its
+# own /web-manager-data volume) -- this override only adds what the base
+# file intentionally does not provide for a normal deployment: building
+# beets-web-manager from local source at an exact commit instead of pulling
+# a published GHCR tag, and a host port mapping the acceptance script can
+# reach from outside the Docker network.
+#
+# Wave 24 final review round 3, section 25-27 (found by actually running
+# this in CI -- no Docker daemon was available in the environment this was
+# first authored in): `docker compose -f docker-compose.full.yml -f
+# docker/acceptance/docker-compose.acceptance.yml ...` resolves every
+# merged file's relative build.context against ONE project directory (the
+# first/base -f file's directory -- repo root), not against each override
+# file's own directory. `context: .` here means the same repo root that
+# docker-compose.full.yml's own `beets` build context ("." in that file,
+# also repo root) means -- a context written relative to THIS file's own
+# location (docker/acceptance/, e.g. "../..") silently built against a
+# directory two levels above repo root instead and failed with "open
+# Dockerfile: no such file or directory".
+services:
+  beets-web-manager:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VCS_REF: ${VCS_REF:?set VCS_REF}
+        VERSION: acceptance
+    image: beets-web-manager:acceptance
+    ports:
+      - "127.0.0.1:${ACCEPTANCE_WEB_PORT:-18337}:8337"
+
+  beets:
+    build:
+      args:
+        VCS_REF: ${VCS_REF:?set VCS_REF}
+    image: beets-engine:acceptance

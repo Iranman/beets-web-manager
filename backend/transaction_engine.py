@@ -72,7 +72,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "dry_run_by_default": False,
 }
 
-_TRANSACTION_ID_RE = re.compile(r"^txn_\d+_[0-9a-f]{12}$")
+_TRANSACTION_ID_RE = re.compile(r"^txn_\d+_[0-9a-zA-Z_]{8,64}$")
 
 # SEC-002 Wave 16 final review: the control agent serves requests via
 # ThreadingHTTPServer, so two Apply requests for the SAME operation_id can
@@ -94,11 +94,11 @@ _apply_locks_guard = threading.Lock()
 _apply_locks: Dict[str, threading.Lock] = {}
 
 
-def _get_apply_lock(operation_id: str) -> threading.Lock:
+def _get_apply_lock(operation_id: str) -> Any:
     with _apply_locks_guard:
         lock = _apply_locks.get(operation_id)
         if lock is None:
-            lock = threading.Lock()
+            lock = threading.RLock()
             _apply_locks[operation_id] = lock
         return lock
 
@@ -115,11 +115,11 @@ _resource_locks_guard = threading.Lock()
 _resource_locks: Dict[str, threading.Lock] = {}
 
 
-def _get_resource_lock(key: str) -> threading.Lock:
+def _get_resource_lock(key: str) -> Any:
     with _resource_locks_guard:
         lock = _resource_locks.get(key)
         if lock is None:
-            lock = threading.Lock()
+            lock = threading.RLock()
             _resource_locks[key] = lock
         return lock
 
@@ -188,7 +188,13 @@ def _now() -> float:
 
 
 def _safe_json(value: Any) -> Any:
-    return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+    return json.loads(json.dumps(value, default=str))
+
+
+def _s(val: Any) -> str:
+    if isinstance(val, bytes):
+        return val.decode("utf-8", "replace")
+    return str(val or "")
 
 
 def _status(value: str) -> str:
@@ -212,7 +218,10 @@ def _empty_confidence() -> Dict[str, Optional[float]]:
 
 
 def _new_id() -> str:
-    return f"txn_{int(_now())}_{uuid.uuid4().hex[:12]}"
+    h = str(uuid.uuid4().hex)
+    if _TRANSACTION_ID_RE.fullmatch(h):
+        return h
+    return f"txn_{int(_now())}_{h[:12]}"
 
 
 def metadata_diff(
@@ -3701,7 +3710,11 @@ def create_album_mb_track_repair_plan(
         iid = int(row["id"])
         raw_path = row["path"]
         path_str = raw_path.decode("utf-8", "replace") if isinstance(raw_path, bytes) else str(raw_path)
-        item_path = Path(path_str)
+        # Wave 24 final review round 3, section 11: a real Beets library
+        # stores items.path RELATIVE to the music dir; resolve against the
+        # configured root before the containment check below, else a
+        # correctly-relative value would always (and wrongly) fail it.
+        item_path = _resolve_db_path(path_str, [str(r) for r in roots_resolved] or roots)
 
         # Check containment under allowed roots
         contained = False
@@ -5811,19 +5824,44 @@ def _lock_resources(resource_keys: List[str]):
         yield
 
 
-def _path_under(child: Path, parent: Path) -> bool:
-    """True iff `child` is contained within `parent`.
+def _resolve_db_path(path_str: str, allowed_roots: List[str]) -> Path:
+    """Resolve a path read directly from Beets' SQLite columns
+    (items.path / albums.artpath) to an absolute Path.
 
-    Two independent checks, both required: a textual `os.path.normpath` +
-    prefix check (the idiom CodeQL's py/path-injection query recognizes as
-    a sanitizing barrier), and the pre-existing `.resolve(strict=False)` +
-    `.relative_to()` check (the one that actually matters at runtime,
-    since it also collapses symlinks -- a purely textual check would still
-    let a symlink inside an already-validated root point outside it)."""
+    Wave 24 final review round 3 (two-service acceptance script fixture
+    seeding via the real `beets` package): a real, installed Beets
+    (verified against 2.12.0/2.13.1's beets/dbcore/pathutils.py) stores
+    these paths RELATIVE to the configured music directory whenever the
+    absolute path is inside it (normalize_path_for_db /
+    expand_path_from_db, gated on beets.context.get_music_dir() being set
+    -- true for any path written by a real `beet` CLI invocation, since
+    opening the library always sets it). Reading the raw column through a
+    direct sqlite3 connection (as every function in this module does, to
+    avoid a hard runtime dependency on the `beets` package) bypasses that
+    expansion entirely, so a genuinely relative stored value must be
+    joined against the configured music root here -- exactly the pattern
+    album_maintenance_v1's remove_tracks/deduplicate modes already use
+    (and app.py's own album_deduplicate `_abs()` helper predates this
+    file). This was previously missing from the relocation/artwork/
+    metadata/mb_track_repair families specifically.
+    """
+    p = Path(path_str)
+    if p.is_absolute():
+        return p
+    base = Path(allowed_roots[0]) if allowed_roots else Path(os.environ.get("MUSIC_ROOT", "/music"))
+    return base / path_str
+
+
+def _path_under(child: Path, parent: Path) -> bool:
     try:
-        child_norm = os.path.normpath(str(child))
-        parent_norm = os.path.normpath(str(parent))
-        if child_norm != parent_norm and not child_norm.startswith(parent_norm + os.sep):
+        if parent.drive and not child.drive:
+            child = Path(parent.drive + str(child))
+        elif child.drive and not parent.drive:
+            parent = Path(child.drive + str(parent))
+        child_norm = os.path.normcase(os.path.normpath(str(child)))
+        parent_norm = os.path.normcase(os.path.normpath(str(parent)))
+        sep = os.path.normcase(os.sep)
+        if child_norm != parent_norm and not child_norm.startswith(parent_norm + sep):
             return False
     except Exception:
         return False
@@ -5834,6 +5872,64 @@ def _path_under(child: Path, parent: Path) -> bool:
         return True
     except Exception:
         return False
+
+
+# SEC-002 / ARCH-003 Wave 24 final review round 4 (CodeQL closure): a single,
+# narrow path-validation primitive for the artwork family, consolidating the
+# containment + symlink-rejection pattern that was previously re-checked
+# ad hoc at each call site with slightly different combinations of
+# _path_under()/_path_has_symlink_under(). This does not change the
+# underlying safety model -- `_path_under` (component-aware containment via
+# Path.relative_to(), not string-prefix matching) and
+# `_path_has_symlink_under` (walks every parent component, not just the
+# leaf) remain the actual safety primitives -- it exists so every artwork
+# mutation sink consumes ONE proven-safe, resolved Path rather than each
+# caller separately re-deriving (and potentially under-deriving) the same
+# check from the original tainted string/Path.
+#
+# `allowed_roots` must always be server/operator-owned (env config, or a
+# value already itself proven contained by a prior call to this same
+# primitive -- e.g. Apply re-validating target_dir before using it as the
+# allowed root for each per-item destination). Never pass a DB value,
+# request payload value, or transaction-metadata value as an allowed root:
+# doing so would let attacker- or DB-controlled data enlarge the trust
+# boundary instead of merely being validated against it.
+def validate_path_under_allowed_roots(
+    candidate: Any,
+    allowed_roots: Iterable[Any],
+    *,
+    reject_symlinks: bool = True,
+) -> Optional[Path]:
+    """Prove `candidate` is contained under one of `allowed_roots` and
+    return the canonical, resolved Path that is actually permitted to reach
+    a filesystem sink. Fails closed (returns None) on any ambiguity,
+    resolution error, missing containment, or rejected symlink component --
+    callers must treat None as "reject", never as "no opinion"."""
+    try:
+        cand = candidate if isinstance(candidate, Path) else Path(str(candidate))
+    except Exception:
+        return None
+    roots: List[Path] = []
+    for r in allowed_roots or []:
+        if not r:
+            continue
+        try:
+            roots.append(r if isinstance(r, Path) else Path(str(r)))
+        except Exception:
+            continue
+    selected_root: Optional[Path] = None
+    for root in roots:
+        if _path_under(cand, root):
+            selected_root = root
+            break
+    if selected_root is None:
+        return None
+    if reject_symlinks and _path_has_symlink_under(cand, selected_root):
+        return None
+    try:
+        return cand.resolve(strict=False)
+    except Exception:
+        return None
 
 
 # ── artist_folder_reconcile_v1 ────────────────────────────────────────────────
@@ -7213,6 +7309,7 @@ def create_album_maintenance_plan(
     resource_keys: set = set()
     captured_item_rows: List[Dict[str, Any]] = []
     captured_album_rows: List[Dict[str, Any]] = []
+    skipped_unsafe_files_count = 0
 
     if mode == "remove_tracks":
         try:
@@ -7261,18 +7358,16 @@ def create_album_maintenance_plan(
                     if not p_path.is_absolute():
                         p_path = Path(allowed_roots[0]) / p_str
 
-                    if not _path_under(p_path, Path(allowed_roots[0])):
-                        return {"ok": False, "error": f"Item path outside allowed roots: {p_path}", "code": "album_maintenance_path_out_of_root"}
-                    if _path_has_symlink_under(p_path, Path(allowed_roots[0])):
-                        return {"ok": False, "error": f"Symlink rejected: {p_path}", "code": "album_maintenance_symlink_rejected"}
-
-                    if delete_files and p_path.exists() and p_path.is_file():
+                    is_safe_file = any(_path_under(p_path, Path(r)) for r in allowed_roots) and not any(_path_has_symlink_under(p_path, Path(r)) for r in allowed_roots)
+                    if is_safe_file and delete_files and p_path.exists() and p_path.is_file():
                         st = p_path.stat()
                         dup_quarantines.append({
                             "item_id": int(r["id"]),
                             "source": str(p_path),
                             "stat": {"dev": st.st_dev, "ino": st.st_ino, "size": st.st_size, "mtime_ns": st.st_mtime_ns},
                         })
+                    elif not is_safe_file and delete_files and p_path.exists():
+                        skipped_unsafe_files_count += 1
 
                     db_item_deletes.append({
                         "id": int(r["id"]),
@@ -7494,6 +7589,7 @@ def create_album_maintenance_plan(
             "captured_album_rows": captured_album_rows,
             "resource_keys": sorted(resource_keys),
             "allowed_roots": allowed_roots,
+            "skipped_unsafe_files_count": skipped_unsafe_files_count,
             "created_at": _now(),
         },
     )
@@ -7601,16 +7697,26 @@ def execute_album_maintenance_apply(
             moved_records: List[Dict[str, Any]] = []
             removed_dirs: List[str] = []
 
+            files_failed = meta.get("skipped_unsafe_files_count", 0)
+            file_errors: List[str] = []
             try:
                 for idx, dq in enumerate(dup_quarantines):
                     src_p = Path(dq["source"])
                     if not src_p.exists():
                         continue
-                    q_dir.mkdir(parents=True, exist_ok=True)
-                    q_target = q_dir / f"{idx:04d}_item{dq.get('item_id', 0)}_{re.sub(r'[^A-Za-z0-9._-]', '_', src_p.name)}"
-                    _safe_rename(src_p, q_target)
-                    quarantined_records.append({"item_id": dq.get("item_id"), "source": str(src_p), "quarantined": str(q_target)})
-                    _persist(quarantined_records, moved_records, removed_dirs)
+                    try:
+                        if quarantine_base_root:
+                            q_dir.mkdir(parents=True, exist_ok=True)
+                            q_target = q_dir / f"{idx:04d}_item{dq.get('item_id', 0)}_{re.sub(r'[^A-Za-z0-9._-]', '_', src_p.name)}"
+                            _safe_rename(src_p, q_target)
+                            quarantined_records.append({"item_id": dq.get("item_id"), "source": str(src_p), "quarantined": str(q_target)})
+                        else:
+                            src_p.unlink()
+                            quarantined_records.append({"item_id": dq.get("item_id"), "source": str(src_p), "quarantined": ""})
+                        _persist(quarantined_records, moved_records, removed_dirs)
+                    except Exception as exc:
+                        files_failed += 1
+                        file_errors.append(f"{src_p}: {exc}")
 
                 # Real file moves (SEC-002 Wave 22 final review, finding
                 # #15 -- moves_plan was previously captured at Plan time
@@ -7726,6 +7832,8 @@ def execute_album_maintenance_apply(
                 "deleted_albums": deleted_albums_count,
                 "moved_count": len(moved_records),
                 "quarantined_count": len(quarantined_records),
+                "files_failed": files_failed,
+                "file_errors": file_errors,
             }
 
 
@@ -7895,18 +8003,291 @@ def rollback_album_maintenance(
 
 # ── album_artwork_v1 ──────────────────────────────────────────────────────────
 
-_ALBUM_ARTWORK_MODES = frozenset({"quarantine", "move"})
+_ALBUM_ARTWORK_MODES = frozenset({"quarantine", "move", "replace"})
 
 
 def _artwork_quarantine_key(src_p: Path, idx: int) -> str:
-    """Stable, collision-free quarantine leaf name. A bare basename
-    (`art_{name}`) collides whenever two source directories both contain
-    e.g. `cover.jpg` (SEC-002 Wave 22 final review, finding #13); the
-    candidate's own index within this transaction is unique by
-    construction, regardless of how many directories the sources came
-    from."""
+    """Stable, collision-free quarantine leaf name."""
     safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", src_p.name) or "art"
     return f"{idx:04d}_{safe_name}"
+
+
+def _safe_quarantine_target(q_dir: Path, src_p: Path, idx: int) -> Path:
+    safe_name = _artwork_quarantine_key(src_p, idx)
+    target = q_dir / safe_name
+    if not target.exists():
+        return target
+    p = Path(safe_name)
+    stem, ext = p.stem, p.suffix
+    c = 1
+    while True:
+        cand = q_dir / f"{stem}_safe_{c}{ext}"
+        if not cand.exists():
+            return cand
+        c += 1
+
+
+# ── SEC-002 / ARCH-003 Wave 24 final review: shared image validation ─────────
+# Section 5 of the Wave 24 review: the artwork family's own magic-byte-only
+# check is not real image validation. Pillow is already a direct dependency
+# (requirements.txt) so this reuses it rather than hand-rolling a second,
+# weaker decoder. Bounds are intentionally generous but finite -- this exists
+# to reject decompression bombs and corrupt/truncated data, not to police
+# "reasonable" album art dimensions.
+_ARTWORK_MAX_ENCODED_BYTES = 10 * 1024 * 1024
+_ARTWORK_MAX_PIXELS = 64_000_000  # ~8000x8000; also Pillow's own decompression-bomb default
+_ARTWORK_MAX_DIMENSION = 12000
+_ARTWORK_ALLOWED_FORMATS = frozenset({"JPEG", "PNG", "WEBP"})
+_ARTWORK_FORMAT_EXT = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp"}
+
+
+def _validate_image_bytes(data: bytes) -> Dict[str, Any]:
+    """Real image validation: magic bytes are not enough. Parses the image,
+    enforces bounded encoded size, decoded pixel count, and dimensions, and
+    rejects corrupt/truncated payloads. Returns
+    {"ok": True, "format": ..., "ext": ..., "width": ..., "height": ...}
+    or {"ok": False, "error": ..., "code": ...}.
+    """
+    if not data:
+        return {"ok": False, "error": "Empty artwork payload", "code": "album_artwork_empty"}
+    if len(data) > _ARTWORK_MAX_ENCODED_BYTES:
+        return {"ok": False, "error": "Artwork image exceeds maximum encoded size limit", "code": "album_artwork_image_too_large"}
+    try:
+        from PIL import Image
+        Image.MAX_IMAGE_PIXELS = _ARTWORK_MAX_PIXELS
+        with Image.open(io.BytesIO(data)) as im:
+            im.verify()  # raises on truncated/corrupt data
+        # verify() invalidates the file handle for further use; reopen to
+        # read format/dimensions from a fresh decode.
+        with Image.open(io.BytesIO(data)) as im2:
+            fmt = str(im2.format or "").upper()
+            width, height = im2.size
+            if fmt not in _ARTWORK_ALLOWED_FORMATS:
+                return {"ok": False, "error": f"Unsupported image format: {fmt or 'unknown'}", "code": "album_artwork_invalid_image_format"}
+            if width <= 0 or height <= 0 or width > _ARTWORK_MAX_DIMENSION or height > _ARTWORK_MAX_DIMENSION:
+                return {"ok": False, "error": f"Image dimensions out of bounds: {width}x{height}", "code": "album_artwork_dimensions_invalid"}
+            if width * height > _ARTWORK_MAX_PIXELS:
+                return {"ok": False, "error": "Image pixel count exceeds maximum (possible decompression bomb)", "code": "album_artwork_pixel_bomb"}
+            # Force a full decode of pixel data -- verify() only validates
+            # structure/headers for most formats, not full decompression.
+            im2.load()
+        return {"ok": True, "format": fmt, "ext": _ARTWORK_FORMAT_EXT[fmt], "width": width, "height": height}
+    except Exception as ex:
+        return {"ok": False, "error": f"Corrupt or unparseable image: {ex}", "code": "album_artwork_corrupt_image"}
+
+
+# ── SEC-002 / ARCH-003 Wave 24 final review: native Beets integration ────────
+# Section 7/8/28: the engine must ask the REAL, installed Beets (with the
+# operator's actual config and plugins loaded) where a file belongs, rather
+# than reinventing a parallel "Artist/Album/NN - Title" formatter. This runs
+# inside the beets-engine container, where the full `beets` package is
+# always installed (it is the same image that runs the `beet` CLI) -- see
+# Dockerfile.beets. It is guarded so the lighter Web Manager test/dev
+# environment (which intentionally does not depend on the full `beets`
+# package -- see requirements.txt) degrades to an explicit, fail-closed
+# error instead of a silent parallel implementation.
+try:
+    import beets as _beets_pkg  # type: ignore
+    import beets.library as _beets_library_mod  # type: ignore
+    import beets.plugins as _beets_plugins_mod  # type: ignore
+    _BEETS_IMPORT_ERROR: Optional[str] = None
+except Exception as _bexc:  # pragma: no cover - exercised in the lightweight test env
+    _beets_pkg = None
+    _beets_library_mod = None
+    _beets_plugins_mod = None
+    _BEETS_IMPORT_ERROR = str(_bexc)
+
+_beets_plugins_loaded = False
+_beets_plugins_lock = threading.Lock()
+
+
+def native_beets_available() -> bool:
+    return _beets_library_mod is not None
+
+
+def _ensure_beets_plugins_loaded() -> None:
+    global _beets_plugins_loaded
+    if _beets_plugins_loaded or _beets_plugins_mod is None:
+        return
+    with _beets_plugins_lock:
+        if _beets_plugins_loaded:
+            return
+        try:
+            _beets_plugins_mod.load_plugins()
+        except Exception:
+            # Plugin load failures must not block core path formatting; a
+            # plugin-provided path template function will simply fail its
+            # own evaluation below, which surfaces as a Plan error.
+            pass
+        _beets_plugins_loaded = True
+
+
+def native_beets_item_destination(
+    lib_db_path: str,
+    music_root: str,
+    item_id: int,
+    field_overrides: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Ask the real, installed Beets library (actual config + plugins) for
+    an item's destination path. Read-only: never calls item.store(),
+    lib.add(), or any other Library mutation method, so it is safe to call
+    from a non-mutating Plan.
+
+    Returns {"ok": True, "path": Path} or {"ok": False, "error": ..., "code": ...}.
+    """
+    if not native_beets_available():
+        return {
+            "ok": False,
+            "code": "album_relocation_native_beets_unavailable",
+            "error": f"Native Beets path formatting is unavailable in this process: {_BEETS_IMPORT_ERROR}",
+        }
+    try:
+        _ensure_beets_plugins_loaded()
+        # The library "directory" is always the caller's already-validated,
+        # server-configured MUSIC_ROOT -- never independently resolved from
+        # beets.config["directory"], which could diverge from what the rest
+        # of the engine's root-containment checks trust (and, in a process
+        # without BEETSDIR pointed at the operator's real config, would
+        # silently resolve to whatever config happens to be on this host).
+        directory = str(music_root)
+        lib = _beets_library_mod.Library(str(lib_db_path), directory)
+        try:
+            item = lib.get_item(int(item_id))
+            if item is None:
+                return {"ok": False, "code": "album_relocation_item_not_found", "error": f"Item {item_id} not found in Beets library"}
+            if field_overrides:
+                # Path templates read album-level fields (albumartist,
+                # album, ...) from the item's *associated Album* object,
+                # not from the item's own copy of those fields -- setting
+                # them on the item alone has no effect on destination().
+                # The Album object also refreshes itself FROM THE DATABASE
+                # on every access (Item._cached_album's documented
+                # behavior), which would silently discard an in-memory
+                # preview override. Since this is a throwaway, never-
+                # persisted object for a single Plan-time computation
+                # (nothing here is stored back to the database), bypassing
+                # Model's field-tracking __setattr__ to stub out that one
+                # instance's refresh is safe and does not touch any other
+                # in-flight request.
+                album_obj = item._cached_album
+                target = album_obj if album_obj is not None else item
+                for k, v in field_overrides.items():
+                    try:
+                        setattr(target, k, v)
+                    except Exception:
+                        pass
+                if album_obj is not None:
+                    object.__setattr__(album_obj, "load", lambda *a, **k: None)
+            dest_bytes = item.destination()
+            dest = Path(os.fsdecode(dest_bytes))
+            return {"ok": True, "path": dest}
+        finally:
+            # Close the sqlite connection this Library opened -- leaving it
+            # open holds a file handle on the same library DB the rest of
+            # the engine (and, on Windows, test cleanup) needs to access.
+            try:
+                lib._close()
+            except Exception:
+                pass
+    except Exception as ex:
+        return {"ok": False, "code": "album_relocation_native_beets_failed", "error": f"Native Beets destination computation failed: {ex}"}
+
+
+def native_beets_write_item_tags(lib_db_path: str, music_root: str, item_id: int) -> Dict[str, Any]:
+    """Write the item's CURRENT database field values to its media file tags
+    using Beets' own Item.write(), rather than a hand-rolled mediafile
+    writer -- this is the real semantics behind "resync tags from the
+    database" (Wave 24 review section 28/30), not a diff-only update.
+    """
+    if not native_beets_available():
+        return {
+            "ok": False,
+            "code": "album_metadata_native_beets_unavailable",
+            "error": f"Native Beets tag writing is unavailable in this process: {_BEETS_IMPORT_ERROR}",
+        }
+    try:
+        _ensure_beets_plugins_loaded()
+        # The library "directory" is always the caller's already-validated,
+        # server-configured MUSIC_ROOT -- never independently resolved from
+        # beets.config["directory"], which could diverge from what the rest
+        # of the engine's root-containment checks trust (and, in a process
+        # without BEETSDIR pointed at the operator's real config, would
+        # silently resolve to whatever config happens to be on this host).
+        directory = str(music_root)
+        lib = _beets_library_mod.Library(str(lib_db_path), directory)
+        try:
+            item = lib.get_item(int(item_id))
+            if item is None:
+                return {"ok": False, "code": "album_metadata_item_not_found", "error": f"Item {item_id} not found in Beets library"}
+            item.write()
+            return {"ok": True}
+        finally:
+            try:
+                lib._close()
+            except Exception:
+                pass
+    except Exception as ex:
+        return {"ok": False, "code": "album_metadata_tag_write_failed", "error": f"Native Beets tag write failed: {ex}"}
+
+
+def _capture_media_tag_state(path: Path, fields: Iterable[str]) -> Dict[str, Any]:
+    """Capture a file's before-state (identity stat + current tag values)
+    so Apply can TOCTOU-revalidate and Rollback can truthfully restore
+    tags, not just DB rows (Wave 24 review sections 23/26)."""
+    try:
+        st = path.stat()
+    except OSError:
+        return {"exists": False}
+    tags: Dict[str, Any] = {}
+    try:
+        import mediafile
+        mf = mediafile.MediaFile(str(path))
+        for f in fields:
+            if hasattr(mf, f):
+                try:
+                    tags[f] = getattr(mf, f)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return {
+        "exists": True,
+        "stat": {"dev": st.st_dev, "ino": st.st_ino, "size": st.st_size, "mtime_ns": st.st_mtime_ns},
+        "tags": tags,
+    }
+
+
+def _write_media_tag_fields(path: Path, fields: Dict[str, Any]) -> Dict[str, Any]:
+    """Write specific tag fields to a media file. Never swallows failure --
+    every caller in this module must treat a non-ok result as a real
+    transaction failure (Wave 24 review section 24), not a logged-and-
+    ignored best effort."""
+    if not fields:
+        return {"ok": True, "written": []}
+    try:
+        import mediafile
+    except Exception as ex:
+        return {"ok": False, "error": f"mediafile unavailable: {ex}", "code": "tag_write_module_unavailable"}
+    try:
+        mf = mediafile.MediaFile(str(path))
+    except Exception as ex:
+        return {"ok": False, "error": f"Could not open media file: {ex}", "code": "tag_write_open_failed"}
+    written = []
+    for k, v in fields.items():
+        if not hasattr(mf, k):
+            continue
+        try:
+            current = getattr(mf, k, None)
+            coerced = int(v) if isinstance(current, int) and str(v).lstrip("-").isdigit() else v
+            setattr(mf, k, coerced)
+            written.append(k)
+        except Exception as ex:
+            return {"ok": False, "error": f"Failed to set tag field {k!r}: {ex}", "code": "tag_write_setattr_failed"}
+    try:
+        mf.save()
+    except Exception as ex:
+        return {"ok": False, "error": f"Failed to save media file: {ex}", "code": "tag_write_save_failed"}
+    return {"ok": True, "written": written}
 
 
 def create_album_artwork_plan(
@@ -7918,14 +8299,7 @@ def create_album_artwork_plan(
     db_path: Optional[str] = None,
     quarantine_base_root: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Create a non-mutating preview plan for album artwork operations.
-
-    Two distinct, explicitly modeled operations (SEC-002 Wave 22 final
-    review, findings #9/#10): `quarantine` (remove artwork from the
-    library and clear the album's artpath) and `move` (relocate artwork
-    files into a specific target directory, verified-duplicate-aware,
-    collision-safe -- files actually end up at `target_dir`, never
-    silently redirected to quarantine while claiming success)."""
+    """Create a non-mutating preview plan for album artwork operations."""
     try:
         aid = int(payload.get("album_id") or 0)
     except Exception:
@@ -7937,32 +8311,138 @@ def create_album_artwork_plan(
     if mode not in _ALBUM_ARTWORK_MODES:
         return {"ok": False, "error": f"Unsupported artwork mode: {mode}", "code": "album_artwork_invalid_mode"}
 
-    allowed_roots = music_allowed_roots or [str(os.environ.get("MUSIC_ROOT", "/music"))]
+    payload_trash = payload.get("quarantine_root") or payload.get("trash_root")
+    if payload_trash:
+        pt_path = Path(payload_trash)
+        if not any(_path_under(pt_path, Path(r)) for r in (music_allowed_roots or [os.environ.get("MUSIC_ROOT", "/music")]) + (staging_allowed_roots or [])):
+            return {"ok": False, "error": f"Trash root outside configured allowed roots: {payload_trash}", "code": "album_artwork_trash_root_out_of_config"}
+
+    q_base = payload_trash or quarantine_base_root or os.environ.get("RECONCILE_QUARANTINE_DIR") or os.environ.get("TRASH_ROOT") or "/config/reconcile_quarantine"
+    trash_p = Path(q_base)
+    stg_dir = trash_p / "staging"
+
+    allowed_roots = music_allowed_roots or [r for r in [os.environ.get("MUSIC_ROOT"), os.environ.get("MUSIC_LIBRARY_PATH"), "/music", "/data/media/music"] if r]
     stg_roots = staging_allowed_roots or [
-        str(os.environ.get("DOWNLOADS_ROOT", "/downloads")),
-        str(os.environ.get("STAGING_ROOT", "/staging")),
+        str(r) for r in [
+            os.environ.get("DOWNLOADS_ROOT"),
+            os.environ.get("STAGING_ROOT"),
+            "/downloads",
+            "/staging",
+        ] if r
     ]
-    source_roots = [Path(r) for r in (allowed_roots + stg_roots)]
-    lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB", "")
+    config_roots = [r for r in [os.environ.get("BEETSDIR"), os.environ.get("RECONCILE_QUARANTINE_DIR"), "/config"] if r]
+    check_roots = [Path(r) for r in (allowed_roots + stg_roots + config_roots) if r and str(r).strip()]
+    if not any(_path_under(trash_p, r) for r in check_roots):
+        return {"ok": False, "error": f"Trash root outside configured allowed roots: {q_base}", "code": "album_artwork_trash_root_out_of_config"}
+    source_roots = [Path(r) for r in (allowed_roots + stg_roots + [q_base, str(Path(q_base) / "staging")]) if r]
+    lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB") or os.environ.get("LIB_PATH") or ""
     if lib_db and not Path(lib_db).exists():
         lib_db = ""
 
     resource_keys = [f"album:{aid}"]
     original_artpath = ""
+    original_artpath_trusted = False
+    derived_target_dir = ""
     if lib_db and Path(lib_db).exists():
         con = sqlite3.connect(lib_db, timeout=10)
         try:
-            row = con.execute("SELECT artpath FROM albums WHERE id=?", (aid,)).fetchone()
+            row = con.execute("SELECT artpath, mb_releasegroupid FROM albums WHERE id=?", (aid,)).fetchone()
             if row and row[0]:
                 raw_art = row[0]
                 original_artpath = raw_art.decode("utf-8", "replace") if isinstance(raw_art, bytes) else str(raw_art)
+                if original_artpath:
+                    # SEC-002 / ARCH-003 Wave 24 final review, section 3: a
+                    # database-supplied path must be VERIFIED against the
+                    # already-configured allowed roots -- it must never be
+                    # allowed to CREATE a new one. Server configuration
+                    # defines trust roots, not the mutable albums.artpath
+                    # column. A DB row pointing outside the configured
+                    # roots is not silently trusted for source discovery or
+                    # replace-target matching below; it is only kept as an
+                    # informational value for logging/rollback bookkeeping.
+                    #
+                    # Wave 24 final review round 3, section 11: a real Beets
+                    # library stores this column RELATIVE to the music dir
+                    # (see _resolve_db_path); resolve it before using it as a
+                    # filesystem path, but the trust decision below is
+                    # unaffected -- a relative value resolves under
+                    # allowed_roots[0], which is itself one of the
+                    # already-configured roots, so it cannot expand trust.
+                    original_artpath = str(_resolve_db_path(original_artpath, allowed_roots))
+                    p_orig_dir = Path(original_artpath).parent
+                    original_artpath_trusted = any(_path_under(p_orig_dir, r) for r in source_roots)
+            if row and row[1]:
+                db_rgid = str(row[1] or "").strip()
+                exp_rgid = str(payload.get("expected_mb_releasegroupid") or payload.get("rgid") or "").strip()
+                if db_rgid and exp_rgid and db_rgid.lower() != exp_rgid.lower():
+                    return {"ok": False, "error": f"Release group mismatch: expected {exp_rgid}, got {db_rgid}", "code": "album_artwork_releasegroup_mismatch"}
+
+            item_rows = con.execute("SELECT path FROM items WHERE album_id=?", (aid,)).fetchall()
+            item_dirs = set()
+            for irow in item_rows:
+                if irow[0]:
+                    ipath_str = irow[0].decode("utf-8", "replace") if isinstance(irow[0], bytes) else str(irow[0])
+                    if ipath_str:
+                        # Wave 24 final review round 3, section 11: same
+                        # relative-path normalization as original_artpath
+                        # above -- items.path is subject to the identical
+                        # real-Beets relative-storage behavior.
+                        item_dirs.add(str(_resolve_db_path(ipath_str, allowed_roots).parent))
+            if item_dirs:
+                parents = {str(Path(d).parent if re.search(r"^(disc|cd|disk)\s*\d+$", Path(d).name, re.I) else Path(d)) for d in item_dirs}
+                if len(parents) > 1:
+                    return {"ok": False, "error": f"Album items span multiple conflicting directories: {item_dirs}", "code": "album_artwork_item_directories_conflict"}
+                derived_target_dir = list(parents)[0]
         finally:
             con.close()
 
-    # Gather + independently validate every candidate source (SEC-002 Wave
-    # 22 final review, finding #12 -- candidate sources were previously
-    # accepted from the caller with no root/symlink check at all).
-    candidates_raw = payload.get("quarantined_art") or payload.get("candidates") or []
+    candidates_raw = list(payload.get("quarantined_art") or payload.get("candidates") or [])
+
+    if mode == "quarantine" and not candidates_raw:
+        search_files: List[Path] = []
+        if original_artpath and original_artpath_trusted:
+            p_art = Path(original_artpath)
+            if p_art.exists():
+                search_files.append(p_art)
+        if derived_target_dir:
+            p_dir = Path(derived_target_dir)
+            if p_dir.exists():
+                for fn in ("albumart.jpg", "albumart.png", "folder.jpg", "cover.jpg", "front.jpg", "cover.png"):
+                    candidate = p_dir / fn
+                    if candidate.exists() and candidate not in search_files:
+                        search_files.append(candidate)
+        for sf in search_files:
+            candidates_raw.append({"source": str(sf)})
+
+    # SEC-002 / ARCH-003 Wave 24 final review, section 2: Plan must never
+    # mutate the filesystem -- staging the uploaded image to disk here was
+    # a real Plan-time mutation and violated Plan -> Review -> Apply ->
+    # Verify. The bounded, already-validated image bytes are instead kept
+    # as transaction input (base64, capped well under the transaction
+    # store's practical size) and only written to disk during Apply. A
+    # regression test snapshots the filesystem across Plan to prove this.
+    pending_upload: Optional[Dict[str, Any]] = None
+    image_b64 = payload.get("image_data_b64") or payload.get("image_b64")
+    if image_b64 and mode in ("move", "replace"):
+        import base64
+        try:
+            img_bytes = base64.b64decode(image_b64, validate=True)
+        except Exception:
+            return {"ok": False, "error": "Invalid base64 artwork encoding", "code": "album_artwork_invalid_encoding"}
+
+        validation = _validate_image_bytes(img_bytes)
+        if not validation.get("ok"):
+            return {"ok": False, "error": validation.get("error"), "code": validation.get("code")}
+
+        pending_upload = {
+            "image_b64": image_b64,
+            "ext": validation["ext"],
+            "format": validation["format"],
+            "width": validation["width"],
+            "height": validation["height"],
+            "size": len(img_bytes),
+        }
+
     src_records: List[Dict[str, Any]] = []
     for cand in candidates_raw:
         src_p = Path(cand["source"])
@@ -7981,27 +8461,100 @@ def create_album_artwork_plan(
     quarantines: List[Dict[str, Any]] = []
     moves_plan: List[Dict[str, Any]] = []
     target_dir_str = ""
+    new_artpath = ""
 
-    if mode == "move":
-        target_dir_str = str(payload.get("target_dir") or "").strip()
+    if mode in ("move", "replace"):
+        target_dir_str = str(payload.get("target_dir") or derived_target_dir or "").strip()
         if not target_dir_str:
-            return {"ok": False, "error": "target_dir is required for move mode", "code": "album_artwork_invalid_payload"}
+            target_dir_str = str(Path(allowed_roots[0]) / f"album_{aid}")
         target_dir = Path(target_dir_str)
-        if not any(_path_under(target_dir, r) for r in [Path(r) for r in allowed_roots]):
-            return {"ok": False, "error": f"Artwork target outside allowed roots: {target_dir}", "code": "album_artwork_path_out_of_root"}
-        if _path_has_symlink_under(target_dir, Path(allowed_roots[0])):
-            return {"ok": False, "error": f"Symlink rejected: {target_dir}", "code": "album_artwork_symlink_rejected"}
-        for idx, rec in enumerate(src_records):
-            src_p = Path(rec["source"])
-            dest = target_dir / src_p.name
+        if allowed_roots:
+            for r in [Path(ar) for ar in allowed_roots]:
+                cand = Path(r.drive + str(target_dir)) if r.drive and not target_dir.drive else target_dir
+                if _path_under(cand, r):
+                    target_dir = cand
+                    break
+
+        # Wave 24 round 4 CodeQL audit note: this is.symlink() call is a
+        # deliberate metadata-only read, kept BEFORE full root-containment
+        # proof so a symlinked album folder produces its own distinct
+        # "could not be resolved safely" (400) response rather than the
+        # generic "access denied" (403) one -- app.py's caller (and its
+        # regression test) depend on that specific code/message pair.
+        # Reordering this after containment would collapse the two cases;
+        # see the alert-913 dismissal rationale in the Round 4 PR body for
+        # why the read itself has no attacker-controlled escape (it only
+        # returns a bool, and the containment check immediately below
+        # fails closed regardless of the answer).
+        if target_dir.is_symlink():
+            return {"ok": False, "error": f"Symlink rejected: {target_dir}", "code": "album_artwork_symlink_album_folder"}
+        validated_target_dir = validate_path_under_allowed_roots(target_dir, allowed_roots)
+        if validated_target_dir is None:
+            return {"ok": False, "error": f"Artwork target outside allowed roots or symlinked: {target_dir}", "code": "album_artwork_path_out_of_root"}
+        target_dir = validated_target_dir
+
+        candidate_list: List[Dict[str, Any]] = [{"kind": "file", "rec": rec} for rec in src_records]
+        if pending_upload:
+            candidate_list.append({"kind": "upload", "rec": pending_upload})
+
+        for idx, entry in enumerate(candidate_list):
+            is_upload = entry["kind"] == "upload"
+            rec = entry["rec"]
+            src_p = None if is_upload else Path(rec["source"])
+            src_name = f"upload{rec['ext']}" if is_upload else src_p.name
+            if mode == "replace":
+                existing_target = None
+                # Section 3: only trust the DB-supplied artpath for
+                # replace-target matching once it has been verified against
+                # the configured allowed roots above.
+                if original_artpath and original_artpath_trusted:
+                    op = Path(original_artpath)
+                    existing_target = op if op.is_absolute() and _path_under(op, target_dir) else (target_dir / op.name)
+                if not existing_target or not existing_target.exists():
+                    for fn in ("albumart.jpg", "cover.jpg", "folder.jpg", "front.jpg", "albumart.png", "cover.png"):
+                        cand = target_dir / fn
+                        if cand.exists() or cand.is_symlink() or os.path.islink(str(cand)):
+                            existing_target = cand
+                            break
+                dest = existing_target or (target_dir / "albumart.jpg")
+            else:
+                dest = target_dir / src_name
+            new_artpath = str(dest)
+            if dest.is_symlink() or os.path.islink(str(dest)) or _is_symlink_path(dest):
+                return {"ok": False, "error": f"Symlink rejected: {dest}", "code": "album_artwork_symlink_rejected"}
+
+            dest_before_stat = None
             if dest.exists():
-                if dest.resolve(strict=False) == src_p.resolve(strict=False):
-                    continue  # source already at target; nothing to do
-                if _album_cleanup_verified_same_file(src_p, dest):
+                if not dest.is_file():
+                    return {"ok": False, "error": f"Artwork destination is not a regular file: {dest}", "code": "album_artwork_dest_not_regular_file"}
+                dst_st = dest.stat()
+                # Section 4: capture the existing destination's full
+                # before-state so Apply can revalidate it has not changed
+                # (TOCTOU) before quarantining/replacing it.
+                dest_before_stat = {"dev": dst_st.st_dev, "ino": dst_st.st_ino, "size": dst_st.st_size, "mtime_ns": dst_st.st_mtime_ns}
+                if not is_upload and dest.resolve(strict=False) == src_p.resolve(strict=False):
+                    moves_plan.append({"candidate_idx": idx, "type": "same_file", "source": rec["source"], "destination": str(dest), "stat": rec["stat"]})
+                    continue
+                if not is_upload and _album_cleanup_verified_same_file(src_p, dest):
                     moves_plan.append({"candidate_idx": idx, "type": "dedup_remove", "source": rec["source"], "stat": rec["stat"]})
                     continue
-                dest = _unique_dest(dest)
-            moves_plan.append({"candidate_idx": idx, "type": "move", "source": rec["source"], "destination": str(dest), "stat": rec["stat"]})
+                if mode != "replace":
+                    dest = _unique_dest(dest)
+                    new_artpath = str(dest)
+                    dest_before_stat = None
+
+            if is_upload:
+                moves_plan.append({
+                    "candidate_idx": idx, "type": "pending_upload", "destination": str(dest),
+                    "image_b64": rec["image_b64"], "ext": rec["ext"], "format": rec["format"],
+                    "width": rec["width"], "height": rec["height"],
+                    "dest_before_stat": dest_before_stat,
+                })
+            else:
+                moves_plan.append({
+                    "candidate_idx": idx, "type": "move", "source": rec["source"], "destination": str(dest),
+                    "stat": rec["stat"], "dest_before_stat": dest_before_stat,
+                })
     else:
         quarantines = src_records
 
@@ -8026,6 +8579,7 @@ def create_album_artwork_plan(
             "mode": mode,
             "album_id": aid,
             "target_dir": target_dir_str,
+            "new_artpath": new_artpath,
             "quarantines": quarantines,
             "moves_plan": moves_plan,
             "original_artpath": original_artpath,
@@ -8042,6 +8596,7 @@ def create_album_artwork_plan(
         "mode": mode,
         "move_count": len(moves_plan),
         "quarantine_count": len(quarantines),
+        "target_artpath": new_artpath,
     }
 
 
@@ -8072,9 +8627,9 @@ def execute_album_artwork_apply(
 
         mode = meta.get("mode") or "quarantine"
         resource_keys = meta.get("resource_keys") or []
-        allowed_roots = music_allowed_roots or meta.get("allowed_roots") or [str(os.environ.get("MUSIC_ROOT", "/music"))]
+        allowed_roots = music_allowed_roots or meta.get("allowed_roots") or [r for r in [os.environ.get("MUSIC_ROOT"), os.environ.get("MUSIC_LIBRARY_PATH"), "/music"] if r]
         source_roots = [Path(r) for r in (meta.get("source_roots") or allowed_roots)]
-        lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB", "")
+        lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB") or os.environ.get("LIB_PATH") or ""
 
         def _fail(msg: str, code: str) -> Dict[str, Any]:
             curr = store.get(operation_id)
@@ -8087,10 +8642,11 @@ def execute_album_artwork_apply(
             moves_plan = meta.get("moves_plan") or []
             quarantines = meta.get("quarantines") or []
 
-            # Full TOCTOU + root/symlink revalidation, immediately before
-            # mutation, for every source in either mode (SEC-002 Wave 22
-            # final review, finding #21).
             for rec in moves_plan + quarantines:
+                if rec.get("type") == "pending_upload":
+                    # No on-disk source yet -- the bytes are still bounded
+                    # transaction input; nothing to TOCTOU-check here.
+                    continue
                 src_p = Path(rec["source"])
                 if not any(_path_under(src_p, r) for r in source_roots):
                     return _fail(f"Artwork source outside allowed roots: {src_p}", "album_artwork_path_out_of_root")
@@ -8104,13 +8660,45 @@ def execute_album_artwork_apply(
                         or st.st_size != exp_st.get("size") or st.st_mtime_ns != exp_st.get("mtime_ns")):
                     return _fail(f"Source artwork changed since plan: {src_p}", "album_artwork_toctou_mismatch")
 
+            # Section 4: revalidate any existing replace-mode destination
+            # against the before-state captured at Plan time. A destination
+            # that changed since Plan (a legitimate later artwork change
+            # landed there) must not be silently quarantined/overwritten.
+            for rec in moves_plan:
+                if rec.get("type") not in ("move", "pending_upload"):
+                    continue
+                dest_before = rec.get("dest_before_stat")
+                if not dest_before:
+                    continue
+                dest_p = Path(rec["destination"])
+                if not dest_p.exists():
+                    return _fail(f"Artwork replace target changed since plan (no longer exists): {dest_p}", "album_artwork_stale_destination")
+                dst_st = dest_p.stat()
+                if (dst_st.st_dev != dest_before.get("dev") or dst_st.st_ino != dest_before.get("ino")
+                        or dst_st.st_size != dest_before.get("size") or dst_st.st_mtime_ns != dest_before.get("mtime_ns")):
+                    return _fail(f"Artwork replace target changed since plan: {dest_p}", "album_artwork_stale_destination")
+
             target_dir_str = meta.get("target_dir") or ""
-            if mode == "move":
-                target_dir = Path(target_dir_str)
-                if not any(_path_under(target_dir, Path(r)) for r in allowed_roots):
-                    return _fail(f"Artwork target outside allowed roots: {target_dir}", "album_artwork_path_out_of_root")
-                if _path_has_symlink_under(target_dir, Path(allowed_roots[0])):
-                    return _fail(f"Symlink detected on artwork target: {target_dir}", "album_artwork_symlink_rejected")
+            validated_target_dir: Optional[Path] = None
+            if mode in ("move", "replace"):
+                target_dir_candidate = Path(target_dir_str)
+                if allowed_roots:
+                    for r in [Path(ar) for ar in allowed_roots]:
+                        cand = Path(r.drive + str(target_dir_candidate)) if r.drive and not target_dir_candidate.drive else target_dir_candidate
+                        if _path_under(cand, r):
+                            target_dir_candidate = cand
+                            break
+                # Wave 24 round 4: revalidate target_dir fresh at Apply
+                # (transaction metadata is never trusted as its own root of
+                # authority -- only music_allowed_roots, which is always
+                # server/operator-configured, ever is) and keep the ONE
+                # resolved, proven-safe Path for every sink below, instead
+                # of the previous pattern where this validated value was
+                # discarded and target_dir was rebuilt from the raw string
+                # again just before the mkdir/rename calls.
+                validated_target_dir = validate_path_under_allowed_roots(target_dir_candidate, allowed_roots)
+                if validated_target_dir is None:
+                    return _fail(f"Artwork target outside allowed roots or symlinked: {target_dir_candidate}", "album_artwork_path_out_of_root")
 
             store.update(operation_id, status="Running", metadata={**meta, "mutation_started": True})
 
@@ -8131,25 +8719,81 @@ def execute_album_artwork_apply(
             quarantined_records: List[Dict[str, Any]] = []
 
             try:
-                if mode == "move":
-                    target_dir = Path(target_dir_str)
+                if mode in ("move", "replace"):
+                    target_dir = validated_target_dir
                     target_dir.mkdir(parents=True, exist_ok=True)
                     for idx, m in enumerate(moves_plan):
-                        src_p = Path(m["source"])
+                        if m["type"] == "pending_upload":
+                            # Section 2: the bounded upload is written to
+                            # disk for the first time HERE, during Apply --
+                            # never during Plan. Re-validate the bytes
+                            # again as defense in depth before writing.
+                            import base64
+                            img_bytes = base64.b64decode(m["image_b64"], validate=True)
+                            revalidation = _validate_image_bytes(img_bytes)
+                            if not revalidation.get("ok"):
+                                return _fail(f"Artwork upload failed re-validation at Apply: {revalidation.get('error')}", revalidation.get("code") or "album_artwork_corrupt_image")
+                            q_dir.mkdir(parents=True, exist_ok=True)
+                            stg_p = q_dir / f"upload_{idx}{m['ext']}"
+                            stg_p.write_bytes(img_bytes)
+                            try:
+                                fd_stg = os.open(str(stg_p), os.O_RDONLY)
+                                try:
+                                    os.fsync(fd_stg)
+                                finally:
+                                    os.close(fd_stg)
+                            except Exception:
+                                pass
+                            src_p = stg_p
+                        else:
+                            src_p = Path(m["source"])
                         if not src_p.exists():
+                            continue
+                        try:
+                            fd_src = os.open(str(src_p), os.O_RDONLY)
+                            try:
+                                os.fsync(fd_src)
+                            finally:
+                                os.close(fd_src)
+                        except Exception:
+                            pass
+                        if m["type"] == "same_file":
+                            moved_records.append({"source": str(src_p), "destination": str(src_p)})
                             continue
                         if m["type"] == "dedup_remove":
                             q_dir.mkdir(parents=True, exist_ok=True)
-                            q_target = q_dir / _artwork_quarantine_key(src_p, idx)
+                            q_target = _safe_quarantine_target(q_dir, src_p, idx)
+                            os.chmod(str(q_dir), 0o700)
                             _safe_rename(src_p, q_target)
+                            os.chmod(str(q_target), 0o600)
                             quarantined_records.append({"source": str(src_p), "quarantined": str(q_target), "kind": "verified_duplicate"})
                         else:
-                            dest_p = Path(m["destination"])
-                            if dest_p.exists():
-                                return _fail(f"Artwork destination now occupied: {dest_p}", "album_artwork_toctou_mismatch")
+                            # Wave 24 round 4: re-derive the per-item
+                            # destination through the validated_target_dir
+                            # (already proven contained/symlink-free above)
+                            # rather than trusting the stored metadata
+                            # string on its own -- defense in depth against
+                            # transaction-record tampering, even though no
+                            # current route lets a request body overwrite
+                            # moves_plan directly.
+                            dest_p = validate_path_under_allowed_roots(Path(m["destination"]), [target_dir])
+                            if dest_p is None:
+                                return _fail(f"Artwork destination outside validated target directory: {m['destination']}", "album_artwork_path_out_of_root")
+                            if dest_p.exists() and mode == "replace" and dest_p.resolve(strict=False) != src_p.resolve(strict=False):
+                                q_dir.mkdir(parents=True, exist_ok=True)
+                                q_target = _safe_quarantine_target(q_dir, dest_p, idx)
+                                os.chmod(str(q_dir), 0o700)
+                                _safe_rename(dest_p, q_target)
+                                os.chmod(str(q_target), 0o600)
+                                quarantined_records.append({"source": str(dest_p), "quarantined": str(q_target), "kind": "replaced_artwork"})
+                                _persist(moved_records, quarantined_records)
                             dest_p.parent.mkdir(parents=True, exist_ok=True)
                             _safe_rename(src_p, dest_p)
-                            moved_records.append({"source": str(src_p), "destination": str(dest_p)})
+                            dpst = dest_p.stat()
+                            moved_records.append({
+                                "source": str(src_p), "destination": str(dest_p),
+                                "dest_stat_after_move": {"dev": dpst.st_dev, "ino": dpst.st_ino, "size": dpst.st_size, "mtime_ns": dpst.st_mtime_ns},
+                            })
                         _persist(moved_records, quarantined_records)
                 else:
                     for idx, q in enumerate(quarantines):
@@ -8157,22 +8801,35 @@ def execute_album_artwork_apply(
                         if not src_p.exists():
                             continue
                         q_dir.mkdir(parents=True, exist_ok=True)
-                        q_target = q_dir / _artwork_quarantine_key(src_p, idx)
+                        q_target = _safe_quarantine_target(q_dir, src_p, idx)
+                        os.chmod(str(q_dir), 0o700)
                         _safe_rename(src_p, q_target)
-                        quarantined_records.append({"source": str(src_p), "quarantined": str(q_target), "kind": "quarantine"})
+                        os.chmod(str(q_target), 0o600)
+                        qst = q_target.stat()
+                        quarantined_records.append({
+                            "source": str(src_p), "quarantined": str(q_target), "kind": "quarantine",
+                            "quarantined_stat": {"dev": qst.st_dev, "ino": qst.st_ino, "size": qst.st_size, "mtime_ns": qst.st_mtime_ns},
+                        })
                         _persist(moved_records, quarantined_records)
-            except OSError as ex:
+            except Exception as ex:
+                rollback_album_artwork(store, operation_id, music_allowed_roots=allowed_roots, db_path=lib_db)
                 return _fail(f"Artwork filesystem mutation failed: {ex}", "album_artwork_filesystem_failed")
 
             aid = int(meta.get("album_id") or 0)
             db_mutated = False
-            if mode == "quarantine" and lib_db and Path(lib_db).exists() and aid > 0:
+            new_artpath = meta.get("new_artpath") or (moved_records[0]["destination"] if moved_records else "")
+
+            if lib_db and Path(lib_db).exists() and aid > 0:
                 con = sqlite3.connect(lib_db, timeout=10)
                 try:
-                    cur = con.execute("UPDATE albums SET artpath=NULL WHERE id=?", (aid,))
+                    if mode in ("move", "replace") and new_artpath:
+                        cur = con.execute("UPDATE albums SET artpath=? WHERE id=?", (new_artpath, aid))
+                    else:
+                        cur = con.execute("UPDATE albums SET artpath=NULL WHERE id=?", (aid,))
                     if cur.rowcount != 1:
                         con.rollback()
-                        return _fail(f"Expected to clear artpath for exactly 1 album row, affected {cur.rowcount}.", "album_artwork_rowcount_mismatch")
+                        rollback_album_artwork(store, operation_id, music_allowed_roots=allowed_roots, db_path=lib_db)
+                        return _fail(f"Expected to update artpath for exactly 1 album row, affected {cur.rowcount}.", "album_artwork_rowcount_mismatch")
                     con.commit()
                     db_mutated = True
                 finally:
@@ -8180,30 +8837,95 @@ def execute_album_artwork_apply(
 
             # Stage 3 verification before Completed.
             for mr in moved_records:
-                if Path(mr["source"]).exists() or not Path(mr["destination"]).exists():
+                if not Path(mr["destination"]).exists():
+                    rollback_album_artwork(store, operation_id, music_allowed_roots=allowed_roots, db_path=lib_db)
                     return _fail("Post-write verification failed for artwork move.", "album_artwork_verification_failed")
             for qr in quarantined_records:
-                if Path(qr["source"]).exists() or not Path(qr["quarantined"]).exists():
+                if not Path(qr["quarantined"]).exists():
+                    rollback_album_artwork(store, operation_id, music_allowed_roots=allowed_roots, db_path=lib_db)
                     return _fail("Post-write verification failed for artwork quarantine.", "album_artwork_verification_failed")
-            if mode == "quarantine" and db_mutated:
+                if Path(qr["source"]).exists():
+                    # Wave 24 final review round 3 (surfaced by a relative-
+                    # DB-path replace-over-existing-artwork test -- no prior
+                    # test exercised replace against a non-blank artpath):
+                    # a "replaced_artwork" quarantine's source path is the
+                    # OLD art's location, which "replace" mode legitimately
+                    # reoccupies moments later with the NEW art (same path,
+                    # new content) via its own moved_records entry above --
+                    # that is the intended outcome, not a failed quarantine.
+                    # Any other kind (verified_duplicate / plain quarantine)
+                    # must never see its source path exist afterward.
+                    reoccupied = qr.get("kind") == "replaced_artwork" and any(
+                        mr.get("destination") == qr["source"] for mr in moved_records
+                    )
+                    if not reoccupied:
+                        rollback_album_artwork(store, operation_id, music_allowed_roots=allowed_roots, db_path=lib_db)
+                        return _fail("Post-write verification failed for artwork quarantine.", "album_artwork_verification_failed")
+            if lib_db and Path(lib_db).exists() and aid > 0 and db_mutated:
                 con = sqlite3.connect(lib_db, timeout=10)
                 try:
                     row = con.execute("SELECT artpath FROM albums WHERE id=?", (aid,)).fetchone()
-                    if row and row[0]:
-                        return _fail("Post-write verification failed: artpath not cleared.", "album_artwork_verification_failed")
+                    if mode in ("move", "replace") and new_artpath:
+                        art_val = row[0].decode("utf-8", "replace") if isinstance(row[0], bytes) else str(row[0]) if row and row[0] else ""
+                        if art_val != new_artpath:
+                            return _fail("Post-write verification failed: artpath does not match expected target.", "album_artwork_verification_failed")
+                    else:
+                        if row and row[0]:
+                            return _fail("Post-write verification failed: artpath not cleared.", "album_artwork_verification_failed")
                 finally:
                     con.close()
+
+            is_durable = True
+            if mode in ("move", "replace") and new_artpath and Path(new_artpath).exists():
+                try:
+                    fd = os.open(new_artpath, os.O_RDONLY)
+                    try:
+                        os.fsync(fd)
+                    finally:
+                        os.close(fd)
+                except OSError:
+                    is_durable = False
+                fn_fsync = getattr(__import__("sys").modules.get("backend.beets_control_agent"), "_fsync_file", None)
+                if fn_fsync and callable(fn_fsync):
+                    try:
+                        fn_fsync(new_artpath)
+                    except OSError:
+                        is_durable = False
+                    except Exception as ex:
+                        # Wave 24 final review round 3 (surfaced once the
+                        # Stage-3 verification false-positive above was
+                        # fixed -- a prior revision of that check always
+                        # failed first on any replace-over-existing-art,
+                        # which coincidentally masked this call ever being
+                        # reached). A non-OSError failure here is still a
+                        # genuine post-write step failure, not merely
+                        # "durability unknown": every mutation (quarantine
+                        # + write + DB pointer update) has already
+                        # committed by this point, so treat it the same as
+                        # any other post-write failure -- roll back fully
+                        # and report it, rather than either silently
+                        # downgrading durability or letting the exception
+                        # escape this function uncaught (which would leave
+                        # committed mutations standing with no rollback and
+                        # no controlled error response).
+                        rollback_album_artwork(store, operation_id, music_allowed_roots=allowed_roots, db_path=lib_db)
+                        return _fail(f"Post-write durability check failed: {ex}", "album_artwork_durability_check_failed")
 
             store.update(operation_id, status="Completed", metadata={
                 **store.get(operation_id).get("metadata", {}),
                 "db_mutated": db_mutated,
                 "completed_at": _now(),
+                "durable": is_durable,
             })
 
             return {
                 "ok": True, "operation_id": operation_id, "status": "Completed", "mutated": True,
-                "mode": mode, "target_dir": target_dir_str if mode == "move" else None,
+                "mode": mode, "target_dir": target_dir_str if mode in ("move", "replace") else None,
+                "artpath": new_artpath if mode in ("move", "replace") else "",
+                "durable": is_durable,
                 "moved_count": len(moved_records), "quarantined_count": len(quarantined_records),
+                "quarantined_records": quarantined_records,
+                "moved_records": moved_records,
             }
 
 
@@ -8248,7 +8970,7 @@ def rollback_album_artwork(
             for qr in quarantined_records:
                 q_p = Path(qr["quarantined"])
                 orig_p = Path(qr["source"])
-                if not any(_path_under(orig_p, r) for r in source_roots) or orig_p.exists() or orig_p.is_symlink():
+                if not any(_path_under(orig_p, r) for r in source_roots) or orig_p.is_symlink():
                     files_failed += 1
                     continue
                 if not q_p.exists():
@@ -8259,20 +8981,63 @@ def rollback_album_artwork(
                     if _path_has_symlink_under(orig_p.parent, source_roots[0]) if source_roots else False:
                         files_failed += 1
                         continue
-                    _safe_rename(q_p, orig_p)
+                    tmp_bak = orig_p.with_suffix(".tmp_bak") if orig_p.exists() else None
+                    if tmp_bak and orig_p.resolve(strict=False) != q_p.resolve(strict=False):
+                        try:
+                            _safe_rename(orig_p, tmp_bak)
+                        except Exception:
+                            tmp_bak = None
+                    try:
+                        try:
+                            _safe_rename(q_p, orig_p)
+                        except Exception:
+                            shutil.copyfile(str(q_p), str(orig_p))
+                        if tmp_bak and tmp_bak.exists():
+                            try:
+                                tmp_bak.unlink()
+                            except Exception:
+                                pass
+                    except Exception:
+                        if tmp_bak and tmp_bak.exists():
+                            try:
+                                shutil.copyfile(str(tmp_bak), str(orig_p))
+                                tmp_bak.unlink()
+                            except Exception:
+                                pass
+                        raise
                     files_restored += 1
-                except OSError:
+                except Exception:
                     files_failed += 1
 
+            q_sources = {qr["source"] for qr in quarantined_records if isinstance(qr, dict) and "source" in qr}
             for mr in reversed(moved_records):
                 dest_p = Path(mr["destination"])
                 orig_p = Path(mr["source"])
+                if str(dest_p) in q_sources or str(Path(dest_p).resolve(strict=False)) in {str(Path(s).resolve(strict=False)) for s in q_sources}:
+                    if orig_p.exists() and orig_p.resolve(strict=False) != dest_p.resolve(strict=False):
+                        try:
+                            orig_p.unlink()
+                        except Exception:
+                            pass
+                    continue
                 if not any(_path_under(orig_p, r) for r in source_roots) or orig_p.exists() or orig_p.is_symlink():
                     files_failed += 1
                     continue
                 if not dest_p.exists():
                     files_failed += 1
                     continue
+                # Wave 24 review section 6/18: rollback must not overwrite
+                # a legitimate later change. If the file currently at
+                # dest_p no longer matches what Apply actually wrote there,
+                # something else has touched it since -- moving it back to
+                # orig_p would silently destroy that newer state.
+                dest_after = mr.get("dest_stat_after_move")
+                if dest_after:
+                    cur_st = dest_p.stat()
+                    if (cur_st.st_dev != dest_after.get("dev") or cur_st.st_ino != dest_after.get("ino")
+                            or cur_st.st_size != dest_after.get("size") or cur_st.st_mtime_ns != dest_after.get("mtime_ns")):
+                        files_failed += 1
+                        continue
                 try:
                     orig_p.parent.mkdir(parents=True, exist_ok=True)
                     _safe_rename(dest_p, orig_p)
@@ -9107,5 +9872,1141 @@ def rollback_playlist_media_cleanup(
                 "db_restored": db_restored, "db_failed": db_failed,
                 "partial_mutation": final_status == "Partially Rolled Back",
             }
+
+
+# ── album_relocation_v1 ───────────────────────────────────────────────────────
+
+_ALBUM_RELOCATION_MODES = frozenset({"rename", "move_to_library"})
+
+
+def create_album_relocation_plan(
+    store: TransactionStore,
+    payload: Dict[str, Any],
+    *,
+    music_allowed_roots: Optional[List[str]] = None,
+    staging_allowed_roots: Optional[List[str]] = None,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Create non-mutating preview plan for album relocation (rename/move-to-library).
+
+    Wave 24 final review, sections 7-13: destinations are computed by
+    asking the real, installed Beets engine (its actual config and
+    plugins) via native_beets_item_destination() instead of a hand-rolled
+    "Artist/Album/NN - Title" formatter; "rename" plans a tag write
+    (albumartist/album) alongside the move, not a move alone; source-root
+    validation is unconditional (move_to_library no longer skips it, and
+    is checked against configured staging/import roots rather than
+    trusting an arbitrary DB path); every path is checked for symlink
+    components and regular-file-ness; and destination collisions capture
+    a before-stat for Apply-time TOCTOU revalidation.
+    """
+    try:
+        aid = int(payload.get("album_id") or 0)
+    except Exception:
+        aid = 0
+    if aid <= 0:
+        return {"ok": False, "error": "album_id required", "code": "album_relocation_invalid_payload"}
+
+    mode = str(payload.get("mode") or "rename").strip()
+    if mode not in _ALBUM_RELOCATION_MODES:
+        return {"ok": False, "error": f"Unsupported relocation mode: {mode}", "code": "album_relocation_invalid_mode"}
+
+    if not native_beets_available():
+        return {
+            "ok": False,
+            "error": f"Native Beets path formatting is unavailable in this process: {_BEETS_IMPORT_ERROR}. "
+                     f"Relocation refuses to fall back to a hand-rolled formatter.",
+            "code": "album_relocation_native_beets_unavailable",
+        }
+
+    allowed_roots = music_allowed_roots or [str(os.environ.get("MUSIC_ROOT", "/music"))]
+    music_root = Path(allowed_roots[0])
+    stg_roots = staging_allowed_roots or [str(r) for r in [os.environ.get("DOWNLOADS_ROOT", "/downloads"), os.environ.get("STAGING_ROOT", "/staging")] if r]
+    lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB", "")
+    if not lib_db or not Path(lib_db).exists():
+        return {"ok": False, "error": "Beets library database not found", "code": "album_relocation_db_not_found"}
+
+    resource_keys = [f"album:{aid}"]
+    items_plan: List[Dict[str, Any]] = []
+    artwork_plan: List[Dict[str, Any]] = []
+    item_tag_diffs: List[Dict[str, Any]] = []
+    target_artist = ""
+    target_album = ""
+
+    con = sqlite3.connect(lib_db, timeout=10)
+    con.row_factory = sqlite3.Row
+    try:
+        arow = con.execute("SELECT * FROM albums WHERE id=?", (aid,)).fetchone()
+        if not arow:
+            return {"ok": False, "error": f"Album {aid} not found", "code": "album_relocation_album_not_found"}
+
+        cur_artist = _s(arow["albumartist"] or arow["artist"] or "Unknown Artist")
+        cur_album = _s(arow["album"] or "Unknown Album")
+        target_artist = _s(payload.get("new_artist") or payload.get("new_albumartist") or cur_artist)
+        target_album = _s(payload.get("new_title") or cur_album)
+
+        # Section 9: "rename" means retag (write the corrected
+        # artist/album to file tags) THEN move to the corrected native
+        # Beets path -- a pure file move silently drops half the product
+        # contract. field_overrides also drives destination computation
+        # below, so the planned path reflects the NEW tags, not the old.
+        album_field_overrides: Dict[str, Any] = {}
+        if mode == "rename":
+            if target_artist and target_artist != cur_artist:
+                album_field_overrides["albumartist"] = target_artist
+            if target_album and target_album != cur_album:
+                album_field_overrides["album"] = target_album
+
+        item_rows = con.execute("SELECT * FROM items WHERE album_id=? ORDER BY disc, track, id", (aid,)).fetchall()
+        if not item_rows:
+            return {"ok": False, "error": f"Album {aid} has no track items", "code": "album_relocation_no_items"}
+
+        # Section 10/11: source-root validation is unconditional now (the
+        # original bug was skipping it *entirely* for move_to_library, not
+        # merely using the wrong root set). Both modes accept a source
+        # already inside the authoritative music root OR a configured
+        # staging/import/download root -- "another explicitly configured
+        # server-authorized role root" per the review's own wording --
+        # never an arbitrary, unauthorized host path. A move_to_library
+        # item that turns out to already be correctly placed (e.g. a
+        # partially-completed prior import) is legitimately a same-
+        # location no-op, not a rejection.
+        source_check_roots = allowed_roots + stg_roots
+        dest_seen: set = set()
+
+        for irow in item_rows:
+            iid = int(irow["id"])
+            orig_path_str = irow["path"].decode("utf-8", "replace") if isinstance(irow["path"], bytes) else str(irow["path"])
+            # Wave 24 final review round 3, section 11: a real Beets
+            # library stores items.path RELATIVE to the music dir; resolve
+            # against the configured music root (allowed_roots[0]) before
+            # treating it as absolute -- source_check_roots validation
+            # below still requires the resolved path land under one of the
+            # already-configured roots, so this cannot expand trust.
+            orig_p = _resolve_db_path(orig_path_str, allowed_roots)
+
+            matched_root = next((Path(r) for r in source_check_roots if _path_under(orig_p, Path(r))), None)
+            if matched_root is None:
+                code = "album_relocation_source_root_not_authorized" if mode == "move_to_library" else "album_relocation_path_out_of_root"
+                return {"ok": False, "error": f"Item path outside allowed roots for mode {mode}: {orig_p}", "code": code}
+            if _path_has_symlink_under(orig_p, matched_root):
+                return {"ok": False, "error": f"Symlink rejected on relocation source: {orig_p}", "code": "album_relocation_symlink_rejected"}
+            if not orig_p.exists():
+                return {"ok": False, "error": f"Item file missing on disk: {orig_p}", "code": "album_relocation_file_missing"}
+            if not orig_p.is_file():
+                return {"ok": False, "error": f"Item path is not a regular file: {orig_p}", "code": "album_relocation_not_regular_file"}
+
+            st = orig_p.stat()
+
+            dest_res = native_beets_item_destination(lib_db, str(music_root), iid, field_overrides=album_field_overrides)
+            if not dest_res.get("ok"):
+                return {"ok": False, "error": dest_res.get("error"), "code": dest_res.get("code") or "album_relocation_native_beets_failed"}
+            dest_p = dest_res["path"]
+
+            if not _path_under(dest_p, music_root):
+                return {"ok": False, "error": f"Computed destination outside MUSIC_ROOT: {dest_p}", "code": "album_relocation_dest_out_of_root"}
+            if _is_symlink_path(dest_p):
+                return {"ok": False, "error": f"Symlink rejected on relocation destination: {dest_p}", "code": "album_relocation_symlink_rejected"}
+            if _path_has_symlink_under(dest_p.parent, music_root):
+                return {"ok": False, "error": f"Symlink rejected on relocation destination parent: {dest_p.parent}", "code": "album_relocation_symlink_rejected"}
+
+            move_type = "move"
+            dest_before_stat = None
+            if dest_p == orig_p:
+                move_type = "same_location"
+            elif dest_p.exists():
+                if not dest_p.is_file():
+                    return {"ok": False, "error": f"Relocation destination is not a regular file: {dest_p}", "code": "album_relocation_dest_not_regular_file"}
+                if dest_p.resolve(strict=False) == orig_p.resolve(strict=False):
+                    move_type = "case_rename"
+                else:
+                    dst_st = dest_p.stat()
+                    dest_before_stat = {"dev": dst_st.st_dev, "ino": dst_st.st_ino, "size": dst_st.st_size, "mtime_ns": dst_st.st_mtime_ns}
+                    dest_p = _unique_dest(dest_p)
+
+            dest_key = os.path.normcase(str(dest_p))
+            if dest_key in dest_seen:
+                return {"ok": False, "error": f"Relocation plan produced duplicate destination paths: {dest_p}", "code": "album_relocation_duplicate_destination"}
+            dest_seen.add(dest_key)
+
+            items_plan.append({
+                "item_id": iid,
+                "old_path": str(orig_p),
+                "new_path": str(dest_p),
+                "move_type": move_type,
+                "stat": {"dev": st.st_dev, "ino": st.st_ino, "size": st.st_size, "mtime_ns": st.st_mtime_ns},
+                "dest_before_stat": dest_before_stat,
+            })
+            if album_field_overrides:
+                # Capture the file's CURRENT tag values for the fields
+                # about to be rewritten, so rollback can truthfully
+                # restore tags (section 17/26), not just DB rows.
+                before_state = _capture_media_tag_state(orig_p, album_field_overrides.keys())
+                item_tag_diffs.append({
+                    "item_id": iid, "path": str(orig_p), "fields": dict(album_field_overrides),
+                    "before_tags": before_state.get("tags") or {},
+                })
+
+        dest_dir = Path(items_plan[0]["new_path"]).parent
+
+        orig_art = _s(arow["artpath"] or "").strip()
+        if orig_art:
+            # Wave 24 final review round 3, section 11: same relative-path
+            # normalization as items.path above.
+            art_p = _resolve_db_path(orig_art, allowed_roots)
+            art_root = next((Path(r) for r in (allowed_roots + stg_roots) if _path_under(art_p, Path(r))), None)
+            if art_root is not None and not _path_has_symlink_under(art_p, art_root) and art_p.exists() and art_p.is_file():
+                st = art_p.stat()
+                new_art_p = dest_dir / "cover.jpg"
+                if _path_under(new_art_p, music_root) and not _is_symlink_path(new_art_p) and not _path_has_symlink_under(new_art_p.parent, music_root):
+                    art_dest_before = None
+                    if new_art_p.exists():
+                        if new_art_p.is_file():
+                            dst_st = new_art_p.stat()
+                            art_dest_before = {"dev": dst_st.st_dev, "ino": dst_st.st_ino, "size": dst_st.st_size, "mtime_ns": dst_st.st_mtime_ns}
+                        else:
+                            new_art_p = None
+                    if new_art_p is not None:
+                        artwork_plan.append({
+                            "old_path": str(art_p),
+                            "new_path": str(new_art_p),
+                            "stat": {"dev": st.st_dev, "ino": st.st_ino, "size": st.st_size, "mtime_ns": st.st_mtime_ns},
+                            "dest_before_stat": art_dest_before,
+                        })
+    finally:
+        con.close()
+
+    resource_keys.extend(f"item:{it['item_id']}" for it in items_plan)
+    resource_keys.extend(f"path:{os.path.normcase(it['new_path'])}" for it in items_plan)
+
+    summary_text = f"Album relocation ({mode}): album {aid} -> {dest_dir}"
+    tx = store.create(
+        operation_type="Album Relocation",
+        status="Preview",
+        summary=summary_text,
+        metadata={
+            "mutation_family": "album_relocation_v1",
+            "mode": mode,
+            "album_id": aid,
+            "dest_dir": str(dest_dir),
+            "target_artist": target_artist,
+            "target_album": target_album,
+            "items_plan": items_plan,
+            "artwork_plan": artwork_plan,
+            "item_tag_diffs": item_tag_diffs,
+            "resource_keys": resource_keys,
+            "allowed_roots": allowed_roots,
+            "staging_roots": stg_roots,
+            "created_at": _now(),
+        },
+    )
+    return {
+        "ok": True,
+        "operation_id": tx["id"],
+        "album_id": aid,
+        "mode": mode,
+        "dest_dir": str(dest_dir),
+        "items_count": len(items_plan),
+        "artwork_count": len(artwork_plan),
+        "native_beets": True,
+    }
+
+
+def execute_album_relocation_apply(
+    store: TransactionStore,
+    operation_id: str,
+    *,
+    music_allowed_roots: Optional[List[str]] = None,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Execute album relocation apply with TOCTOU revalidation, tag writes,
+    DB path update, and Stage 3 verification.
+
+    Wave 24 final review sections 9/12/14/15/16: "rename" writes the
+    planned tag diff before moving each file (not a move-only operation);
+    a captured destination-before-stat is revalidated immediately before
+    a collision is overwritten (never a silent new choice at Apply time);
+    any failure after mutation has started attempts an automatic rollback
+    instead of leaving files moved with status Failed; and Stage 3 checks
+    the old path is gone, the new file exists with a preserved size
+    signature, the DB item/album rows truthfully reflect the final paths,
+    every final path is inside MUSIC_ROOT, and there are no duplicate
+    destinations.
+    """
+    if not _TRANSACTION_ID_RE.match(operation_id):
+        return {"ok": False, "error": "Invalid transaction ID format", "code": "album_relocation_invalid_id"}
+
+    with _get_apply_lock(operation_id):
+        try:
+            tx = store.get(operation_id)
+        except KeyError:
+            return {"ok": False, "error": f"Transaction {operation_id} not found", "code": "album_relocation_not_found"}
+
+        meta = tx.get("metadata") or {}
+        if meta.get("mutation_family") != "album_relocation_v1":
+            return {"ok": False, "error": "Transaction is not an album_relocation_v1 operation", "code": "album_relocation_family_mismatch"}
+
+        if tx.get("status") == "Completed":
+            return {"ok": True, "operation_id": operation_id, "status": "Completed", "mutated": True}
+
+        resource_keys = meta.get("resource_keys") or []
+        allowed_roots = music_allowed_roots or meta.get("allowed_roots") or [str(os.environ.get("MUSIC_ROOT", "/music"))]
+        music_root = Path(allowed_roots[0])
+        lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB", "")
+
+        def _fail(msg: str, code: str, *, attempt_recovery: bool = False) -> Dict[str, Any]:
+            curr = store.get(operation_id)
+            c_meta = curr.get("metadata") or {}
+            mutated = bool(c_meta.get("filesystem_mutated") or c_meta.get("db_mutated"))
+            recovery_status = None
+            if attempt_recovery and mutated:
+                rb = rollback_album_relocation(store, operation_id, music_allowed_roots=allowed_roots, db_path=lib_db)
+                recovery_status = rb.get("status")
+                store.update(operation_id, logs=[f"Apply failed: {msg}", f"Automatic recovery attempt: {recovery_status}"])
+                if recovery_status == "Rolled Back":
+                    return {"ok": False, "error": msg, "code": code, "mutated": False, "partial_mutation": False, "rollback_available": False, "status": "Rolled Back"}
+                store.update(operation_id, status="Recovery Required")
+                return {"ok": False, "error": msg, "code": code, "mutated": True, "partial_mutation": True, "rollback_available": False, "status": "Recovery Required", "recovery_detail": recovery_status}
+            store.update(operation_id, status="Failed", logs=[f"Apply failed: {msg}"])
+            return {"ok": False, "error": msg, "code": code, "mutated": mutated, "partial_mutation": mutated, "rollback_available": mutated}
+
+        with _lock_resources(resource_keys):
+            items_plan = meta.get("items_plan") or []
+            artwork_plan = meta.get("artwork_plan") or []
+            item_tag_diffs = meta.get("item_tag_diffs") or []
+            tag_fields_by_item = {int(d["item_id"]): d["fields"] for d in item_tag_diffs if d.get("fields")}
+
+            # TOCTOU revalidation: source files.
+            for item in items_plan:
+                sp = Path(item["old_path"])
+                if item["move_type"] != "same_location":
+                    if not sp.exists():
+                        return _fail(f"Source file missing before relocation: {sp}", "album_relocation_toctou_mismatch")
+                    st = sp.stat()
+                    exp_st = item.get("stat") or {}
+                    if (st.st_dev != exp_st.get("dev") or st.st_ino != exp_st.get("ino")
+                            or st.st_size != exp_st.get("size") or st.st_mtime_ns != exp_st.get("mtime_ns")):
+                        return _fail(f"Source file changed since plan: {sp}", "album_relocation_toctou_mismatch")
+
+            # Section 12: revalidate any destination collision captured at
+            # Plan time -- Apply must not silently pick a new destination
+            # or overwrite a target that changed since Plan.
+            for item in items_plan:
+                dest_before = item.get("dest_before_stat")
+                if not dest_before:
+                    continue
+                dp = Path(item["new_path"])
+                if not dp.exists():
+                    return _fail(f"Relocation destination changed since plan (no longer exists): {dp}", "album_relocation_stale_destination")
+                dst_st = dp.stat()
+                if (dst_st.st_dev != dest_before.get("dev") or dst_st.st_ino != dest_before.get("ino")
+                        or dst_st.st_size != dest_before.get("size") or dst_st.st_mtime_ns != dest_before.get("mtime_ns")):
+                    return _fail(f"Relocation destination changed since plan: {dp}", "album_relocation_stale_destination")
+            for art in artwork_plan:
+                dest_before = art.get("dest_before_stat")
+                if not dest_before:
+                    continue
+                dp = Path(art["new_path"])
+                if not dp.exists():
+                    return _fail(f"Relocation artwork destination changed since plan (no longer exists): {dp}", "album_relocation_stale_destination")
+                dst_st = dp.stat()
+                if (dst_st.st_dev != dest_before.get("dev") or dst_st.st_ino != dest_before.get("ino")
+                        or dst_st.st_size != dest_before.get("size") or dst_st.st_mtime_ns != dest_before.get("mtime_ns")):
+                    return _fail(f"Relocation artwork destination changed since plan: {dp}", "album_relocation_stale_destination")
+
+            dest_dir = Path(meta["dest_dir"])
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            store.update(operation_id, status="Running", metadata={**meta, "mutation_started": True})
+
+            moved_items: List[Dict[str, Any]] = []
+            moved_artwork: List[Dict[str, Any]] = []
+            tags_written: List[int] = []
+
+            def _persist_progress() -> None:
+                curr = store.get(operation_id).get("metadata", {})
+                store.update(operation_id, metadata={
+                    **curr,
+                    "moved_items": moved_items,
+                    "moved_artwork": moved_artwork,
+                    "tags_written": tags_written,
+                    "filesystem_mutated": True,
+                    "mutated": True,
+                })
+
+            try:
+                for item in items_plan:
+                    iid = int(item["item_id"])
+                    tag_fields = tag_fields_by_item.get(iid)
+                    if tag_fields:
+                        # Section 9: retag THEN move -- write tags while the
+                        # file is still at its known-good old_path.
+                        tw = _write_media_tag_fields(Path(item["old_path"]), tag_fields)
+                        if not tw.get("ok"):
+                            raise RuntimeError(f"Tag write failed for item {iid}: {tw.get('error')}")
+                        tags_written.append(iid)
+                        # A real IPC regression test caught this: a tag
+                        # write legitimately changes the file's size (tag
+                        # frames grow/shrink), so Stage 3's post-move size
+                        # check must compare against the size AFTER the tag
+                        # write, not the stale pre-write size captured at
+                        # Plan time -- otherwise every successful, correct
+                        # rename-with-retag would fail its own integrity
+                        # check.
+                        try:
+                            post_tag_st = Path(item["old_path"]).stat()
+                            item["stat"] = {
+                                **(item.get("stat") or {}),
+                                "size": post_tag_st.st_size,
+                                "mtime_ns": post_tag_st.st_mtime_ns,
+                            }
+                        except OSError:
+                            pass
+
+                    if item["move_type"] == "same_location":
+                        moved_items.append(item)
+                        _persist_progress()
+                        continue
+
+                    sp = Path(item["old_path"])
+                    dp = Path(item["new_path"])
+
+                    # Section 12/49: a destination that was free at Plan
+                    # time (no dest_before_stat -- the earlier revalidation
+                    # loop only covers destinations that already had a
+                    # collision at Plan) must still be free right before
+                    # the move. _safe_rename does not itself guard against
+                    # overwriting an existing leaf, so a race that placed
+                    # something there since Plan must be caught here, not
+                    # silently clobbered.
+                    if item["move_type"] != "case_rename" and not item.get("dest_before_stat") and dp.exists():
+                        raise RuntimeError(f"Relocation destination appeared since plan (stale plan): {dp}")
+
+                    dp.parent.mkdir(parents=True, exist_ok=True)
+
+                    if item["move_type"] == "case_rename":
+                        tmp_dp = dp.parent / f"{dp.name}.tmp_case_{uuid.uuid4().hex[:6]}"
+                        _safe_rename(sp, tmp_dp)
+                        _safe_rename(tmp_dp, dp)
+                    else:
+                        _safe_rename(sp, dp)
+
+                    moved_items.append(item)
+                    _persist_progress()
+
+                for art in artwork_plan:
+                    sp = Path(art["old_path"])
+                    dp = Path(art["new_path"])
+                    if sp.exists():
+                        dp.parent.mkdir(parents=True, exist_ok=True)
+                        _safe_rename(sp, dp)
+                        moved_artwork.append(art)
+                        _persist_progress()
+            except Exception as ex:
+                return _fail(f"Relocation mutation failed: {ex}", "album_relocation_filesystem_failed", attempt_recovery=True)
+
+            # Update DB paths
+            aid = int(meta.get("album_id") or 0)
+            db_mutated = False
+            if lib_db and Path(lib_db).exists() and aid > 0:
+                con = sqlite3.connect(lib_db, timeout=10)
+                try:
+                    cur = con.cursor()
+                    for item in moved_items:
+                        iid = int(item["item_id"])
+                        npath = item["new_path"]
+                        cur.execute("UPDATE items SET path=? WHERE id=?", (npath.encode("utf-8") if isinstance(npath, str) else npath, iid))
+                        if cur.rowcount != 1:
+                            con.rollback()
+                            con.close()
+                            return _fail(f"Expected to update path for item {iid}, affected {cur.rowcount}", "album_relocation_rowcount_mismatch", attempt_recovery=True)
+
+                    if moved_artwork:
+                        nart = moved_artwork[0]["new_path"]
+                        cur.execute("UPDATE albums SET artpath=? WHERE id=?", (nart.encode("utf-8") if isinstance(nart, str) else nart, aid))
+
+                    con.commit()
+                    db_mutated = True
+                except Exception as ex:
+                    con.close()
+                    return _fail(f"Relocation DB update failed: {ex}", "album_relocation_db_failed", attempt_recovery=True)
+                finally:
+                    con.close()
+
+            # Stage 3 verification: filesystem, DB truthfulness, and
+            # containment -- not just "does the new path exist".
+            new_paths_seen: set = set()
+            for item in moved_items:
+                new_p = Path(item["new_path"])
+                old_p = Path(item["old_path"])
+                if not new_p.exists() or not new_p.is_file():
+                    return _fail(f"Post-write verification failed: missing {new_p}", "album_relocation_verification_failed", attempt_recovery=True)
+                if not _path_under(new_p, music_root):
+                    return _fail(f"Post-write verification failed: {new_p} is outside MUSIC_ROOT", "album_relocation_verification_failed", attempt_recovery=True)
+                exp_size = (item.get("stat") or {}).get("size")
+                if exp_size is not None and new_p.stat().st_size != exp_size:
+                    return _fail(f"Post-write verification failed: size mismatch for {new_p}", "album_relocation_verification_failed", attempt_recovery=True)
+                if item["move_type"] not in ("same_location", "case_rename") and old_p.exists():
+                    return _fail(f"Post-write verification failed: old path still present {old_p}", "album_relocation_verification_failed", attempt_recovery=True)
+                key = os.path.normcase(str(new_p))
+                if key in new_paths_seen:
+                    return _fail(f"Post-write verification failed: duplicate destination {new_p}", "album_relocation_verification_failed", attempt_recovery=True)
+                new_paths_seen.add(key)
+
+            if db_mutated and lib_db and Path(lib_db).exists():
+                con = sqlite3.connect(lib_db, timeout=10)
+                try:
+                    for item in moved_items:
+                        row = con.execute("SELECT path FROM items WHERE id=?", (int(item["item_id"]),)).fetchone()
+                        db_path_val = row[0].decode("utf-8", "replace") if row and isinstance(row[0], bytes) else (str(row[0]) if row else "")
+                        if db_path_val != item["new_path"]:
+                            return _fail(f"Post-write verification failed: DB path mismatch for item {item['item_id']}", "album_relocation_verification_failed", attempt_recovery=True)
+                    if moved_artwork:
+                        arow = con.execute("SELECT artpath FROM albums WHERE id=?", (aid,)).fetchone()
+                        art_val = arow[0].decode("utf-8", "replace") if arow and isinstance(arow[0], bytes) else (str(arow[0]) if arow and arow[0] else "")
+                        if art_val != moved_artwork[0]["new_path"]:
+                            return _fail("Post-write verification failed: album artpath mismatch", "album_relocation_verification_failed", attempt_recovery=True)
+                finally:
+                    con.close()
+
+            store.update(operation_id, status="Completed", metadata={
+                **store.get(operation_id).get("metadata", {}),
+                "db_mutated": db_mutated,
+                "completed_at": _now(),
+            })
+
+            return {
+                "ok": True, "operation_id": operation_id, "status": "Completed", "mutated": True,
+                "dest_dir": str(dest_dir), "moved_count": len(moved_items),
+                "artwork_moved_count": len(moved_artwork), "tags_written_count": len(tags_written),
+            }
+
+
+def rollback_album_relocation(
+    store: TransactionStore,
+    operation_id: str,
+    *,
+    music_allowed_roots: Optional[List[str]] = None,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Roll back an album_relocation_v1 transaction: filesystem (items,
+    then artwork), then tags, then DB (item paths + album artpath) --
+    verifying at each stage.
+
+    Wave 24 final review sections 17/18/26: rollback previously restored
+    moved item paths but never touched moved artwork or albums.artpath,
+    and never restored the tags "rename" writes. It also blindly moved
+    whatever currently sat at the destination back over the original
+    location. Each restore now verifies the current file at the
+    destination still matches what Apply actually wrote there before
+    moving it back, so a legitimate later change is never clobbered.
+    """
+    if not _TRANSACTION_ID_RE.match(operation_id):
+        return {"ok": False, "error": "Invalid transaction ID format", "code": "album_relocation_invalid_id"}
+
+    with _get_apply_lock(operation_id):
+        try:
+            tx = store.get(operation_id)
+        except KeyError:
+            return {"ok": False, "error": f"Transaction {operation_id} not found", "code": "album_relocation_not_found"}
+
+        meta = tx.get("metadata") or {}
+        if meta.get("mutation_family") != "album_relocation_v1":
+            return {"ok": False, "error": "Transaction is not an album_relocation_v1 operation", "code": "album_relocation_family_mismatch"}
+
+        if tx.get("status") == "Rolled Back":
+            return {"ok": False, "error": "Transaction is already rolled back.", "code": "album_relocation_already_rolled_back"}
+
+        resource_keys = meta.get("resource_keys") or []
+        lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB", "")
+
+        with _lock_resources(resource_keys):
+            moved_items = meta.get("moved_items") or []
+            moved_artwork = meta.get("moved_artwork") or []
+            item_tag_diffs = meta.get("item_tag_diffs") or []
+            tags_written = set(meta.get("tags_written") or [])
+            files_restored = 0
+            files_failed = 0
+
+            def _restore_one(cur_p: Path, orig_p: Path) -> bool:
+                if not cur_p.exists():
+                    return False
+                if orig_p.exists():
+                    # Current-state protection: never move a restored file
+                    # over something that already exists at the original
+                    # location -- that would silently destroy whatever is
+                    # legitimately there now.
+                    return False
+                try:
+                    orig_p.parent.mkdir(parents=True, exist_ok=True)
+                    _safe_rename(cur_p, orig_p)
+                    return True
+                except OSError:
+                    return False
+
+            for item in moved_items:
+                if item["move_type"] == "same_location":
+                    files_restored += 1
+                    continue
+                if _restore_one(Path(item["new_path"]), Path(item["old_path"])):
+                    files_restored += 1
+                else:
+                    files_failed += 1
+
+            artwork_restored = 0
+            artwork_failed = 0
+            for art in moved_artwork:
+                if _restore_one(Path(art["new_path"]), Path(art["old_path"])):
+                    artwork_restored += 1
+                else:
+                    artwork_failed += 1
+            files_failed += artwork_failed
+
+            # Restore tags before DB, per rollback-truthfulness policy:
+            # never report Rolled Back if a planned tag restore fails.
+            tags_restored = 0
+            tags_failed = 0
+            for diff in item_tag_diffs:
+                iid = int(diff["item_id"])
+                if iid not in tags_written:
+                    continue
+                before_tags = diff.get("before_tags") or {}
+                if not before_tags:
+                    continue
+                target_path = Path(diff["path"])
+                if not target_path.exists():
+                    # The item's move wasn't restored (or failed above) --
+                    # its tags live wherever the file currently is; do not
+                    # guess. Counted as a tag-restore failure.
+                    tags_failed += 1
+                    continue
+                tw = _write_media_tag_fields(target_path, before_tags)
+                if tw.get("ok"):
+                    tags_restored += 1
+                else:
+                    tags_failed += 1
+
+            db_restored = True
+            if meta.get("db_mutated") and lib_db and Path(lib_db).exists():
+                con = sqlite3.connect(lib_db, timeout=10)
+                try:
+                    cur = con.cursor()
+                    for item in moved_items:
+                        iid = int(item["item_id"])
+                        opath = item["old_path"]
+                        cur.execute("UPDATE items SET path=? WHERE id=?", (opath.encode("utf-8") if isinstance(opath, str) else opath, iid))
+                        if cur.rowcount != 1:
+                            db_restored = False
+                    if moved_artwork:
+                        aid = int(meta.get("album_id") or 0)
+                        orig_art = moved_artwork[0]["old_path"]
+                        cur.execute("UPDATE albums SET artpath=? WHERE id=?", (orig_art.encode("utf-8") if isinstance(orig_art, str) else orig_art, aid))
+                        if cur.rowcount != 1:
+                            db_restored = False
+                    con.commit()
+                finally:
+                    con.close()
+
+            ok = files_failed == 0 and db_restored and tags_failed == 0
+            any_progress = files_restored > 0 or artwork_restored > 0 or tags_restored > 0 or db_restored
+            final_status = "Rolled Back" if ok else ("Partially Rolled Back" if any_progress else "Failed")
+            store.update(operation_id, status=final_status, metadata={
+                **meta, "rollback_available": False, "rolled_back_at": _now(),
+                "tags_restored_count": tags_restored, "tags_failed_count": tags_failed,
+                "artwork_restored_count": artwork_restored, "artwork_failed_count": artwork_failed,
+            })
+            return {
+                "ok": ok, "operation_id": operation_id, "status": final_status,
+                "files_restored": files_restored, "files_failed": files_failed,
+                "tags_restored": tags_restored, "tags_failed": tags_failed,
+            }
+
+
+# ── album_metadata_repair_v1 ─────────────────────────────────────────────────
+
+# Wave 24 final review sections 19/20: explicit, immutable server-side
+# allowlists, taken directly from the real Beets sqlite schema (verified
+# against the installed Beets version's albums/items tables). Only these
+# exact column names may ever be interpolated into an UPDATE ... SET
+# column-identifier position. "id"/"path"/"album_id"/"artpath"/"added" are
+# deliberately excluded -- they are structural/provenance fields owned by
+# other families (album_relocation_v1, album_artwork_v1) or Beets itself,
+# not user-editable metadata. mb_artistid does NOT exist on the albums
+# table (it is an Item-level track-artist identity field; the album-level
+# identity field is mb_albumartistid) -- the previous code checked a
+# nonexistent album column.
+ALBUM_METADATA_FIELDS = frozenset({
+    "album", "albumartist", "albumartist_credit", "albumartist_sort",
+    "albumartists", "albumartists_credit", "albumartists_sort",
+    "albumdisambig", "albumstatus", "albumtype", "albumtypes",
+    "asin", "barcode", "catalognum", "comp", "country", "day",
+    "disctotal", "genres", "label", "language",
+    "mb_albumartistid", "mb_albumartistids", "mb_albumid", "mb_releasegroupid",
+    "month", "original_day", "original_month", "original_year",
+    "release_group_title", "releasegroupdisambig", "script", "style", "year",
+})
+
+ITEM_METADATA_FIELDS = frozenset({
+    "album", "albumartist", "albumartist_credit", "albumartist_sort",
+    "albumartists", "albumartists_credit", "albumartists_sort",
+    "albumdisambig", "albumstatus", "albumtype", "albumtypes",
+    "artist", "artist_credit", "artist_sort", "artists", "artists_credit", "artists_sort",
+    "asin", "barcode", "catalognum", "comp", "country", "day",
+    "disctotal", "genres", "label", "language",
+    "mb_albumartistid", "mb_albumartistids", "mb_albumid",
+    "mb_artistid", "mb_artistids", "mb_releasegroupid",
+    "month", "original_day", "original_month", "original_year",
+    "release_group_title", "releasegroupdisambig", "script", "style", "year",
+    "comments", "lyrics", "bpm", "initial_key", "isrc", "media", "grouping", "title",
+})
+
+# Album-level identity columns the conflict policy (section 21/22) applies
+# to -- correct schema, not the invented mb_artistid.
+IDENTITY_FIELDS = ("mb_releasegroupid", "mb_albumid", "mb_albumartistid")
+
+# Existing production caller (_apply_genre_to_album in app.py) has always
+# sent the singular {"genre": ...}; the real column is plural "genres".
+_METADATA_FIELD_ALIASES = {"genre": "genres"}
+
+
+def _normalize_metadata_fields(raw: Dict[str, Any], allowlist: frozenset) -> Tuple[Dict[str, Any], List[str]]:
+    """Split caller-supplied field names into (allowed, rejected).
+    Nothing outside `allowlist` is ever returned in the allowed dict."""
+    allowed: Dict[str, Any] = {}
+    rejected: List[str] = []
+    for k, v in (raw or {}).items():
+        real_key = _METADATA_FIELD_ALIASES.get(k, k)
+        if real_key in allowlist:
+            allowed[real_key] = v
+        else:
+            rejected.append(k)
+    return allowed, rejected
+
+
+def create_album_metadata_plan(
+    store: TransactionStore,
+    payload: Dict[str, Any],
+    *,
+    music_allowed_roots: Optional[List[str]] = None,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Create non-mutating preview plan for album metadata and tag updates.
+
+    Wave 24 final review sections 19-23/30: unknown/disallowed fields are
+    rejected here, before a transaction is even created, and the stored
+    plan metadata carries only the allowlisted, diffed columns (never the
+    caller's original raw dict) so Apply has nothing arbitrary to
+    interpolate into SQL; the client-supplied force_identity_override is
+    no longer honored; and each tag-mutated file's before-state (identity
+    stat + current tag values) is captured for TOCTOU/rollback. A
+    `force_write_tags` flag also plans a real Beets Item.write() resync
+    (current DB values -> file tags) for every item, independent of
+    whether any field actually differs -- the real semantics behind
+    "rewrite tags to match the database" (section 28/30), not a diff-only
+    no-op.
+    """
+    try:
+        aid = int(payload.get("album_id") or 0)
+    except Exception:
+        aid = 0
+    if aid <= 0:
+        return {"ok": False, "error": "album_id required", "code": "album_metadata_invalid_payload"}
+
+    force_write_tags = bool(payload.get("force_write_tags"))
+    raw_updates = payload.get("updates") or {}
+    raw_item_updates = payload.get("item_updates") or {}
+
+    updates, rejected = _normalize_metadata_fields(raw_updates, ALBUM_METADATA_FIELDS)
+    if rejected:
+        return {"ok": False, "error": f"Unknown/disallowed album metadata field(s): {sorted(rejected)}", "code": "album_metadata_field_not_allowed"}
+
+    lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB", "")
+    if not lib_db or not Path(lib_db).exists():
+        return {"ok": False, "error": "Beets library database not found", "code": "album_metadata_db_not_found"}
+    allowed_roots = music_allowed_roots or [str(os.environ.get("MUSIC_ROOT", "/music"))]
+
+    resource_keys = [f"album:{aid}"]
+    con = sqlite3.connect(lib_db, timeout=10)
+    con.row_factory = sqlite3.Row
+    try:
+        arow = con.execute("SELECT * FROM albums WHERE id=?", (aid,)).fetchone()
+        if not arow:
+            return {"ok": False, "error": f"Album {aid} not found", "code": "album_metadata_album_not_found"}
+
+        for id_field in IDENTITY_FIELDS:
+            if id_field in updates and updates[id_field] and id_field in arow.keys():
+                existing_val = _s(arow[id_field] or "").strip()
+                new_val = _s(updates[id_field]).strip()
+                if existing_val and existing_val != new_val:
+                    # Section 21/22: no payload field can bypass this --
+                    # a conflict always requires review.
+                    return {
+                        "ok": False,
+                        "error": f"Identity conflict on {id_field}: existing '{existing_val}' != new '{new_val}'",
+                        "code": "album_metadata_identity_conflict",
+                    }
+
+        album_diff = {}
+        for col, new_val in updates.items():
+            if col in arow.keys():
+                old_val = _s(arow[col] or "")
+                if old_val != _s(new_val):
+                    album_diff[col] = {"before": old_val, "after": _s(new_val)}
+
+        item_rows = con.execute("SELECT * FROM items WHERE album_id=? ORDER BY disc, track, id", (aid,)).fetchall()
+        item_diffs = []
+        for irow in item_rows:
+            iid = int(irow["id"])
+            ipath = irow["path"].decode("utf-8", "replace") if isinstance(irow["path"], bytes) else str(irow["path"])
+            # Wave 24 final review round 3, section 11: same relative-path
+            # normalization as the relocation/artwork families above.
+            ipath = str(_resolve_db_path(ipath, allowed_roots))
+            raw_i_up = raw_item_updates.get(str(iid)) or raw_item_updates.get(iid) or {}
+            i_up, rejected_item = _normalize_metadata_fields(raw_i_up, ITEM_METADATA_FIELDS)
+            if rejected_item:
+                return {"ok": False, "error": f"Unknown/disallowed item metadata field(s) for item {iid}: {sorted(rejected_item)}", "code": "album_metadata_field_not_allowed"}
+
+            merged_i_up = dict(i_up)
+            for k in ("mb_albumid", "mb_releasegroupid", "album", "albumartist", "year", "genres"):
+                if k in updates and k not in merged_i_up:
+                    merged_i_up[k] = updates[k]
+
+            idiff = {}
+            for col, new_val in merged_i_up.items():
+                if col in irow.keys():
+                    old_val = _s(irow[col] or "")
+                    if old_val != _s(new_val):
+                        idiff[col] = {"before": old_val, "after": _s(new_val)}
+
+            if idiff or force_write_tags:
+                # Section 23: capture the media file's before-state
+                # (identity stat + current tag values for the fields being
+                # touched) so Apply can TOCTOU-revalidate and Rollback can
+                # truthfully restore tags, not just DB rows.
+                capture_fields = set(idiff.keys()) | (ITEM_METADATA_FIELDS if force_write_tags else set())
+                before_state = _capture_media_tag_state(Path(ipath), capture_fields)
+                item_diffs.append({
+                    "item_id": iid, "path": ipath, "diff": idiff,
+                    "force_write": force_write_tags,
+                    "file_before_stat": before_state.get("stat"),
+                    "before_tags": before_state.get("tags") or {},
+                })
+    finally:
+        con.close()
+
+    summary_text = f"Album metadata update: album {aid} ({len(album_diff)} album fields, {len(item_diffs)} items updated)"
+    tx = store.create(
+        operation_type="Album Metadata Repair",
+        status="Preview",
+        summary=summary_text,
+        metadata={
+            "mutation_family": "album_metadata_repair_v1",
+            "album_id": aid,
+            "album_diff": album_diff,
+            "item_diffs": item_diffs,
+            "force_write_tags": force_write_tags,
+            "resource_keys": resource_keys,
+            "allowed_roots": allowed_roots,
+            "created_at": _now(),
+        },
+    )
+    return {
+        "ok": True,
+        "operation_id": tx["id"],
+        "album_id": aid,
+        "album_fields_changed": len(album_diff),
+        "items_changed": len(item_diffs),
+    }
+
+
+def execute_album_metadata_apply(
+    store: TransactionStore,
+    operation_id: str,
+    *,
+    music_allowed_roots: Optional[List[str]] = None,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Execute album metadata apply on DB and media tags with Stage 3
+    verification.
+
+    Wave 24 final review sections 23-28: every SQL column identifier is
+    re-asserted against the allowlist immediately before use (defense in
+    depth on top of the Plan-time filter); each tag-mutated file's
+    identity is TOCTOU-revalidated right before writing; a tag write is
+    never silently swallowed -- failure past the point of DB mutation
+    triggers an automatic best-effort rollback (Recovery Required if that
+    itself cannot fully undo it); tags are written by asking the real
+    Beets Item.write() to resync from the just-committed DB row (reusing
+    Beets rather than a duplicate hand-rolled writer), falling back to a
+    field-scoped writer only when native Beets is unavailable; and Stage 3
+    re-reads both the item DB rows and the actual on-disk tags.
+    """
+    if not _TRANSACTION_ID_RE.match(operation_id):
+        return {"ok": False, "error": "Invalid transaction ID format", "code": "album_metadata_invalid_id"}
+
+    with _get_apply_lock(operation_id):
+        try:
+            tx = store.get(operation_id)
+        except KeyError:
+            return {"ok": False, "error": f"Transaction {operation_id} not found", "code": "album_metadata_not_found"}
+
+        meta = tx.get("metadata") or {}
+        if meta.get("mutation_family") != "album_metadata_repair_v1":
+            return {"ok": False, "error": "Transaction is not an album_metadata_repair_v1 operation", "code": "album_metadata_family_mismatch"}
+
+        if tx.get("status") == "Completed":
+            return {"ok": True, "operation_id": operation_id, "status": "Completed", "mutated": True}
+
+        resource_keys = meta.get("resource_keys") or []
+        lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB", "")
+        if not lib_db or not Path(lib_db).exists():
+            return {"ok": False, "error": "Beets library database not found", "code": "album_metadata_db_not_found"}
+        allowed_roots = music_allowed_roots or meta.get("allowed_roots") or [str(os.environ.get("MUSIC_ROOT", "/music"))]
+        music_root = allowed_roots[0]
+
+        def _fail(msg: str, code: str, *, attempt_recovery: bool = False) -> Dict[str, Any]:
+            if attempt_recovery:
+                rb = rollback_album_metadata(store, operation_id, db_path=lib_db)
+                store.update(operation_id, logs=[f"Apply failed: {msg}", f"Automatic recovery attempt: {rb.get('status')}"])
+                if rb.get("status") == "Rolled Back":
+                    return {"ok": False, "error": msg, "code": code, "mutated": False, "partial_mutation": False, "rollback_available": False, "status": "Rolled Back"}
+                store.update(operation_id, status="Recovery Required")
+                return {"ok": False, "error": msg, "code": code, "mutated": True, "partial_mutation": True, "rollback_available": False, "status": "Recovery Required"}
+            store.update(operation_id, status="Failed", logs=[f"Apply failed: {msg}"])
+            return {"ok": False, "error": msg, "code": code, "mutated": True, "partial_mutation": True, "rollback_available": True}
+
+        with _lock_resources(resource_keys):
+            store.update(operation_id, status="Running", metadata={**meta, "mutation_started": True})
+            aid = int(meta["album_id"])
+            album_diff = meta.get("album_diff") or {}
+            item_diffs = meta.get("item_diffs") or []
+
+            # Defense in depth: re-assert every column name against the
+            # allowlist immediately before it can reach a SQL statement,
+            # even though Plan already filtered it.
+            for k in album_diff.keys():
+                if k not in ALBUM_METADATA_FIELDS:
+                    return _fail(f"Refusing disallowed album field at Apply: {k}", "album_metadata_field_not_allowed")
+            for idiff in item_diffs:
+                for k in idiff["diff"].keys():
+                    if k not in ITEM_METADATA_FIELDS:
+                        return _fail(f"Refusing disallowed item field at Apply: {k}", "album_metadata_field_not_allowed")
+
+            # TOCTOU: revalidate every tag-mutated file's identity before
+            # touching anything.
+            for idiff in item_diffs:
+                before = idiff.get("file_before_stat")
+                if not before:
+                    continue
+                p = Path(idiff["path"])
+                if not p.exists():
+                    return _fail(f"Media file missing before metadata apply: {p}", "album_metadata_toctou_mismatch")
+                st = p.stat()
+                if (st.st_dev != before.get("dev") or st.st_ino != before.get("ino")
+                        or st.st_size != before.get("size") or st.st_mtime_ns != before.get("mtime_ns")):
+                    return _fail(f"Media file changed since plan: {p}", "album_metadata_toctou_mismatch")
+
+            con = sqlite3.connect(lib_db, timeout=10)
+            db_mutated = False
+            try:
+                cur = con.cursor()
+                if album_diff:
+                    cols = [f"{k}=?" for k in album_diff.keys()]
+                    vals = [album_diff[k]["after"] for k in album_diff.keys()] + [aid]
+                    cur.execute(f"UPDATE albums SET {', '.join(cols)} WHERE id=?", vals)
+                    if cur.rowcount != 1:
+                        con.rollback()
+                        con.close()
+                        return _fail(f"Expected to update 1 album row, affected {cur.rowcount}", "album_metadata_rowcount_mismatch")
+
+                for idiff in item_diffs:
+                    if not idiff["diff"]:
+                        continue
+                    iid = int(idiff["item_id"])
+                    diff_dict = idiff["diff"]
+                    icols = [f"{k}=?" for k in diff_dict.keys()]
+                    ivals = [diff_dict[k]["after"] for k in diff_dict.keys()] + [iid]
+                    cur.execute(f"UPDATE items SET {', '.join(icols)} WHERE id=?", ivals)
+                    if cur.rowcount != 1:
+                        con.rollback()
+                        con.close()
+                        return _fail(f"Expected to update 1 item row for id {iid}, affected {cur.rowcount}", "album_metadata_rowcount_mismatch")
+
+                con.commit()
+                db_mutated = True
+            finally:
+                con.close()
+
+            store.update(operation_id, metadata={**store.get(operation_id).get("metadata", {}), "db_mutated": db_mutated})
+
+            # Section 24/28: write tags for every item that has a real diff
+            # or requested a forced resync. A tag write failure here is a
+            # transaction failure, never a logged-and-ignored best effort.
+            tags_written: List[int] = []
+            for idiff in item_diffs:
+                if not idiff["diff"] and not idiff.get("force_write"):
+                    continue
+                iid = int(idiff["item_id"])
+                ipath = Path(idiff["path"])
+                if not ipath.exists() or not ipath.is_file():
+                    return _fail(f"Media file missing for tag write: {ipath}", "album_metadata_tag_write_failed", attempt_recovery=True)
+
+                result = native_beets_write_item_tags(lib_db, music_root, iid)
+                if not result.get("ok"):
+                    # Degraded fallback: field-scoped writer for the diffed
+                    # fields only (covers dev/test environments without the
+                    # full Beets package -- never used in the production
+                    # engine container, which always has it).
+                    fields = {k: v["after"] for k, v in idiff["diff"].items()}
+                    fallback = _write_media_tag_fields(ipath, fields) if fields else {"ok": False, "error": result.get("error"), "code": result.get("code")}
+                    if not fallback.get("ok"):
+                        return _fail(f"Tag write failed for item {iid}: {fallback.get('error') or result.get('error')}", fallback.get("code") or result.get("code") or "album_metadata_tag_write_failed", attempt_recovery=True)
+                tags_written.append(iid)
+                store.update(operation_id, metadata={**store.get(operation_id).get("metadata", {}), "tags_written": tags_written})
+
+            # Stage 3 verification: re-read DB rows AND actual on-disk tags.
+            con = sqlite3.connect(lib_db, timeout=10)
+            con.row_factory = sqlite3.Row
+            try:
+                arow = con.execute("SELECT * FROM albums WHERE id=?", (aid,)).fetchone()
+                for k, v in album_diff.items():
+                    if arow and _s(arow[k] or "") != v["after"]:
+                        return _fail(f"Post-write verification failed for album field {k}", "album_metadata_verification_failed", attempt_recovery=True)
+                for idiff in item_diffs:
+                    if not idiff["diff"]:
+                        continue
+                    iid = int(idiff["item_id"])
+                    irow = con.execute("SELECT * FROM items WHERE id=?", (iid,)).fetchone()
+                    if not irow:
+                        return _fail(f"Post-write verification failed: item {iid} missing from DB", "album_metadata_verification_failed", attempt_recovery=True)
+                    for k, v in idiff["diff"].items():
+                        if k in irow.keys() and _s(irow[k] or "") != v["after"]:
+                            return _fail(f"Post-write verification failed for item {iid} field {k}", "album_metadata_verification_failed", attempt_recovery=True)
+            finally:
+                con.close()
+
+            for idiff in item_diffs:
+                if not idiff["diff"] or int(idiff["item_id"]) not in tags_written:
+                    continue
+                capture = _capture_media_tag_state(Path(idiff["path"]), idiff["diff"].keys())
+                for k, v in idiff["diff"].items():
+                    actual = _s(capture.get("tags", {}).get(k, ""))
+                    if actual != v["after"]:
+                        return _fail(f"Post-write verification failed: on-disk tag {k} does not match for item {idiff['item_id']}", "album_metadata_verification_failed", attempt_recovery=True)
+
+            store.update(operation_id, status="Completed", metadata={
+                **store.get(operation_id).get("metadata", {}),
+                "db_mutated": db_mutated,
+                "tags_written": tags_written,
+                "completed_at": _now(),
+            })
+            return {"ok": True, "operation_id": operation_id, "status": "Completed", "mutated": True, "tags_written_count": len(tags_written)}
+
+
+def rollback_album_metadata(
+    store: TransactionStore,
+    operation_id: str,
+    *,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Roll back an album_metadata_repair_v1 transaction: restore file
+    tags FIRST (verified), then DB rows (verified) -- section 26/27:
+    rollback must be truthful about what it actually restored, never
+    report Rolled Back when a planned tag restore failed.
+    """
+    if not _TRANSACTION_ID_RE.match(operation_id):
+        return {"ok": False, "error": "Invalid transaction ID format", "code": "album_metadata_invalid_id"}
+
+    with _get_apply_lock(operation_id):
+        try:
+            tx = store.get(operation_id)
+        except KeyError:
+            return {"ok": False, "error": f"Transaction {operation_id} not found", "code": "album_metadata_not_found"}
+
+        meta = tx.get("metadata") or {}
+        if meta.get("mutation_family") != "album_metadata_repair_v1":
+            return {"ok": False, "error": "Transaction is not an album_metadata_repair_v1 operation", "code": "album_metadata_family_mismatch"}
+
+        if tx.get("status") == "Rolled Back":
+            return {"ok": False, "error": "Transaction is already rolled back.", "code": "album_metadata_already_rolled_back"}
+
+        resource_keys = meta.get("resource_keys") or []
+        lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB", "")
+        if not lib_db or not Path(lib_db).exists():
+            return {"ok": False, "error": "Beets library database not found", "code": "album_metadata_db_not_found"}
+
+        with _lock_resources(resource_keys):
+            aid = int(meta["album_id"])
+            album_diff = meta.get("album_diff") or {}
+            item_diffs = meta.get("item_diffs") or []
+            tags_written = set(meta.get("tags_written") or [])
+
+            # 1. Restore tags first, from the captured before_tags.
+            tags_restored = 0
+            tags_failed = 0
+            for idiff in item_diffs:
+                iid = int(idiff["item_id"])
+                if not idiff["diff"] or iid not in tags_written:
+                    continue
+                # None is a real, meaningful captured value here (the tag
+                # was unset before Apply) -- it must be written back, not
+                # silently dropped, or a field that started empty would
+                # never be restored and rollback would falsely report
+                # success.
+                captured = idiff.get("before_tags", {})
+                before_tags = {k: captured.get(k) for k in idiff["diff"].keys()}
+                p = Path(idiff["path"])
+                if not p.exists():
+                    tags_failed += 1
+                    continue
+                tw = _write_media_tag_fields(p, before_tags)
+                if not tw.get("ok"):
+                    tags_failed += 1
+                    continue
+                capture = _capture_media_tag_state(p, before_tags.keys())
+                if all(_s(capture.get("tags", {}).get(k, "")) == _s(v) for k, v in before_tags.items()):
+                    tags_restored += 1
+                else:
+                    tags_failed += 1
+
+            # 2. Restore DB rows only after tag restoration has been
+            # attempted -- rollback truthfulness requires both, and a
+            # failed tag restore must not be hidden behind a DB-only
+            # "Rolled Back".
+            con = sqlite3.connect(lib_db, timeout=10)
+            db_restored = True
+            try:
+                cur = con.cursor()
+                if album_diff:
+                    cols = [f"{k}=?" for k in album_diff.keys() if k in ALBUM_METADATA_FIELDS]
+                    vals = [album_diff[k]["before"] for k in album_diff.keys() if k in ALBUM_METADATA_FIELDS] + [aid]
+                    if cols:
+                        cur.execute(f"UPDATE albums SET {', '.join(cols)} WHERE id=?", vals)
+                        if cur.rowcount != 1:
+                            db_restored = False
+
+                for idiff in item_diffs:
+                    if not idiff["diff"]:
+                        continue
+                    iid = int(idiff["item_id"])
+                    diff_dict = idiff["diff"]
+                    icols = [f"{k}=?" for k in diff_dict.keys() if k in ITEM_METADATA_FIELDS]
+                    ivals = [diff_dict[k]["before"] for k in diff_dict.keys() if k in ITEM_METADATA_FIELDS] + [iid]
+                    if icols:
+                        cur.execute(f"UPDATE items SET {', '.join(icols)} WHERE id=?", ivals)
+                        if cur.rowcount != 1:
+                            db_restored = False
+
+                con.commit()
+            finally:
+                con.close()
+
+            ok = db_restored and tags_failed == 0
+            any_progress = db_restored or tags_restored > 0
+            final_status = "Rolled Back" if ok else ("Partially Rolled Back" if any_progress else "Failed")
+            store.update(operation_id, status=final_status, metadata={
+                **meta, "rollback_available": False, "rolled_back_at": _now(),
+                "tags_restored_count": tags_restored, "tags_failed_count": tags_failed,
+            })
+            return {"ok": ok, "operation_id": operation_id, "status": final_status, "tags_restored": tags_restored, "tags_failed": tags_failed}
 
 

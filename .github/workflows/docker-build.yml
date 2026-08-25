@@ -45,7 +45,7 @@ jobs:
       - run: docker compose -f docker-compose.dev.yml config
       - run: docker compose -f docker-compose.full.yml config
       - run: docker compose config
-      - run: docker build --pull=false --build-arg VCS_REF="${{ github.sha }}" -t beets-web-manager:ci .
+      - run: docker build --pull=false --build-arg VCS_REF="${{ github.event.pull_request.head.sha || github.sha }}" -t beets-web-manager:ci .
       - name: Installation smoke test
         run: |
           set -e
@@ -103,7 +103,7 @@ jobs:
         run: |
           docker build --pull=false \
             --build-arg BEETS_BASE_IMAGE="lscr.io/linuxserver/beets:${{ matrix.beets_version }}" \
-            --build-arg VCS_REF="${{ github.sha }}" \
+            --build-arg VCS_REF="${{ github.event.pull_request.head.sha || github.sha }}" \
             -f Dockerfile.beets -t beets-engine:ci .
       - name: Verify Beets engine image
         run: |
@@ -111,7 +111,7 @@ jobs:
           python scripts/verify_beets_engine_image.py \
             --image beets-engine:ci \
             --require-version "${{ matrix.beets_version }}" \
-            --require-revision "${{ github.sha }}" \
+            --require-revision "${{ github.event.pull_request.head.sha || github.sha }}" \
             --require-plugin chroma \
             --forbid-duplicate-plugin musicbrainz \
             --require-command-help mbsubmit \
@@ -119,9 +119,46 @@ jobs:
             --check-bpsync \
             --check-s6-supervision
 
+  two-service-acceptance:
+    name: two-service-docker-acceptance
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout at exact PR head
+        uses: actions/checkout@v7
+        with:
+          # Wave 24 final review round 3, section 25-27: the acceptance
+          # script derives VCS_REF from `git rev-parse HEAD` (so the
+          # image's OCI revision label is provably the commit that was
+          # actually built, not asserted separately) -- for a
+          # pull_request event, actions/checkout's default ref resolves
+          # to the ephemeral PR *merge* commit, not the PR head SHA.
+          # Checking out the real head explicitly makes `git rev-parse
+          # HEAD` inside the script equal
+          # github.event.pull_request.head.sha, matching what every
+          # other job in this workflow passes as VCS_REF via build-arg.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - run: pip install -r requirements.txt
+      - name: Install real Beets for disposable-library seeding
+        # Wave 24 final review round 3, section 21-24: this is genuine
+        # two-service acceptance -- both images built from local source
+        # at this exact checkout, booted together via `docker compose`,
+        # and exercised over real HTTP against the Web Manager's actual
+        # production routes (which then reach the engine container only
+        # over the Docker network, exactly like production) -- not an
+        # image-build-only smoke test and not a direct
+        # transaction_engine/Control Agent in-process call mislabeled as
+        # IPC. See scripts/verify_two_service_docker_acceptance.py's
+        # module docstring for the full step-by-step contract.
+        run: pip install beets==2.13.1
+      - name: Run two-service Docker acceptance
+        run: python scripts/verify_two_service_docker_acceptance.py
+
   publish-ghcr:
     name: Build & Publish GHCR Image
-    needs: [compose-verification, beets-engine-verification]
+    needs: [compose-verification, beets-engine-verification, two-service-acceptance]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -147,6 +184,17 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/iranman/beets-web-manager
+          # Wave 24 round 4 (CodeQL/provenance closure): metadata-action's
+          # git context derives org.opencontainers.image.revision from the
+          # GITHUB_SHA env var, which on a pull_request-triggered run is
+          # the ephemeral base+head merge commit -- NOT the actual PR head
+          # every other provenance check in this workflow (VCS_REF build
+          # args, the two-service-acceptance job's own image inspection)
+          # is built against. A custom label with the same key overrides
+          # the auto-generated one, keeping this the single source of
+          # truth for "what commit actually built this image."
+          labels: |
+            org.opencontainers.image.revision=${{ github.event.pull_request.head.sha || github.sha }}
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -159,6 +207,9 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/iranman/beets-engine
+          # See the identical note on the Web Manager metadata step above.
+          labels: |
+            org.opencontainers.image.revision=${{ github.event.pull_request.head.sha || github.sha }}
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -179,7 +230,7 @@ jobs:
           tags: ${{ steps.meta_webmanager.outputs.tags }}
           labels: ${{ steps.meta_webmanager.outputs.labels }}
           build-args: |
-            VCS_REF=${{ github.sha }}
+            VCS_REF=${{ github.event.pull_request.head.sha || github.sha }}
             VERSION=${{ steps.meta_webmanager.outputs.version }}
             BUILD_DATE=${{ steps.build_date.outputs.date }}
           cache-from: type=gha
@@ -194,7 +245,7 @@ jobs:
           tags: ${{ steps.meta_engine.outputs.tags }}
           labels: ${{ steps.meta_engine.outputs.labels }}
           build-args: |
-            VCS_REF=${{ github.sha }}
+            VCS_REF=${{ github.event.pull_request.head.sha || github.sha }}
             VERSION=${{ steps.meta_engine.outputs.version }}
             BUILD_DATE=${{ steps.build_date.outputs.date }}
           cache-from: type=gha
