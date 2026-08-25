@@ -93,7 +93,7 @@ _APP_STATE_HINTS = {
     "CACHE_STATE": ("_cache", "cache_dir", "CACHE_DIR", ".cache", "artist_image", "release_art"),
     "CONFIG_STATE": ("config.yaml", "_cfg", "bootstrap_secret", "beets_config", "settings", "auth_token", "/config/config", "PREFERENCES"),
     "STAGING_ONLY": ("staging", "preview_download", "cookie_rejected", "ytdlp", "slskd"),
-    "APP_STATE": ("job", "manifest", "report", "_last_", "playlist", "wanted_row", "submission", "history"),
+    "APP_STATE": ("job", "manifest", "report", "_last_", "playlist", "wanted_row", "submission", "history", "recent_import", "pending", "auto_import", "import_review", "import_all"),
 }
 
 _BEET_READONLY_VERBS = {"version", "ls", "list", "stats", "config", "fields"}
@@ -244,6 +244,8 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
 
     # 9. app.py (Web Manager main module)
     if sink.kind == "subprocess":
+        if "beets_client.reimport_source" in text:
+            return "ENGINE_CONTROLLED_TRANSACTION", "import_folder_v1", "beets-client-reimport-source-ipc"
         if "BEET_BIN" in text or re.search(r"\bbase(_import)?\s*\+", text) or "beet" in text:
             verbs_hit = {v for v in _BEET_MUTATING_VERBS if f'"{v}"' in text or f"'{v}'" in text}
             if verbs_hit:
@@ -267,6 +269,8 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
                 return classification, "", f"path-hint:{classification.lower()}"
         if func in ("_move_artwork_to_target", "_album_cleanup_apply_issue") and "rmdir" in text:
             return "NON_MEDIA_FILESYSTEM", "", "reviewed-cosmetic-empty-dir-cleanup"
+        if func == "start_import" and "mkdir" in text:
+            return "NON_MEDIA_FILESYSTEM", "", "import-source-directory-creation"
         if "replace(" in text or "rename(" in text:
             if not _text_looks_path_like(text) or r"\x00" in text or "artpath.replace" in text:
                 return "READ_ONLY_FALSE_POSITIVE", "", "string-replace-false-positive"
