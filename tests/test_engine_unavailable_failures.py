@@ -30,6 +30,10 @@ class TestEngineUnavailableFailures(unittest.TestCase):
             self.client.plan_folder_cleanup({"action": "safe_rename", "source": "/music/a", "target": "/music/b"})
         self.assertIn("beets control agent", str(ctx.exception).lower())
 
+        with self.assertRaises(BeetsUnavailableError) as cleanup_ctx:
+            self.client.plan_library_cleanup({"action": "dedup_cleanup", "paths": ["/music/a.mp3"]})
+        self.assertIn("beets control agent", str(cleanup_ctx.exception).lower())
+
     def test_timeout_raises_beets_unavailable_error(self):
         def timeout_handler(*args, **kwargs):
             raise TimeoutError("connection timed out")

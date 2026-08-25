@@ -4318,6 +4318,90 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             self._send_json(code, res)
             return
 
+        # ── library_cleanup_v1 ─────────────────────────────────────────────────
+        if path == "/library/cleanup/plan":
+            music_roots = _allowed_root_paths(["music"])
+            music_root_env = os.environ.get("MUSIC_ROOT") or str(MUSIC_ROOT) or "/music"
+            if music_root_env not in music_roots:
+                music_roots.append(music_root_env)
+            staging_roots = _allowed_root_paths(["staging"])
+            for raw in (
+                os.environ.get("DOWNLOADS_ROOT", "/downloads"),
+                os.environ.get("STAGING_ROOT", "/staging"),
+                os.environ.get("DOWNLOAD_PATH", DOWNLOAD_PATH),
+                str(PLAYLIST_DOWNLOAD_ROOT),
+            ):
+                if raw and raw not in staging_roots:
+                    staging_roots.append(raw)
+            quarantine_root = os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
+            res = transaction_engine.create_library_cleanup_plan(
+                _txn_store, body,
+                db_path=LIB_PATH,
+                music_allowed_roots=music_roots,
+                staging_allowed_roots=staging_roots,
+                quarantine_base_root=quarantine_root,
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        if path == "/library/cleanup/apply":
+            op_id = str(body.get("operation_id") or "").strip()
+            if not op_id:
+                self._send_json(400, {"ok": False, "error": "operation_id required"})
+                return
+            music_roots = _allowed_root_paths(["music"])
+            music_root_env = os.environ.get("MUSIC_ROOT") or str(MUSIC_ROOT) or "/music"
+            if music_root_env not in music_roots:
+                music_roots.append(music_root_env)
+            staging_roots = _allowed_root_paths(["staging"])
+            for raw in (
+                os.environ.get("DOWNLOADS_ROOT", "/downloads"),
+                os.environ.get("STAGING_ROOT", "/staging"),
+                os.environ.get("DOWNLOAD_PATH", DOWNLOAD_PATH),
+                str(PLAYLIST_DOWNLOAD_ROOT),
+            ):
+                if raw and raw not in staging_roots:
+                    staging_roots.append(raw)
+            quarantine_root = os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
+            res = transaction_engine.execute_library_cleanup_apply(
+                _txn_store, op_id,
+                db_path=LIB_PATH,
+                music_allowed_roots=music_roots,
+                staging_allowed_roots=staging_roots,
+                quarantine_base_root=quarantine_root,
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        if path == "/library/cleanup/rollback":
+            op_id = str(body.get("operation_id") or "").strip()
+            if not op_id:
+                self._send_json(400, {"ok": False, "error": "operation_id required"})
+                return
+            music_roots = _allowed_root_paths(["music"])
+            music_root_env = os.environ.get("MUSIC_ROOT") or str(MUSIC_ROOT) or "/music"
+            if music_root_env not in music_roots:
+                music_roots.append(music_root_env)
+            staging_roots = _allowed_root_paths(["staging"])
+            for raw in (
+                os.environ.get("DOWNLOADS_ROOT", "/downloads"),
+                os.environ.get("STAGING_ROOT", "/staging"),
+                os.environ.get("DOWNLOAD_PATH", DOWNLOAD_PATH),
+                str(PLAYLIST_DOWNLOAD_ROOT),
+            ):
+                if raw and raw not in staging_roots:
+                    staging_roots.append(raw)
+            res = transaction_engine.rollback_library_cleanup(
+                _txn_store, op_id,
+                db_path=LIB_PATH,
+                music_allowed_roots=music_roots,
+                staging_allowed_roots=staging_roots,
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
         # ── playlist_media_cleanup_v1 ──────────────────────────────────────────
         if path == "/playlists/media-cleanup/plan":
             music_root_env = os.environ.get("MUSIC_ROOT", "/music")

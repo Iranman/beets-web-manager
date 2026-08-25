@@ -24,11 +24,11 @@ anything). It now does what it claims:
    a live write-attempt exec'd inside the container).
 7. Exercises production Web Manager HTTP routes (not the Control Agent
    directly) for artwork upload, artwork delete, rename, move-to-library,
-   metadata repair, retag, album remove, and deduplicate -- each is a real
+   metadata repair, retag, library dedup cleanup, album remove, and deduplicate -- each is a real
    HTTP request to the web-manager container's published port, which then
    reaches the engine container purely over the Docker network via
    BeetsClient/BEETS_API_URL, exactly like production.
-8. Stops the engine container and proves a mutating Web Manager route
+8. Stops the engine container and proves mutating Web Manager routes, including /api/dedup/cleanup,
    fails truthfully with zero local mutation while the engine is down,
    then restarts it.
 9. Fails closed on every step (image build failure, wrong OCI revision,
@@ -196,12 +196,27 @@ def seed_disposable_library(config_dir: Path, music_dir: Path) -> dict:
         length=1.0,
     )
     item.add(lib)
+
+    cleanup_path = item_dir / "98 - Cleanup Duplicate.wav"
+    cleanup_path.write_bytes(_real_wav_bytes(freq=330))
+    cleanup_item = bl.Item(
+        albumartist="Acceptance Artist", album="Acceptance Album",
+        artist="Acceptance Artist", title="Cleanup Duplicate",
+        track=98, disc=1, year=2024, album_id=album.id,
+        path=str(cleanup_path).encode("utf-8"),
+        mb_trackid="44444444-4444-4444-4444-444444444444",
+        length=1.0,
+    )
+    cleanup_item.add(lib)
     lib._close()
 
     return {
         "album_id": int(album.id),
         "item_id": int(item.id),
         "item_path": str(item_path),
+        "cleanup_item_id": int(cleanup_item.id),
+        "cleanup_item_path": str(cleanup_path),
+        "cleanup_container_path": "/data/media/music/" + cleanup_path.relative_to(music_dir).as_posix(),
         "db_path": str(db_path),
     }
 
@@ -447,6 +462,26 @@ def main() -> int:
             client.wait_job(body["job_id"])
             _ok("retag job dispatched and completed")
 
+        print("==> Exercising library duplicate cleanup...")
+        status, body = client.request(
+            "POST", "/api/dedup/cleanup",
+            json_body={"paths": [fixture["cleanup_container_path"]], "dry_run": False},
+            timeout=45,
+        )
+        if status != 200 or not body.get("ok") or int(body.get("deleted") or 0) != 1:
+            _fail(f"library duplicate cleanup request failed: {status} {body}")
+        else:
+            cleanup_host_path = Path(fixture["cleanup_item_path"])
+            con = sqlite3.connect(fixture["db_path"])
+            try:
+                remaining = con.execute("SELECT COUNT(*) FROM items WHERE id=?", (fixture["cleanup_item_id"],)).fetchone()[0]
+            finally:
+                con.close()
+            if cleanup_host_path.exists() or int(remaining or 0) != 0:
+                _fail("library duplicate cleanup did not quarantine the file and retire the DB row")
+            else:
+                _ok("library duplicate cleanup succeeded through Web Manager -> Beets engine IPC")
+
         print("==> Exercising rename...")
         status, body = client.request("POST", f"/api/albums/{aid}/rename")
         if status != 200 or not body.get("ok"):
@@ -477,11 +512,26 @@ def main() -> int:
             _fail(f"could not verify host-mounted DB state: {ex}")
 
         print("==> Engine-offline fail-closed proof...")
+        offline_host_path = Path(fixture["item_path"]).parent / "99 - Offline Cleanup.wav"
+        offline_host_path.parent.mkdir(parents=True, exist_ok=True)
+        offline_host_path.write_bytes(_real_wav_bytes(freq=550))
+        offline_item_id = 9999
+        offline_container_path = "/data/media/music/" + offline_host_path.relative_to(music_dir).as_posix()
+        con = sqlite3.connect(db_path)
+        try:
+            con.execute(
+                "INSERT INTO items (id, album_id, title, artist, albumartist, album, track, disc, year, path, mb_trackid) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (offline_item_id, aid, "Offline Cleanup", "Acceptance Artist", "Acceptance Artist", "Acceptance Album", 99, 1, 2024, str(offline_host_path).encode("utf-8"), "55555555-5555-5555-5555-555555555555"),
+            )
+            con.commit()
+        finally:
+            con.close()
         stop_res = run(["docker", "stop", engine_container])
         if stop_res.returncode != 0:
             _fail("could not stop the engine container for the offline proof")
         else:
             db_bytes_before = Path(db_path).read_bytes()
+            file_bytes_before = offline_host_path.read_bytes()
             status, body = client.request("POST", f"/api/albums/{aid}/fix-metadata",
                                            json_body={"album": "Should Not Land"}, timeout=15)
             offline_ok = True
@@ -492,15 +542,26 @@ def main() -> int:
                         offline_ok = False
                 except TimeoutError:
                     pass
+            status_cleanup, cleanup_body = client.request(
+                "POST", "/api/dedup/cleanup",
+                json_body={"paths": [offline_container_path], "dry_run": False},
+                timeout=15,
+            )
+            if status_cleanup == 200 and cleanup_body.get("ok"):
+                offline_ok = False
             if not offline_ok:
                 _fail("a mutating request appeared to succeed while the engine container was stopped")
             else:
-                _ok("mutating request did not silently succeed while the engine was offline")
+                _ok("mutating requests did not silently succeed while the engine was offline")
             db_bytes_after = Path(db_path).read_bytes()
             if db_bytes_after != db_bytes_before:
                 _fail("host-mounted DB changed while the engine container was stopped -- local mutation occurred")
             else:
                 _ok("host-mounted DB unchanged while the engine was offline")
+            if not offline_host_path.exists() or offline_host_path.read_bytes() != file_bytes_before:
+                _fail("host-mounted media changed while the engine container was stopped -- local cleanup mutation occurred")
+            else:
+                _ok("host-mounted media unchanged while the engine was offline")
             run(["docker", "start", engine_container])
 
         if FAILURES:

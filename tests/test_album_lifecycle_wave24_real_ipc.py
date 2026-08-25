@@ -708,6 +708,42 @@ class TestWave24RealHTTPIPC(unittest.TestCase):
         self.assertTrue(unique_path.exists(), "unique track's file must be completely untouched")
         self.assertEqual(unique_path.read_bytes()[:4], b"RIFF")  # still a real, undamaged WAV file
 
+    def test_real_ipc_library_cleanup_duplicate_plan_apply_rollback(self):
+        """Real HTTP exercise of library_cleanup_v1 duplicate cleanup.
+
+        This uses the production BeetsClient endpoints against the running
+        Control Agent, not a direct transaction_engine call: Plan leaves file
+        and DB unchanged, Apply quarantines the file before deleting the DB
+        row, and Rollback restores the file before restoring the row.
+        """
+        cleanup_path = self.item1_dir / "03 - Cleanup Duplicate.wav"
+        cleanup_path.write_bytes(_real_wav_bytes(freq=770))
+        self._insert_item(6, cleanup_path, track=3, title="Cleanup Duplicate")
+
+        plan_res = self.client.plan_library_cleanup({
+            "action": "dedup_cleanup",
+            "paths": [str(cleanup_path)],
+        })
+        self.assertTrue(plan_res.get("ok"), f"Library cleanup plan failed: {plan_res}")
+        self.assertEqual(plan_res.get("planned_count"), 1)
+        self.assertTrue(cleanup_path.exists(), "Plan must not mutate the media file")
+        con = sqlite3.connect(self.db_path)
+        self.assertEqual(con.execute("SELECT COUNT(*) FROM items WHERE id=6").fetchone()[0], 1)
+        con.close()
+
+        apply_res = self.client.apply_library_cleanup(plan_res["operation_id"])
+        self.assertTrue(apply_res.get("ok"), f"Library cleanup apply failed: {apply_res}")
+        self.assertFalse(cleanup_path.exists())
+        con = sqlite3.connect(self.db_path)
+        self.assertEqual(con.execute("SELECT COUNT(*) FROM items WHERE id=6").fetchone()[0], 0)
+        con.close()
+
+        rollback_res = self.client.rollback_library_cleanup(plan_res["operation_id"])
+        self.assertTrue(rollback_res.get("ok"), f"Library cleanup rollback failed: {rollback_res}")
+        self.assertTrue(cleanup_path.exists())
+        con = sqlite3.connect(self.db_path)
+        self.assertEqual(con.execute("SELECT COUNT(*) FROM items WHERE id=6").fetchone()[0], 1)
+        con.close()
     def test_real_ipc_dedup_rejects_item_not_belonging_to_album(self):
         """A to_delete entry whose id doesn't actually belong to the
         stated album (an identity/same-path-style mismatch the caller
@@ -794,6 +830,9 @@ class TestWave24RealHTTPIPC(unittest.TestCase):
 
         with self.assertRaises(BeetsUnavailableError):
             dead_client.plan_album_maintenance({"mode": "deduplicate", "album_id": 1, "to_delete": [{"id": 1, "path": str(self.item1_path)}]})
+
+        with self.assertRaises(BeetsUnavailableError):
+            dead_client.plan_library_cleanup({"action": "dedup_cleanup", "paths": [str(self.item1_path)]})
 
         # No local mutation of any kind occurred while the engine was down.
         self.assertEqual(self.db_path.read_bytes(), db_bytes_before, "DB must be byte-for-byte unchanged when the engine is unreachable")
