@@ -38964,7 +38964,7 @@ def _album_cleanup_remove_empty_tree(folder: Path, log: List[str]) -> int:
             removed_dirs = apply_res.get("removed_dirs") or [key]
             removed += len(removed_dirs)
             for removed_dir in removed_dirs:
-                log.append(f"  Removed empty folder via engine: {removed_dir}")
+                log.append(f"  Removed empty album folder via engine: {removed_dir}")
     if removed == 0:
         log.append("  SKIP empty-folder candidate that is not empty.")
     return removed
