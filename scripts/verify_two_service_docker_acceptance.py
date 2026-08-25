@@ -494,9 +494,17 @@ def run_wave25_scenarios(client: "HttpClient", downloads_dir: Path, music_dir: P
             timeout=30,
         )
         rejected = not (status == 200 and body.get("ok"))
-        if rejected and status == 200:
-            # Accepted at the plan/dispatch layer is still a failure unless
-            # the resulting job genuinely fails closed with zero mutation.
+        if status == 200 and body.get("ok"):
+            # Accepted at the plan/dispatch layer (the route always queues an
+            # async job and returns 200 immediately -- the web-manager
+            # container cannot see the symlink itself, so real rejection can
+            # only happen later inside the engine's create_import_folder_plan
+            # symlink-component check, once the job actually runs). Bug found
+            # during this acceptance round: `if rejected and status == 200`
+            # was dead code here, since `rejected` is already False whenever
+            # status==200 and ok is True -- the job's actual outcome was
+            # never checked, so a real symlink escape could have silently
+            # passed this scenario. Check the job's outcome directly instead.
             try:
                 result = client.wait_job(body["job_id"], timeout=60)
                 rejected = result.get("status") != "success"

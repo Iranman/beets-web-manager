@@ -21,6 +21,13 @@ which covers the prior independent-review round's findings):
    store.update(status="Recovery Required") call in the codebase
    (several pre-existing, plus the new album_artwork_fetch_v1 family)
    silently persisted as "Pending" instead.
+4. import_folder_with_id()'s _do() referenced a local variable,
+   input_looks_like_release_group, that was never assigned anywhere in the
+   function -- every real call raised NameError inside the background job.
+   No existing unit test reached this line (all mocked at a level above
+   it); only the real two-service Docker acceptance run, exercising the
+   actual production route end to end, surfaced it. Fixed by deriving the
+   flag from the already-computed mb_albumid/selected_releasegroupid state.
 """
 import sqlite3
 import sys
@@ -39,7 +46,7 @@ class TestImportSourcePathDoesNotRequireLocalExistence(unittest.TestCase):
 
     def test_import_folder_with_id_does_not_require_local_existence(self):
         idx = self.app_source.index("def import_folder_with_id()")
-        window = self.app_source[idx: idx + 4500]
+        window = self.app_source[idx: idx + 6000]
         self.assertIn("require_exists=False", window)
         self.assertNotIn("require_exists=True", window)
 
@@ -107,6 +114,43 @@ class TestImportFolderPlanFailsClosedOnMissingSource(unittest.TestCase):
         )
         self.assertTrue(res.get("ok"), res)
         self.assertEqual(res.get("file_count"), 1)
+
+
+class TestImportFolderWithIdReleaseGroupFlagIsAssigned(unittest.TestCase):
+    """CI-discovered bug (real two-service Docker acceptance run, not a
+    local unit test): input_looks_like_release_group was referenced inside
+    import_folder_with_id()'s _do() but never assigned in the function,
+    raising NameError on every real fresh-import call."""
+
+    def setUp(self):
+        self.app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+
+    def test_input_looks_like_release_group_is_assigned_before_use(self):
+        idx = self.app_source.index("def import_folder_with_id()")
+        assign_idx = self.app_source.index("input_looks_like_release_group =", idx)
+        use_idx = self.app_source.index("if input_looks_like_release_group:", idx)
+        self.assertLess(
+            assign_idx, use_idx,
+            "input_looks_like_release_group is referenced before it is assigned",
+        )
+
+    def test_flag_logic_matches_release_group_vs_release_id_semantics(self):
+        # Mirrors exactly what the route computes from mb_albumid /
+        # selected_releasegroupid, without needing to invoke the full Flask
+        # route and its many external dependencies.
+        def _compute(mb_albumid: str, selected_releasegroupid: str) -> bool:
+            return bool(selected_releasegroupid) and selected_releasegroupid == mb_albumid
+
+        # A real, distinct release id plus an independently-supplied
+        # release-group id: mb_albumid is already directly importable.
+        self.assertFalse(_compute("release-uuid", "different-rg-uuid"))
+        # Only a release-group id was supplied (mb_albumid fell back to it,
+        # or a release-group URL was pasted into the release-id field):
+        # mb_albumid actually holds a release-group value and needs
+        # resolving to a representative release before import.
+        self.assertTrue(_compute("rg-uuid", "rg-uuid"))
+        # No release-group detected at all.
+        self.assertFalse(_compute("release-uuid", ""))
 
 
 class TestRecoveryRequiredStatusPersists(unittest.TestCase):

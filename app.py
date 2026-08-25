@@ -21063,6 +21063,21 @@ def import_folder_with_id():
     selected_releasegroupid = _extract_mb_uuid(raw_mb_releasegroupid)
     if not selected_releasegroupid and "release-group" in raw_mb_input.casefold():
         selected_releasegroupid = mb_albumid
+    # Wave 25 Docker acceptance round: mb_albumid currently holds a
+    # release-group UUID rather than a genuine, directly-importable release
+    # UUID exactly when selected_releasegroupid ended up equal to it -- either
+    # because the caller supplied mb_releasegroupid explicitly with no
+    # separate release id (mb_albumid fell back to the release-group value
+    # above), or because a release-group URL/ID was pasted into the generic
+    # release-id field and detected by the check just above. In both cases
+    # the value must be resolved to a representative release before beet
+    # import can use it. This flag was referenced below but never assigned,
+    # so every real fresh-import call raised NameError -- only surfaced once
+    # the real two-service Docker acceptance run exercised this production
+    # route end to end.
+    input_looks_like_release_group = (
+        bool(selected_releasegroupid) and selected_releasegroupid == mb_albumid
+    )
     ai_suggestion = payload.get("ai_suggestion")   # optional — records in AI match history
     use_move      = bool(payload.get("move", False))
     try:
