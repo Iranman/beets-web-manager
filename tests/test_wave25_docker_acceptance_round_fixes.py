@@ -28,6 +28,21 @@ which covers the prior independent-review round's findings):
    it); only the real two-service Docker acceptance run, exercising the
    actual production route end to end, surfaced it. Fixed by deriving the
    flag from the already-computed mb_albumid/selected_releasegroupid state.
+5. The same function had two more identical-class bugs, found one at a
+   time across successive real CI runs of the same fresh-import scenario
+   after each prior NameError was fixed and the next one was reached:
+   source_is_library (referenced ~11 times for library-source-specific
+   validation/rollback/messaging, never assigned -- fixed by deriving it
+   from folder_path vs. the music root) and already_present/combined
+   (referenced by a legacy "beet reported nothing to import" raw-stdout
+   phrase-matching fallback that predates the import_folder_v1 engine
+   migration and has no raw stdout left to match against -- fixed by
+   defaulting both conservatively so that fallback stays inert instead of
+   crashing, while the real library-lookup strategies above it still find
+   genuinely-already-imported sources by MB identity/path/name).
+   `python -m pyflakes app.py` (not a project dependency; run manually
+   during this investigation) confirmed no further undefined names remain
+   inside this specific function after all three fixes.
 """
 import sqlite3
 import sys
@@ -133,6 +148,25 @@ class TestImportFolderWithIdReleaseGroupFlagIsAssigned(unittest.TestCase):
             assign_idx, use_idx,
             "input_looks_like_release_group is referenced before it is assigned",
         )
+
+    def test_source_is_library_is_assigned_before_use(self):
+        idx = self.app_source.index("def import_folder_with_id()")
+        assign_idx = self.app_source.index("source_is_library = _path_is_under", idx)
+        first_use_idx = self.app_source.index("if source_is_library:", idx)
+        self.assertLess(
+            assign_idx, first_use_idx,
+            "source_is_library is referenced before it is assigned",
+        )
+
+    def test_already_present_and_combined_are_assigned_before_use(self):
+        idx = self.app_source.index("def import_folder_with_id()")
+        already_present_assign = self.app_source.index("already_present = False", idx)
+        combined_assign = self.app_source.index('combined = ""', idx)
+        first_use_idx = self.app_source.index(
+            "if not album_ids and not item_ids and already_present", idx
+        )
+        self.assertLess(already_present_assign, first_use_idx)
+        self.assertLess(combined_assign, first_use_idx)
 
     def test_flag_logic_matches_release_group_vs_release_id_semantics(self):
         # Mirrors exactly what the route computes from mb_albumid /

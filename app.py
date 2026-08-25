@@ -21170,7 +21170,32 @@ def import_folder_with_id():
         music_root = "/data/media/music"
         source_folder_path = folder_path
         import_folder_path = folder_path
-
+        # Wave 25 Docker acceptance round (second NameError found by the same
+        # real fresh-import scenario, after fixing input_looks_like_release_group
+        # above): source_is_library is referenced extensively below (library-
+        # source validation, rollback, and messaging branches) but was never
+        # assigned anywhere in this function either. True when the caller is
+        # re-tagging/re-validating a folder that is already inside the music
+        # library, as opposed to importing from staging/downloads.
+        source_is_library = _path_is_under(Path(folder_path), Path(music_root))
+        # Wave 25 Docker acceptance round (third NameError found by the same
+        # real fresh-import scenario): already_present/combined are
+        # referenced much further below by a legacy "beet reported nothing
+        # to import" phrase-matching fallback (_delete_if_already_in_library
+        # searches raw beet CLI stdout for phrases like "already in the
+        # library"). That mechanism predates the import_folder_v1 engine
+        # migration -- the controlled beets_client.plan_import_folder /
+        # apply_import_folder path no longer exposes raw beet stdout to
+        # app.py at all, so there is no text left to phrase-match, and
+        # fabricating a signal here would be dishonest. Defaulting both
+        # False/"" keeps that specific legacy fallback inert rather than
+        # crashing; a genuinely already-imported source is still found by
+        # the real library lookups (strategies A-G below, which query by MB
+        # identity/path/name), and the one real remaining gap -- a source
+        # where none of those find a match because nothing was ever
+        # imported -- is now an honest error instead of a NameError.
+        already_present = False
+        combined = ""
 
         if input_looks_like_release_group:
             resolved_release = _resolve_album_release_for_import(
