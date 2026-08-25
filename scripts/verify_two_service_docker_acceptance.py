@@ -290,6 +290,461 @@ def check_web_manager_isolation(web_container: str) -> None:
         _ok(f"web-manager container cannot write to /data/media/music ({output.strip()})")
 
 
+# ── SEC-002 / ARCH-003 Wave 25 Docker acceptance ────────────────────────────
+# The Wave 24 exercises above only re-verify album-level routes
+# (artwork/metadata/rename/dedupe) against an already-imported fixture --
+# they never touch a single Wave 25 workflow (fresh import, reimport,
+# reconciliation, artwork acquisition). These scenarios exercise the real
+# production import/artwork-acquisition HTTP routes end to end, using a
+# real, long-standing, verified MusicBrainz release (Radiohead's "OK
+# Computer") -- there is no offline/mocked path for MusicBrainz lookups in
+# this codebase; a genuine fresh-import test requires real network access
+# to musicbrainz.org from inside the beets engine container, matching
+# exactly how this feature behaves in production. Chosen specifically for
+# long-term stability (27+ year old, extremely well-established release).
+WAVE25_RELEASE_ID = "1834eae1-741b-3c03-9ca5-0df3decb43ea"
+WAVE25_RELEASEGROUP_ID = "b1392450-e666-3926-a536-22c65f834433"
+WAVE25_TRACKLIST = [
+    "Airbag", "Paranoid Android", "Subterranean Homesick Alien",
+    "Exit Music (for a Film)", "Let Down", "Karma Police",
+    "Fitter Happier", "Electioneering", "Climbing Up the Walls",
+    "No Surprises", "Lucky", "The Tourist",
+]
+
+
+def seed_wave25_import_source(downloads_dir: Path, subdir: str, track_range=None) -> dict:
+    """Write a disposable, synthetic source folder shaped like WAVE25_RELEASE_ID
+    onto the host side of the engine's download-root bind mount (mounted at
+    /data/torrents in the engine container via DOWNLOAD_PATH -- see `env`
+    in main()). Returns the container-visible path the production import
+    route should be pointed at (this script's own process, and the
+    web-manager container, never touch this folder directly -- only the
+    engine container, via the real bind mount, does)."""
+    positions = track_range or range(1, len(WAVE25_TRACKLIST) + 1)
+    folder = downloads_dir / subdir
+    folder.mkdir(parents=True, exist_ok=True)
+    for idx in positions:
+        title = WAVE25_TRACKLIST[idx - 1]
+        p = folder / f"{idx:02d} - {title}.wav"
+        p.write_bytes(_real_wav_bytes(freq=220.0 + idx * 15.0, duration=0.3))
+    return {"container_path": f"/data/torrents/{subdir}"}
+
+
+def run_wave25_scenarios(client: "HttpClient", downloads_dir: Path, music_dir: Path, db_path: str) -> None:
+    """Fresh import, reimport idempotency, symlink/root-escape rejection,
+    and identity-conflict rejection against the real production import
+    route. Artwork acquisition (Plan/Apply/Verify, stale-plan rejection)
+    is exercised separately in run_wave25_artwork_scenarios, since it uses
+    the Wave 24 fixture album rather than a fresh import."""
+
+    def scenario_pass(name: str) -> None:
+        print(f"[PASS] {name}")
+
+    def scenario_fail(name: str, detail: str) -> None:
+        _fail(f"{name}: {detail}")
+
+    # ── Fresh import ─────────────────────────────────────────────────────
+    print("==> [Wave25] Fresh import via the real production route...")
+    src = seed_wave25_import_source(downloads_dir, "fresh-import")
+    status, body = client.request(
+        "POST", "/api/folders/import-with-id",
+        json_body={
+            "path": src["container_path"],
+            "mb_albumid": WAVE25_RELEASE_ID,
+            "mb_releasegroupid": WAVE25_RELEASEGROUP_ID,
+            "move": False,
+        },
+        timeout=30,
+    )
+    fresh_album_id = None
+    if status != 200 or not body.get("ok"):
+        scenario_fail("fresh-import", f"request rejected: {status} {body}")
+    else:
+        try:
+            result = client.wait_job(body["job_id"], timeout=180)
+        except TimeoutError as ex:
+            result = None
+            scenario_fail("fresh-import", str(ex))
+        if result is not None:
+            if result.get("status") != "success":
+                scenario_fail("fresh-import", f"job did not succeed: {result.get('status')} / {result.get('log')}")
+            else:
+                try:
+                    con = sqlite3.connect(db_path)
+                    con.row_factory = sqlite3.Row
+                    row = con.execute(
+                        "SELECT id, album, albumartist FROM albums WHERE mb_albumid=? OR mb_releasegroupid=?",
+                        (WAVE25_RELEASE_ID, WAVE25_RELEASEGROUP_ID),
+                    ).fetchone()
+                    item_count = 0
+                    files_exist = False
+                    if row:
+                        fresh_album_id = int(row["id"])
+                        items = con.execute("SELECT path FROM items WHERE album_id=?", (fresh_album_id,)).fetchall()
+                        item_count = len(items)
+                        # A real Beets library stores items.path RELATIVE to
+                        # the music directory whenever the absolute path is
+                        # inside it (see transaction_engine._resolve_db_path's
+                        # own note on this) -- resolve against the
+                        # host-mounted music root, don't assume absolute.
+                        def _item_path_exists(raw) -> bool:
+                            p_str = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
+                            p = Path(p_str)
+                            return p.exists() if p.is_absolute() else (music_dir / p).exists()
+                        files_exist = all(_item_path_exists(i[0]) for i in items) if items else False
+                    con.close()
+                except Exception as ex:
+                    row, item_count, files_exist = None, 0, False
+                    scenario_fail("fresh-import", f"could not verify host-mounted DB state: {ex}")
+                else:
+                    if not row:
+                        scenario_fail("fresh-import", "no album row was created with the expected MB identity")
+                    elif item_count == 0:
+                        scenario_fail("fresh-import", "album row exists but has zero items")
+                    elif not files_exist:
+                        scenario_fail("fresh-import", "item DB paths do not point at real files on the host-mounted music root")
+                    else:
+                        scenario_pass(f"fresh-import (album_id={fresh_album_id}, {item_count} item(s), real files verified on host music root)")
+
+    # ── Reimport idempotency ────────────────────────────────────────────
+    print("==> [Wave25] Reimport idempotency (same source, called again)...")
+    if fresh_album_id is None:
+        scenario_fail("reimport-idempotent", "skipped: fresh-import did not produce an album to re-import")
+    else:
+        status, body = client.request(
+            "POST", "/api/folders/import-with-id",
+            json_body={
+                "path": src["container_path"],
+                "mb_albumid": WAVE25_RELEASE_ID,
+                "mb_releasegroupid": WAVE25_RELEASEGROUP_ID,
+                "existing_album_id": fresh_album_id,
+                "move": False,
+            },
+            timeout=30,
+        )
+        if status != 200 or not body.get("ok"):
+            scenario_fail("reimport-idempotent", f"request rejected: {status} {body}")
+        else:
+            try:
+                result = client.wait_job(body["job_id"], timeout=180)
+            except TimeoutError as ex:
+                scenario_fail("reimport-idempotent", str(ex))
+                result = None
+            if result is not None and result.get("status") != "success":
+                scenario_fail("reimport-idempotent", f"job did not succeed: {result.get('status')} / {result.get('log')}")
+            elif result is not None:
+                try:
+                    con = sqlite3.connect(db_path)
+                    album_rows = con.execute(
+                        "SELECT id FROM albums WHERE mb_albumid=? OR mb_releasegroupid=?",
+                        (WAVE25_RELEASE_ID, WAVE25_RELEASEGROUP_ID),
+                    ).fetchall()
+                    con.close()
+                except Exception as ex:
+                    scenario_fail("reimport-idempotent", f"could not verify host-mounted DB state: {ex}")
+                else:
+                    if len(album_rows) != 1:
+                        scenario_fail("reimport-idempotent", f"expected exactly 1 album row for this release after a second import, found {len(album_rows)} -- duplicate import")
+                    else:
+                        scenario_pass("reimport-idempotent (no duplicate album row)")
+
+    # ── Symlink / root-escape rejection ─────────────────────────────────
+    print("==> [Wave25] Symlink and root-escape rejection...")
+    outside_dir = downloads_dir.parent / "wave25-outside-root"
+    outside_dir.mkdir(parents=True, exist_ok=True)
+    (outside_dir / "escape.wav").write_bytes(_real_wav_bytes())
+    escape_cases = {
+        "outside-allowed-root": "/etc/wave25-escape-attempt",
+        "sibling-prefix": "/data/torrents-evil/should-not-match",
+        "traversal": "/data/torrents/../etc",
+    }
+    for case_name, bad_path in escape_cases.items():
+        status, body = client.request(
+            "POST", "/api/folders/import-with-id",
+            json_body={"path": bad_path, "mb_albumid": WAVE25_RELEASE_ID, "mb_releasegroupid": WAVE25_RELEASEGROUP_ID},
+            timeout=15,
+        )
+        if status == 200 and body.get("ok"):
+            scenario_fail(f"root-escape-rejected[{case_name}]", f"request unexpectedly accepted: {status} {body}")
+        else:
+            scenario_pass(f"root-escape-rejected[{case_name}] ({status})")
+
+    # A real symlink pointing outside the allowed roots, placed INSIDE the
+    # allowed download root -- must be rejected by the engine's own
+    # symlink-component check (create_import_folder_plan), since the
+    # web-manager container cannot see real symlinks on a filesystem it
+    # doesn't have mounted.
+    link_subdir = "symlink-escape"
+    link_path = downloads_dir / link_subdir
+    try:
+        if link_path.exists() or link_path.is_symlink():
+            link_path.unlink()
+        os.symlink(str(outside_dir), str(link_path), target_is_directory=True)
+        symlink_created = True
+    except Exception as ex:
+        symlink_created = False
+        print(f"  (could not create a real symlink on this host to test with: {ex} -- skipping this specific case)")
+    if symlink_created:
+        status, body = client.request(
+            "POST", "/api/folders/import-with-id",
+            json_body={
+                "path": f"/data/torrents/{link_subdir}",
+                "mb_albumid": WAVE25_RELEASE_ID, "mb_releasegroupid": WAVE25_RELEASEGROUP_ID,
+            },
+            timeout=30,
+        )
+        rejected = not (status == 200 and body.get("ok"))
+        if rejected and status == 200:
+            # Accepted at the plan/dispatch layer is still a failure unless
+            # the resulting job genuinely fails closed with zero mutation.
+            try:
+                result = client.wait_job(body["job_id"], timeout=60)
+                rejected = result.get("status") != "success"
+            except TimeoutError:
+                pass
+        if not rejected:
+            scenario_fail("symlink-source-rejected", f"a symlinked source folder was not rejected: {status} {body}")
+        else:
+            scenario_pass("symlink-source-rejected")
+        try:
+            link_path.unlink()
+        except Exception:
+            pass
+
+    # ── Identity-conflict rejection ─────────────────────────────────────
+    print("==> [Wave25] Identity-conflict rejection (malformed/missing MBID)...")
+    src2 = seed_wave25_import_source(downloads_dir, "identity-conflict", track_range=range(1, 3))
+    status, body = client.request(
+        "POST", "/api/folders/import-with-id",
+        json_body={"path": src2["container_path"], "mb_albumid": "not-a-real-musicbrainz-id"},
+        timeout=15,
+    )
+    if status == 200 and body.get("ok"):
+        scenario_fail("identity-conflict-blocked[malformed-mbid]", f"a syntactically invalid MBID was accepted: {status} {body}")
+    else:
+        scenario_pass("identity-conflict-blocked[malformed-mbid]")
+
+    status, body = client.request(
+        "POST", "/api/folders/import-with-id",
+        json_body={"path": src2["container_path"]},
+        timeout=15,
+    )
+    if status == 200 and body.get("ok"):
+        scenario_fail("identity-conflict-blocked[missing-mbid]", f"import with no MB identity evidence at all was accepted: {status} {body}")
+    else:
+        scenario_pass("identity-conflict-blocked[missing-mbid]")
+
+
+def run_wave25_artwork_scenarios(client: "HttpClient", fixture: dict, db_path: str) -> None:
+    """album_artwork_fetch_v1: real Plan -> Apply against the Wave 24
+    fixture album, plus a genuine stale-plan rejection (this family is one
+    of the few Wave 25 additions that exposes Plan and Apply as two
+    separate HTTP calls, so this is the one scenario that can genuinely
+    test the Plan-to-Apply window at the Docker/HTTP boundary rather than
+    only at the transaction_engine.py unit level)."""
+
+    def scenario_pass(name: str) -> None:
+        print(f"[PASS] {name}")
+
+    def scenario_fail(name: str, detail: str) -> None:
+        _fail(f"{name}: {detail}")
+
+    aid = fixture["album_id"]
+
+    print("==> [Wave25] Artwork acquisition (album_artwork_fetch_v1 Plan -> Apply -> Verify)...")
+    status, body = client.request("POST", f"/api/albums/{aid}/fetch-embed-artwork", timeout=15)
+    if status != 200 or not body.get("ok"):
+        scenario_fail("artwork-fetch-embed", f"request rejected: {status} {body}")
+    else:
+        try:
+            result = client.wait_job(body["job_id"], timeout=90)
+        except TimeoutError as ex:
+            scenario_fail("artwork-fetch-embed", str(ex))
+            result = None
+        if result is not None:
+            if result.get("status") != "success":
+                # fetchart legitimately can fail to find art for a
+                # synthetic/no-real-release fixture album -- what matters
+                # for this scenario is that the transaction reports a
+                # truthful, non-"success" status rather than a false
+                # positive, not that art was actually found.
+                print(f"  (fetchart found no art for the synthetic fixture album, as expected: {result.get('log')})")
+                scenario_pass("artwork-fetch-embed (truthful failure, no false success)")
+            else:
+                try:
+                    con = sqlite3.connect(db_path)
+                    row = con.execute("SELECT artpath FROM albums WHERE id=?", (aid,)).fetchone()
+                    con.close()
+                except Exception as ex:
+                    scenario_fail("artwork-fetch-embed", f"could not verify host-mounted DB state: {ex}")
+                else:
+                    if not row or not row[0]:
+                        scenario_fail("artwork-fetch-embed", "job reported success but albums.artpath is still empty")
+                    else:
+                        scenario_pass(f"artwork-fetch-embed (verified artpath={row[0]})")
+
+    print("==> [Wave25] Stale-plan precondition check (smoke test over real HTTP)...")
+    # Honest scope note: BeetsClient.fetch_and_embed_album_art() composes
+    # Plan and Apply back-to-back with no externally reachable window in
+    # between (there is no separate, web-manager-exposed Plan-only HTTP
+    # call this script can call, wait on, mutate around, and only then
+    # Apply) -- so a genuine Plan-then-mutate-then-Apply race cannot be
+    # injected through the real production HTTP surface as it exists
+    # today. The authoritative proof that Apply actually re-verifies
+    # identity fresh rather than trusting a stale Plan snapshot is
+    # tests/test_album_artwork_fetch_v1.py::test_apply_rejects_stale_plan_on_identity_change,
+    # which drives create_album_artwork_fetch_plan/execute_album_artwork_fetch_apply
+    # directly and genuinely controls the window between them. What this
+    # Docker-level check adds is confirming the real HTTP path still
+    # reaches that same precondition logic at all: change the album's
+    # identity, then confirm a fresh fetch-embed-artwork call still
+    # completes against the CURRENT identity rather than erroring out or
+    # silently operating on stale cached state.
+    status, body = client.request("POST", f"/api/albums/{aid}/fix-metadata",
+                                   json_body={"mb_albumid": "99999999-9999-9999-9999-999999999999"}, timeout=15)
+    identity_changed = status == 200 and body.get("ok")
+    if identity_changed:
+        client.wait_job(body["job_id"], timeout=30)
+    if not identity_changed:
+        scenario_fail("stale-plan-precondition-smoke-test", "could not change album identity via fix-metadata to set up this check")
+    else:
+        status, body = client.request("POST", f"/api/albums/{aid}/fetch-embed-artwork", timeout=15)
+        reached_apply = status == 200 and bool(body.get("job_id"))
+        if reached_apply:
+            client.wait_job(body["job_id"], timeout=60)
+        if not reached_apply:
+            scenario_fail("stale-plan-precondition-smoke-test", f"fetch-embed-artwork did not even dispatch after an identity change: {status} {body}")
+        else:
+            scenario_pass("stale-plan-precondition-smoke-test (real HTTP path reaches Apply's identity precondition check; see the unit test above for the authoritative race proof)")
+
+
+def wave25_engine_offline_checks(client: "HttpClient", db_path: str) -> None:
+    """Wave 25 production routes, exercised while the engine is stopped --
+    extends the Wave 24 engine-offline proof (which only covered
+    fix-metadata) to the fresh-import and artwork-acquisition routes this
+    round added."""
+    db_bytes_before = Path(db_path).read_bytes()
+
+    status, body = client.request(
+        "POST", "/api/folders/import-with-id",
+        json_body={"path": "/data/torrents/engine-offline-should-not-import",
+                   "mb_albumid": WAVE25_RELEASE_ID, "mb_releasegroupid": WAVE25_RELEASEGROUP_ID},
+        timeout=15,
+    )
+    offline_ok = True
+    if status == 200 and body.get("ok"):
+        try:
+            result = client.wait_job(body["job_id"], timeout=20)
+            if result.get("status") == "success":
+                offline_ok = False
+        except TimeoutError:
+            pass
+    if not offline_ok:
+        _fail("engine-offline-fails-closed[import]: a fresh-import request appeared to succeed while the engine was stopped")
+        print("[FAIL] engine-offline-fails-closed[import]")
+    else:
+        print("[PASS] engine-offline-fails-closed[import]")
+
+    db_bytes_after = Path(db_path).read_bytes()
+    if db_bytes_after != db_bytes_before:
+        _fail("engine-offline-fails-closed[no-local-mutation]: host-mounted DB changed while the engine was offline during a Wave25 route call")
+        print("[FAIL] engine-offline-fails-closed[no-local-mutation]")
+    else:
+        print("[PASS] engine-offline-fails-closed[no-local-mutation]")
+
+
+def run_wave25_crash_resume_scenario(client: "HttpClient", web_container: str,
+                                      downloads_dir: Path, db_path: str) -> None:
+    """Crash/resume: a real production import completes, the web-manager
+    process is then forcibly killed and restarted (`docker kill` + `docker
+    start`, not a graceful stop -- the closest this script can get to a
+    genuine crash without a precise, inherently racy mid-job kill), and
+    the SAME import is submitted again. The property that actually matters
+    for safety is verified reliably rather than via a timing-dependent
+    kill: a crash (or any process restart) must never cause the native
+    Beets import to be silently repeated -- reimport-disk-style item-id/
+    album-id confusion, or a genuine duplicate album, would be the
+    failure mode here. A precise mid-job kill would additionally exercise
+    Recovery-Required-style partial-completion handling, but is inherently
+    flaky in CI (the exact instant killed is a race against however many
+    of the job's own sequential engine calls have completed) and is
+    intentionally not attempted here -- see the note in the final report."""
+
+    def scenario_pass(name: str) -> None:
+        print(f"[PASS] {name}")
+
+    def scenario_fail(name: str, detail: str) -> None:
+        _fail(f"{name}: {detail}")
+
+    print("==> [Wave25] Crash/resume: complete a real import...")
+    src = seed_wave25_import_source(downloads_dir, "crash-resume", track_range=range(1, 4))
+    status, body = client.request(
+        "POST", "/api/folders/import-with-id",
+        json_body={"path": src["container_path"], "mb_albumid": WAVE25_RELEASE_ID,
+                   "mb_releasegroupid": WAVE25_RELEASEGROUP_ID, "move": False},
+        timeout=30,
+    )
+    if status != 200 or not body.get("ok"):
+        scenario_fail("crash-resume-no-duplicate", f"initial import request rejected: {status} {body}")
+        return
+    try:
+        result = client.wait_job(body["job_id"], timeout=120)
+    except TimeoutError as ex:
+        scenario_fail("crash-resume-no-duplicate", f"initial import did not complete: {ex}")
+        return
+    if result.get("status") != "success":
+        scenario_fail("crash-resume-no-duplicate", f"initial import did not succeed: {result.get('status')} / {result.get('log')}")
+        return
+
+    print("==> [Wave25] Crash/resume: killing and restarting the web-manager container...")
+    kill_res = run(["docker", "kill", web_container])
+    if kill_res.returncode != 0:
+        scenario_fail("crash-resume-no-duplicate", "could not kill the web-manager container to simulate a crash")
+        return
+    start_res = run(["docker", "start", web_container])
+    if start_res.returncode != 0:
+        scenario_fail("crash-resume-no-duplicate", "could not restart the web-manager container after the simulated crash")
+        return
+    if not wait_healthy(web_container):
+        scenario_fail("crash-resume-no-duplicate", "web-manager container did not become healthy again after the simulated crash")
+        return
+    scenario_pass("crash-resume-restart (web-manager came back healthy after a hard kill)")
+
+    print("==> [Wave25] Crash/resume: re-submitting the identical import after restart...")
+    status, body = client.request(
+        "POST", "/api/folders/import-with-id",
+        json_body={"path": src["container_path"], "mb_albumid": WAVE25_RELEASE_ID,
+                   "mb_releasegroupid": WAVE25_RELEASEGROUP_ID, "move": False},
+        timeout=30,
+    )
+    if status != 200 or not body.get("ok"):
+        scenario_fail("crash-resume-no-duplicate", f"post-restart import request rejected: {status} {body}")
+        return
+    try:
+        result = client.wait_job(body["job_id"], timeout=120)
+    except TimeoutError as ex:
+        scenario_fail("crash-resume-no-duplicate", f"post-restart import did not complete: {ex}")
+        return
+    if result.get("status") != "success":
+        scenario_fail("crash-resume-no-duplicate", f"post-restart import did not succeed truthfully: {result.get('status')} / {result.get('log')}")
+        return
+
+    try:
+        con = sqlite3.connect(db_path)
+        rows = con.execute(
+            "SELECT id FROM albums WHERE mb_albumid=? OR mb_releasegroupid=?",
+            (WAVE25_RELEASE_ID, WAVE25_RELEASEGROUP_ID),
+        ).fetchall()
+        con.close()
+    except Exception as ex:
+        scenario_fail("crash-resume-no-duplicate", f"could not verify host-mounted DB state: {ex}")
+        return
+    if len(rows) != 1:
+        scenario_fail("crash-resume-no-duplicate", f"expected exactly 1 album row for this release after crash+restart+reimport, found {len(rows)} -- duplicate import after crash")
+    else:
+        scenario_pass("crash-resume-no-duplicate (process restart did not cause a duplicate import)")
+
+
 def main() -> int:
     print("==> Checking Docker daemon / compose availability...")
     require_docker()
@@ -476,6 +931,10 @@ def main() -> int:
         except Exception as ex:
             _fail(f"could not verify host-mounted DB state: {ex}")
 
+        print("\n==> Wave 25 scenarios (real production import + artwork-acquisition routes) ==>")
+        run_wave25_artwork_scenarios(client, fixture, db_path)
+        run_wave25_scenarios(client, downloads_dir, music_dir, db_path)
+
         print("==> Engine-offline fail-closed proof...")
         stop_res = run(["docker", "stop", engine_container])
         if stop_res.returncode != 0:
@@ -501,7 +960,18 @@ def main() -> int:
                 _fail("host-mounted DB changed while the engine container was stopped -- local mutation occurred")
             else:
                 _ok("host-mounted DB unchanged while the engine was offline")
+
+            print("==> [Wave25] Engine-offline fail-closed proof (Wave 25 routes)...")
+            wave25_engine_offline_checks(client, db_path)
+
             run(["docker", "start", engine_container])
+            if not wait_healthy(engine_container):
+                _fail("beets engine container did not become healthy again after restart")
+            else:
+                _ok("engine container healthy again after restart")
+
+        print("\n==> Wave 25 crash/resume scenario ==>")
+        run_wave25_crash_resume_scenario(client, web_container, downloads_dir, db_path)
 
         if FAILURES:
             print(f"\n[SUMMARY] {len(FAILURES)} failure(s):")

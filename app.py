@@ -11332,6 +11332,38 @@ def album_fetch_art(aid):
     return jsonify({"ok": True, "job_id": job.job_id})
 
 
+@app.post("/api/albums/<int:aid>/fetch-embed-artwork")
+def album_fetch_embed_artwork(aid):
+    """Fetch and embed cover art for an album through the controlled
+    album_artwork_fetch_v1 engine transaction (Plan -> Apply -> Verify).
+
+    SEC-002 / ARCH-003 Wave 25 Docker acceptance round: distinct from the
+    pre-existing /api/albums/<id>/fetch-art above, which predates the
+    two-service architecture and calls a local `lib.get_album(aid)` /
+    Discogs-fallback pipeline of its own -- migrating that route is
+    real, standalone engineering not attempted in this pass (see
+    docs/TECHNICAL_DEBT.md). This route is the actual, directly reachable
+    production entry point for the new controlled family
+    (beets_client.fetch_and_embed_album_art -> POST
+    /albums/artwork/fetch/plan + /apply on the engine), used by
+    reimport_disk's post-import artwork step and independently callable
+    here so it has its own real HTTP surface, not just an internal
+    function call."""
+    def _do(log, cancel_event=None):
+        res = beets_client.fetch_and_embed_album_art(aid)
+        if not res.get("ok"):
+            raise RuntimeError(res.get("error") or "artwork fetch/embed failed")
+        log.append(f"  Artwork saved: {res.get('artpath')}")
+        _invalidate_lib_cache()
+        return res
+    job = jobs.start_python(
+        _do,
+        label=f"FetchEmbedArtwork: album {aid}",
+        metadata={"type": "album_artwork_fetch_v1", "album_id": aid},
+    )
+    return jsonify({"ok": True, "job_id": job.job_id})
+
+
 @app.post("/api/albums/<int:aid>/art/url")
 def album_replace_art_from_url(aid):
     """Download a user-provided cover image URL and set it as this album's art."""
@@ -21056,15 +21088,34 @@ def import_folder_with_id():
             pass
     if not folder_path:
         return jsonify({"ok": False, "error": "path required"}), 400
+    # Wave 25 Docker acceptance round (found only by actually exercising
+    # this real production route against the documented two-service
+    # deployment): requiring local existence made _resolve_import_review_source_path
+    # call candidate.exists()/is_symlink() against a path this process (the
+    # web-manager container) has no filesystem visibility into at all --
+    # docker-compose.yml/docker-compose.full.yml mount ONLY
+    # /web-manager-data into beets-web-manager, by design (the engine
+    # container owns /data/media/music and /data/torrents). Every real
+    # import-with-id call was therefore guaranteed to fail with "Source
+    # path does not exist", 404, regardless of whether the folder was
+    # genuinely there -- the frontend calls this route directly
+    # (api/client.ts), so this broke the confirm-and-import workflow
+    # entirely in the real, security-hardened deployment topology, not
+    # just some rare edge case. Root-containment (a pure string
+    # comparison, no filesystem access) is still checked here and remains
+    # a real, fast, meaningful rejection of an out-of-bounds path.
+    # Existence and symlink-safety are the engine's job -- it has the
+    # actual mount -- and create_import_folder_plan() below already does
+    # real, disk-backed root-containment + symlink-component checks with
+    # a real fail-closed existence requirement of its own.
     trusted_folder, folder_error = _resolve_import_review_source_path(
         folder_path,
         allow_music=True,
         expected_type="dir",
-        require_exists=True,
+        require_exists=False,
     )
     if folder_error or trusted_folder is None:
-        status = 404 if folder_error == "Source path does not exist." else 400
-        return jsonify({"ok": False, "error": folder_error or "Source path is not allowed."}), status
+        return jsonify({"ok": False, "error": folder_error or "Source path is not allowed."}), 400
     folder_path = str(trusted_folder)
     if not raw_mb_input:
         return jsonify({

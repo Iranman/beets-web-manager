@@ -38,6 +38,16 @@ STATUSES = {
     "Failed",
     "Rolled Back",
     "Partially Rolled Back",
+    # Wave 25 Docker acceptance round: several Apply paths already called
+    # store.update(operation_id, status="Recovery Required") after a
+    # partial failure where automatic rollback could not be completed --
+    # but _status()/TransactionStore.update() silently downgrade any
+    # status not in this set back to "Pending", so every one of those
+    # calls was actually leaving the record looking like a fresh,
+    # not-yet-started transaction instead of flagging it for operator
+    # attention. Added here so the status this codebase has been trying
+    # to set since Wave 20-ish actually persists.
+    "Recovery Required",
 }
 
 TRANSACTION_TYPES = {
@@ -9082,6 +9092,229 @@ def rollback_album_artwork(
             }
 
 
+# ── album_artwork_fetch_v1 ────────────────────────────────────────────────────
+# SEC-002 / ARCH-003 Wave 25 Docker acceptance round: import-time artwork
+# acquisition (fetchart + embedart) was routed through the generic
+# beets_client.run_command()/POST /commands/execute mechanism -- real
+# functionality (see fetch_and_embed_album_art()'s own docstring for why a
+# generic engine command runner is the right transport), but left as an
+# unexplained exception to the controlled-mutation model with no Plan,
+# Apply-time precondition check, or Verify step of its own. This narrow
+# family wraps that same underlying mechanism in real Plan/Apply/Verify
+# semantics, matching every other *_v1 family's contract, WITHOUT
+# reimplementing fetchart/embedart's own logic -- Beets remains entirely
+# responsible for provider selection, image fetching, and tag writing;
+# this only orchestrates around it.
+#
+# Deliberately NOT reversible after Apply: embedded artwork tag data
+# cannot be truthfully un-embedded (there is no prior tag state to restore
+# to that this family captured -- unlike album_artwork_v1, which moves an
+# already-known file and so can always restore the original), so there is
+# no rollback_album_artwork_fetch(). A partial failure (fetchart succeeds
+# but embedart does not confirm, or post-Apply verification fails) leaves
+# the transaction in "Recovery Required" status instead of a false
+# "Completed" or a "Failed" that would invite an unsafe blind retry.
+
+def create_album_artwork_fetch_plan(
+    store: TransactionStore,
+    payload: Dict[str, Any],
+    *,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Create a non-mutating preview plan for online artwork acquisition
+    (album_artwork_fetch_v1). Unlike album_artwork_v1, the resulting image
+    is not yet known at Plan time -- it comes from whichever configured
+    fetchart provider(s) return during Apply. Plan captures the album's
+    identity and current artwork state only, so Apply can prove the same
+    album is still being targeted before mutating it."""
+    payload = payload or {}
+    try:
+        album_id = int(payload.get("album_id") or 0)
+    except Exception:
+        album_id = 0
+    if album_id <= 0:
+        return {"ok": False, "error": "Invalid album_id", "code": "album_artwork_fetch_invalid_payload"}
+
+    lib_db = db_path or os.environ.get("BEETS_DB_PATH", os.path.expanduser("~/.config/beets/musiclibrary.blb"))
+    if not os.path.exists(lib_db):
+        return {"ok": False, "error": f"Beets database file not found at {lib_db}", "code": "album_artwork_fetch_db_missing"}
+
+    try:
+        con = sqlite3.connect(lib_db, timeout=10)
+        con.row_factory = sqlite3.Row
+        row = con.execute(
+            "SELECT id, album, albumartist, mb_albumid, mb_releasegroupid, artpath FROM albums WHERE id=?",
+            (album_id,),
+        ).fetchone()
+        item_count = con.execute("SELECT COUNT(*) FROM items WHERE album_id=?", (album_id,)).fetchone()[0]
+        con.close()
+    except Exception as ex:
+        return {"ok": False, "error": f"Database query failed: {ex}", "code": "album_artwork_fetch_db_error"}
+
+    if not row:
+        return {"ok": False, "error": f"Album {album_id} not found", "code": "album_artwork_fetch_album_not_found"}
+    if not item_count:
+        return {"ok": False, "error": f"Album {album_id} has no track items", "code": "album_artwork_fetch_no_items"}
+
+    raw_art = row["artpath"]
+    existing_artpath = raw_art.decode("utf-8", "replace") if isinstance(raw_art, bytes) else str(raw_art or "")
+
+    resource_keys = [f"album:{album_id}"]
+    tx = store.create(
+        operation_type="Artwork Update",
+        status="Preview",
+        summary=f"Fetch and embed artwork for album {album_id} ({row['albumartist'] or ''} - {row['album'] or ''})",
+        metadata={
+            "mutation_family": "album_artwork_fetch_v1",
+            "album_id": album_id,
+            "mb_albumid": str(row["mb_albumid"] or ""),
+            "mb_releasegroupid": str(row["mb_releasegroupid"] or ""),
+            "existing_artpath": existing_artpath,
+            "existing_artpath_present": bool(existing_artpath),
+            "resource_keys": resource_keys,
+            "reversible": False,
+            "created_at": _now(),
+        },
+    )
+    return {
+        "ok": True,
+        "operation_id": tx["id"],
+        "album_id": album_id,
+        "existing_artpath": existing_artpath,
+    }
+
+
+def execute_album_artwork_fetch_apply(
+    store: TransactionStore,
+    operation_id: str,
+    *,
+    db_path: Optional[str] = None,
+    run_beet_command_fn: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Execute album_artwork_fetch_v1: run native Beets fetchart + embedart
+    for the planned album, then verify the resulting artwork state.
+
+    run_beet_command_fn is a required dependency injected by the caller
+    (the Control Agent, which owns the actual `beet` subprocess machinery)
+    -- transaction_engine.py deliberately never invokes `beet` subcommands
+    itself, matching the same fetch_tracklist_fn injection pattern already
+    used by create_album_mb_track_repair_plan. Expected signature:
+    run_beet_command_fn(command: str, args: List[str]) ->
+    {"ok": bool, "error": Optional[str], ...}.
+    """
+    if not _TRANSACTION_ID_RE.match(operation_id):
+        return {"ok": False, "error": "Invalid transaction ID format", "code": "album_artwork_fetch_invalid_id"}
+    if run_beet_command_fn is None:
+        return {"ok": False, "error": "No beet command runner configured", "code": "album_artwork_fetch_no_runner"}
+
+    with _get_apply_lock(operation_id):
+        try:
+            tx = store.get(operation_id)
+        except KeyError:
+            return {"ok": False, "error": f"Transaction {operation_id} not found", "code": "album_artwork_fetch_not_found"}
+
+        meta = tx.get("metadata") or {}
+        if meta.get("mutation_family") != "album_artwork_fetch_v1":
+            return {"ok": False, "error": "Transaction is not an album_artwork_fetch_v1 operation", "code": "album_artwork_fetch_family_mismatch"}
+
+        if tx.get("status") == "Completed":
+            return {
+                "ok": True, "operation_id": operation_id, "status": "Completed",
+                "mutated": True, "artpath": meta.get("result_artpath", ""),
+            }
+        if tx.get("status") == "Recovery Required":
+            return {
+                "ok": False,
+                "error": "Transaction requires manual recovery; a prior Apply attempt did not complete cleanly",
+                "code": "album_artwork_fetch_recovery_required",
+                "status": "Recovery Required",
+            }
+
+        album_id = int(meta.get("album_id") or 0)
+        lib_db = db_path or os.environ.get("BEETS_DB_PATH", os.path.expanduser("~/.config/beets/musiclibrary.blb"))
+        resource_keys = meta.get("resource_keys") or []
+
+        def _fail(msg: str, code: str) -> Dict[str, Any]:
+            store.update(operation_id, status="Failed", logs=[f"Apply failed: {msg}"])
+            return {"ok": False, "error": msg, "code": code, "mutated": False, "status": "Failed"}
+
+        def _recovery(msg: str, code: str, reason: str) -> Dict[str, Any]:
+            curr = store.get(operation_id).get("metadata", {})
+            store.update(operation_id, status="Recovery Required", metadata={
+                **curr,
+                "filesystem_mutated": True,
+                "recovery_required_at": _now(),
+                "recovery_reason": reason,
+            })
+            return {"ok": False, "error": msg, "code": code, "mutated": True, "status": "Recovery Required"}
+
+        with _lock_resources(resource_keys):
+            # TOCTOU precondition: the album's identity must not have
+            # changed since Plan -- a different album entirely must never
+            # silently receive this artwork.
+            try:
+                con = sqlite3.connect(lib_db, timeout=10)
+                con.row_factory = sqlite3.Row
+                row = con.execute(
+                    "SELECT id, mb_albumid, mb_releasegroupid FROM albums WHERE id=?",
+                    (album_id,),
+                ).fetchone()
+                con.close()
+            except Exception as ex:
+                return _fail(f"Database query failed: {ex}", "album_artwork_fetch_db_error")
+            if not row:
+                return _fail(f"Album {album_id} no longer exists", "album_artwork_fetch_album_not_found")
+            cur_mbid = str(row["mb_albumid"] or "")
+            cur_rgid = str(row["mb_releasegroupid"] or "")
+            if meta.get("mb_albumid") and cur_mbid and meta["mb_albumid"] != cur_mbid:
+                return _fail("Album identity changed since plan (mb_albumid mismatch)", "album_artwork_fetch_stale_plan")
+            if meta.get("mb_releasegroupid") and cur_rgid and meta["mb_releasegroupid"] != cur_rgid:
+                return _fail("Album identity changed since plan (release group mismatch)", "album_artwork_fetch_stale_plan")
+
+            store.update(operation_id, status="Running", metadata={**meta, "apply_started": True})
+
+            fetch_res = run_beet_command_fn("fetchart", [f"album_id:{album_id}"])
+            if not fetch_res.get("ok"):
+                return _fail(fetch_res.get("error") or "fetchart command failed", "album_artwork_fetch_fetchart_failed")
+
+            embed_res = run_beet_command_fn("embedart", ["-y", f"album_id:{album_id}"])
+            if not embed_res.get("ok"):
+                # fetchart already ran and may have written a real file +
+                # DB artpath -- real partial work that cannot be blindly
+                # discarded, but the tag-embed half never confirmed.
+                return _recovery(
+                    embed_res.get("error") or "embedart command failed after fetchart succeeded",
+                    "album_artwork_fetch_embedart_failed",
+                    "fetchart succeeded but embedart did not confirm",
+                )
+
+            # Verify: the album must now have a real artpath recorded.
+            try:
+                con = sqlite3.connect(lib_db, timeout=10)
+                con.row_factory = sqlite3.Row
+                vrow = con.execute("SELECT artpath FROM albums WHERE id=?", (album_id,)).fetchone()
+                con.close()
+            except Exception as ex:
+                return _recovery(f"Post-apply verification query failed: {ex}", "album_artwork_fetch_verify_query_failed", f"post-apply verification query failed: {ex}")
+
+            raw_v = vrow["artpath"] if vrow else None
+            result_artpath = raw_v.decode("utf-8", "replace") if isinstance(raw_v, bytes) else str(raw_v or "")
+            if not result_artpath:
+                return _recovery(
+                    "Post-apply verification failed: artpath not set after fetchart/embedart",
+                    "album_artwork_fetch_verification_failed",
+                    "fetchart/embedart reported success but albums.artpath is still empty",
+                )
+
+            store.update(operation_id, status="Completed", metadata={
+                **store.get(operation_id).get("metadata", {}),
+                "filesystem_mutated": True,
+                "result_artpath": result_artpath,
+                "completed_at": _now(),
+            })
+            return {"ok": True, "operation_id": operation_id, "status": "Completed", "mutated": True, "artpath": result_artpath}
+
+
 # ── import_folder_v1 ─────────────────────────────────────────────────────────
 
 def create_import_folder_plan(
@@ -9115,6 +9348,18 @@ def create_import_folder_plan(
         return {"ok": False, "error": f"Source folder outside allowed staging roots: {src_p}", "code": "import_folder_path_out_of_root"}
     if any(_path_has_symlink_under(src_p, Path(r)) for r in stg_roots):
         return {"ok": False, "error": f"Symlink rejected: {src_p}", "code": "import_folder_symlink_rejected"}
+    # Wave 25 Docker acceptance round: this used to silently produce an
+    # empty files_plan (and a Plan response with ok=True) for a
+    # nonexistent or non-directory source -- the caller-side existence
+    # check (app.py's _resolve_import_review_source_path) cannot verify
+    # this itself (the web-manager container has no visibility into
+    # staging/music roots by design), so this engine-side check, which
+    # DOES have real access to the mounted filesystem, must be the one
+    # that actually fails closed.
+    if not src_p.exists():
+        return {"ok": False, "error": f"Source folder does not exist: {src_p}", "code": "import_folder_source_not_found"}
+    if not src_p.is_dir():
+        return {"ok": False, "error": f"Source path is not a folder: {src_p}", "code": "import_folder_source_not_a_directory"}
 
     album_id = int(payload.get("album_id") or 0)
     mode = str(payload.get("mode") or "import").strip()

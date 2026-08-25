@@ -168,6 +168,14 @@ _CONTROL_AGENT_FUNCTION_CLASSIFICATION = {
     "_cleanup_broken_managed_runtime": ("NON_MEDIA_FILESYSTEM", "infra_v1", "control-agent-runtime-cleanup"),
     "_engine_acoustid_lookup": ("ENGINE_NATIVE_READ_ONLY", "acoustid_v1", "acoustid-lookup-no-local-mutation"),
     "AgentJob._run": ("ENGINE_NATIVE_BEETS", "agent_job_v1", "agent-job-runner"),
+    # Wave 25 Docker acceptance round: extracted from /commands/execute's
+    # own handler body (where these exact sinks were previously classified
+    # ENGINE_ADMIN_MUTATION via the do_POST-family text-pattern rules
+    # below) so it can be shared with album_artwork_fetch_v1's Apply,
+    # which needs the identical locked-subprocess mechanism but is not
+    # itself an HTTP request handler. Same real nature, same
+    # classification -- only the enclosing function name changed.
+    "_run_beet_subcommand_locked": ("ENGINE_ADMIN_MUTATION", "admin_command_v1", "control-agent-admin-command-endpoint"),
 }
 
 

@@ -2531,6 +2531,55 @@ def _sanitize_command_path_args(args: Any, allowed_types: list) -> list:
     return sanitized
 
 
+def _run_beet_subcommand_locked(cmd_list: list, *, config_override: str = "", timeout: float = 120.0) -> dict[str, Any]:
+    """Run a `beet` subcommand under the OS concurrency lock and return a
+    plain result dict -- the shared implementation behind /commands/execute
+    and any in-process caller (e.g. album_artwork_fetch_v1's Apply, which
+    needs this exact mechanism but is not itself an HTTP request). Callers
+    are responsible for allow-listing/capability-gating `cmd_list[0]` and
+    sanitizing the rest of `cmd_list` before calling this -- it performs no
+    validation of its own, matching /commands/execute's own division of
+    responsibility (validate first, then run)."""
+    command = cmd_list[0] if cmd_list else ""
+    mutating = command in {
+        "import", "update", "write", "move", "modify", "mbsync",
+        "fetchart", "embedart", "lastgenre", "alt", "remove", "rm"
+    }
+    lock_file = acquire_os_lock(read_only=not mutating)
+    tmp_cfg_path = None
+    try:
+        full_cmd = [BEET_BIN]
+        if config_override:
+            tmp_cfg_path = f"/tmp/beets_exec_cfg_{uuid.uuid4().hex}.yaml"
+            with open(tmp_cfg_path, "w", encoding="utf-8") as f:
+                f.write(config_override)
+            os.chmod(tmp_cfg_path, 0o600)
+            full_cmd.extend(["-c", tmp_cfg_path])
+
+        full_cmd.extend(cmd_list)
+        env = os.environ.copy()
+        env["BEETSDIR"] = BEETSDIR
+        res = subprocess.run(
+            full_cmd,
+            capture_output=True,
+            text=True,
+            timeout=float(timeout),
+            env=env
+        )
+        return {"returncode": res.returncode, "stdout": res.stdout, "stderr": res.stderr}
+    except subprocess.TimeoutExpired:
+        return {"timed_out": True, "returncode": 124, "stdout": "", "stderr": f"Command timed out after {timeout}s"}
+    except Exception as ex:
+        return {"internal_error": True, "returncode": -1, "stdout": "", "stderr": str(ex)}
+    finally:
+        if tmp_cfg_path and os.path.exists(tmp_cfg_path):
+            try:
+                os.unlink(tmp_cfg_path)
+            except Exception:
+                pass
+        release_os_lock(lock_file)
+
+
 def acquire_os_lock(read_only: bool = False):
     """Acquire an OS file lock on LOCK_PATH for Beets concurrency protection."""
     os.makedirs(os.path.dirname(LOCK_PATH), exist_ok=True)
@@ -4135,6 +4184,50 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             self._send_json(code, res)
             return
 
+        if path == "/albums/artwork/fetch/plan":
+            res = transaction_engine.create_album_artwork_fetch_plan(
+                _txn_store, body,
+                db_path=LIB_PATH,
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        if path == "/albums/artwork/fetch/apply":
+            op_id = str(body.get("operation_id") or "").strip()
+            if not op_id:
+                self._send_json(400, {"ok": False, "error": "operation_id required"})
+                return
+            for _fetch_cmd in ("fetchart", "embedart"):
+                if _fetch_cmd not in ALLOWED_COMMANDS:
+                    self._send_json(400, {"ok": False, "error": f"Command '{_fetch_cmd}' is not in the allowlist"})
+                    return
+                _cap_err = require_command_capability(_fetch_cmd)
+                if _cap_err is not None:
+                    self._send_json(409, _cap_err)
+                    return
+
+            def _run_beet_command(command: str, args: list) -> dict:
+                try:
+                    sanitized_args = _sanitize_command_path_args(args, ["music", "staging", "config", "tmp"])
+                except UnsafePathError:
+                    return {"ok": False, "error": "Invalid path parameter in command args"}
+                res = _run_beet_subcommand_locked([command] + sanitized_args)
+                if res.get("timed_out") or res.get("internal_error"):
+                    return {"ok": False, "error": res.get("stderr") or "command execution error"}
+                if res.get("returncode") != 0:
+                    return {"ok": False, "error": (res.get("stderr") or res.get("stdout") or f"{command} exited {res.get('returncode')}")[:500]}
+                return {"ok": True, "stdout": res.get("stdout", "")}
+
+            res = transaction_engine.execute_album_artwork_fetch_apply(
+                _txn_store, op_id,
+                db_path=LIB_PATH,
+                run_beet_command_fn=_run_beet_command,
+            )
+            code = 200 if res.get("ok") else (409 if res.get("status") == "Recovery Required" else 400)
+            self._send_json(code, res)
+            return
+
         if path == "/albums/relocation/plan":
             music_root_env = os.environ.get("MUSIC_ROOT") or str(MUSIC_ROOT) or "/music"
             stg_roots = [os.environ.get("DOWNLOADS_ROOT", "/downloads"), os.environ.get("STAGING_ROOT", "/staging")]
@@ -4219,8 +4312,23 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
 
         # ── import_folder_v1 ──────────────────────────────────────────────────
         if path == "/import/plan":
-            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
-            stg_roots = [os.environ.get("DOWNLOADS_ROOT", "/downloads"), os.environ.get("STAGING_ROOT", "/staging"), music_root_env]
+            # Wave 25 Docker acceptance round (found only by actually
+            # pointing a real production import at a real download-root
+            # path): MUSIC_ROOT/DOWNLOADS_ROOT/STAGING_ROOT env vars are
+            # never actually set anywhere (neither compose file, nor
+            # Dockerfile.beets) -- the real bind-mount targets are the
+            # module-level MUSIC_ROOT (/data/media/music) and DOWNLOAD_PATH
+            # (/data/torrents) constants above. os.environ.get("MUSIC_ROOT",
+            # "/music")/os.environ.get("DOWNLOADS_ROOT", "/downloads")
+            # therefore always fell back to paths that do not exist in this
+            # container at all, so create_import_folder_plan's root-
+            # containment check rejected every real source folder with
+            # import_folder_path_out_of_root regardless of where it
+            # actually was. Matches the already-correct fallback pattern
+            # used elsewhere in this file (music_root_env = ... or
+            # str(MUSIC_ROOT) or "/music").
+            music_root_env = os.environ.get("MUSIC_ROOT") or str(MUSIC_ROOT) or "/music"
+            stg_roots = [os.environ.get("DOWNLOADS_ROOT") or str(DOWNLOAD_PATH), os.environ.get("STAGING_ROOT") or str(DOWNLOAD_PATH), music_root_env]
             quarantine_root = os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
             res = transaction_engine.create_import_folder_plan(
                 _txn_store, body,
@@ -4238,7 +4346,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             if not op_id:
                 self._send_json(400, {"ok": False, "error": "operation_id required"})
                 return
-            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            music_root_env = os.environ.get("MUSIC_ROOT") or str(MUSIC_ROOT) or "/music"
             quarantine_root = os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
 
             def _beets_import_runner(payload: dict) -> dict:
@@ -4486,48 +4594,17 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 cmd_list.append(str(safe_source_path))
             cmd_list.extend(sanitized_args)
 
-            mutating = command in {
-                "import", "update", "write", "move", "modify", "mbsync",
-                "fetchart", "embedart", "lastgenre", "alt", "remove", "rm"
-            }
-
-            lock_file = acquire_os_lock(read_only=not mutating)
-            tmp_cfg_path = None
-            try:
-                full_cmd = [BEET_BIN]
-                if config_override:
-                    tmp_cfg_path = f"/tmp/beets_exec_cfg_{uuid.uuid4().hex}.yaml"
-                    with open(tmp_cfg_path, "w", encoding="utf-8") as f:
-                        f.write(config_override)
-                    os.chmod(tmp_cfg_path, 0o600)
-                    full_cmd.extend(["-c", tmp_cfg_path])
-
-                full_cmd.extend(cmd_list)
-                env = os.environ.copy()
-                env["BEETSDIR"] = BEETSDIR
-                res = subprocess.run(
-                    full_cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=float(timeout),
-                    env=env
-                )
-                self._send_json(200, {
-                    "returncode": res.returncode,
-                    "stdout": res.stdout,
-                    "stderr": res.stderr,
-                })
-            except subprocess.TimeoutExpired:
+            res = _run_beet_subcommand_locked(cmd_list, config_override=config_override, timeout=float(timeout))
+            if res.get("timed_out"):
                 self._send_json(408, {"error": f"Command '{command}' timed out after {timeout}s", "returncode": 124})
-            except Exception:
+            elif res.get("internal_error"):
                 self._send_json(500, {"error": "Command execution error"})
-            finally:
-                if tmp_cfg_path and os.path.exists(tmp_cfg_path):
-                    try:
-                        os.unlink(tmp_cfg_path)
-                    except Exception:
-                        pass
-                release_os_lock(lock_file)
+            else:
+                self._send_json(200, {
+                    "returncode": res["returncode"],
+                    "stdout": res["stdout"],
+                    "stderr": res["stderr"],
+                })
             return
 
         if path == "/jobs/create":

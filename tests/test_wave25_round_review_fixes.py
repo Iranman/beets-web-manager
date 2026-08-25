@@ -41,6 +41,19 @@ class TestWave25ReviewStructuralFixes(unittest.TestCase):
     def test_beets_client_has_real_artwork_fetch_embed_method(self):
         self.assertIn("def fetch_and_embed_album_art(", self.client_source)
 
+    def test_artwork_fetch_is_a_real_controlled_transaction_not_bare_run_command(self):
+        """Docker acceptance round: fetch_and_embed_album_art must compose
+        the real album_artwork_fetch_v1 Plan/Apply family, not a bare
+        run_command()/POST /commands/execute pair with no transaction
+        record at all."""
+        self.assertIn("def plan_album_artwork_fetch(", self.client_source)
+        self.assertIn("def apply_album_artwork_fetch(", self.client_source)
+        idx = self.client_source.index("def fetch_and_embed_album_art(")
+        end_idx = self.client_source.index("\n    def ", idx + 1)
+        body = self.client_source[idx:end_idx]
+        self.assertIn("self.plan_album_artwork_fetch(", body)
+        self.assertIn("self.apply_album_artwork_fetch(", body)
+
     def test_app_calls_the_real_artwork_method(self):
         self.assertIn("beets_client.fetch_and_embed_album_art(", self.app_source)
 
@@ -225,52 +238,66 @@ class TestWave25ReviewStructuralFixes(unittest.TestCase):
 
 
 class TestFetchAndEmbedAlbumArt(unittest.TestCase):
-    """Real functional unit tests for BeetsClient.fetch_and_embed_album_art
-    -- the thin composition over run_command()/POST /commands/execute that
-    replaces the nonexistent repair_album_artwork()."""
+    """Real functional unit tests for BeetsClient.fetch_and_embed_album_art.
+
+    Wave 25 Docker acceptance round: this is now a thin wrapper over the
+    real album_artwork_fetch_v1 Plan/Apply transaction family (see
+    tests/test_album_artwork_fetch_v1.py for the transaction_engine.py
+    logic itself), not a bare run_command()/POST /commands/execute
+    composition -- fetchart/embedart genuinely mutate authoritative
+    library state and needed a real controlled-mutation boundary, not just
+    a restored call. These tests prove the client-level wrapper composes
+    Plan -> Apply correctly and propagates failure/Recovery-Required
+    status truthfully; still replaces the nonexistent repair_album_artwork()."""
 
     def setUp(self):
         from backend.beets_client import BeetsClient
         self.client = BeetsClient(base_url="http://engine.invalid:8338", token="test-token")
 
-    def test_success_runs_fetchart_then_embedart(self):
+    def test_success_plans_then_applies(self):
         calls = []
 
         def fake_request(method, path, payload=None, timeout=None):
-            calls.append((path, payload.get("command") if payload else None))
-            return {"returncode": 0, "stdout": "", "stderr": ""}
+            calls.append(path)
+            if path == "/albums/artwork/fetch/plan":
+                self.assertEqual(payload, {"album_id": 42})
+                return {"ok": True, "operation_id": "txn_1_aaaaaaaaaaaaaaaa"}
+            if path == "/albums/artwork/fetch/apply":
+                self.assertEqual(payload, {"operation_id": "txn_1_aaaaaaaaaaaaaaaa"})
+                return {"ok": True, "status": "Completed", "artpath": "/music/a/cover.jpg"}
+            raise AssertionError(f"unexpected path {path}")
 
         with unittest.mock.patch.object(self.client, "_request", side_effect=fake_request):
             res = self.client.fetch_and_embed_album_art(42)
 
         self.assertTrue(res.get("ok"), res)
-        self.assertEqual([c[1] for c in calls], ["fetchart", "embedart"])
-        self.assertTrue(all(c[0] == "/commands/execute" for c in calls))
+        self.assertEqual(res.get("artpath"), "/music/a/cover.jpg")
+        self.assertEqual(calls, ["/albums/artwork/fetch/plan", "/albums/artwork/fetch/apply"])
 
-    def test_fetchart_failure_short_circuits_and_reports_error(self):
-        def fake_request(method, path, payload=None, timeout=None):
-            return {"returncode": 1, "stdout": "", "stderr": "no art found"}
-
-        with unittest.mock.patch.object(self.client, "_request", side_effect=fake_request) as m:
-            res = self.client.fetch_and_embed_album_art(42)
-
-        self.assertFalse(res.get("ok"))
-        self.assertEqual(m.call_count, 1, "embedart must not run if fetchart already failed")
-
-    def test_embedart_failure_is_reported_not_swallowed(self):
-        calls = {"n": 0}
+    def test_plan_rejection_short_circuits_before_apply(self):
+        calls = []
 
         def fake_request(method, path, payload=None, timeout=None):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                return {"returncode": 0, "stdout": "", "stderr": ""}
-            return {"returncode": 1, "stdout": "", "stderr": "embed failed"}
+            calls.append(path)
+            return {"ok": False, "error": "Album 42 not found"}
 
         with unittest.mock.patch.object(self.client, "_request", side_effect=fake_request):
             res = self.client.fetch_and_embed_album_art(42)
 
         self.assertFalse(res.get("ok"))
-        self.assertEqual(calls["n"], 2)
+        self.assertEqual(calls, ["/albums/artwork/fetch/plan"], "apply must not run if plan was rejected")
+
+    def test_apply_recovery_required_status_is_surfaced_not_swallowed(self):
+        def fake_request(method, path, payload=None, timeout=None):
+            if path == "/albums/artwork/fetch/plan":
+                return {"ok": True, "operation_id": "txn_1_bbbbbbbbbbbbbbbb"}
+            return {"ok": False, "error": "embedart did not confirm", "status": "Recovery Required"}
+
+        with unittest.mock.patch.object(self.client, "_request", side_effect=fake_request):
+            res = self.client.fetch_and_embed_album_art(42)
+
+        self.assertFalse(res.get("ok"))
+        self.assertEqual(res.get("status"), "Recovery Required")
 
 
 if __name__ == "__main__":
