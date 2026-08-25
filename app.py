@@ -29732,15 +29732,14 @@ def dedup_cleanup():
         return jsonify({
             "ok": False,
             "error": "Beets engine is unavailable; duplicate cleanup was not performed.",
-            "details": _s(ex),
+            "code": getattr(ex, "error_code", "") or "beets_unavailable",
             "dry_run": dry_run,
         }), 503
     except BeetsError as ex:
         return jsonify({
             "ok": False,
             "error": "Beets engine rejected duplicate cleanup planning.",
-            "details": _s(ex),
-            "error_code": getattr(ex, "error_code", ""),
+            "code": getattr(ex, "error_code", "") or "beets_error",
             "dry_run": dry_run,
         }), getattr(ex, "status_code", 400) or 400
 
@@ -29776,7 +29775,7 @@ def dedup_cleanup():
         return jsonify({
             "ok": False,
             "error": "Beets engine is unavailable; duplicate cleanup was not performed.",
-            "details": _s(ex),
+            "code": getattr(ex, "error_code", "") or "beets_unavailable",
             "operation_id": op_id,
             "results": results,
             "dry_run": dry_run,
@@ -29785,8 +29784,7 @@ def dedup_cleanup():
         return jsonify({
             "ok": False,
             "error": "Beets engine rejected duplicate cleanup apply.",
-            "details": _s(ex),
-            "error_code": getattr(ex, "error_code", ""),
+            "code": getattr(ex, "error_code", "") or "beets_error",
             "operation_id": op_id,
             "results": results,
             "dry_run": dry_run,

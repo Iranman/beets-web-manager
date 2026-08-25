@@ -9322,9 +9322,20 @@ def _cleanup_unique_strings(values: Any) -> List[str]:
 
 def _cleanup_resolve_path(path: Path) -> Path:
     try:
-        return path.resolve(strict=False)
+        raw = os.fspath(path)
+    except TypeError:
+        raw = str(path)
+    return Path(os.path.abspath(os.path.normpath(raw)))
+
+
+def _cleanup_validate_path_under_roots(candidate: Any, roots: List[Path]) -> Optional[Path]:
+    try:
+        text = os.fspath(candidate) if isinstance(candidate, Path) else str(candidate)
     except Exception:
-        return path.absolute()
+        return None
+    if not _normpath_within_roots(text, roots):
+        return None
+    return validate_path_under_allowed_roots(text, roots)
 
 
 def _cleanup_normalize_roots(values: Optional[List[str]], fallback: List[str]) -> List[Path]:
@@ -9346,20 +9357,26 @@ def _cleanup_root_for_path(path: Path, roots: List[Path]) -> Optional[Path]:
     return max(matches, key=lambda p: len(p.parts))
 
 
-def _cleanup_stat_record(path: Path) -> Dict[str, Any]:
-    st = path.stat()
+def _cleanup_stat_record(path: Path, root: Optional[Path] = None) -> Dict[str, Any]:
+    path_text = os.path.normpath(str(path))
+    if root is not None and not _normpath_within_roots(path_text, [root]):
+        raise ValueError("cleanup path outside validated root")
+    st = os.stat(path_text)
     return {
         "dev": st.st_dev,
         "ino": st.st_ino,
         "size": st.st_size,
         "mtime_ns": st.st_mtime_ns,
-        "type": "directory" if path.is_dir() else "file",
+        "type": "directory" if os.path.isdir(path_text) else "file",
     }
 
 
-def _cleanup_stat_matches(path: Path, expected: Dict[str, Any]) -> bool:
+def _cleanup_stat_matches(path: Path, expected: Dict[str, Any], root: Optional[Path] = None) -> bool:
     try:
-        st = path.stat()
+        path_text = os.path.normpath(str(path))
+        if root is not None and not _normpath_within_roots(path_text, [root]):
+            return False
+        st = os.stat(path_text)
     except Exception:
         return False
     return (
@@ -9555,27 +9572,31 @@ def create_library_cleanup_plan(
     affected_item_ids: List[int] = []
 
     for raw in raw_paths:
-        requested_path = Path(raw)
-        p = _cleanup_resolve_path(requested_path)
+        display_path = _cleanup_resolve_path(Path(raw))
         rec: Dict[str, Any] = {
             "path": raw,
-            "resolved_path": str(p),
-            "resource": str(p),
+            "resolved_path": str(display_path),
+            "resource": str(display_path),
             "reason": "duplicate cleanup requested by Web Manager",
             "expected_result": "file quarantined before any Beets item row is retired",
             "rollback": "quarantined file is restored before captured DB rows are restored",
             "ok": False,
         }
-        root = _cleanup_root_for_path(requested_path, cleanup_roots) or _cleanup_root_for_path(p, cleanup_roots)
-        root_type = "music" if root and root in music_roots else "staging"
+        if not _normpath_within_roots(raw, cleanup_roots):
+            rec.update(error="Path is outside server-owned cleanup roots", code="library_cleanup_path_out_of_root")
+            results.append(rec)
+            continue
+        p = _cleanup_validate_path_under_roots(raw, cleanup_roots)
+        if p is None:
+            rec.update(error="Symlink source or parent rejected", code="library_cleanup_symlink_rejected")
+            results.append(rec)
+            continue
+        root = _cleanup_root_for_path(p, cleanup_roots)
         if root is None:
             rec.update(error="Path is outside server-owned cleanup roots", code="library_cleanup_path_out_of_root")
             results.append(rec)
             continue
-        if _path_has_symlink_under(requested_path, root) or _path_has_symlink_under(p, root):
-            rec.update(error="Symlink source or parent rejected", code="library_cleanup_symlink_rejected")
-            results.append(rec)
-            continue
+        root_type = "music" if root in music_roots else "staging"
         if not p.exists():
             rec.update(error="File not found", code="library_cleanup_file_missing")
             results.append(rec)
@@ -9609,7 +9630,7 @@ def create_library_cleanup_plan(
             results.append(rec)
             continue
 
-        stat_record = _cleanup_stat_record(p)
+        stat_record = _cleanup_stat_record(p, root)
         item_id = int(item_rows[0]["id"]) if item_rows else None
         quarantine = {
             "source": str(p),
@@ -9713,19 +9734,23 @@ def execute_library_cleanup_apply(
         with _lock_resources(resource_keys):
             quarantines = meta.get("quarantines") or []
             db_item_deletes = meta.get("db_item_deletes") or []
+            validated_quarantines: List[Dict[str, Any]] = []
             for q in quarantines:
-                sp = Path(q["source"])
+                source_text = str(q.get("source") or "")
+                if not source_text or not _normpath_within_roots(source_text, cleanup_roots):
+                    return _fail(f"Source outside allowed roots: {source_text}", "library_cleanup_path_out_of_root")
+                sp = _cleanup_validate_path_under_roots(source_text, cleanup_roots)
+                if sp is None:
+                    return _fail(f"Symlink detected on source: {source_text}", "library_cleanup_symlink_rejected")
                 root = _cleanup_root_for_path(sp, cleanup_roots)
                 expected_root = _cleanup_resolve_path(Path(q.get("root") or root or "."))
                 if root is None or not _path_under(sp, expected_root):
                     return _fail(f"Source outside allowed roots: {sp}", "library_cleanup_path_out_of_root")
-                if _path_has_symlink_under(sp, root):
-                    return _fail(f"Symlink detected on source: {sp}", "library_cleanup_symlink_rejected")
                 if not sp.exists() or not sp.is_file():
                     return _fail(f"Source file missing before apply: {sp}", "library_cleanup_file_missing")
                 if sp.suffix.lower() not in _LIBRARY_CLEANUP_AUDIO_EXTS:
                     return _fail(f"Source is not an audio file: {sp}", "library_cleanup_not_audio")
-                if not _cleanup_stat_matches(sp, q.get("stat") or {}):
+                if not _cleanup_stat_matches(sp, q.get("stat") or {}, root):
                     return _fail(f"Source file changed since plan: {sp}", "library_cleanup_toctou_mismatch")
                 item_rows = _library_cleanup_item_rows_for_path(lib_db, sp, music_roots) if lib_db else []
                 expected_ids = sorted(int(i) for i in (q.get("db_item_ids") or []))
@@ -9734,23 +9759,28 @@ def execute_library_cleanup_apply(
                 art_refs = _library_cleanup_album_art_refs_for_path(lib_db, sp, music_roots) if lib_db else []
                 if art_refs:
                     return _fail(f"File became referenced by albums.artpath: {sp}", "library_cleanup_artpath_referenced")
+                validated_quarantines.append({"plan": q, "source": sp, "root": root})
 
             store.update(operation_id, status="Running", metadata={**meta, "mutation_started": True})
-            q_base = Path(quarantine_base_root or meta.get("quarantine_base_root") or os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine"))
+            q_base = _cleanup_resolve_path(Path(quarantine_base_root or meta.get("quarantine_base_root") or os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")))
             q_dir = q_base / operation_id
+            q_dir_text = os.path.normpath(str(q_dir))
+            if not _normpath_within_roots(q_dir_text, [q_base]) or _path_has_symlink_under(q_base, q_base):
+                return _fail("Quarantine root rejected", "library_cleanup_quarantine_path_rejected")
             quarantined_records: List[Dict[str, Any]] = []
-            for idx, q in enumerate(quarantines):
-                sp = Path(q["source"])
+            for idx, checked in enumerate(validated_quarantines):
+                q = checked["plan"]
+                sp = checked["source"]
                 digest = hashlib.sha256(str(sp).encode("utf-8", "surrogateescape")).hexdigest()[:16]
-                q_dir.mkdir(parents=True, exist_ok=True)
-                q_root = _cleanup_resolve_path(q_base)
-                q_target = q_dir / f"{idx:04d}_{digest}_{_library_cleanup_safe_leaf(sp.name)}"
-                if not _path_under(q_target, q_root) or _path_has_symlink_under(q_target.parent, q_root):
+                os.makedirs(q_dir_text, mode=0o700, exist_ok=True)
+                q_target_raw = Path(q_dir_text) / f"{idx:04d}_{digest}_{_library_cleanup_safe_leaf(sp.name)}"
+                q_target = _cleanup_validate_path_under_roots(q_target_raw, [q_base])
+                if q_target is None or _path_has_symlink_under(q_target.parent, q_base) or q_target.exists():
                     return _fail(f"Quarantine path rejected for {sp}", "library_cleanup_quarantine_path_rejected")
                 try:
                     _safe_rename(sp, q_target)
                 except OSError as ex:
-                    return _fail(f"Could not quarantine file {sp}: {ex}", "library_cleanup_quarantine_failed")
+                    return _fail(f"Could not quarantine file {sp}: {type(ex).__name__}", "library_cleanup_quarantine_failed")
                 quarantined_records.append({
                     "source": str(sp),
                     "quarantined": str(q_target),
@@ -9786,7 +9816,9 @@ def execute_library_cleanup_apply(
                 store.update(operation_id, metadata={**store.get(operation_id).get("metadata", {}), "db_mutated": True, "deleted_items_count": deleted_items})
 
             for qr in quarantined_records:
-                if Path(qr["source"]).exists() or not Path(qr["quarantined"]).exists():
+                source_path = _cleanup_validate_path_under_roots(qr.get("source"), cleanup_roots)
+                quarantine_path = _cleanup_validate_path_under_roots(qr.get("quarantined"), [q_base])
+                if source_path is None or quarantine_path is None or source_path.exists() or not quarantine_path.exists():
                     return _fail("Post-apply verification failed for quarantined file", "library_cleanup_verification_failed")
             if db_item_deletes and lib_db and Path(lib_db).exists():
                 con = sqlite3.connect(lib_db, timeout=10)
@@ -9951,13 +9983,15 @@ def create_folder_cleanup_plan(
         return {"ok": False, "error": "source folder required", "code": "folder_cleanup_invalid_payload"}
 
     allowed_roots = _cleanup_normalize_roots(music_allowed_roots, [str(os.environ.get("MUSIC_ROOT", "/music"))])
-    src_requested = Path(src_folder)
-    src_p = _cleanup_resolve_path(src_requested)
-    root = _cleanup_root_for_path(src_requested, allowed_roots) or _cleanup_root_for_path(src_p, allowed_roots)
+    src_display = _cleanup_resolve_path(Path(src_folder))
+    if not _normpath_within_roots(src_folder, allowed_roots):
+        return {"ok": False, "error": f"Folder outside allowed root: {src_display}", "code": "folder_cleanup_path_out_of_root"}
+    src_p = _cleanup_validate_path_under_roots(src_folder, allowed_roots)
+    if src_p is None:
+        return {"ok": False, "error": f"Symlink rejected: {src_display}", "code": "folder_cleanup_symlink_rejected"}
+    root = _cleanup_root_for_path(src_p, allowed_roots)
     if root is None:
-        return {"ok": False, "error": f"Folder outside allowed root: {src_p}", "code": "folder_cleanup_path_out_of_root"}
-    if _path_has_symlink_under(src_requested, root) or _path_has_symlink_under(src_p, root):
-        return {"ok": False, "error": f"Symlink rejected: {src_p}", "code": "folder_cleanup_symlink_rejected"}
+        return {"ok": False, "error": f"Folder outside allowed root: {src_display}", "code": "folder_cleanup_path_out_of_root"}
 
     file_moves: List[Dict[str, Any]] = []
     dir_removals: List[Any] = []
@@ -9978,7 +10012,7 @@ def create_folder_cleanup_plan(
             refs = _library_cleanup_db_refs_beneath_folder(db_path or "", src_p, allowed_roots)
             if refs:
                 return {"ok": False, "error": "Directory still has Beets DB references", "code": "folder_cleanup_db_references", "references": refs[:20]}
-            dir_removals.append({"path": str(src_p), "stat": _cleanup_stat_record(src_p), "expected_empty": True})
+            dir_removals.append({"path": str(src_p), "stat": _cleanup_stat_record(src_p, root), "expected_empty": True})
     elif action in ("safe_rename", "rename_folder") and target_folder:
         tgt_p = _cleanup_resolve_path(Path(target_folder))
         tgt_root = _cleanup_root_for_path(tgt_p, allowed_roots)
@@ -10075,7 +10109,7 @@ def execute_folder_cleanup_apply(
                 if _path_has_symlink_under(sp, root):
                     return _fail(f"Symlink detected on source: {sp}", "folder_cleanup_symlink_rejected")
                 if sp.exists() and "stat" in fm:
-                    if not _cleanup_stat_matches(sp, fm["stat"]):
+                    if not _cleanup_stat_matches(sp, fm["stat"], root):
                         return _fail(f"Source file stat changed: {sp}", "folder_cleanup_toctou_mismatch")
 
             store.update(operation_id, status="Running", metadata={**meta, "mutation_started": True})
@@ -10136,7 +10170,7 @@ def execute_folder_cleanup_apply(
                 expected = spec.get("stat") if isinstance(spec, dict) else None
                 if expected:
                     try:
-                        current = _cleanup_stat_record(dp)
+                        current = _cleanup_stat_record(dp, root)
                     except Exception:
                         return _fail(f"Directory disappeared before removal: {dp}", "folder_cleanup_toctou_mismatch")
                     if current.get("dev") != expected.get("dev") or current.get("ino") != expected.get("ino"):
