@@ -9357,9 +9357,10 @@ def _cleanup_root_for_path(path: Path, roots: List[Path]) -> Optional[Path]:
     return max(matches, key=lambda p: len(p.parts))
 
 
-def _cleanup_stat_record(path: Path, root: Optional[Path] = None) -> Dict[str, Any]:
-    path_text = os.path.normpath(str(path))
-    if root is not None and not _normpath_within_roots(path_text, [root]):
+def _cleanup_stat_record(path: Path, root: Path) -> Dict[str, Any]:
+    path_text = os.path.abspath(os.path.normpath(str(path)))
+    root_text = os.path.abspath(os.path.normpath(str(root)))
+    if path_text != root_text and not path_text.startswith(root_text + os.sep):
         raise ValueError("cleanup path outside validated root")
     st = os.stat(path_text)
     return {
@@ -9371,10 +9372,11 @@ def _cleanup_stat_record(path: Path, root: Optional[Path] = None) -> Dict[str, A
     }
 
 
-def _cleanup_stat_matches(path: Path, expected: Dict[str, Any], root: Optional[Path] = None) -> bool:
+def _cleanup_stat_matches(path: Path, expected: Dict[str, Any], root: Path) -> bool:
     try:
-        path_text = os.path.normpath(str(path))
-        if root is not None and not _normpath_within_roots(path_text, [root]):
+        path_text = os.path.abspath(os.path.normpath(str(path)))
+        root_text = os.path.abspath(os.path.normpath(str(root)))
+        if path_text != root_text and not path_text.startswith(root_text + os.sep):
             return False
         st = os.stat(path_text)
     except Exception:
@@ -9597,11 +9599,18 @@ def create_library_cleanup_plan(
             results.append(rec)
             continue
         root_type = "music" if root in music_roots else "staging"
-        if not p.exists():
+        safe_path_text = os.path.abspath(os.path.normpath(str(p)))
+        root_text = os.path.abspath(os.path.normpath(str(root)))
+        if safe_path_text != root_text and not safe_path_text.startswith(root_text + os.sep):
+            rec.update(error="Path is outside server-owned cleanup roots", code="library_cleanup_path_out_of_root")
+            results.append(rec)
+            continue
+        p = Path(safe_path_text)
+        if not os.path.exists(safe_path_text):
             rec.update(error="File not found", code="library_cleanup_file_missing")
             results.append(rec)
             continue
-        if not p.is_file():
+        if not os.path.isfile(safe_path_text):
             rec.update(error="Path is not a file", code="library_cleanup_not_file")
             results.append(rec)
             continue
@@ -9746,7 +9755,12 @@ def execute_library_cleanup_apply(
                 expected_root = _cleanup_resolve_path(Path(q.get("root") or root or "."))
                 if root is None or not _path_under(sp, expected_root):
                     return _fail(f"Source outside allowed roots: {sp}", "library_cleanup_path_out_of_root")
-                if not sp.exists() or not sp.is_file():
+                safe_path_text = os.path.abspath(os.path.normpath(str(sp)))
+                root_text = os.path.abspath(os.path.normpath(str(root)))
+                if safe_path_text != root_text and not safe_path_text.startswith(root_text + os.sep):
+                    return _fail(f"Source outside allowed roots: {sp}", "library_cleanup_path_out_of_root")
+                sp = Path(safe_path_text)
+                if not os.path.exists(safe_path_text) or not os.path.isfile(safe_path_text):
                     return _fail(f"Source file missing before apply: {sp}", "library_cleanup_file_missing")
                 if sp.suffix.lower() not in _LIBRARY_CLEANUP_AUDIO_EXTS:
                     return _fail(f"Source is not an audio file: {sp}", "library_cleanup_not_audio")
@@ -9763,9 +9777,11 @@ def execute_library_cleanup_apply(
 
             store.update(operation_id, status="Running", metadata={**meta, "mutation_started": True})
             q_base = _cleanup_resolve_path(Path(quarantine_base_root or meta.get("quarantine_base_root") or os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")))
-            q_dir = q_base / operation_id
-            q_dir_text = os.path.normpath(str(q_dir))
-            if not _normpath_within_roots(q_dir_text, [q_base]) or _path_has_symlink_under(q_base, q_base):
+            q_base_text = os.path.abspath(os.path.normpath(str(q_base)))
+            q_dir_text = os.path.abspath(os.path.normpath(str(q_base / operation_id)))
+            if q_dir_text != q_base_text and not q_dir_text.startswith(q_base_text + os.sep):
+                return _fail("Quarantine root rejected", "library_cleanup_quarantine_path_rejected")
+            if _path_has_symlink_under(q_base, q_base):
                 return _fail("Quarantine root rejected", "library_cleanup_quarantine_path_rejected")
             quarantined_records: List[Dict[str, Any]] = []
             for idx, checked in enumerate(validated_quarantines):
@@ -9773,9 +9789,11 @@ def execute_library_cleanup_apply(
                 sp = checked["source"]
                 digest = hashlib.sha256(str(sp).encode("utf-8", "surrogateescape")).hexdigest()[:16]
                 os.makedirs(q_dir_text, mode=0o700, exist_ok=True)
-                q_target_raw = Path(q_dir_text) / f"{idx:04d}_{digest}_{_library_cleanup_safe_leaf(sp.name)}"
-                q_target = _cleanup_validate_path_under_roots(q_target_raw, [q_base])
-                if q_target is None or _path_has_symlink_under(q_target.parent, q_base) or q_target.exists():
+                q_target_text = os.path.abspath(os.path.normpath(str(Path(q_dir_text) / f"{idx:04d}_{digest}_{_library_cleanup_safe_leaf(sp.name)}")))
+                if q_target_text == q_base_text or not q_target_text.startswith(q_base_text + os.sep):
+                    return _fail(f"Quarantine path rejected for {sp}", "library_cleanup_quarantine_path_rejected")
+                q_target = Path(q_target_text)
+                if _path_has_symlink_under(q_target.parent, q_base) or os.path.exists(q_target_text):
                     return _fail(f"Quarantine path rejected for {sp}", "library_cleanup_quarantine_path_rejected")
                 try:
                     _safe_rename(sp, q_target)
@@ -9816,9 +9834,17 @@ def execute_library_cleanup_apply(
                 store.update(operation_id, metadata={**store.get(operation_id).get("metadata", {}), "db_mutated": True, "deleted_items_count": deleted_items})
 
             for qr in quarantined_records:
-                source_path = _cleanup_validate_path_under_roots(qr.get("source"), cleanup_roots)
-                quarantine_path = _cleanup_validate_path_under_roots(qr.get("quarantined"), [q_base])
-                if source_path is None or quarantine_path is None or source_path.exists() or not quarantine_path.exists():
+                source_text = os.path.abspath(os.path.normpath(str(qr.get("source") or "")))
+                quarantine_text = os.path.abspath(os.path.normpath(str(qr.get("quarantined") or "")))
+                source_root = _cleanup_root_for_path(Path(source_text), cleanup_roots)
+                if source_root is None:
+                    return _fail("Post-apply verification failed for quarantined file", "library_cleanup_verification_failed")
+                source_root_text = os.path.abspath(os.path.normpath(str(source_root)))
+                if source_text != source_root_text and not source_text.startswith(source_root_text + os.sep):
+                    return _fail("Post-apply verification failed for quarantined file", "library_cleanup_verification_failed")
+                if quarantine_text == q_base_text or not quarantine_text.startswith(q_base_text + os.sep):
+                    return _fail("Post-apply verification failed for quarantined file", "library_cleanup_verification_failed")
+                if os.path.exists(source_text) or not os.path.exists(quarantine_text):
                     return _fail("Post-apply verification failed for quarantined file", "library_cleanup_verification_failed")
             if db_item_deletes and lib_db and Path(lib_db).exists():
                 con = sqlite3.connect(lib_db, timeout=10)
@@ -9998,9 +10024,14 @@ def create_folder_cleanup_plan(
     dir_renames: List[Dict[str, Any]] = []
 
     if action in ("remove_empty_source", "remove_empty"):
-        if not src_p.exists():
+        src_path_text = os.path.abspath(os.path.normpath(str(src_p)))
+        root_text = os.path.abspath(os.path.normpath(str(root)))
+        if src_path_text != root_text and not src_path_text.startswith(root_text + os.sep):
+            return {"ok": False, "error": f"Folder outside allowed root: {src_display}", "code": "folder_cleanup_path_out_of_root"}
+        src_p = Path(src_path_text)
+        if not os.path.exists(src_path_text):
             pass
-        elif not src_p.is_dir():
+        elif not os.path.isdir(src_path_text):
             return {"ok": False, "error": f"Source is not a directory: {src_p}", "code": "folder_cleanup_not_directory"}
         else:
             try:
