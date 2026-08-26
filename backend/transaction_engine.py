@@ -10617,11 +10617,21 @@ def execute_library_cleanup_apply(
                     return _fail(f"Source file changed since plan: {sp}", "library_cleanup_toctou_mismatch")
                 if sp.suffix.lower() not in _LIBRARY_CLEANUP_AUDIO_EXTS:
                     return _fail(f"Source is not an audio file: {sp}", "library_cleanup_not_audio")
-                item_rows = _library_cleanup_item_rows_for_path(lib_db, sp, music_roots) if lib_db else []
+                # Round-99-reconciliation (final review, section 12/20):
+                # these two helpers open their own sqlite3 connection and
+                # can raise sqlite3.Error (a broken/locked/schema-changed
+                # DB) -- caught here, before any file has been touched, so
+                # it fails closed exactly like every other pre-mutation
+                # rejection in this loop rather than crashing out with an
+                # unhandled exception.
+                try:
+                    item_rows = _library_cleanup_item_rows_for_path(lib_db, sp, music_roots) if lib_db else []
+                    art_refs = _library_cleanup_album_art_refs_for_path(lib_db, sp, music_roots) if lib_db else []
+                except sqlite3.Error as ex:
+                    return _fail(f"Database error while revalidating {sp}: {ex}", "library_cleanup_db_error")
                 expected_ids = sorted(int(i) for i in (q.get("db_item_ids") or []))
                 if sorted(int(r["id"]) for r in item_rows) != expected_ids:
                     return _fail(f"Beets item references changed since plan for {sp}", "library_cleanup_db_reference_changed")
-                art_refs = _library_cleanup_album_art_refs_for_path(lib_db, sp, music_roots) if lib_db else []
                 if art_refs:
                     return _fail(f"File became referenced by albums.artpath: {sp}", "library_cleanup_artpath_referenced")
                 validated_quarantines.append({"plan": q, "source": sp, "root": root})
@@ -10696,16 +10706,34 @@ def execute_library_cleanup_apply(
                     return _fail("Beets library database not found before DB retirement", "library_cleanup_db_not_found")
                 con = sqlite3.connect(lib_db, timeout=10)
                 try:
-                    cur = con.cursor()
-                    for spec in db_item_deletes:
-                        iid = int(spec["id"])
-                        cur.execute("DELETE FROM items WHERE id=?", (iid,))
-                        if cur.rowcount != 1:
+                    try:
+                        cur = con.cursor()
+                        for spec in db_item_deletes:
+                            iid = int(spec["id"])
+                            cur.execute("DELETE FROM items WHERE id=?", (iid,))
+                            if cur.rowcount != 1:
+                                con.rollback()
+                                return _fail(f"Expected to delete exactly 1 item row for id={iid}, affected {cur.rowcount}.", "library_cleanup_rowcount_mismatch")
+                            deleted_items += 1
+                        con.commit()
+                        db_mutated = True
+                    except sqlite3.Error as ex:
+                        # Round-99-reconciliation (final review, section 12):
+                        # this used to propagate as an unhandled exception,
+                        # leaving the transaction stuck at "Running" forever
+                        # (never Failed, never Completed) even though the
+                        # file(s) were already safely quarantined and
+                        # rollback_library_cleanup() remained callable. A
+                        # controlled family must never let its own DB layer
+                        # crash out of Apply uncaught -- report it the same
+                        # way the rowcount-mismatch case above already does:
+                        # a truthful Failed with rollback_available=True,
+                        # never a silent hang or a false Completed.
+                        try:
                             con.rollback()
-                            return _fail(f"Expected to delete exactly 1 item row for id={iid}, affected {cur.rowcount}.", "library_cleanup_rowcount_mismatch")
-                        deleted_items += 1
-                    con.commit()
-                    db_mutated = True
+                        except sqlite3.Error:
+                            pass
+                        return _fail(f"Database error while retiring duplicate item row(s): {ex}", "library_cleanup_db_error")
                 finally:
                     con.close()
                 store.update(operation_id, metadata={**store.get(operation_id).get("metadata", {}), "db_mutated": True, "deleted_items_count": deleted_items})
@@ -10713,9 +10741,12 @@ def execute_library_cleanup_apply(
             if db_item_deletes and lib_db and Path(lib_db).exists():
                 con = sqlite3.connect(lib_db, timeout=10)
                 try:
-                    for spec in db_item_deletes:
-                        if con.execute("SELECT id FROM items WHERE id=?", (int(spec["id"]),)).fetchone() is not None:
-                            return _fail(f"Post-apply verification failed: item {spec['id']} still present", "library_cleanup_verification_failed")
+                    try:
+                        for spec in db_item_deletes:
+                            if con.execute("SELECT id FROM items WHERE id=?", (int(spec["id"]),)).fetchone() is not None:
+                                return _fail(f"Post-apply verification failed: item {spec['id']} still present", "library_cleanup_verification_failed")
+                    except sqlite3.Error as ex:
+                        return _fail(f"Database error during post-apply verification: {ex}", "library_cleanup_db_error")
                 finally:
                     con.close()
 

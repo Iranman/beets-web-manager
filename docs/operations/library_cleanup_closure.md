@@ -1,10 +1,10 @@
 # SEC-002 / ARCH-003 Library Cleanup Closure
 
-Status: Draft PR #99. Overall ARCH-003 remains In Progress.
+Status: PR #99, rebased onto Wave 25 (`main` @ `226754059e1eb17fbca889e4f3aa668387305f86`) after Wave 25/PR #100 merged first. Overall ARCH-003 remains In Progress. See "Rebase onto Wave 25 main" below for the current-main-relative census and result -- the numbers immediately below this line are the *original*, now-superseded Wave 24-relative starting record and are kept for history, not as the authoritative current state.
 
-Starting baseline: `b9a96bdfa6b9bf478dd111a8eb038d77cee5be38`.
-Starting inventory: 506 total sinks, 185 unresolved, `library_cleanup` unresolved = 9.
-Final branch-relative inventory after this change: 506 total sinks, 176 unresolved, `library_cleanup` unresolved = 0.
+Starting baseline (original, Wave 24-relative): `b9a96bdfa6b9bf478dd111a8eb038d77cee5be38`.
+Starting inventory (original): 506 total sinks, 185 unresolved, `library_cleanup` unresolved = 9.
+Final branch-relative inventory (original, before the Wave 25 rebase): 506 total sinks, 176 unresolved, `library_cleanup` unresolved = 0.
 
 ## Exact Starting Census
 
@@ -78,3 +78,86 @@ Focused regression coverage:
 - `tests/test_engine_unavailable_failures.py`: BeetsClient `plan_library_cleanup()` raises `BeetsUnavailableError` on engine transport failure.
 - `tests/test_album_lifecycle_wave24_real_ipc.py`: real HTTP IPC Plan/Apply/Rollback for `library_cleanup_v1`, plus engine-offline fail-closed coverage for the new client method.
 - `scripts/verify_two_service_docker_acceptance.py`: seeds a dedicated cleanup duplicate and exercises production `/api/dedup/cleanup` through Web Manager to Beets Engine, then verifies the same route does not mutate DB/media while the engine is stopped.
+## Rebase onto Wave 25 main
+
+Wave 25 (PR #100, `confirmed_import_v1`, `album_artwork_fetch_v1`, MusicBrainz plugin handling,
+`--quiet-fallback skip`, crash-resume failpoint acceptance, and a corrected `import_reconciliation`
+census) merged to `main` first, at `226754059e1eb17fbca889e4f3aa668387305f86`. GitHub then reported
+this PR as non-mergeable. Brought forward by merging current `main` into this branch and resolving
+every conflict from current main's own code, semantically -- never by mechanically restoring this
+PR's older file snapshots over Wave 25's, and never by choosing a whole shared file from either side
+without inspection.
+
+**Conflicts encountered** (3 files; every other shared file -- `app.py`, `backend/beets_client.py`,
+`backend/beets_control_agent.py`, `backend/transaction_engine.py`,
+`scripts/generate_arch003_mutation_inventory.py`, `docs/TECHNICAL_DEBT.md` -- auto-merged cleanly,
+independently re-verified afterward for silent duplication; none found beyond pre-existing duplicate
+defs already present on both parent branches before this merge):
+
+1. `scripts/verify_two_service_docker_acceptance.py`: both this PR and Wave 25 added a distinct
+   engine-offline check in the same location (this PR's own cleanup-media-unchanged assertion;
+   Wave 25's `wave25_engine_offline_checks()` call for its own routes). Resolved by keeping both --
+   neither supersedes the other.
+2. `security/arch003_mutation_inventory.json`, `security/endpoint_inventory.json`: both generated.
+   Never hand-merged; fully regenerated from the merged source after every code conflict was
+   resolved.
+
+**Real defect found during this rebase's independent re-verification** (not a pre-existing PR #99 bug,
+not a merge artifact -- introduced when the family was originally written, only now caught): in
+`execute_library_cleanup_apply()`, the post-quarantine file-state verification loop (confirming every
+quarantined file's source is gone and its quarantine target exists) ran *after* the DB row deletion
+loop instead of between quarantine and DB deletion, as the family's own documented required sequence
+states (Plan -> quarantine -> verify quarantine -> delete exact DB row -> verify -> Completed). The
+success and mid-quarantine-failure paths were unaffected (both already failed closed before reaching
+DB deletion), but nothing enforced that a quarantine's *post-hoc* state was independently confirmed
+before the harder-to-undo DB delete ran, beyond `_safe_rename()` itself not raising. Reordered so the
+verify-quarantine step runs immediately after all quarantines complete and strictly before any DB
+mutation is attempted.
+
+**Current-main census (regenerated, not carried over from the original table above):**
+
+| Metric | Original (Wave 24-relative) | Current main baseline (before this PR) | After this PR, current main-relative |
+|---|---|---|---|
+| Total sinks | 506 | 475 | 474 |
+| Total unresolved | 185 (start) / 176 (PR99 final) | 134 | 125 |
+| `library_cleanup` unresolved | 9 (start) / 0 (PR99 final) | 9 | **0** |
+| `import_reconciliation` unresolved | n/a (AGY's concurrent domain) | 0 (Wave 25 closure) | **0 (unchanged)** |
+| `config` unresolved | 20 | 20 | 20 |
+| `ai_import` unresolved | 19 | 18 | 18 |
+| `other` unresolved | 96 | 87 | 87 |
+
+All nine original starting blockers were individually re-verified against the current-main function
+bodies (not the old PR #99 snapshot) before relying on their disposition:
+
+1. `_cleanup_broken_managed_runtime` -- unchanged by Wave 25; re-confirmed it rejects path separators,
+   `.`/`..`, root-escape, symlink, and directory targets before `unlink()`, and only removes a runtime
+   binary that fails its own probe. `NON_MEDIA_FILESYSTEM`, domain `config`.
+2. `_cleanup_initial_browser_password_if_replaced` -- unchanged by Wave 25; re-confirmed exact-filename
+   check, symlink checks on the file and its parent, and unlink only after a usable replacement
+   password is confirmed. `CONFIG_STATE`, domain `config`.
+3-4. `dedup_cleanup`'s file unlink and `DELETE FROM items WHERE path=...` -- migrated to engine-side
+   `library_cleanup_v1` (`create_library_cleanup_plan`/`execute_library_cleanup_apply`): quarantine by
+   exact stat-identity-revalidated path, delete by exact captured `item_id` (never a path-based
+   `DELETE`), full pre/post verification. `CONTROLLED_MEDIA_MUTATION`.
+5. `dedup_cleanup`'s empty-parent `rmdir()` -- confirmed the current `_cleanup_empty_parents()` closure
+   in `app.py` calls only `beets_client.plan_folder_cleanup`/`apply_folder_cleanup` (the pre-existing
+   `folder_cleanup_v1` family) walking up to 12 parent levels; no local `rmdir()` remains.
+6-7. `_album_cleanup_remove_empty_tree`'s two `rmdir()` calls -- confirmed the current function in
+   `app.py` also delegates every candidate directory to `beets_client.plan_folder_cleanup`/
+   `apply_folder_cleanup`; no local directory deletion remains, engine-unavailable is logged and
+   skipped, never falls back to a local `rmdir()`.
+8-9. `_playlist_stamp_download_tags`/`_enrich_playlist_file_tags` -- confirmed both write tags only via
+   `beets_client.write_tags()` (pure HTTP, no local fallback) against files reached exclusively through
+   playlist download/staging validation and pre-import enrichment call sites; genuinely staging-only,
+   never reachable against authoritative library media. `STAGING_ONLY`, domain `other`.
+
+All four reclassified sinks (1, 2, 8, 9) carry `human_reviewed: true`, `reviewed_in_pr: 99`, and a
+specific `review_reason` string naming the current-main evidence -- not a blanket or substring-based
+dismissal.
+
+**Wave 25 protection**: this rebase touched none of `confirmed_import_v1`, `album_artwork_fetch_v1`,
+`reimport_source_atomic`/`verify_deterministic_identity`, the `musicbrainz` plugin fix, the
+`--quiet-fallback skip` change, or the crash-resume acceptance failpoint. The full two-service Docker
+acceptance suite (every Wave 24 scenario, every Wave 25 scenario, plus the new library-cleanup
+scenario added by this rebase) was re-run on the final rebased head to prove none of it regressed --
+see the PR body for the exact result.

@@ -1208,15 +1208,36 @@ def main() -> int:
             _fail(f"library duplicate cleanup request failed: {status} {body}")
         else:
             cleanup_host_path = Path(fixture["cleanup_item_path"])
+            canonical_host_path = Path(fixture["item_path"])
             con = sqlite3.connect(fixture["db_path"])
             try:
                 remaining = con.execute("SELECT COUNT(*) FROM items WHERE id=?", (fixture["cleanup_item_id"],)).fetchone()[0]
+                # library_cleanup_v1's whole point is narrow, reviewed
+                # duplicate retirement, not "delete everything nearby" --
+                # explicitly prove the surviving canonical track and its
+                # album row are untouched, not merely that the duplicate
+                # is gone.
+                canonical_row = con.execute(
+                    "SELECT id, album_id FROM items WHERE id=?", (fixture["item_id"],)
+                ).fetchone()
+                album_row = con.execute(
+                    "SELECT id, album, albumartist FROM albums WHERE id=?", (fixture["album_id"],)
+                ).fetchone()
             finally:
                 con.close()
             if cleanup_host_path.exists() or int(remaining or 0) != 0:
                 _fail("library duplicate cleanup did not quarantine the file and retire the DB row")
+            elif not canonical_host_path.exists():
+                _fail("library duplicate cleanup removed the surviving canonical track's file, not just the duplicate")
+            elif not canonical_row or int(canonical_row[1]) != int(fixture["album_id"]):
+                _fail("library duplicate cleanup lost or reparented the surviving canonical item row")
+            elif not album_row or album_row[1] != "Acceptance Album" or album_row[2] != "Acceptance Artist":
+                _fail("library duplicate cleanup left the album row incoherent")
             else:
-                _ok("library duplicate cleanup succeeded through Web Manager -> Beets engine IPC")
+                _ok(
+                    "library duplicate cleanup succeeded through Web Manager -> Beets engine IPC "
+                    "(duplicate quarantined + DB row retired; surviving canonical track and album untouched)"
+                )
 
         print("==> Exercising fix-metadata...")
         status, body = client.request("POST", f"/api/albums/{aid}/fix-metadata",

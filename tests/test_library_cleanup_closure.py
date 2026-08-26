@@ -2,6 +2,7 @@ import ast
 import json
 import os
 import sqlite3
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -101,6 +102,92 @@ class LibraryCleanupTransactionTests(unittest.TestCase):
         self.assertTrue(rollback.get("ok"), msg=rollback)
         self.assertEqual(dup.read_bytes(), original_bytes)
         self.assertEqual(self._item_count(11), 1)
+
+    def test_apply_fails_closed_when_db_delete_errors_after_quarantine_succeeds(self):
+        """Round-99-reconciliation (final review, section 12/20 of the merge
+        brief): required scenario -- file quarantine succeeds, DB deletion
+        fails. Found via direct reproduction (not a mock) that this used to
+        raise an unhandled sqlite3.OperationalError straight out of
+        execute_library_cleanup_apply(), leaving the transaction stuck at
+        "Running" forever instead of reporting Failed. Fixed to report a
+        truthful Failed/rollback_available=True result; this test also
+        proves rollback_library_cleanup() still recovers a fully coherent
+        end state (file restored, DB row untouched-or-restored) afterward.
+
+        Induces the DB failure with a real, OS-level read-only file rather
+        than mocking any part of the engine: SELECTs (the pre-quarantine
+        revalidation) still succeed against a read-only file, so the
+        induced failure lands exactly in the intended window -- after
+        quarantine, on the DELETE -- not earlier."""
+        dup = self.music_dir / "Artist" / "Album" / "duplicate.mp3"
+        dup.parent.mkdir(parents=True)
+        original_bytes = b"duplicate audio"
+        dup.write_bytes(original_bytes)
+        self._insert_item(11, dup)
+
+        plan = transaction_engine.create_library_cleanup_plan(
+            self.store,
+            {"action": "dedup_cleanup", "paths": [str(dup)]},
+            music_allowed_roots=[str(self.music_dir)],
+            staging_allowed_roots=[str(self.staging_dir)],
+            db_path=str(self.db_path),
+            quarantine_base_root=str(self.quarantine_dir),
+        )
+        self.assertTrue(plan.get("ok"), msg=plan)
+
+        original_mode = os.stat(self.db_path).st_mode
+        os.chmod(self.db_path, stat.S_IREAD)
+        try:
+            try:
+                apply_res = transaction_engine.execute_library_cleanup_apply(
+                    self.store,
+                    plan["operation_id"],
+                    music_allowed_roots=[str(self.music_dir)],
+                    staging_allowed_roots=[str(self.staging_dir)],
+                    db_path=str(self.db_path),
+                    quarantine_base_root=str(self.quarantine_dir),
+                )
+            except Exception as ex:  # pragma: no cover -- this is exactly the bug being asserted against
+                self.fail(f"execute_library_cleanup_apply() must never raise an unhandled exception; raised {type(ex).__name__}: {ex}")
+        finally:
+            os.chmod(self.db_path, original_mode)
+
+        if apply_res.get("ok"):
+            # Running as a user (e.g. root in some CI/container contexts)
+            # for whom a read-only file does not actually block writes --
+            # the induction technique itself didn't fire, not a pass on
+            # the thing being tested. Restore state and skip rather than
+            # report a false pass or a false failure.
+            transaction_engine.rollback_library_cleanup(
+                self.store, plan["operation_id"],
+                music_allowed_roots=[str(self.music_dir)],
+                staging_allowed_roots=[str(self.staging_dir)],
+                db_path=str(self.db_path),
+            )
+            self.skipTest("read-only file permission was not enforced in this environment (likely running as root)")
+
+        self.assertFalse(apply_res.get("ok"), msg=apply_res)
+        self.assertEqual(apply_res.get("code"), "library_cleanup_db_error")
+        self.assertTrue(apply_res.get("mutated"))
+        self.assertTrue(apply_res.get("rollback_available"))
+        tx = self.store.get(plan["operation_id"])
+        self.assertEqual(tx.get("status"), "Failed")
+        self.assertNotEqual(tx.get("status"), "Running", "transaction must never be left stuck mid-apply")
+
+        # The file was already quarantined before the DB error.
+        self.assertFalse(dup.exists())
+
+        rollback = transaction_engine.rollback_library_cleanup(
+            self.store,
+            plan["operation_id"],
+            music_allowed_roots=[str(self.music_dir)],
+            staging_allowed_roots=[str(self.staging_dir)],
+            db_path=str(self.db_path),
+        )
+        self.assertTrue(dup.exists())
+        self.assertEqual(dup.read_bytes(), original_bytes)
+        self.assertEqual(self._item_count(11), 1)
+        self.assertIn(rollback.get("status"), {"Rolled Back", "Partially Rolled Back"})
 
     def test_duplicate_cleanup_rejects_outside_root(self):
         outside = self.root / "outside.mp3"
