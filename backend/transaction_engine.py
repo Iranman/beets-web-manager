@@ -9363,10 +9363,8 @@ def _cleanup_stat_record(path: Path, root: Path) -> Dict[str, Any]:
     if path_text != root_text and not path_text.startswith(root_text + os.sep):
         raise ValueError("cleanup path outside validated root")
     # path_text is bounded to the server-owned cleanup root immediately above.
-    # codeql[py/path-injection]
-    st = os.stat(path_text)
-    # codeql[py/path-injection]
-    is_dir = os.path.isdir(path_text)
+    st = os.stat(path_text)  # codeql[py/path-injection]
+    is_dir = os.path.isdir(path_text)  # codeql[py/path-injection]
     return {
         "dev": st.st_dev,
         "ino": st.st_ino,
@@ -9383,8 +9381,7 @@ def _cleanup_stat_matches(path: Path, expected: Dict[str, Any], root: Path) -> b
         if path_text != root_text and not path_text.startswith(root_text + os.sep):
             return False
         # path_text is bounded to the server-owned cleanup root immediately above.
-        # codeql[py/path-injection]
-        st = os.stat(path_text)
+        st = os.stat(path_text)  # codeql[py/path-injection]
     except Exception:
         return False
     return (
@@ -9613,14 +9610,12 @@ def create_library_cleanup_plan(
             continue
         p = Path(safe_path_text)
         # safe_path_text is bounded to the selected server-owned cleanup root above.
-        # codeql[py/path-injection]
-        planned_source_exists = os.path.exists(safe_path_text)
+        planned_source_exists = os.path.exists(safe_path_text)  # codeql[py/path-injection]
         if not planned_source_exists:
             rec.update(error="File not found", code="library_cleanup_file_missing")
             results.append(rec)
             continue
-        # codeql[py/path-injection]
-        planned_source_is_file = os.path.isfile(safe_path_text)
+        planned_source_is_file = os.path.isfile(safe_path_text)  # codeql[py/path-injection]
         if not planned_source_is_file:
             rec.update(error="Path is not a file", code="library_cleanup_not_file")
             results.append(rec)
@@ -9772,10 +9767,8 @@ def execute_library_cleanup_apply(
                     return _fail(f"Source outside allowed roots: {sp}", "library_cleanup_path_out_of_root")
                 sp = Path(safe_path_text)
                 # safe_path_text is bounded to the selected server-owned cleanup root above.
-                # codeql[py/path-injection]
-                source_exists = os.path.exists(safe_path_text)
-                # codeql[py/path-injection]
-                source_is_file = os.path.isfile(safe_path_text)
+                source_exists = os.path.exists(safe_path_text)  # codeql[py/path-injection]
+                source_is_file = os.path.isfile(safe_path_text)  # codeql[py/path-injection]
                 if not source_exists or not source_is_file:
                     return _fail(f"Source file missing before apply: {sp}", "library_cleanup_file_missing")
                 if sp.suffix.lower() not in _LIBRARY_CLEANUP_AUDIO_EXTS:
@@ -9810,8 +9803,7 @@ def execute_library_cleanup_apply(
                     return _fail(f"Quarantine path rejected for {sp}", "library_cleanup_quarantine_path_rejected")
                 q_target = Path(q_target_text)
                 # q_target_text is a transaction-generated leaf below the server-owned quarantine root.
-                # codeql[py/path-injection]
-                quarantine_target_exists = os.path.exists(q_target_text)
+                quarantine_target_exists = os.path.exists(q_target_text)  # codeql[py/path-injection]
                 if _path_has_symlink_under(q_target.parent, q_base) or quarantine_target_exists:
                     return _fail(f"Quarantine path rejected for {sp}", "library_cleanup_quarantine_path_rejected")
                 try:
@@ -10049,13 +10041,11 @@ def create_folder_cleanup_plan(
             return {"ok": False, "error": f"Folder outside allowed root: {src_display}", "code": "folder_cleanup_path_out_of_root"}
         src_p = Path(src_path_text)
         # src_path_text is bounded to the selected server-owned cleanup root above.
-        # codeql[py/path-injection]
-        cleanup_source_exists = os.path.exists(src_path_text)
+        cleanup_source_exists = os.path.exists(src_path_text)  # codeql[py/path-injection]
         if not cleanup_source_exists:
             pass
         else:
-            # codeql[py/path-injection]
-            cleanup_source_is_dir = os.path.isdir(src_path_text)
+            cleanup_source_is_dir = os.path.isdir(src_path_text)  # codeql[py/path-injection]
             if not cleanup_source_is_dir:
                 return {"ok": False, "error": f"Source is not a directory: {src_p}", "code": "folder_cleanup_not_directory"}
             try:
