@@ -506,3 +506,22 @@ passes). The underlying reason the real Docker fixture's copy was partial is not
 evidence -- the next real Docker run's `missing_item_ids`/`files_present` diagnostic, now finally surfaced, is
 expected to make that root cause identifiable without further guessing, per the same "prove what Beets actually
 did" discipline used for every other finding in this round.
+
+**Round 4, fourth real Docker iteration**: the `missing_item_ids`/debug diagnostics added by the previous fix
+finally made the real cause directly visible instead of requiring another guess. All 12 of the album's item
+paths were reported missing, and every one was the exact same shape: `b'/data/media/music/Radiohead/OK
+Computer/01 Airbag.flac'` -- a full ABSOLUTE path under the ENGINE CONTAINER's own `/data/media/music`, not a
+path relative to it. That path is completely real and valid from *inside* the engine container (exactly the
+view `transaction_engine._capture_and_verify()` checks from, which is why the engine's own verification
+correctly reported `ok: True` and why the third-round fix's stricter all-items check still didn't fail this
+case for the wrong reason). It is not a real filesystem entry on the GitHub Actions runner (the *host*), where
+this acceptance script itself runs -- only the bind-mounted host directory (`music_dir`, the whole point of
+this check: proving files really landed on the host bind mount, not just inside the container's own process
+view) has the actual file. `_resolve_db_path`'s long-standing comment that "a real Beets library stores
+items.path RELATIVE to the music directory whenever the absolute path is inside it" turned out not to hold for
+this real `beet import` invocation (Beets 2.13.1) -- it stored the full absolute container-side path instead.
+This is an acceptance-script-only bug, not a production one: production code only ever needs to resolve these
+paths from inside the same container that wrote them, where they are already correct as-is. Fixed by having the
+script's own host-side `_item_path_exists()` rebase an absolute path under the well-known container music root
+(`/data/media/music`) onto the host-mounted `music_dir` before checking, falling back to a literal existence
+check for any other absolute path.

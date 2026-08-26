@@ -578,15 +578,36 @@ def run_wave25_scenarios(client: "HttpClient", downloads_dir: Path, music_dir: P
                         fresh_album_id = int(row["id"])
                         items = con.execute("SELECT path FROM items WHERE album_id=?", (fresh_album_id,)).fetchall()
                         item_count = len(items)
-                        # A real Beets library stores items.path RELATIVE to
-                        # the music directory whenever the absolute path is
-                        # inside it (see transaction_engine._resolve_db_path's
-                        # own note on this) -- resolve against the
-                        # host-mounted music root, don't assume absolute.
+                        # Round 4, fourth real Docker iteration (real
+                        # evidence, not a guess): a real Beets 2.13.1
+                        # `beet import` here stores items.path as the FULL
+                        # ABSOLUTE path under this run's `directory:` config
+                        # -- which is the ENGINE CONTAINER's own
+                        # /data/media/music, not a path relative to it. That
+                        # absolute path is completely valid from *inside*
+                        # the engine container (which is exactly the view
+                        # transaction_engine._capture_and_verify() checks
+                        # from, and why its own verification correctly
+                        # passed) -- but this script runs on the HOST
+                        # (the GH Actions runner / this dev machine), where
+                        # that literal container path does not exist as a
+                        # real filesystem entry; only the bind-mounted host
+                        # directory (`music_dir`) does. Rebase an absolute
+                        # path that falls under the well-known container
+                        # music root onto the host-mounted equivalent before
+                        # checking; fall back to a literal existence check
+                        # for any other absolute path (defensive only, not
+                        # expected here).
                         def _item_path_exists(raw) -> bool:
                             p_str = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
                             p = Path(p_str)
-                            return p.exists() if p.is_absolute() else (music_dir / p).exists()
+                            if not p.is_absolute():
+                                return (music_dir / p).exists()
+                            try:
+                                rel = p.relative_to("/data/media/music")
+                            except ValueError:
+                                return p.exists()
+                            return (music_dir / rel).exists()
                         files_exist = all(_item_path_exists(i[0]) for i in items) if items else False
                         if not files_exist and items:
                             bad_paths = [repr(i[0]) for i in items if not _item_path_exists(i[0])]
