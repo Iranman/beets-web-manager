@@ -88,7 +88,7 @@ class LibraryCleanupTransactionTests(unittest.TestCase):
         self.assertTrue(apply.get("ok"), msg=apply)
         self.assertFalse(dup.exists())
         self.assertEqual(self._item_count(11), 0)
-        quarantined = list((self.quarantine_dir / plan["operation_id"]).iterdir())
+        quarantined = list(self.quarantine_dir.glob(f"{plan['operation_id']}_*"))
         self.assertEqual(len(quarantined), 1)
 
         rollback = transaction_engine.rollback_library_cleanup(

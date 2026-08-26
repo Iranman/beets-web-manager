@@ -159,6 +159,7 @@ def seed_disposable_library(config_dir: Path, music_dir: Path) -> dict:
     import beets.library as bl
 
     config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "reconcile_quarantine").mkdir(parents=True, exist_ok=True)
     music_dir.mkdir(parents=True, exist_ok=True)
 
     (config_dir / "config.yaml").write_text(

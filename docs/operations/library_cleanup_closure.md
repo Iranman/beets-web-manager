@@ -41,9 +41,9 @@ Path/root authority: Control Agent supplies server-owned music and staging roots
 
 Plan is non-mutating: `create_library_cleanup_plan()` only resolves roots, rejects symlinks, validates file type, captures `dev`/`ino`/`size`/`mtime_ns`, captures exact Beets item rows, checks `albums.artpath`, and records expected result/rollback. `create_folder_cleanup_plan()` only verifies an empty directory candidate and DB references.
 
-TOCTOU model: Apply revalidates root containment, symlink components, file type, file stat identity, item-row identity, and `albums.artpath` immediately before mutation. Empty directory Apply revalidates root containment, symlink components, directory identity, immediate emptiness, and DB references before `rmdir()`.
+TOCTOU model: Apply revalidates root containment, symlink components, file type, file stat identity, item-row identity, and `albums.artpath` immediately before mutation. Empty directory Apply revalidates root containment, symlink components, directory type, immediate emptiness, and DB references before `rmdir()`.
 
-Deletion semantics: duplicate files are quarantined under `RECONCILE_QUARANTINE_DIR/<operation_id>` before any Beets row is deleted. Empty directories are removed only when inside the engine-owned root, not symlinked, expected empty, actually empty immediately before mutation, and unreferenced by Beets DB state.
+Deletion semantics: duplicate files are quarantined under `RECONCILE_QUARANTINE_DIR` with transaction-prefixed leaf names before any Beets row is deleted. Empty directories are removed only when inside the engine-owned root, not symlinked, expected empty, actually empty immediately before mutation, and unreferenced by Beets DB state.
 
 Rollback/recovery: `library_cleanup_v1` restores quarantined files first and only then restores captured `items` rows. `folder_cleanup_v1` rollback recreates removed empty directories and reverses recorded moves/renames. Partial rollback reports `Partially Rolled Back` / failed counts rather than false success.
 

@@ -9783,24 +9783,17 @@ def execute_library_cleanup_apply(
             store.update(operation_id, status="Running", metadata={**meta, "mutation_started": True})
             q_base = _cleanup_resolve_path(Path(quarantine_base_root or meta.get("quarantine_base_root") or os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")))
             q_base_text = os.path.abspath(os.path.normpath(str(q_base)))
-            q_dir_text = os.path.abspath(os.path.normpath(str(q_base / operation_id)))
+            q_dir_text = q_base_text
             if q_dir_text != q_base_text and not q_dir_text.startswith(q_base_text + os.sep):
                 return _fail("Quarantine root rejected", "library_cleanup_quarantine_path_rejected")
             if _path_has_symlink_under(q_base, q_base):
                 return _fail("Quarantine root rejected", "library_cleanup_quarantine_path_rejected")
             quarantined_records: List[Dict[str, Any]] = []
-            if validated_quarantines:
-                try:
-                    os.makedirs(q_dir_text, mode=0o700, exist_ok=False)
-                except FileExistsError:
-                    return _fail("Quarantine transaction directory already exists", "library_cleanup_quarantine_path_rejected")
-                except OSError as ex:
-                    return _fail(f"Could not create quarantine directory: {type(ex).__name__}", "library_cleanup_quarantine_failed")
             for idx, checked in enumerate(validated_quarantines):
                 q = checked["plan"]
                 sp = checked["source"]
                 digest = hashlib.sha256(str(sp).encode("utf-8", "surrogateescape")).hexdigest()[:16]
-                q_target_text = os.path.abspath(os.path.normpath(str(Path(q_dir_text) / f"{idx:04d}_{digest}_{_library_cleanup_safe_leaf(sp.name)}")))
+                q_target_text = os.path.abspath(os.path.normpath(str(Path(q_dir_text) / f"{operation_id}_{idx:04d}_{digest}_{_library_cleanup_safe_leaf(sp.name)}")))
                 if q_target_text == q_base_text or not q_target_text.startswith(q_base_text + os.sep):
                     return _fail(f"Quarantine path rejected for {sp}", "library_cleanup_quarantine_path_rejected")
                 q_target = Path(q_target_text)
