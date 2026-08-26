@@ -434,8 +434,10 @@ def seed_wave25_import_source(downloads_dir: Path, subdir: str, track_range=None
         mf = mediafile.MediaFile(str(p))
         mf.title = track["title"]
         mf.artist = artist
+        mf.albumartist = artist
         mf.album = album
         mf.track = idx
+        mf.tracktotal = len(tracklist)
         mf.save()
     return {"container_path": f"/data/torrents/{subdir}", "local_folder": folder}
 

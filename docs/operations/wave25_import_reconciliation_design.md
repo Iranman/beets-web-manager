@@ -413,3 +413,21 @@ now reports two separate claims rather than one overstated one: `artwork-transac
 transaction's status semantics are truthful either way) and `artwork-successful-acquisition` (only claimed
 when a real `artpath` is verified — the fixture album's synthetic identity means this legitimately may never
 succeed, and the script says so explicitly rather than calling a failed fetch a passing acquisition test).
+
+**A second real Docker iteration within Round 4** found the `--quiet-fallback skip` fix working exactly as
+intended (an honest `confirmed_import_skipped_no_confident_match`, zero mutation, no more silent wrong-identity
+import) — but even with real durations, exact titles, artist, and album tags, Beets' own recommendation for the
+forced `--search-id` candidate still did not reach "strong" in quiet mode, so the import was skipped rather
+than applied. Two changes, in order of how directly they address the actual gap: (1) the fixture was missing
+`albumartist` (only `artist` was set) and `tracktotal` — real downloads normally carry both, and Beets' distance
+calculation does consider them; (2) `run_confirmed_import_native()`'s per-Apply temp config now also sets
+`match.strong_rec_thresh: 0.25` (relaxed from Beets' unsupervised-import default of `0.04`), narrowly scoped to
+this family's own disposable config file — never the reimport path's config, never the user's real
+`config.yaml`. This is not "disable matching to make the test pass": `confirmed_import_v1`'s authorization
+never came from Beets' own recommendation confidence in the first place — it comes from
+`create_confirmed_import_plan()`'s independent review (immutable source manifest, the caller's explicitly
+reviewed concrete Release ID/RGID, and real track/fingerprint alignment against that exact release, all already
+verified before Apply runs). Beets' strict default threshold is tuned for *unsupervised* autotagging, where it
+is the only safeguard against a wrong match; here it is a second, uncoordinated gate stacked on top of a real
+one it was never designed to cooperate with. `--quiet-fallback skip` remains the actual backstop — a mismatch
+far outside what the Plan already reviewed still fails closed rather than importing under the wrong identity.

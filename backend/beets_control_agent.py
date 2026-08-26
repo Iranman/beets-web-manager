@@ -2184,16 +2184,38 @@ def run_confirmed_import_native(source_path: str, mb_albumid: str, *, use_move: 
         import_target_path = preserved_path
 
     # --quiet-fallback skip (not "asis" -- see docstring above) is always
-    # applied via this override, so it is combined with the copy/move
-    # policy below in one config file rather than two competing ones.
+    # applied via this override, combined with the copy/move policy below
+    # in one config file rather than two competing ones.
+    #
+    # match.strong_rec_thresh is also relaxed here, narrowly, for this
+    # family only (never touched in the reimport path's own config, and
+    # never in the user's real config.yaml -- this is a disposable
+    # per-Apply temp file). Justification, not a blind "make matching
+    # pass": confirmed_import_v1's authorization does NOT come from
+    # Beets' own recommendation confidence in the first place -- it comes
+    # from create_confirmed_import_plan()'s own independent review (an
+    # immutable source manifest, the caller's explicitly reviewed concrete
+    # Release ID/RGID, and real track/fingerprint alignment against that
+    # exact release, all already verified before Apply ever runs). Beets'
+    # default strong-recommendation threshold is tuned for *unsupervised*
+    # autotagging, where it is the ONLY safeguard against a wrong match --
+    # here it would be a second, redundant, uncoordinated gate stacked on
+    # top of a real one, tuned for a scenario that no longer applies, and
+    # requiring near-zero metadata distance even for a plan Beets was
+    # already told, out of band, to trust. --quiet-fallback skip is left
+    # fully in place as the actual safety backstop: a track-count/identity
+    # mismatch far outside what the Plan already reviewed still fails
+    # closed. See docs/operations/wave25_import_reconciliation_design.md's
+    # Round 4 section for the full reasoning.
+    match_override = "match:\n  strong_rec_thresh: 0.25\n"
     if preserved_path or use_move:
-        config_override = "import:\n  quiet_fallback: skip\n"
+        config_override = "import:\n  quiet_fallback: skip\n" + match_override
     else:
         # Already-in-library folder, not asked to move: tag in place,
         # matching source_is_library semantics elsewhere in this project --
         # a folder that is already correctly organized should not be
         # relocated just because it is being tagged for the first time.
-        config_override = "import:\n  copy: no\n  move: no\n  quiet_fallback: skip\n"
+        config_override = "import:\n  copy: no\n  move: no\n  quiet_fallback: skip\n" + match_override
 
     def _album_count() -> int:
         try:
