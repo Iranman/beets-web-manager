@@ -420,8 +420,30 @@ def seed_wave25_import_source(downloads_dir: Path, subdir: str, track_range=None
     tagged with Beets/Picard" source. No MusicBrainz Release/ReleaseGroup/
     Recording ID is ever written here; see
     assert_wave25_source_has_no_mb_ids, called before every real import
-    request below."""
+    request below.
+
+    FLAC, not WAV (Round 4, second real-Docker iteration on this exact
+    fixture): a real run with correctly-tagged, correct-duration WAV files
+    still could not reach Beets' relaxed recommendation threshold -- the
+    real native `beet import` log showed a plain "Skipping." with the
+    right item count, meaning Beets could not read back the identity this
+    script wrote. WAV has no single, universally-implemented tagging
+    scheme (id3/INFO-chunk/other, version-dependent); the GH runner's own
+    `pip install`ed `mediafile` writing the tag and the engine
+    container's separately-bundled Beets/mediafile version reading it back
+    are not guaranteed to agree on how a WAV's tags are stored. FLAC's
+    Vorbis comment tagging has no such ambiguity. `ffmpeg` (pre-installed
+    on GitHub's ubuntu-latest runners) losslessly converts the same
+    synthetic sine-wave PCM this script has always generated -- the audio
+    content and durations are unchanged, only the container format."""
     import mediafile
+
+    ffmpeg_bin = shutil.which("ffmpeg")
+    if not ffmpeg_bin:
+        raise RuntimeError(
+            "ffmpeg is required to build a realistic, reliably-tagged Wave 25 fixture "
+            "(WAV tagging is not reliable enough for the real Beets import path) but was not found on PATH"
+        )
 
     tracklist = _fetch_release_tracklist(release_id)
     positions = track_range or range(1, len(tracklist) + 1)
@@ -429,8 +451,23 @@ def seed_wave25_import_source(downloads_dir: Path, subdir: str, track_range=None
     folder.mkdir(parents=True, exist_ok=True)
     for idx in positions:
         track = tracklist[idx - 1]
-        p = folder / f"{idx:02d} - {track['title']}.wav"
-        p.write_bytes(_real_wav_bytes(freq=220.0 + idx * 15.0, duration=track["duration_seconds"], rate=4000))
+        wav_bytes = _real_wav_bytes(freq=220.0 + idx * 15.0, duration=track["duration_seconds"], rate=4000)
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_wav:
+            tmp_wav.write(wav_bytes)
+            tmp_wav_path = tmp_wav.name
+        p = folder / f"{idx:02d} - {track['title']}.flac"
+        try:
+            conv = subprocess.run(
+                [ffmpeg_bin, "-y", "-loglevel", "error", "-i", tmp_wav_path, str(p)],
+                capture_output=True, text=True, timeout=60,
+            )
+            if conv.returncode != 0 or not p.exists():
+                raise RuntimeError(f"ffmpeg failed converting fixture track {idx} to FLAC: {conv.stderr}")
+        finally:
+            try:
+                os.unlink(tmp_wav_path)
+            except OSError:
+                pass
         mf = mediafile.MediaFile(str(p))
         mf.title = track["title"]
         mf.artist = artist
@@ -454,7 +491,7 @@ def assert_wave25_source_has_no_mb_ids(local_folder: Path) -> None:
     for."""
     import mediafile
 
-    for wav_path in sorted(local_folder.glob("*.wav")):
+    for wav_path in sorted(local_folder.glob("*.flac")):
         mf = mediafile.MediaFile(str(wav_path))
         for field in ("mb_albumid", "mb_releasegroupid", "mb_trackid", "mb_releasetrackid"):
             value = getattr(mf, field, None)
