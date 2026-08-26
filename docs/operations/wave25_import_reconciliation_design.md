@@ -326,3 +326,90 @@ Track alignment reuses `backend/track_align.py` (`align_tracks`, `resolve_unmatc
 `Dockerfile.beets` now also copies it into the engine image alongside `matching_contract.py`. AcoustID lookups
 reuse the engine-local `_engine_acoustid_lookup()` (already used by the playlist-import identity gate); no new
 matcher or fingerprint client was written.
+
+---
+
+## Round 4 — The Real Docker Failure: `--quiet-fallback asis` and an Unrealistic Fixture
+
+Round 3's `confirmed_import_v1` was built and unit-tested locally, but its native-import path had never run
+against real Docker. The first real run found a genuine bug, not a re-run of the already-fixed
+`verify_deterministic_identity` blocker:
+
+```
+[FAIL] fresh-import: ... ERROR: Beets API request error: Native import reported success
+       but the resulting album could not be verified
+```
+
+**Diagnosis** (proven from the real engine container's own before/after startup-guard log lines, not guessed):
+the host-mounted library went from 1 album / 1 item to 2 albums / 13 items across the run — Beets genuinely
+imported something — but `confirmed_import_v1`'s post-import query for `mb_albumid = <planned Release ID>`
+found nothing. Two compounding causes:
+
+1. **`run_confirmed_import_native()` used `--quiet-fallback asis`**, copied verbatim from
+   `reimport_source_atomic`'s command construction in Round 3. In quiet mode, `asis` lets Beets import the
+   source WITHOUT ever applying the forced `--search-id` candidate whenever its own match confidence for that
+   candidate isn't strong enough — it tags/organizes the files under Beets' own guess (or no MusicBrainz
+   identity at all) instead of failing closed. This is tolerable for `reimport_source_atomic` (the source is
+   already-organized, already-tagged library content being re-verified) but wrong for `confirmed_import_v1`,
+   whose entire authorization model is "trust THIS reviewed release, nothing else." **Fixed**: switched to
+   `--quiet-fallback skip` — if Beets cannot confidently apply the approved release, the import is skipped
+   entirely rather than silently proceeding under an unreviewed identity.
+2. **The Docker fixture was unrealistic**: 12 synthetic WAV files at a flat ~0.3 seconds each, shaped like the
+   real release's tracklist by filename only, against tracks that are actually 2-6 minutes long. Beets' match-
+   confidence scoring for a forced `--search-id` candidate depends heavily on duration/track-count fit (this
+   codebase never fingerprints audio content during a plain import) — an extreme duration mismatch alone was
+   enough to starve that confidence regardless of filename/title similarity. **Fixed**: the acceptance script
+   now fetches the real release's tracklist (title + duration) from MusicBrainz once per run (cached), and
+   generates synthetic audio at the REAL durations, with basic (non-MusicBrainz) tags — title, artist, album,
+   track number — written via `mediafile` (the same tag library Beets itself uses). No MusicBrainz Release/
+   ReleaseGroup/Recording ID is ever written to the fixture; `assert_wave25_source_has_no_mb_ids()` proves this
+   before every real import request, so the test cannot silently pass by accidentally proving the wrong trust
+   model (reimport of pre-tagged content, not confirmed import of untagged content).
+
+**Distinguishing a clean skip from a partial mutation**: switching to `skip` on its own would only change the
+symptom (a truthful "skipped" outcome is still an outcome `execute_confirmed_import_apply` must interpret
+correctly). `run_confirmed_import_native()` now reports `albums_before`/`albums_after` (a plain library album
+count taken immediately before and after the subprocess call), and `execute_confirmed_import_apply()` uses
+that to tell a real "nothing happened" skip (`Failed`, `confirmed_import_skipped_no_confident_match`, zero
+mutation) apart from a genuine partial mutation under the wrong identity (`Recovery Required`,
+`confirmed_import_verification_failed`, as before) — never the same undifferentiated message for both. Bounded,
+redacted native-import diagnostics (return code, stdout/stderr excerpts — paths redacted, never secrets/config
+contents) are now persisted into the transaction's own metadata on either outcome, so a future failure does not
+require re-deriving this from raw container logs by hand.
+
+**A true crash-after-native-success test**: the prior crash/resume scenario only proved "complete an import,
+hard-kill+restart the web-manager container, resubmit" — a restart+idempotency test, not a test of the
+required window (native import succeeds, verification/completion has not happened yet, the process is
+interrupted). Building that window without a timing race required a small, deliberately narrow piece of test
+infrastructure: a single named failpoint, `confirmed_import_after_native`, checked in
+`execute_confirmed_import_apply()` immediately after the `native_import_invoked` crash-safety checkpoint is
+durably persisted and before the post-import capture/verify step. It is inert everywhere except this
+acceptance stack:
+
+- The request field (`_acceptance_failpoint`, threaded through `import_folder_with_id()` →
+  `BeetsClient.apply_confirmed_import()` → `POST /imports/confirmed/apply`) is read by the Control Agent at
+  all **only** when its own container was booted with `BEETS_ACCEPTANCE_MODE=1` — a module-level constant read
+  once at process start, set **only** in `docker/acceptance/docker-compose.acceptance.yml`, never in
+  `docker-compose.yml`/`docker-compose.full.yml`. A real deployment ignores the field unconditionally no matter
+  what a client sends.
+- Only the single exact string `"confirmed_import_after_native"` has any effect — not a generic arbitrary
+  failure-injection API.
+
+The rewritten scenario: Plan a real untagged import against a **second**, independent, long-stable release
+(Pink Floyd's *The Dark Side of the Moon* — `confirmed_import_v1`'s idempotency is keyed on the target Release
+ID globally, so reusing the fresh-import scenario's own release would let this scenario's "initial import"
+silently resume whatever fresh-import already completed, never reaching native import at all); Apply with the
+failpoint enabled; confirm the job genuinely did **not** report success (the failpoint fired) while also
+confirming a real album now exists in the library (native import genuinely ran and mutated real state before
+the simulated crash); restart the **engine** container (proving the persisted transaction record survives a
+real process restart, not just an in-memory continuation); retry the identical import with the failpoint
+disabled; require the retry's own job log to report resuming a prior verified result (proof, not inference,
+that native import was not invoked a second time); require exactly one album row for the release afterward.
+
+**Artwork acceptance honesty**: `fetchart` was not loaded in the acceptance engine's Beets config at all
+(`plugins: ''`) — the scenario's prior "truthful failure" was actually "unknown command," not a real attempt
+that legitimately found no art. Fixed by enabling the (core, no extra install) `fetchart` plugin. The scenario
+now reports two separate claims rather than one overstated one: `artwork-transaction-fail-closed` (the
+transaction's status semantics are truthful either way) and `artwork-successful-acquisition` (only claimed
+when a real `artpath` is verified — the fixture album's synthetic identity means this legitimately may never
+succeed, and the script says so explicitly rather than calling a failed fetch a passing acquisition test).

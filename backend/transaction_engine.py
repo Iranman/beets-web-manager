@@ -9559,11 +9559,23 @@ def create_confirmed_import_plan(
     if existing_album_id > 0:
         resource_keys.append(f"album:{existing_album_id}")
 
+    # Round 4 brief section 11-12: make the partial-import policy explicit
+    # in the Plan itself rather than leaving "present_count > 0" as the
+    # only visible signal. This does not change the accept/reject
+    # threshold (a reviewed incomplete album is still allowed, matching
+    # the existing present_count == 0 rejection above) -- it makes that
+    # policy legible to whoever reviews or audits a given Plan, and gives
+    # a future stricter policy (e.g. a minimum coverage ratio) something
+    # concrete to gate on without inventing a second scoring system.
+    coverage_ratio = round(present_count / len(mb_tracks), 4) if mb_tracks else 0.0
     track_coverage = {
         "expected_track_count": len(mb_tracks),
         "present_track_count": present_count,
         "missing_track_count": missing_count,
         "extra_track_count": extra_count,
+        "coverage_ratio": coverage_ratio,
+        "partial_import": present_count < len(mb_tracks),
+        "review_required": present_count < len(mb_tracks),
     }
     tx = store.create(
         operation_type="Confirmed Import",
@@ -9602,6 +9614,7 @@ def execute_confirmed_import_apply(
     db_path: Optional[str] = None,
     inspect_source_fn: Optional[Any] = None,
     run_native_import_fn: Optional[Any] = None,
+    acceptance_failpoint: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Execute confirmed_import_v1: revalidate the immutable source manifest,
     run native Beets --search-id import via the injected runner (NEVER
@@ -9615,6 +9628,16 @@ def execute_confirmed_import_apply(
     {"ok", "error"} is a required dependency (Control Agent-owned subprocess
     mechanics), matching the run_beet_command_fn/beets_import_runner
     precedent -- transaction_engine.py never invokes `beet` itself.
+
+    acceptance_failpoint is test-only infrastructure (Round 4): when equal
+    to "confirmed_import_after_native", Apply deterministically stops
+    right after the native_import_invoked checkpoint is persisted and
+    before the post-import capture/verify step -- simulating a process
+    crash in that exact window for the dedicated Docker acceptance
+    scenario, without a timing race. The caller (the Control Agent route)
+    is responsible for only ever passing a non-None value when running in
+    an explicit acceptance/test container; this function does not itself
+    know or care why the caller chose to pass it, it just honors it.
 
     Non-reversible after Apply, same as album_artwork_fetch_v1: undoing a
     real Beets import (tags written, files possibly moved/copied,
@@ -9653,16 +9676,21 @@ def execute_confirmed_import_apply(
         resource_keys = meta.get("resource_keys") or []
         lib_db = db_path or os.environ.get("BEETS_DB_PATH", os.path.expanduser("~/.config/beets/musiclibrary.blb"))
 
-        def _fail(msg: str, code: str) -> Dict[str, Any]:
-            store.update(operation_id, status="Failed", logs=[f"Apply failed: {msg}"])
+        def _fail(msg: str, code: str, *, diagnostics: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+            curr = store.get(operation_id).get("metadata", {})
+            update_meta = {**curr, "last_failure_diagnostics": diagnostics} if diagnostics else curr
+            store.update(operation_id, status="Failed", metadata=update_meta, logs=[f"Apply failed: {msg}"])
             return {"ok": False, "error": msg, "code": code, "mutated": False, "status": "Failed"}
 
-        def _recovery(msg: str, code: str, reason: str) -> Dict[str, Any]:
+        def _recovery(msg: str, code: str, reason: str, *, diagnostics: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             curr = store.get(operation_id).get("metadata", {})
-            store.update(operation_id, status="Recovery Required", metadata={
+            update_meta = {
                 **curr, "filesystem_mutated": True,
                 "recovery_required_at": _now(), "recovery_reason": reason,
-            })
+            }
+            if diagnostics:
+                update_meta["last_failure_diagnostics"] = diagnostics
+            store.update(operation_id, status="Recovery Required", metadata=update_meta)
             return {"ok": False, "error": msg, "code": code, "mutated": True, "status": "Recovery Required"}
 
         def _capture_and_verify(*, require_files_present: bool) -> Optional[Dict[str, Any]]:
@@ -9775,6 +9803,13 @@ def execute_confirmed_import_apply(
             import_res = run_native_import_fn(
                 source_folder, target_mb_albumid, use_move=bool(meta.get("use_move")),
             )
+            diagnostics = {
+                "returncode": (import_res or {}).get("returncode"),
+                "stdout_excerpt": (import_res or {}).get("stdout_excerpt"),
+                "stderr_excerpt": (import_res or {}).get("stderr_excerpt"),
+                "albums_before": (import_res or {}).get("albums_before"),
+                "albums_after": (import_res or {}).get("albums_after"),
+            }
             # Crash-safety checkpoint: record that native import was
             # invoked, regardless of outcome, before doing anything else --
             # a crash between here and Completed leaves an honest trail for
@@ -9783,19 +9818,49 @@ def execute_confirmed_import_apply(
                 **store.get(operation_id).get("metadata", {}),
                 "native_import_invoked": True,
                 "filesystem_mutated": True,
+                "last_native_import_diagnostics": diagnostics,
             })
             if not isinstance(import_res, dict) or not import_res.get("ok"):
                 return _fail(
                     (import_res.get("error") if isinstance(import_res, dict) else None) or "Native Beets import failed",
                     "confirmed_import_native_import_failed",
+                    diagnostics=diagnostics,
+                )
+
+            # Round 4 deterministic acceptance failpoint: only ever honored
+            # when the caller (an acceptance-mode-only container) passed
+            # it. Fires right here -- after the native_import_invoked
+            # checkpoint above is already durably persisted, before this
+            # transaction ever captures/verifies its own result -- so a
+            # retry's idempotency pre-check (querying the library directly)
+            # is the only thing that can discover the real album Beets
+            # already created, exactly like a genuine crash in this window.
+            if acceptance_failpoint == "confirmed_import_after_native":
+                return _recovery(
+                    "Acceptance failpoint triggered (test infrastructure only, never reachable in a real deployment)",
+                    "confirmed_import_acceptance_failpoint",
+                    "deterministic acceptance-only failure injection after native import succeeded, before verification",
+                    diagnostics=diagnostics,
                 )
 
             result = _capture_and_verify(require_files_present=True)
             if not result or not result.get("ok"):
+                albums_before, albums_after = diagnostics["albums_before"], diagnostics["albums_after"]
+                if isinstance(albums_before, int) and isinstance(albums_after, int) and albums_before >= 0 and albums_after == albums_before:
+                    # Beets' own album count did not change at all -- a
+                    # clean --quiet-fallback skip, not a partial mutation
+                    # under the wrong identity. Nothing needs recovering;
+                    # this is a truthful, zero-mutation failure.
+                    return _fail(
+                        "Beets could not confidently apply the approved release to this source and skipped the import (no library mutation occurred)",
+                        "confirmed_import_skipped_no_confident_match",
+                        diagnostics=diagnostics,
+                    )
                 return _recovery(
                     "Native import reported success but the resulting album could not be verified",
                     "confirmed_import_verification_failed",
                     f"post-import verification failed: {(result or {}).get('reason', 'no matching album found')}",
+                    diagnostics=diagnostics,
                 )
 
             store.update(operation_id, status="Completed", metadata={

@@ -21080,6 +21080,13 @@ def import_folder_with_id():
     )
     ai_suggestion = payload.get("ai_suggestion")   # optional — records in AI match history
     use_move      = bool(payload.get("move", False))
+    # Wave 25 Round 4: test-only pass-through for the dedicated Docker
+    # acceptance crash/resume scenario. Inert in every real deployment --
+    # the engine only honors it when its OWN container was booted with
+    # BEETS_ACCEPTANCE_MODE=1 (see beets_control_agent.ACCEPTANCE_MODE),
+    # which no production compose file ever sets, regardless of what any
+    # caller of this route sends.
+    acceptance_failpoint = _s(payload.get("_acceptance_failpoint")).strip() or None
     try:
         existing_album_id = int(payload.get("existing_album_id") or payload.get("album_id") or 0)
     except Exception:
@@ -21835,10 +21842,14 @@ def import_folder_with_id():
         })
         if not plan_res.get("ok"):
             raise RuntimeError(f"Import planning failed: {plan_res.get('error') or 'unknown error'}")
-        apply_res = beets_client.apply_confirmed_import(plan_res["operation_id"])
+        apply_res = beets_client.apply_confirmed_import(
+            plan_res["operation_id"], acceptance_failpoint=acceptance_failpoint,
+        )
         if not apply_res.get("ok"):
             raise RuntimeError(f"Import execution failed: {apply_res.get('error') or 'unknown error'}")
         log.append(f"[import] Engine controlled import completed: {import_folder_path}")
+        if apply_res.get("resumed"):
+            log.append("[import] Resumed an already-verified prior result for this release (native import was not re-invoked).")
         confirmed_import_album_id = int(apply_res.get("album_id") or 0)
         confirmed_import_item_ids = [int(i) for i in (apply_res.get("item_ids") or [])]
 

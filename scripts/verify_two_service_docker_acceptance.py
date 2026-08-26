@@ -164,7 +164,17 @@ def seed_disposable_library(config_dir: Path, music_dir: Path) -> dict:
     (config_dir / "config.yaml").write_text(
         "directory: /data/media/music\n"
         "library: /config/musiclibrary.blb\n"
-        "plugins: ''\n"
+        # Round 4 brief section 27: 'fetchart' is a core Beets plugin (no
+        # extra install needed) -- it was never loaded here at all, which
+        # is why the artwork scenario's failure used to be "unknown
+        # command 'fetchart'" rather than a genuine "searched, found
+        # nothing" outcome. Enabling it lets that scenario exercise the
+        # real command; it still cannot prove a successful ACQUISITION
+        # against this fixture (its mb_albumid/artist/album are synthetic,
+        # so no real cover art provider will have anything for it) -- see
+        # run_wave25_artwork_scenarios for the two separately-reported
+        # claims this implies.
+        "plugins: fetchart\n"
         "threaded: yes\n"
         "import:\n"
         "    write: yes\n"
@@ -304,30 +314,127 @@ def check_web_manager_isolation(web_container: str) -> None:
 # long-term stability (27+ year old, extremely well-established release).
 WAVE25_RELEASE_ID = "1834eae1-741b-3c03-9ca5-0df3decb43ea"
 WAVE25_RELEASEGROUP_ID = "b1392450-e666-3926-a536-22c65f834433"
-WAVE25_TRACKLIST = [
-    "Airbag", "Paranoid Android", "Subterranean Homesick Alien",
-    "Exit Music (for a Film)", "Let Down", "Karma Police",
-    "Fitter Happier", "Electioneering", "Climbing Up the Walls",
-    "No Surprises", "Lucky", "The Tourist",
-]
+WAVE25_ARTIST = "Radiohead"
+WAVE25_ALBUM = "OK Computer"
+
+# A second, independent, long-stable real release for the crash/resume
+# scenario (Round 4): confirmed_import_v1's idempotency is keyed on the
+# TARGET Release ID globally, not on any one operation/source -- reusing
+# WAVE25_RELEASE_ID here would mean crash/resume's own "initial import"
+# instantly resumes whatever the fresh-import scenario already completed
+# for that release (if it ran first in this same process), never
+# genuinely reaching native import at all. A distinct release makes this
+# scenario self-contained regardless of scenario execution order.
+WAVE25_CRASH_RESUME_RELEASE_ID = "b84ee12a-09ef-421b-82de-0441a926375b"
+WAVE25_CRASH_RESUME_RELEASEGROUP_ID = "f5093c06-23e3-404f-aeaa-40f72885ee3a"
+WAVE25_CRASH_RESUME_ARTIST = "Pink Floyd"
+WAVE25_CRASH_RESUME_ALBUM = "The Dark Side of the Moon"
+
+_WAVE25_TRACKLIST_CACHE: dict = {}
 
 
-def seed_wave25_import_source(downloads_dir: Path, subdir: str, track_range=None) -> dict:
-    """Write a disposable, synthetic source folder shaped like WAVE25_RELEASE_ID
+def _fetch_release_tracklist(release_id: str) -> list:
+    """Fetch the real tracklist (title + duration) for a release ID once
+    and cache it for the whole acceptance run (Round 4 brief section
+    9-10): the same authoritative data the real import path itself queries,
+    rather than hard-coded/drifting durations. An extreme duration mismatch
+    (the original fixture used a flat ~0.3s per file against tracks that
+    are actually 2-6 minutes long) starves Beets' own match-confidence
+    scoring for the forced --search-id candidate regardless of filename/
+    title similarity -- this is what actually caused the real Docker
+    failure this round investigates, not (only) the --quiet-fallback asis
+    bug fixed alongside it. Cached per release ID so this is at most one
+    network call per distinct release for the whole run, not one per
+    track/scenario."""
+    if release_id in _WAVE25_TRACKLIST_CACHE:
+        return _WAVE25_TRACKLIST_CACHE[release_id]
+    url = f"https://musicbrainz.org/ws/2/release/{release_id}?inc=recordings&fmt=json"
+    req = urllib.request.Request(url, headers={"User-Agent": "BeetsWebManagerAcceptance/1.0"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        data = json.loads(resp.read())
+    tracks = []
+    for medium in data.get("media", []) or []:
+        for trk in medium.get("tracks", []) or []:
+            rec = trk.get("recording") or {}
+            length_ms = int(trk.get("length") or rec.get("length") or 0)
+            tracks.append({
+                "position": int(trk.get("position") or len(tracks) + 1),
+                "title": str(trk.get("title") or rec.get("title") or f"Track {len(tracks) + 1}"),
+                "duration_seconds": max(2.0, length_ms / 1000.0),
+            })
+    if not tracks:
+        raise RuntimeError(
+            f"MusicBrainz returned no tracks for release {release_id} -- cannot build a realistic fixture"
+        )
+    _WAVE25_TRACKLIST_CACHE[release_id] = tracks
+    return tracks
+
+
+def seed_wave25_import_source(downloads_dir: Path, subdir: str, track_range=None, *,
+                               release_id: str = WAVE25_RELEASE_ID,
+                               artist: str = WAVE25_ARTIST, album: str = WAVE25_ALBUM) -> dict:
+    """Write a disposable, synthetic source folder shaped like `release_id`
     onto the host side of the engine's download-root bind mount (mounted at
     /data/torrents in the engine container via DOWNLOAD_PATH -- see `env`
     in main()). Returns the container-visible path the production import
-    route should be pointed at (this script's own process, and the
-    web-manager container, never touch this folder directly -- only the
-    engine container, via the real bind mount, does)."""
-    positions = track_range or range(1, len(WAVE25_TRACKLIST) + 1)
+    route should be pointed at, plus the LOCAL (host-side) folder path this
+    script's own process can read directly to assert fixture properties
+    before posting a request (only the engine container, via the real bind
+    mount, is allowed to READ these files for the actual import).
+
+    Round 4: durations now come from _fetch_release_tracklist() (a real,
+    cached MusicBrainz lookup) instead of a flat, unrealistic 0.3s --
+    Beets' own recommendation scoring for the forced --search-id candidate
+    depends heavily on duration/track-count fit, not audio content (this
+    codebase never fingerprints during a plain import). A low sample rate
+    keeps total fixture size small in CI while remaining a fully valid,
+    duration-correct WAV file. Basic (non-MusicBrainz) tags -- title,
+    artist, album, track number -- are written via `mediafile`, the same
+    tag library Beets itself uses, matching a real "downloaded but never
+    tagged with Beets/Picard" source. No MusicBrainz Release/ReleaseGroup/
+    Recording ID is ever written here; see
+    assert_wave25_source_has_no_mb_ids, called before every real import
+    request below."""
+    import mediafile
+
+    tracklist = _fetch_release_tracklist(release_id)
+    positions = track_range or range(1, len(tracklist) + 1)
     folder = downloads_dir / subdir
     folder.mkdir(parents=True, exist_ok=True)
     for idx in positions:
-        title = WAVE25_TRACKLIST[idx - 1]
-        p = folder / f"{idx:02d} - {title}.wav"
-        p.write_bytes(_real_wav_bytes(freq=220.0 + idx * 15.0, duration=0.3))
-    return {"container_path": f"/data/torrents/{subdir}"}
+        track = tracklist[idx - 1]
+        p = folder / f"{idx:02d} - {track['title']}.wav"
+        p.write_bytes(_real_wav_bytes(freq=220.0 + idx * 15.0, duration=track["duration_seconds"], rate=4000))
+        mf = mediafile.MediaFile(str(p))
+        mf.title = track["title"]
+        mf.artist = artist
+        mf.album = album
+        mf.track = idx
+        mf.save()
+    return {"container_path": f"/data/torrents/{subdir}", "local_folder": folder}
+
+
+def assert_wave25_source_has_no_mb_ids(local_folder: Path) -> None:
+    """Round 4 brief section 20: prove the fixture is genuinely untagged --
+    no MusicBrainz Release/ReleaseGroup/Recording ID anywhere -- BEFORE
+    posting the import request. This script runs on the HOST side of the
+    bind mount (see seed_wave25_import_source's own docstring), so it can
+    read these files directly without going through either container.
+    Raises (fails the whole run loudly) rather than silently continuing --
+    a fixture that accidentally carried MusicBrainz tags would prove
+    nothing about the fresh-review trust model confirmed_import_v1 exists
+    for."""
+    import mediafile
+
+    for wav_path in sorted(local_folder.glob("*.wav")):
+        mf = mediafile.MediaFile(str(wav_path))
+        for field in ("mb_albumid", "mb_releasegroupid", "mb_trackid", "mb_releasetrackid"):
+            value = getattr(mf, field, None)
+            if value:
+                raise AssertionError(
+                    f"Fixture file {wav_path.name} unexpectedly carries {field}={value!r} -- "
+                    "this must be genuinely untagged before import (do not pre-stamp MusicBrainz IDs)"
+                )
 
 
 def run_wave25_scenarios(client: "HttpClient", downloads_dir: Path, music_dir: Path, db_path: str) -> None:
@@ -344,8 +451,9 @@ def run_wave25_scenarios(client: "HttpClient", downloads_dir: Path, music_dir: P
         _fail(f"{name}: {detail}")
 
     # ── Fresh import ─────────────────────────────────────────────────────
-    print("==> [Wave25] Fresh import via the real production route...")
+    print("==> [Wave25] Fresh import via the real production route (confirmed_import_v1)...")
     src = seed_wave25_import_source(downloads_dir, "fresh-import")
+    assert_wave25_source_has_no_mb_ids(src["local_folder"])
     status, body = client.request(
         "POST", "/api/folders/import-with-id",
         json_body={
@@ -354,30 +462,34 @@ def run_wave25_scenarios(client: "HttpClient", downloads_dir: Path, music_dir: P
             "mb_releasegroupid": WAVE25_RELEASEGROUP_ID,
             "move": False,
         },
-        timeout=30,
+        timeout=60,
     )
     fresh_album_id = None
     if status != 200 or not body.get("ok"):
-        scenario_fail("fresh-import", f"request rejected: {status} {body}")
+        scenario_fail("fresh-import-untagged-confirmed", f"request rejected: {status} {body}")
     else:
         try:
             result = client.wait_job(body["job_id"], timeout=180)
         except TimeoutError as ex:
             result = None
-            scenario_fail("fresh-import", str(ex))
+            scenario_fail("fresh-import-untagged-confirmed", str(ex))
         if result is not None:
             if result.get("status") != "success":
-                scenario_fail("fresh-import", f"job did not succeed: {result.get('status')} / {result.get('log')}")
+                scenario_fail("fresh-import-untagged-confirmed", f"job did not succeed: {result.get('status')} / {result.get('log')}")
             else:
                 try:
                     con = sqlite3.connect(db_path)
                     con.row_factory = sqlite3.Row
+                    # Exact planned Release ID is the primary proof (Round 4
+                    # brief section 17) -- never loosened to an OR/most-
+                    # recent/closest-title fallback just to make this pass.
                     row = con.execute(
-                        "SELECT id, album, albumartist FROM albums WHERE mb_albumid=? OR mb_releasegroupid=?",
-                        (WAVE25_RELEASE_ID, WAVE25_RELEASEGROUP_ID),
+                        "SELECT id, album, albumartist, mb_albumid, mb_releasegroupid FROM albums WHERE mb_albumid=?",
+                        (WAVE25_RELEASE_ID,),
                     ).fetchone()
                     item_count = 0
                     files_exist = False
+                    rgid_ok = False
                     if row:
                         fresh_album_id = int(row["id"])
                         items = con.execute("SELECT path FROM items WHERE album_id=?", (fresh_album_id,)).fetchall()
@@ -392,24 +504,31 @@ def run_wave25_scenarios(client: "HttpClient", downloads_dir: Path, music_dir: P
                             p = Path(p_str)
                             return p.exists() if p.is_absolute() else (music_dir / p).exists()
                         files_exist = all(_item_path_exists(i[0]) for i in items) if items else False
+                        # Round 4 brief section 18: RGID must be verified
+                        # too, not silently substituted for the Release ID.
+                        actual_rgid = row["mb_releasegroupid"]
+                        actual_rgid = actual_rgid.decode("utf-8", "replace") if isinstance(actual_rgid, bytes) else str(actual_rgid or "")
+                        rgid_ok = actual_rgid.strip().lower() == WAVE25_RELEASEGROUP_ID
                     con.close()
                 except Exception as ex:
-                    row, item_count, files_exist = None, 0, False
-                    scenario_fail("fresh-import", f"could not verify host-mounted DB state: {ex}")
+                    row, item_count, files_exist, rgid_ok = None, 0, False, False
+                    scenario_fail("fresh-import-untagged-confirmed", f"could not verify host-mounted DB state: {ex}")
                 else:
                     if not row:
-                        scenario_fail("fresh-import", "no album row was created with the expected MB identity")
+                        scenario_fail("fresh-import-untagged-confirmed", "no album row was created with the exact planned Release ID")
                     elif item_count == 0:
-                        scenario_fail("fresh-import", "album row exists but has zero items")
+                        scenario_fail("fresh-import-untagged-confirmed", "album row exists but has zero items")
                     elif not files_exist:
-                        scenario_fail("fresh-import", "item DB paths do not point at real files on the host-mounted music root")
+                        scenario_fail("fresh-import-untagged-confirmed", "item DB paths do not point at real files on the host-mounted music root")
+                    elif not rgid_ok:
+                        scenario_fail("fresh-import-untagged-confirmed", f"album Release Group does not match the planned RGID {WAVE25_RELEASEGROUP_ID}")
                     else:
-                        scenario_pass(f"fresh-import (album_id={fresh_album_id}, {item_count} item(s), real files verified on host music root)")
+                        scenario_pass(f"fresh-import-untagged-confirmed (album_id={fresh_album_id}, {item_count} item(s), real files + exact Release ID + RGID verified)")
 
     # ── Reimport idempotency ────────────────────────────────────────────
-    print("==> [Wave25] Reimport idempotency (same source, called again)...")
+    print("==> [Wave25] Confirmed-import idempotency (same source, called again)...")
     if fresh_album_id is None:
-        scenario_fail("reimport-idempotent", "skipped: fresh-import did not produce an album to re-import")
+        scenario_fail("confirmed-import-idempotent", "skipped: fresh-import did not produce an album to re-import")
     else:
         status, body = client.request(
             "POST", "/api/folders/import-with-id",
@@ -423,30 +542,33 @@ def run_wave25_scenarios(client: "HttpClient", downloads_dir: Path, music_dir: P
             timeout=30,
         )
         if status != 200 or not body.get("ok"):
-            scenario_fail("reimport-idempotent", f"request rejected: {status} {body}")
+            scenario_fail("confirmed-import-idempotent", f"request rejected: {status} {body}")
         else:
             try:
                 result = client.wait_job(body["job_id"], timeout=180)
             except TimeoutError as ex:
-                scenario_fail("reimport-idempotent", str(ex))
+                scenario_fail("confirmed-import-idempotent", str(ex))
                 result = None
             if result is not None and result.get("status") != "success":
-                scenario_fail("reimport-idempotent", f"job did not succeed: {result.get('status')} / {result.get('log')}")
+                scenario_fail("confirmed-import-idempotent", f"job did not succeed: {result.get('status')} / {result.get('log')}")
             elif result is not None:
+                resumed = any("Resumed an already-verified prior result" in line for line in (result.get("log") or []))
                 try:
                     con = sqlite3.connect(db_path)
                     album_rows = con.execute(
-                        "SELECT id FROM albums WHERE mb_albumid=? OR mb_releasegroupid=?",
-                        (WAVE25_RELEASE_ID, WAVE25_RELEASEGROUP_ID),
+                        "SELECT id FROM albums WHERE mb_albumid=?",
+                        (WAVE25_RELEASE_ID,),
                     ).fetchall()
                     con.close()
                 except Exception as ex:
-                    scenario_fail("reimport-idempotent", f"could not verify host-mounted DB state: {ex}")
+                    scenario_fail("confirmed-import-idempotent", f"could not verify host-mounted DB state: {ex}")
                 else:
                     if len(album_rows) != 1:
-                        scenario_fail("reimport-idempotent", f"expected exactly 1 album row for this release after a second import, found {len(album_rows)} -- duplicate import")
+                        scenario_fail("confirmed-import-idempotent", f"expected exactly 1 album row for this release after a second import, found {len(album_rows)} -- duplicate import")
+                    elif not resumed:
+                        scenario_fail("confirmed-import-idempotent", "second import did not report resuming an already-verified result (native import may have been re-invoked)")
                     else:
-                        scenario_pass("reimport-idempotent (no duplicate album row)")
+                        scenario_pass("confirmed-import-idempotent (no duplicate album row, native import not re-invoked)")
 
     # ── Symlink / root-escape rejection ─────────────────────────────────
     print("==> [Wave25] Symlink and root-escape rejection...")
@@ -571,13 +693,17 @@ def run_wave25_artwork_scenarios(client: "HttpClient", fixture: dict, db_path: s
             result = None
         if result is not None:
             if result.get("status") != "success":
-                # fetchart legitimately can fail to find art for a
-                # synthetic/no-real-release fixture album -- what matters
-                # for this scenario is that the transaction reports a
-                # truthful, non-"success" status rather than a false
-                # positive, not that art was actually found.
+                # Round 4 brief section 27: report this as exactly two
+                # separate claims, not one overstated "artwork acquisition
+                # passed". fetchart is now a genuinely loaded, real
+                # command (see seed_disposable_library) -- it legitimately
+                # cannot find real cover art for this fixture (synthetic
+                # mb_albumid/artist/album, no real release exists), so a
+                # truthful non-"success" status here proves the
+                # transaction/failure semantics, and nothing more.
                 print(f"  (fetchart found no art for the synthetic fixture album, as expected: {result.get('log')})")
-                scenario_pass("artwork-fetch-embed (truthful failure, no false success)")
+                scenario_pass("artwork-transaction-fail-closed (truthful failure status, no false success)")
+                print("  [NOTE] artwork-successful-acquisition: NOT EXERCISED -- fixture album has no real MusicBrainz identity for any provider to find art against")
             else:
                 try:
                     con = sqlite3.connect(db_path)
@@ -589,7 +715,8 @@ def run_wave25_artwork_scenarios(client: "HttpClient", fixture: dict, db_path: s
                     if not row or not row[0]:
                         scenario_fail("artwork-fetch-embed", "job reported success but albums.artpath is still empty")
                     else:
-                        scenario_pass(f"artwork-fetch-embed (verified artpath={row[0]})")
+                        scenario_pass(f"artwork-transaction-fail-closed (job reported success)")
+                        scenario_pass(f"artwork-successful-acquisition (verified artpath={row[0]})")
 
     print("==> [Wave25] Stale-plan precondition check (smoke test over real HTTP)...")
     # Honest scope note: BeetsClient.fetch_and_embed_album_art() composes
@@ -661,22 +788,21 @@ def wave25_engine_offline_checks(client: "HttpClient", db_path: str) -> None:
         print("[PASS] engine-offline-fails-closed[no-local-mutation]")
 
 
-def run_wave25_crash_resume_scenario(client: "HttpClient", web_container: str,
+def run_wave25_crash_resume_scenario(client: "HttpClient", engine_container: str,
                                       downloads_dir: Path, db_path: str) -> None:
-    """Crash/resume: a real production import completes, the web-manager
-    process is then forcibly killed and restarted (`docker kill` + `docker
-    start`, not a graceful stop -- the closest this script can get to a
-    genuine crash without a precise, inherently racy mid-job kill), and
-    the SAME import is submitted again. The property that actually matters
-    for safety is verified reliably rather than via a timing-dependent
-    kill: a crash (or any process restart) must never cause the native
-    Beets import to be silently repeated -- reimport-disk-style item-id/
-    album-id confusion, or a genuine duplicate album, would be the
-    failure mode here. A precise mid-job kill would additionally exercise
-    Recovery-Required-style partial-completion handling, but is inherently
-    flaky in CI (the exact instant killed is a race against however many
-    of the job's own sequential engine calls have completed) and is
-    intentionally not attempted here -- see the note in the final report."""
+    """Crash/resume (Round 4 rewrite): a deterministic failpoint --
+    `_acceptance_failpoint: "confirmed_import_after_native"`, honored by
+    the engine ONLY because this acceptance stack's compose override boots
+    it with BEETS_ACCEPTANCE_MODE=1 (see backend/beets_control_agent.py) --
+    fires confirmed_import_v1's Apply right after native Beets import has
+    genuinely succeeded (a real album+items now exist) but before this
+    transaction ever captures/verifies that result. This is the actual
+    required failure window (native import succeeded, verification/
+    completion did not happen yet), reached without any timing race. A
+    prior version of this scenario only proved "complete an import, hard-
+    kill+restart the web-manager container, resubmit" -- that is a
+    restart+idempotency test, not a crash-after-native-success test, and
+    is intentionally no longer described as one."""
 
     def scenario_pass(name: str) -> None:
         print(f"[PASS] {name}")
@@ -684,73 +810,105 @@ def run_wave25_crash_resume_scenario(client: "HttpClient", web_container: str,
     def scenario_fail(name: str, detail: str) -> None:
         _fail(f"{name}: {detail}")
 
-    print("==> [Wave25] Crash/resume: complete a real import...")
-    src = seed_wave25_import_source(downloads_dir, "crash-resume", track_range=range(1, 4))
+    print("==> [Wave25] Crash/resume: import with the deterministic after-native failpoint enabled...")
+    src = seed_wave25_import_source(
+        downloads_dir, "crash-resume",
+        release_id=WAVE25_CRASH_RESUME_RELEASE_ID,
+        artist=WAVE25_CRASH_RESUME_ARTIST, album=WAVE25_CRASH_RESUME_ALBUM,
+    )
+    assert_wave25_source_has_no_mb_ids(src["local_folder"])
     status, body = client.request(
         "POST", "/api/folders/import-with-id",
-        json_body={"path": src["container_path"], "mb_albumid": WAVE25_RELEASE_ID,
-                   "mb_releasegroupid": WAVE25_RELEASEGROUP_ID, "move": False},
-        timeout=30,
+        json_body={
+            "path": src["container_path"], "mb_albumid": WAVE25_CRASH_RESUME_RELEASE_ID,
+            "mb_releasegroupid": WAVE25_CRASH_RESUME_RELEASEGROUP_ID, "move": False,
+            "_acceptance_failpoint": "confirmed_import_after_native",
+        },
+        timeout=60,
     )
     if status != 200 or not body.get("ok"):
-        scenario_fail("crash-resume-no-duplicate", f"initial import request rejected: {status} {body}")
+        scenario_fail("crash-resume-no-duplicate", f"failpoint-enabled import request was rejected outright: {status} {body}")
+        return
+    try:
+        result = client.wait_job(body["job_id"], timeout=180)
+    except TimeoutError as ex:
+        scenario_fail("crash-resume-no-duplicate", f"failpoint-enabled import did not reach a terminal state: {ex}")
+        return
+    if result.get("status") == "success":
+        scenario_fail("crash-resume-no-duplicate", "the failpoint-enabled import reported success -- the failpoint did not fire, this scenario proves nothing")
+        return
+    scenario_pass("crash-resume-failpoint-fired (job truthfully did not report success while the simulated crash window was active)")
+
+    # Prove native import genuinely ran and created a real album BEFORE
+    # the simulated crash -- this is not "nothing happened, then we
+    # retried", it is "the mutation already happened, then the process
+    # was interrupted before recording that".
+    try:
+        con = sqlite3.connect(db_path)
+        con.row_factory = sqlite3.Row
+        pre_retry_row = con.execute(
+            "SELECT id FROM albums WHERE mb_albumid=?", (WAVE25_CRASH_RESUME_RELEASE_ID,)
+        ).fetchone()
+        con.close()
+    except Exception as ex:
+        scenario_fail("crash-resume-no-duplicate", f"could not verify host-mounted DB state after the failpoint fired: {ex}")
+        return
+    if not pre_retry_row:
+        scenario_fail("crash-resume-no-duplicate", "no album exists after the failpoint fired -- native import did not actually mutate anything, so this is not proving the required crash window at all")
+        return
+    scenario_pass("crash-resume-native-import-really-ran (a real album exists before the retry, proving the crash happened AFTER genuine mutation)")
+
+    print("==> [Wave25] Crash/resume: restarting the engine container to simulate a real process interruption...")
+    restart_res = run(["docker", "restart", engine_container])
+    if restart_res.returncode != 0:
+        scenario_fail("crash-resume-no-duplicate", "could not restart the engine container to simulate the crash")
+        return
+    if not wait_healthy(engine_container):
+        scenario_fail("crash-resume-no-duplicate", "engine container did not become healthy again after the simulated crash restart")
+        return
+    scenario_pass("crash-resume-engine-restart (engine came back healthy, and its persisted transaction state survived the restart)")
+
+    print("==> [Wave25] Crash/resume: retrying the SAME confirmed import, failpoint disabled...")
+    status, body = client.request(
+        "POST", "/api/folders/import-with-id",
+        json_body={
+            "path": src["container_path"], "mb_albumid": WAVE25_CRASH_RESUME_RELEASE_ID,
+            "mb_releasegroupid": WAVE25_CRASH_RESUME_RELEASEGROUP_ID, "move": False,
+        },
+        timeout=60,
+    )
+    if status != 200 or not body.get("ok"):
+        scenario_fail("crash-resume-no-duplicate", f"post-crash retry request rejected: {status} {body}")
         return
     try:
         result = client.wait_job(body["job_id"], timeout=120)
     except TimeoutError as ex:
-        scenario_fail("crash-resume-no-duplicate", f"initial import did not complete: {ex}")
+        scenario_fail("crash-resume-no-duplicate", f"post-crash retry did not complete: {ex}")
         return
     if result.get("status") != "success":
-        scenario_fail("crash-resume-no-duplicate", f"initial import did not succeed: {result.get('status')} / {result.get('log')}")
+        scenario_fail("crash-resume-no-duplicate", f"post-crash retry did not succeed truthfully: {result.get('status')} / {result.get('log')}")
         return
 
-    print("==> [Wave25] Crash/resume: killing and restarting the web-manager container...")
-    kill_res = run(["docker", "kill", web_container])
-    if kill_res.returncode != 0:
-        scenario_fail("crash-resume-no-duplicate", "could not kill the web-manager container to simulate a crash")
+    log_lines = result.get("log") or []
+    resumed = any("Resumed an already-verified prior result" in line for line in log_lines)
+    if not resumed:
+        scenario_fail("crash-resume-no-duplicate", "post-crash retry succeeded but did not report resuming the prior result -- native import may have been invoked a second time (invocation-count proof section 25 failed)")
         return
-    start_res = run(["docker", "start", web_container])
-    if start_res.returncode != 0:
-        scenario_fail("crash-resume-no-duplicate", "could not restart the web-manager container after the simulated crash")
-        return
-    if not wait_healthy(web_container):
-        scenario_fail("crash-resume-no-duplicate", "web-manager container did not become healthy again after the simulated crash")
-        return
-    scenario_pass("crash-resume-restart (web-manager came back healthy after a hard kill)")
-
-    print("==> [Wave25] Crash/resume: re-submitting the identical import after restart...")
-    status, body = client.request(
-        "POST", "/api/folders/import-with-id",
-        json_body={"path": src["container_path"], "mb_albumid": WAVE25_RELEASE_ID,
-                   "mb_releasegroupid": WAVE25_RELEASEGROUP_ID, "move": False},
-        timeout=30,
-    )
-    if status != 200 or not body.get("ok"):
-        scenario_fail("crash-resume-no-duplicate", f"post-restart import request rejected: {status} {body}")
-        return
-    try:
-        result = client.wait_job(body["job_id"], timeout=120)
-    except TimeoutError as ex:
-        scenario_fail("crash-resume-no-duplicate", f"post-restart import did not complete: {ex}")
-        return
-    if result.get("status") != "success":
-        scenario_fail("crash-resume-no-duplicate", f"post-restart import did not succeed truthfully: {result.get('status')} / {result.get('log')}")
-        return
+    scenario_pass("crash-resume-native-import-invoked-exactly-once (retry's own job log proves it resumed rather than re-invoking native import)")
 
     try:
         con = sqlite3.connect(db_path)
         rows = con.execute(
-            "SELECT id FROM albums WHERE mb_albumid=? OR mb_releasegroupid=?",
-            (WAVE25_RELEASE_ID, WAVE25_RELEASEGROUP_ID),
+            "SELECT id FROM albums WHERE mb_albumid=?", (WAVE25_CRASH_RESUME_RELEASE_ID,)
         ).fetchall()
         con.close()
     except Exception as ex:
         scenario_fail("crash-resume-no-duplicate", f"could not verify host-mounted DB state: {ex}")
         return
     if len(rows) != 1:
-        scenario_fail("crash-resume-no-duplicate", f"expected exactly 1 album row for this release after crash+restart+reimport, found {len(rows)} -- duplicate import after crash")
+        scenario_fail("crash-resume-no-duplicate", f"expected exactly 1 album row for this release after the crash+retry, found {len(rows)} -- duplicate import after crash")
     else:
-        scenario_pass("crash-resume-no-duplicate (process restart did not cause a duplicate import)")
+        scenario_pass("crash-resume-no-duplicate (native import succeeded once, the simulated crash happened before verification, and the retry safely resumed with no duplicate)")
 
 
 def main() -> int:
@@ -979,7 +1137,7 @@ def main() -> int:
                 _ok("engine container healthy again after restart")
 
         print("\n==> Wave 25 crash/resume scenario ==>")
-        run_wave25_crash_resume_scenario(client, web_container, downloads_dir, db_path)
+        run_wave25_crash_resume_scenario(client, engine_container, downloads_dir, db_path)
 
         if FAILURES:
             print(f"\n[SUMMARY] {len(FAILURES)} failure(s):")

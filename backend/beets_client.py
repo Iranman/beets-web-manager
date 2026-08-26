@@ -453,9 +453,20 @@ class BeetsClient:
         to already carry the target identity)."""
         return self._request("POST", "/imports/confirmed/plan", payload, timeout=timeout)
 
-    def apply_confirmed_import(self, operation_id: str, *, timeout: float = 180.0) -> Dict[str, Any]:
-        """Engine-side confirmed_import_v1 application (Wave 25 Round 3)."""
-        return self._request("POST", "/imports/confirmed/apply", {"operation_id": operation_id}, timeout=timeout)
+    def apply_confirmed_import(self, operation_id: str, *, acceptance_failpoint: Optional[str] = None,
+                                timeout: float = 180.0) -> Dict[str, Any]:
+        """Engine-side confirmed_import_v1 application (Wave 25 Round 3).
+
+        acceptance_failpoint (Wave 25 Round 4) is test-only infrastructure
+        for the dedicated Docker acceptance crash/resume scenario -- the
+        engine ignores this field entirely unless that specific container
+        was booted with BEETS_ACCEPTANCE_MODE=1, which no real deployment
+        topology ever sets. Always None/omitted in real production calls.
+        """
+        body: Dict[str, Any] = {"operation_id": operation_id}
+        if acceptance_failpoint:
+            body["_acceptance_failpoint"] = acceptance_failpoint
+        return self._request("POST", "/imports/confirmed/apply", body, timeout=timeout)
 
     def rollback_import_folder(self, operation_id: str, *, timeout: float = 60.0) -> Dict[str, Any]:
         """Engine-side import folder rollback (SEC-002 Wave 22 Closure)."""

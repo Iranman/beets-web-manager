@@ -353,6 +353,177 @@ class TestAcoustidConflict(ConfirmedImportTestCase):
         self.assertTrue(plan.get("ok"), plan)
 
 
+class TestNativeImportSkipVsPartialMutation(ConfirmedImportTestCase):
+    """Round 4 brief: the real Docker failure was --quiet-fallback asis
+    silently importing the source under an unreviewed identity when Beets
+    could not confidently apply the approved release (an album/items got
+    created, but confirmed_import_v1 could not verify them against the
+    planned Release ID). Fixed by switching to --quiet-fallback skip and
+    distinguishing, via the native runner's albums_before/albums_after
+    counts, a clean skip (Failed, no mutation) from a genuine partial
+    mutation under the wrong identity (Recovery Required)."""
+
+    def test_clean_skip_reports_failed_not_recovery_required(self):
+        src = self._seed_source("Skipped Album", ["Track One.flac", "Track Two.flac"])
+        plan = self._plan(self._base_payload(src))
+        self.assertTrue(plan.get("ok"), plan)
+
+        def _native_import_skips(source_path, target_mb_albumid, *, use_move):
+            # Beets declined to apply the candidate; nothing changed.
+            return {"ok": True, "returncode": 0, "albums_before": 1, "albums_after": 1,
+                    "stdout_excerpt": "", "stderr_excerpt": ""}
+
+        result = self._apply(plan["operation_id"], native_import_fn=_native_import_skips)
+        self.assertFalse(result.get("ok"))
+        self.assertEqual(result["status"], "Failed")
+        self.assertEqual(result["code"], "confirmed_import_skipped_no_confident_match")
+
+    def test_partial_mutation_under_wrong_identity_reports_recovery_required(self):
+        src = self._seed_source("Partial Mutation Album", ["Track One.flac", "Track Two.flac"])
+        plan = self._plan(self._base_payload(src))
+        self.assertTrue(plan.get("ok"), plan)
+
+        def _native_import_creates_unverifiable_album(source_path, target_mb_albumid, *, use_move):
+            # Simulates the original bug: Beets imported something (album
+            # count went up) but not under the planned Release ID.
+            con = sqlite3.connect(str(self.lib_db))
+            con.execute("INSERT INTO albums (mb_albumid, mb_releasegroupid, album) VALUES (?,?,?)",
+                        ("ffffffff-0000-0000-0000-000000000000", "", "Asis Album"))
+            con.commit()
+            con.close()
+            return {"ok": True, "returncode": 0, "albums_before": 1, "albums_after": 2,
+                    "stdout_excerpt": "", "stderr_excerpt": ""}
+
+        result = self._apply(plan["operation_id"], native_import_fn=_native_import_creates_unverifiable_album)
+        self.assertFalse(result.get("ok"))
+        self.assertEqual(result["status"], "Recovery Required")
+        self.assertEqual(result["code"], "confirmed_import_verification_failed")
+
+    def test_missing_album_count_diagnostics_falls_back_to_recovery_required(self):
+        """Backward-compatible: a runner that doesn't report album counts
+        (e.g. an older/simpler fake) must not crash, and defaults to the
+        safer Recovery Required outcome rather than assuming a clean skip."""
+        src = self._seed_source("No Diagnostics Album", ["Track One.flac", "Track Two.flac"])
+        plan = self._plan(self._base_payload(src))
+        self.assertTrue(plan.get("ok"), plan)
+
+        def _native_import_no_diagnostics(source_path, target_mb_albumid, *, use_move):
+            return {"ok": True}
+
+        result = self._apply(plan["operation_id"], native_import_fn=_native_import_no_diagnostics)
+        self.assertFalse(result.get("ok"))
+        self.assertEqual(result["status"], "Recovery Required")
+
+
+class TestAcceptanceFailpoint(ConfirmedImportTestCase):
+    """Round 4 brief section 23-25: a deterministic, narrowly-named
+    failpoint for the Docker acceptance crash/resume scenario -- fires
+    after the native_import_invoked checkpoint is durably persisted, before
+    verification, simulating a crash in exactly that window without a
+    timing race."""
+
+    def test_failpoint_fires_after_native_import_before_verification(self):
+        src = self._seed_source("Failpoint Album", ["Track One.flac", "Track Two.flac"])
+        plan = self._plan(self._base_payload(src))
+        self.assertTrue(plan.get("ok"), plan)
+
+        native = self._fake_native_import()
+        result = execute_confirmed_import_apply(
+            self.store, plan["operation_id"],
+            music_allowed_roots=[str(self.music_root)],
+            db_path=str(self.lib_db),
+            inspect_source_fn=_inspect,
+            run_native_import_fn=native,
+            acceptance_failpoint="confirmed_import_after_native",
+        )
+        self.assertFalse(result.get("ok"))
+        self.assertEqual(result["status"], "Recovery Required")
+        self.assertEqual(result["code"], "confirmed_import_acceptance_failpoint")
+
+        # Beets really did import (the fake runner created a real album) --
+        # the failpoint fired AFTER real work happened, not instead of it.
+        con = sqlite3.connect(str(self.lib_db))
+        count = con.execute("SELECT COUNT(*) FROM albums WHERE mb_albumid=?", (TARGET_RELEASE,)).fetchone()[0]
+        con.close()
+        self.assertEqual(count, 1)
+
+    def test_retry_after_failpoint_resumes_without_calling_native_import_again(self):
+        src1 = self._seed_source("Failpoint Original", ["Track One.flac", "Track Two.flac"])
+        plan1 = self._plan(self._base_payload(src1))
+        self.assertTrue(plan1.get("ok"), plan1)
+        first = execute_confirmed_import_apply(
+            self.store, plan1["operation_id"],
+            music_allowed_roots=[str(self.music_root)],
+            db_path=str(self.lib_db),
+            inspect_source_fn=_inspect,
+            run_native_import_fn=self._fake_native_import(),
+            acceptance_failpoint="confirmed_import_after_native",
+        )
+        self.assertEqual(first["status"], "Recovery Required")
+
+        # Retry: a brand-new Plan for the same target, no failpoint this
+        # time -- must discover the real album the first attempt's native
+        # import already created, and must NOT invoke native import again.
+        src2 = self._seed_source("Failpoint Retry", ["Track One.flac", "Track Two.flac"])
+        plan2 = self._plan(self._base_payload(src2))
+        self.assertTrue(plan2.get("ok"), plan2)
+
+        calls = {"n": 0}
+
+        def _should_not_run(*a, **kw):
+            calls["n"] += 1
+            raise AssertionError("native import must not run again after the failpoint-simulated crash")
+
+        second = self._apply(plan2["operation_id"], native_import_fn=_should_not_run)
+        self.assertTrue(second.get("ok"), second)
+        self.assertTrue(second.get("resumed"))
+        self.assertEqual(calls["n"], 0)
+
+        con = sqlite3.connect(str(self.lib_db))
+        count = con.execute("SELECT COUNT(*) FROM albums WHERE mb_albumid=?", (TARGET_RELEASE,)).fetchone()[0]
+        con.close()
+        self.assertEqual(count, 1, "must never create a duplicate album row")
+
+    def test_failpoint_is_a_no_op_when_not_the_recognized_name(self):
+        """Only the exact recognized failpoint name has any effect --
+        this is not a generic arbitrary failure-injection API."""
+        src = self._seed_source("Unrecognized Failpoint", ["Track One.flac", "Track Two.flac"])
+        plan = self._plan(self._base_payload(src))
+        self.assertTrue(plan.get("ok"), plan)
+        result = execute_confirmed_import_apply(
+            self.store, plan["operation_id"],
+            music_allowed_roots=[str(self.music_root)],
+            db_path=str(self.lib_db),
+            inspect_source_fn=_inspect,
+            run_native_import_fn=self._fake_native_import(),
+            acceptance_failpoint="some_other_unrecognized_value",
+        )
+        self.assertTrue(result.get("ok"), result)
+        self.assertEqual(result["status"], "Completed")
+
+
+class TestAcceptanceModeGating(unittest.TestCase):
+    """Round 4 brief section 23: the failpoint must be inert unless the
+    container was booted with BEETS_ACCEPTANCE_MODE=1 -- never settable by
+    a real client against a real deployment."""
+
+    def test_acceptance_mode_defaults_off(self):
+        import importlib
+        import backend.beets_control_agent as bca
+        # Reload isolated from any test-runtime env pollution: the module
+        # constant is read once at import time from the real environment.
+        if "BEETS_ACCEPTANCE_MODE" not in __import__("os").environ:
+            self.assertFalse(bca.ACCEPTANCE_MODE)
+
+    def test_acceptance_route_ignores_failpoint_field_when_mode_is_off(self):
+        src_text = (ROOT / "backend" / "beets_control_agent.py").read_text(encoding="utf-8")
+        idx = src_text.index('if path == "/imports/confirmed/apply":')
+        end_idx = src_text.index("\n        if path ==", idx + 10)
+        window = src_text[idx:end_idx]
+        self.assertIn("if ACCEPTANCE_MODE:", window)
+        self.assertIn("_acceptance_failpoint", window)
+
+
 class TestReimportSecurityModelUnchanged(unittest.TestCase):
     """Round 3 brief §2/§12: verify_deterministic_identity() and
     reimport_source_atomic() were not weakened -- no new bypass flags."""
