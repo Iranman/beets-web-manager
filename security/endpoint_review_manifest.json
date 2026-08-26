@@ -2,6 +2,24 @@
   "manifest_version": 1,
   "entries": [
     {
+      "method": "POST",
+      "endpoint": "album_fetch_embed_artwork",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Fetch and embed cover art for an album through the controlled album_artwork_fetch_v1 engine transaction (Plan/Apply/Verify).",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
       "method": "DELETE",
       "endpoint": "album_delete_art",
       "security_classification": "ADMIN_ONLY",

@@ -6490,11 +6490,23 @@ def _prune_stale_wanted_rows_before_import(existing_album_id: int, mb_albumid: s
                 )
             if not delete_ids:
                 return 0
-            con.execute(
-                f"DELETE FROM items WHERE id IN ({','.join('?' * len(delete_ids))})",
-                delete_ids,
-            )
-            con.commit()
+            # Wave 25 round (independent review): a third instance of the
+            # same bug as _delete_album_items_under_folder/import_folder_with_id
+            # below -- folder_cleanup_v1's Plan never reads
+            # action="delete_stale_items" or item_ids, so this always
+            # planned/applied a no-op transaction while claiming success.
+            # playlist_media_cleanup_v1 is the real family for retiring
+            # specific item rows (and quarantining their file, when one
+            # still exists -- these rows were selected specifically
+            # because their file does NOT exist, so this is DB-row-only in
+            # practice, which the family already handles: it schedules the
+            # DB delete regardless of whether the file was found).
+            p_res = beets_client.plan_playlist_media_cleanup({"item_ids": delete_ids})
+            if not p_res.get("ok") or not p_res.get("operation_id"):
+                raise RuntimeError(p_res.get("error") or "Engine plan_playlist_media_cleanup failed for stale wanted rows")
+            app_res = beets_client.apply_playlist_media_cleanup(p_res["operation_id"])
+            if not app_res.get("ok"):
+                raise RuntimeError(app_res.get("error") or "Engine apply_playlist_media_cleanup failed for stale wanted rows")
         label_text = ", ".join(labels[:5])
         log.append(
             "  [import] Removed "
@@ -6579,23 +6591,18 @@ def _merge_imported_album_into_existing(imported_album_id: int, existing_album_i
         # the pre-Wave-18 implementation, with only the replace_rows branch
         # below changed to delegate to the engine instead of deleting rows
         # and unlinking files directly from the Web Manager.
-        def _delete_row_file(row: sqlite3.Row, reason: str) -> None:
-            raw_path = _s(row["path"]) if "path" in row.keys() else ""
-            if not raw_path:
-                return
-            fpath = Path(raw_path)
-            if not fpath.is_absolute():
-                fpath = MUSIC_ROOT / raw_path
-            try:
-                resolved = fpath.resolve(strict=False)
-                if _path_is_under(resolved, MUSIC_ROOT):
-                    resolved.unlink(missing_ok=True)
-                    log.append(
-                        f"  [merge] Removed {reason} track "
-                        f"{int(row['track'] or 0):02d}: {resolved.name}"
-                    )
-            except Exception as ex:
-                log.append(f"  [merge] WARN removing conflicting file: {ex}")
+        #
+        # Wave 25 round (independent review): the pre-Wave-18 helper that
+        # used to be called here, _delete_row_file(), directly deleted a
+        # Beets-DB-tracked media file via a generic engine call with no
+        # corresponding DB row update in the same transaction -- exactly
+        # the "generic delete_file is not a transaction" pattern this
+        # review's threat model flags. It is DEAD CODE: every actual path
+        # below (replace_rows -> bulk_import_replacement_v1, dup_rows/
+        # move_ids -> existing_album_reconcile_v1) already delegates both
+        # the file and the DB row to a real controlled transaction family.
+        # Removed rather than left as a live-looking trap for a future
+        # caller to reach for.
 
         with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:
             existing = con.execute(
@@ -11325,6 +11332,38 @@ def album_fetch_art(aid):
     return jsonify({"ok": True, "job_id": job.job_id})
 
 
+@app.post("/api/albums/<int:aid>/fetch-embed-artwork")
+def album_fetch_embed_artwork(aid):
+    """Fetch and embed cover art for an album through the controlled
+    album_artwork_fetch_v1 engine transaction (Plan -> Apply -> Verify).
+
+    SEC-002 / ARCH-003 Wave 25 Docker acceptance round: distinct from the
+    pre-existing /api/albums/<id>/fetch-art above, which predates the
+    two-service architecture and calls a local `lib.get_album(aid)` /
+    Discogs-fallback pipeline of its own -- migrating that route is
+    real, standalone engineering not attempted in this pass (see
+    docs/TECHNICAL_DEBT.md). This route is the actual, directly reachable
+    production entry point for the new controlled family
+    (beets_client.fetch_and_embed_album_art -> POST
+    /albums/artwork/fetch/plan + /apply on the engine), used by
+    reimport_disk's post-import artwork step and independently callable
+    here so it has its own real HTTP surface, not just an internal
+    function call."""
+    def _do(log, cancel_event=None):
+        res = beets_client.fetch_and_embed_album_art(aid)
+        if not res.get("ok"):
+            raise RuntimeError(res.get("error") or "artwork fetch/embed failed")
+        log.append(f"  Artwork saved: {res.get('artpath')}")
+        _invalidate_lib_cache()
+        return res
+    job = jobs.start_python(
+        _do,
+        label=f"FetchEmbedArtwork: album {aid}",
+        metadata={"type": "album_artwork_fetch_v1", "album_id": aid},
+    )
+    return jsonify({"ok": True, "job_id": job.job_id})
+
+
 @app.post("/api/albums/<int:aid>/art/url")
 def album_replace_art_from_url(aid):
     """Download a user-provided cover image URL and set it as this album's art."""
@@ -13162,7 +13201,23 @@ def _delete_unmatched_items_in_folder(album_id: int, folder_path: str, log: list
 
 
 def _delete_album_items_under_folder(album_id: int, folder_path: str, log: list) -> int:
-    """Delete DB items for one album whose files are still under a staging folder."""
+    """Delete DB items for one album whose files are still under a staging folder.
+
+    Wave 25 round (independent review): this previously (1) deleted each
+    item's media file via the generic, DB-unaware beets_client.delete_file()
+    -- which /files/delete will happily perform on a real library-root
+    path, with no Plan/Apply/Verify/rollback -- and then (2) called
+    plan_folder_cleanup(action="delete_stale_items", item_ids=...), a
+    payload shape folder_cleanup_v1's Plan never actually reads (it only
+    recognizes remove_empty/safe_rename/merge_source_files and silently
+    no-ops on anything else). The Apply therefore always "succeeded" while
+    never deleting a single DB row -- these items' files were removed but
+    their `items` rows stayed behind, pointing at now-missing paths
+    (silent DB/filesystem divergence), while the log falsely reported them
+    removed. playlist_media_cleanup_v1 already exists specifically for
+    "quarantine these items' files and retire their DB rows (and any
+    album row left with zero items) as one transaction" -- use it instead
+    of hand-rolling file deletion + a no-op transaction."""
     if not album_id or not folder_path:
         return 0
     folder = Path(folder_path).resolve(strict=False)
@@ -13190,21 +13245,16 @@ def _delete_album_items_under_folder(album_id: int, folder_path: str, log: list)
         except Exception:
             continue
         delete_ids.append(int(row["id"]))
-        try:
-            abs_resolved.unlink(missing_ok=True)
-            log.append(f"  Removed failed staged import: {abs_resolved.name}")
-        except Exception as ex:
-            log.append(f"  WARN deleting failed staged import {abs_resolved.name}: {ex}")
 
     if not delete_ids:
         return 0
     try:
-        with _db() as con:
-            con.execute(
-                f"DELETE FROM items WHERE id IN ({','.join('?' * len(delete_ids))})",
-                delete_ids,
-            )
-            con.commit()
+        p_res = beets_client.plan_playlist_media_cleanup({"item_ids": delete_ids})
+        if not p_res.get("ok") or not p_res.get("operation_id"):
+            raise RuntimeError(p_res.get("error") or "Engine plan_playlist_media_cleanup failed for staged items")
+        app_res = beets_client.apply_playlist_media_cleanup(p_res["operation_id"])
+        if not app_res.get("ok"):
+            raise RuntimeError(app_res.get("error") or "Engine apply_playlist_media_cleanup failed for staged items")
     except Exception as ex:
         log.append(f"  Staged-file DB cleanup warning: {ex}")
         return 0
@@ -13233,7 +13283,7 @@ def _delete_staged_import_folder(folder_path: str, log: list) -> bool:
         if folder == downloads_root:
             return False
         if folder.exists():
-            shutil.rmtree(str(folder))
+            beets_client.delete_file(str(folder))
             log.append(f"  [import] Removed failed staging folder: {folder}")
             return True
     except Exception as ex:
@@ -21013,8 +21063,30 @@ def import_folder_with_id():
     selected_releasegroupid = _extract_mb_uuid(raw_mb_releasegroupid)
     if not selected_releasegroupid and "release-group" in raw_mb_input.casefold():
         selected_releasegroupid = mb_albumid
+    # Wave 25 Docker acceptance round: mb_albumid currently holds a
+    # release-group UUID rather than a genuine, directly-importable release
+    # UUID exactly when selected_releasegroupid ended up equal to it -- either
+    # because the caller supplied mb_releasegroupid explicitly with no
+    # separate release id (mb_albumid fell back to the release-group value
+    # above), or because a release-group URL/ID was pasted into the generic
+    # release-id field and detected by the check just above. In both cases
+    # the value must be resolved to a representative release before beet
+    # import can use it. This flag was referenced below but never assigned,
+    # so every real fresh-import call raised NameError -- only surfaced once
+    # the real two-service Docker acceptance run exercised this production
+    # route end to end.
+    input_looks_like_release_group = (
+        bool(selected_releasegroupid) and selected_releasegroupid == mb_albumid
+    )
     ai_suggestion = payload.get("ai_suggestion")   # optional — records in AI match history
     use_move      = bool(payload.get("move", False))
+    # Wave 25 Round 4: test-only pass-through for the dedicated Docker
+    # acceptance crash/resume scenario. Inert in every real deployment --
+    # the engine only honors it when its OWN container was booted with
+    # BEETS_ACCEPTANCE_MODE=1 (see beets_control_agent.ACCEPTANCE_MODE),
+    # which no production compose file ever sets, regardless of what any
+    # caller of this route sends.
+    acceptance_failpoint = _s(payload.get("_acceptance_failpoint")).strip() or None
     try:
         existing_album_id = int(payload.get("existing_album_id") or payload.get("album_id") or 0)
     except Exception:
@@ -21038,15 +21110,34 @@ def import_folder_with_id():
             pass
     if not folder_path:
         return jsonify({"ok": False, "error": "path required"}), 400
+    # Wave 25 Docker acceptance round (found only by actually exercising
+    # this real production route against the documented two-service
+    # deployment): requiring local existence made _resolve_import_review_source_path
+    # call candidate.exists()/is_symlink() against a path this process (the
+    # web-manager container) has no filesystem visibility into at all --
+    # docker-compose.yml/docker-compose.full.yml mount ONLY
+    # /web-manager-data into beets-web-manager, by design (the engine
+    # container owns /data/media/music and /data/torrents). Every real
+    # import-with-id call was therefore guaranteed to fail with "Source
+    # path does not exist", 404, regardless of whether the folder was
+    # genuinely there -- the frontend calls this route directly
+    # (api/client.ts), so this broke the confirm-and-import workflow
+    # entirely in the real, security-hardened deployment topology, not
+    # just some rare edge case. Root-containment (a pure string
+    # comparison, no filesystem access) is still checked here and remains
+    # a real, fast, meaningful rejection of an out-of-bounds path.
+    # Existence and symlink-safety are the engine's job -- it has the
+    # actual mount -- and create_import_folder_plan() below already does
+    # real, disk-backed root-containment + symlink-component checks with
+    # a real fail-closed existence requirement of its own.
     trusted_folder, folder_error = _resolve_import_review_source_path(
         folder_path,
         allow_music=True,
         expected_type="dir",
-        require_exists=True,
+        require_exists=False,
     )
     if folder_error or trusted_folder is None:
-        status = 404 if folder_error == "Source path does not exist." else 400
-        return jsonify({"ok": False, "error": folder_error or "Source path is not allowed."}), status
+        return jsonify({"ok": False, "error": folder_error or "Source path is not allowed."}), 400
     folder_path = str(trusted_folder)
     if not raw_mb_input:
         return jsonify({
@@ -21086,7 +21177,32 @@ def import_folder_with_id():
         music_root = "/data/media/music"
         source_folder_path = folder_path
         import_folder_path = folder_path
-
+        # Wave 25 Docker acceptance round (second NameError found by the same
+        # real fresh-import scenario, after fixing input_looks_like_release_group
+        # above): source_is_library is referenced extensively below (library-
+        # source validation, rollback, and messaging branches) but was never
+        # assigned anywhere in this function either. True when the caller is
+        # re-tagging/re-validating a folder that is already inside the music
+        # library, as opposed to importing from staging/downloads.
+        source_is_library = _path_is_under(Path(folder_path), Path(music_root))
+        # Wave 25 Docker acceptance round (third NameError found by the same
+        # real fresh-import scenario): already_present/combined are
+        # referenced much further below by a legacy "beet reported nothing
+        # to import" phrase-matching fallback (_delete_if_already_in_library
+        # searches raw beet CLI stdout for phrases like "already in the
+        # library"). That mechanism predates the import_folder_v1 engine
+        # migration -- the controlled beets_client.plan_import_folder /
+        # apply_import_folder path no longer exposes raw beet stdout to
+        # app.py at all, so there is no text left to phrase-match, and
+        # fabricating a signal here would be dishonest. Defaulting both
+        # False/"" keeps that specific legacy fallback inert rather than
+        # crashing; a genuinely already-imported source is still found by
+        # the real library lookups (strategies A-G below, which query by MB
+        # identity/path/name), and the one real remaining gap -- a source
+        # where none of those find a match because nothing was ever
+        # imported -- is now an honest error instead of a NameError.
+        already_present = False
+        combined = ""
 
         if input_looks_like_release_group:
             resolved_release = _resolve_album_release_for_import(
@@ -21303,7 +21419,21 @@ def import_folder_with_id():
             }
 
         def _cleanup_failed_import_copy(album_db_id: int) -> None:
-            """Remove a failed copy-mode import only when the original source still exists."""
+            """Remove a failed copy-mode import only when the original source still exists.
+
+            Wave 25 round (independent review): this previously deleted each
+            item's file via a generic, DB-unaware engine delete-file call
+            BEFORE calling plan_album_cleanup/apply_album_cleanup -- but
+            album_cleanup_v1's own Apply already deletes both the DB rows
+            AND the on-disk files itself (symlink-checked, TOCTOU-
+            precondition-rechecked, step-tracked), per its own contract
+            ("Create transaction plan for deleting an album from Beets DB
+            and disk"). The manual pre-delete loop was therefore redundant
+            AND bypassed that transaction's own safety checks for the file
+            half of the deletion (the files were gone before Apply's own
+            symlink/TOCTOU checks ever ran on them). Let the existing
+            transaction do the whole job instead of duplicating it unsafely.
+            """
             if source_is_library:
                 log.append("  Failed import cleanup skipped: source is already under the music library")
                 return
@@ -21326,23 +21456,13 @@ def import_folder_with_id():
                         log.append(
                             "  Failed import cleanup skipped: album rows were not created by this job")
                         return
-                    mroot = Path(music_root).resolve(strict=False)
-                    deleted_files = 0
-                    for row in rows:
-                        raw_path = _s(row["path"])
-                        fpath = Path(raw_path)
-                        if not fpath.is_absolute():
-                            fpath = Path(music_root) / raw_path
-                        try:
-                            resolved = fpath.resolve(strict=False)
-                            resolved.relative_to(mroot)
-                            resolved.unlink(missing_ok=True)
-                            deleted_files += 1
-                        except Exception as ex:
-                            log.append(f"  WARN cleanup could not delete {fpath}: {ex}")
-                    con.execute("DELETE FROM items WHERE album_id=?", (album_db_id,))
-                    con.execute("DELETE FROM albums WHERE id=?", (album_db_id,))
-                    con.commit()
+                    p_res = beets_client.plan_album_cleanup(album_db_id)
+                    if not p_res.get("ok") or not p_res.get("operation_id"):
+                        raise RuntimeError(p_res.get("error") or f"Engine plan_album_cleanup failed for album {album_db_id}")
+                    app_res = beets_client.apply_album_cleanup(p_res["operation_id"])
+                    if not app_res.get("ok"):
+                        raise RuntimeError(app_res.get("error") or f"Engine apply_album_cleanup failed for album {album_db_id}")
+                deleted_files = len(app_res.get("deleted") or [])
                 log.append(f"  Removed failed copied import: album_id {album_db_id}, {deleted_files} file(s)")
             except Exception as ex:
                 log.append(f"  Failed import cleanup warning: {ex}")
@@ -21383,9 +21503,12 @@ def import_folder_with_id():
                                 f"item path is outside source folder ({fpath})"
                             )
                             return False
-                    con.execute("DELETE FROM items WHERE album_id=?", (album_db_id,))
-                    con.execute("DELETE FROM albums WHERE id=?", (album_db_id,))
-                    con.commit()
+                    p_res = beets_client.plan_album_cleanup(album_db_id)
+                    if not p_res.get("ok") or not p_res.get("operation_id"):
+                        raise RuntimeError(f"Engine plan_album_cleanup failed for album {album_db_id}")
+                    app_res = beets_client.apply_album_cleanup(p_res["operation_id"])
+                    if not app_res.get("ok"):
+                        raise RuntimeError(f"Engine apply_album_cleanup failed for album {album_db_id}")
                 log.append(
                     "  Rolled back failed library-source import DB rows for "
                     f"album_id {album_db_id}; source files were kept on disk"
@@ -21694,51 +21817,89 @@ def import_folder_with_id():
         t_before = time.time() - 5
         import_timeout = _beet_import_timeout(import_folder_path)
 
-        # SEC-002 / ARCH-003 Wave 22 final review, findings #3-#6 (CRITICAL,
-        # merge-blocking, not fully closed): the actual Beets import for
-        # this workflow still runs locally below via `subprocess.run`, not
-        # through this engine call. The Control Agent's `/import/apply`
-        # route does not (and, as of this review, safely cannot -- see
-        # finding #6 and the Wave 22 design doc) supply a real
-        # `beets_import_runner`, so `execute_import_folder_apply` now
-        # correctly fails closed here every time (it no longer lies about
-        # having imported anything, per finding #3's fix) rather than
-        # silently no-op-succeeding as it did before this review. This is
-        # NOT a working fallback pattern -- it is the plan/verify half of
-        # a transaction boundary that is not yet wired to the real
-        # mutation, kept only for its non-mutating preview/audit value
-        # until the native-Beets-import-inside-the-engine work described
-        # in the design doc is done. Removing the local import below
-        # before that work lands would delete the only code path that
-        # currently performs imports at all; it is intentionally still
-        # here, not a regression.
-        plan_res = beets_client.plan_import_folder({
+        # Wave 25 Round 3: routed through confirmed_import_v1, NOT
+        # import_folder_v1/reimport_source_atomic. This workflow's whole
+        # premise is a human reviewing and confirming an identity for
+        # PREVIOUSLY-UNTAGGED source audio -- reimport_source_atomic's
+        # verify_deterministic_identity() gate requires the source's OWN
+        # embedded MusicBrainz tags to already match the target, which
+        # fresh untagged downloads never have by construction (that gate
+        # remains untouched and still correctly protects genuine reimports
+        # of already-tagged library content via BeetsClient.reimport_source
+        # / POST /imports/reimport). confirmed_import_v1 instead binds
+        # authorization to an immutable source manifest digest (re-checked
+        # at Apply), this already-resolved concrete Release ID + Release
+        # Group, and best-effort track/fingerprint alignment -- see
+        # docs/operations/wave25_import_reconciliation_design.md.
+        plan_res = beets_client.plan_confirmed_import({
             "source_folder": import_folder_path,
-            "album_id": existing_album_id,
+            "existing_album_id": existing_album_id,
             "mb_albumid": mb_albumid,
             "mb_releasegroupid": selected_releasegroupid,
-            "selected_source_files": [str(f) for f in selected_source_files],
-            "wanted_tracks": wanted_tracks,
-            "replace_existing_item_ids": replace_existing_item_ids,
+            "mb_release_group_resolved": resolved_releasegroupid,
+            "mb_tracks": mb_identity.get("tracks") or [],
+            "use_move": use_move,
         })
         if not plan_res.get("ok"):
             raise RuntimeError(f"Import planning failed: {plan_res.get('error') or 'unknown error'}")
-        apply_res = beets_client.apply_import_folder(plan_res["operation_id"])
-        if not apply_res.get("ok"):
-            raise RuntimeError(f"Import execution failed: {apply_res.get('error') or 'unknown error'}")
+        # Round 4 (found while adding this very diagnostics feature):
+        # BeetsClient._request() raises BeetsError/BeetsUnavailableError
+        # for every non-2xx response (standard urllib behavior) -- it
+        # never returns a plain {"ok": False, ...} dict for those, so a
+        # `if not apply_res.get("ok")` check here would be dead code for
+        # every real rejection this route can produce (Plan/Apply both
+        # respond 400/409 on failure, never 200 with ok:false). The
+        # exception itself is the only thing that ever reaches this line,
+        # and its own .diagnostics attribute (populated by _request() from
+        # the agent's error JSON) is what carries the real native Beets
+        # stdout/stderr -- surfaced into this job's own log here so it is
+        # visible to whoever is debugging a real failure, including the
+        # Docker acceptance script's own [FAIL] report.
+        try:
+            apply_res = beets_client.apply_confirmed_import(
+                plan_res["operation_id"], acceptance_failpoint=acceptance_failpoint,
+            )
+        except (BeetsError, BeetsUnavailableError) as ex:
+            diag = getattr(ex, "diagnostics", None) or {}
+            if diag.get("returncode") is not None:
+                log.append(f"[import] Native Beets exit code: {diag['returncode']}")
+            if diag.get("stdout_excerpt"):
+                log.append(f"[import] Native Beets stdout: {diag['stdout_excerpt']}")
+            if diag.get("stderr_excerpt"):
+                log.append(f"[import] Native Beets stderr: {diag['stderr_excerpt']}")
+            raise
         log.append(f"[import] Engine controlled import completed: {import_folder_path}")
+        if apply_res.get("resumed"):
+            log.append("[import] Resumed an already-verified prior result for this release (native import was not re-invoked).")
+        confirmed_import_album_id = int(apply_res.get("album_id") or 0)
+        confirmed_import_item_ids = [int(i) for i in (apply_res.get("item_ids") or [])]
 
         # ── Step 2: find the album ─────────────────────────────────────────────
         log.append("[2/4] Locating album in library…")
         time.sleep(1)
 
+        # confirmed_import_v1's Apply already performed authoritative,
+        # verified result capture (queried the library by the exact planned
+        # Release ID, confirmed items and files exist on disk) -- trust
+        # that directly rather than re-discovering it through the broad
+        # heuristic strategies below, which exist to cover cases this
+        # deterministic result does not (kept as a defensive fallback, not
+        # the primary path, now that a real verified result is available).
+        if confirmed_import_album_id > 0:
+            album_ids, item_ids = [confirmed_import_album_id], list(confirmed_import_item_ids)
+            strategy = "confirmed_import_v1 verified result"
+        else:
+            album_ids, item_ids = [], []
+            strategy = ""
+
         # A: items still in the import source folder
-        album_ids, item_ids = _find_ids_in_db(import_folder_path)
-        strategy = (
-            "source path (library)" if source_is_library
-            else "source path (selected subset)" if selected_subset_import
-            else "source path (downloads)"
-        )
+        if not album_ids and not item_ids:
+            album_ids, item_ids = _find_ids_in_db(import_folder_path)
+            strategy = (
+                "source path (library)" if source_is_library
+                else "source path (selected subset)" if selected_subset_import
+                else "source path (downloads)"
+            )
 
         # B: items recently copied to the music library
         if not album_ids and not item_ids:
@@ -21909,6 +22070,27 @@ def import_folder_with_id():
             failed_library_source_summaries: List[Dict[str, Any]] = []
             rolled_back_failed_library_source = False
             for aid in album_ids:
+                if strategy == "confirmed_import_v1 verified result":
+                    # Already authoritatively verified server-side inside
+                    # execute_confirmed_import_apply()'s post-import
+                    # capture (exact planned Release ID + RGID match,
+                    # items/files confirmed on disk) via structured
+                    # library queries. Re-deriving that here through
+                    # _album_match_summary() would be redundant at best --
+                    # and structurally broken at worst, since it depends
+                    # on raw SQL through _db(), which is intentionally
+                    # disabled in the two-service topology
+                    # (BeetsClient.raw_sqlite_query always raises "Raw
+                    # SQLite queries are not permitted"). Trust the
+                    # already-verified result directly instead of
+                    # re-deriving it through a path that can never
+                    # succeed here.
+                    log.append(
+                        f"  Album {aid} already verified by confirmed_import_v1 "
+                        "(exact planned release match) — skipping redundant re-validation."
+                    )
+                    validated_album_ids.append(aid)
+                    continue
                 summary = _album_match_summary(int(aid))
                 log.append(
                     f"  Validation album_id {aid}: {summary['matches']}/"
@@ -22114,7 +22296,7 @@ def import_folder_with_id():
                         continue
                     except Exception:
                         pass
-                    resolved_src.unlink(missing_ok=True)
+                    beets_client.delete_file(str(resolved_src))
                     removed_selected += 1
                 except Exception as ex:
                     log.append(f"  [cleanup] WARN could not remove imported source file {src}: {ex}")
@@ -22152,26 +22334,33 @@ def import_folder_with_id():
                             + ", ".join(f.name for f in unknown[:5])
                         )
                     else:
-                        # Only residual art files (already moved) or empty — safe to remove
-                        for f in remaining_files:
-                            f.unlink(missing_ok=True)
-                        for sub in sorted(src_dir.rglob("*"), reverse=True):
-                            if sub.is_dir():
-                                try:
-                                    sub.rmdir()
-                                except Exception:
-                                    pass
-                        try:
-                            src_dir.rmdir()
-                            log.append(f"  [cleanup] Source folder removed: {src_dir.name}")
-                        except Exception as ex:
-                            log.append(f"  [cleanup] Could not remove source folder: {ex}")
+                        # Only residual art files (already moved) or empty — safe to remove.
+                        # Wave 25 round (independent review): folder_cleanup_v1's Plan
+                        # reads payload["source"]/["source_folder"] and
+                        # action in {"remove_empty_source","remove_empty",
+                        # "safe_rename","rename_folder","merge_source_files","merge"}
+                        # -- the previous {"path": ..., "action": "delete"}
+                        # payload matched none of that, so Plan always
+                        # returned {"ok": False, "error": "source folder
+                        # required"} and this source folder was never
+                        # actually removed (silently caught by the outer
+                        # except below, logged as "cleanup skipped").
+                        # remove_empty is the correct action: Apply only
+                        # rmdir()s if the directory is verified truly empty,
+                        # failing closed (not raising) otherwise.
+                        p_cl = beets_client.plan_folder_cleanup({"source": str(src_dir), "action": "remove_empty"})
+                        if not p_cl.get("ok") or not p_cl.get("operation_id"):
+                            raise RuntimeError(p_cl.get("error") or f"Engine plan_folder_cleanup failed for {src_dir}")
+                        app_cl = beets_client.apply_folder_cleanup(p_cl["operation_id"])
+                        if not app_cl.get("ok"):
+                            raise RuntimeError(app_cl.get("error") or f"Engine apply_folder_cleanup failed for {src_dir}")
+                        log.append(f"  [cleanup] Source folder removed: {src_dir.name}")
         except Exception as ex:
             log.append(f"  (source folder cleanup skipped: {ex})")
 
         if selected_subset_import and import_folder_path != source_folder_path:
             try:
-                shutil.rmtree(import_folder_path, ignore_errors=True)
+                beets_client.delete_file(import_folder_path)
             except Exception as ex:
                 log.append(f"  [cleanup] WARN staging cleanup skipped: {ex}")
         for aid in album_ids:
@@ -22812,34 +23001,21 @@ def reimport_disk():
                         f"Existing album repair did not match enough tracks: "
                         f"{matched}/{expected_tracks}"
                     )
-            with _db() as con_existing_repair:
-                con_existing_repair.execute(
-                    "UPDATE albums SET mb_albumid=? WHERE id=?",
-                    (mb_albumid, aid),
-                )
-                con_existing_repair.execute(
-                    "UPDATE items SET mb_albumid=? WHERE album_id=?",
-                    (mb_albumid, aid),
-                )
-                con_existing_repair.commit()
+            p_res = beets_client.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mb_albumid})
+            if not p_res.get("ok") or not p_res.get("operation_id"):
+                raise RuntimeError(f"Engine plan_album_mb_track_repair failed for album {aid}")
+            app_res = beets_client.apply_album_mb_track_repair(p_res["operation_id"], write_tags=True)
+            if not app_res.get("ok"):
+                raise RuntimeError(f"Engine apply_album_mb_track_repair failed for album {aid}")
+
             log.append("[3/3] Writing tags and moving existing album...")
             _strip_year_from_album_db(aid, log)
-            for cmd_label, args, tmo in [
-                ("mbsync", ["mbsync", f"album_id:{aid}"], 120),
-                ("write", ["write", f"album_id:{aid}"], 120),
-                ("move", ["move", f"album_id:{aid}"], 120),
-            ]:
-                r2 = _beet_run(base_std + args, log, timeout=tmo, env=env, cancel=cancel_event,
-                               config_override=repair_cfg_content)
-                out2 = _ANSI_RE.sub('', (r2.stdout + r2.stderr).strip())
-                if out2:
-                    log.append(f"  [{cmd_label}] {out2[:300]}")
-                if r2.returncode == -9:
-                    raise RuntimeError("cancelled")
-                if r2.returncode >= 2:
-                    raise RuntimeError(f"beet {cmd_label} failed (rc={r2.returncode})")
-                if r2.returncode != 0:
-                    log.append(f"  WARN: beet {cmd_label} exited {r2.returncode}; continuing")
+            up_res = beets_client.update_album_metadata(aid, {}, force_write_tags=True)
+            if not up_res.get("ok"):
+                raise RuntimeError(f"Engine update_album_metadata failed for album {aid}")
+            rel_res = beets_client.relocate_album(aid, mode="rename")
+            if not rel_res.get("ok"):
+                raise RuntimeError(f"Engine relocate_album failed for album {aid}")
             _repair_album_mbid_sticking_once(
                 aid,
                 mb_albumid,
@@ -23334,7 +23510,7 @@ def reimport_disk():
                         while new_path.exists():
                             new_path = f.parent / f"{base_new}.{n}{ext_new}"
                             n += 1
-                        f.rename(new_path)
+                        beets_client.move_file(str(f), str(new_path))
                         log.append(f"  Pre-rename: {f.name!r} → {new_path.name!r}")
                         renamed_count += 1
         except Exception as ex:
@@ -23376,20 +23552,29 @@ def reimport_disk():
                         if album_id:
                             orphan_album_ids.add(int(album_id))
                 if orphan_ids:
-                    con0.execute(f"DELETE FROM items WHERE id IN ({','.join('?'*len(orphan_ids))})",
-                                 orphan_ids)
-                    con0.commit()
+                    # Wave 25 round (independent review): plan_folder_cleanup's
+                    # Plan never reads action="delete_stale_items" or
+                    # item_ids at all (folder_cleanup_v1 only recognizes
+                    # remove_empty/safe_rename/merge_source_files) -- this
+                    # always produced a no-op transaction that reported
+                    # success without deleting a single orphan DB row.
+                    # playlist_media_cleanup_v1 is the real family for
+                    # "quarantine these items' files (if still present) and
+                    # retire their DB rows -- and any album row left empty
+                    # -- as one transaction."
+                    p_res = beets_client.plan_playlist_media_cleanup({"item_ids": orphan_ids})
+                    if not p_res.get("ok") or not p_res.get("operation_id"):
+                        raise RuntimeError(p_res.get("error") or "Engine plan_playlist_media_cleanup failed for orphan items")
+                    app_res = beets_client.apply_playlist_media_cleanup(p_res["operation_id"])
+                    if not app_res.get("ok"):
+                        raise RuntimeError(app_res.get("error") or "Engine apply_playlist_media_cleanup failed for orphan items")
                     log.append(f"  Cleared {len(orphan_ids)} existing DB item(s) for this folder "
                                f"(album_ids: {sorted(orphan_album_ids)})")
                 # Remove album rows that now have zero items
                 for aid0 in orphan_album_ids:
-                    cnt = con0.execute("SELECT COUNT(*) FROM items WHERE album_id = ?",
-                                       (aid0,)).fetchone()[0]
-                    if cnt == 0:
-                        con0.execute("DELETE FROM albums WHERE id = ?", (aid0,))
-                        log.append(f"  Removed empty album row (id={aid0})")
-                con0.commit()
-                con0.close()
+                    p_ac = beets_client.plan_album_cleanup(aid0)
+                    if p_ac.get("ok") and p_ac.get("operation_id"):
+                        beets_client.apply_album_cleanup(p_ac["operation_id"])
             except Exception as ex:
                 log.append(f"  DB cleanup warning: {ex}")
 
@@ -23591,14 +23776,13 @@ def reimport_disk():
                         f"{labels or len(still_missing_before_retag)}"
                     )
 
-            try:
-                with _db() as con2:
-                    con2.execute("UPDATE albums SET mb_albumid = ? WHERE id = ?",
-                                 (mb_albumid, aid))
-                    con2.commit()
-                log.append(f"  Set albums.mb_albumid (id={aid})")
-            except Exception as ex:
-                log.append(f"  albums update warning: {ex}")
+            p_res = beets_client.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mb_albumid})
+            if not p_res.get("ok") or not p_res.get("operation_id"):
+                raise RuntimeError(f"Engine plan_album_mb_track_repair failed for album {aid}")
+            app_res = beets_client.apply_album_mb_track_repair(p_res["operation_id"], write_tags=True)
+            if not app_res.get("ok"):
+                raise RuntimeError(f"Engine apply_album_mb_track_repair failed for album {aid}")
+            log.append(f"  Set albums.mb_albumid (id={aid})")
 
             # Match each track by title similarity against MB release data
             # (handles filenames like "Artist - Album - %02i{$track} - Title")
@@ -23644,16 +23828,13 @@ def reimport_disk():
                     replace_existing_item_ids=replace_existing_item_ids)
                 if merged_aid != aid:
                     aid = merged_aid
-                    try:
-                        with _db() as con_merge:
-                            con_merge.execute(
-                                "UPDATE albums SET mb_albumid = ? WHERE id = ?",
-                                (mb_albumid, aid),
-                            )
-                            con_merge.commit()
-                        log.append(f"  Set albums.mb_albumid (id={aid}) after merge")
-                    except Exception as ex:
-                        log.append(f"  albums update warning after merge: {ex}")
+                    p_res = beets_client.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mb_albumid})
+                    if not p_res.get("ok") or not p_res.get("operation_id"):
+                        raise RuntimeError(f"Engine plan_album_mb_track_repair failed for album {aid} after merge")
+                    app_res = beets_client.apply_album_mb_track_repair(p_res["operation_id"], write_tags=True)
+                    if not app_res.get("ok"):
+                        raise RuntimeError(f"Engine apply_album_mb_track_repair failed for album {aid} after merge")
+                    log.append(f"  Set albums.mb_albumid (id={aid}) after merge")
                     matched = _match_tracks_from_mb(
                         mb_albumid, aid, log, zero_unmatched=True)
                     if matched < 0:
@@ -23766,48 +23947,38 @@ def reimport_disk():
                 except Exception:
                     pass
 
-            # mbsync fetches album-level metadata (label, country, albumtype, sort
-            # names, etc.) from MusicBrainz. beet import already stamped mb_albumid,
-            # so no separate modify step is needed.
-            r2 = _beet_run(base_std + ["mbsync", f"album_id:{aid}"], log,
-                           timeout=120, env=env, cancel=cancel_event, config_override=temp_cfg_content)
-            out2 = _ANSI_RE.sub('', (r2.stdout + r2.stderr).strip())
-            if out2:
-                log.append(f"  [mbsync] {out2[:300]}")
+            p_res = beets_client.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mb_albumid})
+            if not p_res.get("ok") or not p_res.get("operation_id"):
+                raise RuntimeError(f"Engine plan_album_mb_track_repair failed for album {aid}")
+            app_res = beets_client.apply_album_mb_track_repair(p_res["operation_id"], write_tags=True)
+            if not app_res.get("ok"):
+                raise RuntimeError(f"Engine apply_album_mb_track_repair failed for album {aid}")
 
             # ── Restore albumartist if mbsync changed it ──────────────────────
             if _intended_albumartist:
-                try:
-                    with _db() as _cp:
-                        _cur_aa_row = _cp.execute(
-                            "SELECT albumartist FROM albums WHERE id=?", (aid,)
-                        ).fetchone()
-                    _cur_aa = (_cur_aa_row[0] if _cur_aa_row else "") or ""
-                    if _cur_aa != _intended_albumartist:
-                        with _db() as _cr:
-                            _cr.execute("UPDATE albums SET albumartist=? WHERE id=?",
-                                        (_intended_albumartist, aid))
-                            _cr.execute("UPDATE items SET albumartist=? WHERE album_id=?",
-                                        (_intended_albumartist, aid))
-                            _cr.commit()
-                        log.append(
-                            f"  [albumartist] Pinned: '{_cur_aa}' → '{_intended_albumartist}'")
-                except Exception as _ae:
-                    log.append(f"  [albumartist] Warning: {_ae}")
+                with _db() as _cp:
+                    _cur_aa_row = _cp.execute(
+                        "SELECT albumartist FROM albums WHERE id=?", (aid,)
+                    ).fetchone()
+                _cur_aa = (_cur_aa_row[0] if _cur_aa_row else "") or ""
+                if _cur_aa != _intended_albumartist:
+                    up_aa = beets_client.update_album_metadata(aid, {"albumartist": _intended_albumartist}, force_write_tags=True)
+                    if not up_aa.get("ok"):
+                        raise RuntimeError(f"Engine update albumartist failed for album {aid}")
+                    log.append(
+                        f"  [albumartist] Pinned: '{_cur_aa}' → '{_intended_albumartist}'")
 
             # Strip any trailing year suffix from album name BEFORE rename so the
             # path template $album (%left{$year,4}) doesn't produce "Album (2022) (2022)"
             _strip_year_from_album_db(aid, log)
 
-            for cmd_label, args, tmo in [
-                ("write",   ["write",  f"album_id:{aid}"], 120),
-                ("rename",  ["move",   f"album_id:{aid}"], 120),
-            ]:
-                r2 = _beet_run(base_std + args, log, timeout=tmo, env=env, cancel=cancel_event,
-                               config_override=temp_cfg_content)
-                out2 = _ANSI_RE.sub('', (r2.stdout + r2.stderr).strip())
-                if out2:
-                    log.append(f"  [{cmd_label}] {out2[:300]}")
+            up_res = beets_client.update_album_metadata(aid, {}, force_write_tags=True)
+            if not up_res.get("ok"):
+                raise RuntimeError(f"Engine update_album_metadata failed for album {aid}")
+            rel_res = beets_client.relocate_album(aid, mode="rename")
+            if not rel_res.get("ok"):
+                raise RuntimeError(f"Engine relocate_album failed for album {aid}")
+            log.append(f"  ✓ Relocated album {aid} to: {rel_res.get('dest_dir')}")
 
             # ── Post-move fallback: only inspect this album's current item dirs ──
             # If a future Beets template/plugin issue leaves unresolved tokens in
@@ -23844,28 +24015,54 @@ def reimport_disk():
                     + "; ".join(skipped_album_errors)
                 )
 
+        # Wave 25 Round (independent review): item_ids holds items
+        # _find_ids_in_db found WITHOUT an album_id -- i.e. standalone
+        # tracks Beets did not group into an album row. The previous
+        # version of this loop resolved each item's real album_id (below,
+        # for _strip_year_from_album_db) but then discarded it, passing
+        # the item's own row id to update_album_metadata()/relocate_album()
+        # /plan_album_mb_track_repair() as if it WERE an album_id. Those
+        # functions take an album_id; an item id can numerically collide
+        # with an unrelated album's id, causing wrong-album mutation. Fix:
+        # always use the freshly re-resolved real album_id for every
+        # album-scoped call, never the item id; skip items that genuinely
+        # have no album (there is nothing album-level to repair); and
+        # dedupe so two items sharing the same album are only processed
+        # once.
+        _item_repaired_album_ids: set = set()
         for iid in item_ids:
-            # Resolve album_id for this item so we can clean up the album name too
             try:
                 with _db(text_factory=str) as _ci:
                     _aid_row = _ci.execute(
                         "SELECT album_id FROM items WHERE id = ?", (iid,)).fetchone()
-                if _aid_row and _aid_row[0]:
-                    _strip_year_from_album_db(_aid_row[0], log)
             except Exception:
-                pass
+                _aid_row = None
+            _real_aid = int(_aid_row[0]) if _aid_row and _aid_row[0] else 0
+            if _real_aid <= 0:
+                # Genuinely standalone track: no album row to repair,
+                # relocate, or MB-track-repair -- album-level operations
+                # do not apply.
+                continue
+            if _real_aid in _item_repaired_album_ids:
+                continue
+            _item_repaired_album_ids.add(_real_aid)
 
-            for cmd_label, args, tmo in [
-                ("modify",  ["modify", "-y", "--nowrite", f"mb_albumid={mb_albumid}", f"id:{iid}"], 120),
-                ("mbsync",  ["mbsync", f"id:{iid}"], 60),
-                ("write",   ["write",  f"id:{iid}"], 30),
-                ("rename",  ["move",   f"id:{iid}"], 30),
-            ]:
-                r2 = _beet_run(base_std + args, log, timeout=tmo, env=env, cancel=cancel_event,
-                               config_override=temp_cfg_content)
-                out2 = _ANSI_RE.sub('', (r2.stdout + r2.stderr).strip())
-                if out2:
-                    log.append(f"  [{cmd_label}] {out2[:200]}")
+            _strip_year_from_album_db(_real_aid, log)
+
+            p_res = beets_client.plan_album_mb_track_repair({"album_id": _real_aid, "mb_albumid": mb_albumid})
+            if not p_res.get("ok") or not p_res.get("operation_id"):
+                raise RuntimeError(f"Engine plan_album_mb_track_repair failed for album {_real_aid}")
+            app_res = beets_client.apply_album_mb_track_repair(p_res["operation_id"], write_tags=True)
+            if not app_res.get("ok"):
+                raise RuntimeError(f"Engine apply_album_mb_track_repair failed for album {_real_aid}")
+            up_res = beets_client.update_album_metadata(_real_aid, {}, force_write_tags=True)
+            if not up_res.get("ok"):
+                raise RuntimeError(f"Engine update_album_metadata failed for album {_real_aid}")
+            rel_res = beets_client.relocate_album(_real_aid, mode="rename")
+            if not rel_res.get("ok"):
+                raise RuntimeError(f"Engine relocate_album failed for album {_real_aid}")
+            if _real_aid not in final_album_ids:
+                final_album_ids.append(_real_aid)
 
         if final_album_ids:
             album_ids = final_album_ids
@@ -23880,19 +24077,21 @@ def reimport_disk():
             )
 
         # ── Fetch and embed album art ─────────────────────────────────────────
+        # Wave 25 round (independent review): BeetsClient had no
+        # repair_album_artwork method at all -- every call here raised
+        # AttributeError, silently swallowed by this try/except, so
+        # artwork was never actually fetched for any import. Best-effort
+        # by design (matches the pre-Wave-25 local `beet fetchart`/`beet
+        # embedart` behavior this replaces): missing cover art must not
+        # fail an otherwise-successful import, but the failure is now a
+        # real, checked result rather than a guaranteed no-op.
         for _art_aid in album_ids:
-            for _art_cmd, _art_args, _art_tmo in [
-                ("fetchart", ["fetchart", f"album_id:{_art_aid}"], 60),
-                ("embedart", ["embedart", "-y", f"album_id:{_art_aid}"], 60),
-            ]:
-                try:
-                    _r_art = _beet_run(base_std + _art_args, log, timeout=_art_tmo, env=env, cancel=cancel_event,
-                                       config_override=temp_cfg_content)
-                    _art_out = _ANSI_RE.sub('', (_r_art.stdout + _r_art.stderr).strip())
-                    if _art_out:
-                        log.append(f"  [{_art_cmd}] {_art_out[:200]}")
-                except Exception as _ae:
-                    log.append(f"  [{_art_cmd}] Warning: {_ae}")
+            try:
+                _art_res = beets_client.fetch_and_embed_album_art(int(_art_aid))
+                if not _art_res.get("ok"):
+                    log.append(f"  [artwork] Warning: {_art_res.get('error')}")
+            except Exception as _ae:
+                log.append(f"  [artwork] Warning: {_ae}")
 
         # ── Record recent import ───────────────────────────────────────────────
         try:
@@ -26475,45 +26674,39 @@ def _ai_import_folder(folder_path: str, mb_albumid: str, suggestion: dict,
     # ── Step 1: beet import with the selected release ─────────────────────────
     mb_albumid = _prefer_album_mb_release(mb_albumid, log)
     _validate_import_source_audio(folder_path, log, reject_downloads=True)
-    r = _beet_run(
-        base + ["import", "-q", "--noincremental", "--quiet-fallback", "asis",
-                import_mode, "--search-id", mb_albumid, folder_path],
-        log, timeout=180, env=env, cancel=cancel_event)
+    atomic_res = beets_client.reimport_source(
+        folder_path,
+        beets_options={"search_id": mb_albumid, "copy": preserve_torrent_source},
+        timeout=180.0
+    )
+    if not atomic_res.get("ok"):
+        raise RuntimeError(f"Beets import failed: {atomic_res.get('error', 'reimport_source failed')}")
 
-    if r.returncode == -9:
-        raise RuntimeError("cancelled")
-
-    combined = _ANSI_RE.sub('', (r.stdout + r.stderr).strip())
-    if combined:
-        for line in combined.splitlines()[:8]:
-            log.append(f"  {line}")
-
+    combined = ""
     _delete_if_already_in_library(folder_path, combined, log)
-
-    if r.returncode >= 2:
-        raise RuntimeError(f"beet import rc={r.returncode}")
 
     # ── Step 2: find album in DB ──────────────────────────────────────────────
     time.sleep(1)
-    aid = None
+    aid = atomic_res.get("album_id")
     _MROOT_B = b"/data/media/music/"
-    try:
-        # Search by mb_albumid (most reliable after --search-id import)
-        with _db(text_factory=bytes) as con:
-            row = con.execute("SELECT id FROM albums WHERE mb_albumid = ?",
-                              (mb_albumid,)).fetchone()
-            if row:
-                aid = row[0]
-            if aid is None:
-                # Recently added fallback
-                t_before = time.time() - 200   # last few minutes
-                rows = con.execute(
-                    "SELECT DISTINCT album_id FROM items "
-                    "WHERE album_id IS NOT NULL AND added >= ?", (t_before,)).fetchall()
-                if rows:
-                    aid = rows[-1][0]  # most recently added album
-    except Exception as ex:
-        log.append(f"  DB lookup warning: {ex}")
+    if aid is None:
+        try:
+            # Search by mb_albumid (most reliable after --search-id import)
+            with _db(text_factory=bytes) as con:
+                row = con.execute("SELECT id FROM albums WHERE mb_albumid = ?",
+                                  (mb_albumid,)).fetchone()
+                if row:
+                    aid = row[0]
+                if aid is None:
+                    # Recently added fallback
+                    t_before = time.time() - 200   # last few minutes
+                    rows = con.execute(
+                        "SELECT DISTINCT album_id FROM items "
+                        "WHERE album_id IS NOT NULL AND added >= ?", (t_before,)).fetchall()
+                    if rows:
+                        aid = rows[-1][0]  # most recently added album
+        except Exception as ex:
+            log.append(f"  DB lookup warning: {ex}")
 
     if aid is None:
         log.append("  WARN: album not found in DB after import — skipping retag")
@@ -26531,32 +26724,27 @@ def _ai_import_folder(folder_path: str, mb_albumid: str, suggestion: dict,
 
     # ── Step 3: stamp mb_albumid + retag ─────────────────────────────────────
     log.append(f"  Retagging album_id={aid} with MB data…")
-    try:
-        with _db() as con2:
-            con2.execute("UPDATE albums SET mb_albumid = ? WHERE id = ?", (mb_albumid, aid))
-            con2.execute("UPDATE items  SET mb_albumid = ? WHERE album_id = ?", (mb_albumid, aid))
-    except Exception as ex:
-        log.append(f"  DB stamp warning: {ex}")
+    if cancel_event and cancel_event.is_set():
+        raise RuntimeError("cancelled")
 
-    for cmd_label, args, tmo in [
-        ("mbsync", ["mbsync", f"album_id:{aid}"], 120),
-        ("write",  ["write",  f"album_id:{aid}"], 120),
-        ("move",   ["move",   f"album_id:{aid}"], 120),
-    ]:
-        if cancel_event and cancel_event.is_set():
-            raise RuntimeError("cancelled")
-        r2 = _beet_run(base + args, log, timeout=tmo, env=env, cancel=cancel_event)
-        if r2.returncode == -9:
-            raise RuntimeError("cancelled")
-        if r2.returncode == 124:
-            # Unlike some other beet-subprocess call sites, a timeout here
-            # must never be treated as a soft warning: the persisted
-            # identity/tag state for this album is unverified, so silently
-            # continuing to artwork could stamp a false "imported" result.
-            raise RuntimeError(f"beet {cmd_label} timed out (rc=124)")
-        out2 = _ANSI_RE.sub('', (r2.stdout + r2.stderr).strip())
-        if out2:
-            log.append(f"  [{cmd_label}] {out2[:200]}")
+    p_res = beets_client.plan_album_mb_track_repair({"album_id": int(aid), "mb_albumid": mb_albumid})
+    if not p_res.get("ok") or not p_res.get("operation_id"):
+        raise RuntimeError(f"beet mbsync/track repair plan failed: {p_res.get('error', 'plan failed')}")
+    app_res = beets_client.apply_album_mb_track_repair(p_res["operation_id"], write_tags=True)
+    if not app_res.get("ok"):
+        raise RuntimeError(f"beet mbsync/track repair apply failed: {app_res.get('error')}")
+
+    if cancel_event and cancel_event.is_set():
+        raise RuntimeError("cancelled")
+
+    up_res = beets_client.update_album_metadata(int(aid), {}, force_write_tags=True)
+    if not up_res.get("ok"):
+        raise RuntimeError(f"beet write failed: {up_res.get('error')}")
+
+    rel_res = beets_client.relocate_album(int(aid), mode="rename")
+    if not rel_res.get("ok"):
+        raise RuntimeError(f"beet relocate failed: {rel_res.get('error')}")
+    log.append(f"  ✓ Relocated album {aid} to: {rel_res.get('dest_dir')}")
 
     _repair_album_mbid_sticking_once(
         int(aid),
@@ -28385,18 +28573,13 @@ def _run_normalize_artists_if_needed():
             cfg = "/config/config.yaml"
             for i, aid in enumerate(affected_ids, 1):
                 log.append(f"[{i}/{len(affected_ids)}] Moving album_id={aid}…")
-                r = subprocess.run(
-                    [BEET_BIN, "-c", cfg, "write", f"album_id:{aid}"],
-                    capture_output=True, text=True, timeout=120
-                )
-                for line in (r.stdout + r.stderr).splitlines():
-                    if line.strip(): log.append("  " + line)
-                r = subprocess.run(
-                    [BEET_BIN, "-c", cfg, "move", f"album_id:{aid}"],
-                    capture_output=True, text=True, timeout=120
-                )
-                for line in (r.stdout + r.stderr).splitlines():
-                    if line.strip(): log.append("  " + line)
+                try:
+                    beets_client.update_album_metadata(aid, {}, force_write_tags=True)
+                    rel_res = beets_client.relocate_album(aid, mode="rename")
+                    if rel_res.get("ok"):
+                        log.append(f"  ✓ Relocated album {aid} to: {rel_res.get('dest_dir')}")
+                except Exception as _ex:
+                    log.append(f"  relocate warning: {_ex}")
             _invalidate_lib_cache()
             log.append(f"Auto-normalized {len(to_fix)} artist name(s).")
         jobs.start_python(_do, label="Auto-normalize artist names")
@@ -28500,17 +28683,15 @@ def start_import():
 
     def _do(log, cancel_event=None):
         _validate_import_source_audio(path, log, reject_downloads=True)
-        env = _beet_env()
-        r = _beet_run(command, log, timeout=300, env=env, cancel=cancel_event)
-        if r.returncode == -9:   # killed by user
-            return
-        combined = _ANSI_RE.sub('', (r.stdout + r.stderr).strip())
-        for line in combined.splitlines():
-            log.append(line)
+        beets_options = {"quiet_fallback": fallback, "copy": preserve_torrent_source}
+        if search_id:
+            beets_options["search_id"] = search_id
+        res = beets_client.reimport_source(path, beets_options=beets_options, timeout=300.0)
+        if not res.get("ok"):
+            raise RuntimeError(f"Engine import failed: {res.get('error', 'reimport_source failed')}")
+        combined = ""
         _delete_if_already_in_library(path, combined, log)
         _invalidate_lib_cache()
-        if r.returncode >= 2:
-            raise RuntimeError(f"beet import exited with rc={r.returncode}")
 
     job = jobs.start_python(_do, label=label)
     return jsonify({"ok": True, "job_id": job.job_id})
@@ -46072,7 +46253,7 @@ def _validate_wanted_download_identity_before_import(import_dir: str,
             )
             if _s(identity.get("final_action") or "review") == "reject":
                 try:
-                    Path(path_value).unlink()
+                    beets_client.delete_file(path_value)
                 except Exception:
                     pass
             detail = _playlist_identity_log(best_any_match) if best_any_match else "no identity evidence"

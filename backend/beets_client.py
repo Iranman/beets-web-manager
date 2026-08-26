@@ -21,11 +21,21 @@ class BeetsError(Exception):
     string-matching the free-text message. Both default to "" / 0 for
     transport-level failures (BeetsUnavailableError, BeetsAuthError) that
     never got a structured agent response to read them from.
+
+    diagnostics (Round 4) carries any extra "diagnostics" object the agent
+    included in its error JSON (e.g. confirmed_import_v1's native-import
+    returncode/stdout_excerpt/stderr_excerpt) -- urllib raises HTTPError
+    for every non-2xx response, so a caller's own `if not res.get("ok")`
+    check on a returned dict never actually runs for these; the exception
+    IS the only thing that reaches the caller. Without capturing this here
+    it would be silently discarded. None when the agent's error body
+    didn't include one.
     """
-    def __init__(self, message: str, error_code: str = "", status_code: int = 0):
+    def __init__(self, message: str, error_code: str = "", status_code: int = 0, diagnostics: Optional[Dict[str, Any]] = None):
         super().__init__(message)
         self.error_code = error_code
         self.status_code = status_code
+        self.diagnostics = diagnostics
 
 
 class BeetsUnavailableError(BeetsError):
@@ -141,16 +151,18 @@ class BeetsClient:
                 raise BeetsAuthError("Authentication with Beets Control Agent failed: 401 Unauthorized") from exc
             err_body = ""
             err_code = ""
+            err_diagnostics = None
             try:
                 err_body = exc.read().decode("utf-8")
                 err_json = json.loads(err_body)
                 msg = err_json.get("error", f"HTTP {exc.code}")
                 err_code = str(err_json.get("error_code") or "")
+                err_diagnostics = err_json.get("diagnostics") if isinstance(err_json.get("diagnostics"), dict) else None
             except Exception:
                 msg = f"HTTP {exc.code}: {err_body[:200]}"
             if exc.code >= 500:
-                raise BeetsUnavailableError(f"Beets Control Agent error: {msg}", error_code=err_code, status_code=exc.code) from exc
-            raise BeetsError(f"Beets API request error: {msg}", error_code=err_code, status_code=exc.code) from exc
+                raise BeetsUnavailableError(f"Beets Control Agent error: {msg}", error_code=err_code, status_code=exc.code, diagnostics=err_diagnostics) from exc
+            raise BeetsError(f"Beets API request error: {msg}", error_code=err_code, status_code=exc.code, diagnostics=err_diagnostics) from exc
         except urllib.error.URLError as exc:
             raise BeetsUnavailableError(f"Beets Control Agent is unavailable at {self.base_url}: {exc.reason}") from exc
         except json.JSONDecodeError as exc:
@@ -381,6 +393,62 @@ class BeetsClient:
         """Engine-side album artwork rollback (SEC-002 Wave 22)."""
         return self._request("POST", "/albums/artwork/rollback", {"operation_id": operation_id}, timeout=timeout)
 
+    def plan_album_artwork_fetch(self, payload: Dict[str, Any], *, timeout: float = 30.0) -> Dict[str, Any]:
+        """Engine-side online artwork acquisition planning (album_artwork_fetch_v1,
+        SEC-002 / ARCH-003 Wave 25 Docker acceptance round)."""
+        return self._request("POST", "/albums/artwork/fetch/plan", payload, timeout=timeout)
+
+    def apply_album_artwork_fetch(self, operation_id: str, *, timeout: float = 90.0) -> Dict[str, Any]:
+        """Engine-side online artwork acquisition apply (album_artwork_fetch_v1).
+        Not reversible -- there is no rollback_album_artwork_fetch; a
+        partial failure surfaces as status="Recovery Required" rather than
+        a false Completed/Failed."""
+        return self._request("POST", "/albums/artwork/fetch/apply", {"operation_id": operation_id}, timeout=timeout)
+
+    def fetch_and_embed_album_art(self, album_id: int, *, timeout: float = 90.0) -> Dict[str, Any]:
+        """Fetch cover art for an album from configured online sources
+        (MusicBrainz/Cover Art Archive etc.) and embed it into the album's
+        media files, using Beets' own `fetchart`/`embedart` plugins inside
+        the engine container.
+
+        SEC-002 / ARCH-003 Wave 25 Docker acceptance round: this is a thin
+        convenience wrapper over the real, engine-side album_artwork_fetch_v1
+        Plan/Apply transaction family (POST /albums/artwork/fetch/plan and
+        /apply, below), not a direct run_command() composition --
+        fetchart/embedart genuinely mutate authoritative
+        library state (the album's artpath, embedded tag data), so leaving
+        them as a bare, untracked /commands/execute call with no
+        precondition check or durable operation record would have been
+        exactly the kind of unexplained exception to the controlled-
+        mutation model this project's own review process exists to catch.
+        Beets remains entirely responsible for provider selection, image
+        fetching, and tag writing -- this transaction only orchestrates
+        around it (Plan captures album identity + existing artwork state;
+        Apply re-verifies identity, runs fetchart then embedart, and
+        verifies the resulting DB artpath; a partial failure lands in
+        Recovery Required rather than a false success). Prior to the
+        Wave 25 independent review round, the caller referenced a
+        nonexistent `repair_album_artwork` method, so artwork fetch/embed
+        silently never ran at all.
+
+        Returns {"ok": bool, "error"?: str, "artpath"?: str,
+        "status"?: str, "operation_id"?: str}."""
+        plan_res = self.plan_album_artwork_fetch({"album_id": album_id}, timeout=timeout)
+        if not plan_res.get("ok"):
+            return {"ok": False, "error": plan_res.get("error") or "album_artwork_fetch_v1 plan rejected"}
+        op_id = plan_res.get("operation_id")
+        if not op_id:
+            return {"ok": False, "error": "album_artwork_fetch_v1 plan returned no operation_id"}
+        apply_res = self.apply_album_artwork_fetch(op_id, timeout=timeout)
+        if not apply_res.get("ok"):
+            return {
+                "ok": False,
+                "error": apply_res.get("error") or "album_artwork_fetch_v1 apply failed",
+                "status": apply_res.get("status"),
+                "operation_id": op_id,
+            }
+        return {"ok": True, "artpath": apply_res.get("artpath", ""), "operation_id": op_id, "status": "Completed"}
+
     def plan_import_folder(self, payload: Dict[str, Any], *, timeout: float = 30.0) -> Dict[str, Any]:
         """Engine-side import folder planning (SEC-002 Wave 22 Closure)."""
         return self._request("POST", "/import/plan", payload, timeout=timeout)
@@ -388,6 +456,29 @@ class BeetsClient:
     def apply_import_folder(self, operation_id: str, *, timeout: float = 120.0) -> Dict[str, Any]:
         """Engine-side import folder application (SEC-002 Wave 22 Closure)."""
         return self._request("POST", "/import/apply", {"operation_id": operation_id}, timeout=timeout)
+
+    def plan_confirmed_import(self, payload: Dict[str, Any], *, timeout: float = 30.0) -> Dict[str, Any]:
+        """Engine-side confirmed_import_v1 planning (Wave 25 Round 3): a
+        fresh reviewed import of previously-untagged source audio into an
+        explicitly approved MusicBrainz Release, distinct from
+        plan_import_folder/reimport_source (which both require the source
+        to already carry the target identity)."""
+        return self._request("POST", "/imports/confirmed/plan", payload, timeout=timeout)
+
+    def apply_confirmed_import(self, operation_id: str, *, acceptance_failpoint: Optional[str] = None,
+                                timeout: float = 180.0) -> Dict[str, Any]:
+        """Engine-side confirmed_import_v1 application (Wave 25 Round 3).
+
+        acceptance_failpoint (Wave 25 Round 4) is test-only infrastructure
+        for the dedicated Docker acceptance crash/resume scenario -- the
+        engine ignores this field entirely unless that specific container
+        was booted with BEETS_ACCEPTANCE_MODE=1, which no real deployment
+        topology ever sets. Always None/omitted in real production calls.
+        """
+        body: Dict[str, Any] = {"operation_id": operation_id}
+        if acceptance_failpoint:
+            body["_acceptance_failpoint"] = acceptance_failpoint
+        return self._request("POST", "/imports/confirmed/apply", body, timeout=timeout)
 
     def rollback_import_folder(self, operation_id: str, *, timeout: float = 60.0) -> Dict[str, Any]:
         """Engine-side import folder rollback (SEC-002 Wave 22 Closure)."""

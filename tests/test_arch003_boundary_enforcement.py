@@ -94,8 +94,19 @@ class TestArch003BoundaryEnforcement(unittest.TestCase):
         self.assertIn("beets_client.apply_album_artwork(", self.app_source)
 
     def test_app_delegates_import_folder_to_beets_client(self):
-        self.assertIn("beets_client.plan_import_folder(", self.app_source)
-        self.assertIn("beets_client.apply_import_folder(", self.app_source)
+        # Wave 25 Round 3: import_folder_with_id() now routes fresh reviewed
+        # imports through confirmed_import_v1 (plan_confirmed_import /
+        # apply_confirmed_import), not the old import_folder_v1 family --
+        # see docs/operations/wave25_import_reconciliation_design.md for
+        # why (verify_deterministic_identity's embedded-tag requirement is
+        # incompatible with importing untagged fresh downloads). The old
+        # plan_import_folder/apply_import_folder methods still exist on
+        # BeetsClient and the import_folder_v1 family is still tested, but
+        # neither is invoked by production app.py code any more.
+        self.assertIn("beets_client.plan_confirmed_import(", self.app_source)
+        self.assertIn("beets_client.apply_confirmed_import(", self.app_source)
+        self.assertNotIn("beets_client.plan_import_folder(", self.app_source)
+        self.assertNotIn("beets_client.apply_import_folder(", self.app_source)
 
     def test_transaction_rollback_api_supports_all_families(self):
         self.assertIn('mutation_family == "folder_cleanup_v1"', self.app_source)

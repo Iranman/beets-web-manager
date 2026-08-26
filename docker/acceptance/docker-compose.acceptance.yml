@@ -39,3 +39,12 @@ services:
       args:
         VCS_REF: ${VCS_REF:?set VCS_REF}
     image: beets-engine:acceptance
+    environment:
+      # Wave 25 Round 4: enables the single, narrowly-named
+      # confirmed_import_v1 deterministic acceptance failpoint used ONLY by
+      # scripts/verify_two_service_docker_acceptance.py's crash/resume
+      # scenario -- see backend/beets_control_agent.py's ACCEPTANCE_MODE.
+      # Never set in docker-compose.yml or docker-compose.full.yml (the
+      # real deployment topologies), so this has zero effect outside this
+      # disposable acceptance stack.
+      - BEETS_ACCEPTANCE_MODE=1

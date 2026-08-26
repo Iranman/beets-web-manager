@@ -60,6 +60,19 @@ except ImportError:
 PORT = int(os.environ.get("BEETS_AGENT_PORT", "8338"))
 BEETS_API_TOKEN = os.environ.get("BEETS_API_TOKEN", "")
 BEETS_API_TOKEN_MIN_LENGTH = 32
+# Wave 25 Round 4: gates a single, narrowly-named deterministic failpoint
+# (confirmed_import_v1's "after native import, before verification") used
+# ONLY by the dedicated Docker acceptance script's crash/resume scenario --
+# never set in any real deployment topology (docker-compose.yml/
+# docker-compose.full.yml never set it; only
+# docker/acceptance/docker-compose.acceptance.yml does). Read once at
+# import time: this is legitimate container-boot configuration, not a
+# runtime toggle, and is the ONLY thing that makes the
+# `_acceptance_failpoint` request field (see /imports/confirmed/apply)
+# anything other than silently ignored -- a real client can never trigger
+# it against a real deployment no matter what it sends, because a real
+# engine container is never booted with this set.
+ACCEPTANCE_MODE = os.environ.get("BEETS_ACCEPTANCE_MODE") == "1"
 # Known human-instructional placeholder words -- an obviously-weak value like
 # "changeme" is non-empty and would otherwise silently authenticate every
 # control-agent request if only an emptiness check were enforced.
@@ -867,6 +880,12 @@ def resolve_safe_path(
 IMPORT_SOURCE_OPERATIONS: dict[str, list[str]] = {
     "reimport": ["music", "staging"],
     "ai_batch_discovery": ["music", "staging"],
+    # Wave 25 Round 3: confirmed_import_v1's Plan/Apply inspection of a
+    # fresh (possibly untagged) source -- same allowed roots as "reimport"
+    # (an already-organized-but-untracked library folder is as legitimate a
+    # confirmed-import source as a staged download), but tracked under its
+    # own operation name since it is a distinct trust model, not a reimport.
+    "confirmed_import": ["music", "staging"],
 }
 
 IMPORT_INSPECT_MAX_ENTRIES_SCANNED = _env_int_clamped(
@@ -2076,6 +2095,185 @@ def reimport_source_atomic(
         release_os_lock(lock_file)
 
 
+_CONFIRMED_IMPORT_DIAGNOSTIC_EXCERPT_MAX_CHARS = 2000
+
+
+def _sanitize_confirmed_import_output(text: str) -> str:
+    """Bound and lightly redact native beet import stdout/stderr before it
+    is ever persisted into transaction metadata or returned over HTTP --
+    diagnostic value only, never secrets/config contents (Round 4 brief
+    section 2/13)."""
+    text = str(text or "")
+    for needle in (BEETSDIR, "/config"):
+        if needle:
+            text = text.replace(needle, "<REDACTED_PATH>")
+    if len(text) > _CONFIRMED_IMPORT_DIAGNOSTIC_EXCERPT_MAX_CHARS:
+        text = text[:_CONFIRMED_IMPORT_DIAGNOSTIC_EXCERPT_MAX_CHARS] + "…(truncated)"
+    return text
+
+
+def run_confirmed_import_native(source_path: str, mb_albumid: str, *, use_move: bool = False) -> dict[str, Any]:
+    """Native `beet import --search-id` runner for confirmed_import_v1 --
+    deliberately does not call the reimport-family atomic-import function or
+    its embedded-tag identity verifier. This family's whole purpose is to
+    import source audio that does not yet carry the target's MusicBrainz
+    identity, so gating on pre-existing embedded tags would reject the very
+    case it exists to handle. Authorization (immutable source manifest
+    digest + reviewed target identity + track alignment) has already
+    happened in transaction_engine.create_confirmed_import_plan /
+    execute_confirmed_import_apply before this function is ever called --
+    this function only runs the actual subprocess, reusing the same
+    low-level mechanics as the reimport path (preserve_import_source for
+    torrent-staged sources, acquire_os_lock/release_os_lock, BEETSDIR env,
+    timeout scaling) without its identity gate.
+
+    Round 4 (real Docker acceptance finding): the reimport path's
+    `--quiet-fallback asis` is wrong here and was copied over by mistake in
+    Round 3. In quiet mode, `asis` lets Beets import the source WITHOUT
+    ever applying the forced `--search-id` candidate whenever its own match
+    confidence for that candidate is not strong enough (which an extreme
+    duration/content mismatch against the real release guarantees) -- this
+    produced exactly the observed failure: a real album+items got created,
+    but with no planned MusicBrainz identity for the caller to verify.
+    `--quiet-fallback skip` is the correct choice for a family whose entire
+    authorization is "trust THIS reviewed release, nothing else" -- if
+    Beets cannot confidently apply it, the import must not silently
+    proceed under a different, unreviewed identity.
+
+    Returns a plain {"ok", "error"?, "returncode", "stdout_excerpt",
+    "stderr_excerpt", "preserved_path", "albums_before", "albums_after"}
+    outcome (diagnostics bounded/redacted, never secrets/config contents --
+    see _sanitize_confirmed_import_output). `albums_before`/`albums_after`
+    let the caller (transaction_engine.py) distinguish a clean skip (no
+    mutation at all) from a partial mutation under the wrong identity
+    (something new was created, just not verifiable as the planned
+    release) -- the caller is still responsible for querying the library
+    and verifying the actual result; this function never reports an
+    album/item identity itself."""
+    try:
+        trusted = resolve_safe_path(source_path, ["music", "staging"], require_exists=True, expected_type="dir")
+    except UnsafePathError:
+        return {"ok": False, "error": "invalid_path"}
+
+    mb_albumid = str(mb_albumid or "").strip().lower()
+    if not _MB_UUID_RE.match(mb_albumid):
+        return {"ok": False, "error": "invalid_release_id"}
+
+    source_inspect = inspect_import_source(str(trusted), "confirmed_import")
+    if not source_inspect.get("ok"):
+        return {"ok": False, "error": source_inspect.get("error_code", "inspection_failed")}
+
+    is_torrent_staged = False
+    try:
+        staging_roots = [os.path.realpath(r) for r in _allowed_root_paths(["staging"])]
+        is_torrent_staged = any(_path_is_within(str(trusted), r) for r in staging_roots)
+    except Exception:
+        pass
+
+    import_target_path = str(trusted)
+    preserved_path = None
+    if is_torrent_staged:
+        # Always protect a staged/torrent source with a disposable copy
+        # before Beets touches it, regardless of use_move -- matching
+        # reimport_source_atomic's own unconditional behavior for the same
+        # case. The real download is never mutated by this family.
+        pres_res = preserve_import_source(str(trusted), expected_source_signature=source_inspect.get("source_signature", ""))
+        if not pres_res.get("ok"):
+            return {"ok": False, "error": pres_res.get("error_code", "preserve_failed")}
+        preserved_path = pres_res.get("preserved_path")
+        import_target_path = preserved_path
+
+    # --quiet-fallback skip (not "asis" -- see docstring above) is always
+    # applied via this override, combined with the copy/move policy below
+    # in one config file rather than two competing ones.
+    #
+    # Round 4 (corrected): an earlier iteration of this fix also relaxed
+    # match.strong_rec_thresh here, on the theory that confirmed_import_v1's
+    # own independent review made Beets' default recommendation confidence
+    # a redundant, overly strict second gate. That theory was never
+    # actually tested against real Beets -- the acceptance fixture was
+    # failing for an unrelated reason (the disposable library's config.yaml
+    # had unloaded the `musicbrainz` plugin entirely, so `--search-id`
+    # resolved zero candidates, not merely a low-confidence one). With that
+    # real bug fixed and the fixture given realistic tags/durations,
+    # reproducing beets.autotag.match.tag_album() directly against this
+    # fixture's own metadata confirms Beets computes an exact distance of
+    # 0.0 and a `strong` recommendation under its own DEFAULT threshold --
+    # no relaxation is needed. Per the standing instruction not to blindly
+    # force Beets matching, the default strong_rec_thresh is left
+    # untouched here; --quiet-fallback skip remains the actual safety
+    # backstop for any genuine track-count/identity mismatch. See
+    # docs/operations/wave25_import_reconciliation_design.md's Round 4
+    # section for the full reasoning and the reproduction that proved it.
+    if preserved_path or use_move:
+        config_override = "import:\n  quiet_fallback: skip\n"
+    else:
+        # Already-in-library folder, not asked to move: tag in place,
+        # matching source_is_library semantics elsewhere in this project --
+        # a folder that is already correctly organized should not be
+        # relocated just because it is being tagged for the first time.
+        config_override = "import:\n  copy: no\n  move: no\n  quiet_fallback: skip\n"
+
+    def _album_count() -> int:
+        try:
+            with sqlite3.connect(LIB_PATH, timeout=10) as con:
+                return int(con.execute("SELECT COUNT(*) FROM albums").fetchone()[0])
+        except Exception:
+            return -1
+
+    lock_file = acquire_os_lock(read_only=False)
+    tmp_cfg_path = None
+    try:
+        full_cmd = [BEET_BIN]
+        if config_override:
+            tmp_cfg_path = f"/tmp/beets_confirmed_import_cfg_{uuid.uuid4().hex}.yaml"
+            with open(tmp_cfg_path, "w", encoding="utf-8") as f:
+                f.write(config_override)
+            os.chmod(tmp_cfg_path, 0o600)
+            full_cmd.extend(["-c", tmp_cfg_path])
+
+        cmd_args = ["import", "-q", "--noincremental", "--quiet-fallback", "skip"]
+        if preserved_path:
+            cmd_args.append("--copy")
+        cmd_args.extend(["--search-id", mb_albumid])
+        cmd_args.append(import_target_path)
+        full_cmd.extend(cmd_args)
+
+        env = os.environ.copy()
+        env["BEETSDIR"] = BEETSDIR
+        proc_timeout = _reimport_timeout_for_count(source_inspect.get("audio_count", 0))
+        albums_before = _album_count()
+        res = subprocess.run(full_cmd, capture_output=True, text=True, timeout=proc_timeout, env=env)
+        albums_after = _album_count()
+
+        stdout_excerpt = _sanitize_confirmed_import_output(res.stdout)
+        stderr_excerpt = _sanitize_confirmed_import_output(res.stderr)
+
+        if res.returncode >= 2:
+            return {
+                "ok": False, "error": "Beets import failed", "returncode": res.returncode,
+                "stdout_excerpt": stdout_excerpt, "stderr_excerpt": stderr_excerpt,
+                "albums_before": albums_before, "albums_after": albums_after,
+            }
+
+        return {
+            "ok": True, "preserved_path": preserved_path, "returncode": res.returncode,
+            "stdout_excerpt": stdout_excerpt, "stderr_excerpt": stderr_excerpt,
+            "albums_before": albums_before, "albums_after": albums_after,
+        }
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "Beets import timed out"}
+    except Exception as ex:
+        return {"ok": False, "error": f"Beets import failed: {ex}"}
+    finally:
+        if tmp_cfg_path and os.path.exists(tmp_cfg_path):
+            try:
+                os.unlink(tmp_cfg_path)
+            except Exception:
+                pass
+        release_os_lock(lock_file)
+
+
 def _path_has_symlink_component(path: Path, root: Path, *, include_leaf: bool = True) -> bool:
     try:
         relative = path.relative_to(root)
@@ -2529,6 +2727,55 @@ def _sanitize_command_path_args(args: Any, allowed_types: list) -> list:
         else:
             sanitized.append(s_arg)
     return sanitized
+
+
+def _run_beet_subcommand_locked(cmd_list: list, *, config_override: str = "", timeout: float = 120.0) -> dict[str, Any]:
+    """Run a `beet` subcommand under the OS concurrency lock and return a
+    plain result dict -- the shared implementation behind /commands/execute
+    and any in-process caller (e.g. album_artwork_fetch_v1's Apply, which
+    needs this exact mechanism but is not itself an HTTP request). Callers
+    are responsible for allow-listing/capability-gating `cmd_list[0]` and
+    sanitizing the rest of `cmd_list` before calling this -- it performs no
+    validation of its own, matching /commands/execute's own division of
+    responsibility (validate first, then run)."""
+    command = cmd_list[0] if cmd_list else ""
+    mutating = command in {
+        "import", "update", "write", "move", "modify", "mbsync",
+        "fetchart", "embedart", "lastgenre", "alt", "remove", "rm"
+    }
+    lock_file = acquire_os_lock(read_only=not mutating)
+    tmp_cfg_path = None
+    try:
+        full_cmd = [BEET_BIN]
+        if config_override:
+            tmp_cfg_path = f"/tmp/beets_exec_cfg_{uuid.uuid4().hex}.yaml"
+            with open(tmp_cfg_path, "w", encoding="utf-8") as f:
+                f.write(config_override)
+            os.chmod(tmp_cfg_path, 0o600)
+            full_cmd.extend(["-c", tmp_cfg_path])
+
+        full_cmd.extend(cmd_list)
+        env = os.environ.copy()
+        env["BEETSDIR"] = BEETSDIR
+        res = subprocess.run(
+            full_cmd,
+            capture_output=True,
+            text=True,
+            timeout=float(timeout),
+            env=env
+        )
+        return {"returncode": res.returncode, "stdout": res.stdout, "stderr": res.stderr}
+    except subprocess.TimeoutExpired:
+        return {"timed_out": True, "returncode": 124, "stdout": "", "stderr": f"Command timed out after {timeout}s"}
+    except Exception as ex:
+        return {"internal_error": True, "returncode": -1, "stdout": "", "stderr": str(ex)}
+    finally:
+        if tmp_cfg_path and os.path.exists(tmp_cfg_path):
+            try:
+                os.unlink(tmp_cfg_path)
+            except Exception:
+                pass
+        release_os_lock(lock_file)
 
 
 def acquire_os_lock(read_only: bool = False):
@@ -4135,6 +4382,50 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             self._send_json(code, res)
             return
 
+        if path == "/albums/artwork/fetch/plan":
+            res = transaction_engine.create_album_artwork_fetch_plan(
+                _txn_store, body,
+                db_path=LIB_PATH,
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        if path == "/albums/artwork/fetch/apply":
+            op_id = str(body.get("operation_id") or "").strip()
+            if not op_id:
+                self._send_json(400, {"ok": False, "error": "operation_id required"})
+                return
+            for _fetch_cmd in ("fetchart", "embedart"):
+                if _fetch_cmd not in ALLOWED_COMMANDS:
+                    self._send_json(400, {"ok": False, "error": f"Command '{_fetch_cmd}' is not in the allowlist"})
+                    return
+                _cap_err = require_command_capability(_fetch_cmd)
+                if _cap_err is not None:
+                    self._send_json(409, _cap_err)
+                    return
+
+            def _run_beet_command(command: str, args: list) -> dict:
+                try:
+                    sanitized_args = _sanitize_command_path_args(args, ["music", "staging", "config", "tmp"])
+                except UnsafePathError:
+                    return {"ok": False, "error": "Invalid path parameter in command args"}
+                res = _run_beet_subcommand_locked([command] + sanitized_args)
+                if res.get("timed_out") or res.get("internal_error"):
+                    return {"ok": False, "error": res.get("stderr") or "command execution error"}
+                if res.get("returncode") != 0:
+                    return {"ok": False, "error": (res.get("stderr") or res.get("stdout") or f"{command} exited {res.get('returncode')}")[:500]}
+                return {"ok": True, "stdout": res.get("stdout", "")}
+
+            res = transaction_engine.execute_album_artwork_fetch_apply(
+                _txn_store, op_id,
+                db_path=LIB_PATH,
+                run_beet_command_fn=_run_beet_command,
+            )
+            code = 200 if res.get("ok") else (409 if res.get("status") == "Recovery Required" else 400)
+            self._send_json(code, res)
+            return
+
         if path == "/albums/relocation/plan":
             music_root_env = os.environ.get("MUSIC_ROOT") or str(MUSIC_ROOT) or "/music"
             stg_roots = [os.environ.get("DOWNLOADS_ROOT", "/downloads"), os.environ.get("STAGING_ROOT", "/staging")]
@@ -4219,8 +4510,23 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
 
         # ── import_folder_v1 ──────────────────────────────────────────────────
         if path == "/import/plan":
-            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
-            stg_roots = [os.environ.get("DOWNLOADS_ROOT", "/downloads"), os.environ.get("STAGING_ROOT", "/staging"), music_root_env]
+            # Wave 25 Docker acceptance round (found only by actually
+            # pointing a real production import at a real download-root
+            # path): MUSIC_ROOT/DOWNLOADS_ROOT/STAGING_ROOT env vars are
+            # never actually set anywhere (neither compose file, nor
+            # Dockerfile.beets) -- the real bind-mount targets are the
+            # module-level MUSIC_ROOT (/data/media/music) and DOWNLOAD_PATH
+            # (/data/torrents) constants above. os.environ.get("MUSIC_ROOT",
+            # "/music")/os.environ.get("DOWNLOADS_ROOT", "/downloads")
+            # therefore always fell back to paths that do not exist in this
+            # container at all, so create_import_folder_plan's root-
+            # containment check rejected every real source folder with
+            # import_folder_path_out_of_root regardless of where it
+            # actually was. Matches the already-correct fallback pattern
+            # used elsewhere in this file (music_root_env = ... or
+            # str(MUSIC_ROOT) or "/music").
+            music_root_env = os.environ.get("MUSIC_ROOT") or str(MUSIC_ROOT) or "/music"
+            stg_roots = [os.environ.get("DOWNLOADS_ROOT") or str(DOWNLOAD_PATH), os.environ.get("STAGING_ROOT") or str(DOWNLOAD_PATH), music_root_env]
             quarantine_root = os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
             res = transaction_engine.create_import_folder_plan(
                 _txn_store, body,
@@ -4238,7 +4544,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             if not op_id:
                 self._send_json(400, {"ok": False, "error": "operation_id required"})
                 return
-            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            music_root_env = os.environ.get("MUSIC_ROOT") or str(MUSIC_ROOT) or "/music"
             quarantine_root = os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
 
             def _beets_import_runner(payload: dict) -> dict:
@@ -4274,6 +4580,75 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 music_allowed_roots=[music_root_env],
             )
             code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        # ── confirmed_import_v1 (Wave 25 Round 3) ───────────────────────────────
+        # Fresh reviewed import of previously-untagged source audio. Distinct
+        # trust model from /import/plan+/import/apply (import_folder_v1) and
+        # /imports/reimport (reimport_source_atomic) above -- see
+        # transaction_engine.py's confirmed_import_v1 section header and
+        # docs/operations/wave25_import_reconciliation_design.md.
+
+        if path == "/imports/confirmed/plan":
+            music_root_env = os.environ.get("MUSIC_ROOT") or str(MUSIC_ROOT) or "/music"
+            stg_roots = [os.environ.get("DOWNLOADS_ROOT") or str(DOWNLOAD_PATH), os.environ.get("STAGING_ROOT") or str(DOWNLOAD_PATH)]
+
+            def _inspect_for_confirmed_import(p: str) -> dict:
+                return inspect_import_source(p, "confirmed_import")
+
+            def _acoustid_for_confirmed_import(file_path: str) -> list:
+                if not _playlist_import_fpcalc_available():
+                    return []
+                try:
+                    return _engine_acoustid_lookup(Path(file_path)) or []
+                except Exception:
+                    return []
+
+            res = transaction_engine.create_confirmed_import_plan(
+                _txn_store, body,
+                db_path=LIB_PATH,
+                music_allowed_roots=[music_root_env],
+                staging_allowed_roots=stg_roots,
+                inspect_source_fn=_inspect_for_confirmed_import,
+                acoustid_lookup_fn=_acoustid_for_confirmed_import,
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        if path == "/imports/confirmed/apply":
+            op_id = str(body.get("operation_id") or "").strip()
+            if not op_id:
+                self._send_json(400, {"ok": False, "error": "operation_id required"})
+                return
+            music_root_env = os.environ.get("MUSIC_ROOT") or str(MUSIC_ROOT) or "/music"
+
+            def _inspect_for_confirmed_import(p: str) -> dict:
+                return inspect_import_source(p, "confirmed_import")
+
+            def _run_native_import(source_path: str, mb_albumid: str, *, use_move: bool) -> dict:
+                return run_confirmed_import_native(source_path, mb_albumid, use_move=use_move)
+
+            # Round 4: the deterministic acceptance-only failpoint. The
+            # request field is read at all ONLY when this container was
+            # booted with BEETS_ACCEPTANCE_MODE=1 (see ACCEPTANCE_MODE's
+            # own comment) -- in every real deployment topology this whole
+            # branch is dead and the field, even if a caller sent it, is
+            # never looked at.
+            acceptance_failpoint = None
+            if ACCEPTANCE_MODE:
+                acceptance_failpoint = str(body.get("_acceptance_failpoint") or "").strip() or None
+
+            res = transaction_engine.execute_confirmed_import_apply(
+                _txn_store, op_id,
+                db_path=LIB_PATH,
+                music_allowed_roots=[music_root_env],
+                inspect_source_fn=_inspect_for_confirmed_import,
+                run_native_import_fn=_run_native_import,
+                acceptance_failpoint=acceptance_failpoint,
+            )
+            code = 200 if res.get("ok") else (409 if res.get("status") == "Recovery Required" else 400)
             self._send_json(code, res)
             return
 
@@ -4486,48 +4861,17 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 cmd_list.append(str(safe_source_path))
             cmd_list.extend(sanitized_args)
 
-            mutating = command in {
-                "import", "update", "write", "move", "modify", "mbsync",
-                "fetchart", "embedart", "lastgenre", "alt", "remove", "rm"
-            }
-
-            lock_file = acquire_os_lock(read_only=not mutating)
-            tmp_cfg_path = None
-            try:
-                full_cmd = [BEET_BIN]
-                if config_override:
-                    tmp_cfg_path = f"/tmp/beets_exec_cfg_{uuid.uuid4().hex}.yaml"
-                    with open(tmp_cfg_path, "w", encoding="utf-8") as f:
-                        f.write(config_override)
-                    os.chmod(tmp_cfg_path, 0o600)
-                    full_cmd.extend(["-c", tmp_cfg_path])
-
-                full_cmd.extend(cmd_list)
-                env = os.environ.copy()
-                env["BEETSDIR"] = BEETSDIR
-                res = subprocess.run(
-                    full_cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=float(timeout),
-                    env=env
-                )
-                self._send_json(200, {
-                    "returncode": res.returncode,
-                    "stdout": res.stdout,
-                    "stderr": res.stderr,
-                })
-            except subprocess.TimeoutExpired:
+            res = _run_beet_subcommand_locked(cmd_list, config_override=config_override, timeout=float(timeout))
+            if res.get("timed_out"):
                 self._send_json(408, {"error": f"Command '{command}' timed out after {timeout}s", "returncode": 124})
-            except Exception:
+            elif res.get("internal_error"):
                 self._send_json(500, {"error": "Command execution error"})
-            finally:
-                if tmp_cfg_path and os.path.exists(tmp_cfg_path):
-                    try:
-                        os.unlink(tmp_cfg_path)
-                    except Exception:
-                        pass
-                release_os_lock(lock_file)
+            else:
+                self._send_json(200, {
+                    "returncode": res["returncode"],
+                    "stdout": res["stdout"],
+                    "stderr": res["stderr"],
+                })
             return
 
         if path == "/jobs/create":
