@@ -21842,23 +21842,32 @@ def import_folder_with_id():
         })
         if not plan_res.get("ok"):
             raise RuntimeError(f"Import planning failed: {plan_res.get('error') or 'unknown error'}")
-        apply_res = beets_client.apply_confirmed_import(
-            plan_res["operation_id"], acceptance_failpoint=acceptance_failpoint,
-        )
-        if not apply_res.get("ok"):
-            # Round 4: surface the real native beet stdout/stderr into this
-            # job's own log (visible to whoever is debugging a real
-            # failure, including the Docker acceptance script's own
-            # failure report) instead of only the short error string --
-            # see execute_confirmed_import_apply's diagnostics.
-            diag = apply_res.get("diagnostics") or {}
+        # Round 4 (found while adding this very diagnostics feature):
+        # BeetsClient._request() raises BeetsError/BeetsUnavailableError
+        # for every non-2xx response (standard urllib behavior) -- it
+        # never returns a plain {"ok": False, ...} dict for those, so a
+        # `if not apply_res.get("ok")` check here would be dead code for
+        # every real rejection this route can produce (Plan/Apply both
+        # respond 400/409 on failure, never 200 with ok:false). The
+        # exception itself is the only thing that ever reaches this line,
+        # and its own .diagnostics attribute (populated by _request() from
+        # the agent's error JSON) is what carries the real native Beets
+        # stdout/stderr -- surfaced into this job's own log here so it is
+        # visible to whoever is debugging a real failure, including the
+        # Docker acceptance script's own [FAIL] report.
+        try:
+            apply_res = beets_client.apply_confirmed_import(
+                plan_res["operation_id"], acceptance_failpoint=acceptance_failpoint,
+            )
+        except (BeetsError, BeetsUnavailableError) as ex:
+            diag = getattr(ex, "diagnostics", None) or {}
             if diag.get("returncode") is not None:
                 log.append(f"[import] Native Beets exit code: {diag['returncode']}")
             if diag.get("stdout_excerpt"):
                 log.append(f"[import] Native Beets stdout: {diag['stdout_excerpt']}")
             if diag.get("stderr_excerpt"):
                 log.append(f"[import] Native Beets stderr: {diag['stderr_excerpt']}")
-            raise RuntimeError(f"Import execution failed: {apply_res.get('error') or 'unknown error'}")
+            raise
         log.append(f"[import] Engine controlled import completed: {import_folder_path}")
         if apply_res.get("resumed"):
             log.append("[import] Resumed an already-verified prior result for this release (native import was not re-invoked).")

@@ -21,11 +21,21 @@ class BeetsError(Exception):
     string-matching the free-text message. Both default to "" / 0 for
     transport-level failures (BeetsUnavailableError, BeetsAuthError) that
     never got a structured agent response to read them from.
+
+    diagnostics (Round 4) carries any extra "diagnostics" object the agent
+    included in its error JSON (e.g. confirmed_import_v1's native-import
+    returncode/stdout_excerpt/stderr_excerpt) -- urllib raises HTTPError
+    for every non-2xx response, so a caller's own `if not res.get("ok")`
+    check on a returned dict never actually runs for these; the exception
+    IS the only thing that reaches the caller. Without capturing this here
+    it would be silently discarded. None when the agent's error body
+    didn't include one.
     """
-    def __init__(self, message: str, error_code: str = "", status_code: int = 0):
+    def __init__(self, message: str, error_code: str = "", status_code: int = 0, diagnostics: Optional[Dict[str, Any]] = None):
         super().__init__(message)
         self.error_code = error_code
         self.status_code = status_code
+        self.diagnostics = diagnostics
 
 
 class BeetsUnavailableError(BeetsError):
@@ -141,16 +151,18 @@ class BeetsClient:
                 raise BeetsAuthError("Authentication with Beets Control Agent failed: 401 Unauthorized") from exc
             err_body = ""
             err_code = ""
+            err_diagnostics = None
             try:
                 err_body = exc.read().decode("utf-8")
                 err_json = json.loads(err_body)
                 msg = err_json.get("error", f"HTTP {exc.code}")
                 err_code = str(err_json.get("error_code") or "")
+                err_diagnostics = err_json.get("diagnostics") if isinstance(err_json.get("diagnostics"), dict) else None
             except Exception:
                 msg = f"HTTP {exc.code}: {err_body[:200]}"
             if exc.code >= 500:
-                raise BeetsUnavailableError(f"Beets Control Agent error: {msg}", error_code=err_code, status_code=exc.code) from exc
-            raise BeetsError(f"Beets API request error: {msg}", error_code=err_code, status_code=exc.code) from exc
+                raise BeetsUnavailableError(f"Beets Control Agent error: {msg}", error_code=err_code, status_code=exc.code, diagnostics=err_diagnostics) from exc
+            raise BeetsError(f"Beets API request error: {msg}", error_code=err_code, status_code=exc.code, diagnostics=err_diagnostics) from exc
         except urllib.error.URLError as exc:
             raise BeetsUnavailableError(f"Beets Control Agent is unavailable at {self.base_url}: {exc.reason}") from exc
         except json.JSONDecodeError as exc:
