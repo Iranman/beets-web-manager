@@ -431,3 +431,36 @@ verified before Apply runs). Beets' strict default threshold is tuned for *unsup
 is the only safeguard against a wrong match; here it is a second, uncoordinated gate stacked on top of a real
 one it was never designed to cooperate with. `--quiet-fallback skip` remains the actual backstop — a mismatch
 far outside what the Plan already reviewed still fails closed rather than importing under the wrong identity.
+
+**Round 4, corrected: the actual root cause, found by direct reproduction rather than another guess.** The
+`strong_rec_thresh: 0.25` relaxation above did not fix the real Docker run, and neither did the subsequent
+WAV → FLAC fixture-format change (both were reasonable hypotheses given the evidence available at the time —
+correct item count, exit code 0, a bare `Skipping.` with no title/artist mismatch detail — but neither was
+tested independently of the full two-service Docker stack before being committed). Per the standing instruction
+to prove what Beets actually did rather than guess again, the fix that follows was verified locally, outside
+Docker, by calling `beets.autotag.match.tag_album()` directly against Item objects carrying the exact tags this
+fixture writes (title/artist/albumartist/album/track/tracktotal/length, real MusicBrainz durations, no MB IDs),
+with `search_ids=[<the real release id>]` — reproducing precisely what `beet import --search-id` does
+internally.
+
+With the engine's config exactly as committed (`plugins: fetchart`, no `musicbrainz`), this reproduction
+returned **zero candidates** and `Recommendation.none` — not a low-confidence match. The actual bug: Beets'
+`plugins` config key is not additive across config sources. `beets.config["plugins"].as_str_seq()` resolves
+from whichever loaded config source defines `plugins` with the highest priority; it does not merge that
+source's list with the packaged default's `plugins: [musicbrainz]`. Setting `plugins: fetchart` in the
+disposable acceptance library's `config.yaml` (added earlier in Round 4 to fix the artwork scenario, see above)
+silently replaced the default plugin list, unloading `musicbrainz` — the plugin that actually resolves
+`--search-id`/`search_ids` into a real candidate via the MusicBrainz API. With it unloaded, there was never a
+candidate to weigh any threshold against, which is exactly consistent with the bare `Skipping.` and no further
+diagnostic detail observed in every prior iteration (title/artist mismatch detail is something Beets can only
+print about a candidate it actually found).
+
+Fixed: `seed_disposable_library()`'s config now reads `plugins: fetchart musicbrainz` (both listed explicitly).
+Re-running the same local reproduction with the `musicbrainz` plugin loaded (no other changes) returns exactly
+one candidate, at the correct release, with **distance `0.0`** and recommendation **`strong`** — under Beets'
+own *default*, unmodified `strong_rec_thresh` (`0.04`). This proves the earlier `strong_rec_thresh: 0.25`
+relaxation was never actually necessary and was masking the real bug rather than fixing it, so it has been
+reverted; `run_confirmed_import_native()`'s per-Apply temp config once again leaves Beets' match strictness at
+its default, matching the Round 4 brief's instruction not to blindly force matching. The WAV → FLAC fixture
+change is kept (a genuine, if not load-bearing, reliability improvement for cross-installation tag reading) but
+is not what fixed this failure.

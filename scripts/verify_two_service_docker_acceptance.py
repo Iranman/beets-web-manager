@@ -174,7 +174,26 @@ def seed_disposable_library(config_dir: Path, music_dir: Path) -> dict:
         # so no real cover art provider will have anything for it) -- see
         # run_wave25_artwork_scenarios for the two separately-reported
         # claims this implies.
-        "plugins: fetchart\n"
+        #
+        # Round 4 (real root cause of the confirmed_import_v1 "Skipping."
+        # failure, found by reproducing beets.autotag.match.tag_album()
+        # directly against this fixture's own metadata outside Docker):
+        # Beets' `plugins` config key is NOT additive across config
+        # sources -- confuse (beets' config layer) resolves a list-typed
+        # key entirely from whichever loaded source defines it with the
+        # highest priority; it does not merge that source's list with the
+        # packaged default's `plugins: [musicbrainz]`. Setting
+        # `plugins: fetchart` here therefore silently REPLACED the
+        # default plugin list, unloading `musicbrainz` -- the plugin that
+        # actually resolves `--search-id`/`search_ids` into a candidate
+        # via the MusicBrainz API. With it unloaded, tag_album() returned
+        # zero candidates (not merely a low-confidence one), which is why
+        # quiet mode printed a bare "Skipping." with no match detail at
+        # all: there was never anything to weigh a threshold against.
+        # This was the actual bug -- not track/tag realism, not the WAV
+        # vs FLAC container format, not strong_rec_thresh. Both plugins
+        # must be listed explicitly.
+        "plugins: fetchart musicbrainz\n"
         "threaded: yes\n"
         "import:\n"
         "    write: yes\n"

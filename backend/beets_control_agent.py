@@ -2187,35 +2187,32 @@ def run_confirmed_import_native(source_path: str, mb_albumid: str, *, use_move: 
     # applied via this override, combined with the copy/move policy below
     # in one config file rather than two competing ones.
     #
-    # match.strong_rec_thresh is also relaxed here, narrowly, for this
-    # family only (never touched in the reimport path's own config, and
-    # never in the user's real config.yaml -- this is a disposable
-    # per-Apply temp file). Justification, not a blind "make matching
-    # pass": confirmed_import_v1's authorization does NOT come from
-    # Beets' own recommendation confidence in the first place -- it comes
-    # from create_confirmed_import_plan()'s own independent review (an
-    # immutable source manifest, the caller's explicitly reviewed concrete
-    # Release ID/RGID, and real track/fingerprint alignment against that
-    # exact release, all already verified before Apply ever runs). Beets'
-    # default strong-recommendation threshold is tuned for *unsupervised*
-    # autotagging, where it is the ONLY safeguard against a wrong match --
-    # here it would be a second, redundant, uncoordinated gate stacked on
-    # top of a real one, tuned for a scenario that no longer applies, and
-    # requiring near-zero metadata distance even for a plan Beets was
-    # already told, out of band, to trust. --quiet-fallback skip is left
-    # fully in place as the actual safety backstop: a track-count/identity
-    # mismatch far outside what the Plan already reviewed still fails
-    # closed. See docs/operations/wave25_import_reconciliation_design.md's
-    # Round 4 section for the full reasoning.
-    match_override = "match:\n  strong_rec_thresh: 0.25\n"
+    # Round 4 (corrected): an earlier iteration of this fix also relaxed
+    # match.strong_rec_thresh here, on the theory that confirmed_import_v1's
+    # own independent review made Beets' default recommendation confidence
+    # a redundant, overly strict second gate. That theory was never
+    # actually tested against real Beets -- the acceptance fixture was
+    # failing for an unrelated reason (the disposable library's config.yaml
+    # had unloaded the `musicbrainz` plugin entirely, so `--search-id`
+    # resolved zero candidates, not merely a low-confidence one). With that
+    # real bug fixed and the fixture given realistic tags/durations,
+    # reproducing beets.autotag.match.tag_album() directly against this
+    # fixture's own metadata confirms Beets computes an exact distance of
+    # 0.0 and a `strong` recommendation under its own DEFAULT threshold --
+    # no relaxation is needed. Per the standing instruction not to blindly
+    # force Beets matching, the default strong_rec_thresh is left
+    # untouched here; --quiet-fallback skip remains the actual safety
+    # backstop for any genuine track-count/identity mismatch. See
+    # docs/operations/wave25_import_reconciliation_design.md's Round 4
+    # section for the full reasoning and the reproduction that proved it.
     if preserved_path or use_move:
-        config_override = "import:\n  quiet_fallback: skip\n" + match_override
+        config_override = "import:\n  quiet_fallback: skip\n"
     else:
         # Already-in-library folder, not asked to move: tag in place,
         # matching source_is_library semantics elsewhere in this project --
         # a folder that is already correctly organized should not be
         # relocated just because it is being tagged for the first time.
-        config_override = "import:\n  copy: no\n  move: no\n  quiet_fallback: skip\n" + match_override
+        config_override = "import:\n  copy: no\n  move: no\n  quiet_fallback: skip\n"
 
     def _album_count() -> int:
         try:
