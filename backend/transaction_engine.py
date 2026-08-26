@@ -39,6 +39,16 @@ STATUSES = {
     "Failed",
     "Rolled Back",
     "Partially Rolled Back",
+    # Wave 25 Docker acceptance round: several Apply paths already called
+    # store.update(operation_id, status="Recovery Required") after a
+    # partial failure where automatic rollback could not be completed --
+    # but _status()/TransactionStore.update() silently downgrade any
+    # status not in this set back to "Pending", so every one of those
+    # calls was actually leaving the record looking like a fresh,
+    # not-yet-started transaction instead of flagging it for operator
+    # attention. Added here so the status this codebase has been trying
+    # to set since Wave 20-ish actually persists.
+    "Recovery Required",
 }
 
 TRANSACTION_TYPES = {
@@ -9083,6 +9093,830 @@ def rollback_album_artwork(
             }
 
 
+# ── album_artwork_fetch_v1 ────────────────────────────────────────────────────
+# SEC-002 / ARCH-003 Wave 25 Docker acceptance round: import-time artwork
+# acquisition (fetchart + embedart) was routed through the generic
+# beets_client.run_command()/POST /commands/execute mechanism -- real
+# functionality (see fetch_and_embed_album_art()'s own docstring for why a
+# generic engine command runner is the right transport), but left as an
+# unexplained exception to the controlled-mutation model with no Plan,
+# Apply-time precondition check, or Verify step of its own. This narrow
+# family wraps that same underlying mechanism in real Plan/Apply/Verify
+# semantics, matching every other *_v1 family's contract, WITHOUT
+# reimplementing fetchart/embedart's own logic -- Beets remains entirely
+# responsible for provider selection, image fetching, and tag writing;
+# this only orchestrates around it.
+#
+# Deliberately NOT reversible after Apply: embedded artwork tag data
+# cannot be truthfully un-embedded (there is no prior tag state to restore
+# to that this family captured -- unlike album_artwork_v1, which moves an
+# already-known file and so can always restore the original), so there is
+# no rollback_album_artwork_fetch(). A partial failure (fetchart succeeds
+# but embedart does not confirm, or post-Apply verification fails) leaves
+# the transaction in "Recovery Required" status instead of a false
+# "Completed" or a "Failed" that would invite an unsafe blind retry.
+
+def create_album_artwork_fetch_plan(
+    store: TransactionStore,
+    payload: Dict[str, Any],
+    *,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Create a non-mutating preview plan for online artwork acquisition
+    (album_artwork_fetch_v1). Unlike album_artwork_v1, the resulting image
+    is not yet known at Plan time -- it comes from whichever configured
+    fetchart provider(s) return during Apply. Plan captures the album's
+    identity and current artwork state only, so Apply can prove the same
+    album is still being targeted before mutating it."""
+    payload = payload or {}
+    try:
+        album_id = int(payload.get("album_id") or 0)
+    except Exception:
+        album_id = 0
+    if album_id <= 0:
+        return {"ok": False, "error": "Invalid album_id", "code": "album_artwork_fetch_invalid_payload"}
+
+    lib_db = db_path or os.environ.get("BEETS_DB_PATH", os.path.expanduser("~/.config/beets/musiclibrary.blb"))
+    if not os.path.exists(lib_db):
+        return {"ok": False, "error": f"Beets database file not found at {lib_db}", "code": "album_artwork_fetch_db_missing"}
+
+    try:
+        con = sqlite3.connect(lib_db, timeout=10)
+        con.row_factory = sqlite3.Row
+        row = con.execute(
+            "SELECT id, album, albumartist, mb_albumid, mb_releasegroupid, artpath FROM albums WHERE id=?",
+            (album_id,),
+        ).fetchone()
+        item_count = con.execute("SELECT COUNT(*) FROM items WHERE album_id=?", (album_id,)).fetchone()[0]
+        con.close()
+    except Exception as ex:
+        return {"ok": False, "error": f"Database query failed: {ex}", "code": "album_artwork_fetch_db_error"}
+
+    if not row:
+        return {"ok": False, "error": f"Album {album_id} not found", "code": "album_artwork_fetch_album_not_found"}
+    if not item_count:
+        return {"ok": False, "error": f"Album {album_id} has no track items", "code": "album_artwork_fetch_no_items"}
+
+    raw_art = row["artpath"]
+    existing_artpath = raw_art.decode("utf-8", "replace") if isinstance(raw_art, bytes) else str(raw_art or "")
+
+    resource_keys = [f"album:{album_id}"]
+    tx = store.create(
+        operation_type="Artwork Update",
+        status="Preview",
+        summary=f"Fetch and embed artwork for album {album_id} ({row['albumartist'] or ''} - {row['album'] or ''})",
+        metadata={
+            "mutation_family": "album_artwork_fetch_v1",
+            "album_id": album_id,
+            "mb_albumid": str(row["mb_albumid"] or ""),
+            "mb_releasegroupid": str(row["mb_releasegroupid"] or ""),
+            "existing_artpath": existing_artpath,
+            "existing_artpath_present": bool(existing_artpath),
+            "resource_keys": resource_keys,
+            "reversible": False,
+            "created_at": _now(),
+        },
+    )
+    return {
+        "ok": True,
+        "operation_id": tx["id"],
+        "album_id": album_id,
+        "existing_artpath": existing_artpath,
+    }
+
+
+def execute_album_artwork_fetch_apply(
+    store: TransactionStore,
+    operation_id: str,
+    *,
+    db_path: Optional[str] = None,
+    run_beet_command_fn: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Execute album_artwork_fetch_v1: run native Beets fetchart + embedart
+    for the planned album, then verify the resulting artwork state.
+
+    run_beet_command_fn is a required dependency injected by the caller
+    (the Control Agent, which owns the actual `beet` subprocess machinery)
+    -- transaction_engine.py deliberately never invokes `beet` subcommands
+    itself, matching the same fetch_tracklist_fn injection pattern already
+    used by create_album_mb_track_repair_plan. Expected signature:
+    run_beet_command_fn(command: str, args: List[str]) ->
+    {"ok": bool, "error": Optional[str], ...}.
+    """
+    if not _TRANSACTION_ID_RE.match(operation_id):
+        return {"ok": False, "error": "Invalid transaction ID format", "code": "album_artwork_fetch_invalid_id"}
+    if run_beet_command_fn is None:
+        return {"ok": False, "error": "No beet command runner configured", "code": "album_artwork_fetch_no_runner"}
+
+    with _get_apply_lock(operation_id):
+        try:
+            tx = store.get(operation_id)
+        except KeyError:
+            return {"ok": False, "error": f"Transaction {operation_id} not found", "code": "album_artwork_fetch_not_found"}
+
+        meta = tx.get("metadata") or {}
+        if meta.get("mutation_family") != "album_artwork_fetch_v1":
+            return {"ok": False, "error": "Transaction is not an album_artwork_fetch_v1 operation", "code": "album_artwork_fetch_family_mismatch"}
+
+        if tx.get("status") == "Completed":
+            return {
+                "ok": True, "operation_id": operation_id, "status": "Completed",
+                "mutated": True, "artpath": meta.get("result_artpath", ""),
+            }
+        if tx.get("status") == "Recovery Required":
+            return {
+                "ok": False,
+                "error": "Transaction requires manual recovery; a prior Apply attempt did not complete cleanly",
+                "code": "album_artwork_fetch_recovery_required",
+                "status": "Recovery Required",
+            }
+
+        album_id = int(meta.get("album_id") or 0)
+        lib_db = db_path or os.environ.get("BEETS_DB_PATH", os.path.expanduser("~/.config/beets/musiclibrary.blb"))
+        resource_keys = meta.get("resource_keys") or []
+
+        def _fail(msg: str, code: str) -> Dict[str, Any]:
+            store.update(operation_id, status="Failed", logs=[f"Apply failed: {msg}"])
+            return {"ok": False, "error": msg, "code": code, "mutated": False, "status": "Failed"}
+
+        def _recovery(msg: str, code: str, reason: str) -> Dict[str, Any]:
+            curr = store.get(operation_id).get("metadata", {})
+            store.update(operation_id, status="Recovery Required", metadata={
+                **curr,
+                "filesystem_mutated": True,
+                "recovery_required_at": _now(),
+                "recovery_reason": reason,
+            })
+            return {"ok": False, "error": msg, "code": code, "mutated": True, "status": "Recovery Required"}
+
+        with _lock_resources(resource_keys):
+            # TOCTOU precondition: the album's identity must not have
+            # changed since Plan -- a different album entirely must never
+            # silently receive this artwork.
+            try:
+                con = sqlite3.connect(lib_db, timeout=10)
+                con.row_factory = sqlite3.Row
+                row = con.execute(
+                    "SELECT id, mb_albumid, mb_releasegroupid FROM albums WHERE id=?",
+                    (album_id,),
+                ).fetchone()
+                con.close()
+            except Exception as ex:
+                return _fail(f"Database query failed: {ex}", "album_artwork_fetch_db_error")
+            if not row:
+                return _fail(f"Album {album_id} no longer exists", "album_artwork_fetch_album_not_found")
+            cur_mbid = str(row["mb_albumid"] or "")
+            cur_rgid = str(row["mb_releasegroupid"] or "")
+            if meta.get("mb_albumid") and cur_mbid and meta["mb_albumid"] != cur_mbid:
+                return _fail("Album identity changed since plan (mb_albumid mismatch)", "album_artwork_fetch_stale_plan")
+            if meta.get("mb_releasegroupid") and cur_rgid and meta["mb_releasegroupid"] != cur_rgid:
+                return _fail("Album identity changed since plan (release group mismatch)", "album_artwork_fetch_stale_plan")
+
+            store.update(operation_id, status="Running", metadata={**meta, "apply_started": True})
+
+            fetch_res = run_beet_command_fn("fetchart", [f"album_id:{album_id}"])
+            if not fetch_res.get("ok"):
+                return _fail(fetch_res.get("error") or "fetchart command failed", "album_artwork_fetch_fetchart_failed")
+
+            embed_res = run_beet_command_fn("embedart", ["-y", f"album_id:{album_id}"])
+            if not embed_res.get("ok"):
+                # fetchart already ran and may have written a real file +
+                # DB artpath -- real partial work that cannot be blindly
+                # discarded, but the tag-embed half never confirmed.
+                return _recovery(
+                    embed_res.get("error") or "embedart command failed after fetchart succeeded",
+                    "album_artwork_fetch_embedart_failed",
+                    "fetchart succeeded but embedart did not confirm",
+                )
+
+            # Verify: the album must now have a real artpath recorded.
+            try:
+                con = sqlite3.connect(lib_db, timeout=10)
+                con.row_factory = sqlite3.Row
+                vrow = con.execute("SELECT artpath FROM albums WHERE id=?", (album_id,)).fetchone()
+                con.close()
+            except Exception as ex:
+                return _recovery(f"Post-apply verification query failed: {ex}", "album_artwork_fetch_verify_query_failed", f"post-apply verification query failed: {ex}")
+
+            raw_v = vrow["artpath"] if vrow else None
+            result_artpath = raw_v.decode("utf-8", "replace") if isinstance(raw_v, bytes) else str(raw_v or "")
+            if not result_artpath:
+                return _recovery(
+                    "Post-apply verification failed: artpath not set after fetchart/embedart",
+                    "album_artwork_fetch_verification_failed",
+                    "fetchart/embedart reported success but albums.artpath is still empty",
+                )
+
+            store.update(operation_id, status="Completed", metadata={
+                **store.get(operation_id).get("metadata", {}),
+                "filesystem_mutated": True,
+                "result_artpath": result_artpath,
+                "completed_at": _now(),
+            })
+            return {"ok": True, "operation_id": operation_id, "status": "Completed", "mutated": True, "artpath": result_artpath}
+
+
+# ── confirmed_import_v1 ──────────────────────────────────────────────────────
+#
+# Wave 25 Round 3: a distinct controlled family for FRESH REVIEWED imports of
+# previously-untagged source audio, deliberately separate from
+# reimport_source_atomic()/verify_deterministic_identity() (which remain
+# unchanged and continue to gate genuine *re*-imports of already-tagged
+# library content). See docs/operations/wave25_import_reconciliation_design.md
+# for the full security-model writeup ("REIMPORT TRUST MODEL" vs "FRESH
+# REVIEWED IMPORT TRUST MODEL").
+#
+# Trust model: missing embedded MusicBrainz tags are the EXPECTED case for a
+# fresh download and are never treated as identity evidence one way or the
+# other. Authorization instead comes from binding together an immutable
+# source manifest digest (re-checked at Apply -- any change invalidates the
+# Plan), the caller's explicitly reviewed concrete target Release ID, the
+# target's real Release Group (validated, never substituted), and
+# best-effort track alignment / AcoustID fingerprint evidence (reusing
+# backend.track_align, not a new matcher). A CONFLICTING embedded tag
+# (present and different from the target) is still a hard rejection --
+# only the ABSENCE of tags is treated as normal here.
+
+def _confirmed_import_embedded_tag_conflict(
+    audio_files: List[Dict[str, Any]], target_mb_albumid: str, target_mb_rgid: str,
+) -> Optional[Dict[str, Any]]:
+    """A source file with NO embedded MusicBrainz tags is the expected case
+    for a fresh download and is not a conflict. A source file whose embedded
+    tags are PRESENT and DIFFERENT from the approved target is a real
+    conflict this family must never silently overwrite."""
+    for entry in audio_files:
+        props = entry.get("properties") or {}
+        embedded_albumid = str(props.get("mb_albumid") or "").strip().lower()
+        if embedded_albumid and target_mb_albumid and embedded_albumid != target_mb_albumid:
+            return {
+                "relative_path": entry.get("relative_path", ""),
+                "embedded_mb_albumid": embedded_albumid,
+                "reason": "embedded_mb_albumid_conflict",
+            }
+        embedded_rgid = str(props.get("mb_releasegroupid") or "").strip().lower()
+        if embedded_rgid and target_mb_rgid and embedded_rgid != target_mb_rgid:
+            return {
+                "relative_path": entry.get("relative_path", ""),
+                "embedded_mb_releasegroupid": embedded_rgid,
+                "reason": "embedded_mb_releasegroupid_conflict",
+            }
+    return None
+
+
+def _confirmed_import_title_similarity(file_path: str, mb_title_norm: str) -> float:
+    """Self-contained title similarity for track_align.align_tracks's
+    similarity_fn -- deliberately not a new matcher, just enough
+    normalization to compare a local filename stem against an already-
+    normalized MusicBrainz track title."""
+    stem = Path(str(file_path)).stem
+    norm_stem = re.sub(r"[^a-z0-9]+", " ", stem.casefold()).strip()
+    norm_target = re.sub(r"[^a-z0-9]+", " ", str(mb_title_norm or "").casefold()).strip()
+    if not norm_stem or not norm_target:
+        return 0.0
+    from difflib import SequenceMatcher
+    score = SequenceMatcher(None, norm_stem, norm_target).ratio()
+    if set(norm_stem.split()) & set(norm_target.split()):
+        score = max(score, 0.70)
+    return score
+
+
+def _confirmed_import_acoustid_conflicts(
+    comparison: List[Dict[str, Any]], mb_tracks: List[Dict[str, Any]], acoustid_lookup_fn: Optional[Any],
+    *, min_conflict_score: int = 85,
+) -> List[Dict[str, Any]]:
+    """Best-effort additional conflict check (on top of
+    resolve_unmatched_via_acoustid's own promotion of missing rows): flag an
+    unmatched ('extra') source file whose fingerprint strongly identifies a
+    KNOWN MusicBrainz recording that is not anywhere in the target release's
+    own tracklist -- a real contradiction, not merely an unmatched title.
+    Only runs when acoustid_lookup_fn is supplied; absence of fingerprint
+    evidence is never itself treated as a conflict."""
+    if acoustid_lookup_fn is None:
+        return []
+    target_trackids = {str(t.get("mb_trackid") or "").strip().lower() for t in mb_tracks if t.get("mb_trackid")}
+    conflicts: List[Dict[str, Any]] = []
+    for row in comparison:
+        if row.get("status") != "extra" or not row.get("file_path"):
+            continue
+        try:
+            hits = acoustid_lookup_fn(row["file_path"]) or []
+        except Exception:
+            hits = []
+        for hit in hits:
+            try:
+                score = int(hit.get("score") or 0)
+            except Exception:
+                score = 0
+            hit_trackid = str(hit.get("mb_trackid") or "").strip().lower()
+            if score >= min_conflict_score and hit_trackid and hit_trackid not in target_trackids:
+                conflicts.append({
+                    "file_path": row["file_path"],
+                    "acoustid_score": score,
+                    "conflicting_mb_trackid": hit_trackid,
+                    "conflicting_title": hit.get("title", ""),
+                })
+                break
+    return conflicts
+
+
+def create_confirmed_import_plan(
+    store: TransactionStore,
+    payload: Dict[str, Any],
+    *,
+    staging_allowed_roots: Optional[List[str]] = None,
+    music_allowed_roots: Optional[List[str]] = None,
+    db_path: Optional[str] = None,
+    inspect_source_fn: Optional[Any] = None,
+    acoustid_lookup_fn: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Create a non-mutating Plan for confirmed_import_v1.
+
+    inspect_source_fn(source_folder) -> dict is a required dependency
+    (matching the fetch_tracklist_fn/run_beet_command_fn injection pattern
+    already used elsewhere in this file) -- this module has no filesystem
+    access of its own; only the Control Agent, which owns the real mounted
+    staging/music roots, can safely read source audio. Expected shape
+    matches beets_control_agent.inspect_import_source(): {"ok",
+    "canonical_path", "audio_files": [{"relative_path","size","mtime_ns",
+    "properties"}], "source_signature"}.
+
+    acoustid_lookup_fn(file_path) -> list[dict] is optional best-effort
+    fingerprint evidence (track_align.AcoustidLookupFn shape); omitted
+    entirely when fpcalc/AcoustID is unavailable -- never required.
+
+    Payload: source_folder, mb_albumid (concrete Release ID, required),
+    mb_releasegroupid (optional), mb_release_group_resolved (the release's
+    actual Release Group as resolved by whoever fetched mb_tracks -- the web
+    manager, which has MusicBrainz API access this module deliberately does
+    not), mb_tracks (pre-fetched tracklist, required, non-empty),
+    existing_album_id (optional), use_move (bool).
+    """
+    payload = payload or {}
+    source_folder = str(payload.get("source_folder") or "").strip()
+    if not source_folder:
+        return {"ok": False, "error": "source_folder required", "code": "confirmed_import_invalid_payload"}
+
+    target_mb_albumid = str(payload.get("mb_albumid") or "").strip().lower()
+    if not _MB_UUID_RE.match(target_mb_albumid):
+        return {"ok": False, "error": "A concrete MusicBrainz Release ID is required", "code": "confirmed_import_invalid_release_id"}
+
+    target_mb_rgid = str(payload.get("mb_releasegroupid") or "").strip().lower()
+    if target_mb_rgid and not _MB_UUID_RE.match(target_mb_rgid):
+        return {"ok": False, "error": "mb_releasegroupid is not a valid MusicBrainz UUID", "code": "confirmed_import_invalid_rgid"}
+
+    resolved_mb_rgid = str(payload.get("mb_release_group_resolved") or "").strip().lower()
+    if resolved_mb_rgid and not _MB_UUID_RE.match(resolved_mb_rgid):
+        resolved_mb_rgid = ""
+    if target_mb_rgid and resolved_mb_rgid and target_mb_rgid != resolved_mb_rgid:
+        return {
+            "ok": False,
+            "error": "The selected Release does not belong to the approved Release Group",
+            "code": "confirmed_import_release_group_mismatch",
+        }
+    final_rgid = target_mb_rgid or resolved_mb_rgid
+
+    mb_tracks = payload.get("mb_tracks")
+    if not isinstance(mb_tracks, list) or not mb_tracks:
+        return {"ok": False, "error": "MusicBrainz release tracklist is required and must be non-empty", "code": "confirmed_import_missing_tracklist"}
+
+    src_p = Path(source_folder)
+    stg_roots = staging_allowed_roots or [str(os.environ.get("DOWNLOADS_ROOT", "/downloads")), str(os.environ.get("STAGING_ROOT", "/staging"))]
+    mus_roots = music_allowed_roots or [str(os.environ.get("MUSIC_ROOT", "/music"))]
+    all_roots = stg_roots + mus_roots
+    if not any(_path_under(src_p, Path(r)) for r in all_roots):
+        return {"ok": False, "error": f"Source folder outside allowed roots: {src_p}", "code": "confirmed_import_path_out_of_root"}
+    if any(_path_has_symlink_under(src_p, Path(r)) for r in all_roots):
+        return {"ok": False, "error": f"Symlink rejected: {src_p}", "code": "confirmed_import_symlink_rejected"}
+
+    if inspect_source_fn is None:
+        return {"ok": False, "error": "No source inspector configured", "code": "confirmed_import_no_inspector"}
+    insp = inspect_source_fn(str(src_p))
+    if not isinstance(insp, dict) or not insp.get("ok"):
+        return {
+            "ok": False,
+            "error": (insp.get("error_code") if isinstance(insp, dict) else None) or "Source inspection failed",
+            "code": "confirmed_import_inspection_failed",
+        }
+    audio_files = insp.get("audio_files") or []
+    if not audio_files:
+        return {"ok": False, "error": "Source folder contains no audio files", "code": "confirmed_import_no_audio"}
+
+    conflict = _confirmed_import_embedded_tag_conflict(audio_files, target_mb_albumid, final_rgid)
+    if conflict:
+        return {
+            "ok": False,
+            "error": (
+                "Source audio already carries a conflicting MusicBrainz identity; "
+                "a confirmed fresh import never overwrites trusted contradictory "
+                "identity. Missing tags are fine -- conflicting tags are not the "
+                "same thing."
+            ),
+            "code": "confirmed_import_embedded_identity_conflict",
+            "conflict": conflict,
+        }
+
+    canonical_path = str(insp.get("canonical_path") or src_p)
+    local_files = [str(Path(canonical_path) / e["relative_path"]) for e in audio_files]
+
+    try:
+        from track_align import align_tracks, resolve_unmatched_via_acoustid
+    except ImportError:
+        from backend.track_align import align_tracks, resolve_unmatched_via_acoustid
+
+    comparison = align_tracks(local_files, mb_tracks, _confirmed_import_title_similarity)
+    if acoustid_lookup_fn is not None:
+        try:
+            resolve_unmatched_via_acoustid(comparison, acoustid_lookup_fn, fpcalc_available=True)
+        except Exception:
+            pass
+
+    present_statuses = {"matched", "fuzzy", "acoustid_verified"}
+    present_count = sum(1 for row in comparison if row.get("status") in present_statuses)
+    missing_count = sum(1 for row in comparison if row.get("status") == "missing")
+    extra_count = sum(1 for row in comparison if row.get("status") == "extra")
+    if present_count == 0:
+        return {
+            "ok": False,
+            "error": "No source track could be aligned to the selected release's tracklist; refusing to import what does not appear to be this release",
+            "code": "confirmed_import_no_track_alignment",
+        }
+
+    acoustid_conflicts = _confirmed_import_acoustid_conflicts(comparison, mb_tracks, acoustid_lookup_fn)
+    if acoustid_conflicts:
+        return {
+            "ok": False,
+            "error": "Fingerprint evidence identifies source audio as a different, known MusicBrainz recording than the approved release; refusing to import",
+            "code": "confirmed_import_acoustid_conflict",
+            "conflicts": acoustid_conflicts,
+        }
+
+    try:
+        existing_album_id = int(payload.get("existing_album_id") or 0)
+    except Exception:
+        existing_album_id = 0
+    use_move = bool(payload.get("use_move", False))
+
+    resource_keys = [f"import-source:{canonical_path}"]
+    if existing_album_id > 0:
+        resource_keys.append(f"album:{existing_album_id}")
+
+    # Round 4 brief section 11-12: make the partial-import policy explicit
+    # in the Plan itself rather than leaving "present_count > 0" as the
+    # only visible signal. This does not change the accept/reject
+    # threshold (a reviewed incomplete album is still allowed, matching
+    # the existing present_count == 0 rejection above) -- it makes that
+    # policy legible to whoever reviews or audits a given Plan, and gives
+    # a future stricter policy (e.g. a minimum coverage ratio) something
+    # concrete to gate on without inventing a second scoring system.
+    coverage_ratio = round(present_count / len(mb_tracks), 4) if mb_tracks else 0.0
+    track_coverage = {
+        "expected_track_count": len(mb_tracks),
+        "present_track_count": present_count,
+        "missing_track_count": missing_count,
+        "extra_track_count": extra_count,
+        "coverage_ratio": coverage_ratio,
+        "partial_import": present_count < len(mb_tracks),
+        "review_required": present_count < len(mb_tracks),
+    }
+    tx = store.create(
+        operation_type="Confirmed Import",
+        status="Preview",
+        summary=f"Confirmed import ({len(audio_files)} file(s)) -> release {target_mb_albumid}",
+        metadata={
+            "mutation_family": "confirmed_import_v1",
+            "source_folder": canonical_path,
+            "source_manifest_digest": insp.get("source_signature", ""),
+            "target_mb_albumid": target_mb_albumid,
+            "target_mb_releasegroupid": final_rgid,
+            "existing_album_id": existing_album_id,
+            "use_move": use_move,
+            "track_alignment": comparison,
+            "track_coverage": track_coverage,
+            "resource_keys": resource_keys,
+            "reversible": False,
+            "created_at": _now(),
+        },
+    )
+    return {
+        "ok": True,
+        "operation_id": tx["id"],
+        "source_folder": canonical_path,
+        "audio_count": len(audio_files),
+        "track_alignment": comparison,
+        "track_coverage": track_coverage,
+    }
+
+
+def execute_confirmed_import_apply(
+    store: TransactionStore,
+    operation_id: str,
+    *,
+    music_allowed_roots: Optional[List[str]] = None,
+    db_path: Optional[str] = None,
+    inspect_source_fn: Optional[Any] = None,
+    run_native_import_fn: Optional[Any] = None,
+    acceptance_failpoint: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Execute confirmed_import_v1: revalidate the immutable source manifest,
+    run native Beets --search-id import via the injected runner (NEVER
+    reimport_source_atomic() -- that function's identity gate requires
+    pre-existing embedded tags this family's whole purpose is to establish
+    for the first time), capture the resulting album/item identity by
+    querying the library for the planned Release ID (never guessed from
+    "most recently added"), and verify the result before reporting success.
+
+    run_native_import_fn(source_path, mb_albumid, *, use_move) ->
+    {"ok", "error"} is a required dependency (Control Agent-owned subprocess
+    mechanics), matching the run_beet_command_fn/beets_import_runner
+    precedent -- transaction_engine.py never invokes `beet` itself.
+
+    acceptance_failpoint is test-only infrastructure (Round 4): when equal
+    to "confirmed_import_after_native", Apply deterministically stops
+    right after the native_import_invoked checkpoint is persisted and
+    before the post-import capture/verify step -- simulating a process
+    crash in that exact window for the dedicated Docker acceptance
+    scenario, without a timing race. The caller (the Control Agent route)
+    is responsible for only ever passing a non-None value when running in
+    an explicit acceptance/test container; this function does not itself
+    know or care why the caller chose to pass it, it just honors it.
+
+    Non-reversible after Apply, same as album_artwork_fetch_v1: undoing a
+    real Beets import (tags written, files possibly moved/copied,
+    reconciled against a live library) cannot be truthfully guaranteed, so
+    no rollback is offered rather than a rollback that might lie.
+    """
+    if not _TRANSACTION_ID_RE.match(operation_id):
+        return {"ok": False, "error": "Invalid transaction ID format", "code": "confirmed_import_invalid_id"}
+
+    with _get_apply_lock(operation_id):
+        try:
+            tx = store.get(operation_id)
+        except KeyError:
+            return {"ok": False, "error": f"Transaction {operation_id} not found", "code": "confirmed_import_not_found"}
+
+        meta = tx.get("metadata") or {}
+        if meta.get("mutation_family") != "confirmed_import_v1":
+            return {"ok": False, "error": "Transaction is not a confirmed_import_v1 operation", "code": "confirmed_import_family_mismatch"}
+
+        if tx.get("status") == "Completed":
+            return {
+                "ok": True, "operation_id": operation_id, "status": "Completed", "mutated": True,
+                "album_id": meta.get("result_album_id"), "item_ids": meta.get("result_item_ids") or [],
+            }
+        if tx.get("status") == "Recovery Required":
+            return {
+                "ok": False,
+                "error": "Transaction requires manual recovery; a prior Apply attempt did not complete cleanly",
+                "code": "confirmed_import_recovery_required",
+                "status": "Recovery Required",
+            }
+
+        target_mb_albumid = str(meta.get("target_mb_albumid") or "")
+        target_mb_rgid = str(meta.get("target_mb_releasegroupid") or "")
+        source_folder = str(meta.get("source_folder") or "")
+        resource_keys = meta.get("resource_keys") or []
+        lib_db = db_path or os.environ.get("BEETS_DB_PATH", os.path.expanduser("~/.config/beets/musiclibrary.blb"))
+
+        def _fail(msg: str, code: str, *, diagnostics: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+            curr = store.get(operation_id).get("metadata", {})
+            update_meta = {**curr, "last_failure_diagnostics": diagnostics} if diagnostics else curr
+            store.update(operation_id, status="Failed", metadata=update_meta, logs=[f"Apply failed: {msg}"])
+            result = {"ok": False, "error": msg, "code": code, "mutated": False, "status": "Failed"}
+            if diagnostics:
+                # Surfaced to the HTTP caller too (not just persisted), so
+                # the real native beet stdout/stderr is actually visible to
+                # whoever is debugging a real failure instead of requiring
+                # a separate transaction-store lookup (Round 4 brief
+                # section 2/13).
+                result["diagnostics"] = diagnostics
+            return result
+
+        def _recovery(msg: str, code: str, reason: str, *, diagnostics: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+            curr = store.get(operation_id).get("metadata", {})
+            update_meta = {
+                **curr, "filesystem_mutated": True,
+                "recovery_required_at": _now(), "recovery_reason": reason,
+            }
+            if diagnostics:
+                update_meta["last_failure_diagnostics"] = diagnostics
+            store.update(operation_id, status="Recovery Required", metadata=update_meta)
+            result = {"ok": False, "error": msg, "code": code, "mutated": True, "status": "Recovery Required"}
+            if diagnostics:
+                result["diagnostics"] = diagnostics
+            return result
+
+        def _capture_and_verify(*, require_files_present: bool) -> Optional[Dict[str, Any]]:
+            """Query the library for the planned Release ID and verify the
+            result. Returns None when no album with this Release ID exists
+            at all (the pre-check calls this to mean "not imported yet";
+            the post-import call to this same helper never receives None as
+            an acceptable outcome). Returns {"ok": False, ...} when an album
+            exists but cannot be positively verified -- never guessed."""
+            try:
+                con = sqlite3.connect(lib_db, timeout=10)
+                con.row_factory = sqlite3.Row
+                album_row = con.execute(
+                    "SELECT id, mb_albumid, mb_releasegroupid FROM albums WHERE mb_albumid = ?",
+                    (target_mb_albumid,),
+                ).fetchone()
+                if not album_row:
+                    con.close()
+                    return None
+                item_rows = con.execute(
+                    "SELECT id, path FROM items WHERE album_id = ?", (album_row["id"],)
+                ).fetchall()
+                con.close()
+            except Exception:
+                return {"ok": False, "reason": "db_query_failed"}
+
+            if not item_rows:
+                return {"ok": False, "reason": "no_items", "album_id": int(album_row["id"])}
+
+            music_root = Path((music_allowed_roots or [os.environ.get("MUSIC_ROOT", "/music")])[0])
+            files_present = 0
+            missing_item_ids: List[int] = []
+            for irow in item_rows:
+                raw = irow["path"]
+                p = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw or "")
+                pp = Path(p)
+                if not pp.is_absolute():
+                    pp = music_root / p
+                if pp.exists():
+                    files_present += 1
+                else:
+                    missing_item_ids.append(int(irow["id"]))
+            # Round 4 (real Docker acceptance finding): this used to accept
+            # ANY nonzero files_present count as fully verified -- a real
+            # import that copied some but not all of an album's items (a
+            # partial copy failure, not a clean skip) still reported
+            # ok=True here, with every item_id (including the ones with no
+            # backing file) returned to the caller as part of a "Completed"
+            # result. "Confirmed" means every item this result claims to
+            # have imported is actually present on disk -- not merely that
+            # the album isn't completely empty. A legitimately incomplete
+            # album (fewer *tracks* than the full MB release, handled by
+            # confirmed_import_v1's own track_coverage/review policy at
+            # Plan time) is a different, already-reviewed concept from an
+            # item *row* that exists without a real file behind it.
+            if require_files_present:
+                if files_present == 0:
+                    return {"ok": False, "reason": "no_files_on_disk", "album_id": int(album_row["id"])}
+                if missing_item_ids:
+                    return {
+                        "ok": False, "reason": "incomplete_files_on_disk", "album_id": int(album_row["id"]),
+                        "files_present": files_present, "items_total": len(item_rows),
+                        "missing_item_ids": missing_item_ids[:20],
+                    }
+
+            if target_mb_rgid:
+                actual_rgid = str(album_row["mb_releasegroupid"] or "").strip().lower()
+                if actual_rgid and actual_rgid != target_mb_rgid:
+                    return {"ok": False, "reason": "releasegroup_mismatch", "album_id": int(album_row["id"])}
+
+            return {
+                "ok": True,
+                "album_id": int(album_row["id"]),
+                "item_ids": [int(r["id"]) for r in item_rows],
+                "files_present": files_present,
+                "items_total": len(item_rows),
+            }
+
+        with _lock_resources(resource_keys):
+            # Idempotency / crash-resume: if a verifiable album for this
+            # exact target Release ID already exists, never invoke native
+            # import a second time -- resume the existing result instead.
+            # This is the mechanism that makes both "retry an already-
+            # completed import" and "resume after a crash that happened
+            # after native import succeeded but before Completed was
+            # recorded" safe (the same mb_albumid uniqueness signal
+            # reimport_source_atomic's own result-capture already relies
+            # on elsewhere in this file).
+            existing = _capture_and_verify(require_files_present=True)
+            if existing and existing.get("ok"):
+                store.update(operation_id, status="Completed", metadata={
+                    **meta, "filesystem_mutated": True,
+                    "result_album_id": existing["album_id"],
+                    "result_item_ids": existing["item_ids"],
+                    "resumed_existing_result": True,
+                    "completed_at": _now(),
+                })
+                return {
+                    "ok": True, "operation_id": operation_id, "status": "Completed", "mutated": True,
+                    "album_id": existing["album_id"], "item_ids": existing["item_ids"], "resumed": True,
+                }
+            if existing and not existing.get("ok"):
+                return _fail(
+                    f"An album for this Release ID already exists but could not be verified ({existing.get('reason')})",
+                    "confirmed_import_existing_unverified",
+                )
+
+            if inspect_source_fn is None:
+                return _fail("No source inspector configured", "confirmed_import_no_inspector")
+            insp = inspect_source_fn(source_folder)
+            if not isinstance(insp, dict) or not insp.get("ok"):
+                if meta.get("apply_started"):
+                    return _recovery(
+                        "Source folder is no longer present and no verified result was found",
+                        "confirmed_import_ambiguous_after_prior_attempt",
+                        "prior apply attempt was recorded but neither the source nor a verified result could be found",
+                    )
+                return _fail(
+                    (insp.get("error_code") if isinstance(insp, dict) else None) or "Source is no longer available for import",
+                    "confirmed_import_source_unavailable",
+                )
+            if insp.get("source_signature") != meta.get("source_manifest_digest"):
+                return _fail(
+                    "Source contents changed since this Plan was created",
+                    "confirmed_import_stale_plan",
+                )
+
+            if not run_native_import_fn:
+                return _fail("No native import runner configured", "confirmed_import_no_runner")
+
+            store.update(operation_id, status="Running", metadata={**meta, "apply_started": True})
+
+            import_res = run_native_import_fn(
+                source_folder, target_mb_albumid, use_move=bool(meta.get("use_move")),
+            )
+            diagnostics = {
+                "returncode": (import_res or {}).get("returncode"),
+                "stdout_excerpt": (import_res or {}).get("stdout_excerpt"),
+                "stderr_excerpt": (import_res or {}).get("stderr_excerpt"),
+                "albums_before": (import_res or {}).get("albums_before"),
+                "albums_after": (import_res or {}).get("albums_after"),
+            }
+            # Crash-safety checkpoint: record that native import was
+            # invoked, regardless of outcome, before doing anything else --
+            # a crash between here and Completed leaves an honest trail for
+            # the idempotency check above on the next Apply attempt.
+            store.update(operation_id, status="Running", metadata={
+                **store.get(operation_id).get("metadata", {}),
+                "native_import_invoked": True,
+                "filesystem_mutated": True,
+                "last_native_import_diagnostics": diagnostics,
+            })
+            if not isinstance(import_res, dict) or not import_res.get("ok"):
+                return _fail(
+                    (import_res.get("error") if isinstance(import_res, dict) else None) or "Native Beets import failed",
+                    "confirmed_import_native_import_failed",
+                    diagnostics=diagnostics,
+                )
+
+            # Round 4 deterministic acceptance failpoint: only ever honored
+            # when the caller (an acceptance-mode-only container) passed
+            # it. Fires right here -- after the native_import_invoked
+            # checkpoint above is already durably persisted, before this
+            # transaction ever captures/verifies its own result -- so a
+            # retry's idempotency pre-check (querying the library directly)
+            # is the only thing that can discover the real album Beets
+            # already created, exactly like a genuine crash in this window.
+            if acceptance_failpoint == "confirmed_import_after_native":
+                return _recovery(
+                    "Acceptance failpoint triggered (test infrastructure only, never reachable in a real deployment)",
+                    "confirmed_import_acceptance_failpoint",
+                    "deterministic acceptance-only failure injection after native import succeeded, before verification",
+                    diagnostics=diagnostics,
+                )
+
+            result = _capture_and_verify(require_files_present=True)
+            if not result or not result.get("ok"):
+                albums_before, albums_after = diagnostics["albums_before"], diagnostics["albums_after"]
+                if isinstance(albums_before, int) and isinstance(albums_after, int) and albums_before >= 0 and albums_after == albums_before:
+                    # Beets' own album count did not change at all -- a
+                    # clean --quiet-fallback skip, not a partial mutation
+                    # under the wrong identity. Nothing needs recovering;
+                    # this is a truthful, zero-mutation failure.
+                    return _fail(
+                        "Beets could not confidently apply the approved release to this source and skipped the import (no library mutation occurred)",
+                        "confirmed_import_skipped_no_confident_match",
+                        diagnostics=diagnostics,
+                    )
+                verify_reason = (result or {}).get("reason", "no matching album found")
+                verify_detail = f"post-import verification failed: {verify_reason}"
+                if verify_reason == "incomplete_files_on_disk":
+                    verify_detail += (
+                        f" ({result.get('files_present')}/{result.get('items_total')} item(s) have a real "
+                        f"file; missing item id(s): {result.get('missing_item_ids')})"
+                    )
+                return _recovery(
+                    "Native import reported success but the resulting album could not be verified",
+                    "confirmed_import_verification_failed",
+                    verify_detail,
+                    diagnostics=diagnostics,
+                )
+
+            store.update(operation_id, status="Completed", metadata={
+                **store.get(operation_id).get("metadata", {}),
+                "result_album_id": result["album_id"],
+                "result_item_ids": result["item_ids"],
+                "completed_at": _now(),
+            })
+            return {
+                "ok": True, "operation_id": operation_id, "status": "Completed", "mutated": True,
+                "album_id": result["album_id"], "item_ids": result["item_ids"],
+            }
+
+
 # ── import_folder_v1 ─────────────────────────────────────────────────────────
 
 def create_import_folder_plan(
@@ -9116,6 +9950,18 @@ def create_import_folder_plan(
         return {"ok": False, "error": f"Source folder outside allowed staging roots: {src_p}", "code": "import_folder_path_out_of_root"}
     if any(_path_has_symlink_under(src_p, Path(r)) for r in stg_roots):
         return {"ok": False, "error": f"Symlink rejected: {src_p}", "code": "import_folder_symlink_rejected"}
+    # Wave 25 Docker acceptance round: this used to silently produce an
+    # empty files_plan (and a Plan response with ok=True) for a
+    # nonexistent or non-directory source -- the caller-side existence
+    # check (app.py's _resolve_import_review_source_path) cannot verify
+    # this itself (the web-manager container has no visibility into
+    # staging/music roots by design), so this engine-side check, which
+    # DOES have real access to the mounted filesystem, must be the one
+    # that actually fails closed.
+    if not src_p.exists():
+        return {"ok": False, "error": f"Source folder does not exist: {src_p}", "code": "import_folder_source_not_found"}
+    if not src_p.is_dir():
+        return {"ok": False, "error": f"Source path is not a folder: {src_p}", "code": "import_folder_source_not_a_directory"}
 
     album_id = int(payload.get("album_id") or 0)
     mode = str(payload.get("mode") or "import").strip()

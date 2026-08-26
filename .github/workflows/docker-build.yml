@@ -141,6 +141,18 @@ jobs:
         with:
           python-version: "3.13"
       - run: pip install -r requirements.txt
+      - name: Install ffmpeg for realistic Wave 25 fixture tagging
+        # Wave 25 round 4: the confirmed_import_v1 acceptance fixture is
+        # converted from synthetic WAV PCM to FLAC (see
+        # seed_wave25_import_source in
+        # scripts/verify_two_service_docker_acceptance.py) so that basic
+        # title/artist/album/track tags are read back reliably by the
+        # engine container's Beets/mediafile install -- WAV has no single
+        # universally-agreed tag scheme. Do not rely on ffmpeg being
+        # present on the runner image implicitly; install it explicitly
+        # so this step is deterministic regardless of what any given
+        # ubuntu-latest image happens to ship.
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - name: Install real Beets for disposable-library seeding
         # Wave 24 final review round 3, section 21-24: this is genuine
         # two-service acceptance -- both images built from local source
