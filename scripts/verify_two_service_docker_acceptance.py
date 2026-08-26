@@ -350,8 +350,34 @@ def _fetch_release_tracklist(release_id: str) -> list:
         return _WAVE25_TRACKLIST_CACHE[release_id]
     url = f"https://musicbrainz.org/ws/2/release/{release_id}?inc=recordings&fmt=json"
     req = urllib.request.Request(url, headers={"User-Agent": "BeetsWebManagerAcceptance/1.0"})
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        data = json.loads(resp.read())
+    # MusicBrainz's public API is genuinely flaky/rate-limited -- this hit a
+    # real transient 503 in CI. Mirror the same transient-retry pattern
+    # already used in production (helpers_mb.fetch_mb_release_tracklist)
+    # rather than letting one bad response crash the whole acceptance run.
+    transient_codes = {429, 500, 502, 503, 504}
+    data = None
+    last_ex: Exception = None
+    for attempt in range(1, 4):
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read())
+            break
+        except urllib.error.HTTPError as ex:
+            last_ex = ex
+            if ex.code in transient_codes and attempt < 3:
+                print(f"  MusicBrainz fetch transient error ({ex.code}) for {release_id}; retrying {attempt + 1}/3")
+                time.sleep(2.0 * attempt)
+                continue
+            raise
+        except Exception as ex:
+            last_ex = ex
+            if attempt < 3:
+                print(f"  MusicBrainz fetch error ({ex}) for {release_id}; retrying {attempt + 1}/3")
+                time.sleep(2.0 * attempt)
+                continue
+            raise
+    if data is None:
+        raise RuntimeError(f"Could not fetch MusicBrainz tracklist for {release_id} after retries: {last_ex}")
     tracks = []
     for medium in data.get("media", []) or []:
         for trk in medium.get("tracks", []) or []:
