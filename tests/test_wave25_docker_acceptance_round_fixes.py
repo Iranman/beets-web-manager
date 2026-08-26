@@ -187,6 +187,43 @@ class TestImportFolderWithIdReleaseGroupFlagIsAssigned(unittest.TestCase):
         self.assertFalse(_compute("release-uuid", ""))
 
 
+class TestConfirmedImportV1ResultSkipsRedundantRawSqlRevalidation(unittest.TestCase):
+    """Real Docker acceptance finding (Wave 25 Round 4, corrected): once
+    confirmed_import_v1's own Apply step had already verified the album
+    via structured queries (exact planned Release ID + RGID + items/files
+    confirmed on disk), _album_match_summary() unconditionally ran a
+    SECOND, redundant validation pass over every discovered album_id --
+    via raw SQL through _db(), which BeetsClient.raw_sqlite_query() always
+    rejects ("Raw SQLite queries are not permitted") in the two-service
+    topology. This meant every confirmed_import_v1 import (fresh-import
+    and crash-resume alike) failed at this later step, even after the
+    actual import fix (a missing `musicbrainz` plugin in the acceptance
+    engine's config) let native import succeed for the first time."""
+
+    def setUp(self):
+        self.app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+
+    def test_confirmed_import_v1_result_is_trusted_without_calling_album_match_summary(self):
+        idx = self.app_source.index("def import_folder_with_id()")
+        loop_idx = self.app_source.index("for aid in album_ids:", idx)
+        skip_idx = self.app_source.index(
+            'strategy == "confirmed_import_v1 verified result"', idx
+        )
+        summary_call_idx = self.app_source.index(
+            "summary = _album_match_summary(int(aid))", idx
+        )
+        self.assertLess(loop_idx, skip_idx)
+        self.assertLess(
+            skip_idx, summary_call_idx,
+            "the confirmed_import_v1 skip check must run before the raw-SQL revalidation call",
+        )
+        # The skip branch must trust the result directly (append + continue)
+        # before ever reaching _album_match_summary for that album.
+        window = self.app_source[skip_idx: summary_call_idx]
+        self.assertIn("validated_album_ids.append(aid)", window)
+        self.assertIn("continue", window)
+
+
 class TestRecoveryRequiredStatusPersists(unittest.TestCase):
     def test_recovery_required_is_a_recognized_status(self):
         from backend.transaction_engine import STATUSES

@@ -22070,6 +22070,27 @@ def import_folder_with_id():
             failed_library_source_summaries: List[Dict[str, Any]] = []
             rolled_back_failed_library_source = False
             for aid in album_ids:
+                if strategy == "confirmed_import_v1 verified result":
+                    # Already authoritatively verified server-side inside
+                    # execute_confirmed_import_apply()'s post-import
+                    # capture (exact planned Release ID + RGID match,
+                    # items/files confirmed on disk) via structured
+                    # library queries. Re-deriving that here through
+                    # _album_match_summary() would be redundant at best --
+                    # and structurally broken at worst, since it depends
+                    # on raw SQL through _db(), which is intentionally
+                    # disabled in the two-service topology
+                    # (BeetsClient.raw_sqlite_query always raises "Raw
+                    # SQLite queries are not permitted"). Trust the
+                    # already-verified result directly instead of
+                    # re-deriving it through a path that can never
+                    # succeed here.
+                    log.append(
+                        f"  Album {aid} already verified by confirmed_import_v1 "
+                        "(exact planned release match) — skipping redundant re-validation."
+                    )
+                    validated_album_ids.append(aid)
+                    continue
                 summary = _album_match_summary(int(aid))
                 log.append(
                     f"  Validation album_id {aid}: {summary['matches']}/"

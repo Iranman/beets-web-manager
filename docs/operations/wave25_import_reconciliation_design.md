@@ -464,3 +464,24 @@ reverted; `run_confirmed_import_native()`'s per-Apply temp config once again lea
 its default, matching the Round 4 brief's instruction not to blindly force matching. The WAV → FLAC fixture
 change is kept (a genuine, if not load-bearing, reliability improvement for cross-installation tag reading) but
 is not what fixed this failure.
+
+**Round 4, second real Docker iteration after the plugin fix**: native import now genuinely succeeded end to
+end for the first time (`Engine controlled import completed`, `Found 1 album(s) via confirmed_import_v1 verified
+result`), and the rebuilt crash-resume scenario's idempotency proof also worked exactly as designed (`Resumed an
+already-verified prior result for this release (native import was not re-invoked)`). Both scenarios then failed
+identically one step later: `Could not validate imported album: Raw SQLite queries are not permitted; use
+structured library query helpers`. Cause: `import_folder_with_id()`'s legacy per-album re-validation helper,
+`_album_match_summary()`, runs unconditionally over every discovered `album_id` regardless of how it was found,
+and does so via raw SQL through `_db()` — which resolves to `BeetsClient.raw_sqlite_query()`, a method that has
+always unconditionally raised in the two-service topology (a deliberate, pre-existing SEC-002 control requiring
+structured query helpers instead of ad-hoc SQL). This is not a new bug introduced by `confirmed_import_v1`; it is
+a pre-existing dead/broken code path in the legacy heuristic album-discovery machinery that had simply never
+been reached by any prior real Docker run, because every earlier run failed before getting this far. Fixed by
+skipping `_album_match_summary()` entirely for an album already found via the `"confirmed_import_v1 verified
+result"` strategy — that result was already authoritatively verified server-side, through structured queries
+(exact planned Release ID + RGID match, items/files confirmed on disk) inside
+`execute_confirmed_import_apply()`'s own capture/verify step, so re-deriving the same conclusion through a
+second, redundant, and in this topology non-functional path added no safety and only broke a working import.
+The legacy strategies (A–I) and their raw-SQL re-validation are left untouched for every other discovery path,
+which is outside this round's scope. See `tests/test_wave25_docker_acceptance_round_fixes.py`'s
+`TestConfirmedImportV1ResultSkipsRedundantRawSqlRevalidation` for the regression test.
