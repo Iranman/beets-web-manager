@@ -9358,38 +9358,28 @@ def _cleanup_root_for_path(path: Path, roots: List[Path]) -> Optional[Path]:
 
 
 def _cleanup_stat_record(path: Path, root: Path) -> Dict[str, Any]:
-    path_text = os.path.abspath(os.path.normpath(str(path)))
-    root_text = os.path.abspath(os.path.normpath(str(root)))
-    if path_text != root_text and not path_text.startswith(root_text + os.sep):
+    if not _path_under(path, root) or _path_has_symlink_under(path, root):
         raise ValueError("cleanup path outside validated root")
-    # path_text is bounded to the server-owned cleanup root immediately above.
-    st = os.stat(path_text)  # codeql[py/path-injection]
-    is_dir = os.path.isdir(path_text)  # codeql[py/path-injection]
-    return {
-        "dev": st.st_dev,
-        "ino": st.st_ino,
-        "size": st.st_size,
-        "mtime_ns": st.st_mtime_ns,
-        "type": "directory" if is_dir else "file",
-    }
+    state = _capture_media_tag_state(path, [])
+    if not state.get("exists"):
+        raise ValueError("cleanup file missing")
+    stat_record = dict(state.get("stat") or {})
+    if "inode" in stat_record and "ino" not in stat_record:
+        stat_record["ino"] = stat_record["inode"]
+    stat_record["type"] = "file"
+    return stat_record
 
 
 def _cleanup_stat_matches(path: Path, expected: Dict[str, Any], root: Path) -> bool:
+    if not expected:
+        return False
+    expected_stat = dict(expected)
+    if "ino" in expected_stat and "inode" not in expected_stat:
+        expected_stat["inode"] = expected_stat["ino"]
     try:
-        path_text = os.path.abspath(os.path.normpath(str(path)))
-        root_text = os.path.abspath(os.path.normpath(str(root)))
-        if path_text != root_text and not path_text.startswith(root_text + os.sep):
-            return False
-        # path_text is bounded to the server-owned cleanup root immediately above.
-        st = os.stat(path_text)  # codeql[py/path-injection]
+        return _bulk_replacement_toctou_check(str(path), expected_stat, [root]) is None
     except Exception:
         return False
-    return (
-        st.st_dev == expected.get("dev")
-        and st.st_ino == expected.get("ino")
-        and st.st_size == expected.get("size")
-        and st.st_mtime_ns == expected.get("mtime_ns")
-    )
 
 
 def _cleanup_json_value(value: Any) -> Any:
@@ -9609,15 +9599,16 @@ def create_library_cleanup_plan(
             results.append(rec)
             continue
         p = Path(safe_path_text)
-        # safe_path_text is bounded to the selected server-owned cleanup root above.
-        planned_source_exists = os.path.exists(safe_path_text)  # codeql[py/path-injection]
-        if not planned_source_exists:
-            rec.update(error="File not found", code="library_cleanup_file_missing")
-            results.append(rec)
-            continue
-        planned_source_is_file = os.path.isfile(safe_path_text)  # codeql[py/path-injection]
-        if not planned_source_is_file:
-            rec.update(error="Path is not a file", code="library_cleanup_not_file")
+        path_check = _bulk_replacement_toctou_check(safe_path_text, None, [root])
+        if path_check:
+            if "symlink" in path_check:
+                rec.update(error="Symlink source or parent rejected", code="library_cleanup_symlink_rejected")
+            elif "root escape" in path_check or "unresolvable" in path_check:
+                rec.update(error="Path is outside server-owned cleanup roots", code="library_cleanup_path_out_of_root")
+            elif path_check == "file missing":
+                rec.update(error="File not found", code="library_cleanup_file_missing")
+            else:
+                rec.update(error=f"File check failed: {path_check}", code="library_cleanup_not_file")
             results.append(rec)
             continue
         if p.suffix.lower() not in _LIBRARY_CLEANUP_AUDIO_EXTS:
@@ -9766,15 +9757,20 @@ def execute_library_cleanup_apply(
                 if safe_path_text != root_text and not safe_path_text.startswith(root_text + os.sep):
                     return _fail(f"Source outside allowed roots: {sp}", "library_cleanup_path_out_of_root")
                 sp = Path(safe_path_text)
-                # safe_path_text is bounded to the selected server-owned cleanup root above.
-                source_exists = os.path.exists(safe_path_text)  # codeql[py/path-injection]
-                source_is_file = os.path.isfile(safe_path_text)  # codeql[py/path-injection]
-                if not source_exists or not source_is_file:
-                    return _fail(f"Source file missing before apply: {sp}", "library_cleanup_file_missing")
+                expected_stat = dict(q.get("stat") or {})
+                if "ino" in expected_stat and "inode" not in expected_stat:
+                    expected_stat["inode"] = expected_stat["ino"]
+                path_check = _bulk_replacement_toctou_check(safe_path_text, expected_stat, [root])
+                if path_check:
+                    if "symlink" in path_check:
+                        return _fail(f"Symlink detected on source: {sp}", "library_cleanup_symlink_rejected")
+                    if "root escape" in path_check or "unresolvable" in path_check:
+                        return _fail(f"Source outside allowed roots: {sp}", "library_cleanup_path_out_of_root")
+                    if path_check == "file missing":
+                        return _fail(f"Source file missing before apply: {sp}", "library_cleanup_file_missing")
+                    return _fail(f"Source file changed since plan: {sp}", "library_cleanup_toctou_mismatch")
                 if sp.suffix.lower() not in _LIBRARY_CLEANUP_AUDIO_EXTS:
                     return _fail(f"Source is not an audio file: {sp}", "library_cleanup_not_audio")
-                if not _cleanup_stat_matches(sp, q.get("stat") or {}, root):
-                    return _fail(f"Source file changed since plan: {sp}", "library_cleanup_toctou_mismatch")
                 item_rows = _library_cleanup_item_rows_for_path(lib_db, sp, music_roots) if lib_db else []
                 expected_ids = sorted(int(i) for i in (q.get("db_item_ids") or []))
                 if sorted(int(r["id"]) for r in item_rows) != expected_ids:
@@ -9793,18 +9789,22 @@ def execute_library_cleanup_apply(
             if _path_has_symlink_under(q_base, q_base):
                 return _fail("Quarantine root rejected", "library_cleanup_quarantine_path_rejected")
             quarantined_records: List[Dict[str, Any]] = []
+            if validated_quarantines:
+                try:
+                    os.makedirs(q_dir_text, mode=0o700, exist_ok=False)
+                except FileExistsError:
+                    return _fail("Quarantine transaction directory already exists", "library_cleanup_quarantine_path_rejected")
+                except OSError as ex:
+                    return _fail(f"Could not create quarantine directory: {type(ex).__name__}", "library_cleanup_quarantine_failed")
             for idx, checked in enumerate(validated_quarantines):
                 q = checked["plan"]
                 sp = checked["source"]
                 digest = hashlib.sha256(str(sp).encode("utf-8", "surrogateescape")).hexdigest()[:16]
-                os.makedirs(q_dir_text, mode=0o700, exist_ok=True)
                 q_target_text = os.path.abspath(os.path.normpath(str(Path(q_dir_text) / f"{idx:04d}_{digest}_{_library_cleanup_safe_leaf(sp.name)}")))
                 if q_target_text == q_base_text or not q_target_text.startswith(q_base_text + os.sep):
                     return _fail(f"Quarantine path rejected for {sp}", "library_cleanup_quarantine_path_rejected")
                 q_target = Path(q_target_text)
-                # q_target_text is a transaction-generated leaf below the server-owned quarantine root.
-                quarantine_target_exists = os.path.exists(q_target_text)  # codeql[py/path-injection]
-                if _path_has_symlink_under(q_target.parent, q_base) or quarantine_target_exists:
+                if _path_has_symlink_under(q_target.parent, q_base):
                     return _fail(f"Quarantine path rejected for {sp}", "library_cleanup_quarantine_path_rejected")
                 try:
                     _safe_rename(sp, q_target)
@@ -10040,24 +10040,21 @@ def create_folder_cleanup_plan(
         if src_path_text != root_text and not src_path_text.startswith(root_text + os.sep):
             return {"ok": False, "error": f"Folder outside allowed root: {src_display}", "code": "folder_cleanup_path_out_of_root"}
         src_p = Path(src_path_text)
-        # src_path_text is bounded to the selected server-owned cleanup root above.
-        cleanup_source_exists = os.path.exists(src_path_text)  # codeql[py/path-injection]
-        if not cleanup_source_exists:
+        try:
+            unexpected = [child.name for child in src_p.iterdir()]
+        except FileNotFoundError:
             pass
+        except NotADirectoryError:
+            return {"ok": False, "error": f"Source is not a directory: {src_p}", "code": "folder_cleanup_not_directory"}
+        except OSError as ex:
+            return {"ok": False, "error": f"Could not inspect directory: {ex}", "code": "folder_cleanup_scan_failed"}
         else:
-            cleanup_source_is_dir = os.path.isdir(src_path_text)  # codeql[py/path-injection]
-            if not cleanup_source_is_dir:
-                return {"ok": False, "error": f"Source is not a directory: {src_p}", "code": "folder_cleanup_not_directory"}
-            try:
-                unexpected = [child.name for child in src_p.iterdir()]
-            except Exception as ex:
-                return {"ok": False, "error": f"Could not inspect directory: {ex}", "code": "folder_cleanup_scan_failed"}
             if unexpected:
                 return {"ok": False, "error": "Directory is not empty", "code": "folder_cleanup_not_empty", "unexpected_entries": sorted(unexpected)[:20]}
             refs = _library_cleanup_db_refs_beneath_folder(db_path or "", src_p, allowed_roots)
             if refs:
                 return {"ok": False, "error": "Directory still has Beets DB references", "code": "folder_cleanup_db_references", "references": refs[:20]}
-            dir_removals.append({"path": str(src_p), "stat": _cleanup_stat_record(src_p, root), "expected_empty": True})
+            dir_removals.append({"path": str(src_p), "expected_empty": True})
     elif action in ("safe_rename", "rename_folder") and target_folder:
         tgt_p = _cleanup_resolve_path(Path(target_folder))
         tgt_root = _cleanup_root_for_path(tgt_p, allowed_roots)
