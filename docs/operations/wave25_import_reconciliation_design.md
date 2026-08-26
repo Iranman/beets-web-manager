@@ -228,3 +228,101 @@ workflows.
 
 See the PR body and `docs/TECHNICAL_DEBT.md` for final CI/CodeQL/Docker-acceptance state on the exact merged
 head.
+
+---
+
+## Round 3 — `confirmed_import_v1`: Two Distinct Import Trust Models
+
+The dedicated Wave 25 Docker acceptance round (above) found that routing fresh imports through
+`reimport_source_atomic()` / `verify_deterministic_identity()` was not a small bug but a genuine architecture
+mismatch: `verify_deterministic_identity()` is a deliberate SEC-002 Wave 8 security control that requires the
+source audio's **own embedded MusicBrainz tags** to already match the caller-supplied target identity before
+any import runs. That is the correct model for a genuine *re*-import (already-tagged library content being
+reorganized or re-verified) — it is the wrong model for `import_folder_with_id()`'s actual job, which is a
+human reviewing an **untagged** download and manually confirming which MusicBrainz release it is. Untagged
+source audio has no embedded MB tags to verify by construction, so `verify_deterministic_identity()` rejected
+essentially every real fresh import, not just the round's synthetic test fixture.
+
+The fix is **not** to weaken `verify_deterministic_identity()` — that would collapse two genuinely different
+authorization models into one weaker model, exactly what Round 3's brief explicitly forbade. Instead, this
+round built a second, distinct controlled family:
+
+### REIMPORT TRUST MODEL (unchanged)
+
+```
+Existing embedded MusicBrainz identity
+  -> verify_deterministic_identity() (requires embedded tags to already match)
+  -> reimport_source_atomic()
+```
+
+Used by `BeetsClient.reimport_source()` / `POST /imports/reimport` (`reimport_disk`, `_ai_import_folder`,
+`start_import._do`). No code in this family changed in Round 3: `verify_deterministic_identity()` and
+`reimport_source_atomic()` still have the exact same signatures, no `skip_identity_check`/`force`/
+`trust_caller`/`ignore_missing_tags` escape hatch was added to either, and `run_confirmed_import_native()`
+(below) never calls either of them — enforced by
+`tests/test_confirmed_import_v1.py::TestReimportSecurityModelUnchanged`.
+
+### FRESH REVIEWED IMPORT TRUST MODEL (new: `confirmed_import_v1`)
+
+```
+No embedded MusicBrainz identity required
+  -> immutable source manifest digest (re-checked at Apply -- any file
+     added/removed/resized/retimestamped invalidates the Plan)
+  -> concrete, explicitly reviewed target Release ID (never a Release
+     Group ID -- Beets' --search-id needs a real release)
+  -> Release -> Release Group validated, never silently substituted
+  -> best-effort track alignment (backend/track_align.align_tracks --
+     reused, not a new matcher) + AcoustID fingerprint evidence where
+     available (never required; absence is never itself a conflict)
+  -> native Beets `import --search-id` inside the engine
+  -> Stage-3 verify: query the library by the exact planned Release ID,
+     confirm items and files exist on disk, confirm mb_releasegroupid
+     matches if given -- only then Completed
+```
+
+Missing embedded MusicBrainz tags are the **expected, valid** case here. A **conflicting** embedded tag
+(present and different from the approved target) is still a hard rejection
+(`confirmed_import_embedded_identity_conflict`) — missing and conflicting are not the same thing.
+
+**Components** (`backend/transaction_engine.py`, new `confirmed_import_v1` section):
+- `create_confirmed_import_plan()` — non-mutating. Validates the concrete target Release ID/RGID, requires a
+  non-empty pre-fetched tracklist (fetched by the caller, which has MusicBrainz API access this module
+  deliberately does not — matching the existing `fetch_tracklist_fn` injection precedent), calls the injected
+  `inspect_source_fn` (engine-only real filesystem access) for a bounded audio inventory + source manifest
+  digest, rejects a conflicting embedded tag, aligns tracks via `backend.track_align.align_tracks` +
+  `resolve_unmatched_via_acoustid`, and rejects if fingerprint evidence strongly identifies a known, different
+  recording (`confirmed_import_acoustid_conflict`) or if zero tracks align at all
+  (`confirmed_import_no_track_alignment`). Missing tracks alone (an intentionally incomplete album) do not
+  block the Plan.
+- `execute_confirmed_import_apply()` — idempotency/crash-resume first: queries the library for an already-
+  verified album at the planned Release ID before doing anything else, and resumes that result instead of ever
+  invoking native import a second time for the same target (this is what makes both "retry an already-
+  completed import" and "the process crashed after native import succeeded but before Completed was recorded"
+  safe). Otherwise, TOCTOU-rechecks the source manifest digest (`confirmed_import_stale_plan` on mismatch),
+  invokes the injected `run_native_import_fn`, persists a `native_import_invoked` checkpoint immediately
+  regardless of outcome, then captures and verifies the result by querying the library for the planned Release
+  ID — never guessed from "most recently added". An ambiguous outcome (native import reported success but no
+  verifiable album is found) is `Recovery Required`, never silently `Completed`. Non-reversible after Apply,
+  same reasoning as `album_artwork_fetch_v1`: undoing a real Beets import cannot be truthfully guaranteed.
+- `run_confirmed_import_native()` (`backend/beets_control_agent.py`) — the injected native-import runner.
+  Reuses `reimport_source_atomic`'s low-level mechanics (`preserve_import_source` for torrent-staged sources,
+  `acquire_os_lock`/`release_os_lock`, `BEETSDIR` env, timeout scaling) **without** its identity gate, per the
+  brief's explicit instruction to share execution mechanics but never trust policy across the two models.
+- New Control Agent routes: `POST /imports/confirmed/plan`, `POST /imports/confirmed/apply`.
+- New `BeetsClient` methods: `plan_confirmed_import()`, `apply_confirmed_import()`.
+- `import_folder_with_id()` (`app.py`) now calls `plan_confirmed_import`/`apply_confirmed_import` instead of
+  the old `plan_import_folder`/`apply_import_folder` (`import_folder_v1`). `import_folder_v1` itself
+  (`create_import_folder_plan`/`execute_import_folder_apply` in `transaction_engine.py`) is left in place,
+  untouched and still tested, simply no longer invoked by production code for this workflow — removing a
+  working, tested, harmless family would have been unnecessary churn.
+
+**Known limitation, documented rather than silently accepted**: crash-safety is proven for the required
+acceptance scenario — a crash *after* native import fully succeeds but before `Completed` is recorded (handled
+by the idempotency pre-check, which resumes via the `mb_albumid`-uniqueness signal rather than re-importing). A
+crash *mid-subprocess* (during the `beet import` call itself) is a materially harder problem already present in
+`reimport_source_atomic`'s own design, not introduced by this family, and is out of this round's scope.
+
+Track alignment reuses `backend/track_align.py` (`align_tracks`, `resolve_unmatched_via_acoustid`) unchanged —
+`Dockerfile.beets` now also copies it into the engine image alongside `matching_contract.py`. AcoustID lookups
+reuse the engine-local `_engine_acoustid_lookup()` (already used by the playlist-import identity gate); no new
+matcher or fingerprint client was written.

@@ -867,6 +867,12 @@ def resolve_safe_path(
 IMPORT_SOURCE_OPERATIONS: dict[str, list[str]] = {
     "reimport": ["music", "staging"],
     "ai_batch_discovery": ["music", "staging"],
+    # Wave 25 Round 3: confirmed_import_v1's Plan/Apply inspection of a
+    # fresh (possibly untagged) source -- same allowed roots as "reimport"
+    # (an already-organized-but-untracked library folder is as legitimate a
+    # confirmed-import source as a staged download), but tracked under its
+    # own operation name since it is a distinct trust model, not a reimport.
+    "confirmed_import": ["music", "staging"],
 }
 
 IMPORT_INSPECT_MAX_ENTRIES_SCANNED = _env_int_clamped(
@@ -2067,6 +2073,105 @@ def reimport_source_atomic(
         return {"ok": False, "error_code": "import_failed", "message": "Beets import timed out"}
     except Exception:
         return {"ok": False, "error_code": "import_failed", "message": "Beets import failed"}
+    finally:
+        if tmp_cfg_path and os.path.exists(tmp_cfg_path):
+            try:
+                os.unlink(tmp_cfg_path)
+            except Exception:
+                pass
+        release_os_lock(lock_file)
+
+
+def run_confirmed_import_native(source_path: str, mb_albumid: str, *, use_move: bool = False) -> dict[str, Any]:
+    """Native `beet import --search-id` runner for confirmed_import_v1 --
+    deliberately does not call the reimport-family atomic-import function or
+    its embedded-tag identity verifier. This family's whole purpose is to
+    import source audio that does not yet carry the target's MusicBrainz
+    identity, so gating on pre-existing embedded tags would reject the very
+    case it exists to handle. Authorization (immutable source manifest
+    digest + reviewed target identity + track alignment) has already
+    happened in transaction_engine.create_confirmed_import_plan /
+    execute_confirmed_import_apply before this function is ever called --
+    this function only runs the actual subprocess, reusing the same
+    low-level mechanics as the reimport path (preserve_import_source for
+    torrent-staged sources, acquire_os_lock/release_os_lock, BEETSDIR env,
+    timeout scaling) without its identity gate. Returns a plain
+    {"ok", "error"?} outcome; the caller (transaction_engine.py) is
+    responsible for querying the library and verifying the result -- this
+    function never reports an album/item identity itself."""
+    try:
+        trusted = resolve_safe_path(source_path, ["music", "staging"], require_exists=True, expected_type="dir")
+    except UnsafePathError:
+        return {"ok": False, "error": "invalid_path"}
+
+    mb_albumid = str(mb_albumid or "").strip().lower()
+    if not _MB_UUID_RE.match(mb_albumid):
+        return {"ok": False, "error": "invalid_release_id"}
+
+    source_inspect = inspect_import_source(str(trusted), "confirmed_import")
+    if not source_inspect.get("ok"):
+        return {"ok": False, "error": source_inspect.get("error_code", "inspection_failed")}
+
+    is_torrent_staged = False
+    try:
+        staging_roots = [os.path.realpath(r) for r in _allowed_root_paths(["staging"])]
+        is_torrent_staged = any(_path_is_within(str(trusted), r) for r in staging_roots)
+    except Exception:
+        pass
+
+    import_target_path = str(trusted)
+    preserved_path = None
+    if is_torrent_staged:
+        # Always protect a staged/torrent source with a disposable copy
+        # before Beets touches it, regardless of use_move -- matching
+        # reimport_source_atomic's own unconditional behavior for the same
+        # case. The real download is never mutated by this family.
+        pres_res = preserve_import_source(str(trusted), expected_source_signature=source_inspect.get("source_signature", ""))
+        if not pres_res.get("ok"):
+            return {"ok": False, "error": pres_res.get("error_code", "preserve_failed")}
+        preserved_path = pres_res.get("preserved_path")
+        import_target_path = preserved_path
+
+    if preserved_path or use_move:
+        config_override = ""
+    else:
+        # Already-in-library folder, not asked to move: tag in place,
+        # matching source_is_library semantics elsewhere in this project --
+        # a folder that is already correctly organized should not be
+        # relocated just because it is being tagged for the first time.
+        config_override = "import:\n  copy: no\n  move: no\n"
+
+    lock_file = acquire_os_lock(read_only=False)
+    tmp_cfg_path = None
+    try:
+        full_cmd = [BEET_BIN]
+        if config_override:
+            tmp_cfg_path = f"/tmp/beets_confirmed_import_cfg_{uuid.uuid4().hex}.yaml"
+            with open(tmp_cfg_path, "w", encoding="utf-8") as f:
+                f.write(config_override)
+            os.chmod(tmp_cfg_path, 0o600)
+            full_cmd.extend(["-c", tmp_cfg_path])
+
+        cmd_args = ["import", "-q", "--noincremental", "--quiet-fallback", "asis"]
+        if preserved_path:
+            cmd_args.append("--copy")
+        cmd_args.extend(["--search-id", mb_albumid])
+        cmd_args.append(import_target_path)
+        full_cmd.extend(cmd_args)
+
+        env = os.environ.copy()
+        env["BEETSDIR"] = BEETSDIR
+        proc_timeout = _reimport_timeout_for_count(source_inspect.get("audio_count", 0))
+        res = subprocess.run(full_cmd, capture_output=True, text=True, timeout=proc_timeout, env=env)
+
+        if res.returncode >= 2:
+            return {"ok": False, "error": "Beets import failed", "returncode": res.returncode}
+
+        return {"ok": True, "preserved_path": preserved_path}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "Beets import timed out"}
+    except Exception as ex:
+        return {"ok": False, "error": f"Beets import failed: {ex}"}
     finally:
         if tmp_cfg_path and os.path.exists(tmp_cfg_path):
             try:
@@ -4382,6 +4487,64 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 music_allowed_roots=[music_root_env],
             )
             code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        # ── confirmed_import_v1 (Wave 25 Round 3) ───────────────────────────────
+        # Fresh reviewed import of previously-untagged source audio. Distinct
+        # trust model from /import/plan+/import/apply (import_folder_v1) and
+        # /imports/reimport (reimport_source_atomic) above -- see
+        # transaction_engine.py's confirmed_import_v1 section header and
+        # docs/operations/wave25_import_reconciliation_design.md.
+
+        if path == "/imports/confirmed/plan":
+            music_root_env = os.environ.get("MUSIC_ROOT") or str(MUSIC_ROOT) or "/music"
+            stg_roots = [os.environ.get("DOWNLOADS_ROOT") or str(DOWNLOAD_PATH), os.environ.get("STAGING_ROOT") or str(DOWNLOAD_PATH)]
+
+            def _inspect_for_confirmed_import(p: str) -> dict:
+                return inspect_import_source(p, "confirmed_import")
+
+            def _acoustid_for_confirmed_import(file_path: str) -> list:
+                if not _playlist_import_fpcalc_available():
+                    return []
+                try:
+                    return _engine_acoustid_lookup(Path(file_path)) or []
+                except Exception:
+                    return []
+
+            res = transaction_engine.create_confirmed_import_plan(
+                _txn_store, body,
+                db_path=LIB_PATH,
+                music_allowed_roots=[music_root_env],
+                staging_allowed_roots=stg_roots,
+                inspect_source_fn=_inspect_for_confirmed_import,
+                acoustid_lookup_fn=_acoustid_for_confirmed_import,
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        if path == "/imports/confirmed/apply":
+            op_id = str(body.get("operation_id") or "").strip()
+            if not op_id:
+                self._send_json(400, {"ok": False, "error": "operation_id required"})
+                return
+            music_root_env = os.environ.get("MUSIC_ROOT") or str(MUSIC_ROOT) or "/music"
+
+            def _inspect_for_confirmed_import(p: str) -> dict:
+                return inspect_import_source(p, "confirmed_import")
+
+            def _run_native_import(source_path: str, mb_albumid: str, *, use_move: bool) -> dict:
+                return run_confirmed_import_native(source_path, mb_albumid, use_move=use_move)
+
+            res = transaction_engine.execute_confirmed_import_apply(
+                _txn_store, op_id,
+                db_path=LIB_PATH,
+                music_allowed_roots=[music_root_env],
+                inspect_source_fn=_inspect_for_confirmed_import,
+                run_native_import_fn=_run_native_import,
+            )
+            code = 200 if res.get("ok") else (409 if res.get("status") == "Recovery Required" else 400)
             self._send_json(code, res)
             return
 

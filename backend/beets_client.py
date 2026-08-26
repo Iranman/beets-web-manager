@@ -445,6 +445,18 @@ class BeetsClient:
         """Engine-side import folder application (SEC-002 Wave 22 Closure)."""
         return self._request("POST", "/import/apply", {"operation_id": operation_id}, timeout=timeout)
 
+    def plan_confirmed_import(self, payload: Dict[str, Any], *, timeout: float = 30.0) -> Dict[str, Any]:
+        """Engine-side confirmed_import_v1 planning (Wave 25 Round 3): a
+        fresh reviewed import of previously-untagged source audio into an
+        explicitly approved MusicBrainz Release, distinct from
+        plan_import_folder/reimport_source (which both require the source
+        to already carry the target identity)."""
+        return self._request("POST", "/imports/confirmed/plan", payload, timeout=timeout)
+
+    def apply_confirmed_import(self, operation_id: str, *, timeout: float = 180.0) -> Dict[str, Any]:
+        """Engine-side confirmed_import_v1 application (Wave 25 Round 3)."""
+        return self._request("POST", "/imports/confirmed/apply", {"operation_id": operation_id}, timeout=timeout)
+
     def rollback_import_folder(self, operation_id: str, *, timeout: float = 60.0) -> Dict[str, Any]:
         """Engine-side import folder rollback (SEC-002 Wave 22 Closure)."""
         return self._request("POST", "/import/rollback", {"operation_id": operation_id}, timeout=timeout)

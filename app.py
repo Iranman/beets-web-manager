@@ -21810,51 +21810,64 @@ def import_folder_with_id():
         t_before = time.time() - 5
         import_timeout = _beet_import_timeout(import_folder_path)
 
-        # SEC-002 / ARCH-003 Wave 22 final review, findings #3-#6 (CRITICAL,
-        # merge-blocking, not fully closed): the actual Beets import for
-        # this workflow still runs locally below via `subprocess.run`, not
-        # through this engine call. The Control Agent's `/import/apply`
-        # route does not (and, as of this review, safely cannot -- see
-        # finding #6 and the Wave 22 design doc) supply a real
-        # `beets_import_runner`, so `execute_import_folder_apply` now
-        # correctly fails closed here every time (it no longer lies about
-        # having imported anything, per finding #3's fix) rather than
-        # silently no-op-succeeding as it did before this review. This is
-        # NOT a working fallback pattern -- it is the plan/verify half of
-        # a transaction boundary that is not yet wired to the real
-        # mutation, kept only for its non-mutating preview/audit value
-        # until the native-Beets-import-inside-the-engine work described
-        # in the design doc is done. Removing the local import below
-        # before that work lands would delete the only code path that
-        # currently performs imports at all; it is intentionally still
-        # here, not a regression.
-        plan_res = beets_client.plan_import_folder({
+        # Wave 25 Round 3: routed through confirmed_import_v1, NOT
+        # import_folder_v1/reimport_source_atomic. This workflow's whole
+        # premise is a human reviewing and confirming an identity for
+        # PREVIOUSLY-UNTAGGED source audio -- reimport_source_atomic's
+        # verify_deterministic_identity() gate requires the source's OWN
+        # embedded MusicBrainz tags to already match the target, which
+        # fresh untagged downloads never have by construction (that gate
+        # remains untouched and still correctly protects genuine reimports
+        # of already-tagged library content via BeetsClient.reimport_source
+        # / POST /imports/reimport). confirmed_import_v1 instead binds
+        # authorization to an immutable source manifest digest (re-checked
+        # at Apply), this already-resolved concrete Release ID + Release
+        # Group, and best-effort track/fingerprint alignment -- see
+        # docs/operations/wave25_import_reconciliation_design.md.
+        plan_res = beets_client.plan_confirmed_import({
             "source_folder": import_folder_path,
-            "album_id": existing_album_id,
+            "existing_album_id": existing_album_id,
             "mb_albumid": mb_albumid,
             "mb_releasegroupid": selected_releasegroupid,
-            "selected_source_files": [str(f) for f in selected_source_files],
-            "wanted_tracks": wanted_tracks,
-            "replace_existing_item_ids": replace_existing_item_ids,
+            "mb_release_group_resolved": resolved_releasegroupid,
+            "mb_tracks": mb_identity.get("tracks") or [],
+            "use_move": use_move,
         })
         if not plan_res.get("ok"):
             raise RuntimeError(f"Import planning failed: {plan_res.get('error') or 'unknown error'}")
-        apply_res = beets_client.apply_import_folder(plan_res["operation_id"])
+        apply_res = beets_client.apply_confirmed_import(plan_res["operation_id"])
         if not apply_res.get("ok"):
             raise RuntimeError(f"Import execution failed: {apply_res.get('error') or 'unknown error'}")
         log.append(f"[import] Engine controlled import completed: {import_folder_path}")
+        confirmed_import_album_id = int(apply_res.get("album_id") or 0)
+        confirmed_import_item_ids = [int(i) for i in (apply_res.get("item_ids") or [])]
 
         # ── Step 2: find the album ─────────────────────────────────────────────
         log.append("[2/4] Locating album in library…")
         time.sleep(1)
 
+        # confirmed_import_v1's Apply already performed authoritative,
+        # verified result capture (queried the library by the exact planned
+        # Release ID, confirmed items and files exist on disk) -- trust
+        # that directly rather than re-discovering it through the broad
+        # heuristic strategies below, which exist to cover cases this
+        # deterministic result does not (kept as a defensive fallback, not
+        # the primary path, now that a real verified result is available).
+        if confirmed_import_album_id > 0:
+            album_ids, item_ids = [confirmed_import_album_id], list(confirmed_import_item_ids)
+            strategy = "confirmed_import_v1 verified result"
+        else:
+            album_ids, item_ids = [], []
+            strategy = ""
+
         # A: items still in the import source folder
-        album_ids, item_ids = _find_ids_in_db(import_folder_path)
-        strategy = (
-            "source path (library)" if source_is_library
-            else "source path (selected subset)" if selected_subset_import
-            else "source path (downloads)"
-        )
+        if not album_ids and not item_ids:
+            album_ids, item_ids = _find_ids_in_db(import_folder_path)
+            strategy = (
+                "source path (library)" if source_is_library
+                else "source path (selected subset)" if selected_subset_import
+                else "source path (downloads)"
+            )
 
         # B: items recently copied to the music library
         if not album_ids and not item_ids:

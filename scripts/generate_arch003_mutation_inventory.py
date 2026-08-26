@@ -161,6 +161,19 @@ _CONTROL_AGENT_FUNCTION_CLASSIFICATION = {
     # transaction family.
     "reimport_source_atomic": ("ENGINE_NATIVE_BEETS", "", "engine-native-atomic-reimport-not-import-folder-v1"),
     "preserve_import_source": ("ENGINE_NATIVE_BEETS", "", "engine-native-atomic-reimport-not-import-folder-v1"),
+    # Wave 25 Round 3: confirmed_import_v1's native-import runner, injected
+    # into transaction_engine.execute_confirmed_import_apply via
+    # run_native_import_fn (same dependency-injection pattern as
+    # run_beet_command_fn/beets_import_runner elsewhere). Deliberately does
+    # NOT call reimport_source_atomic/verify_deterministic_identity -- see
+    # its own docstring and docs/operations/wave25_import_reconciliation_design.md.
+    # Like reimport_source_atomic, this function itself has no
+    # TransactionStore/mutation_family/operation_id awareness (that lives in
+    # the caller, execute_confirmed_import_apply), so it is truthfully
+    # ENGINE_NATIVE_BEETS with no fabricated family tag on the function
+    # itself, matching the same reasoning applied to reimport_source_atomic
+    # above.
+    "run_confirmed_import_native": ("ENGINE_NATIVE_BEETS", "", "engine-native-confirmed-import-v1-native-import-runner"),
     "_write_agent_config_file": ("ENGINE_CONFIG_STATE", "config_v1", "control-agent-config-file-write"),
     "_revert_agent_config_file": ("ENGINE_CONFIG_STATE", "config_v1", "control-agent-config-file-revert"),
     "_playlist_import_write_state": ("ENGINE_CONFIG_STATE", "config_v1", "playlist-import-job-state"),
