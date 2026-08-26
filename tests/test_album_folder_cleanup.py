@@ -63,7 +63,7 @@ class _FakeEngineClient:
         src = Path(payload["source"])
         if not src.exists() or not src.is_dir() or any(src.iterdir()):
             return {"ok": True, "operation_id": None}
-        return {"ok": True, "operation_id": self._new_op("folder_cleanup", payload)}
+        return {"ok": True, "operation_id": self._new_op("folder_cleanup", payload), "removals_count": 1}
 
     def apply_folder_cleanup(self, op_id: str) -> Dict[str, Any]:
         op = self._ops.pop(op_id, None)
@@ -74,7 +74,7 @@ class _FakeEngineClient:
             src.rmdir()
         except OSError as ex:
             return {"ok": False, "error": str(ex)}
-        return {"ok": True}
+        return {"ok": True, "mutated": True, "removed_dirs": [str(src)]}
 
     def plan_album_maintenance(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         mode = payload.get("mode")

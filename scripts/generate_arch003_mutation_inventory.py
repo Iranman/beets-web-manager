@@ -33,6 +33,7 @@ from discover_mutation_sinks import MutationSink, discover_all  # noqa: E402
 
 REPO_ROOT = Path(__file__).parent.parent.resolve()
 INVENTORY_PATH = REPO_ROOT / "security" / "arch003_mutation_inventory.json"
+LIBRARY_CLEANUP_CLOSURE_PR = 99
 
 _ENGINE_FUNCTION_FAMILY = {
     "_execute_album_cleanup_apply_locked": "album_cleanup_v1",
@@ -51,6 +52,9 @@ _ENGINE_FUNCTION_FAMILY = {
     "rollback_existing_album_reconcile": "existing_album_reconcile_v1",
     "execute_folder_cleanup_apply": "folder_cleanup_v1",
     "rollback_folder_cleanup": "folder_cleanup_v1",
+    "create_library_cleanup_plan": "library_cleanup_v1",
+    "execute_library_cleanup_apply": "library_cleanup_v1",
+    "rollback_library_cleanup": "library_cleanup_v1",
     "execute_playlist_media_cleanup_apply": "playlist_media_cleanup_v1",
     "rollback_playlist_media_cleanup": "playlist_media_cleanup_v1",
     "rollback_bulk_import_replacement": "bulk_import_replacement_v1",
@@ -68,6 +72,7 @@ _ENGINE_FUNCTION_FAMILY = {
     "create_album_maintenance_plan": "album_maintenance_v1",
     "create_album_artwork_plan": "album_artwork_v1",
     "create_folder_cleanup_plan": "folder_cleanup_v1",
+    "create_library_cleanup_plan": "library_cleanup_v1",
     "create_playlist_media_cleanup_plan": "playlist_media_cleanup_v1",
     "create_import_folder_plan": "import_folder_v1",
     "create_album_relocation_plan": "album_relocation_v1",
@@ -138,6 +143,30 @@ def _text_looks_path_like(text: str) -> bool:
     return bool(_PATH_LIKE_NAME_RE.search(text)) or bool(_PATH_LIKE_SHORT_NAME_RE.match(text.strip()))
 
 
+_APP_FUNCTION_CLASSIFICATION = {
+    "_cleanup_broken_managed_runtime": ("NON_MEDIA_FILESYSTEM", "infra_v1", "reviewed-library-cleanup-closure-runtime-cleanup"),
+    "_cleanup_initial_browser_password_if_replaced": ("CONFIG_STATE", "config_v1", "reviewed-library-cleanup-closure-initial-browser-password"),
+    "_playlist_stamp_download_tags": ("STAGING_ONLY", "playlist_staging_v1", "reviewed-library-cleanup-closure-playlist-download-tags"),
+    "_enrich_playlist_file_tags": ("STAGING_ONLY", "playlist_staging_v1", "reviewed-library-cleanup-closure-playlist-download-tags"),
+}
+
+_REVIEWED_RULE_DETAILS = {
+    "reviewed-library-cleanup-closure-runtime-cleanup": {
+        "domain": "config",
+        "review_reason": "SEC-002 library_cleanup closure: target is an application-managed yt-dlp JavaScript runtime binary under YTDLP_RUNTIME_BIN_DIR, not media-library state; app code rejects path separators, directories, and symlinks before unlink.",
+        "reviewed_in_pr": LIBRARY_CLEANUP_CLOSURE_PR,
+    },
+    "reviewed-library-cleanup-closure-initial-browser-password": {
+        "domain": "config",
+        "review_reason": "SEC-002 library_cleanup closure: target is the application bootstrap browser password file .initial_admin_password, not media-library state; app code rejects unexpected names and symlinked credential paths before unlink.",
+        "reviewed_in_pr": LIBRARY_CLEANUP_CLOSURE_PR,
+    },
+    "reviewed-library-cleanup-closure-playlist-download-tags": {
+        "domain": "other",
+        "review_reason": "SEC-002 library_cleanup closure: tag write occurs through BeetsClient HTTP for playlist download/staging files before import, not as library cleanup or Web Manager local media mutation.",
+        "reviewed_in_pr": LIBRARY_CLEANUP_CLOSURE_PR,
+    },
+}
 _CONTROL_AGENT_FUNCTION_CLASSIFICATION = {
     "_handle_delete_album": ("ENGINE_CONTROLLED_TRANSACTION", "album_maintenance_v1", "reviewed-control-agent-delete-album-transaction"),
     "_normalise_album_art_image": ("ENGINE_NATIVE_BEETS", "album_artwork_v1", "artwork-normalisation-helper"),
@@ -306,6 +335,11 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
         return "NEEDS_REVIEW", "", "backend-support-module-not-individually-reviewed"
 
     # 9. app.py (Web Manager main module)
+    mapped = _APP_FUNCTION_CLASSIFICATION.get(func)
+    if mapped:
+        classification, family, rule = mapped
+        return classification, family, rule
+
     if sink.kind == "subprocess":
         if "beets_client.reimport_source" in text:
             # Wave 25 round (independent review): see the matching note on
@@ -354,6 +388,12 @@ def _determine_domain(sink: MutationSink, classification: str, family: str, rule
     func = sink.function.lower()
     text = sink.call_text.lower()
     file = sink.file
+
+    reviewed = _REVIEWED_RULE_DETAILS.get(rule)
+    if reviewed:
+        return str(reviewed["domain"])
+    if family == "library_cleanup_v1":
+        return "library_cleanup"
 
     # Playlist operations
     if "playlist" in func or "playlist" in text or "playlist" in rule:
@@ -445,14 +485,23 @@ def generate(write: bool = True) -> dict:
         if prior_entry and prior_entry.get("human_reviewed"):
             entry = dict(prior_entry)
             entry["file"], entry["function"], entry["line"] = s.file, s.function, s.lineno
-            if not entry.get("domain"):
-                _, family, rule = _classify(s)
+            classification, family, rule = _classify(s)
+            review = _REVIEWED_RULE_DETAILS.get(rule)
+            if review:
+                entry["classification"] = classification
+                entry["transaction_family"] = family
+                entry["domain"] = _determine_domain(s, classification, family, rule)
+                entry["rule"] = rule
+                entry["review_reason"] = str(review["review_reason"])
+                entry["reviewed_in_pr"] = int(review["reviewed_in_pr"])
+            elif not entry.get("domain"):
                 entry["domain"] = _determine_domain(s, entry.get("classification") or "", family, rule)
             entries.append(entry)
             continue
         classification, family, rule = _classify(s)
         domain = _determine_domain(s, classification, family, rule)
-        human_reviewed = rule.startswith(("reviewed-", "confirmed-"))
+        review = _REVIEWED_RULE_DETAILS.get(rule)
+        human_reviewed = bool(review) or rule.startswith(("reviewed-", "confirmed-"))
         entries.append({
             "key": s.key,
             "file": s.file,
@@ -466,8 +515,8 @@ def generate(write: bool = True) -> dict:
             "rule": rule,
             "machine_classified": True,
             "human_reviewed": human_reviewed,
-            "review_reason": "individually investigated during SEC-002/ARCH-003 Wave 24 review (production caller search, route tracing, function-body read)" if human_reviewed else "",
-            "reviewed_in_pr": 98 if human_reviewed else None,
+            "review_reason": str(review["review_reason"]) if review else ("individually investigated during SEC-002/ARCH-003 Wave 24 review (production caller search, route tracing, function-body read)" if human_reviewed else ""),
+            "reviewed_in_pr": int(review["reviewed_in_pr"]) if review else (98 if human_reviewed else None),
         })
 
     counts = Counter(e["classification"] for e in entries)

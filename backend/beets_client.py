@@ -496,6 +496,18 @@ class BeetsClient:
         """Engine-side folder cleanup rollback (SEC-002 Wave 22 Closure)."""
         return self._request("POST", "/folders/cleanup/rollback", {"operation_id": operation_id}, timeout=timeout)
 
+    def plan_library_cleanup(self, payload: Dict[str, Any], *, timeout: float = 30.0) -> Dict[str, Any]:
+        """Engine-side library cleanup planning (SEC-002 / ARCH-003 library_cleanup_v1)."""
+        return self._request("POST", "/library/cleanup/plan", payload, timeout=timeout)
+
+    def apply_library_cleanup(self, operation_id: str, *, timeout: float = 60.0) -> Dict[str, Any]:
+        """Engine-side library cleanup application (SEC-002 / ARCH-003 library_cleanup_v1)."""
+        return self._request("POST", "/library/cleanup/apply", {"operation_id": operation_id}, timeout=timeout)
+
+    def rollback_library_cleanup(self, operation_id: str, *, timeout: float = 60.0) -> Dict[str, Any]:
+        """Engine-side library cleanup rollback (SEC-002 / ARCH-003 library_cleanup_v1)."""
+        return self._request("POST", "/library/cleanup/rollback", {"operation_id": operation_id}, timeout=timeout)
+
     def plan_playlist_media_cleanup(self, payload: Dict[str, Any], *, timeout: float = 30.0) -> Dict[str, Any]:
         """Engine-side playlist media cleanup planning (SEC-002 Wave 22 Closure)."""
         return self._request("POST", "/playlists/media-cleanup/plan", payload, timeout=timeout)

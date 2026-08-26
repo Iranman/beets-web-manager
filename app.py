@@ -194,8 +194,21 @@ def _is_musl_linux() -> bool:
 
 
 def _cleanup_broken_managed_runtime(name: str) -> None:
-    target = _YTDLP_RUNTIME_BIN_DIR / name
+    clean_name = Path(_s(name)).name
+    if not clean_name or clean_name != _s(name) or clean_name in {".", ".."}:
+        _plugin_install_log.append(f"[warn] refusing unsafe managed runtime cleanup target: {name!r}")
+        return
+    runtime_root = _YTDLP_RUNTIME_BIN_DIR.resolve(strict=False)
+    target = (_YTDLP_RUNTIME_BIN_DIR / clean_name).resolve(strict=False)
+    try:
+        target.relative_to(runtime_root)
+    except Exception:
+        _plugin_install_log.append(f"[warn] refusing managed runtime cleanup outside runtime root: {name!r}")
+        return
     if not target.exists():
+        return
+    if target.is_symlink() or target.is_dir():
+        _plugin_install_log.append(f"[warn] refusing managed runtime cleanup for symlink/directory: {target}")
         return
     probe = _probe_js_runtime(str(target))
     if probe.get("ok"):
@@ -203,11 +216,10 @@ def _cleanup_broken_managed_runtime(name: str) -> None:
     try:
         target.unlink()
         _plugin_install_log.append(
-            f"[cleanup] removed non-working managed {name} runtime: {probe.get('error') or 'probe failed'}"
+            f"[cleanup] removed non-working managed {clean_name} runtime: {probe.get('error') or 'probe failed'}"
         )
     except Exception as ex:
-        _plugin_install_log.append(f"[warn] could not remove non-working managed {name}: {ex}")
-
+        _plugin_install_log.append(f"[warn] could not remove non-working managed {clean_name}: {ex}")
 
 def _ytdlp_js_runtime_status() -> Dict[str, Any]:
     _prepend_ytdlp_runtime_path()
@@ -2475,20 +2487,26 @@ def _bootstrap_browser_password_if_missing() -> None:
 
 
 def _cleanup_initial_browser_password_if_replaced() -> None:
-    """If an explicit or persisted replacement password exists and is usable, remove
-    .initial_admin_password so stale initial credentials do not linger unnecessarily."""
+    """Remove stale initial browser credentials after a usable replacement exists."""
     try:
-        if not _INITIAL_BROWSER_PASSWORD_FILE.exists():
+        initial_file = _INITIAL_BROWSER_PASSWORD_FILE
+        if initial_file.name != ".initial_admin_password":
+            app.logger.warning("Refusing initial password cleanup for unexpected file name: %s", initial_file)
+            return
+        if initial_file.parent.is_symlink() or initial_file.is_symlink():
+            app.logger.warning("Refusing initial password cleanup through symlink: %s", initial_file)
+            return
+        if not initial_file.exists():
             return
         initial_content = ""
         try:
-            initial_content = _INITIAL_BROWSER_PASSWORD_FILE.read_text(encoding="utf-8").strip()
+            initial_content = initial_file.read_text(encoding="utf-8").strip()
         except Exception:
             pass
 
         env_pwd = _first_config_secret("BEETS_WEB_PASSWORD")
         persisted_pwd = ""
-        if _PERSISTED_BROWSER_PASSWORD_FILE.exists():
+        if _PERSISTED_BROWSER_PASSWORD_FILE.exists() and not _PERSISTED_BROWSER_PASSWORD_FILE.is_symlink():
             try:
                 persisted_pwd = _PERSISTED_BROWSER_PASSWORD_FILE.read_text(encoding="utf-8").strip()
             except Exception:
@@ -2496,13 +2514,12 @@ def _cleanup_initial_browser_password_if_replaced() -> None:
 
         if (env_pwd and env_pwd != initial_content and _browser_password_is_usable(env_pwd)) or \
            (persisted_pwd and persisted_pwd != initial_content and _browser_password_is_usable(persisted_pwd)):
-            _INITIAL_BROWSER_PASSWORD_FILE.unlink(missing_ok=True)
+            initial_file.unlink(missing_ok=True)
     except Exception as ex:
         try:
             app.logger.warning("Could not remove initial password file: %s", ex)
         except Exception:
             pass
-
 
 _bootstrap_auth_token_if_missing()
 _migrate_or_initialize_setup_state()
@@ -29877,153 +29894,129 @@ def dedup_ai_review():
 
 @app.post("/api/dedup/cleanup")
 def dedup_cleanup():
-    payload  = request.get_json(silent=True) or {}
-    paths    = payload.get("paths", [])
-    dry_run  = payload.get("dry_run", True)
-    root     = str(payload.get("root") or payload.get("scan_path") or "").strip()
+    payload = request.get_json(silent=True) or {}
+    paths = payload.get("paths", [])
+    dry_run_raw = payload.get("dry_run", True)
+    dry_run = str(dry_run_raw).strip().lower() not in {"0", "false", "no", "off"} if isinstance(dry_run_raw, str) else bool(dry_run_raw)
+    root = str(payload.get("root") or payload.get("scan_path") or "").strip()
     if not isinstance(paths, list):
         return jsonify({"ok": False, "error": "paths must be a list"}), 400
 
-    def _fmt(p):
-        return str(p)
+    plan_payload = {
+        "action": "dedup_cleanup",
+        "paths": [_s(p) for p in paths],
+        "requested_root": root,
+    }
+    try:
+        plan_res = beets_client.plan_library_cleanup(plan_payload)
+    except BeetsUnavailableError as ex:
+        return jsonify({
+            "ok": False,
+            "error": "Beets engine is unavailable; duplicate cleanup was not performed.",
+            "code": getattr(ex, "error_code", "") or "beets_unavailable",
+            "dry_run": dry_run,
+        }), 503
+    except BeetsError as ex:
+        return jsonify({
+            "ok": False,
+            "error": "Beets engine rejected duplicate cleanup planning.",
+            "code": getattr(ex, "error_code", "") or "beets_error",
+            "dry_run": dry_run,
+        }), getattr(ex, "status_code", 400) or 400
 
-    def _resolved(p: Path) -> Path:
-        try:
-            return p.resolve(strict=False)
-        except Exception:
-            return p.absolute()
-
-    cleanup_roots: List[Path] = []
-    for raw in (root, str(DOWNLOADS_ROOT), "/data/downloads", str(MUSIC_ROOT)):
-        if not raw:
-            continue
-        try:
-            rp = _resolved(Path(raw))
-        except Exception:
-            continue
-        if rp not in cleanup_roots:
-            cleanup_roots.append(rp)
-
-    def _within(child: Path, parent: Path) -> bool:
-        try:
-            _resolved(child).relative_to(parent)
-            return True
-        except Exception:
-            return False
-
-    def _boundary_for(folder: Path) -> Optional[Path]:
-        matches = [r for r in cleanup_roots if _within(folder, r)]
-        if not matches:
-            return None
-        return max(matches, key=lambda r: len(r.parts))
-
-    selected_paths: set = set()
-    removed_folders: set = set()
     results = []
-    parent_checks = []
+    for rec in plan_res.get("results") or []:
+        out = dict(rec)
+        out.setdefault("folders_removed", [])
+        out["dry_run"] = dry_run
+        out["deleted"] = bool(out.get("ok")) if dry_run else False
+        results.append(out)
 
-    for path_str in paths:
-        path_str = _s(path_str)
-        p = Path(path_str)
-        p_res = _resolved(p)
-        rec = {"path": path_str, "deleted": False,
-               "resolved_path": str(p_res), "folders_removed": [],
-               "error": None, "dry_run": dry_run}
-        if not _boundary_for(p_res.parent):
-            rec["error"] = "Path is outside allowed cleanup roots"
-            results.append(rec)
-            continue
-        if not p_res.exists():
-            rec["error"] = "File not found"
-            results.append(rec)
-            continue
-        if not p_res.is_file():
-            rec["error"] = "Path is not a file"
-            results.append(rec)
-            continue
-        if p_res.suffix.lower() not in AUDIO_EXT:
-            rec["error"] = "Not an audio file"
-            results.append(rec)
-            continue
-        selected_paths.add(p_res)
-        if dry_run:
-            rec["deleted"] = True
-            parent_checks.append((p_res.parent, rec))
-        else:
-            try:
-                p_res.unlink()
-                rec["deleted"] = True
+    planned = int(plan_res.get("planned_count") or 0)
+    skipped = int(plan_res.get("skipped_count") or sum(1 for r in results if not r.get("ok")))
+    if dry_run or planned <= 0:
+        return jsonify({
+            "ok": True,
+            "results": results,
+            "deleted": planned if dry_run else 0,
+            "skipped": skipped,
+            "folders_removed": 0,
+            "dry_run": dry_run,
+            "operation_id": plan_res.get("operation_id"),
+            "plan": plan_res,
+        })
+
+    op_id = _s(plan_res.get("operation_id")).strip()
+    if not op_id:
+        return jsonify({"ok": False, "error": "Engine did not return a cleanup operation_id", "results": results}), 502
+
+    try:
+        apply_res = beets_client.apply_library_cleanup(op_id)
+    except BeetsUnavailableError as ex:
+        return jsonify({
+            "ok": False,
+            "error": "Beets engine is unavailable; duplicate cleanup was not performed.",
+            "code": getattr(ex, "error_code", "") or "beets_unavailable",
+            "operation_id": op_id,
+            "results": results,
+            "dry_run": dry_run,
+        }), 503
+    except BeetsError as ex:
+        return jsonify({
+            "ok": False,
+            "error": "Beets engine rejected duplicate cleanup apply.",
+            "code": getattr(ex, "error_code", "") or "beets_error",
+            "operation_id": op_id,
+            "results": results,
+            "dry_run": dry_run,
+        }), getattr(ex, "status_code", 409) or 409
+
+    def _cleanup_empty_parents(parent_folders: List[str]) -> List[str]:
+        removed: List[str] = []
+        seen: set = set()
+        for folder_str in sorted({_s(p).strip() for p in parent_folders if _s(p).strip()}, key=len, reverse=True):
+            current = Path(folder_str)
+            for _ in range(12):
+                key = _s(current)
+                if not key or key in seen:
+                    break
+                seen.add(key)
                 try:
-                    with _db(text_factory=bytes) as con:
-                        old_abs = str(p_res).encode()
-                        old_db = _db_path_value(p_res).encode()
-                        cur = con.execute(
-                            "DELETE FROM items WHERE path=? OR path=?",
-                            (old_db, old_abs),
-                        )
-                        rec["db_rows_removed"] = max(0, int(cur.rowcount or 0))
-                        con.commit()
-                except Exception as db_exc:
-                    app.logger.warning("DB row cleanup failed for %r: %s", str(p_res), type(db_exc).__name__)
-                    rec["db_warning"] = "Could not remove database rows for this file."
-                parent_checks.append((p_res.parent, rec))
-            except Exception as exc:
-                app.logger.warning("File delete failed for %r: %s", str(p_res), type(exc).__name__)
-                rec["error"] = "Could not delete this file."
-        results.append(rec)
-
-    def _folder_empty(folder: Path) -> bool:
-        try:
-            for child in folder.iterdir():
-                if child.name.startswith("."):
-                    continue
-                if dry_run:
-                    child_res = _resolved(child)
-                    if child_res in selected_paths or child_res in removed_folders:
-                        continue
-                return False
-            return True
-        except Exception:
-            return False
-
-    def _clean_empty_parents(start_folder: Path):
-        folder = start_folder
-        boundary = _boundary_for(folder)
-        max_steps = 12 if boundary else 2
-        removed = []
-        for _ in range(max_steps):
-            folder_res = _resolved(folder)
-            if boundary and folder_res == boundary:
-                break
-            if not _folder_empty(folder):
-                break
-            if folder_res in removed_folders:
-                folder = folder.parent
-                continue
-            if dry_run:
-                removed_folders.add(folder_res)
-                removed.append(_fmt(folder))
-                folder = folder.parent
-                continue
-            try:
-                folder.rmdir()
-            except Exception:
-                break
-            removed_folders.add(folder_res)
-            removed.append(_fmt(folder))
-            folder = folder.parent
+                    folder_plan = beets_client.plan_folder_cleanup({"action": "remove_empty", "source": key})
+                    if not folder_plan.get("ok") or int(folder_plan.get("removals_count") or 0) <= 0:
+                        break
+                    folder_op = _s(folder_plan.get("operation_id")).strip()
+                    if not folder_op:
+                        break
+                    folder_apply = beets_client.apply_folder_cleanup(folder_op)
+                    if not folder_apply.get("ok") or not folder_apply.get("mutated"):
+                        break
+                    removed_dirs = [_s(p) for p in folder_apply.get("removed_dirs") or [key] if _s(p)]
+                    removed.extend(removed_dirs)
+                    current = current.parent
+                except (BeetsUnavailableError, BeetsError) as ex:
+                    app.logger.info("Engine empty-parent cleanup stopped at %s: %s", key, ex)
+                    break
         return removed
 
-    for parent, rec in parent_checks:
-        rec["folders_removed"].extend(_clean_empty_parents(parent))
+    removed_folders = _cleanup_empty_parents(apply_res.get("candidate_parent_folders") or plan_res.get("candidate_parent_folders") or [])
+    for rec in results:
+        if rec.get("ok"):
+            rec["deleted"] = True
+            rec["quarantined"] = True
+            rec["folders_removed"] = list(removed_folders)
 
-    deleted = sum(1 for r in results if r["deleted"] and not r.get("error"))
-    skipped = sum(1 for r in results if r.get("error"))
-    folders = sum(len(r["folders_removed"]) for r in results)
-    return jsonify({"ok": True, "results": results,
-                    "deleted": deleted, "skipped": skipped,
-                    "folders_removed": folders, "dry_run": dry_run})
-
+    deleted = int(apply_res.get("quarantined_count") or apply_res.get("deleted_items") or planned)
+    return jsonify({
+        "ok": True,
+        "results": results,
+        "deleted": deleted,
+        "skipped": skipped,
+        "folders_removed": len(removed_folders),
+        "dry_run": dry_run,
+        "operation_id": op_id,
+        "apply": apply_res,
+    })
 
 # ── Clean: no-audio folder cleanup ────────────────────────────────────────────
 
@@ -39115,30 +39108,45 @@ def _album_cleanup_duplicate_file_choice(candidate: Path, existing: Path,
 
 
 def _album_cleanup_remove_empty_tree(folder: Path, log: List[str]) -> int:
-    removed = 0
-    if not folder.exists() or not folder.is_dir() or folder.is_symlink():
-        return removed
+    candidates: List[Path] = []
     try:
-        child_dirs = [p for p in folder.rglob("*") if p.is_dir() and not p.is_symlink()]
+        if folder.exists() and folder.is_dir() and not folder.is_symlink():
+            child_dirs = [p for p in folder.rglob("*") if p.is_dir() and not p.is_symlink()]
+            candidates.extend(sorted(child_dirs, key=lambda p: len(p.parts), reverse=True))
+            candidates.append(folder)
     except Exception:
-        child_dirs = []
-    for child in sorted(child_dirs, key=lambda p: len(p.parts), reverse=True):
-        if child.is_symlink() or not _path_is_under(child, folder):
+        candidates = [folder]
+
+    removed = 0
+    seen: set = set()
+    for candidate in candidates:
+        key = _s(candidate)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        try:
+            plan_res = beets_client.plan_folder_cleanup({"action": "remove_empty", "source": key})
+        except (BeetsUnavailableError, BeetsError) as ex:
+            log.append(f"  SKIP empty-folder cleanup; engine rejected {candidate}: {ex}")
+            continue
+        if not plan_res.get("ok") or int(plan_res.get("removals_count") or 0) <= 0:
+            continue
+        op_id = _s(plan_res.get("operation_id")).strip()
+        if not op_id:
             continue
         try:
-            child.rmdir()
-            log.append(f"  Removed empty folder: {child}")
-            removed += 1
-        except Exception:
-            pass
-    try:
-        folder.rmdir()
-        log.append(f"  Removed empty album folder: {folder}")
-        removed += 1
-    except Exception:
+            apply_res = beets_client.apply_folder_cleanup(op_id)
+        except (BeetsUnavailableError, BeetsError) as ex:
+            log.append(f"  SKIP empty-folder cleanup; engine apply failed for {candidate}: {ex}")
+            continue
+        if apply_res.get("ok") and apply_res.get("mutated"):
+            removed_dirs = apply_res.get("removed_dirs") or [key]
+            removed += len(removed_dirs)
+            for removed_dir in removed_dirs:
+                log.append(f"  Removed empty album folder via engine: {removed_dir}")
+    if removed == 0:
         log.append("  SKIP empty-folder candidate that is not empty.")
     return removed
-
 
 def _album_cleanup_file_info(path: Path) -> Dict[str, Any]:
     try:

@@ -24,11 +24,11 @@ anything). It now does what it claims:
    a live write-attempt exec'd inside the container).
 7. Exercises production Web Manager HTTP routes (not the Control Agent
    directly) for artwork upload, artwork delete, rename, move-to-library,
-   metadata repair, retag, album remove, and deduplicate -- each is a real
+   metadata repair, retag, library dedup cleanup, album remove, and deduplicate -- each is a real
    HTTP request to the web-manager container's published port, which then
    reaches the engine container purely over the Docker network via
    BeetsClient/BEETS_API_URL, exactly like production.
-8. Stops the engine container and proves a mutating Web Manager route
+8. Stops the engine container and proves mutating Web Manager routes, including /api/dedup/cleanup,
    fails truthfully with zero local mutation while the engine is down,
    then restarts it.
 9. Fails closed on every step (image build failure, wrong OCI revision,
@@ -159,6 +159,7 @@ def seed_disposable_library(config_dir: Path, music_dir: Path) -> dict:
     import beets.library as bl
 
     config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "reconcile_quarantine").mkdir(parents=True, exist_ok=True)
     music_dir.mkdir(parents=True, exist_ok=True)
 
     (config_dir / "config.yaml").write_text(
@@ -225,12 +226,50 @@ def seed_disposable_library(config_dir: Path, music_dir: Path) -> dict:
         length=1.0,
     )
     item.add(lib)
+
+    cleanup_path = item_dir / "98 - Cleanup Duplicate.wav"
+    cleanup_path.write_bytes(_real_wav_bytes(freq=330))
+    cleanup_item = bl.Item(
+        albumartist="Acceptance Artist", album="Acceptance Album",
+        artist="Acceptance Artist", title="Cleanup Duplicate",
+        track=98, disc=1, year=2024, album_id=album.id,
+        path=str(cleanup_path).encode("utf-8"),
+        mb_trackid="44444444-4444-4444-4444-444444444444",
+        length=1.0,
+    )
+    cleanup_item.add(lib)
+
+    offline_dir = music_dir / "Offline Artist" / "Offline Album"
+    offline_dir.mkdir(parents=True, exist_ok=True)
+    offline_path = offline_dir / "99 - Offline Cleanup.wav"
+    offline_path.write_bytes(_real_wav_bytes(freq=550))
+    offline_album = bl.Album(
+        lib, albumartist="Offline Artist", album="Offline Album",
+        year=2024, mb_albumid="66666666-6666-6666-6666-666666666666",
+        mb_releasegroupid="77777777-7777-7777-7777-777777777777",
+    )
+    offline_album.add(lib)
+    offline_item = bl.Item(
+        albumartist="Offline Artist", album="Offline Album",
+        artist="Offline Artist", title="Offline Cleanup",
+        track=99, disc=1, year=2024, album_id=offline_album.id,
+        path=str(offline_path).encode("utf-8"),
+        mb_trackid="55555555-5555-5555-5555-555555555555",
+        length=1.0,
+    )
+    offline_item.add(lib)
     lib._close()
 
     return {
         "album_id": int(album.id),
         "item_id": int(item.id),
         "item_path": str(item_path),
+        "cleanup_item_id": int(cleanup_item.id),
+        "cleanup_item_path": str(cleanup_path),
+        "cleanup_container_path": "/data/media/music/" + cleanup_path.relative_to(music_dir).as_posix(),
+        "offline_item_id": int(offline_item.id),
+        "offline_item_path": str(offline_path),
+        "offline_container_path": "/data/media/music/" + offline_path.relative_to(music_dir).as_posix(),
         "db_path": str(db_path),
     }
 
@@ -1159,6 +1198,47 @@ def main() -> int:
         else:
             _ok("artwork delete succeeded")
 
+        print("==> Exercising library duplicate cleanup...")
+        status, body = client.request(
+            "POST", "/api/dedup/cleanup",
+            json_body={"paths": [fixture["cleanup_container_path"]], "dry_run": False},
+            timeout=45,
+        )
+        if status != 200 or not body.get("ok") or int(body.get("deleted") or 0) != 1:
+            _fail(f"library duplicate cleanup request failed: {status} {body}")
+        else:
+            cleanup_host_path = Path(fixture["cleanup_item_path"])
+            canonical_host_path = Path(fixture["item_path"])
+            con = sqlite3.connect(fixture["db_path"])
+            try:
+                remaining = con.execute("SELECT COUNT(*) FROM items WHERE id=?", (fixture["cleanup_item_id"],)).fetchone()[0]
+                # library_cleanup_v1's whole point is narrow, reviewed
+                # duplicate retirement, not "delete everything nearby" --
+                # explicitly prove the surviving canonical track and its
+                # album row are untouched, not merely that the duplicate
+                # is gone.
+                canonical_row = con.execute(
+                    "SELECT id, album_id FROM items WHERE id=?", (fixture["item_id"],)
+                ).fetchone()
+                album_row = con.execute(
+                    "SELECT id, album, albumartist FROM albums WHERE id=?", (fixture["album_id"],)
+                ).fetchone()
+            finally:
+                con.close()
+            if cleanup_host_path.exists() or int(remaining or 0) != 0:
+                _fail("library duplicate cleanup did not quarantine the file and retire the DB row")
+            elif not canonical_host_path.exists():
+                _fail("library duplicate cleanup removed the surviving canonical track's file, not just the duplicate")
+            elif not canonical_row or int(canonical_row[1]) != int(fixture["album_id"]):
+                _fail("library duplicate cleanup lost or reparented the surviving canonical item row")
+            elif not album_row or album_row[1] != "Acceptance Album" or album_row[2] != "Acceptance Artist":
+                _fail("library duplicate cleanup left the album row incoherent")
+            else:
+                _ok(
+                    "library duplicate cleanup succeeded through Web Manager -> Beets engine IPC "
+                    "(duplicate quarantined + DB row retired; surviving canonical track and album untouched)"
+                )
+
         print("==> Exercising fix-metadata...")
         status, body = client.request("POST", f"/api/albums/{aid}/fix-metadata",
                                        json_body={"album": "Acceptance Album Renamed", "year": 2025})
@@ -1210,11 +1290,14 @@ def main() -> int:
         run_wave25_scenarios(client, downloads_dir, music_dir, db_path)
 
         print("==> Engine-offline fail-closed proof...")
+        offline_host_path = Path(fixture["offline_item_path"])
+        offline_container_path = fixture["offline_container_path"]
         stop_res = run(["docker", "stop", engine_container])
         if stop_res.returncode != 0:
             _fail("could not stop the engine container for the offline proof")
         else:
             db_bytes_before = Path(db_path).read_bytes()
+            file_bytes_before = offline_host_path.read_bytes()
             status, body = client.request("POST", f"/api/albums/{aid}/fix-metadata",
                                            json_body={"album": "Should Not Land"}, timeout=15)
             offline_ok = True
@@ -1225,15 +1308,26 @@ def main() -> int:
                         offline_ok = False
                 except TimeoutError:
                     pass
+            status_cleanup, cleanup_body = client.request(
+                "POST", "/api/dedup/cleanup",
+                json_body={"paths": [offline_container_path], "dry_run": False},
+                timeout=15,
+            )
+            if status_cleanup == 200 and cleanup_body.get("ok"):
+                offline_ok = False
             if not offline_ok:
                 _fail("a mutating request appeared to succeed while the engine container was stopped")
             else:
-                _ok("mutating request did not silently succeed while the engine was offline")
+                _ok("mutating requests did not silently succeed while the engine was offline")
             db_bytes_after = Path(db_path).read_bytes()
             if db_bytes_after != db_bytes_before:
                 _fail("host-mounted DB changed while the engine container was stopped -- local mutation occurred")
             else:
                 _ok("host-mounted DB unchanged while the engine was offline")
+            if not offline_host_path.exists() or offline_host_path.read_bytes() != file_bytes_before:
+                _fail("host-mounted media changed while the engine container was stopped -- local cleanup mutation occurred")
+            else:
+                _ok("host-mounted media unchanged while the engine was offline")
 
             print("==> [Wave25] Engine-offline fail-closed proof (Wave 25 routes)...")
             wave25_engine_offline_checks(client, db_path)
