@@ -588,6 +588,9 @@ def run_wave25_scenarios(client: "HttpClient", downloads_dir: Path, music_dir: P
                             p = Path(p_str)
                             return p.exists() if p.is_absolute() else (music_dir / p).exists()
                         files_exist = all(_item_path_exists(i[0]) for i in items) if items else False
+                        if not files_exist and items:
+                            bad_paths = [repr(i[0]) for i in items if not _item_path_exists(i[0])]
+                            print(f"  [debug] fresh-import item path(s) that did not resolve under {music_dir}: {bad_paths}")
                         # Round 4 brief section 18: RGID must be verified
                         # too, not silently substituted for the Release ID.
                         actual_rgid = row["mb_releasegroupid"]

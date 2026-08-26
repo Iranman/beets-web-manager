@@ -9733,6 +9733,7 @@ def execute_confirmed_import_apply(
 
             music_root = Path((music_allowed_roots or [os.environ.get("MUSIC_ROOT", "/music")])[0])
             files_present = 0
+            missing_item_ids: List[int] = []
             for irow in item_rows:
                 raw = irow["path"]
                 p = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw or "")
@@ -9741,8 +9742,30 @@ def execute_confirmed_import_apply(
                     pp = music_root / p
                 if pp.exists():
                     files_present += 1
-            if require_files_present and files_present == 0:
-                return {"ok": False, "reason": "no_files_on_disk", "album_id": int(album_row["id"])}
+                else:
+                    missing_item_ids.append(int(irow["id"]))
+            # Round 4 (real Docker acceptance finding): this used to accept
+            # ANY nonzero files_present count as fully verified -- a real
+            # import that copied some but not all of an album's items (a
+            # partial copy failure, not a clean skip) still reported
+            # ok=True here, with every item_id (including the ones with no
+            # backing file) returned to the caller as part of a "Completed"
+            # result. "Confirmed" means every item this result claims to
+            # have imported is actually present on disk -- not merely that
+            # the album isn't completely empty. A legitimately incomplete
+            # album (fewer *tracks* than the full MB release, handled by
+            # confirmed_import_v1's own track_coverage/review policy at
+            # Plan time) is a different, already-reviewed concept from an
+            # item *row* that exists without a real file behind it.
+            if require_files_present:
+                if files_present == 0:
+                    return {"ok": False, "reason": "no_files_on_disk", "album_id": int(album_row["id"])}
+                if missing_item_ids:
+                    return {
+                        "ok": False, "reason": "incomplete_files_on_disk", "album_id": int(album_row["id"]),
+                        "files_present": files_present, "items_total": len(item_rows),
+                        "missing_item_ids": missing_item_ids[:20],
+                    }
 
             if target_mb_rgid:
                 actual_rgid = str(album_row["mb_releasegroupid"] or "").strip().lower()
@@ -9867,10 +9890,17 @@ def execute_confirmed_import_apply(
                         "confirmed_import_skipped_no_confident_match",
                         diagnostics=diagnostics,
                     )
+                verify_reason = (result or {}).get("reason", "no matching album found")
+                verify_detail = f"post-import verification failed: {verify_reason}"
+                if verify_reason == "incomplete_files_on_disk":
+                    verify_detail += (
+                        f" ({result.get('files_present')}/{result.get('items_total')} item(s) have a real "
+                        f"file; missing item id(s): {result.get('missing_item_ids')})"
+                    )
                 return _recovery(
                     "Native import reported success but the resulting album could not be verified",
                     "confirmed_import_verification_failed",
-                    f"post-import verification failed: {(result or {}).get('reason', 'no matching album found')}",
+                    verify_detail,
                     diagnostics=diagnostics,
                 )
 

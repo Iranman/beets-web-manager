@@ -415,6 +415,61 @@ class TestNativeImportSkipVsPartialMutation(ConfirmedImportTestCase):
         self.assertEqual(result["status"], "Recovery Required")
 
 
+class TestPartialFileCopyIsRejected(ConfirmedImportTestCase):
+    """Round 4, corrected (real Docker acceptance finding): a real fresh
+    import against a realistic multi-track fixture reported Apply success
+    and a `confirmed_import_v1 verified result`, but some of the album's
+    item rows pointed at files that were never actually copied -- the
+    acceptance script's own from-scratch check of every item path (never
+    loosened to "at least one") caught what the engine's own
+    `_capture_and_verify(require_files_present=True)` did not: it only
+    required `files_present != 0`, so a real album with e.g. 10 of 12
+    items missing their file still verified as `ok`. "Confirmed" must mean
+    every item this result claims to have imported is actually present on
+    disk, not merely that the album is not completely empty."""
+
+    def test_apply_fails_when_some_but_not_all_items_are_missing_their_file(self):
+        src = self._seed_source("Partially Copied Album", ["Track One.flac", "Track Two.flac"])
+        plan = self._plan(self._base_payload(src))
+        self.assertTrue(plan.get("ok"), plan)
+
+        def _native_import_partial_copy(source_path, target_mb_albumid, *, use_move):
+            con = sqlite3.connect(str(self.lib_db))
+            con.execute(
+                "INSERT INTO albums (mb_albumid, mb_releasegroupid, album) VALUES (?,?,?)",
+                (target_mb_albumid, TARGET_RG, "Fresh Album"),
+            )
+            aid = con.execute("SELECT last_insert_rowid()").fetchone()[0]
+            # Track One really gets copied...
+            real_dest = self.music_root / "Track One.flac"
+            real_dest.write_bytes(b"fake-audio-bytes")
+            con.execute("INSERT INTO items (album_id, path) VALUES (?,?)", (aid, str(real_dest)))
+            # ...but Track Two's row is created without a backing file --
+            # the exact shape of the real Docker finding (a genuine
+            # partial-copy failure, not a clean quiet-fallback skip).
+            missing_dest = self.music_root / "Track Two.flac"
+            con.execute("INSERT INTO items (album_id, path) VALUES (?,?)", (aid, str(missing_dest)))
+            con.commit()
+            con.close()
+            return {"ok": True, "returncode": 0, "albums_before": 0, "albums_after": 1,
+                    "stdout_excerpt": "", "stderr_excerpt": ""}
+
+        result = self._apply(plan["operation_id"], native_import_fn=_native_import_partial_copy)
+        self.assertFalse(result.get("ok"), result)
+        self.assertEqual(result["status"], "Recovery Required")
+        self.assertEqual(result["code"], "confirmed_import_verification_failed")
+
+    def test_apply_succeeds_when_every_item_has_a_real_file(self):
+        # Control: the existing full-copy fake fixture must still pass --
+        # this fix must not reject a genuinely complete import.
+        src = self._seed_source("Fully Copied Album", ["Track One.flac", "Track Two.flac"])
+        plan = self._plan(self._base_payload(src))
+        self.assertTrue(plan.get("ok"), plan)
+        result = self._apply(plan["operation_id"], native_import_fn=self._fake_native_import())
+        self.assertTrue(result.get("ok"), result)
+        self.assertEqual(result["status"], "Completed")
+
+
 class TestAcceptanceFailpoint(ConfirmedImportTestCase):
     """Round 4 brief section 23-25: a deterministic, narrowly-named
     failpoint for the Docker acceptance crash/resume scenario -- fires

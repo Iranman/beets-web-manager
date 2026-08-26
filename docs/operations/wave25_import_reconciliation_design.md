@@ -485,3 +485,24 @@ second, redundant, and in this topology non-functional path added no safety and 
 The legacy strategies (A–I) and their raw-SQL re-validation are left untouched for every other discovery path,
 which is outside this round's scope. See `tests/test_wave25_docker_acceptance_round_fixes.py`'s
 `TestConfirmedImportV1ResultSkipsRedundantRawSqlRevalidation` for the regression test.
+
+**Round 4, third real Docker iteration (after both fixes above)**: native import succeeded, the album was found
+via the `confirmed_import_v1 verified result` strategy (no more raw-SQL crash), and `confirmed-import-idempotent`
+passed outright. `fresh-import-untagged-confirmed` still failed, now with a much narrower signal: `item DB paths
+do not point at real files on the host-mounted music root`. Cause: `_capture_and_verify(require_files_present=True)`
+only ever checked `files_present == 0` as its failure condition -- meaning a real import that copied *some* but
+not *all* of an album's items (a genuine partial copy failure, not a clean `--quiet-fallback skip`, which is a
+separate, already-handled case) still reported `ok: True`, with every item ID -- including ones with no backing
+file at all -- returned to the caller as part of a `Completed` result. This is exactly the class of loosening the
+Round 4 brief prohibits: "confirmed" must mean every item this result claims to have imported is actually present
+on disk, not merely that the album is not completely empty. Fixed by requiring `files_present == len(item_rows)`
+(every discovered item must resolve to a real file) whenever `require_files_present=True`, for both the
+idempotency pre-check and the post-import verification call sites, with a new `incomplete_files_on_disk` reason
+distinct from `no_files_on_disk` and diagnostic detail (`files_present`/`items_total`/`missing_item_ids`) surfaced
+into the Recovery Required message so a future occurrence is diagnosable from the job log directly, without
+needing another round of blind guessing. See `tests/test_confirmed_import_v1.py`'s `TestPartialFileCopyIsRejected`
+for the regression coverage (both the rejection and a control case proving a genuinely complete import still
+passes). The underlying reason the real Docker fixture's copy was partial is not yet confirmed with direct
+evidence -- the next real Docker run's `missing_item_ids`/`files_present` diagnostic, now finally surfaced, is
+expected to make that root cause identifiable without further guessing, per the same "prove what Beets actually
+did" discipline used for every other finding in this round.
