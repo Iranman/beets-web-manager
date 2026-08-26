@@ -9680,7 +9680,15 @@ def execute_confirmed_import_apply(
             curr = store.get(operation_id).get("metadata", {})
             update_meta = {**curr, "last_failure_diagnostics": diagnostics} if diagnostics else curr
             store.update(operation_id, status="Failed", metadata=update_meta, logs=[f"Apply failed: {msg}"])
-            return {"ok": False, "error": msg, "code": code, "mutated": False, "status": "Failed"}
+            result = {"ok": False, "error": msg, "code": code, "mutated": False, "status": "Failed"}
+            if diagnostics:
+                # Surfaced to the HTTP caller too (not just persisted), so
+                # the real native beet stdout/stderr is actually visible to
+                # whoever is debugging a real failure instead of requiring
+                # a separate transaction-store lookup (Round 4 brief
+                # section 2/13).
+                result["diagnostics"] = diagnostics
+            return result
 
         def _recovery(msg: str, code: str, reason: str, *, diagnostics: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             curr = store.get(operation_id).get("metadata", {})
@@ -9691,7 +9699,10 @@ def execute_confirmed_import_apply(
             if diagnostics:
                 update_meta["last_failure_diagnostics"] = diagnostics
             store.update(operation_id, status="Recovery Required", metadata=update_meta)
-            return {"ok": False, "error": msg, "code": code, "mutated": True, "status": "Recovery Required"}
+            result = {"ok": False, "error": msg, "code": code, "mutated": True, "status": "Recovery Required"}
+            if diagnostics:
+                result["diagnostics"] = diagnostics
+            return result
 
         def _capture_and_verify(*, require_files_present: bool) -> Optional[Dict[str, Any]]:
             """Query the library for the planned Release ID and verify the

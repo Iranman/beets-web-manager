@@ -21846,6 +21846,18 @@ def import_folder_with_id():
             plan_res["operation_id"], acceptance_failpoint=acceptance_failpoint,
         )
         if not apply_res.get("ok"):
+            # Round 4: surface the real native beet stdout/stderr into this
+            # job's own log (visible to whoever is debugging a real
+            # failure, including the Docker acceptance script's own
+            # failure report) instead of only the short error string --
+            # see execute_confirmed_import_apply's diagnostics.
+            diag = apply_res.get("diagnostics") or {}
+            if diag.get("returncode") is not None:
+                log.append(f"[import] Native Beets exit code: {diag['returncode']}")
+            if diag.get("stdout_excerpt"):
+                log.append(f"[import] Native Beets stdout: {diag['stdout_excerpt']}")
+            if diag.get("stderr_excerpt"):
+                log.append(f"[import] Native Beets stderr: {diag['stderr_excerpt']}")
             raise RuntimeError(f"Import execution failed: {apply_res.get('error') or 'unknown error'}")
         log.append(f"[import] Engine controlled import completed: {import_folder_path}")
         if apply_res.get("resumed"):
