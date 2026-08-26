@@ -10662,6 +10662,33 @@ def execute_library_cleanup_apply(
                     "quarantined_records": quarantined_records,
                 })
 
+            # Round-99-reconciliation (final review, section 9/12 of the
+            # merge brief): verify every quarantine actually landed BEFORE
+            # ever touching the DB, not after. The rename call above not
+            # raising is already strong evidence, but the DB delete is the
+            # harder-to-undo half of this transaction (a rollback restores
+            # a quarantined file trivially; it cannot un-delete a
+            # committed row without the captured row data) -- so nothing
+            # here may commit any DB mutation until the exact required
+            # sequence's own verify-quarantine step has independently
+            # confirmed source-gone/target-present for every file. This
+            # also holds during the file loop above (each `_safe_rename`
+            # is followed here, in file order, before any file's DB row
+            # is even considered), not only as one bulk pass afterward.
+            for qr in quarantined_records:
+                source_text = os.path.abspath(os.path.normpath(str(qr.get("source") or "")))
+                quarantine_text = os.path.abspath(os.path.normpath(str(qr.get("quarantined") or "")))
+                source_root = _cleanup_root_for_path(Path(source_text), cleanup_roots)
+                if source_root is None:
+                    return _fail("Post-quarantine verification failed for quarantined file", "library_cleanup_verification_failed")
+                source_root_text = os.path.abspath(os.path.normpath(str(source_root)))
+                if source_text != source_root_text and not source_text.startswith(source_root_text + os.sep):
+                    return _fail("Post-quarantine verification failed for quarantined file", "library_cleanup_verification_failed")
+                if quarantine_text == q_base_text or not quarantine_text.startswith(q_base_text + os.sep):
+                    return _fail("Post-quarantine verification failed for quarantined file", "library_cleanup_verification_failed")
+                if os.path.exists(source_text) or not os.path.exists(quarantine_text):
+                    return _fail("Post-quarantine verification failed for quarantined file", "library_cleanup_verification_failed")
+
             deleted_items = 0
             db_mutated = False
             if db_item_deletes:
@@ -10683,19 +10710,6 @@ def execute_library_cleanup_apply(
                     con.close()
                 store.update(operation_id, metadata={**store.get(operation_id).get("metadata", {}), "db_mutated": True, "deleted_items_count": deleted_items})
 
-            for qr in quarantined_records:
-                source_text = os.path.abspath(os.path.normpath(str(qr.get("source") or "")))
-                quarantine_text = os.path.abspath(os.path.normpath(str(qr.get("quarantined") or "")))
-                source_root = _cleanup_root_for_path(Path(source_text), cleanup_roots)
-                if source_root is None:
-                    return _fail("Post-apply verification failed for quarantined file", "library_cleanup_verification_failed")
-                source_root_text = os.path.abspath(os.path.normpath(str(source_root)))
-                if source_text != source_root_text and not source_text.startswith(source_root_text + os.sep):
-                    return _fail("Post-apply verification failed for quarantined file", "library_cleanup_verification_failed")
-                if quarantine_text == q_base_text or not quarantine_text.startswith(q_base_text + os.sep):
-                    return _fail("Post-apply verification failed for quarantined file", "library_cleanup_verification_failed")
-                if os.path.exists(source_text) or not os.path.exists(quarantine_text):
-                    return _fail("Post-apply verification failed for quarantined file", "library_cleanup_verification_failed")
             if db_item_deletes and lib_db and Path(lib_db).exists():
                 con = sqlite3.connect(lib_db, timeout=10)
                 try:
