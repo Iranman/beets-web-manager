@@ -1206,6 +1206,10 @@ def get_ai_batch_field(web_container: str, batch_job_id: str, field: str) -> str
     return _run_ai_batch_seed(web_container, "get", batch_job_id, field)
 
 
+def dump_ai_batch_folder_states(web_container: str, batch_job_id: str) -> str:
+    return _run_ai_batch_seed(web_container, "dump_folder_states", batch_job_id)
+
+
 def run_wave26_ai_import_scenarios(client: "HttpClient", web_container: str, engine_container: str,
                                     downloads_dir: Path, db_path: str) -> None:
     """Wave 26 (PR #101) AI Batch Import Docker acceptance scenarios --
@@ -1563,6 +1567,11 @@ def run_wave26_ai_import_scenarios(client: "HttpClient", web_container: str, eng
     max_attempts = 6
     for attempt in range(1, max_attempts + 1):
         wait_engine_ipc_reachable(web_container)
+        try:
+            pre_states = dump_ai_batch_folder_states(web_container, offline_batch_job_id)
+            print(f"  [diag] folder_states before attempt {attempt}: {pre_states}")
+        except Exception as ex:
+            print(f"  [diag] could not dump folder_states before attempt {attempt}: {ex}")
         status, body = client.request(
             "POST", "/api/ai-batch-import/recover",
             json_body={"batch_job_id": offline_batch_job_id, "retry_failed": True},
@@ -1577,6 +1586,11 @@ def run_wave26_ai_import_scenarios(client: "HttpClient", web_container: str, eng
             scenario_fail("engine-offline-ai-import", f"post-restart retry did not resolve: {ex}")
             return
         last_log = result.get("log") or []
+        try:
+            post_states = dump_ai_batch_folder_states(web_container, offline_batch_job_id)
+            print(f"  [diag] folder_states after attempt {attempt}: {post_states}")
+        except Exception as ex:
+            print(f"  [diag] could not dump folder_states after attempt {attempt}: {ex}")
         if result.get("status") != "success":
             scenario_fail("engine-offline-ai-import", f"post-restart retry did not succeed truthfully: {result.get('status')} / {last_log}")
             return

@@ -32,6 +32,7 @@ Usage:
     python3 ai_batch_seed.py attempt_stale_write <batch_job_id> <stale_revision>
 """
 import hashlib
+import json
 import os
 import sys
 import time
@@ -145,6 +146,16 @@ def cmd_get(batch_job_id: str, field: str) -> None:
     print(state.get(field))
 
 
+def cmd_dump_folder_states(batch_job_id: str) -> None:
+    """Diagnostic-only: print the raw folder_states dict as JSON, to
+    ground-truth what the store actually persisted (as opposed to what
+    the code is assumed/expected to have written)."""
+    state = _store().get_batch_state(batch_job_id)
+    if not state:
+        raise SystemExit(f"no such batch_job_id: {batch_job_id}")
+    print(json.dumps(state.get("folder_states") or {}, default=str))
+
+
 def cmd_attempt_stale_write(batch_job_id: str, stale_revision: str) -> None:
     """Direct, unambiguous CAS proof for section 24's "stale AI review
     blocked on revision change" -- deliberately does NOT re-read the
@@ -183,5 +194,7 @@ if __name__ == "__main__":
         cmd_get(*rest)
     elif cmd == "attempt_stale_write":
         cmd_attempt_stale_write(*rest)
+    elif cmd == "dump_folder_states":
+        cmd_dump_folder_states(*rest)
     else:
         raise SystemExit(f"unknown command: {cmd}")
