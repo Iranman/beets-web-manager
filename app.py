@@ -25144,10 +25144,19 @@ except Exception:
     pass
 
 
+def _get_ai_batch_store() -> AiBatchStateStore:
+    active_dir = Path(os.environ.get("AI_BATCH_STATE_DIR", "/config/ai_batch_jobs"))
+    if _ai_batch_store.db_path.parent != active_dir:
+        _ai_batch_store.db_path = active_dir / "ai_batch_state.db"
+        _ai_batch_store.db_path.parent.mkdir(parents=True, exist_ok=True)
+        _ai_batch_store._init_db()
+    return _ai_batch_store
+
+
 def _ai_batch_write_state(state: Dict[str, Any]) -> None:
     with _ai_batch_state_lock:
         expected_rev = state.get("revision")
-        updated = _ai_batch_store.save_batch_state(state, expected_revision=expected_rev)
+        updated = _get_ai_batch_store().save_batch_state(state, expected_revision=expected_rev)
         state["revision"] = updated.get("revision", 1)
         state["schema_version"] = updated.get("schema_version", 1)
 
@@ -25165,11 +25174,11 @@ def _ai_batch_load_state(identifier: str) -> Optional[Dict[str, Any]]:
     if not ident:
         return None
     with _ai_batch_state_lock:
-        return _ai_batch_store.get_batch_state(ident)
+        return _get_ai_batch_store().get_batch_state(ident)
 
 
 def _ai_batch_latest_state() -> Optional[Dict[str, Any]]:
-    states = _ai_batch_store.list_batch_states()
+    states = _get_ai_batch_store().list_batch_states()
     return states[0] if states else None
 
 
@@ -25177,7 +25186,7 @@ def _ai_batch_find_state(ident: str) -> Optional[Dict[str, Any]]:
     ident = _s(ident).strip()
     if not ident:
         return None
-    return _ai_batch_store.get_batch_state(ident)
+    return _get_ai_batch_store().get_batch_state(ident)
 def _ai_batch_control(batch_job_id: str) -> Dict[str, Any]:
     with _ai_batch_control_lock:
         control = _ai_batch_controls.setdefault(batch_job_id, {})
