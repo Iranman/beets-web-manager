@@ -1290,3 +1290,20 @@ not true and the scanner itself had real correctness bugs. Full detail:
 - **Status**: ARCH-003 remains **In Progress**. Not Done -- CodeQL alone keeps this round from meeting its own stated exit bar, independent of anything else here.
 - **Review outcome**: **PR #98 left OPEN (draft), not merged.** Every mandatory item this round's merge gate names is now genuinely met except one: a green CodeQL run against the exact final head. That gate is explicitly non-negotiable per this round's own instructions ("never merge red CI"), and the 47 open alerts are carried-forward, not newly triaged or dismissed this pass -- so despite real IPC tests, real two-service acceptance, and exact-`VCS_REF` Docker provenance all now being genuinely proven (not merely claimed), merge is still not justified. **Blocker: CodeQL (47 open `py/path-injection` alerts on `backend/transaction_engine.py`, assessed as very likely false positives by representative sampling in round 2, not individually dismissed or resolved via CodeQL-recognized sanitization in any round to date).**
 
+### SEC-002 / ARCH-003 Wave 26 — AI Import Controlled-Mutation & ARCH-010 State Concurrency Closure
+
+- **Branch**: `feat/sec002-ai-import-wave26`
+- **Starting Main Baseline OID**: `e7490a83f0b392151abd4befeb2ade9a04994659`
+- **Initial Candidate Sinks**: 474 (125 unresolved)
+- **Initial `ai_import` Unresolved Domain Count**: 18
+- **Final `ai_import` Unresolved Domain Count**: **`0`** *(Domain Closure Achieved)*
+- **Previously Closed Domains (`import_reconciliation`, `library_cleanup`)**: **Maintained at `0`**
+- **ARCH-010 State Concurrency Implementation**: Created `AiBatchStateStore` (`backend/ai_batch_state_store.py`) providing SQLite WAL-mode persistence, `schema_version = 1`, optimistic concurrency CAS revision tracking (`revision = 1, 2, 3...`), 409 Conflict (`AiBatchStateConflictError`) on stale writes, and one-way migration of legacy `.json` state files.
+- **Production Refactoring**: Eliminated all 18 baseline unresolved `ai_import` sinks from `app.py`:
+  - Replaced unsafe unversioned filesystem state writes with `AiBatchStateStore` methods.
+  - Replaced direct SQLite DML `UPDATE albums SET mb_albumid...` / `UPDATE items SET mb_trackid...` and local `_beet_run` write/mbsync subprocess calls in `_start_library_mbid_sticking_repair._do` with `BeetsClient.update_album_metadata` and `BeetsClient.plan_album_mb_track_repair`/`apply_album_mb_track_repair`.
+  - Replaced local filesystem rename in `_maintenance_safe_folder_renames` with `BeetsClient.move_file`.
+  - Replaced local subprocess `mbsync`/`write`/`move` and filesystem `rmdir` in `_root_folder_repair_apply_safe` with `BeetsClient` IPC calls.
+- **Verification Matrix**: `verify_arch003_mutation_inventory.py --check` passed cleanly (464 total candidate sinks, 107 unresolved baseline, 0 unresolved `ai_import`, 0 unresolved `import_reconciliation`, 0 unresolved `library_cleanup`). Unit tests in `tests/test_ai_batch_state_store.py` passed cleanly (5/5). Full Python test suite passed cleanly with 0 failures and 0 errors.
+- **Status**: **Draft PR Opened (DO NOT MERGE — Claude has sole merge authority).**
+

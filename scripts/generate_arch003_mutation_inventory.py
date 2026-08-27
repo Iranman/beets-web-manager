@@ -118,13 +118,16 @@ _APP_STATE_HINTS = {
 # verification basis, never picked up implicitly by a name substring.
 _APP_STATE_VERIFIED_FUNCTIONS = frozenset({
     "_add_to_pending",
+    "_ai_batch_write_state",
     "_library_import_all_write_last",
     "_load_pending_reviews",
     "_mark_pending_review_status",
+    "_record_ai_review_decision",
     "_record_recent_import",
     "_remove_pending_review_for_path",
     "_update_pending_review_revalidation",
     "_write_import_review_auto_state",
+    "batch_ai_suggest._do",
     "clear_ai_pending_review",
     "clear_recent_imports",
     "import_cleanup_stale",
@@ -332,6 +335,10 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
             return "CONFIG_STATE", "", "beets-config-state"
         if file == "backend/security.py":
             return "NON_MEDIA_FILESYSTEM", "", "security-module"
+        if file == "backend/ai_batch_state_store.py":
+            if sink.kind == "sql":
+                return "APP_STATE", "", "ai-batch-state-store-sqlite"
+            return "APP_STATE", "", "ai-batch-state-store-filesystem"
         return "NEEDS_REVIEW", "", "backend-support-module-not-individually-reviewed"
 
     # 9. app.py (Web Manager main module)

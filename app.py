@@ -8,6 +8,7 @@ import importlib.metadata
 import urllib.error, urllib.parse, urllib.request
 from backend.security import (OutboundPolicyError, bounded_rate_key_store_sweep, direct_peer_is_trusted, install_secure_urllib, validate_outbound_url)
 install_secure_urllib()
+from backend.ai_batch_state_store import AiBatchStateConflictError, AiBatchStateStore
 from collections import Counter, OrderedDict, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -15728,9 +15729,7 @@ def batch_ai_suggest():
                 log.append(f"  ERROR: {ex}")
 
             try:
-                tmp = _ALBUM_MB_SUGGESTIONS_FILE.with_suffix(".tmp")
-                tmp.write_text(json.dumps(results, indent=2))
-                tmp.replace(_ALBUM_MB_SUGGESTIONS_FILE)
+                _ai_batch_store.save_suggestions_cache(results)
             except Exception:
                 pass
 
@@ -24505,16 +24504,9 @@ def _record_ai_review_decision(action: str, folder_path: str,
         }
         with _ai_review_decision_lock:
             try:
-                existing = (
-                    json.loads(_AI_REVIEW_DECISIONS_FILE.read_text())
-                    if _AI_REVIEW_DECISIONS_FILE.exists() else []
-                )
-                if not isinstance(existing, list):
-                    existing = []
+                _ai_batch_store.record_review_decision(entry)
             except Exception:
-                existing = []
-            existing.insert(0, entry)
-            _AI_REVIEW_DECISIONS_FILE.write_text(json.dumps(existing[:500], indent=2))
+                pass
     except Exception:
         pass
 
@@ -25145,25 +25137,22 @@ def _ai_batch_json_safe(value: Any) -> Any:
     return _s(value)
 
 
+_ai_batch_store = AiBatchStateStore(_AI_BATCH_STATE_DIR / "ai_batch_state.db")
+try:
+    _ai_batch_store.migrate_legacy_files(_AI_BATCH_STATE_DIR, _AI_REVIEW_DECISIONS_FILE, _ALBUM_MB_SUGGESTIONS_FILE)
+except Exception:
+    pass
+
+
 def _ai_batch_write_state(state: Dict[str, Any]) -> None:
-    _AI_BATCH_STATE_DIR.mkdir(parents=True, exist_ok=True)
-    path = _ai_batch_state_file(state.get("batch_job_id", ""))
-    tmp = path.with_suffix(f".{uuid.uuid4().hex}.tmp")
-    tmp.write_text(json.dumps(_ai_batch_json_safe(state), indent=2, sort_keys=True), encoding="utf-8")
-    os.replace(str(tmp), str(path))
+    with _ai_batch_state_lock:
+        expected_rev = state.get("revision")
+        updated = _ai_batch_store.save_batch_state(state, expected_revision=expected_rev)
+        state["revision"] = updated.get("revision", 1)
+        state["schema_version"] = updated.get("schema_version", 1)
 
 
 def _ai_batch_persist_job_association(batch_job_id: str, job_id: str) -> None:
-    """Durably associate job_id with batch_job_id before the worker thread
-    is unblocked, so an immediate status poll can find this batch by job_id.
-
-    Deliberately bypasses _ai_batch_commit: that function unconditionally
-    calls _ai_batch_recalculate_batch_state, whose finalize logic requires
-    fully-reconciled folder_states to make a correct decision. For a
-    recover/retry start, folder_states is still the pre-reconciliation
-    snapshot at this point -- only the worker's own reconciliation step
-    (inside _run_ai_batch_import) makes it safe to recalculate. A plain,
-    targeted write avoids re-triggering that premature-finalize bug."""
     with _ai_batch_state_lock:
         state = _ai_batch_load_state(batch_job_id) or _ai_batch_initial_state(batch_job_id, "")
         state["job_id"] = job_id
@@ -25176,67 +25165,19 @@ def _ai_batch_load_state(identifier: str) -> Optional[Dict[str, Any]]:
     if not ident:
         return None
     with _ai_batch_state_lock:
-        direct = _ai_batch_state_file(ident)
-        paths: List[Path] = []
-        if direct.exists():
-            paths.append(direct)
-        try:
-            paths.extend(sorted(_AI_BATCH_STATE_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True))
-        except Exception:
-            pass
-        seen: set = set()
-        for path in paths:
-            if path in seen:
-                continue
-            seen.add(path)
-            try:
-                state = json.loads(path.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-            if not isinstance(state, dict):
-                continue
-            if ident in {_s(state.get("batch_job_id")), _s(state.get("job_id"))}:
-                return state
-    return None
+        return _ai_batch_store.get_batch_state(ident)
 
 
 def _ai_batch_latest_state() -> Optional[Dict[str, Any]]:
-    try:
-        paths = sorted(_AI_BATCH_STATE_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
-    except Exception:
-        return None
-    for path in paths:
-        try:
-            state = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        if isinstance(state, dict):
-            return state
-    return None
-
+    states = _ai_batch_store.list_batch_states()
+    return states[0] if states else None
 
 
 def _ai_batch_find_state(ident: str) -> Optional[Dict[str, Any]]:
     ident = _s(ident).strip()
     if not ident:
         return None
-    direct = _ai_batch_load_state(ident)
-    if direct:
-        return direct
-    try:
-        paths = sorted(_AI_BATCH_STATE_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
-    except Exception:
-        return None
-    for path in paths:
-        try:
-            state = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        if not isinstance(state, dict):
-            continue
-        if _s(state.get("batch_job_id")) == ident or _s(state.get("job_id")) == ident:
-            return state
-    return None
+    return _ai_batch_store.get_batch_state(ident)
 def _ai_batch_control(batch_job_id: str) -> Dict[str, Any]:
     with _ai_batch_control_lock:
         control = _ai_batch_controls.setdefault(batch_job_id, {})
@@ -33172,9 +33113,7 @@ def _start_library_mbid_sticking_repair(
                     log.append(f"  Would restore album mb_albumid for album_id {aid}: {label} -> {mbid}")
                     summary["inferred_album_rows"] += 1
                 else:
-                    with _db() as con:
-                        con.execute("UPDATE albums SET mb_albumid=? WHERE id=?", (mbid, aid))
-                        con.commit()
+                    beets_client.update_album_metadata(aid, {"mb_albumid": mbid})
                     log.append(f"  Restored album mb_albumid for album_id {aid}: {label}")
                     summary["inferred_album_rows"] += 1
                     summary["albums_changed"] += 1
@@ -33259,21 +33198,13 @@ def _start_library_mbid_sticking_repair(
                     )
                     summary["resolved_album_rows"] += 1
                 else:
-                    with _db() as con:
-                        if resolved_rgid and not rgid:
-                            con.execute(
-                                "UPDATE albums SET mb_albumid=?, mb_releasegroupid=? WHERE id=?",
-                                (resolved_mbid, resolved_rgid, aid),
-                            )
-                        else:
-                            con.execute(
-                                "UPDATE albums SET mb_albumid=? WHERE id=?",
-                                (resolved_mbid, aid),
-                            )
-                        con.commit()
+                    meta_opts = {"mb_albumid": resolved_mbid}
+                    if resolved_rgid and not rgid:
+                        meta_opts["mb_releasegroupid"] = resolved_rgid
+                    beets_client.update_album_metadata(aid, meta_opts)
                     log.append(
                         f"  [album_id {aid}] linked to release {resolved_mbid} "
-                        f"(written to app DB: albums.mb_albumid"
+                        f"(written via IPC: albums.mb_albumid"
                         + (", albums.mb_releasegroupid" if resolved_rgid and not rgid else "")
                         + ") — item-level release/track rows will be repaired below"
                     )
@@ -33311,10 +33242,6 @@ def _start_library_mbid_sticking_repair(
         except Exception as ex:
             raise RuntimeError(f"Could not scan Beets DB for stuck MBIDs: {ex}") from ex
 
-        job_cfg = f"/tmp/beets-mbid-sticking-repair-{uuid.uuid4().hex}.yaml"
-        base = [BEET_BIN, "-c", _write_job_beets_config(job_cfg)]
-        env = _beet_env()
-
         for row in rows:
             if cancel_event is not None and cancel_event.is_set():
                 raise RuntimeError("cancelled")
@@ -33342,7 +33269,7 @@ def _start_library_mbid_sticking_repair(
                     summary["release_item_rows"] += changed
                     album_changed = album_changed or changed > 0
                     if changed:
-                        log.append(f"  [album_id {aid}] wrote {changed} row(s) to DB: items.mb_albumid")
+                        log.append(f"  [album_id {aid}] wrote {changed} row(s) via IPC: items.mb_albumid")
 
             track_updates: List[tuple] = []
             if repair_tracks:
@@ -33376,35 +33303,23 @@ def _start_library_mbid_sticking_repair(
                     )
                     summary["track_rows"] += len(track_updates)
                 else:
-                    with _db() as con:
-                        con.executemany(
-                            "UPDATE items SET mb_trackid=?, track=?, disc=?, title=?, mb_albumid=? "
-                            "WHERE id=?",
-                            track_updates,
-                        )
-                        con.execute("UPDATE albums SET mb_albumid=? WHERE id=?", (mbid, aid))
-                        con.commit()
-                    log.append(
-                        f"  Repaired {len(track_updates)} recording ID(s): "
-                        f"album_id {aid} {label}"
-                    )
-                    log.append(
-                        f"  [album_id {aid}] wrote {len(track_updates)} row(s) to DB: "
-                        "items.mb_trackid/track/disc/title/mb_albumid"
-                    )
-                    summary["track_rows"] += len(track_updates)
-                    album_changed = True
+                    plan_res = beets_client.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mbid})
+                    if plan_res.get("ok"):
+                        op_id = plan_res.get("operation_id") or ""
+                        apply_res = beets_client.apply_album_mb_track_repair(op_id, write_tags=write_tags)
+                        if apply_res.get("ok"):
+                            log.append(f"  Repaired {len(track_updates)} recording ID(s) via IPC: album_id {aid} {label}")
+                            summary["track_rows"] += len(track_updates)
+                            album_changed = True
+                        else:
+                            log.append(f"  WARN: album_mb_track_repair apply failed for album_id {aid}: {apply_res.get('error')}")
+                            summary["failed_count"] += 1
+                    else:
+                        log.append(f"  WARN: album_mb_track_repair plan failed for album_id {aid}: {plan_res.get('error')}")
+                        summary["failed_count"] += 1
 
             if album_changed:
                 summary["albums_changed"] += 1
-                if write_tags:
-                    proc = _beet_run(base + ["write", f"album_id:{aid}"], log,
-                                     timeout=180, env=env, cancel=cancel_event)
-                    if proc.returncode != 0:
-                        log.append(f"  WARN: beet write failed for album_id {aid} (rc={proc.returncode})")
-                        summary["failed_count"] += 1
-                    else:
-                        log.append(f"  [album_id {aid}] wrote fixed IDs to file tags (beet write)")
             elif not dry_run:
                 summary["skipped_already_fixed"] += 1
                 log.append(f"  [album_id {aid}] no changes needed — already fixed")
@@ -35975,8 +35890,9 @@ def _maintenance_safe_folder_renames(rows: List[Dict[str, Any]], log: List[str],
                 skipped += 1
                 log.append(f"  [folder-safe-rename] skipped existing target: {target}")
                 continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            source.rename(target)
+            res = beets_client.move_file(str(source), str(target))
+            if not res.get("ok"):
+                raise RuntimeError(res.get("error") or "move failed")
             renamed += 1
             if len(examples) < 20:
                 examples.append({"source": str(source), "target": str(target)})
@@ -38847,35 +38763,30 @@ def _root_folder_repair_apply_safe(log: List[str], cancel_event: Optional[Any] =
                     getattr(item, "mb_albumid", "") or getattr(item, "mb_trackid", ""))
             except Exception:
                 has_mb = False
-            if has_mb:
-                r = _beet_run(base + ["mbsync", f"id:{iid}"], log, timeout=60, env=env, cancel=cancel_event)
-                if r.returncode == -9:
-                    raise RuntimeError("cancelled")
-            r = _beet_run(base + ["write", f"id:{iid}"], log, timeout=120, env=env, cancel=cancel_event)
-            if r.returncode == -9:
-                raise RuntimeError("cancelled")
-            if r.returncode not in (0, 124) and r.returncode >= 2:
-                summary["items_failed"] += 1
-                summary["errors"] += 1
-                log.append(f"  ERROR: beet write failed for item {iid} (rc={r.returncode})")
-                continue
-            r = _beet_run(base + ["move", f"id:{iid}"], log, timeout=120, env=env, cancel=cancel_event)
-            if r.returncode == -9:
-                raise RuntimeError("cancelled")
-            if r.returncode != 0:
-                summary["items_failed"] += 1
-                summary["errors"] += 1
-                log.append(f"  ERROR: beet move failed for item {iid} (rc={r.returncode})")
-                continue
-            summary["items_moved"] += 1
+            aid = getattr(item, "album_id", None) if item else None
+            if aid:
+                if has_mb:
+                    mbid = getattr(item, "mb_albumid", "")
+                    plan_res = beets_client.plan_album_mb_track_repair({"album_id": int(aid), "mb_albumid": mbid})
+                    if plan_res.get("ok"):
+                        beets_client.apply_album_mb_track_repair(plan_res.get("operation_id"), write_tags=True)
+                beets_client.update_album_metadata(int(aid), {}, force_write_tags=True)
+                rel_res = beets_client.relocate_album(int(aid), mode="move")
+                if not rel_res.get("ok"):
+                    summary["items_failed"] += 1
+                    summary["errors"] += 1
+                    log.append(f"  ERROR: relocate_album failed for album_id {aid}: {rel_res.get('error')}")
+                    continue
+                summary["items_moved"] += 1
 
         # The move above should have emptied this folder; clean it up if so.
         folder = Path(entry["folder"])
         try:
             if folder.exists() and not any(folder.iterdir()):
-                folder.rmdir()
-                log.append(f"  Removed emptied folder: {folder}")
-                summary["empty_folders_removed"] += 1
+                del_res = beets_client.delete_file(str(folder))
+                if del_res.get("ok"):
+                    log.append(f"  Removed emptied folder via IPC: {folder}")
+                    summary["empty_folders_removed"] += 1
         except Exception:
             pass
 
