@@ -1518,9 +1518,6 @@ def run_wave26_ai_import_scenarios(client: "HttpClient", web_container: str, eng
     if start_res.returncode != 0 or not wait_healthy(engine_container):
         scenario_fail("engine-offline-ai-import", "engine container did not come back healthy after restart")
         return
-    if not wait_engine_ipc_reachable(web_container):
-        scenario_fail("engine-offline-ai-import", "engine container reported healthy but beets-web-manager could not resolve/reach it via Docker DNS within 60s")
-        return
     # /api/ai-batch-import (used for the initial request above) only
     # reconnects to an already-terminal batch -- it never accepts
     # retry_failed and never re-attempts a folder already at a terminal
@@ -1533,25 +1530,39 @@ def run_wave26_ai_import_scenarios(client: "HttpClient", web_container: str, eng
     # re-attempting it is the dedicated recover endpoint with
     # retry_failed=true.
     #
-    # Found on real Linux CI (not just locally): `docker start` + this
-    # script's own wait_healthy() reporting the engine container healthy
-    # does not guarantee the Docker network's internal DNS has finished
-    # re-registering that container's name yet -- one real CI run's first
-    # post-restart retry attempt hit "blocked outbound request to
-    # unresolved host: http://beets:8338/..." from inside beets-web-manager
-    # a fraction of a second after the healthcheck itself passed, and the
-    # folder correctly (truthfully) landed back in a retryable state
-    # ("Could not scan source folder") rather than a false success. This
-    # mirrors the exact same transient-retry pattern this script already
-    # uses for MusicBrainz's own real 503s (_fetch_release_tracklist) --
-    # retry the whole recover-and-verify cycle a bounded number of times
-    # before failing, rather than either a fixed sleep (fragile: no
-    # guarantee it's long enough) or accepting the transient failure as
-    # this scenario's real outcome (it would defeat the scenario's whole
-    # point, which is proving the retry DOES succeed once the engine is
-    # actually reachable).
+    # Found on real Linux CI (repeatedly, not a one-off flake): `docker
+    # start` + this script's own wait_healthy() reporting the engine
+    # container healthy does not guarantee beets-web-manager's actual
+    # DNS resolution of the engine's service name has caught up yet. A
+    # ONE-TIME pre-check via a separate `docker exec` process
+    # (wait_engine_ipc_reachable) proved insufficient: that check
+    # consistently reported success (a fresh process always gets a fresh
+    # resolver query), yet the real, already-running web-manager
+    # worker's OWN next request still hit "unresolved host" -- so
+    # whatever is actually stale/lagging is scoped to that specific
+    # running process/connection, not observable from a separate probe
+    # process. A single upfront gate therefore cannot detect it; the
+    # only thing that reliably works is checking immediately before EACH
+    # real attempt and giving the whole cycle real wall-clock time to
+    # resolve itself, mirroring the identical transient-retry pattern
+    # this script already uses for MusicBrainz's own real 503s
+    # (_fetch_release_tracklist).
+    # A same-process readiness check, not a separate `docker exec` probe:
+    # this hits the running web-manager worker's own /api/setup/status
+    # (?refresh=1 bypasses its cache), which itself calls the engine --
+    # the same process, same connection machinery the real retry request
+    # below will use, unlike wait_engine_ipc_reachable's separate process.
+    dns_deadline = time.time() + 60.0
+    while time.time() < dns_deadline:
+        s_status, s_body = client.request("GET", "/api/setup/status?refresh=1", timeout=30)
+        if s_status == 200 and not s_body.get("stale"):
+            break
+        time.sleep(3)
+
     last_log: list = []
-    for attempt in range(1, 4):
+    max_attempts = 6
+    for attempt in range(1, max_attempts + 1):
+        wait_engine_ipc_reachable(web_container)
         status, body = client.request(
             "POST", "/api/ai-batch-import/recover",
             json_body={"batch_job_id": offline_batch_job_id, "retry_failed": True},
@@ -1577,17 +1588,17 @@ def run_wave26_ai_import_scenarios(client: "HttpClient", web_container: str, eng
             scenario_fail("engine-offline-ai-import", f"could not verify host-mounted DB state after retry: {ex}")
             return
         if len(post_restart_rows) == 1:
-            scenario_pass(f"engine-offline-ai-import-retry-succeeds (attempt {attempt}/3: the exact same AI-reviewed batch, retried after the engine came back, completed the real confirmed_import_v1 import with zero rows created while the engine was down)")
+            scenario_pass(f"engine-offline-ai-import-retry-succeeds (attempt {attempt}/{max_attempts}: the exact same AI-reviewed batch, retried after the engine came back, completed the real confirmed_import_v1 import with zero rows created while the engine was down)")
             return
         if len(post_restart_rows) > 1:
             scenario_fail("engine-offline-ai-import", f"expected at most 1 album row after the post-restart retry, found {len(post_restart_rows)} -- job log: {last_log}")
             return
         transient = any("Could not scan source folder" in line or "unresolved host" in line for line in last_log)
-        if not transient or attempt == 3:
+        if not transient or attempt == max_attempts:
             break
-        print(f"  [retry {attempt}/3] transient engine-connectivity failure right after restart, retrying: {last_log}")
-        time.sleep(3.0 * attempt)
-    scenario_fail("engine-offline-ai-import", f"expected exactly 1 album row after the post-restart retry (tried 3 times), found 0 -- job log: {last_log}")
+        print(f"  [retry {attempt}/{max_attempts}] transient engine-connectivity failure right after restart, retrying: {last_log}")
+        time.sleep(min(5.0 * attempt, 20.0))
+    scenario_fail("engine-offline-ai-import", f"expected exactly 1 album row after the post-restart retry (tried {max_attempts} times), found 0 -- job log: {last_log}")
 
 
 def main() -> int:
