@@ -143,7 +143,11 @@ def cmd_reseed_folder(batch_job_id: str, container_folder_path: str,
     OPENAI_API_KEY and fail for an unrelated reason. This re-applies the
     same provider-boundary stub cmd_create used originally, without
     needing to create a whole new batch (which would fail: the row
-    already exists, and create_batch_state() requires expected_revision=0)."""
+    already exists, and create_batch_state() requires expected_revision=0).
+    Also resets the batch's own top-level status (see below) -- otherwise
+    a leftover terminal status from the prior round makes the very next
+    recover call self-heal-and-return instead of actually processing the
+    just-reseeded folder."""
     store = _store()
     state = store.get_batch_state(batch_job_id)
     if not state:
@@ -182,6 +186,22 @@ def cmd_reseed_folder(batch_job_id: str, container_folder_path: str,
             },
         },
     }
+    # The BATCH's own top-level status is left over from the previous
+    # (failed) processing round -- e.g. "completed_with_warnings" -- and
+    # is itself terminal. _run_ai_batch_import's recover branch checks
+    # `_ai_batch_recalculate_batch_state(state, log) or state.get("status")
+    # in _AI_BATCH_TERMINAL_STATUSES` BEFORE ever reaching real per-folder
+    # processing; leaving the top-level status terminal here means the
+    # first recover call after a reseed only self-heals it to "running"
+    # (a real, separate, legitimate code path) and returns immediately
+    # without processing the just-reseeded folder at all -- found live,
+    # not a guess: real CI showed "No unfinished folder work remains;
+    # recovery finalized existing batch." on every one of 4 attempts.
+    # Resetting the top-level status here too means the very next recover
+    # call proceeds straight to real processing.
+    state["status"] = "running"
+    state["current_step"] = "reopened for acceptance retry"
+    state["completed_at"] = None
     updated = store.save_batch_state(state, expected_revision=state.get("revision"))
     print(updated.get("revision"))
 
