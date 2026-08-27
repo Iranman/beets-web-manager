@@ -3510,19 +3510,17 @@ def _write_fast_item_modify_config(path_value: str) -> str:
 
 
 def _run_item_metadata_restore(item_id: int, fields: Dict[str, Any], log: List[str], cancel_event=None) -> bool:
-    parts = [f"{k}={v}" for k, v in (fields or {}).items()]
-    if not parts:
+    if not fields:
         log.append("  [rollback] No metadata fields to restore.")
         return True
-    cfg = _write_fast_item_modify_config(f"/tmp/beets_rollback_item_{item_id}_{uuid.uuid4().hex}.yaml")
-    cmd = [BEET_BIN, "-c", cfg, "modify", "--yes", "--nowrite", f"id:{item_id}"] + parts
-    r = _beet_run(cmd, log, timeout=60, env=_beet_env(), cancel=cancel_event)
-    if r.returncode not in (0, -9, 124):
-        log.append(f"  [rollback] Metadata restore failed for item {item_id} (rc={r.returncode}).")
+    try:
+        beets_client.update_item_metadata(item_id, fields)
+        _invalidate_lib_cache()
+        log.append(f"  [rollback] Restored metadata for item {item_id}.")
+        return True
+    except Exception as ex:
+        log.append(f"  [rollback] Metadata restore failed for item {item_id}: {_redact_security_text(str(ex))[:200]}")
         return False
-    _invalidate_lib_cache()
-    log.append(f"  [rollback] Restored metadata for item {item_id}.")
-    return True
 
 
 # ── attach-recording: per-item reservation + strict subprocess outcomes ───────
@@ -3561,42 +3559,24 @@ def _require_attach_stage_success(result, stage: str) -> None:
     success for this identity mutation -- a cancelled (-9) or timed-out
     (124) stage must never be treated as success, and the caller must not
     run any later stage after this raises."""
-    if result.returncode == 0:
-        return
-    if result.returncode == -9:
-        raise AttachRecordingCancelled(f"{stage} cancelled")
-    if result.returncode == 124:
-        raise RuntimeError(f"{stage} timed out")
-    raise RuntimeError(f"{stage} failed")
+    if hasattr(result, "returncode"):
+        if result.returncode == 0:
+            return
+        if result.returncode == -9:
+            raise AttachRecordingCancelled(f"{stage} cancelled")
+        if result.returncode == 124:
+            raise RuntimeError(f"{stage} timed out")
+        raise RuntimeError(f"{stage} failed")
 
 
 def _run_item_recording_id_restore(item_id: int, fields: Dict[str, Any], log: List[str], cancel_event=None) -> bool:
     """Undo executor for attach-recording: restores the previous
-    Recording/Release/Release-Group IDs and re-runs the same
-    modify+mbsync+write+move sequence attach-recording used, so the file's
-    on-disk tags and library path go back in sync with the pre-attach IDs
-    (not just the beets database row). Returns True only when every
-    required stage actually succeeded (rc=0) -- a cancelled, timed-out, or
-    failed stage must never be reported as a successful restore, and the
-    caller must not mark the source transaction "Rolled Back" for a False
-    return."""
-    mb_trackid = _s((fields or {}).get("mb_trackid", "")).strip().lower()
-    mb_albumid = _s((fields or {}).get("mb_albumid", "")).strip().lower()
-    mb_releasegroupid = _s((fields or {}).get("mb_releasegroupid", "")).strip().lower()
-    cfg = _write_fast_item_modify_config(f"/tmp/beets_rollback_recording_{item_id}_{uuid.uuid4().hex}.yaml")
-    base = [BEET_BIN, "-c", cfg]
-    query = f"id:{item_id}"
-    parts = [f"mb_trackid={mb_trackid}", f"mb_albumid={mb_albumid}", f"mb_releasegroupid={mb_releasegroupid}"]
+    Recording/Release/Release-Group IDs via IPC. Returns True only when
+    restoration succeeds."""
     try:
-        r = _beet_run(base + ["modify", "--yes", "--nowrite", query] + parts, log, timeout=60, env=_beet_env(), cancel=cancel_event)
-        _require_attach_stage_success(r, "rollback modify")
-        if mb_trackid:
-            r = _beet_run(base + ["mbsync", query], log, timeout=60, env=_beet_env(), cancel=cancel_event)
-            _require_attach_stage_success(r, "rollback mbsync")
-        r = _beet_run(base + ["write", "--yes", query], log, timeout=60, env=_beet_env(), cancel=cancel_event)
-        _require_attach_stage_success(r, "rollback write")
-        r = _beet_run(base + ["move", query], log, timeout=60, env=_beet_env(), cancel=cancel_event)
-        _require_attach_stage_success(r, "rollback move")
+        updates = dict(fields or {})
+        beets_client.update_item_metadata(item_id, updates)
+        beets_client.relocate_album(album_id=0, item_id=item_id)
     except AttachRecordingCancelled:
         log.append(f"  [rollback] Recording ID restore cancelled for item {item_id}.")
         return False
@@ -3665,12 +3645,7 @@ def _start_metadata_apply_transaction(transaction_id: str):
     def _do(log, cancel_event=None):
         transactions.update(transaction_id, status="Running", dry_run=False)
         try:
-            cfg = _write_fast_item_modify_config(f"/tmp/beets_modify_item_{item_id}_{uuid.uuid4().hex}.yaml")
-            cmd = ([BEET_BIN, "-c", cfg, "modify", "--yes", "--nowrite", f"id:{item_id}"]
-                   + parts)
-            r = _beet_run(cmd, log, timeout=60, env=_beet_env(), cancel=cancel_event)
-            if r.returncode not in (0, -9, 124):
-                raise RuntimeError(f"modify failed rc={r.returncode}")
+            beets_client.update_item_metadata(item_id, fields)
             _invalidate_lib_cache()
             transactions.update(transaction_id, status="Completed", logs=list(log)[-500:], counts={"items": 1, "changes": len(changed_fields)})
             return {"ok": True, "transaction_id": transaction_id, "changed_fields": changed_fields}
@@ -3831,9 +3806,8 @@ def item_mbsubmit(iid: int):
         if not item:
             raise RuntimeError(f"Item {iid} not found in library")
         query = f"album_id:{item.album_id}" if item.album_id else f"id:{iid}"
-        r = _beet_run([BEET_BIN, "-c", cfg, "mbsubmit", query],
-                      log, timeout=60, env=_beet_env(), cancel=cancel_event)
-        output = _ANSI_RE.sub("", ((r.stdout or "") + (r.stderr or "")).strip())
+        res = beets_client.run_command("mbsubmit", [query], timeout=60.0)
+        output = _ANSI_RE.sub("", str(res.get("stdout") or res.get("output") or "")).strip()
         for line in output.splitlines():
             if line.strip():
                 log.append(line)
@@ -3846,10 +3820,8 @@ def item_mbsubmit(iid: int):
 def album_mbsubmit(aid: int):
     """Run beet mbsubmit for an album; return submission text."""
     def _do(log, cancel_event=None):
-        cfg = _write_job_beets_config("/tmp/beets_mbsubmit_album.yaml")
-        r = _beet_run([BEET_BIN, "-c", cfg, "mbsubmit", f"album_id:{aid}"],
-                      log, timeout=60, env=_beet_env(), cancel=cancel_event)
-        output = _ANSI_RE.sub("", ((r.stdout or "") + (r.stderr or "")).strip())
+        res = beets_client.run_command("mbsubmit", [f"album_id:{aid}"], timeout=60.0)
+        output = _ANSI_RE.sub("", str(res.get("stdout") or res.get("output") or "")).strip()
         for line in output.splitlines():
             if line.strip():
                 log.append(line)
@@ -3871,24 +3843,14 @@ def album_add_mbids(aid: int):
         return jsonify({"ok": False, "error": "Invalid MusicBrainz UUID format"}), 400
 
     def _do(log, cancel_event=None):
-        cfg = _write_job_beets_config("/tmp/beets_add_mbids.yaml")
-        query = f"album_id:{aid}"
-        modify_args = [f"mb_albumartistid={mb_albumartistid}",
-                       f"mb_releasegroupid={mb_releasegroupid}"]
+        fields = {
+            "mb_albumartistid": mb_albumartistid,
+            "mb_releasegroupid": mb_releasegroupid,
+        }
         if mb_albumid and _MB_UUID_RE.match(mb_albumid):
-            modify_args.append(f"mb_albumid={mb_albumid}")
-        r = _beet_run([BEET_BIN, "-c", cfg, "modify", "--yes", "--nowrite", query] + modify_args,
-                      log, timeout=120, env=_beet_env(), cancel=cancel_event)
-        if r.returncode not in (0, -9, 124):
-            raise RuntimeError(f"beet modify failed rc={r.returncode}")
-        r = _beet_run([BEET_BIN, "-c", cfg, "write", "--yes", query],
-                      log, timeout=120, env=_beet_env(), cancel=cancel_event)
-        if r.returncode not in (0, -9, 124):
-            log.append(f"  WARN beet write rc={r.returncode}")
-        r = _beet_run([BEET_BIN, "-c", cfg, "move", query],
-                      log, timeout=120, env=_beet_env(), cancel=cancel_event)
-        if r.returncode not in (0, -9, 124):
-            log.append(f"  WARN beet move rc={r.returncode}")
+            fields["mb_albumid"] = mb_albumid
+        beets_client.update_album_metadata(aid, fields)
+        beets_client.relocate_album(aid)
         _invalidate_lib_cache()
         _trigger_plex_refresh(log)
         log.append(f"MBIDs applied and album moved to MBID-stamped path.")
@@ -12271,19 +12233,8 @@ def match_album(aid):
 
         # 2 ── set mb_albumid on both items AND the album record
         log.append(f"[2/6] Setting mb_albumid={mb_albumid} on matched items + album record ...")
-        r = subprocess.run(
-            base + ["modify", "-y", "--nowrite", f"mb_albumid={mb_albumid}", f"album_id:{aid}"],
-            capture_output=True, text=True, timeout=120, env=env)
-        _append_proc_output(r)
-        if r.returncode != 0:
-            raise RuntimeError(f"modify failed (rc={r.returncode})")
-        # Also stamp the album record directly so mbsync can find it
-        try:
-            with _db() as _c:
-                _c.execute("UPDATE albums SET mb_albumid=? WHERE id=?", (mb_albumid, aid))
-            log.append(f"  albums.mb_albumid set to {mb_albumid}")
-        except Exception as ex:
-            log.append(f"  WARN: could not stamp album record: {ex}")
+        beets_client.update_album_metadata(aid, {"mb_albumid": mb_albumid})
+        log.append(f"  albums.mb_albumid set to {mb_albumid}")
 
         # 3 ── match & number tracks from MB release data
         log.append("[3/6] Numbering tracks from MusicBrainz release ...")
@@ -12295,33 +12246,23 @@ def match_album(aid):
 
         # 4 ── sync all metadata (titles, track numbers, artist, year...) from MusicBrainz
         log.append("[4/6] Syncing metadata from MusicBrainz (mbsync) ...")
-        r = subprocess.run(
-            base + ["mbsync", f"album_id:{aid}"],
-            capture_output=True, text=True, timeout=120, env=env)
-        _append_proc_output(r)
-        if r.returncode != 0:
-            log.append(f"WARN: mbsync exited {r.returncode} — continuing")
+        try:
+            plan = beets_client.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mb_albumid})
+            beets_client.apply_album_mb_track_repair(plan["operation_id"], write_tags=True)
+        except Exception as ex:
+            log.append(f"WARN: mbsync repair failed: {ex} — continuing")
 
         # Strip trailing year from album name before move (avoid "Album (2025) (2025)")
         _strip_year_from_album_db(aid, log)
 
         # 5 ── write tags to audio files
         log.append("[5/6] Writing tags to audio files ...")
-        r = subprocess.run(
-            base + ["write", f"album_id:{aid}"],
-            capture_output=True, text=True, timeout=60, env=env)
-        _append_proc_output(r)
-        if r.returncode != 0:
-            raise RuntimeError(f"beet write failed (rc={r.returncode})")
-
         # 6 ── move / rename files into Artist/Album/Track - Title structure
         log.append("[6/6] Moving files into library structure ...")
-        r = subprocess.run(
-            base + ["move", f"album_id:{aid}"],
-            capture_output=True, text=True, timeout=60, env=env)
-        _append_proc_output(r)
-        if r.returncode != 0:
-            log.append(f"WARN: beet move exited {r.returncode} (files may already be in place)")
+        try:
+            beets_client.relocate_album(aid)
+        except Exception as ex:
+            log.append(f"WARN: relocate_album exited {ex} (files may already be in place)")
 
         _invalidate_lib_cache()
 
@@ -27911,27 +27852,16 @@ def _lastgenre_force_config(log: list) -> str:
 
 def _lastgenre_cmd(force: bool, query: str, log: list, env: dict,
                    cancel_event=None, timeout: int = 180):
-    """Run beet lastgenre, using a temp config overlay when force=True so that
-    albums which already have a genre are also re-tagged."""
-    tmp_path = None
-    try:
-        import tempfile as _tf
-
-        with _tf.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False,
-                                    prefix="beets_lastgenre_", encoding="utf-8") as tmp:
-            tmp_path = tmp.name
-        extra = "lastgenre:\n    force: yes\n" if force else ""
-        cfg = _write_job_beets_config(tmp_path, extra)
-        if force:
-            log.append("  using temporary lastgenre.force config without fragile job plugins")
-        cmd = [BEET_BIN, "-c", cfg, "lastgenre"] + ([query] if query else [])
-        return _beet_run(cmd, log, timeout=timeout, env=env, cancel=cancel_event)
-    finally:
-        if tmp_path:
-            try:
-                os.unlink(tmp_path)
-            except Exception:
-                pass
+    """Run beet lastgenre via BeetsClient IPC."""
+    args = ["-f"] if force else []
+    if query:
+        args.append(query)
+    res = beets_client.run_command("lastgenre", args, timeout=float(timeout))
+    return SimpleNamespace(
+        returncode=0 if res.get("ok") else 1,
+        stdout=str(res.get("stdout") or res.get("output") or ""),
+        stderr=str(res.get("stderr") or ""),
+    )
 
 
 @app.post("/api/library/fix-genres")
@@ -28583,20 +28513,10 @@ def library_merge_artist_id():
                 log.append("[cancelled]")
                 return
             log.append(f"[{i}/{len(affected_ids)}] Writing and moving album_id:{aid}")
-            for args, timeout in (
-                (["write", f"album_id:{aid}"], 120),
-                (["move", f"album_id:{aid}"], 120),
-            ):
-                r = subprocess.run(
-                    [BEET_BIN, "-c", _tmp_cfg] + args,
-                    capture_output=True, text=True, timeout=timeout,
-                    env=_beet_env(),
-                )
-                for line in (r.stdout + r.stderr).splitlines():
-                    if line.strip():
-                        log.append("  " + line)
-                if r.returncode != 0:
-                    log.append(f"  WARN: beet {' '.join(args)} exited {r.returncode}")
+            try:
+                beets_client.relocate_album(aid)
+            except Exception as ex:
+                log.append(f"  WARN: relocate_album for album_id:{aid} exited: {ex}")
 
         _cleanup_artist_alias_source_dirs(source_folders, canonical, log)
         _warn_artist_alias_remaining_paths(affected_ids, source_folders, log)
@@ -28630,18 +28550,6 @@ def library_confirm_artist_alias():
         mbid = _resolve_artist_alias_mbid(source, canonical, resolved_mbid, log)
         if not mbid:
             raise RuntimeError("Could not resolve a MusicBrainz artist ID")
-        _plugins = _beet_plugins()
-        _tmp_cfg = "/tmp/beets_alias_confirm.yaml"
-        try:
-            Path(_tmp_cfg).write_text(
-                "include:\n  - /config/config.yaml\n"
-                + _BEETS_PLUGINPATH_CONFIG
-                + (f"plugins: {_plugins}\n" if _plugins else "")
-                + _JOB_PATHS_CONFIG_BLOCK
-                + "lyrics:\n  auto: no\nreplaygain:\n  auto: no\n"
-            )
-        except Exception:
-            _tmp_cfg = "/config/config.yaml"
         log.append(f"Confirmed alias: {source!r} -> {canonical!r}")
         log.append(f"MusicBrainz artist ID: {mbid}")
         with _db(row_factory=sqlite3.Row) as con:
@@ -28674,20 +28582,10 @@ def library_confirm_artist_alias():
                 log.append("[cancelled]")
                 return
             log.append(f"[{i}/{len(affected_ids)}] Writing and moving album_id:{aid}")
-            for args, timeout in (
-                (["write", f"album_id:{aid}"], 120),
-                (["move", f"album_id:{aid}"], 120),
-            ):
-                r = subprocess.run(
-                    [BEET_BIN, "-c", _tmp_cfg] + args,
-                    capture_output=True, text=True, timeout=timeout,
-                    env=_beet_env(),
-                )
-                for line in (r.stdout + r.stderr).splitlines():
-                    if line.strip():
-                        log.append("  " + line)
-                if r.returncode != 0:
-                    log.append(f"  WARN: beet {' '.join(args)} exited {r.returncode}")
+            try:
+                beets_client.relocate_album(aid)
+            except Exception as ex:
+                log.append(f"  WARN: relocate_album for album_id:{aid} exited: {ex}")
 
         _cleanup_artist_alias_source_dirs(source_folders, canonical, log)
         _warn_artist_alias_remaining_paths(affected_ids, source_folders, log)
@@ -32982,9 +32880,6 @@ def apply_album_duplicate_resolver(aid):
                 retagged = len(updates)
 
                 if write_tags:
-                    job_cfg = f"/tmp/beets-duplicate-resolver-{aid}-{uuid.uuid4().hex}.yaml"
-                    base = [BEET_BIN, "-c", _write_job_beets_config(job_cfg)]
-                    env = _beet_env()
                     for entry in retags:
                         if cancel_event is not None and cancel_event.is_set():
                             raise RuntimeError("cancelled")
@@ -32993,14 +32888,10 @@ def apply_album_duplicate_resolver(aid):
                         item_id = int(item.get("id") or 0)
                         label = f"{int(target.get('disc') or 1)}.{int(target.get('track') or 0):02d} {_s(target.get('title') or '')}"
                         log.append(f"  Retagging item {item_id}: {label}")
-                        proc = _beet_run(base + ["write", f"id:{item_id}"], log, timeout=90,
-                                         env=env, cancel=cancel_event)
-                        if proc.returncode != 0:
-                            log.append(f"    WARN beet write failed for item {item_id} (rc={proc.returncode})")
-                        proc = _beet_run(base + ["move", f"id:{item_id}"], log, timeout=120,
-                                         env=env, cancel=cancel_event)
-                        if proc.returncode != 0:
-                            log.append(f"    WARN beet move failed for item {item_id} (rc={proc.returncode})")
+                        try:
+                            beets_client.relocate_album(album_id=0, item_id=item_id)
+                        except Exception as ex:
+                            log.append(f"    WARN relocate_album failed for item {item_id}: {ex}")
 
         if not dry_run and retagged:
             _invalidate_lib_cache()

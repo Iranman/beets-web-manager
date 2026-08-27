@@ -102,6 +102,14 @@ DOWNLOAD_PATH = os.environ.get("DOWNLOAD_PATH", "/data/torrents")
 # an uncaught NameError in production -- not just a security gap, the
 # feature could never have worked at all).
 MUSIC_ROOT = Path(MUSIC_LIBRARY_PATH)
+
+
+def _resolved_music_root() -> str:
+    return os.environ.get("MUSIC_ROOT") or os.environ.get("BEETS_MUSIC_ROOT") or str(MUSIC_ROOT)
+
+
+def _resolved_downloads_root() -> str:
+    return os.environ.get("DOWNLOADS_ROOT") or str(DOWNLOAD_PATH)
 PLAYLIST_DIR = Path(os.environ.get("PLAYLIST_DIR", "/data/media/music/playlists"))
 PLAYLIST_DOWNLOAD_ROOT = Path(os.environ.get(
     "PLAYLIST_DOWNLOAD_ROOT",
@@ -330,9 +338,18 @@ def _read_agent_config_file() -> dict[str, Any]:
 
 def _write_agent_config_file(content: str) -> dict[str, Any]:
     """Back up the existing config.yaml (if any), then overwrite it.
-    Raises OSError on failure; callers translate to a structured response."""
+    Validates YAML syntax before committing. Raises OSError/ValueError on failure."""
     if len(content.encode("utf-8")) > _AGENT_CONFIG_CONTENT_MAX_BYTES:
         raise ValueError("config content is too large")
+
+    import yaml
+    try:
+        parsed = yaml.safe_load(content)
+        if parsed is not None and not isinstance(parsed, (dict, list)):
+            raise ValueError("Invalid Beets configuration YAML structure")
+    except Exception as exc:
+        raise ValueError(f"Invalid Beets configuration YAML: {exc}") from exc
+
     with _AGENT_CONFIG_LOCK:
         if os.path.exists(_AGENT_CONFIG_PATH):
             shutil.copy2(_AGENT_CONFIG_PATH, _AGENT_CONFIG_BAK_PATH)
@@ -4303,9 +4320,9 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/imports/review/cleanup/plan":
-            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            music_root_env = _resolved_music_root()
             allowed_roots = [
-                os.environ.get("DOWNLOADS_ROOT", "/downloads"),
+                _resolved_downloads_root(),
                 os.environ.get("PLAYLIST_DOWNLOAD_ROOT", "/data/torrents/music/Playlist Downloads"),
                 os.environ.get("TORRENT_SOURCE_ROOTS", "/torrents"),
                 tempfile.gettempdir(),
@@ -4336,8 +4353,8 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             except Exception:
                 album_id = 0
             allowed_roots = [
-                os.environ.get("DOWNLOADS_ROOT", "/downloads"),
-                os.environ.get("MUSIC_ROOT", "/music"),
+                _resolved_downloads_root(),
+                _resolved_music_root(),
             ]
             res = transaction_engine.create_album_cleanup_plan(_txn_store, album_id, allowed_roots=allowed_roots, payload=body)
             code = 200 if res.get("ok") else 400
@@ -4371,10 +4388,10 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             # approved acquisition/staging root -- never the reverse, and
             # never accepted merely because a path happens to be under
             # *some* trusted root.
-            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            music_root_env = _resolved_music_root()
             original_allowed_roots = [music_root_env]
             candidate_allowed_roots = [
-                os.environ.get("DOWNLOADS_ROOT", "/downloads"),
+                _resolved_downloads_root(),
                 os.environ.get("PLAYLIST_DOWNLOAD_ROOT", "/data/torrents/music/Playlist Downloads"),
                 os.environ.get("TORRENT_SOURCE_ROOTS", "/torrents"),
                 tempfile.gettempdir(),
@@ -4394,11 +4411,11 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             if not op_id:
                 self._send_json(400, {"ok": False, "error": "operation_id required"})
                 return
-            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            music_root_env = _resolved_music_root()
             quarantine_root = os.environ.get("REPLACEMENT_QUARANTINE_DIR", "/config/track_replacement_quarantine")
             original_allowed_roots = [music_root_env]
             candidate_allowed_roots = [
-                os.environ.get("DOWNLOADS_ROOT", "/downloads"),
+                _resolved_downloads_root(),
                 os.environ.get("PLAYLIST_DOWNLOAD_ROOT", "/data/torrents/music/Playlist Downloads"),
                 os.environ.get("TORRENT_SOURCE_ROOTS", "/torrents"),
                 tempfile.gettempdir(),
@@ -4435,7 +4452,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             # for this family; unlike track_replacement_v1, a "candidate"
             # here is never an unimported file sitting in a download
             # directory.
-            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            music_root_env = _resolved_music_root()
             quarantine_root = os.environ.get("REPLACEMENT_QUARANTINE_DIR", "/config/track_replacement_quarantine")
             res = transaction_engine.create_bulk_import_replacement_plan(
                 _txn_store, body,
@@ -4452,7 +4469,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             if not op_id:
                 self._send_json(400, {"ok": False, "error": "operation_id required"})
                 return
-            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            music_root_env = _resolved_music_root()
             quarantine_root = os.environ.get("REPLACEMENT_QUARANTINE_DIR", "/config/track_replacement_quarantine")
             res = transaction_engine.execute_bulk_import_replacement_apply(
                 _txn_store, op_id,
@@ -4469,7 +4486,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             if not op_id:
                 self._send_json(400, {"ok": False, "error": "operation_id required"})
                 return
-            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            music_root_env = _resolved_music_root()
             quarantine_root = os.environ.get("REPLACEMENT_QUARANTINE_DIR", "/config/track_replacement_quarantine")
             res = transaction_engine.rollback_bulk_import_replacement(
                 _txn_store, op_id,
@@ -4482,7 +4499,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/albums/mb-track-repair/plan":
-            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            music_root_env = _resolved_music_root()
             res = transaction_engine.create_album_mb_track_repair_plan(
                 _txn_store, body,
                 music_allowed_roots=[music_root_env],
@@ -4497,7 +4514,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             if not op_id:
                 self._send_json(400, {"ok": False, "error": "operation_id required"})
                 return
-            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            music_root_env = _resolved_music_root()
             write_tags = bool(body.get("write_tags", True))
             res = transaction_engine.execute_album_mb_track_repair_apply(
                 _txn_store, op_id,
@@ -4514,7 +4531,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             if not op_id:
                 self._send_json(400, {"ok": False, "error": "operation_id required"})
                 return
-            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            music_root_env = _resolved_music_root()
             res = transaction_engine.rollback_album_mb_track_repair(
                 _txn_store, op_id,
                 db_path=LIB_PATH,
@@ -4535,10 +4552,10 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             # already use for candidate files) before treating anything
             # under it as authorized; an unvalidated source_folder is
             # simply ignored, not silently accepted.
-            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            music_root_env = _resolved_music_root()
             quarantine_root = os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
             staging_allowed_roots = [
-                os.environ.get("DOWNLOADS_ROOT", "/downloads"),
+                _resolved_downloads_root(),
                 os.environ.get("PLAYLIST_DOWNLOAD_ROOT", "/data/torrents/music/Playlist Downloads"),
                 os.environ.get("TORRENT_SOURCE_ROOTS", "/torrents"),
                 tempfile.gettempdir(),
@@ -4559,10 +4576,10 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             if not op_id:
                 self._send_json(400, {"ok": False, "error": "operation_id required"})
                 return
-            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            music_root_env = _resolved_music_root()
             quarantine_root = os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
             staging_allowed_roots = [
-                os.environ.get("DOWNLOADS_ROOT", "/downloads"),
+                _resolved_downloads_root(),
                 os.environ.get("PLAYLIST_DOWNLOAD_ROOT", "/data/torrents/music/Playlist Downloads"),
                 os.environ.get("TORRENT_SOURCE_ROOTS", "/torrents"),
                 tempfile.gettempdir(),
@@ -4583,7 +4600,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             if not op_id:
                 self._send_json(400, {"ok": False, "error": "operation_id required"})
                 return
-            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            music_root_env = _resolved_music_root()
             res = transaction_engine.rollback_existing_album_reconcile(
                 _txn_store, op_id,
                 db_path=LIB_PATH,
@@ -4594,7 +4611,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/artists/reconcile/plan":
-            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            music_root_env = _resolved_music_root()
             quarantine_root = os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
             res = transaction_engine.create_artist_folder_reconcile_plan(
                 _txn_store, body,
@@ -4611,7 +4628,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             if not op_id:
                 self._send_json(400, {"ok": False, "error": "operation_id required"})
                 return
-            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            music_root_env = _resolved_music_root()
             quarantine_root = os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
             res = transaction_engine.execute_artist_folder_reconcile_apply(
                 _txn_store, op_id,
@@ -4628,7 +4645,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             if not op_id:
                 self._send_json(400, {"ok": False, "error": "operation_id required"})
                 return
-            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            music_root_env = _resolved_music_root()
             res = transaction_engine.rollback_artist_folder_reconcile(
                 _txn_store, op_id,
                 db_path=LIB_PATH,
@@ -4639,7 +4656,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/albums/maintenance/plan":
-            music_root_env = os.environ.get("MUSIC_ROOT") or str(MUSIC_ROOT) or "/music"
+            music_root_env = _resolved_music_root()
             quarantine_root = os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
             res = transaction_engine.create_album_maintenance_plan(
                 _txn_store, body,
@@ -4656,7 +4673,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             if not op_id:
                 self._send_json(400, {"ok": False, "error": "operation_id required"})
                 return
-            music_root_env = os.environ.get("MUSIC_ROOT") or str(MUSIC_ROOT) or "/music"
+            music_root_env = _resolved_music_root()
             quarantine_root = os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
             res = transaction_engine.execute_album_maintenance_apply(
                 _txn_store, op_id,
@@ -4673,7 +4690,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             if not op_id:
                 self._send_json(400, {"ok": False, "error": "operation_id required"})
                 return
-            music_root_env = os.environ.get("MUSIC_ROOT") or str(MUSIC_ROOT) or "/music"
+            music_root_env = _resolved_music_root()
             res = transaction_engine.rollback_album_maintenance(
                 _txn_store, op_id,
                 db_path=LIB_PATH,
@@ -4684,8 +4701,8 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/albums/artwork/plan":
-            music_root_env = os.environ.get("MUSIC_ROOT") or str(MUSIC_ROOT) or "/music"
-            stg_roots = [os.environ.get("DOWNLOADS_ROOT", "/downloads"), os.environ.get("STAGING_ROOT", "/staging")]
+            music_root_env = _resolved_music_root()
+            stg_roots = [_resolved_downloads_root(), os.environ.get("STAGING_ROOT", "/staging")]
             quarantine_root = os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
             res = transaction_engine.create_album_artwork_plan(
                 _txn_store, body,
@@ -4703,7 +4720,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             if not op_id:
                 self._send_json(400, {"ok": False, "error": "operation_id required"})
                 return
-            music_root_env = os.environ.get("MUSIC_ROOT") or str(MUSIC_ROOT) or "/music"
+            music_root_env = _resolved_music_root()
             quarantine_root = os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
             res = transaction_engine.execute_album_artwork_apply(
                 _txn_store, op_id,
@@ -4720,7 +4737,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             if not op_id:
                 self._send_json(400, {"ok": False, "error": "operation_id required"})
                 return
-            music_root_env = os.environ.get("MUSIC_ROOT") or str(MUSIC_ROOT) or "/music"
+            music_root_env = _resolved_music_root()
             res = transaction_engine.rollback_album_artwork(
                 _txn_store, op_id,
                 db_path=LIB_PATH,
@@ -4775,8 +4792,8 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/albums/relocation/plan":
-            music_root_env = os.environ.get("MUSIC_ROOT") or str(MUSIC_ROOT) or "/music"
-            stg_roots = [os.environ.get("DOWNLOADS_ROOT", "/downloads"), os.environ.get("STAGING_ROOT", "/staging")]
+            music_root_env = _resolved_music_root()
+            stg_roots = [_resolved_downloads_root(), os.environ.get("STAGING_ROOT", "/staging")]
             res = transaction_engine.create_album_relocation_plan(
                 _txn_store, body,
                 music_allowed_roots=[music_root_env],
@@ -4792,7 +4809,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             if not op_id:
                 self._send_json(400, {"ok": False, "error": "operation_id required"})
                 return
-            music_root_env = os.environ.get("MUSIC_ROOT") or str(MUSIC_ROOT) or "/music"
+            music_root_env = _resolved_music_root()
             res = transaction_engine.execute_album_relocation_apply(
                 _txn_store, op_id,
                 db_path=LIB_PATH,
@@ -4807,7 +4824,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             if not op_id:
                 self._send_json(400, {"ok": False, "error": "operation_id required"})
                 return
-            music_root_env = os.environ.get("MUSIC_ROOT") or str(MUSIC_ROOT) or "/music"
+            music_root_env = _resolved_music_root()
             res = transaction_engine.rollback_album_relocation(
                 _txn_store, op_id,
                 db_path=LIB_PATH,
@@ -4818,7 +4835,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/albums/metadata/plan":
-            music_root_env = os.environ.get("MUSIC_ROOT") or str(MUSIC_ROOT) or "/music"
+            music_root_env = _resolved_music_root()
             res = transaction_engine.create_album_metadata_plan(
                 _txn_store, body,
                 music_allowed_roots=[music_root_env],
@@ -4833,7 +4850,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             if not op_id:
                 self._send_json(400, {"ok": False, "error": "operation_id required"})
                 return
-            music_root_env = os.environ.get("MUSIC_ROOT") or str(MUSIC_ROOT) or "/music"
+            music_root_env = _resolved_music_root()
             res = transaction_engine.execute_album_metadata_apply(
                 _txn_store, op_id,
                 music_allowed_roots=[music_root_env],
@@ -4865,7 +4882,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             # Dockerfile.beets) -- the real bind-mount targets are the
             # module-level MUSIC_ROOT (/data/media/music) and DOWNLOAD_PATH
             # (/data/torrents) constants above. os.environ.get("MUSIC_ROOT",
-            # "/music")/os.environ.get("DOWNLOADS_ROOT", "/downloads")
+            # "/music")/_resolved_downloads_root()
             # therefore always fell back to paths that do not exist in this
             # container at all, so create_import_folder_plan's root-
             # containment check rejected every real source folder with
@@ -4873,8 +4890,8 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             # actually was. Matches the already-correct fallback pattern
             # used elsewhere in this file (music_root_env = ... or
             # str(MUSIC_ROOT) or "/music").
-            music_root_env = os.environ.get("MUSIC_ROOT") or str(MUSIC_ROOT) or "/music"
-            stg_roots = [os.environ.get("DOWNLOADS_ROOT") or str(DOWNLOAD_PATH), os.environ.get("STAGING_ROOT") or str(DOWNLOAD_PATH), music_root_env]
+            music_root_env = _resolved_music_root()
+            stg_roots = [_resolved_downloads_root(), os.environ.get("STAGING_ROOT") or str(DOWNLOAD_PATH), music_root_env]
             quarantine_root = os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
             res = transaction_engine.create_import_folder_plan(
                 _txn_store, body,
@@ -4892,7 +4909,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             if not op_id:
                 self._send_json(400, {"ok": False, "error": "operation_id required"})
                 return
-            music_root_env = os.environ.get("MUSIC_ROOT") or str(MUSIC_ROOT) or "/music"
+            music_root_env = _resolved_music_root()
             quarantine_root = os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
 
             def _beets_import_runner(payload: dict) -> dict:
@@ -4921,7 +4938,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             if not op_id:
                 self._send_json(400, {"ok": False, "error": "operation_id required"})
                 return
-            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            music_root_env = _resolved_music_root()
             res = transaction_engine.rollback_import_folder(
                 _txn_store, op_id,
                 db_path=LIB_PATH,
@@ -4939,8 +4956,8 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
         # docs/operations/wave25_import_reconciliation_design.md.
 
         if path == "/imports/confirmed/plan":
-            music_root_env = os.environ.get("MUSIC_ROOT") or str(MUSIC_ROOT) or "/music"
-            stg_roots = [os.environ.get("DOWNLOADS_ROOT") or str(DOWNLOAD_PATH), os.environ.get("STAGING_ROOT") or str(DOWNLOAD_PATH)]
+            music_root_env = _resolved_music_root()
+            stg_roots = [_resolved_downloads_root(), os.environ.get("STAGING_ROOT") or str(DOWNLOAD_PATH)]
 
             def _inspect_for_confirmed_import(p: str) -> dict:
                 return inspect_import_source(p, "confirmed_import")
@@ -4970,7 +4987,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             if not op_id:
                 self._send_json(400, {"ok": False, "error": "operation_id required"})
                 return
-            music_root_env = os.environ.get("MUSIC_ROOT") or str(MUSIC_ROOT) or "/music"
+            music_root_env = _resolved_music_root()
 
             def _inspect_for_confirmed_import(p: str) -> dict:
                 return inspect_import_source(p, "confirmed_import")
@@ -5002,7 +5019,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
 
         # ── folder_cleanup_v1 ─────────────────────────────────────────────────
         if path == "/folders/cleanup/plan":
-            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            music_root_env = _resolved_music_root()
             res = transaction_engine.create_folder_cleanup_plan(
                 _txn_store, body,
                 db_path=LIB_PATH,
@@ -5017,7 +5034,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             if not op_id:
                 self._send_json(400, {"ok": False, "error": "operation_id required"})
                 return
-            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            music_root_env = _resolved_music_root()
             res = transaction_engine.execute_folder_cleanup_apply(
                 _txn_store, op_id,
                 db_path=LIB_PATH,
@@ -5032,7 +5049,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             if not op_id:
                 self._send_json(400, {"ok": False, "error": "operation_id required"})
                 return
-            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            music_root_env = _resolved_music_root()
             res = transaction_engine.rollback_folder_cleanup(
                 _txn_store, op_id,
                 music_allowed_roots=[music_root_env],
@@ -5044,12 +5061,12 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
         # ── library_cleanup_v1 ─────────────────────────────────────────────────
         if path == "/library/cleanup/plan":
             music_roots = _allowed_root_paths(["music"])
-            music_root_env = os.environ.get("MUSIC_ROOT") or str(MUSIC_ROOT) or "/music"
+            music_root_env = _resolved_music_root()
             if music_root_env not in music_roots:
                 music_roots.append(music_root_env)
             staging_roots = _allowed_root_paths(["staging"])
             for raw in (
-                os.environ.get("DOWNLOADS_ROOT", "/downloads"),
+                _resolved_downloads_root(),
                 os.environ.get("STAGING_ROOT", "/staging"),
                 os.environ.get("DOWNLOAD_PATH", DOWNLOAD_PATH),
                 str(PLAYLIST_DOWNLOAD_ROOT),
@@ -5074,12 +5091,12 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 self._send_json(400, {"ok": False, "error": "operation_id required"})
                 return
             music_roots = _allowed_root_paths(["music"])
-            music_root_env = os.environ.get("MUSIC_ROOT") or str(MUSIC_ROOT) or "/music"
+            music_root_env = _resolved_music_root()
             if music_root_env not in music_roots:
                 music_roots.append(music_root_env)
             staging_roots = _allowed_root_paths(["staging"])
             for raw in (
-                os.environ.get("DOWNLOADS_ROOT", "/downloads"),
+                _resolved_downloads_root(),
                 os.environ.get("STAGING_ROOT", "/staging"),
                 os.environ.get("DOWNLOAD_PATH", DOWNLOAD_PATH),
                 str(PLAYLIST_DOWNLOAD_ROOT),
@@ -5104,12 +5121,12 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 self._send_json(400, {"ok": False, "error": "operation_id required"})
                 return
             music_roots = _allowed_root_paths(["music"])
-            music_root_env = os.environ.get("MUSIC_ROOT") or str(MUSIC_ROOT) or "/music"
+            music_root_env = _resolved_music_root()
             if music_root_env not in music_roots:
                 music_roots.append(music_root_env)
             staging_roots = _allowed_root_paths(["staging"])
             for raw in (
-                os.environ.get("DOWNLOADS_ROOT", "/downloads"),
+                _resolved_downloads_root(),
                 os.environ.get("STAGING_ROOT", "/staging"),
                 os.environ.get("DOWNLOAD_PATH", DOWNLOAD_PATH),
                 str(PLAYLIST_DOWNLOAD_ROOT),
@@ -5127,7 +5144,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             return
         # ── playlist_media_cleanup_v1 ──────────────────────────────────────────
         if path == "/playlists/media-cleanup/plan":
-            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            music_root_env = _resolved_music_root()
             quarantine_root = os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
             res = transaction_engine.create_playlist_media_cleanup_plan(
                 _txn_store, body,
@@ -5144,7 +5161,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             if not op_id:
                 self._send_json(400, {"ok": False, "error": "operation_id required"})
                 return
-            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            music_root_env = _resolved_music_root()
             quarantine_root = os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
             res = transaction_engine.execute_playlist_media_cleanup_apply(
                 _txn_store, op_id,
@@ -5161,7 +5178,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             if not op_id:
                 self._send_json(400, {"ok": False, "error": "operation_id required"})
                 return
-            music_root_env = os.environ.get("MUSIC_ROOT", "/music")
+            music_root_env = _resolved_music_root()
             res = transaction_engine.rollback_playlist_media_cleanup(
                 _txn_store, op_id,
                 db_path=LIB_PATH,
