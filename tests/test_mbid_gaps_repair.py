@@ -52,14 +52,11 @@ class MbidGapsRepairFixesTheBugTests(unittest.TestCase):
         self.assertIn("_album_source_folder(aid)", self._fn)
 
     def test_writes_resolved_release_id_to_album_db_row(self):
-        self.assertIn('"UPDATE albums SET mb_albumid=? WHERE id=?"', self._fn)
+        self.assertIn('beets_client.update_album_metadata(aid, {"mb_albumid": mbid})', self._fn)
 
     def test_writes_release_group_id_when_it_was_blank(self):
         self.assertIn("_fetch_mb_release_candidate(resolved_mbid)", self._fn)
-        self.assertIn(
-            '"UPDATE albums SET mb_albumid=?, mb_releasegroupid=? WHERE id=?"',
-            self._fn,
-        )
+        self.assertIn("beets_client.update_album_metadata(aid, meta_opts)", self._fn)
 
     def test_unresolved_albums_get_a_reason_not_silent_failure(self):
         self.assertIn('"No MusicBrainz match found"', self._fn)
@@ -103,8 +100,8 @@ class MbidGapsRepairSummaryCountsTests(unittest.TestCase):
 
     def test_beet_write_failure_increments_failed_count_not_silently_ignored(self):
         write_block = self._fn[
-            self._fn.index("if write_tags:"):
-            self._fn.index("elif not dry_run:")
+            self._fn.index("if track_updates:"):
+            self._fn.index("if album_changed:")
         ]
         self.assertIn('summary["failed_count"] += 1', write_block)
 
@@ -151,9 +148,9 @@ class MbidGapsRepairDebugLoggingTests(unittest.TestCase):
         self.assertIn("missing: {release_gaps} release-id row(s)", self._fn)
 
     def test_logs_where_writes_landed(self):
-        self.assertIn("wrote {changed} row(s) to DB: items.mb_albumid", self._fn)
-        self.assertIn("wrote {len(track_updates)} row(s) to DB:", self._fn)
-        self.assertIn("wrote fixed IDs to file tags (beet write)", self._fn)
+        self.assertIn("wrote {changed} row(s) via IPC: items.mb_albumid", self._fn)
+        self.assertIn("Repaired {len(track_updates)} recording ID(s) via IPC:", self._fn)
+        self.assertIn("beets_client.apply_album_mb_track_repair(", self._fn)
 
     def test_logs_skip_reason(self):
         self.assertIn("SKIPPED — {reason}. Needs manual review.", self._fn)
