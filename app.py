@@ -3510,17 +3510,19 @@ def _write_fast_item_modify_config(path_value: str) -> str:
 
 
 def _run_item_metadata_restore(item_id: int, fields: Dict[str, Any], log: List[str], cancel_event=None) -> bool:
-    if not fields:
+    parts = [f"{k}={v}" for k, v in (fields or {}).items()]
+    if not parts:
         log.append("  [rollback] No metadata fields to restore.")
         return True
-    try:
-        beets_client.update_item_metadata(item_id, fields)
-        _invalidate_lib_cache()
-        log.append(f"  [rollback] Restored metadata for item {item_id}.")
-        return True
-    except Exception as ex:
-        log.append(f"  [rollback] Metadata restore failed for item {item_id}: {_redact_security_text(str(ex))[:200]}")
+    cfg = _write_fast_item_modify_config(f"/tmp/beets_rollback_item_{item_id}_{uuid.uuid4().hex}.yaml")
+    cmd = [BEET_BIN, "-c", cfg, "modify", "--yes", "--nowrite", f"id:{item_id}"] + parts
+    r = _beet_run(cmd, log, timeout=60, env=_beet_env(), cancel=cancel_event)
+    if r.returncode not in (0, -9, 124):
+        log.append(f"  [rollback] Metadata restore failed for item {item_id} (rc={r.returncode}).")
         return False
+    _invalidate_lib_cache()
+    log.append(f"  [rollback] Restored metadata for item {item_id}.")
+    return True
 
 
 # ── attach-recording: per-item reservation + strict subprocess outcomes ───────
@@ -3571,12 +3573,31 @@ def _require_attach_stage_success(result, stage: str) -> None:
 
 def _run_item_recording_id_restore(item_id: int, fields: Dict[str, Any], log: List[str], cancel_event=None) -> bool:
     """Undo executor for attach-recording: restores the previous
-    Recording/Release/Release-Group IDs via IPC. Returns True only when
-    restoration succeeds."""
+    Recording/Release/Release-Group IDs and re-runs the same
+    modify+mbsync+write+move sequence attach-recording used, so the file's
+    on-disk tags and library path go back in sync with the pre-attach IDs
+    (not just the beets database row). Returns True only when every
+    required stage actually succeeded (rc=0) -- a cancelled, timed-out, or
+    failed stage must never be reported as a successful restore, and the
+    caller must not mark the source transaction "Rolled Back" for a False
+    return."""
+    mb_trackid = _s((fields or {}).get("mb_trackid", "")).strip().lower()
+    mb_albumid = _s((fields or {}).get("mb_albumid", "")).strip().lower()
+    mb_releasegroupid = _s((fields or {}).get("mb_releasegroupid", "")).strip().lower()
+    cfg = _write_fast_item_modify_config(f"/tmp/beets_rollback_recording_{item_id}_{uuid.uuid4().hex}.yaml")
+    base = [BEET_BIN, "-c", cfg]
+    query = f"id:{item_id}"
+    parts = [f"mb_trackid={mb_trackid}", f"mb_albumid={mb_albumid}", f"mb_releasegroupid={mb_releasegroupid}"]
     try:
-        updates = dict(fields or {})
-        beets_client.update_item_metadata(item_id, updates)
-        beets_client.relocate_album(album_id=0, item_id=item_id)
+        r = _beet_run(base + ["modify", "--yes", "--nowrite", query] + parts, log, timeout=60, env=_beet_env(), cancel=cancel_event)
+        _require_attach_stage_success(r, "rollback modify")
+        if mb_trackid:
+            r = _beet_run(base + ["mbsync", query], log, timeout=60, env=_beet_env(), cancel=cancel_event)
+            _require_attach_stage_success(r, "rollback mbsync")
+        r = _beet_run(base + ["write", "--yes", query], log, timeout=60, env=_beet_env(), cancel=cancel_event)
+        _require_attach_stage_success(r, "rollback write")
+        r = _beet_run(base + ["move", query], log, timeout=60, env=_beet_env(), cancel=cancel_event)
+        _require_attach_stage_success(r, "rollback move")
     except AttachRecordingCancelled:
         log.append(f"  [rollback] Recording ID restore cancelled for item {item_id}.")
         return False

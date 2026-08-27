@@ -153,9 +153,21 @@ _APP_FUNCTION_CLASSIFICATION = {
     "_cleanup_initial_browser_password_if_replaced": ("CONFIG_STATE", "config_v1", "reviewed-library-cleanup-closure-initial-browser-password"),
     "_playlist_stamp_download_tags": ("STAGING_ONLY", "playlist_staging_v1", "reviewed-library-cleanup-closure-playlist-download-tags"),
     "_enrich_playlist_file_tags": ("STAGING_ONLY", "playlist_staging_v1", "reviewed-library-cleanup-closure-playlist-download-tags"),
+    "_run_item_metadata_restore": ("ENGINE_ADMIN_MUTATION", "", "reviewed-wave27-attach-rollback-metadata-restore"),
+    "_run_item_recording_id_restore": ("ENGINE_ADMIN_MUTATION", "", "reviewed-wave27-attach-rollback-recording-id-restore"),
 }
 
 _REVIEWED_RULE_DETAILS = {
+    "reviewed-wave27-attach-rollback-metadata-restore": {
+        "domain": "album_metadata",
+        "review_reason": "SEC-002 Wave 27 review: rollback executor for attach-recording metadata fields.",
+        "reviewed_in_pr": 102,
+    },
+    "reviewed-wave27-attach-rollback-recording-id-restore": {
+        "domain": "album_metadata",
+        "review_reason": "SEC-002 Wave 27 review: strict 4-stage rollback executor for attach-recording identity.",
+        "reviewed_in_pr": 102,
+    },
     "reviewed-library-cleanup-closure-runtime-cleanup": {
         "domain": "config",
         "review_reason": "SEC-002 library_cleanup closure: target is an application-managed yt-dlp JavaScript runtime binary under YTDLP_RUNTIME_BIN_DIR, not media-library state; app code rejects path separators, directories, and symlinks before unlink.",
