@@ -1507,33 +1507,62 @@ def run_wave26_ai_import_scenarios(client: "HttpClient", web_container: str, eng
     # _AI_BATCH_RETRYABLE_FOLDER_STATUSES -- the correct route for
     # re-attempting it is the dedicated recover endpoint with
     # retry_failed=true.
-    status, body = client.request(
-        "POST", "/api/ai-batch-import/recover",
-        json_body={"batch_job_id": offline_batch_job_id, "retry_failed": True},
-        timeout=60,
-    )
-    if status != 200 or not body.get("ok") or not body.get("job_id"):
-        scenario_fail("engine-offline-ai-import", f"post-restart retry request rejected: {status} {body}")
-        return
-    try:
-        result = client.wait_job(body["job_id"], timeout=180)
-    except TimeoutError as ex:
-        scenario_fail("engine-offline-ai-import", f"post-restart retry did not resolve: {ex}")
-        return
-    if result.get("status") != "success":
-        scenario_fail("engine-offline-ai-import", f"post-restart retry did not succeed truthfully: {result.get('status')} / {result.get('log')}")
-        return
-    try:
-        con = sqlite3.connect(db_path)
-        post_restart_rows = con.execute("SELECT id FROM albums WHERE mb_albumid=?", (WAVE26_ENGINE_OFFLINE_RELEASE_ID,)).fetchall()
-        con.close()
-    except Exception as ex:
-        scenario_fail("engine-offline-ai-import", f"could not verify host-mounted DB state after retry: {ex}")
-        return
-    if len(post_restart_rows) != 1:
-        scenario_fail("engine-offline-ai-import", f"expected exactly 1 album row after the post-restart retry, found {len(post_restart_rows)} -- job log: {result.get('log')}")
-    else:
-        scenario_pass("engine-offline-ai-import-retry-succeeds (the exact same AI-reviewed batch, retried after the engine came back, completed the real confirmed_import_v1 import with zero rows created while the engine was down)")
+    #
+    # Found on real Linux CI (not just locally): `docker start` + this
+    # script's own wait_healthy() reporting the engine container healthy
+    # does not guarantee the Docker network's internal DNS has finished
+    # re-registering that container's name yet -- one real CI run's first
+    # post-restart retry attempt hit "blocked outbound request to
+    # unresolved host: http://beets:8338/..." from inside beets-web-manager
+    # a fraction of a second after the healthcheck itself passed, and the
+    # folder correctly (truthfully) landed back in a retryable state
+    # ("Could not scan source folder") rather than a false success. This
+    # mirrors the exact same transient-retry pattern this script already
+    # uses for MusicBrainz's own real 503s (_fetch_release_tracklist) --
+    # retry the whole recover-and-verify cycle a bounded number of times
+    # before failing, rather than either a fixed sleep (fragile: no
+    # guarantee it's long enough) or accepting the transient failure as
+    # this scenario's real outcome (it would defeat the scenario's whole
+    # point, which is proving the retry DOES succeed once the engine is
+    # actually reachable).
+    last_log: list = []
+    for attempt in range(1, 4):
+        status, body = client.request(
+            "POST", "/api/ai-batch-import/recover",
+            json_body={"batch_job_id": offline_batch_job_id, "retry_failed": True},
+            timeout=60,
+        )
+        if status != 200 or not body.get("ok") or not body.get("job_id"):
+            scenario_fail("engine-offline-ai-import", f"post-restart retry request rejected: {status} {body}")
+            return
+        try:
+            result = client.wait_job(body["job_id"], timeout=180)
+        except TimeoutError as ex:
+            scenario_fail("engine-offline-ai-import", f"post-restart retry did not resolve: {ex}")
+            return
+        last_log = result.get("log") or []
+        if result.get("status") != "success":
+            scenario_fail("engine-offline-ai-import", f"post-restart retry did not succeed truthfully: {result.get('status')} / {last_log}")
+            return
+        try:
+            con = sqlite3.connect(db_path)
+            post_restart_rows = con.execute("SELECT id FROM albums WHERE mb_albumid=?", (WAVE26_ENGINE_OFFLINE_RELEASE_ID,)).fetchall()
+            con.close()
+        except Exception as ex:
+            scenario_fail("engine-offline-ai-import", f"could not verify host-mounted DB state after retry: {ex}")
+            return
+        if len(post_restart_rows) == 1:
+            scenario_pass(f"engine-offline-ai-import-retry-succeeds (attempt {attempt}/3: the exact same AI-reviewed batch, retried after the engine came back, completed the real confirmed_import_v1 import with zero rows created while the engine was down)")
+            return
+        if len(post_restart_rows) > 1:
+            scenario_fail("engine-offline-ai-import", f"expected at most 1 album row after the post-restart retry, found {len(post_restart_rows)} -- job log: {last_log}")
+            return
+        transient = any("Could not scan source folder" in line or "unresolved host" in line for line in last_log)
+        if not transient or attempt == 3:
+            break
+        print(f"  [retry {attempt}/3] transient engine-connectivity failure right after restart, retrying: {last_log}")
+        time.sleep(3.0 * attempt)
+    scenario_fail("engine-offline-ai-import", f"expected exactly 1 album row after the post-restart retry (tried 3 times), found 0 -- job log: {last_log}")
 
 
 def main() -> int:
