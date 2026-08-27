@@ -72,12 +72,13 @@ class RootFolderRepairApplySafeTests(unittest.TestCase):
         self.assertIn("_album_cleanup_remove_empty_tree(folder, log)", self._apply)
 
     def test_shallow_items_use_beet_write_then_move_per_item(self):
-        self.assertIn('base + ["write", f"id:{iid}"]', self._apply)
-        self.assertIn('base + ["move", f"id:{iid}"]', self._apply)
+        self.assertIn('beets_client.update_album_metadata(', self._apply)
+        self.assertIn('beets_client.relocate_album(', self._apply)
 
     def test_mbsync_only_when_item_has_mb_ids(self):
         self.assertIn("has_mb", self._apply)
-        self.assertIn('base + ["mbsync", f"id:{iid}"]', self._apply)
+        self.assertIn('beets_client.plan_album_mb_track_repair(', self._apply)
+        self.assertIn('beets_client.apply_album_mb_track_repair(', self._apply)
 
     def test_orphaned_folders_are_queued_not_deleted(self):
         # Untracked audio must never be silently removed; queue for review.
