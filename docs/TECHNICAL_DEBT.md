@@ -614,6 +614,42 @@ Independent review did not accept green tests/CI as proof this wiring was safe o
 - Priority: P2.
 - Status: Closed -- `_AI_PENDING_FILE` fixed and proven via a real, reproduced-live Docker acceptance failure (not merely inspection); `_AI_REVIEW_DECISIONS_FILE`/`_ALBUM_MB_SUGGESTIONS_FILE` audited and confirmed inert at their current `/config` default.
 
+## ARCH-019 `test_undo_restores_previous_identity_values` Is Intermittently Flaky Under CI Load
+
+- Affected area: `tests/test_import_review_attach_enforcement.py`'s
+  `test_undo_restores_previous_identity_values` (Wave 24 era, pre-existing, not touched by
+  Wave 26). Asserts `APP.transactions.get(audit_id)["status"] == "Rolled Back"` immediately
+  after `_wait_job(rollback_body["job_id"])` reports `status == "success"` for the rollback job.
+- Found live on real GitHub Actions CI (PR #101, exact head
+  `382fb6b853527d5947f3f7d7da067afa5ebccfbf`): this repo's own dual-workflow-trigger setup ran
+  two independent `security` job instances against the identical commit simultaneously. One
+  passed cleanly; the other failed with `AssertionError: 'Running' != 'Rolled Back'` on exactly
+  this one test, nothing else. Re-running the failed job alone (`gh run rerun --failed`, no
+  code change) passed cleanly. Never reproduced across this same PR's own extensive local
+  full-suite runs (this exact test file ran clean many times over this review round).
+- Current risk: Low, but real -- this points at a genuine race between the rollback *job*
+  reporting success and the *transaction store's* own status field actually being updated to
+  its terminal value, that only manifests under real CI resource contention (two simultaneous
+  test-suite runs on the same runner), not in an unloaded local run. Test-only as observed so
+  far (the job itself did report "success" correctly), but the same ordering gap, if it exists
+  in the underlying rollback code path rather than only in this test's own timing assumptions,
+  could mean a caller elsewhere trusts a job's "success" status as proof the transaction
+  record is already updated when it is not yet, under equivalent load.
+- Desired state: Either the test polls/rechecks `tx["status"]` with a short bounded retry
+  (matching this codebase's own established transient-retry pattern elsewhere, e.g.
+  `_fetch_release_tracklist`'s MusicBrainz 503 handling) instead of asserting immediately after
+  `_wait_job` returns, or -- if a real ordering bug is confirmed -- the production rollback
+  path itself is fixed so the job is not marked "success" until the transaction record's status
+  update has actually committed.
+- Safe migration approach: Reproduce deliberately under artificial CI-like load (e.g. running
+  this test file concurrently with another full-suite invocation) before deciding which side
+  needs the fix; do not guess from a single observed instance.
+- Priority: P3.
+- Status: Open. Not fixed this pass -- flagged only, found incidentally while finishing the
+  unrelated PR #101 (Wave 26) review; confirmed as a genuine intermittent CI-load-dependent
+  flake (not a Wave 26 regression) via an immediate clean re-run of the exact same commit, not
+  worked around or silently ignored.
+
 ### Wave 9: Playlist, Plex Sync & Staging-Manifest Path Security (22 alerts)
 
 - Starting main SHA: `98d490ec3c40f331dd23061d522e2ac79b015576` (PR #81 / v0.1.13 release commit).
