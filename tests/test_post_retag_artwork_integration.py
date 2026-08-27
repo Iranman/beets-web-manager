@@ -197,9 +197,21 @@ class AiImportFolderSequenceTests(unittest.TestCase):
         self.fake_beet_run = fake_beet_run
         self._patch(mock.patch.object(APP, "_beet_run", side_effect=fake_beet_run))
 
-        def fake_reimport(folder_path, beets_options=None, timeout=None, **kwargs):
-            self.call_order.append(("beet_run", ("import", "-q", "--noincremental", "--quiet-fallback", "asis", "copy", "--search-id", MB_ALBUMID, folder_path)))
-            return {"ok": True, "album_id": self.aid}
+        def fake_fetch_tracklist(mb_albumid, log=None):
+            return {
+                "ok": True,
+                "tracks": [{"track": 1, "title": "Track One", "mb_trackid": "t1", "duration_ms": 200000}],
+                "release_group": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "artist": "Alex Haas & Bill Laswell",
+                "title": "Incidents",
+            }
+
+        def fake_plan_confirmed_import(payload, **kwargs):
+            self.call_order.append(("beet_run", ("import", "-q", "--noincremental", "--quiet-fallback", "skip", "--search-id", MB_ALBUMID, payload.get("source_folder"))))
+            return {"ok": True, "operation_id": "op-confirmed-fake-123"}
+
+        def fake_apply_confirmed_import(op_id, **kwargs):
+            return {"ok": True, "album_id": self.aid, "item_ids": [1]}
 
         def fake_plan_mb_track(payload, **kwargs):
             aid = payload.get("album_id", self.aid)
@@ -217,13 +229,17 @@ class AiImportFolderSequenceTests(unittest.TestCase):
             self.call_order.append(("beet_run", ("move", f"album_id:{aid}")))
             return {"ok": True, "dest_dir": "/data/media/music/artist/album"}
 
-        self.fake_reimport = fake_reimport
+        self.fake_fetch_tracklist = fake_fetch_tracklist
+        self.fake_plan_confirmed_import = fake_plan_confirmed_import
+        self.fake_apply_confirmed_import = fake_apply_confirmed_import
         self.fake_plan_mb_track = fake_plan_mb_track
         self.fake_apply_mb_track = fake_apply_mb_track
         self.fake_update_meta = fake_update_meta
         self.fake_relocate = fake_relocate
 
-        self._patch(mock.patch.object(APP.beets_client, "reimport_source", side_effect=fake_reimport))
+        self._patch(mock.patch.object(APP, "_fetch_mb_release_tracklist", side_effect=fake_fetch_tracklist))
+        self._patch(mock.patch.object(APP.beets_client, "plan_confirmed_import", side_effect=fake_plan_confirmed_import))
+        self._patch(mock.patch.object(APP.beets_client, "apply_confirmed_import", side_effect=fake_apply_confirmed_import))
         self._patch(mock.patch.object(APP.beets_client, "plan_album_mb_track_repair", side_effect=fake_plan_mb_track))
         self._patch(mock.patch.object(APP.beets_client, "apply_album_mb_track_repair", side_effect=fake_apply_mb_track))
         self._patch(mock.patch.object(APP.beets_client, "update_album_metadata", side_effect=fake_update_meta))
@@ -349,7 +365,7 @@ class AiImportFolderSequenceTests(unittest.TestCase):
         self.assertEqual(result["artwork_status"], "skipped_identity_unverified")
 
     def test_no_album_found_reports_contract_and_skips_artwork(self):
-        with mock.patch.object(APP.beets_client, "reimport_source", return_value={"ok": True, "album_id": None}), \
+        with mock.patch.object(APP.beets_client, "apply_confirmed_import", return_value={"ok": True, "album_id": None}), \
              mock.patch.object(APP.lib, "get_album", side_effect=lambda aid: None), \
              mock.patch("sqlite3.connect") as connect_mock:
             fake_con = mock.MagicMock()
@@ -365,7 +381,7 @@ class AiImportFolderSequenceTests(unittest.TestCase):
     # ---- prior-stage failure gating -----------------------------------------
 
     def test_import_failure_raises_before_any_later_stage(self):
-        with mock.patch.object(APP.beets_client, "reimport_source", return_value={"ok": False, "error": "boom"}), \
+        with mock.patch.object(APP.beets_client, "apply_confirmed_import", return_value={"ok": False, "error": "boom"}), \
              mock.patch.object(APP, "_repair_album_art") as repair:
             with self.assertRaises(RuntimeError):
                 APP._ai_import_folder("/tmp/incidents", MB_ALBUMID, {}, self.log)
@@ -401,7 +417,7 @@ class AiImportFolderSequenceTests(unittest.TestCase):
         repair.assert_not_called()
 
     def test_import_timeout_returncode_raises_before_any_later_stage(self):
-        with mock.patch.object(APP.beets_client, "reimport_source", return_value={"ok": False, "error": "timeout"}), \
+        with mock.patch.object(APP.beets_client, "apply_confirmed_import", return_value={"ok": False, "error": "timeout"}), \
              mock.patch.object(APP, "_repair_album_art") as repair:
             with self.assertRaises(RuntimeError):
                 APP._ai_import_folder("/tmp/incidents", MB_ALBUMID, {}, self.log)

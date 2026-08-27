@@ -1,3 +1,4 @@
+import atexit
 import json
 import os
 import shutil
@@ -1606,7 +1607,12 @@ class MatchingContractMalformedInputTests(unittest.TestCase):
 ROOT = Path(__file__).resolve().parents[1]
 
 _APP_TMP_ROOT = Path(tempfile.mkdtemp(prefix="beets_matching_contract_app_"))
-unittest.addModuleCleanup(shutil.rmtree, str(_APP_TMP_ROOT), ignore_errors=True)
+# Deliberately atexit, not unittest.addModuleCleanup -- see the full
+# explanation in tests/test_post_retag_artwork_integration.py and the real
+# failure this caused in tests/test_ai_batch_retry_race.py (Wave 26 review):
+# addModuleCleanup drains process-wide, not per-module, so another module
+# finishing first can delete this module's own tmp root mid-run.
+atexit.register(shutil.rmtree, str(_APP_TMP_ROOT), ignore_errors=True)
 
 _APP_ENV_OVERRIDES = {
     "BEETSDIR": str(_APP_TMP_ROOT / "config"),
@@ -1619,7 +1625,7 @@ _APP_ENV_OVERRIDES = {
 (_APP_TMP_ROOT / "config").mkdir(parents=True, exist_ok=True)
 _app_env_patcher = mock.patch.dict(os.environ, _APP_ENV_OVERRIDES, clear=False)
 _app_env_patcher.start()
-unittest.addModuleCleanup(_app_env_patcher.stop)
+atexit.register(_app_env_patcher.stop)
 
 
 def _import_app_for_boundary_tests():

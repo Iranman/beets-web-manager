@@ -17,11 +17,32 @@ def section(source: str, start: str, end: str) -> str:
 
 class AiBatchImportReliabilityTests(unittest.TestCase):
     def test_batch_scan_creates_durable_batch_job(self):
-        self.assertIn('_AI_BATCH_STATE_DIR = Path(os.environ.get("AI_BATCH_STATE_DIR", "/config/ai_batch_jobs"))', APP)
+        # Wave 26 correction: the default must be a Web-Manager-owned path
+        # (WEB_MANAGER_DATA_DIR, i.e. /web-manager-data), never the Beets
+        # engine's /config mount -- that directory does not exist in the
+        # beets-web-manager container in either documented two-service
+        # compose topology, and AiBatchStateStore's constructor-time mkdir
+        # raised PermissionError there, crashing app.py at import time
+        # before the container could ever become healthy.
+        self.assertIn('_AI_BATCH_STATE_DIR = Path(os.environ.get("AI_BATCH_STATE_DIR", str(WEB_MANAGER_DATA_DIR / "ai_batch_jobs")))', APP)
+        self.assertNotIn('_AI_BATCH_STATE_DIR = Path(os.environ.get("AI_BATCH_STATE_DIR", "/config/ai_batch_jobs"))', APP)
         self.assertIn('def _ai_batch_write_state', APP)
         self.assertIn('def _ai_batch_initial_state', APP)
         self.assertIn('"batch_job_id": batch_job_id', APP)
         self.assertIn('"source_path": source_path', APP)
+
+    def test_ai_pending_review_file_defaults_under_web_manager_data_dir(self):
+        # Wave 26 Docker acceptance round: found live, not by inspection --
+        # a real AI-reviewed-import run reached the review-queueing path and
+        # crashed with "[Errno 2] No such file or directory:
+        # '/config/ai_pending_review.json'". Same root cause and fix shape
+        # as _AI_BATCH_STATE_DIR above: /config is the engine's mount, not
+        # web-manager's.
+        self.assertIn(
+            '_AI_PENDING_FILE = Path(os.environ.get("AI_PENDING_REVIEW_FILE", str(WEB_MANAGER_DATA_DIR / "ai_pending_review.json")))',
+            APP,
+        )
+        self.assertNotIn('_AI_PENDING_FILE = Path("/config/ai_pending_review.json")', APP)
         self.assertIn('"heartbeat_at": now', APP)
 
     def test_discovered_folders_create_per_folder_work_items(self):

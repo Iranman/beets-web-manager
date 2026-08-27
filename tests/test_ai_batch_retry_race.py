@@ -427,12 +427,27 @@ class RetryExhaustionFrontendVisibilityTests(unittest.TestCase):
 # Isolation: app.py is a large module with import-time side effects (opens a
 # Beets Library, starts background threads), so it can only safely be
 # imported once per process, pointed at a throwaway temp directory via env
-# vars set before that one import. Both the temp directory and the env
-# overrides are registered with unittest.addModuleCleanup so `python -m
-# unittest discover` (which runs many other test modules in the same
-# process) is not left with mutated environment variables or an undeleted
-# temp tree once this module's tests finish.
+# vars set before that one import. The temp directory and env overrides are
+# registered with atexit, NOT unittest.addModuleCleanup: addModuleCleanup
+# stores callbacks in a single process-wide list (unittest.case._module_cleanups)
+# that is drained in full whenever ANY module's tests finish -- not scoped to
+# this module. Under `python -m unittest discover`, every test module is
+# imported (registering its addModuleCleanup calls) before any test runs; the
+# first module whose tests finish then drains and fires every other module's
+# still-pending cleanup, deleting THIS module's own tmp root (and reverting
+# its env overrides) while ITS OWN tests are still running later in the same
+# discovery run. Observed directly: AiBatchStateStore's cached instance (keyed
+# by this module's own resolved DB path) survives in the registry, but the
+# underlying SQLite file it points at is gone -- the next connection to it
+# silently recreates an empty file with no schema, reproducing
+# "sqlite3.OperationalError: no such table: ai_batch_state" by a completely
+# different mechanism than the thread-safety bug fixed elsewhere in this
+# round. atexit.register only fires once, at real process exit -- the same
+# fix already applied for the identical failure in
+# tests/test_post_retag_artwork_integration.py and
+# tests/test_artwork_retry_reconciliation.py.
 # ---------------------------------------------------------------------------
+import atexit
 import json
 import os
 import shutil
@@ -443,7 +458,7 @@ import time
 import unittest.mock as mock
 
 _BEHAVIORAL_TMP_ROOT = Path(tempfile.mkdtemp(prefix="beets_retry_race_behavioral_"))
-unittest.addModuleCleanup(shutil.rmtree, str(_BEHAVIORAL_TMP_ROOT), ignore_errors=True)
+atexit.register(shutil.rmtree, str(_BEHAVIORAL_TMP_ROOT), ignore_errors=True)
 
 _BEHAVIORAL_ENV_OVERRIDES = {
     "BEETSDIR": str(_BEHAVIORAL_TMP_ROOT / "config"),
@@ -456,7 +471,7 @@ _BEHAVIORAL_ENV_OVERRIDES = {
 (_BEHAVIORAL_TMP_ROOT / "config").mkdir(parents=True, exist_ok=True)
 _behavioral_env_patcher = mock.patch.dict(os.environ, _BEHAVIORAL_ENV_OVERRIDES, clear=False)
 _behavioral_env_patcher.start()
-unittest.addModuleCleanup(_behavioral_env_patcher.stop)
+atexit.register(_behavioral_env_patcher.stop)
 
 
 def _import_app_for_behavioral_tests():
@@ -1971,6 +1986,52 @@ class RetryExhaustionStateTransitionTests(BehavioralTestCase):
         self.assertEqual(first["status"], "failed")
         self.assertEqual(second["status"], "failed")
         self.assertEqual(second["retry_count"], 3, "retry_count must not keep climbing past the cap")
+
+
+@unittest.skipIf(APP is None, f"app.py could not be imported for behavioral tests: {_APP_IMPORT_ERROR}")
+class AiBatchStateConflictHttpMappingTests(BehavioralTestCase):
+    """Wave 26 independent review (section 25 of the review brief): the PR
+    claimed AiBatchStateConflictError maps to HTTP 409. It was imported but
+    never caught anywhere in app.py -- it fell through to the generic
+    @app.errorhandler(Exception), which returns 500. Proves the real,
+    now-fixed behavior through an actual HTTP request/response cycle, not
+    by inspecting source text."""
+
+    def test_stale_revision_route_commit_returns_http_409_not_500(self):
+        state = APP._ai_batch_initial_state(self.batch_job_id, _behavioral_scan_path())
+        created = APP._get_ai_batch_store().create_batch_state(state)
+        self.assertEqual(created["revision"], 1)
+
+        # Simulate a genuine concurrent writer: something else commits a
+        # newer revision for this exact batch AFTER the route below has
+        # already loaded its own (now-stale) copy but BEFORE the route's
+        # own commit reaches the store. _ai_batch_commit() calls
+        # _ai_batch_recalculate_batch_state() before it ever writes --
+        # patching it to also perform the "other writer's" commit
+        # reproduces the real race window deterministically, without
+        # relying on thread timing.
+        real_recalculate = APP._ai_batch_recalculate_batch_state
+
+        def _recalculate_then_race(state_arg):
+            real_recalculate(state_arg)
+            concurrent_state = dict(APP._get_ai_batch_store().get_batch_state(self.batch_job_id))
+            concurrent_state["status"] = "running"
+            APP._get_ai_batch_store().save_batch_state(concurrent_state, expected_revision=1)
+
+        with mock.patch.object(APP, "_ai_batch_recalculate_batch_state", side_effect=_recalculate_then_race):
+            with APP.app.test_client() as client:
+                resp = client.post("/api/ai-batch-pause", json={"batch_job_id": self.batch_job_id})
+
+        self.assertEqual(resp.status_code, 409, resp.get_data(as_text=True))
+        body = resp.get_json()
+        self.assertFalse(body.get("ok"))
+        self.assertEqual(body.get("code"), "ai_batch_state_conflict")
+
+        # And the DB must reflect the real concurrent writer's commit
+        # (revision 2), not a silently-clobbered stale overwrite.
+        final = APP._get_ai_batch_store().get_batch_state(self.batch_job_id)
+        self.assertEqual(final["revision"], 2)
+        self.assertEqual(final["status"], "running")
 
 
 if __name__ == "__main__":

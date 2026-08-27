@@ -345,6 +345,19 @@ def discover_sinks_in_file(path: Path, rel_path: str) -> List[MutationSink]:
                 "beets_client.run_command", "beets_client.reimport_source",
                 "beets_client.reimport_disk", "beets_client.modify", "beets_client.retag",
                 "beets_client.write_tags",
+                # Wave 26 correction: beets_client.move_file/delete_file are
+                # GENERIC engine-side filesystem mutation passthroughs
+                # (POST /files/move, /files/delete) -- exactly as
+                # architecturally significant as the other beets_client.*
+                # mutation calls already listed here, and exactly the kind
+                # of call a caller can misuse to claim "moved into the
+                # engine, therefore controlled" without actually composing
+                # a real Plan/Apply/Verify family. They were missing from
+                # this tuple entirely, which meant every call site using
+                # them was invisible to this scanner -- not classified as
+                # resolved, not flagged as a blocker, simply never
+                # discovered as a sink at all.
+                "beets_client.move_file", "beets_client.delete_file",
             ):
                 kind = "subprocess"
 
