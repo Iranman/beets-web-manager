@@ -229,6 +229,20 @@ class AiBatchImportReliabilityTests(unittest.TestCase):
         self.assertIn('if state.get("status") in _AI_BATCH_TERMINAL_STATUSES and not retry_failed:', APP)
         self.assertIn('return jsonify({"ok": True, "job_id": state.get("job_id") or batch_job_id', APP)
 
+    def test_scan_unavailable_is_routed_to_a_retryable_status_not_review_created(self):
+        # Wave 26 Docker acceptance round: ground-truthed via a real
+        # folder_states dump on 4 consecutive real CI runs (not a guess)
+        # that a preflight scan failure (engine unreachable, not a
+        # genuine low-confidence match) was landing in the terminal
+        # "review_created" status, which is NOT in
+        # _AI_BATCH_RETRYABLE_FOLDER_STATUSES -- permanently stranding the
+        # folder with no automated retry path even after the engine came
+        # back online.
+        process_fn = section(APP, 'def _ai_batch_process_decisions', 'def _run_ai_batch_import')
+        self.assertIn('elif pf.get("scan_unavailable"):', process_fn)
+        self.assertIn('status="import_failed"', process_fn)
+        self.assertIn('current_step="scan unavailable; queued for retry"', process_fn)
+
     def test_recovery_requeues_only_retryable_outcomes(self):
         self.assertIn('_AI_BATCH_RETRYABLE_FOLDER_STATUSES = {"failed", "import_failed", "ai_failed", "timed_out", "replacement_unavailable"}', APP)
         self.assertIn('retry_failed and status in _AI_BATCH_RETRYABLE_FOLDER_STATUSES', APP)

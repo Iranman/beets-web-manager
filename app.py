@@ -6036,6 +6036,17 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
         "acoustid_top_hits": 0,
         "acoustid_mismatch": False,
         "error": "",
+        # Distinguishes "we could not even determine confidence because the
+        # scan/inspection itself failed" (an infrastructure/connectivity
+        # problem -- retryable) from every other preflight failure below
+        # (genuine evidence gaps: low track-match ratio, artist conflict,
+        # no MusicBrainz match -- correctly needs human review, not a
+        # retry). Found live (Wave 26 Docker acceptance round, engine-
+        # offline scenario): both cases previously landed in the same
+        # terminal "review_created" status, permanently stranding a
+        # transient engine-connectivity failure with no automated retry
+        # path at all.
+        "scan_unavailable": False,
     }
     mb = _fetch_mb_release_tracklist(mb_albumid, log)
     if not mb.get("ok"):
@@ -6088,16 +6099,28 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
     except Exception as ex:
         app.logger.warning("Could not scan source folder locally: %s", type(ex).__name__)
 
+    scan_exception_reason = ""
     if not audio_files and folder_path:
         try:
             inspect_res = beets_client.inspect_import_source(folder_path, "reimport")
             if inspect_res.get("ok"):
                 inspect_evidence = inspect_res
-        except Exception:
-            pass
+            else:
+                scan_exception_reason = _s(inspect_res.get("error") or "").strip()
+        except Exception as scan_ex:
+            # Previously a bare `except: pass` -- silently discarded the
+            # real reason (engine offline, auth failure, timeout, path
+            # rejection) and reported the same generic message for all of
+            # them. Preserved now so scan_unavailable's caller can log a
+            # truthful, specific reason instead of just "Could not scan".
+            scan_exception_reason = str(scan_ex)
 
     if not audio_files and not inspect_evidence:
-        result["error"] = "Could not scan source folder."
+        result["error"] = (
+            f"Could not scan source folder: {scan_exception_reason}" if scan_exception_reason
+            else "Could not scan source folder."
+        )
+        result["scan_unavailable"] = True
         return result
 
     result["audio_count"] = len(inspect_evidence.get("audio_files") or []) if inspect_evidence else len(audio_files)
@@ -25972,6 +25995,31 @@ def _ai_batch_process_decisions(state: Dict[str, Any], log: list, cancel_event=N
                         )
                         queued += 1
                         errors += 1
+            elif pf.get("scan_unavailable"):
+                # Wave 26 Docker acceptance round: this is NOT "the AI's
+                # evidence is ambiguous, a human should decide" -- it is
+                # "we could not even reach the engine to gather evidence",
+                # an infrastructure/connectivity failure. Routing it
+                # through the same terminal "review_created" status as a
+                # genuine low-confidence match permanently stranded the
+                # folder with no automated retry path (found live: after
+                # the engine came back online, /api/ai-batch-import/recover
+                # with retry_failed=true never re-attempted this folder at
+                # all, because "review_created" is not in
+                # _AI_BATCH_RETRYABLE_FOLDER_STATUSES -- confirmed via a
+                # real folder_states dump on 4 consecutive real CI runs,
+                # not a guess). Marked retryable instead, matching the
+                # existing _ai_batch_import_failure_outcome default-branch
+                # contract used elsewhere in this same function.
+                pf_note = pf.get("error") or "Could not scan source folder."
+                log.append(f"  Scan unavailable, marked retryable: {pf_note}")
+                _ai_batch_mark_folder(
+                    state, fid, status="import_failed",
+                    current_step="scan unavailable; queued for retry",
+                    failure_reason=pf_note,
+                )
+                queued += 1
+                errors += 1
             else:
                 if pf.get("ok"):
                     pf_note = (
