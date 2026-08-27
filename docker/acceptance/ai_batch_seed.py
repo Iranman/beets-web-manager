@@ -27,9 +27,11 @@ already-known result, the same way a unit test mocks an HTTP client.
 
 Usage:
     python3 ai_batch_seed.py create <batch_job_id> <container_folder_path> <scan_root> <release_id> <releasegroup_id> <artist> <album>
+    python3 ai_batch_seed.py reseed_folder <batch_job_id> <container_folder_path> <release_id> <releasegroup_id> <artist> <album>
     python3 ai_batch_seed.py bump <batch_job_id>
     python3 ai_batch_seed.py get <batch_job_id> <field>
     python3 ai_batch_seed.py attempt_stale_write <batch_job_id> <stale_revision>
+    python3 ai_batch_seed.py dump_folder_states <batch_job_id>
 """
 import hashlib
 import json
@@ -125,6 +127,65 @@ def cmd_create(batch_job_id: str, container_folder_path: str, scan_root: str,
     print(created.get("revision"))
 
 
+def cmd_reseed_folder(batch_job_id: str, container_folder_path: str,
+                       release_id: str, releasegroup_id: str, artist: str, album: str) -> None:
+    """Re-establish the cached, provider-boundary-stubbed ai_result on an
+    EXISTING batch's folder after a real retry_failed requeue wiped it.
+
+    Found live (Wave 26 Docker acceptance round): _run_ai_batch_import's
+    own retry_failed reconciliation correctly (and, for real production
+    use, desirably) resets a retryable folder to status="ai_queued" with
+    ai_suggest_status="queued" -- discarding any previous ai_result so a
+    genuinely fresh AI suggestion pass runs on retry, in case the earlier
+    suggestion was itself bad. That is correct production behavior, but
+    it means a plain retry_failed call in this acceptance script would go
+    on to make a REAL OpenAI call with this environment's dummy
+    OPENAI_API_KEY and fail for an unrelated reason. This re-applies the
+    same provider-boundary stub cmd_create used originally, without
+    needing to create a whole new batch (which would fail: the row
+    already exists, and create_batch_state() requires expected_revision=0)."""
+    store = _store()
+    state = store.get_batch_state(batch_job_id)
+    if not state:
+        raise SystemExit(f"no such batch_job_id: {batch_job_id}")
+    now = time.time()
+    fid = _folder_id(container_folder_path)
+    folder_states = state.setdefault("folder_states", {})
+    folder_states[fid] = {
+        "folder_id": fid,
+        "batch_job_id": batch_job_id,
+        "source_folder": container_folder_path,
+        "status": "ai_completed",
+        "current_step": "AI suggestion ready (acceptance-reseeded at the provider boundary)",
+        "ai_suggest_status": "completed",
+        "ai_suggest_started_at": now,
+        "ai_suggest_completed_at": now,
+        "ai_suggest_error": "",
+        "review_item_id": "",
+        "detected_artist": artist,
+        "detected_album": album,
+        "suggested_release_group_id": releasegroup_id,
+        "failure_reason": "",
+        "retry_count": 0,
+        "ai_result": {
+            "ok": True,
+            "suggestion": {
+                "artist": artist,
+                "album": album,
+                "albumartist": artist,
+                "confidence": "high",
+                "mb_albumid": release_id,
+                "mb_releasegroupid": releasegroup_id,
+                "mb_valid": True,
+                "year": "",
+                "reason": "acceptance-reseeded high-confidence match",
+            },
+        },
+    }
+    updated = store.save_batch_state(state, expected_revision=state.get("revision"))
+    print(updated.get("revision"))
+
+
 def cmd_bump(batch_job_id: str) -> None:
     store = _store()
     state = store.get_batch_state(batch_job_id)
@@ -188,6 +249,8 @@ if __name__ == "__main__":
     cmd, rest = args[0], args[1:]
     if cmd == "create":
         cmd_create(*rest)
+    elif cmd == "reseed_folder":
+        cmd_reseed_folder(*rest)
     elif cmd == "bump":
         cmd_bump(*rest)
     elif cmd == "get":
