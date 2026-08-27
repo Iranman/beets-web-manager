@@ -17,11 +17,32 @@ def section(source: str, start: str, end: str) -> str:
 
 class AiBatchImportReliabilityTests(unittest.TestCase):
     def test_batch_scan_creates_durable_batch_job(self):
-        self.assertIn('_AI_BATCH_STATE_DIR = Path(os.environ.get("AI_BATCH_STATE_DIR", "/config/ai_batch_jobs"))', APP)
+        # Wave 26 correction: the default must be a Web-Manager-owned path
+        # (WEB_MANAGER_DATA_DIR, i.e. /web-manager-data), never the Beets
+        # engine's /config mount -- that directory does not exist in the
+        # beets-web-manager container in either documented two-service
+        # compose topology, and AiBatchStateStore's constructor-time mkdir
+        # raised PermissionError there, crashing app.py at import time
+        # before the container could ever become healthy.
+        self.assertIn('_AI_BATCH_STATE_DIR = Path(os.environ.get("AI_BATCH_STATE_DIR", str(WEB_MANAGER_DATA_DIR / "ai_batch_jobs")))', APP)
+        self.assertNotIn('_AI_BATCH_STATE_DIR = Path(os.environ.get("AI_BATCH_STATE_DIR", "/config/ai_batch_jobs"))', APP)
         self.assertIn('def _ai_batch_write_state', APP)
         self.assertIn('def _ai_batch_initial_state', APP)
         self.assertIn('"batch_job_id": batch_job_id', APP)
         self.assertIn('"source_path": source_path', APP)
+
+    def test_ai_pending_review_file_defaults_under_web_manager_data_dir(self):
+        # Wave 26 Docker acceptance round: found live, not by inspection --
+        # a real AI-reviewed-import run reached the review-queueing path and
+        # crashed with "[Errno 2] No such file or directory:
+        # '/config/ai_pending_review.json'". Same root cause and fix shape
+        # as _AI_BATCH_STATE_DIR above: /config is the engine's mount, not
+        # web-manager's.
+        self.assertIn(
+            '_AI_PENDING_FILE = Path(os.environ.get("AI_PENDING_REVIEW_FILE", str(WEB_MANAGER_DATA_DIR / "ai_pending_review.json")))',
+            APP,
+        )
+        self.assertNotIn('_AI_PENDING_FILE = Path("/config/ai_pending_review.json")', APP)
         self.assertIn('"heartbeat_at": now', APP)
 
     def test_discovered_folders_create_per_folder_work_items(self):
@@ -207,6 +228,20 @@ class AiBatchImportReliabilityTests(unittest.TestCase):
         self.assertIn('No unfinished folder work remains; recovery finalized existing batch.', APP)
         self.assertIn('if state.get("status") in _AI_BATCH_TERMINAL_STATUSES and not retry_failed:', APP)
         self.assertIn('return jsonify({"ok": True, "job_id": state.get("job_id") or batch_job_id', APP)
+
+    def test_scan_unavailable_is_routed_to_a_retryable_status_not_review_created(self):
+        # Wave 26 Docker acceptance round: ground-truthed via a real
+        # folder_states dump on 4 consecutive real CI runs (not a guess)
+        # that a preflight scan failure (engine unreachable, not a
+        # genuine low-confidence match) was landing in the terminal
+        # "review_created" status, which is NOT in
+        # _AI_BATCH_RETRYABLE_FOLDER_STATUSES -- permanently stranding the
+        # folder with no automated retry path even after the engine came
+        # back online.
+        process_fn = section(APP, 'def _ai_batch_process_decisions', 'def _run_ai_batch_import')
+        self.assertIn('elif pf.get("scan_unavailable"):', process_fn)
+        self.assertIn('status="import_failed"', process_fn)
+        self.assertIn('current_step="scan unavailable; queued for retry"', process_fn)
 
     def test_recovery_requeues_only_retryable_outcomes(self):
         self.assertIn('_AI_BATCH_RETRYABLE_FOLDER_STATUSES = {"failed", "import_failed", "ai_failed", "timed_out", "replacement_unavailable"}', APP)

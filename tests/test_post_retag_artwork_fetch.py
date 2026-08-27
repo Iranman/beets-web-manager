@@ -12,6 +12,7 @@ call the actual function, with only _repair_album_art and lib.get_album
 mocked -- the identity-verification and status-classification logic runs
 unmocked.
 """
+import atexit
 import os
 import shutil
 import sys
@@ -25,7 +26,12 @@ from types import SimpleNamespace
 ROOT = Path(__file__).resolve().parents[1]
 
 _TMP_ROOT = Path(tempfile.mkdtemp(prefix="beets_post_retag_artwork_"))
-unittest.addModuleCleanup(shutil.rmtree, str(_TMP_ROOT), ignore_errors=True)
+# Deliberately atexit, not unittest.addModuleCleanup -- see the full
+# explanation in tests/test_post_retag_artwork_integration.py and the real
+# failure this caused in tests/test_ai_batch_retry_race.py (Wave 26 review):
+# addModuleCleanup drains process-wide, not per-module, so another module
+# finishing first can delete this module's own tmp root mid-run.
+atexit.register(shutil.rmtree, str(_TMP_ROOT), ignore_errors=True)
 
 _ENV_OVERRIDES = {
     "BEETSDIR": str(_TMP_ROOT / "config"),
@@ -38,7 +44,7 @@ _ENV_OVERRIDES = {
 (_TMP_ROOT / "config").mkdir(parents=True, exist_ok=True)
 _env_patcher = mock.patch.dict(os.environ, _ENV_OVERRIDES, clear=False)
 _env_patcher.start()
-unittest.addModuleCleanup(_env_patcher.stop)
+atexit.register(_env_patcher.stop)
 
 
 def setUpModule():

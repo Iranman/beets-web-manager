@@ -113,7 +113,19 @@ class ArtworkRetryReconciliationTests(unittest.TestCase):
         # first.
         _bind_app_globals_to_this_test_module(APP, _TMP_ROOT)
         self.client = APP.app.test_client()
-        self.batch_job_id = "reconcile-test-batch"
+        # Wave 26 correction: this was a hardcoded, shared ID across every
+        # test method in this class. AiBatchStateStore's CAS state
+        # persists in a real SQLite DB across test methods (unlike the
+        # legacy JSON file this class's own _cleanup_state_file() removes,
+        # which the store no longer even uses) -- a fixed ID meant test 2's
+        # setUp() collided with test 1's already-existing row, silently
+        # relying on save_batch_state()'s pre-Wave-26 leniency (a missing
+        # expected_revision against an existing row used to be trusted
+        # rather than rejected). Now that that leniency is correctly gone
+        # (see backend/ai_batch_state_store.py), each test needs its own
+        # never-before-seen batch_job_id, matching the pattern already used
+        # in tests/test_ai_batch_retry_race.py.
+        self.batch_job_id = f"reconcile-test-batch-{uuid.uuid4().hex[:12]}"
         self.state = APP._ai_batch_initial_state(self.batch_job_id, "/data/torrents/music")
         self.state["folder_states"] = {
             "f1": {

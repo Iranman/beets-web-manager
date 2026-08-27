@@ -362,6 +362,60 @@ class TestSEC002Wave14MbIdentityMatching(unittest.TestCase):
             # Assert local RGID is empty, NOT copied from candidate release_group
             self.assertEqual(curr.get("mb_releasegroupid"), "")
 
+    def test_preflight_scan_unavailable_is_distinguished_from_evidence_gap(self):
+        """Wave 26 Docker acceptance round: found live across 4 real CI
+        runs, not a guess -- a folder whose preflight scan itself fails
+        (web-manager has no local mount, so this only happens when the
+        engine's inspect_import_source call also fails/raises) was
+        previously indistinguishable from a genuine low-confidence/
+        evidence-gap case: both landed in the terminal "review_created"
+        status with no automated retry path. scan_unavailable=True must be
+        set so the caller (_ai_batch_process_decisions) can route this to
+        a retryable status instead."""
+        from app import _folder_release_preflight
+        import tempfile
+        from unittest.mock import patch
+
+        mb_mock_data = {
+            "ok": True,
+            "release_title": "Some Release",
+            "release_artist": "Some Artist",
+            "release_group": "88888888-8888-8888-8888-888888888888",
+            "tracks": [{"title": "Track 1", "track": 1}],
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Deliberately empty -- no local audio files, matching
+            # beets-web-manager's real lack of a local media mount.
+            empty_dir = Path(tmpdir) / "Some Artist" / "Some Release"
+            empty_dir.mkdir(parents=True)
+
+            with patch("app._fetch_mb_release_tracklist", return_value=mb_mock_data), \
+                 patch("app.beets_client.inspect_import_source", side_effect=RuntimeError("Beets Control Agent is unavailable")):
+                res = _folder_release_preflight(str(empty_dir), "11111111-1111-1111-1111-111111111111")
+
+        self.assertFalse(res["ok"])
+        self.assertTrue(res["scan_unavailable"])
+        self.assertIn("Beets Control Agent is unavailable", res["error"])
+
+    def test_preflight_scan_unavailable_false_for_genuine_evidence_gap(self):
+        """Non-regression: a REAL preflight failure (e.g. no MusicBrainz
+        tracks) must NOT be misclassified as scan_unavailable -- only a
+        genuine scan/inspect failure should route to the retryable path."""
+        from app import _folder_release_preflight
+        import tempfile
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            album_dir = Path(tmpdir) / "Some Artist" / "Some Release"
+            album_dir.mkdir(parents=True)
+            with patch("app._fetch_mb_release_tracklist", return_value={"ok": True, "tracks": []}):
+                res = _folder_release_preflight(str(album_dir), "11111111-1111-1111-1111-111111111111")
+
+        self.assertFalse(res["ok"])
+        self.assertFalse(res["scan_unavailable"])
+        self.assertEqual(res["error"], "MusicBrainz release has no tracks")
+
 
     def test_partial_album_full_deterministic_match_is_identity_verified(self):
         """Explicit partial-album policy: a local folder holding only 2 of an

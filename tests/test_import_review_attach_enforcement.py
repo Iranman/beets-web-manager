@@ -12,6 +12,7 @@ only the network-touching primitives (AcoustID lookup, MusicBrainz search
 logic, the route's enforcement branches, and the transaction/audit/rollback
 plumbing all run for real.
 """
+import atexit
 import json
 import os
 import shutil
@@ -26,7 +27,16 @@ from types import SimpleNamespace
 ROOT = Path(__file__).resolve().parents[1]
 
 _TMP_ROOT = Path(tempfile.mkdtemp(prefix="beets_attach_enforcement_"))
-unittest.addModuleCleanup(shutil.rmtree, str(_TMP_ROOT), ignore_errors=True)
+# Deliberately atexit, not unittest.addModuleCleanup: addModuleCleanup stores
+# callbacks in a single process-wide list drained in full whenever ANY
+# module's tests finish, not scoped to this module -- under `unittest
+# discover`, another module finishing first can delete this module's own tmp
+# root (and revert its env overrides) while this module's tests are still
+# running later in the same run. See the full explanation in
+# tests/test_post_retag_artwork_integration.py and the real failure this
+# caused in tests/test_ai_batch_retry_race.py (Wave 26 review).
+# atexit.register only fires once, at real process exit.
+atexit.register(shutil.rmtree, str(_TMP_ROOT), ignore_errors=True)
 
 _ENV_OVERRIDES = {
     "BEETSDIR": str(_TMP_ROOT / "config"),
@@ -39,7 +49,7 @@ _ENV_OVERRIDES = {
 (_TMP_ROOT / "config").mkdir(parents=True, exist_ok=True)
 _env_patcher = mock.patch.dict(os.environ, _ENV_OVERRIDES, clear=False)
 _env_patcher.start()
-unittest.addModuleCleanup(_env_patcher.stop)
+atexit.register(_env_patcher.stop)
 
 
 def setUpModule():

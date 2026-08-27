@@ -65,6 +65,28 @@ class TestImportSourcePathDoesNotRequireLocalExistence(unittest.TestCase):
         self.assertIn("require_exists=False", window)
         self.assertNotIn("require_exists=True", window)
 
+    def test_start_ai_batch_job_does_not_require_local_existence(self):
+        """Wave 26 (PR #101) Docker acceptance round: the exact same bug
+        class as import_folder_with_id() above, found by actually running
+        /api/ai-batch-import against the real two-service compose topology
+        -- _start_ai_batch_job()'s own _resolve_import_review_source_path()
+        call still defaulted to require_exists=True, so every real call
+        failed with "Source path does not exist" regardless of whether the
+        engine-side folder was genuinely there. Fixed to require_exists=False,
+        matching the established precedent; the engine's own
+        discover_import_sources() call (inside _ai_batch_find_audio_dirs)
+        is the real, disk-backed existence check."""
+        idx = self.app_source.index("def _start_ai_batch_job(")
+        window = self.app_source[idx: idx + 2000]
+        self.assertIn("require_exists=False", window)
+        self.assertNotIn("require_exists=True", window)
+
+    def test_start_ai_batch_import_route_does_not_require_local_existence(self):
+        idx = self.app_source.index("def start_ai_batch_import()")
+        window = self.app_source[idx: idx + 3000]
+        self.assertIn("require_exists=False", window)
+        self.assertNotIn("require_exists=True", window)
+
     def test_compose_files_confirm_web_manager_has_no_media_mount(self):
         """The fix above is only correct because this is actually true --
         pin it down structurally so a future compose change that DOES add

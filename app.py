@@ -8,6 +8,7 @@ import importlib.metadata
 import urllib.error, urllib.parse, urllib.request
 from backend.security import (OutboundPolicyError, bounded_rate_key_store_sweep, direct_peer_is_trusted, install_secure_urllib, validate_outbound_url)
 install_secure_urllib()
+from backend.ai_batch_state_store import AiBatchStateConflictError, AiBatchStateStore
 from collections import Counter, OrderedDict, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -3161,6 +3162,20 @@ from werkzeug.exceptions import HTTPException as _WerkzeugHTTPException
 def _handle_http_error(exc):
     return jsonify({"ok": False, "error": exc.description, "status": exc.code}), exc.code
 
+@app.errorhandler(AiBatchStateConflictError)
+def _handle_ai_batch_state_conflict(exc):
+    # Wave 26 independent review (section 25): AiBatchStateConflictError
+    # was previously imported but never caught anywhere -- it fell through
+    # to the generic Exception handler below, which returns 500, not 409.
+    # A real CAS conflict is a real, expected outcome of concurrent
+    # writers (see backend/ai_batch_state_store.py), not an unexpected
+    # server error; every route that reaches _ai_batch_write_state /
+    # save_batch_state / create_batch_state now reliably surfaces a real
+    # 409 Conflict, without needing each call site to catch this
+    # individually -- Flask/Werkzeug dispatch to the most specific
+    # registered handler for the exception's class.
+    return jsonify({"ok": False, "error": str(exc), "code": "ai_batch_state_conflict"}), 409
+
 @app.errorhandler(Exception)
 def _handle_unexpected_error(exc):
     import traceback as _tb
@@ -6021,6 +6036,17 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
         "acoustid_top_hits": 0,
         "acoustid_mismatch": False,
         "error": "",
+        # Distinguishes "we could not even determine confidence because the
+        # scan/inspection itself failed" (an infrastructure/connectivity
+        # problem -- retryable) from every other preflight failure below
+        # (genuine evidence gaps: low track-match ratio, artist conflict,
+        # no MusicBrainz match -- correctly needs human review, not a
+        # retry). Found live (Wave 26 Docker acceptance round, engine-
+        # offline scenario): both cases previously landed in the same
+        # terminal "review_created" status, permanently stranding a
+        # transient engine-connectivity failure with no automated retry
+        # path at all.
+        "scan_unavailable": False,
     }
     mb = _fetch_mb_release_tracklist(mb_albumid, log)
     if not mb.get("ok"):
@@ -6073,16 +6099,28 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
     except Exception as ex:
         app.logger.warning("Could not scan source folder locally: %s", type(ex).__name__)
 
+    scan_exception_reason = ""
     if not audio_files and folder_path:
         try:
             inspect_res = beets_client.inspect_import_source(folder_path, "reimport")
             if inspect_res.get("ok"):
                 inspect_evidence = inspect_res
-        except Exception:
-            pass
+            else:
+                scan_exception_reason = _s(inspect_res.get("error") or "").strip()
+        except Exception as scan_ex:
+            # Previously a bare `except: pass` -- silently discarded the
+            # real reason (engine offline, auth failure, timeout, path
+            # rejection) and reported the same generic message for all of
+            # them. Preserved now so scan_unavailable's caller can log a
+            # truthful, specific reason instead of just "Could not scan".
+            scan_exception_reason = str(scan_ex)
 
     if not audio_files and not inspect_evidence:
-        result["error"] = "Could not scan source folder."
+        result["error"] = (
+            f"Could not scan source folder: {scan_exception_reason}" if scan_exception_reason
+            else "Could not scan source folder."
+        )
+        result["scan_unavailable"] = True
         return result
 
     result["audio_count"] = len(inspect_evidence.get("audio_files") or []) if inspect_evidence else len(audio_files)
@@ -15728,9 +15766,7 @@ def batch_ai_suggest():
                 log.append(f"  ERROR: {ex}")
 
             try:
-                tmp = _ALBUM_MB_SUGGESTIONS_FILE.with_suffix(".tmp")
-                tmp.write_text(json.dumps(results, indent=2))
-                tmp.replace(_ALBUM_MB_SUGGESTIONS_FILE)
+                _get_ai_batch_store().save_suggestions_cache(results)
             except Exception:
                 pass
 
@@ -24474,7 +24510,23 @@ def library_import_all_retry_failed():
 
 # ── AI Batch Import ──────────────────────────────────────────────────────────
 
-_AI_PENDING_FILE = Path("/config/ai_pending_review.json")
+# Wave 26 (PR #101) Docker acceptance round: found live, not just by
+# inspection -- a real AI-reviewed-import acceptance run reached the
+# review-queueing path and crashed with
+# "[Errno 2] No such file or directory: '/config/ai_pending_review.json'".
+# /config is the Beets ENGINE's mount (BEETSDIR); beets-web-manager has no
+# mount there at all in either documented compose topology (see
+# WEB_MANAGER_DATA_DIR's own definition and _AI_BATCH_STATE_DIR's identical,
+# already-fixed history above) -- this file was simply never reachable in
+# the real, security-hardened deployment. _AI_REVIEW_DECISIONS_FILE and
+# _ALBUM_MB_SUGGESTIONS_FILE are exempt from this same fix: both are now
+# read-only, one-time legacy migration SOURCES for AiBatchStateStore
+# (migrate_legacy_files(), called once at import time below) rather than
+# live read/write paths, so leaving their default under the same
+# unreachable /config root is inert, not broken -- migrate_legacy_files()
+# already handles a missing source file as "nothing to migrate", not an
+# error.
+_AI_PENDING_FILE = Path(os.environ.get("AI_PENDING_REVIEW_FILE", str(WEB_MANAGER_DATA_DIR / "ai_pending_review.json")))
 _AI_REVIEW_DECISIONS_FILE = Path("/config/ai_review_decisions.json")
 _ALBUM_MB_SUGGESTIONS_FILE = Path("/config/album_mb_suggestions.json")
 _ai_pending_lock = threading.Lock()
@@ -24505,16 +24557,9 @@ def _record_ai_review_decision(action: str, folder_path: str,
         }
         with _ai_review_decision_lock:
             try:
-                existing = (
-                    json.loads(_AI_REVIEW_DECISIONS_FILE.read_text())
-                    if _AI_REVIEW_DECISIONS_FILE.exists() else []
-                )
-                if not isinstance(existing, list):
-                    existing = []
+                _get_ai_batch_store().record_review_decision(entry)
             except Exception:
-                existing = []
-            existing.insert(0, entry)
-            _AI_REVIEW_DECISIONS_FILE.write_text(json.dumps(existing[:500], indent=2))
+                pass
     except Exception:
         pass
 
@@ -24919,7 +24964,19 @@ def clear_ai_pending_review():
 
 
 _AI_BATCH_AUDIO_EXTS = {".mp3", ".flac", ".m4a", ".ogg", ".opus", ".wav", ".aiff", ".wv", ".ape"}
-_AI_BATCH_STATE_DIR = Path(os.environ.get("AI_BATCH_STATE_DIR", "/config/ai_batch_jobs"))
+# Wave 26 correction: this is Web Manager application state (which batches
+# are running, AI review decisions, suggestion cache) -- never authoritative
+# Beets library/media state -- so it belongs under WEB_MANAGER_DATA_DIR
+# (/web-manager-data), the root this container actually owns and creates
+# (see Dockerfile: only /web-manager-data is mkdir'd/chowned/declared as a
+# VOLUME; the image runs as non-root USER beets). The previous default,
+# /config/ai_batch_jobs, is the Beets ENGINE's own config mount -- it does
+# not exist in the beets-web-manager container in either documented
+# two-service compose topology, so AiBatchStateStore's constructor-time
+# `self.db_path.parent.mkdir(parents=True, exist_ok=True)` raised
+# PermissionError creating /config itself at MODULE IMPORT time, before
+# Waitress/Flask ever bound a port -- the container never became healthy.
+_AI_BATCH_STATE_DIR = Path(os.environ.get("AI_BATCH_STATE_DIR", str(WEB_MANAGER_DATA_DIR / "ai_batch_jobs")))
 _AI_BATCH_MAX_AI_WORKERS = max(1, min(10, int(os.environ.get("AI_BATCH_MAX_AI_WORKERS", "3") or "3")))
 _AI_BATCH_AI_TIMEOUT = max(30, int(os.environ.get("AI_BATCH_AI_TIMEOUT", "180") or "180"))
 _AI_BATCH_STALE_SECONDS = max(60, int(os.environ.get("AI_BATCH_STALE_SECONDS", "300") or "300"))
@@ -25145,25 +25202,71 @@ def _ai_batch_json_safe(value: Any) -> Any:
     return _s(value)
 
 
+# Wave 26 correction: a single global AiBatchStateStore whose own db_path
+# attribute was reassigned in place (the previous _get_ai_batch_store())
+# is not safe against concurrent access. Reassigning `.db_path` and then
+# calling `_init_db()` are two separate, unsynchronized steps -- another
+# thread (a lingering AI-batch worker thread from a previous request/test,
+# or a genuine concurrent caller) can read the already-updated `.db_path`
+# and open a connection to it before `_init_db()` has actually created the
+# schema there, hitting "no such table: ai_batch_state". Re-importing
+# app.py also does not happen per test module (Python caches modules), so
+# whichever test module happened to import app.py first permanently owned
+# this one mutable global for the rest of the process -- every other test
+# module's own AI_BATCH_STATE_DIR override then raced to redirect it.
+#
+# Fixed with a small registry keyed by the resolved DB path: a distinct
+# AI_BATCH_STATE_DIR always gets its own, independently-constructed
+# AiBatchStateStore (construction -- which calls _init_db() synchronously
+# -- happens once, under a lock, before the instance is ever published to
+# the registry or returned to a caller), so no caller can ever observe a
+# partially-initialized store, and no concurrent caller can silently
+# redirect an existing store out from under another thread still using it.
+_ai_batch_store_registry_lock = threading.Lock()
+_ai_batch_store_registry: Dict[str, AiBatchStateStore] = {}
+
+
+def _get_ai_batch_store() -> AiBatchStateStore:
+    """Return the AiBatchStateStore for the current AI_BATCH_STATE_DIR,
+    re-read on every call (deployments/tests may vary it), from a registry
+    keyed by the resolved DB path rather than by mutating one shared
+    object's db_path. Guaranteed schema-initialized before returning."""
+    active_dir = Path(os.environ.get("AI_BATCH_STATE_DIR", str(WEB_MANAGER_DATA_DIR / "ai_batch_jobs")))
+    db_path = active_dir / "ai_batch_state.db"
+    key = os.path.normpath(os.path.abspath(str(db_path)))
+    with _ai_batch_store_registry_lock:
+        store = _ai_batch_store_registry.get(key)
+        if store is None:
+            store = AiBatchStateStore(db_path)
+            _ai_batch_store_registry[key] = store
+        return store
+
+
+try:
+    _ai_batch_migration_result = _get_ai_batch_store().migrate_legacy_files(
+        _AI_BATCH_STATE_DIR, _AI_REVIEW_DECISIONS_FILE, _ALBUM_MB_SUGGESTIONS_FILE,
+    )
+    for _ai_migration_error in _ai_batch_migration_result.get("errors") or []:
+        # Corrupt/unrecognized legacy AI state must be visible, not
+        # silently discarded -- the file itself is left in place by
+        # migrate_legacy_files(); this is the operator-visible signal.
+        app.logger.warning(
+            "AI batch state migration: %s: %s",
+            _ai_migration_error.get("file", "?"), _ai_migration_error.get("error", "?"),
+        )
+except Exception as _ai_migration_ex:
+    app.logger.warning("AI batch state migration failed unexpectedly: %s", _ai_migration_ex)
+
+
 def _ai_batch_write_state(state: Dict[str, Any]) -> None:
-    _AI_BATCH_STATE_DIR.mkdir(parents=True, exist_ok=True)
-    path = _ai_batch_state_file(state.get("batch_job_id", ""))
-    tmp = path.with_suffix(f".{uuid.uuid4().hex}.tmp")
-    tmp.write_text(json.dumps(_ai_batch_json_safe(state), indent=2, sort_keys=True), encoding="utf-8")
-    os.replace(str(tmp), str(path))
+    with _ai_batch_state_lock:
+        expected_rev = state.get("revision")
+        updated = _get_ai_batch_store().save_batch_state(state, expected_revision=expected_rev)
+        state["revision"] = updated.get("revision", 1)
+        state["schema_version"] = updated.get("schema_version", 1)
 
 
 def _ai_batch_persist_job_association(batch_job_id: str, job_id: str) -> None:
-    """Durably associate job_id with batch_job_id before the worker thread
-    is unblocked, so an immediate status poll can find this batch by job_id.
-
-    Deliberately bypasses _ai_batch_commit: that function unconditionally
-    calls _ai_batch_recalculate_batch_state, whose finalize logic requires
-    fully-reconciled folder_states to make a correct decision. For a
-    recover/retry start, folder_states is still the pre-reconciliation
-    snapshot at this point -- only the worker's own reconciliation step
-    (inside _run_ai_batch_import) makes it safe to recalculate. A plain,
-    targeted write avoids re-triggering that premature-finalize bug."""
     with _ai_batch_state_lock:
         state = _ai_batch_load_state(batch_job_id) or _ai_batch_initial_state(batch_job_id, "")
         state["job_id"] = job_id
@@ -25176,67 +25279,19 @@ def _ai_batch_load_state(identifier: str) -> Optional[Dict[str, Any]]:
     if not ident:
         return None
     with _ai_batch_state_lock:
-        direct = _ai_batch_state_file(ident)
-        paths: List[Path] = []
-        if direct.exists():
-            paths.append(direct)
-        try:
-            paths.extend(sorted(_AI_BATCH_STATE_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True))
-        except Exception:
-            pass
-        seen: set = set()
-        for path in paths:
-            if path in seen:
-                continue
-            seen.add(path)
-            try:
-                state = json.loads(path.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-            if not isinstance(state, dict):
-                continue
-            if ident in {_s(state.get("batch_job_id")), _s(state.get("job_id"))}:
-                return state
-    return None
+        return _get_ai_batch_store().get_batch_state(ident)
 
 
 def _ai_batch_latest_state() -> Optional[Dict[str, Any]]:
-    try:
-        paths = sorted(_AI_BATCH_STATE_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
-    except Exception:
-        return None
-    for path in paths:
-        try:
-            state = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        if isinstance(state, dict):
-            return state
-    return None
-
+    states = _get_ai_batch_store().list_batch_states()
+    return states[0] if states else None
 
 
 def _ai_batch_find_state(ident: str) -> Optional[Dict[str, Any]]:
     ident = _s(ident).strip()
     if not ident:
         return None
-    direct = _ai_batch_load_state(ident)
-    if direct:
-        return direct
-    try:
-        paths = sorted(_AI_BATCH_STATE_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
-    except Exception:
-        return None
-    for path in paths:
-        try:
-            state = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        if not isinstance(state, dict):
-            continue
-        if _s(state.get("batch_job_id")) == ident or _s(state.get("job_id")) == ident:
-            return state
-    return None
+    return _get_ai_batch_store().get_batch_state(ident)
 def _ai_batch_control(batch_job_id: str) -> Dict[str, Any]:
     with _ai_batch_control_lock:
         control = _ai_batch_controls.setdefault(batch_job_id, {})
@@ -25940,6 +25995,31 @@ def _ai_batch_process_decisions(state: Dict[str, Any], log: list, cancel_event=N
                         )
                         queued += 1
                         errors += 1
+            elif pf.get("scan_unavailable"):
+                # Wave 26 Docker acceptance round: this is NOT "the AI's
+                # evidence is ambiguous, a human should decide" -- it is
+                # "we could not even reach the engine to gather evidence",
+                # an infrastructure/connectivity failure. Routing it
+                # through the same terminal "review_created" status as a
+                # genuine low-confidence match permanently stranded the
+                # folder with no automated retry path (found live: after
+                # the engine came back online, /api/ai-batch-import/recover
+                # with retry_failed=true never re-attempted this folder at
+                # all, because "review_created" is not in
+                # _AI_BATCH_RETRYABLE_FOLDER_STATUSES -- confirmed via a
+                # real folder_states dump on 4 consecutive real CI runs,
+                # not a guess). Marked retryable instead, matching the
+                # existing _ai_batch_import_failure_outcome default-branch
+                # contract used elsewhere in this same function.
+                pf_note = pf.get("error") or "Could not scan source folder."
+                log.append(f"  Scan unavailable, marked retryable: {pf_note}")
+                _ai_batch_mark_folder(
+                    state, fid, status="import_failed",
+                    current_step="scan unavailable; queued for retry",
+                    failure_reason=pf_note,
+                )
+                queued += 1
+                errors += 1
             else:
                 if pf.get("ok"):
                     pf_note = (
@@ -26176,15 +26256,20 @@ def _ai_batch_reconnect_response(batch_job_id: str):
 
 def _start_ai_batch_job(scan_path: str, recover_batch_job_id: str = "", *, retry_failed: bool = False):
     # Authoritative gate, not merely a route-level convenience: scan_path
-    # reaches an unbounded recursive filesystem walk
-    # (_ai_batch_find_audio_dirs) that queues every discovered folder for
-    # AI-driven import review. Both callers of this function (a fresh
-    # /api/ai-batch-import request and /api/ai-batch-import/recover, which
-    # can source scan_path from a stored job-state file rather than the
-    # current request) must go through this check -- stored state is
-    # untrusted at execution time just like a fresh request body.
+    # reaches _ai_batch_find_audio_dirs(), which queues every folder the
+    # engine discovers for AI-driven import review. Both callers of this
+    # function (a fresh /api/ai-batch-import request and
+    # /api/ai-batch-import/recover, which can source scan_path from a
+    # stored job-state file rather than the current request) must go
+    # through this check -- stored state is untrusted at execution time
+    # just like a fresh request body. require_exists=False for the same
+    # reason as the sibling check in start_ai_batch_import() above: this
+    # process has no local mount for /data/torrents or /data/media/music,
+    # so a local existence check here always fails regardless of whether
+    # the path is genuinely valid -- the engine-side discovery call is the
+    # real, disk-backed check.
     trusted_scan_path, scan_path_error = _resolve_import_review_source_path(
-        scan_path, allow_music=True, expected_type="dir",
+        scan_path, allow_music=True, expected_type="dir", require_exists=False,
     )
     if scan_path_error or trusted_scan_path is None:
         return jsonify({"ok": False, "error": scan_path_error or f"Path not found: {scan_path}"}), 400
@@ -26662,68 +26747,85 @@ def _ai_import_folder(folder_path: str, mb_albumid: str, suggestion: dict,
     full MB metadata (mbsync → write → move) so files are correctly tagged and
     renamed in the library structure.
     Runs directly — no Flask context needed, safe for background threads."""
-    env = _beet_env()
-    temp_cfg = "/tmp/beets_ai_batch.yaml"
-    _plugins = _beet_plugins()
-    try:
-        Path(temp_cfg).write_text(
-            "include:\n  - /config/config.yaml\n"
-            + _BEETS_PLUGINPATH_CONFIG
-            + (f"plugins: {_plugins}\n" if _plugins else "")
-            + _JOB_PATHS_CONFIG_BLOCK
-            + "import:\n  duplicate_action: remove\n"
-            "match:\n  strong_rec_thresh: 1.0\n  medium_rec_thresh: 1.0\n"
-            "lyrics:\n  auto: no\n"
-            "replaygain:\n  auto: no\n"
-        )
-    except Exception:
-        temp_cfg = "/config/config.yaml"
-    base = [BEET_BIN, "-c", temp_cfg]
-
     preserve_torrent_source = _preserve_torrent_source_path(folder_path)
-    import_mode = "--copy" if preserve_torrent_source else "--move"
     if preserve_torrent_source:
         log.append(
-            "  [torrent] Protected source detected; importing with --copy "
-            "instead of --move."
+            "  [torrent] Protected source detected; the engine will import "
+            "via a disposable copy, leaving the qBittorrent source in place."
         )
 
-    # ── Step 1: beet import with the selected release ─────────────────────────
+    # ── Step 1: confirmed_import_v1 (Plan -> Apply) with the AI-reviewed,
+    # human/AI-approved release ──────────────────────────────────────────
+    # Wave 26 correction: this previously called beets_client.reimport_source
+    # (POST /imports/reimport, reimport_source_atomic's
+    # verify_deterministic_identity() gate) -- the exact same trust-model
+    # mismatch Wave 25 already fixed for import_folder_with_id.
+    # verify_deterministic_identity() requires the source audio's OWN
+    # embedded MusicBrainz tags to already match the target; AI-suggested
+    # candidates are by construction reviewed matches for PREVIOUSLY-
+    # UNTAGGED source audio, which never has that by construction. Fixed
+    # to compose confirmed_import_v1 (create_confirmed_import_plan /
+    # execute_confirmed_import_apply via plan_confirmed_import /
+    # apply_confirmed_import), which binds authorization to an immutable
+    # source-manifest digest + this already-resolved concrete Release ID
+    # + best-effort track/fingerprint alignment instead of pre-existing
+    # embedded tags -- exactly import_folder_with_id's own composition.
+    # reimport_source_atomic()/verify_deterministic_identity() themselves
+    # remain untouched and still correctly gate genuine reimports of
+    # already-tagged library content elsewhere.
+    #
+    # This also eliminates the dead code this replaced: a temp Beets
+    # config (`/tmp/beets_ai_batch.yaml`, including the ENGINE's own
+    # /config/config.yaml) was written here and assigned to a `base`
+    # command-array variable that was never actually passed to any
+    # subprocess call in this function -- the real import always ran
+    # through the (wrong-trust-model) reimport_source() HTTP call, not a
+    # locally-executed `beet` invocation. The Web Manager has no local
+    # Beets binary/engine config to invoke in the two-service topology in
+    # the first place.
     mb_albumid = _prefer_album_mb_release(mb_albumid, log)
     _validate_import_source_audio(folder_path, log, reject_downloads=True)
-    atomic_res = beets_client.reimport_source(
-        folder_path,
-        beets_options={"search_id": mb_albumid, "copy": preserve_torrent_source},
-        timeout=180.0
-    )
+    mb_identity = _fetch_mb_release_tracklist(mb_albumid, log)
+    if not mb_identity.get("ok"):
+        raise RuntimeError(
+            "The selected MusicBrainz release could not be loaded. Import was not started."
+        )
+    resolved_releasegroupid = _s(mb_identity.get("release_group") or "").strip().lower()
+    if resolved_releasegroupid:
+        log.append(f"[import] Canonical MusicBrainz release-group ID: {resolved_releasegroupid}")
+
+    plan_res = beets_client.plan_confirmed_import({
+        "source_folder": folder_path,
+        "mb_albumid": mb_albumid,
+        "mb_releasegroupid": resolved_releasegroupid,
+        "mb_release_group_resolved": resolved_releasegroupid,
+        "mb_tracks": mb_identity.get("tracks") or [],
+        "use_move": True,
+    })
+    if not plan_res.get("ok"):
+        raise RuntimeError(f"Import planning failed: {plan_res.get('error') or 'unknown error'}")
+    try:
+        atomic_res = beets_client.apply_confirmed_import(plan_res["operation_id"])
+    except (BeetsError, BeetsUnavailableError) as ex:
+        diag = getattr(ex, "diagnostics", None) or {}
+        if diag.get("returncode") is not None:
+            log.append(f"  Native Beets exit code: {diag['returncode']}")
+        if diag.get("stdout_excerpt"):
+            log.append(f"  Native Beets stdout: {diag['stdout_excerpt']}")
+        if diag.get("stderr_excerpt"):
+            log.append(f"  Native Beets stderr: {diag['stderr_excerpt']}")
+        raise RuntimeError(f"Beets import failed: {ex}")
     if not atomic_res.get("ok"):
-        raise RuntimeError(f"Beets import failed: {atomic_res.get('error', 'reimport_source failed')}")
+        raise RuntimeError(f"Beets import failed: {atomic_res.get('error', 'confirmed import apply failed')}")
+    if atomic_res.get("resumed"):
+        log.append("  Resumed an already-verified prior result for this release (native import was not re-invoked).")
 
-    combined = ""
-    _delete_if_already_in_library(folder_path, combined, log)
-
-    # ── Step 2: find album in DB ──────────────────────────────────────────────
-    time.sleep(1)
+    # ── Step 2: album identity ────────────────────────────────────────────
+    # confirmed_import_v1's Apply already performed authoritative, verified
+    # result capture (queried the library by the exact planned Release ID,
+    # confirmed items and files exist on disk) -- trust that directly
+    # rather than re-deriving it through a heuristic DB search.
     aid = atomic_res.get("album_id")
-    _MROOT_B = b"/data/media/music/"
-    if aid is None:
-        try:
-            # Search by mb_albumid (most reliable after --search-id import)
-            with _db(text_factory=bytes) as con:
-                row = con.execute("SELECT id FROM albums WHERE mb_albumid = ?",
-                                  (mb_albumid,)).fetchone()
-                if row:
-                    aid = row[0]
-                if aid is None:
-                    # Recently added fallback
-                    t_before = time.time() - 200   # last few minutes
-                    rows = con.execute(
-                        "SELECT DISTINCT album_id FROM items "
-                        "WHERE album_id IS NOT NULL AND added >= ?", (t_before,)).fetchall()
-                    if rows:
-                        aid = rows[-1][0]  # most recently added album
-        except Exception as ex:
-            log.append(f"  DB lookup warning: {ex}")
 
     if aid is None:
         log.append("  WARN: album not found in DB after import — skipping retag")
@@ -26827,12 +26929,23 @@ def start_ai_batch_import():
 
     if not scan_path:
         return jsonify({"ok": False, "error": "Import source path is required"}), 400
-    # scan_path feeds an unbounded recursive os.walk() (_ai_batch_find_audio_dirs)
-    # that queues every discovered folder for AI-driven import review -- it
-    # must be confined to the same trusted import-source roots as the rest
-    # of the import-review/AI-suggest flow, not merely checked for existence.
+    # scan_path feeds _ai_batch_find_audio_dirs(), which now discovers
+    # candidate folders via the real engine (beets_client.discover_import_sources()),
+    # not a local os.walk() -- it must still be confined to the same
+    # trusted import-source roots as the rest of the import-review/AI-suggest
+    # flow (a fast, local, pure-string root-containment check), but
+    # require_exists=False for the same reason import_folder_with_id() was
+    # already fixed to pass it (Wave 25 Docker acceptance round, found by
+    # actually exercising the real two-service deployment): this process
+    # (beets-web-manager) has no filesystem mount for /data/torrents or
+    # /data/media/music at all -- only the engine container does. A local
+    # existence check here made every real /api/ai-batch-import call fail
+    # with "Source path does not exist" regardless of whether the folder
+    # was genuinely there. The engine's own discover_import_sources() call
+    # (inside _ai_batch_find_audio_dirs) is the real, disk-backed
+    # existence check.
     trusted_scan_path, scan_path_error = _resolve_import_review_source_path(
-        scan_path, allow_music=True, expected_type="dir",
+        scan_path, allow_music=True, expected_type="dir", require_exists=False,
     )
     if scan_path_error or trusted_scan_path is None:
         return jsonify({"ok": False, "error": scan_path_error or f"Path not found: {scan_path}"}), 400
@@ -33172,9 +33285,7 @@ def _start_library_mbid_sticking_repair(
                     log.append(f"  Would restore album mb_albumid for album_id {aid}: {label} -> {mbid}")
                     summary["inferred_album_rows"] += 1
                 else:
-                    with _db() as con:
-                        con.execute("UPDATE albums SET mb_albumid=? WHERE id=?", (mbid, aid))
-                        con.commit()
+                    beets_client.update_album_metadata(aid, {"mb_albumid": mbid})
                     log.append(f"  Restored album mb_albumid for album_id {aid}: {label}")
                     summary["inferred_album_rows"] += 1
                     summary["albums_changed"] += 1
@@ -33259,21 +33370,13 @@ def _start_library_mbid_sticking_repair(
                     )
                     summary["resolved_album_rows"] += 1
                 else:
-                    with _db() as con:
-                        if resolved_rgid and not rgid:
-                            con.execute(
-                                "UPDATE albums SET mb_albumid=?, mb_releasegroupid=? WHERE id=?",
-                                (resolved_mbid, resolved_rgid, aid),
-                            )
-                        else:
-                            con.execute(
-                                "UPDATE albums SET mb_albumid=? WHERE id=?",
-                                (resolved_mbid, aid),
-                            )
-                        con.commit()
+                    meta_opts = {"mb_albumid": resolved_mbid}
+                    if resolved_rgid and not rgid:
+                        meta_opts["mb_releasegroupid"] = resolved_rgid
+                    beets_client.update_album_metadata(aid, meta_opts)
                     log.append(
                         f"  [album_id {aid}] linked to release {resolved_mbid} "
-                        f"(written to app DB: albums.mb_albumid"
+                        f"(written via IPC: albums.mb_albumid"
                         + (", albums.mb_releasegroupid" if resolved_rgid and not rgid else "")
                         + ") — item-level release/track rows will be repaired below"
                     )
@@ -33311,10 +33414,6 @@ def _start_library_mbid_sticking_repair(
         except Exception as ex:
             raise RuntimeError(f"Could not scan Beets DB for stuck MBIDs: {ex}") from ex
 
-        job_cfg = f"/tmp/beets-mbid-sticking-repair-{uuid.uuid4().hex}.yaml"
-        base = [BEET_BIN, "-c", _write_job_beets_config(job_cfg)]
-        env = _beet_env()
-
         for row in rows:
             if cancel_event is not None and cancel_event.is_set():
                 raise RuntimeError("cancelled")
@@ -33342,7 +33441,7 @@ def _start_library_mbid_sticking_repair(
                     summary["release_item_rows"] += changed
                     album_changed = album_changed or changed > 0
                     if changed:
-                        log.append(f"  [album_id {aid}] wrote {changed} row(s) to DB: items.mb_albumid")
+                        log.append(f"  [album_id {aid}] wrote {changed} row(s) via IPC: items.mb_albumid")
 
             track_updates: List[tuple] = []
             if repair_tracks:
@@ -33376,35 +33475,23 @@ def _start_library_mbid_sticking_repair(
                     )
                     summary["track_rows"] += len(track_updates)
                 else:
-                    with _db() as con:
-                        con.executemany(
-                            "UPDATE items SET mb_trackid=?, track=?, disc=?, title=?, mb_albumid=? "
-                            "WHERE id=?",
-                            track_updates,
-                        )
-                        con.execute("UPDATE albums SET mb_albumid=? WHERE id=?", (mbid, aid))
-                        con.commit()
-                    log.append(
-                        f"  Repaired {len(track_updates)} recording ID(s): "
-                        f"album_id {aid} {label}"
-                    )
-                    log.append(
-                        f"  [album_id {aid}] wrote {len(track_updates)} row(s) to DB: "
-                        "items.mb_trackid/track/disc/title/mb_albumid"
-                    )
-                    summary["track_rows"] += len(track_updates)
-                    album_changed = True
+                    plan_res = beets_client.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mbid})
+                    if plan_res.get("ok"):
+                        op_id = plan_res.get("operation_id") or ""
+                        apply_res = beets_client.apply_album_mb_track_repair(op_id, write_tags=write_tags)
+                        if apply_res.get("ok"):
+                            log.append(f"  Repaired {len(track_updates)} recording ID(s) via IPC: album_id {aid} {label}")
+                            summary["track_rows"] += len(track_updates)
+                            album_changed = True
+                        else:
+                            log.append(f"  WARN: album_mb_track_repair apply failed for album_id {aid}: {apply_res.get('error')}")
+                            summary["failed_count"] += 1
+                    else:
+                        log.append(f"  WARN: album_mb_track_repair plan failed for album_id {aid}: {plan_res.get('error')}")
+                        summary["failed_count"] += 1
 
             if album_changed:
                 summary["albums_changed"] += 1
-                if write_tags:
-                    proc = _beet_run(base + ["write", f"album_id:{aid}"], log,
-                                     timeout=180, env=env, cancel=cancel_event)
-                    if proc.returncode != 0:
-                        log.append(f"  WARN: beet write failed for album_id {aid} (rc={proc.returncode})")
-                        summary["failed_count"] += 1
-                    else:
-                        log.append(f"  [album_id {aid}] wrote fixed IDs to file tags (beet write)")
             elif not dry_run:
                 summary["skipped_already_fixed"] += 1
                 log.append(f"  [album_id {aid}] no changes needed — already fixed")
@@ -35975,8 +36062,9 @@ def _maintenance_safe_folder_renames(rows: List[Dict[str, Any]], log: List[str],
                 skipped += 1
                 log.append(f"  [folder-safe-rename] skipped existing target: {target}")
                 continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            source.rename(target)
+            res = beets_client.move_file(str(source), str(target))
+            if not res.get("ok"):
+                raise RuntimeError(res.get("error") or "move failed")
             renamed += 1
             if len(examples) < 20:
                 examples.append({"source": str(source), "target": str(target)})
@@ -38821,9 +38909,6 @@ def _root_folder_repair_apply_safe(log: List[str], cancel_event: Optional[Any] =
     shallow_folders = scan["shallow_folders"]
     total_items = sum(f["item_count"] for f in shallow_folders)
     done = 0
-    cfg = _write_job_beets_config(f"/tmp/beets-root-folder-repair-{uuid.uuid4().hex}.yaml")
-    base = [BEET_BIN, "-c", cfg]
-    env = _beet_env()
 
     for entry in shallow_folders:
         if cancel_event and cancel_event.is_set():
@@ -38847,37 +38932,56 @@ def _root_folder_repair_apply_safe(log: List[str], cancel_event: Optional[Any] =
                     getattr(item, "mb_albumid", "") or getattr(item, "mb_trackid", ""))
             except Exception:
                 has_mb = False
-            if has_mb:
-                r = _beet_run(base + ["mbsync", f"id:{iid}"], log, timeout=60, env=env, cancel=cancel_event)
-                if r.returncode == -9:
-                    raise RuntimeError("cancelled")
-            r = _beet_run(base + ["write", f"id:{iid}"], log, timeout=120, env=env, cancel=cancel_event)
-            if r.returncode == -9:
-                raise RuntimeError("cancelled")
-            if r.returncode not in (0, 124) and r.returncode >= 2:
-                summary["items_failed"] += 1
-                summary["errors"] += 1
-                log.append(f"  ERROR: beet write failed for item {iid} (rc={r.returncode})")
-                continue
-            r = _beet_run(base + ["move", f"id:{iid}"], log, timeout=120, env=env, cancel=cancel_event)
-            if r.returncode == -9:
-                raise RuntimeError("cancelled")
-            if r.returncode != 0:
-                summary["items_failed"] += 1
-                summary["errors"] += 1
-                log.append(f"  ERROR: beet move failed for item {iid} (rc={r.returncode})")
-                continue
-            summary["items_moved"] += 1
+            aid = getattr(item, "album_id", None) if item else None
+            if aid:
+                # Wave 26 correction (section 18 of the review brief): every
+                # required-or-informative child call's result is now
+                # actually inspected. Relocation is the operation's real
+                # purpose (see docstring) and remains fatal-on-failure,
+                # unchanged. mbsync/tag-rewrite are best-effort refreshes
+                # that must not block a successful relocation -- but a
+                # silently-ignored failure there is exactly the "call(),
+                # ignore response, continue" pattern the brief prohibits,
+                # so both are now logged and counted, never discarded.
+                if has_mb:
+                    mbid = getattr(item, "mb_albumid", "")
+                    plan_res = beets_client.plan_album_mb_track_repair({"album_id": int(aid), "mb_albumid": mbid})
+                    if not plan_res.get("ok"):
+                        summary["errors"] += 1
+                        log.append(f"  WARN: mbsync plan failed for album_id {aid}: {plan_res.get('error')}")
+                    else:
+                        track_res = beets_client.apply_album_mb_track_repair(plan_res.get("operation_id"), write_tags=True)
+                        if not track_res.get("ok"):
+                            summary["errors"] += 1
+                            log.append(f"  WARN: mbsync apply failed for album_id {aid}: {track_res.get('error')}")
+                meta_res = beets_client.update_album_metadata(int(aid), {}, force_write_tags=True)
+                if not meta_res.get("ok"):
+                    summary["errors"] += 1
+                    log.append(f"  WARN: tag rewrite failed for album_id {aid}: {meta_res.get('error')}")
+                rel_res = beets_client.relocate_album(int(aid), mode="move")
+                if not rel_res.get("ok"):
+                    summary["items_failed"] += 1
+                    summary["errors"] += 1
+                    log.append(f"  ERROR: relocate_album failed for album_id {aid}: {rel_res.get('error')}")
+                    continue
+                summary["items_moved"] += 1
 
         # The move above should have emptied this folder; clean it up if so.
+        # Wave 26 correction (sections 16-17): this used to check emptiness
+        # via a LOCAL folder.iterdir() call and then delete via the generic
+        # beets_client.delete_file() passthrough -- both the precondition
+        # check and the mutation itself belong on the engine side, which
+        # actually owns this mount; the Web Manager has no reliable local
+        # view of it in the two-service topology. Reuses
+        # _album_cleanup_remove_empty_tree(), the same real
+        # folder_cleanup_v1 Plan/Apply composition already used a few lines
+        # above for the "empty_folders" scan category -- the engine itself
+        # verifies containment, symlink-safety, directory type, actual
+        # emptiness, and DB-reference-freedom immediately before removing
+        # anything, rather than trusting a stale local stat.
         folder = Path(entry["folder"])
-        try:
-            if folder.exists() and not any(folder.iterdir()):
-                folder.rmdir()
-                log.append(f"  Removed emptied folder: {folder}")
-                summary["empty_folders_removed"] += 1
-        except Exception:
-            pass
+        if _album_cleanup_remove_empty_tree(folder, log):
+            summary["empty_folders_removed"] += 1
 
     for entry in scan["orphaned_folders"]:
         if cancel_event and cancel_event.is_set():

@@ -34,6 +34,7 @@ from discover_mutation_sinks import MutationSink, discover_all  # noqa: E402
 REPO_ROOT = Path(__file__).parent.parent.resolve()
 INVENTORY_PATH = REPO_ROOT / "security" / "arch003_mutation_inventory.json"
 LIBRARY_CLEANUP_CLOSURE_PR = 99
+WAVE26_AI_IMPORT_PR = 101
 
 _ENGINE_FUNCTION_FAMILY = {
     "_execute_album_cleanup_apply_locked": "album_cleanup_v1",
@@ -118,13 +119,16 @@ _APP_STATE_HINTS = {
 # verification basis, never picked up implicitly by a name substring.
 _APP_STATE_VERIFIED_FUNCTIONS = frozenset({
     "_add_to_pending",
+    "_ai_batch_write_state",
     "_library_import_all_write_last",
     "_load_pending_reviews",
     "_mark_pending_review_status",
+    "_record_ai_review_decision",
     "_record_recent_import",
     "_remove_pending_review_for_path",
     "_update_pending_review_revalidation",
     "_write_import_review_auto_state",
+    "batch_ai_suggest._do",
     "clear_ai_pending_review",
     "clear_recent_imports",
     "import_cleanup_stale",
@@ -165,6 +169,21 @@ _REVIEWED_RULE_DETAILS = {
         "domain": "other",
         "review_reason": "SEC-002 library_cleanup closure: tag write occurs through BeetsClient HTTP for playlist download/staging files before import, not as library cleanup or Web Manager local media mutation.",
         "reviewed_in_pr": LIBRARY_CLEANUP_CLOSURE_PR,
+    },
+    "reviewed-wave26-staging-cleanup-move-delete": {
+        "domain": "import_reconciliation",
+        "review_reason": "Wave 26 independent review: beets_client.move_file/delete_file called against a path explicitly verified (locally, before the call) to be outside MUSIC_ROOT and under an app-managed staging/download root -- cleanup of a rejected download, an already-imported staged source copy, or a disposable staged-subset working directory, never authoritative library media.",
+        "reviewed_in_pr": WAVE26_AI_IMPORT_PR,
+    },
+    "reviewed-wave26-pretracking-filename-repair": {
+        "domain": "import_reconciliation",
+        "review_reason": "Wave 26 independent review: beets_client.move_file used only to strip a broken template token from a file's own name (same directory, collision-avoided, exception-wrapped) on a file that reimport_disk's own docstring confirms is 'not in the beets DB' at this point -- no DB row exists yet to protect or verify against. A real engine-native atomic rename, not a fabricated transaction family; genuinely lower-risk than a DB-tracked mutation, but not yet composed through a dedicated controlled family -- tracked in docs/TECHNICAL_DEBT.md for a future folder/file-rename primitive.",
+        "reviewed_in_pr": WAVE26_AI_IMPORT_PR,
+    },
+    "reviewed-wave26-orphan-folder-rename": {
+        "domain": "ai_import",
+        "review_reason": "Wave 26 independent review: beets_client.move_file called only for a folder locally pre-verified as db_item_count == 0 (zero Beets items reference it), not the plan's target_exists/DB-tracked/merge/delete cases, never overwriting an existing folder and never deleting media -- a cosmetic rename of a folder Beets does not know about. A real engine-native atomic rename, not a fabricated transaction family (album_relocation_v1/artist_folder_reconcile_v1 both require a tracked album/artist identity this folder does not have); tracked in docs/TECHNICAL_DEBT.md for a future folder-rename primitive.",
+        "reviewed_in_pr": WAVE26_AI_IMPORT_PR,
     },
 }
 _CONTROL_AGENT_FUNCTION_CLASSIFICATION = {
@@ -332,6 +351,10 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
             return "CONFIG_STATE", "", "beets-config-state"
         if file == "backend/security.py":
             return "NON_MEDIA_FILESYSTEM", "", "security-module"
+        if file == "backend/ai_batch_state_store.py":
+            if sink.kind == "sql":
+                return "APP_STATE", "", "ai-batch-state-store-sqlite"
+            return "APP_STATE", "", "ai-batch-state-store-filesystem"
         return "NEEDS_REVIEW", "", "backend-support-module-not-individually-reviewed"
 
     # 9. app.py (Web Manager main module)
@@ -349,6 +372,28 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
             # import_folder_v1's Plan/Apply/Rollback contract. Do not claim
             # a transaction family this call never enters.
             return "ENGINE_NATIVE_BEETS", "", "beets-client-reimport-source-ipc-native-atomic"
+        if "beets_client.move_file" in text or "beets_client.delete_file" in text:
+            # Wave 26 independent review: beets_client.move_file/delete_file
+            # are GENERIC engine-side filesystem passthroughs -- routing a
+            # mutation through the engine does not, by itself, satisfy
+            # controlled-mutation architecture (moving a local call into an
+            # HTTP call is not the same as composing a real Plan/Apply/
+            # Verify family). Each call site below was independently
+            # inspected for what it actually touches; see
+            # _REVIEWED_RULE_DETAILS for the specific evidence per rule.
+            # A function not covered here falls through to
+            # ARCH003_BLOCKER -- unresolved by default, never resolved by
+            # sitting in this generic bucket.
+            if func in (
+                "_delete_staged_import_folder",
+                "import_folder_with_id._do",
+                "_validate_wanted_download_identity_before_import",
+            ):
+                return "STAGING_ONLY", "", "reviewed-wave26-staging-cleanup-move-delete"
+            if func == "reimport_disk._do" and "beets_client.move_file" in text:
+                return "ENGINE_NATIVE_BEETS", "", "reviewed-wave26-pretracking-filename-repair"
+            if func == "_maintenance_safe_folder_renames":
+                return "ENGINE_NATIVE_BEETS", "", "reviewed-wave26-orphan-folder-rename"
         if "BEET_BIN" in text or re.search(r"\bbase(_import)?\s*\+", text) or "beet" in text:
             verbs_hit = {v for v in _BEET_MUTATING_VERBS if f'"{v}"' in text or f"'{v}'" in text}
             if verbs_hit:
