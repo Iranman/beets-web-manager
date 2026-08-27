@@ -333,6 +333,28 @@ def wait_healthy(container: str, timeout=180) -> bool:
     return False
 
 
+def wait_engine_ipc_reachable(web_container: str, engine_host: str = "beets", engine_port: int = 8338, timeout: float = 60.0) -> bool:
+    """Found on real CI (twice, deterministically -- not a one-off flake):
+    wait_healthy() reporting the engine container's OWN healthcheck passing
+    does not guarantee beets-web-manager's Docker Compose DNS resolution of
+    the engine's service name has caught up yet after a stop/start cycle.
+    A bounded retry loop around the actual import request (still kept,
+    below, as defense in depth) was not sufficient by itself -- CI showed
+    all 3 attempts, roughly 10 seconds apart, still hitting "unresolved
+    host". This probes real DNS resolvability from INSIDE the web-manager
+    container directly (the same resolution its own outbound-policy check
+    performs), so the retry loop below only ever has to cover residual
+    request-level flakiness, not a resolution gap most of a minute wide."""
+    deadline = time.time() + timeout
+    probe = f"import socket; socket.getaddrinfo({engine_host!r}, {engine_port})"
+    while time.time() < deadline:
+        res = run(["docker", "exec", web_container, "python3", "-c", probe])
+        if res.returncode == 0:
+            return True
+        time.sleep(2)
+    return False
+
+
 def check_web_manager_isolation(web_container: str) -> None:
     inspect = run(["docker", "inspect", web_container])
     try:
@@ -1495,6 +1517,9 @@ def run_wave26_ai_import_scenarios(client: "HttpClient", web_container: str, eng
     start_res = run(["docker", "start", engine_container])
     if start_res.returncode != 0 or not wait_healthy(engine_container):
         scenario_fail("engine-offline-ai-import", "engine container did not come back healthy after restart")
+        return
+    if not wait_engine_ipc_reachable(web_container):
+        scenario_fail("engine-offline-ai-import", "engine container reported healthy but beets-web-manager could not resolve/reach it via Docker DNS within 60s")
         return
     # /api/ai-batch-import (used for the initial request above) only
     # reconnects to an already-terminal batch -- it never accepts
