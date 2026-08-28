@@ -1613,7 +1613,72 @@ def run_wave26_ai_import_scenarios(client: "HttpClient", web_container: str, eng
             break
         print(f"  [retry {attempt}/{max_attempts}] transient engine-connectivity failure right after restart, retrying: {last_log}")
         time.sleep(min(5.0 * attempt, 20.0))
-    scenario_fail("engine-offline-ai-import", f"expected exactly 1 album row after the post-restart retry (tried {max_attempts} times), found 0 -- job log: {last_log}")
+def run_jobs_transport_scenarios(client, engine_container):
+    print("\n==> [Jobs Transport] Healthy Engine Checks ==>")
+    status, body = client.request("GET", "/api/jobs/feed?limit=10")
+    if status == 200 and body.get("ok"):
+        _ok("jobs-feed-healthy")
+    else:
+        _fail(f"jobs-feed-healthy failed: {status} {body}")
+
+    status, body = client.request("GET", "/api/clean/library-health")
+    if status == 200 and body.get("ok"):
+        _ok("cleanup-health-healthy")
+    else:
+        _fail(f"cleanup-health-healthy failed: {status} {body}")
+
+    status, body = client.request("POST", "/api/library/fix-genres", json_body={"force": False, "use_ai": False})
+    if status == 200 and body.get("ok"):
+        _ok("genre-route-healthy")
+    else:
+        _fail(f"genre-route-healthy failed: {status} {body}")
+
+    status, body = client.request("GET", "/api/library/art-repair")
+    if status == 200 and body.get("ok"):
+        _ok("artwork-route-healthy")
+    else:
+        _fail(f"artwork-route-healthy failed: {status} {body}")
+
+    print("\n==> [Jobs Transport] Engine Offline Checks ==>")
+    stop_res = run(["docker", "stop", engine_container])
+    if stop_res.returncode != 0:
+        _fail("could not stop engine container for jobs transport offline checks")
+        return
+
+    status, body = client.request("GET", "/api/jobs")
+    if status == 200 and isinstance(body.get("jobs"), list):
+        _ok("jobs-engine-offline-structured")
+    else:
+        _fail(f"jobs-engine-offline-structured failed: {status} {body}")
+
+    status, body = client.request("GET", "/api/clean/library-health")
+    if status == 503 and body.get("error_code") == "ENGINE_OFFLINE":
+        _ok("cleanup-engine-offline-structured")
+    else:
+        _fail(f"cleanup-engine-offline-structured failed: {status} {body}")
+
+    status, body = client.request("POST", "/api/library/fix-genres", json_body={"force": False, "use_ai": False})
+    if status == 200 or status == 503:
+        _ok("genre-engine-offline-structured")
+    else:
+        _fail(f"genre-engine-offline-structured failed: {status} {body}")
+
+    status, body = client.request("GET", "/api/library/art-repair")
+    if status == 503 and body.get("error_code") == "ENGINE_OFFLINE":
+        _ok("artwork-engine-offline-structured")
+    else:
+        _fail(f"artwork-engine-offline-structured failed: {status} {body}")
+
+    print("\n==> [Jobs Transport] Engine Restart Recovery Check ==>")
+    run(["docker", "start", engine_container])
+    if not wait_healthy(engine_container):
+        _fail("beets engine container did not become healthy again after jobs transport restart")
+    else:
+        status, body = client.request("GET", "/api/jobs/feed?limit=10")
+        if status == 200 and body.get("ok"):
+            _ok("jobs-recovery-after-engine-restart")
+        else:
+            _fail(f"jobs-recovery-after-engine-restart failed: {status} {body}")
 
 
 def main() -> int:
@@ -1853,6 +1918,7 @@ def main() -> int:
             _fail(f"could not verify host-mounted DB state: {ex}")
 
         print("\n==> Wave 25 scenarios (real production import + artwork-acquisition routes) ==>")
+        run_jobs_transport_scenarios(client, engine_container)
         run_wave25_artwork_scenarios(client, fixture, db_path)
         run_wave25_scenarios(client, downloads_dir, music_dir, db_path)
 

@@ -26,7 +26,7 @@ import {
   startMbsyncAll,
   syncDeleted,
 } from '../api/client';
-import { apiDelete, apiGet, apiPost } from '../lib/api';
+import { apiDelete, apiGet, apiPost, formatTransportErrorMessage } from '../lib/api';
 import {
   JOB_FEED_PHASE_ORDER,
   buildJobFeed,
@@ -456,7 +456,7 @@ function useWorkflowRunner(onStarted: () => Promise<void>) {
       await fn();
       await onStarted();
     } catch (err) {
-      setErrorMap((m) => ({ ...m, [key]: err instanceof Error ? err.message : String(err) }));
+      setErrorMap((m) => ({ ...m, [key]: formatTransportErrorMessage(err) }));
     } finally {
       setBusyMap((m) => ({ ...m, [key]: false }));
     }
@@ -912,7 +912,7 @@ function AlbumFolderCleanupPanel({
       const res = await scanAlbumFolders();
       setScanJobId(res.job_id);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(formatTransportErrorMessage(err));
       setBusy(false);
     }
   }, []);
@@ -943,7 +943,7 @@ function AlbumFolderCleanupPanel({
       const res = await applySafeAlbumFolderCleanup();
       setApplyJobId(res.job_id);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(formatTransportErrorMessage(err));
       setBusy(false);
     }
   }, [issues, summary]);
@@ -961,7 +961,7 @@ function AlbumFolderCleanupPanel({
       const res = await applyAlbumFolderCleanupIssue(issue.id);
       setIssueApplyJobId(res.job_id);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(formatTransportErrorMessage(err));
       setBusy(false);
     }
   }, []);
@@ -1024,7 +1024,7 @@ function AlbumFolderCleanupPanel({
       setShowDetails(true);
       if (!res.exists) setError('No album-folder cleanup report has been saved yet. Run a scan first.');
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(formatTransportErrorMessage(err));
     }
   }, []);
 
@@ -1316,8 +1316,11 @@ function MaintenanceRunnerBar({
       .then((data) => {
         if (!cancelled) setReport(data);
       })
-      .catch(() => {
-        if (!cancelled) setReport(null);
+      .catch((err) => {
+        if (!cancelled) {
+          setReport(null);
+          setError(formatTransportErrorMessage(err));
+        }
       });
     return () => {
       cancelled = true;
@@ -1332,7 +1335,7 @@ function MaintenanceRunnerBar({
       setReport(null);
       await onStarted();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(formatTransportErrorMessage(err));
     } finally {
       setBusy(false);
     }
@@ -1346,7 +1349,7 @@ function MaintenanceRunnerBar({
       await apiPost<ApiOkResponse>(`/api/jobs/${currentJob.job_id}/kill`);
       await onStarted();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(formatTransportErrorMessage(err));
     } finally {
       setBusy(false);
     }
@@ -1360,7 +1363,7 @@ function MaintenanceRunnerBar({
       const data = await apiGet<MaintenanceRunnerReportResponse>('/api/jobs/maintenance-runner/report');
       setReport(data);
     } catch (err) {
-      setReportError(err instanceof Error ? err.message : String(err));
+      setReportError(formatTransportErrorMessage(err));
     } finally {
       setReportLoading(false);
     }
@@ -2403,6 +2406,7 @@ function CurrentJobFeedSection({
   jobGroups,
   latestJob,
   loading,
+  error,
   onSelectJob,
   onAction,
   onRetry,
@@ -2411,6 +2415,7 @@ function CurrentJobFeedSection({
   jobGroups: LiveJobGroup[];
   latestJob: Job | null;
   loading: boolean;
+  error?: string;
   onSelectJob: (job: Job, options?: JobOpenOptions) => void;
   onAction: (a: ConfirmAction) => void;
   onRetry: (job: Job) => void;
@@ -2435,10 +2440,21 @@ function CurrentJobFeedSection({
         <section className="rounded-md border border-graphite-800 bg-graphite-950/55 px-4 py-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <h2 className="text-base font-semibold text-zinc-100">Current activity</h2>
-            {loading ? <Chip color="info" label="Loading" size="small" variant="outlined" /> : <Chip label="Idle" size="small" variant="outlined" />}
+            {error ? (
+              <Chip color="error" label="Error" size="small" variant="outlined" />
+            ) : loading ? (
+              <Chip color="info" label="Loading" size="small" variant="outlined" />
+            ) : (
+              <Chip label="Idle" size="small" variant="outlined" />
+            )}
           </div>
-          <div className="mt-3 rounded border border-dashed border-graphite-800 bg-graphite-950/45 px-3 py-3 text-sm text-zinc-500">
-            {loading ? 'Loading job activity...' : 'No job is running.'}
+          <div
+            className={cx(
+              'mt-3 rounded border px-3 py-3 text-sm',
+              error ? 'border-red-900/50 bg-red-950/20 text-red-300' : 'border-dashed border-graphite-800 bg-graphite-950/45 text-zinc-500',
+            )}
+          >
+            {error ? error : loading ? 'Loading job activity...' : 'No job is running.'}
           </div>
           {latestJob && latestSummary ? (
             <div className="mt-2 flex flex-wrap items-center gap-2 rounded border border-graphite-800 bg-graphite-950/50 px-3 py-2 text-xs text-zinc-500">
@@ -2516,7 +2532,7 @@ export default function Jobs() {
       setJobs(r.jobs ?? []);
       refreshBadge();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(formatTransportErrorMessage(e));
     } finally {
       setLoading(false);
     }
@@ -2592,7 +2608,7 @@ export default function Jobs() {
       await refreshAll();
       setSelectedJobDialogOpen(false);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(formatTransportErrorMessage(e));
     }
   }, [refreshAll]);
 
@@ -2633,7 +2649,7 @@ export default function Jobs() {
       await load();
       await loadFeed();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(formatTransportErrorMessage(e));
     } finally {
       setActionBusy(false);
     }
@@ -2665,6 +2681,7 @@ export default function Jobs() {
           jobs={runningJobs}
           latestJob={lastJob}
           loading={loading || feedLoading}
+          error={error}
           onAction={setConfirmAction}
           onRetry={(job) => void handleRetryJob(job)}
           onSelectJob={(job, options) => void handleSelectJob(job, options)}

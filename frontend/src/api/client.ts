@@ -113,6 +113,7 @@ type ApiErrorBody = {
   ok?: boolean;
   error?: string;
   code?: string;
+  error_code?: string;
   candidate?: unknown;
 };
 
@@ -138,18 +139,55 @@ export async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
     if (!merged.has('X-Beets-CSRF')) merged.set('X-Beets-CSRF', '1');
     headers = merged;
   }
-  const response = await fetch(path, { ...init, headers });
+
+  let response: Response;
+  try {
+    response = await fetch(path, { ...init, headers });
+  } catch (err: unknown) {
+    const name = (err as Error)?.name || '';
+    const isTimeout = name === 'AbortError' || name === 'TimeoutError';
+    const message = isTimeout ? 'Request timed out.' : 'Could not reach Beets Web Manager.';
+    const netErr = new Error(message) as Error & { body?: ApiErrorBody; isNetworkError?: boolean; isTimeout?: boolean; httpStatus?: number };
+    netErr.isNetworkError = !isTimeout;
+    netErr.isTimeout = isTimeout;
+    netErr.httpStatus = 0;
+    throw netErr;
+  }
+
   const body = (await response.json().catch(() => null)) as ApiErrorBody | null;
 
   if (!response.ok) {
-    const err = new Error(body?.error || `HTTP ${response.status}`) as Error & { body?: ApiErrorBody };
+    let message = body?.error || `HTTP ${response.status}`;
+    let isEngineOffline = response.status === 503;
+    if (body?.error_code === 'ENGINE_OFFLINE' || message.toLowerCase().includes('control agent') || message.toLowerCase().includes('engine')) {
+      isEngineOffline = true;
+    }
+
+    if (response.status === 401 || response.status === 403) {
+      message = 'Your session expired. Sign in again.';
+    } else if (isEngineOffline) {
+      message = 'Beets engine is unavailable.';
+    }
+
+    const err = new Error(message) as Error & { body?: ApiErrorBody; isAuthError?: boolean; isEngineOffline?: boolean; httpStatus?: number };
     err.body = body ?? undefined;
+    err.httpStatus = response.status;
+    err.isAuthError = response.status === 401 || response.status === 403;
+    err.isEngineOffline = isEngineOffline;
     throw err;
   }
 
   if (body && body.ok === false) {
-    const err = new Error(body.error || 'Request failed') as Error & { body?: ApiErrorBody };
+    let message = body.error || 'Request failed';
+    let isEngineOffline = false;
+    if (body.error_code === 'ENGINE_OFFLINE' || message.toLowerCase().includes('control agent') || message.toLowerCase().includes('engine')) {
+      isEngineOffline = true;
+      message = 'Beets engine is unavailable.';
+    }
+
+    const err = new Error(message) as Error & { body?: ApiErrorBody; isEngineOffline?: boolean };
     err.body = body;
+    err.isEngineOffline = isEngineOffline;
     throw err;
   }
 

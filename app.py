@@ -11276,8 +11276,11 @@ def _repair_album_art(aid: int, log: List[str], cancel_event=None,
 
 @app.get("/api/library/art-repair")
 def library_art_repair_report():
-    report = _art_repair_build_report()
-    return jsonify(_art_repair_attach_last_run(report))
+    try:
+        report = _art_repair_build_report()
+        return jsonify(_art_repair_attach_last_run(report))
+    except (BeetsUnavailableError, BeetsError) as ex:
+        return jsonify({"ok": False, "error": "Beets engine is unavailable.", "error_code": "ENGINE_OFFLINE", "detail": str(ex)}), 503
 
 
 @app.get("/api/albums/<int:aid>/art")
@@ -30832,6 +30835,8 @@ def _library_health_payload(orphan_sample_limit: int = 100,
 def clean_library_health():
     try:
         return jsonify(_library_health_payload())
+    except (BeetsUnavailableError, BeetsError) as ex:
+        return jsonify({"ok": False, "error": "Beets engine is unavailable.", "error_code": "ENGINE_OFFLINE", "detail": str(ex)}), 503
     except Exception as ex:
         app.logger.warning("Library health scan (route) failed: %s", type(ex).__name__)
         return jsonify({"ok": False, "error": "Could not scan library database health."}), 500
