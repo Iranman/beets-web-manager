@@ -186,12 +186,11 @@ class LibraryHealthPayloadSplitTests(unittest.TestCase):
         self._src = _app_source()
 
     def test_resolved_groups_excluded_from_active_groups(self):
-        self.assertIn("rgid_resolved_groups: List[Dict[str, Any]] = []", self._src)
         self.assertIn('resolution.get("decision") == "keep_separate"', self._src)
 
     def test_resolved_groups_exposed_in_payload(self):
-        self.assertIn('"rgid_resolved_groups": rgid_resolved_groups[:duplicate_limit]', self._src)
-        self.assertIn('"rgid_resolved_group_count": len(rgid_resolved_groups)', self._src)
+        self.assertIn('res["rgid_resolved_groups"] = rgid_resolved_groups', self._src)
+        self.assertIn('res["rgid_resolved_group_count"] = len(rgid_resolved_groups)', self._src)
 
 
 class MbReleaseGroupCandidatesHelperTests(unittest.TestCase):

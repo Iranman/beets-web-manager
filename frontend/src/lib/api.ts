@@ -53,23 +53,23 @@ async function apiFetch<T>(url: string, opts: RequestInit = {}): Promise<T> {
 
   if (!res.ok) {
     let serverMessage = `HTTP ${res.status}`;
-    let isEngineOffline = res.status === 503;
+    let errorCode = '';
     try {
       const body = (await res.json()) as { error?: string; error_code?: string };
       if (typeof body?.error === 'string' && body.error) {
         serverMessage = body.error;
       }
-      if (body?.error_code === 'ENGINE_OFFLINE' || serverMessage.toLowerCase().includes('control agent') || serverMessage.toLowerCase().includes('engine')) {
-        isEngineOffline = true;
+      if (typeof body?.error_code === 'string') {
+        errorCode = body.error_code;
       }
     } catch {
       // ignore JSON parse failure
     }
 
-    if (res.status === 401 || res.status === 403) {
+    if (res.status === 401 || res.status === 403 || errorCode === 'AUTH_FAILED') {
       throw new ApiError(res.status, 'Your session expired. Sign in again.', 'auth');
     }
-    if (isEngineOffline) {
+    if (errorCode === 'ENGINE_OFFLINE' || (res.status === 503 && !errorCode)) {
       throw new ApiError(res.status, 'Beets engine is unavailable.', 'engine_offline');
     }
     throw new ApiError(res.status, serverMessage, 'http_error');

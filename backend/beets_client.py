@@ -508,6 +508,11 @@ class BeetsClient:
         """Engine-side library cleanup rollback (SEC-002 / ARCH-003 library_cleanup_v1)."""
         return self._request("POST", "/library/cleanup/rollback", {"operation_id": operation_id}, timeout=timeout)
 
+    def get_library_health(self, orphan_sample_limit: int = 100, duplicate_limit: int = 100, empty_limit: int = 100, timeout: float = 30.0) -> Dict[str, Any]:
+        """Fetch read-only library health report from Beets control agent."""
+        params = f"?orphan_sample_limit={orphan_sample_limit}&duplicate_limit={duplicate_limit}&empty_limit={empty_limit}"
+        return self._request("GET", f"/library/health{params}", timeout=timeout)
+
     def plan_playlist_media_cleanup(self, payload: Dict[str, Any], *, timeout: float = 30.0) -> Dict[str, Any]:
         """Engine-side playlist media cleanup planning (SEC-002 Wave 22 Closure)."""
         return self._request("POST", "/playlists/media-cleanup/plan", payload, timeout=timeout)

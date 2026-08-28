@@ -11279,8 +11279,34 @@ def library_art_repair_report():
     try:
         report = _art_repair_build_report()
         return jsonify(_art_repair_attach_last_run(report))
-    except (BeetsUnavailableError, BeetsError) as ex:
-        return jsonify({"ok": False, "error": "Beets engine is unavailable.", "error_code": "ENGINE_OFFLINE", "detail": str(ex)}), 503
+    except BeetsUnavailableError as ex:
+        app.logger.warning("Artwork repair report failed: Beets engine unavailable")
+        return jsonify({
+            "ok": False,
+            "error": "Beets engine is unavailable.",
+            "error_code": "ENGINE_OFFLINE",
+        }), 503
+    except BeetsAuthError as ex:
+        app.logger.warning("Artwork repair report failed: Auth error")
+        return jsonify({
+            "ok": False,
+            "error": "Your session expired. Sign in again.",
+            "error_code": "AUTH_FAILED",
+        }), 401
+    except BeetsError as ex:
+        app.logger.error("Artwork repair report failed: %s", ex)
+        return jsonify({
+            "ok": False,
+            "error": "Could not load artwork repair status.",
+            "error_code": "ART_REPAIR_FAILED",
+        }), 500
+    except Exception as ex:
+        app.logger.exception("Artwork repair report unexpected failure")
+        return jsonify({
+            "ok": False,
+            "error": "Could not load artwork repair status.",
+            "error_code": "ART_REPAIR_FAILED",
+        }), 500
 
 
 @app.get("/api/albums/<int:aid>/art")
@@ -30584,262 +30610,88 @@ def _library_health_payload(orphan_sample_limit: int = 100,
                             duplicate_limit: int = 100,
                             empty_limit: int = 100,
                             progress: Optional[Any] = None) -> Dict[str, Any]:
-    def _album_group_key(albumartist: str, album: str) -> Tuple[str, str]:
-        return (_album_track_norm(albumartist), _album_track_norm(album))
-
     if progress:
         progress({
             "category": "Cleanup",
-            "current_task": "Reading Beets database rows",
-            "current_result": "Loading album and item rows",
+            "current_task": "Reading Beets database health",
+            "current_result": "Fetching health report from Beets engine",
         })
-    with _db(row_factory=sqlite3.Row) as con:
-        album_rows = con.execute(
-            """
-            SELECT a.id, a.albumartist, a.album, a.year, a.mb_albumid,
-                   COALESCE(a.mb_releasegroupid, '') AS mb_releasegroupid,
-                   COUNT(i.id) AS track_count
-            FROM albums a
-            LEFT JOIN items i ON i.album_id = a.id
-            GROUP BY a.id
-            ORDER BY lower(COALESCE(a.albumartist,'')), lower(COALESCE(a.album,'')), a.year, a.id
-            """
-        ).fetchall()
-        item_rows = con.execute(
-            """
-            SELECT id, title, artist, album, album_id, disc, track, mb_trackid, path
-            FROM items
-            WHERE COALESCE(path, '') != ''
-            ORDER BY id
-            """
-        ).fetchall()
-
-    total_album_rows = len(album_rows)
-    total_item_rows = len(item_rows)
-    if progress:
-        progress({
-            "category": "Cleanup",
-            "current_task": "Checking duplicate albums and Release Group ID groups",
-            "scanned_count": 0,
-            "total_count": total_album_rows,
-            "albums_count": total_album_rows,
-            "tracks_count": total_item_rows,
-            "current_result": (
-                f"Loaded {total_album_rows} album row(s) and "
-                f"{total_item_rows} item row(s)"
-            ),
-        })
-
-    items_by_album: Dict[int, List[sqlite3.Row]] = {}
-    for row in item_rows:
-        if row["album_id"] is None:
-            continue
-        items_by_album.setdefault(int(row["album_id"]), []).append(row)
-
-    grouped: Dict[Tuple[str, str], List[sqlite3.Row]] = {}
-    for idx, row in enumerate(album_rows, start=1):
-        key = _album_group_key(_s(row["albumartist"]), _s(row["album"]))
-        if not key[0] or not key[1]:
-            continue
-        grouped.setdefault(key, []).append(row)
-        if progress and (idx == 1 or idx % 100 == 0 or idx == total_album_rows):
-            progress({
-                "category": "Cleanup",
-                "current_task": "Checking duplicate albums and Release Group ID groups",
-                "scanned_count": idx,
-                "total_count": total_album_rows,
-                "remaining_count": max(0, total_album_rows - idx),
-                "albums_count": total_album_rows,
-                "tracks_count": total_item_rows,
-            })
-
-    def _aldir_for_album(album_id: int) -> str:
-        """Return the most common parent directory of an album's item paths."""
-        items = items_by_album.get(album_id, [])
-        if not items:
-            return ""
-        dirs = [os.path.dirname(_s(r["path"])) for r in items if _s(r["path"])]
-        dirs = [d for d in dirs if d]
-        if not dirs:
-            return ""
-        most_common = Counter(dirs).most_common(1)
-        return most_common[0][0] if most_common else ""
-
-    duplicate_albums: List[Dict[str, Any]] = []
-    for rows in grouped.values():
-        if len(rows) < 2:
-            continue
-        display = rows[0]
-        safety = _library_duplicate_merge_safety(rows, items_by_album)
-        duplicate_albums.append({
-            "albumartist": _s(display["albumartist"]),
-            "album": _s(display["album"]),
-            "count": len(rows),
-            "albums": [
-                {
-                    "album_id": int(r["id"]),
-                    "track_count": int(r["track_count"] or 0),
-                    "mb_albumid": _s(r["mb_albumid"]),
-                    "mb_releasegroupid": _s(r["mb_releasegroupid"]),
-                    "year": int(r["year"] or 0),
-                    "aldir": _aldir_for_album(int(r["id"])),
-                }
-                for r in rows
-            ],
-            **safety,
-        })
-    duplicate_albums.sort(key=lambda g: (-int(g["count"]), g["albumartist"].casefold(), g["album"].casefold()))
-
-    # RGID-based duplicate detection: same RGID appearing in multiple album rows
-    rgid_map: Dict[str, List[Dict[str, Any]]] = {}
-    for r in album_rows:
-        rgid = _s(r["mb_releasegroupid"]).strip()
-        if not rgid:
-            continue
-        rgid_map.setdefault(rgid, []).append(r)
+    res = beets_client.get_library_health(
+        orphan_sample_limit=orphan_sample_limit,
+        duplicate_limit=duplicate_limit,
+        empty_limit=empty_limit,
+    )
     rgid_resolutions = _load_rgid_resolutions()
-    rgid_duplicate_groups: List[Dict[str, Any]] = []
-    rgid_resolved_groups: List[Dict[str, Any]] = []
-    for rgid, rows in rgid_map.items():
-        if len(rows) < 2:
-            continue
-        group = {
-            "mb_releasegroupid": rgid,
-            "count": len(rows),
-            "albums": [
-                {
-                    "album_id": int(r["id"]),
-                    "albumartist": _s(r["albumartist"]),
-                    "album": _s(r["album"]),
-                    "year": int(r["year"] or 0),
-                    "track_count": int(r["track_count"] or 0),
-                    "mb_albumid": _s(r["mb_albumid"]),
-                    "aldir": _aldir_for_album(int(r["id"])),
-                }
-                for r in rows
-            ],
-        }
-        resolution = rgid_resolutions.get(rgid)
-        if resolution and resolution.get("decision") == "keep_separate":
-            group["resolution"] = resolution
-            rgid_resolved_groups.append(group)
-        else:
-            rgid_duplicate_groups.append(group)
-    rgid_duplicate_groups.sort(key=lambda g: -g["count"])
-    rgid_resolved_groups.sort(key=lambda g: -g["count"])
+    if rgid_resolutions:
+        rgid_duplicate_groups = res.get("rgid_duplicate_groups", [])
+        rgid_resolved_groups = list(res.get("rgid_resolved_groups", []))
+        unresolved_groups = []
+        for group in rgid_duplicate_groups:
+            rgid = group.get("mb_releasegroupid", "")
+            resolution = rgid_resolutions.get(rgid)
+            if resolution and resolution.get("decision") == "keep_separate":
+                group["resolution"] = resolution
+                rgid_resolved_groups.append(group)
+            else:
+                unresolved_groups.append(group)
+        res["rgid_duplicate_groups"] = unresolved_groups
+        res["rgid_duplicate_group_count"] = len(unresolved_groups)
+        res["rgid_resolved_groups"] = rgid_resolved_groups
+        res["rgid_resolved_group_count"] = len(rgid_resolved_groups)
+        if "final_summary" in res:
+            res["final_summary"]["same_release_group_id_groups"] = len(unresolved_groups)
 
     if progress:
+        summary = res.get("final_summary", {})
         progress({
             "category": "Cleanup",
-            "current_task": "Checking orphaned items and empty albums",
-            "scanned_count": 0,
-            "total_count": total_item_rows,
-            "duplicate_album_groups": len(duplicate_albums),
-            "same_release_group_id_groups": len(rgid_duplicate_groups),
-            "empty_albums": 0,
-            "current_result": (
-                f"{len(duplicate_albums)} duplicate album group(s), "
-                f"{len(rgid_duplicate_groups)} same Release Group ID group(s)"
-            ),
+            "current_task": "Library database health scan completed",
+            "scanned_count": summary.get("database_rows_scanned", 0),
+            "total_count": summary.get("database_rows_scanned", 0),
+            "albums_count": summary.get("albums_count", 0),
+            "tracks_count": summary.get("tracks_count", 0),
+            "duplicate_album_groups": summary.get("duplicate_album_groups", 0),
+            "same_release_group_id_groups": summary.get("same_release_group_id_groups", 0),
+            "empty_albums": summary.get("empty_albums", 0),
+            "orphaned_items": summary.get("orphaned_items", 0),
+            "missing_files": summary.get("missing_files", 0),
+            "current_result": "Health scan completed",
         })
-
-    empty_albums = [
-        {
-            "album_id": int(r["id"]),
-            "albumartist": _s(r["albumartist"]),
-            "album": _s(r["album"]),
-            "year": int(r["year"] or 0),
-        }
-        for r in album_rows
-        if int(r["track_count"] or 0) == 0
-    ]
-
-    orphaned_ids: List[int] = []
-    orphaned_items: List[Dict[str, Any]] = []
-    for idx, row in enumerate(item_rows, start=1):
-        raw_path = _s(row["path"])
-        if _db_item_file_exists(raw_path):
-            if progress and (idx == 1 or idx % 250 == 0 or idx == total_item_rows):
-                progress({
-                    "category": "Cleanup",
-                    "current_task": "Checking orphaned items and empty albums",
-                    "scanned_count": idx,
-                    "total_count": total_item_rows,
-                    "remaining_count": max(0, total_item_rows - idx),
-                    "orphaned_items": len(orphaned_ids),
-                    "missing_files": len(orphaned_ids),
-                    "empty_albums": len(empty_albums),
-                    "duplicate_album_groups": len(duplicate_albums),
-                    "same_release_group_id_groups": len(rgid_duplicate_groups),
-                })
-            continue
-        iid = int(row["id"])
-        orphaned_ids.append(iid)
-        if len(orphaned_items) < orphan_sample_limit:
-            orphaned_items.append({
-                "id": iid,
-                "title": _s(row["title"]),
-                "artist": _s(row["artist"]),
-                "album": _s(row["album"]),
-                "path": raw_path,
-            })
-        if progress:
-            progress({
-                "category": "Cleanup",
-                "current_task": "Checking orphaned items and empty albums",
-                "current_item": f"item {iid}",
-                "current_path": raw_path,
-                "scanned_count": idx,
-                "total_count": total_item_rows,
-                "remaining_count": max(0, total_item_rows - idx),
-                "orphaned_items": len(orphaned_ids),
-                "missing_files": len(orphaned_ids),
-                "empty_albums": len(empty_albums),
-                "duplicate_album_groups": len(duplicate_albums),
-                "same_release_group_id_groups": len(rgid_duplicate_groups),
-                "current_result": "Missing file row found",
-            })
-
-    final_summary = {
-        "database_rows_scanned": total_album_rows + total_item_rows,
-        "albums_count": total_album_rows,
-        "tracks_count": total_item_rows,
-        "duplicate_album_groups": len(duplicate_albums),
-        "same_release_group_id_groups": len(rgid_duplicate_groups),
-        "orphaned_items": len(orphaned_ids),
-        "empty_albums": len(empty_albums),
-        "missing_files": len(orphaned_ids),
-    }
-
-    return {
-        "ok": True,
-        "duplicate_albums": duplicate_albums[:duplicate_limit],
-        "duplicate_album_count": len(duplicate_albums),
-        "rgid_duplicate_groups": rgid_duplicate_groups[:duplicate_limit],
-        "rgid_duplicate_group_count": len(rgid_duplicate_groups),
-        "rgid_resolved_groups": rgid_resolved_groups[:duplicate_limit],
-        "rgid_resolved_group_count": len(rgid_resolved_groups),
-        "orphaned_items": orphaned_items,
-        "orphaned_item_count": len(orphaned_ids),
-        "orphaned_item_ids": orphaned_ids,
-        "empty_albums": empty_albums[:empty_limit],
-        "empty_album_count": len(empty_albums),
-        "database_rows_scanned": total_album_rows + total_item_rows,
-        "album_row_count": total_album_rows,
-        "item_row_count": total_item_rows,
-        "final_summary": final_summary,
-    }
+    return res
 
 
 @app.get("/api/clean/library-health")
 def clean_library_health():
     try:
         return jsonify(_library_health_payload())
-    except (BeetsUnavailableError, BeetsError) as ex:
-        return jsonify({"ok": False, "error": "Beets engine is unavailable.", "error_code": "ENGINE_OFFLINE", "detail": str(ex)}), 503
+    except BeetsUnavailableError as ex:
+        app.logger.warning("Library health scan failed: Beets engine unavailable")
+        return jsonify({
+            "ok": False,
+            "error": "Beets engine is unavailable.",
+            "error_code": "ENGINE_OFFLINE",
+        }), 503
+    except BeetsAuthError as ex:
+        app.logger.warning("Library health scan failed: Auth error")
+        return jsonify({
+            "ok": False,
+            "error": "Your session expired. Sign in again.",
+            "error_code": "AUTH_FAILED",
+        }), 401
+    except BeetsError as ex:
+        app.logger.error("Library health scan failed: %s", ex)
+        return jsonify({
+            "ok": False,
+            "error": "Could not load library health.",
+            "error_code": "LIBRARY_HEALTH_FAILED",
+        }), 500
     except Exception as ex:
-        app.logger.warning("Library health scan (route) failed: %s", type(ex).__name__)
-        return jsonify({"ok": False, "error": "Could not scan library database health."}), 500
+        app.logger.exception("Library health scan unexpected failure")
+        return jsonify({
+            "ok": False,
+            "error": "Could not load library health.",
+            "error_code": "LIBRARY_HEALTH_FAILED",
+        }), 500
 
 
 @app.post("/api/clean/library-health/scan")
