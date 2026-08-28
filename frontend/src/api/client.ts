@@ -158,35 +158,42 @@ export async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
 
   if (!response.ok) {
     let errorCode = body?.error_code || body?.code || '';
-    let isEngineOffline = errorCode === 'ENGINE_OFFLINE' || (response.status === 503 && !errorCode);
-    let isAuthError = response.status === 401 || response.status === 403 || errorCode === 'AUTH_FAILED';
+    let isEngineOffline = errorCode === 'ENGINE_OFFLINE' || (response.status === 503 && !errorCode && !body?.error?.includes('authentication'));
+    let isEngineAuthError = errorCode === 'ENGINE_AUTH_FAILED';
+    let isAuthError = (response.status === 401 || response.status === 403 || errorCode === 'AUTH_FAILED' || errorCode === 'USER_AUTH_FAILED') && !isEngineAuthError;
     let message = body?.error || `HTTP ${response.status}`;
 
     if (isAuthError) {
       message = 'Your session expired. Sign in again.';
     } else if (isEngineOffline) {
       message = 'Beets engine is unavailable.';
+    } else if (isEngineAuthError) {
+      message = 'Beets engine authentication failed.';
     }
 
-    const err = new Error(message) as Error & { body?: ApiErrorBody; isAuthError?: boolean; isEngineOffline?: boolean; httpStatus?: number };
+    const err = new Error(message) as Error & { body?: ApiErrorBody; isAuthError?: boolean; isEngineOffline?: boolean; isEngineAuthError?: boolean; httpStatus?: number };
     err.body = body ?? undefined;
     err.httpStatus = response.status;
     err.isAuthError = isAuthError;
     err.isEngineOffline = isEngineOffline;
+    err.isEngineAuthError = isEngineAuthError;
     throw err;
   }
 
   if (body && body.ok === false) {
     let message = body.error || 'Request failed';
-    let isEngineOffline = false;
-    if (body.error_code === 'ENGINE_OFFLINE' || message.toLowerCase().includes('control agent') || message.toLowerCase().includes('engine')) {
-      isEngineOffline = true;
+    let isEngineOffline = body.error_code === 'ENGINE_OFFLINE';
+    let isEngineAuthError = body.error_code === 'ENGINE_AUTH_FAILED';
+    if (isEngineOffline) {
       message = 'Beets engine is unavailable.';
+    } else if (isEngineAuthError) {
+      message = 'Beets engine authentication failed.';
     }
 
-    const err = new Error(message) as Error & { body?: ApiErrorBody; isEngineOffline?: boolean };
+    const err = new Error(message) as Error & { body?: ApiErrorBody; isEngineOffline?: boolean; isEngineAuthError?: boolean };
     err.body = body;
     err.isEngineOffline = isEngineOffline;
+    err.isEngineAuthError = isEngineAuthError;
     throw err;
   }
 

@@ -151,6 +151,72 @@ class JobsPageEndpointsTestCase(unittest.TestCase):
             self.assertEqual(data.get('error_code'), 'LIBRARY_HEALTH_FAILED')
             self.assertEqual(data.get('error'), 'Could not load library health.')
 
+    def test_library_health_engine_auth_error_handling(self):
+        from backend.beets_client import BeetsAuthError
+        with patch.object(app_module.beets_client, 'get_library_health', side_effect=BeetsAuthError("Token invalid")):
+            res = self.client.get('/api/clean/library-health', headers={'X-Beets-CSRF': '1'})
+            self.assertEqual(res.status_code, 503)
+            data = res.get_json()
+            self.assertFalse(data.get('ok'))
+            self.assertEqual(data.get('error_code'), 'ENGINE_AUTH_FAILED')
+            self.assertEqual(data.get('error'), 'Beets engine authentication failed.')
+
+    def test_art_repair_engine_auth_error_handling(self):
+        from backend.beets_client import BeetsAuthError
+        with patch('app._art_repair_build_report', side_effect=BeetsAuthError("Token invalid")):
+            res = self.client.get('/api/library/art-repair', headers={'X-Beets-CSRF': '1'})
+            self.assertEqual(res.status_code, 503)
+            data = res.get_json()
+            self.assertFalse(data.get('ok'))
+            self.assertEqual(data.get('error_code'), 'ENGINE_AUTH_FAILED')
+            self.assertEqual(data.get('error'), 'Beets engine authentication failed.')
+
+    def test_beets_client_http_500_raises_beets_error_not_unavailable(self):
+        import urllib.error
+        from io import BytesIO
+        from backend.beets_client import BeetsClient
+        client = BeetsClient(base_url="http://localhost:8338", token="test")
+        body_bytes = b'{"ok": false, "error": "Internal database query error", "error_code": "DB_QUERY_FAILED"}'
+        err = urllib.error.HTTPError("http://localhost:8338/library/health", 500, "Server Error", {}, BytesIO(body_bytes))
+        with patch('urllib.request.urlopen', side_effect=err):
+            with self.assertRaises(BeetsError) as ctx:
+                client.get_library_health()
+            self.assertNotIsInstance(ctx.exception, BeetsUnavailableError)
+            self.assertEqual(ctx.exception.status_code, 500)
+            self.assertEqual(ctx.exception.error_code, 'DB_QUERY_FAILED')
+
+    def test_beets_client_http_401_raises_beets_auth_error(self):
+        import urllib.error
+        from io import BytesIO
+        from backend.beets_client import BeetsClient, BeetsAuthError
+        client = BeetsClient(base_url="http://localhost:8338", token="test")
+        body_bytes = b'{"ok": false, "error": "Unauthorized token", "error_code": "ENGINE_AUTH_FAILED"}'
+        err = urllib.error.HTTPError("http://localhost:8338/library/health", 401, "Unauthorized", {}, BytesIO(body_bytes))
+        with patch('urllib.request.urlopen', side_effect=err):
+            with self.assertRaises(BeetsAuthError) as ctx:
+                client.get_library_health()
+            self.assertEqual(ctx.exception.status_code, 401)
+            self.assertEqual(ctx.exception.error_code, 'ENGINE_AUTH_FAILED')
+
+    def test_control_agent_bounded_query_limits(self):
+        from backend.beets_control_agent import _parse_bounded_int_param
+        # Valid
+        val, err = _parse_bounded_int_param({"duplicate_limit": ["50"]}, "duplicate_limit")
+        self.assertIsNone(err)
+        self.assertEqual(val, 50)
+        # Malformed
+        val, err = _parse_bounded_int_param({"duplicate_limit": ["garbage"]}, "duplicate_limit")
+        self.assertIsNotNone(err)
+        self.assertIn("must be an integer", err)
+        # Out of bounds (negative)
+        val, err = _parse_bounded_int_param({"duplicate_limit": ["-5"]}, "duplicate_limit")
+        self.assertIsNotNone(err)
+        self.assertIn("must be between 0 and 1000", err)
+        # Out of bounds (too large)
+        val, err = _parse_bounded_int_param({"duplicate_limit": ["999999"]}, "duplicate_limit")
+        self.assertIsNotNone(err)
+        self.assertIn("must be between 0 and 1000", err)
+
 
 if __name__ == '__main__':
     unittest.main()

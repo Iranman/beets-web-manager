@@ -1,4 +1,4 @@
-export type ApiErrorCategory = 'network' | 'engine_offline' | 'auth' | 'timeout' | 'http_error';
+export type ApiErrorCategory = 'network' | 'engine_offline' | 'engine_auth' | 'auth' | 'timeout' | 'http_error';
 
 export class ApiError extends Error {
   httpStatus: number;
@@ -66,7 +66,10 @@ async function apiFetch<T>(url: string, opts: RequestInit = {}): Promise<T> {
       // ignore JSON parse failure
     }
 
-    if (res.status === 401 || res.status === 403 || errorCode === 'AUTH_FAILED') {
+    if (errorCode === 'ENGINE_AUTH_FAILED') {
+      throw new ApiError(res.status, 'Beets engine authentication failed.', 'engine_auth');
+    }
+    if ((res.status === 401 || res.status === 403 || errorCode === 'AUTH_FAILED' || errorCode === 'USER_AUTH_FAILED') && errorCode !== 'ENGINE_AUTH_FAILED') {
       throw new ApiError(res.status, 'Your session expired. Sign in again.', 'auth');
     }
     if (errorCode === 'ENGINE_OFFLINE' || (res.status === 503 && !errorCode)) {

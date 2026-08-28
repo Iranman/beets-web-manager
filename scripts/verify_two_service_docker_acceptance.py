@@ -1639,6 +1639,13 @@ def run_jobs_transport_scenarios(client, engine_container):
     else:
         _fail(f"artwork-route-healthy failed: {status} {body}")
 
+    print("\n==> [Jobs Transport] Reachable Engine Application Error Check ==>")
+    status, body = client.request("GET", "/api/clean/library-health?duplicate_limit=invalid_value")
+    if status == 400 and body.get("error_code") == "INVALID_QUERY_PARAMETER" and body.get("error_code") != "ENGINE_OFFLINE":
+        _ok("reachable-engine-application-error-not-offline")
+    else:
+        _fail(f"reachable-engine-application-error-not-offline failed: {status} {body}")
+
     print("\n==> [Jobs Transport] Engine Offline Checks ==>")
     stop_res = run(["docker", "stop", engine_container])
     if stop_res.returncode != 0:

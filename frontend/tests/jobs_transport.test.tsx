@@ -94,4 +94,50 @@ describe('Jobs Page API Transport Error Formatting', () => {
 
     expect(screen.queryByText('Loading job activity...')).toBeNull();
   });
+
+  it('formats ApiError engine_auth category correctly', () => {
+    const err = new ApiError(503, 'Beets engine authentication failed.', 'engine_auth');
+    expect(formatTransportErrorMessage(err)).toBe('Beets engine authentication failed.');
+  });
+
+  it('does NOT classify error message containing "engine" as offline when error_code != ENGINE_OFFLINE', async () => {
+    const { apiJson } = await import('../src/api/client');
+    vi.spyOn(global, 'fetch').mockImplementation(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({ ok: false, error: 'Database engine calculation failed', error_code: 'LIBRARY_HEALTH_FAILED' }),
+          { status: 500, headers: { 'Content-Type': 'application/json' } },
+        ),
+      ),
+    );
+
+    try {
+      await apiJson('/api/clean/library-health');
+      expect.fail('apiJson should have thrown');
+    } catch (err: any) {
+      expect(err.isEngineOffline).toBe(false);
+      expect(err.message).toBe('Database engine calculation failed');
+    }
+  });
+
+  it('classifies ENGINE_AUTH_FAILED correctly with isEngineAuthError = true', async () => {
+    const { apiJson } = await import('../src/api/client');
+    vi.spyOn(global, 'fetch').mockImplementation(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({ ok: false, error: 'Beets engine authentication failed.', error_code: 'ENGINE_AUTH_FAILED' }),
+          { status: 503, headers: { 'Content-Type': 'application/json' } },
+        ),
+      ),
+    );
+
+    try {
+      await apiJson('/api/clean/library-health');
+      expect.fail('apiJson should have thrown');
+    } catch (err: any) {
+      expect(err.isEngineOffline).toBe(false);
+      expect(err.isEngineAuthError).toBe(true);
+      expect(err.message).toBe('Beets engine authentication failed.');
+    }
+  });
 });

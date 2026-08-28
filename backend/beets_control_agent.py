@@ -3316,6 +3316,25 @@ def _unique_import_review_cleanup_path(path: Path) -> Path:
 
 
 
+def _parse_bounded_int_param(params: dict, key: str, default: int = 100, min_val: int = 0, max_val: int = 1000) -> tuple[Optional[int], Optional[str]]:
+    """Parse query parameter into a bounded integer.
+    Returns (value, None) on success, or (None, error_message) on invalid/out-of-range input.
+    """
+    raw_list = params.get(key)
+    if not raw_list:
+        return default, None
+    raw_str = str(raw_list[0]).strip()
+    if not raw_str:
+        return default, None
+    try:
+        val = int(raw_str)
+    except (ValueError, TypeError):
+        return None, f"Query parameter '{key}' must be an integer"
+    if val < min_val or val > max_val:
+        return None, f"Query parameter '{key}' must be between {min_val} and {max_val}"
+    return val, None
+
+
 def _get_library_health_report(orphan_sample_limit: int = 100,
                                duplicate_limit: int = 100,
                                empty_limit: int = 100) -> dict[str, Any]:
@@ -3355,31 +3374,32 @@ def _get_library_health_report(orphan_sample_limit: int = 100,
     lock = acquire_os_lock(read_only=True)
     try:
         con = sqlite3.connect(LIB_PATH, timeout=10)
-        con.row_factory = sqlite3.Row
-        cur = con.cursor()
+        try:
+            con.row_factory = sqlite3.Row
+            cur = con.cursor()
 
-        album_rows = cur.execute(
-            """
-            SELECT a.id, a.albumartist, a.album, a.year, a.mb_albumid,
-                   COALESCE(a.mb_releasegroupid, '') AS mb_releasegroupid,
-                   COUNT(i.id) AS track_count
-            FROM albums a
-            LEFT JOIN items i ON i.album_id = a.id
-            GROUP BY a.id
-            ORDER BY lower(COALESCE(a.albumartist,'')), lower(COALESCE(a.album,'')), a.year, a.id
-            """
-        ).fetchall()
+            album_rows = cur.execute(
+                """
+                SELECT a.id, a.albumartist, a.album, a.year, a.mb_albumid,
+                       COALESCE(a.mb_releasegroupid, '') AS mb_releasegroupid,
+                       COUNT(i.id) AS track_count
+                FROM albums a
+                LEFT JOIN items i ON i.album_id = a.id
+                GROUP BY a.id
+                ORDER BY lower(COALESCE(a.albumartist,'')), lower(COALESCE(a.album,'')), a.year, a.id
+                """
+            ).fetchall()
 
-        item_rows = cur.execute(
-            """
-            SELECT id, title, artist, album, album_id, disc, track, mb_trackid, path
-            FROM items
-            WHERE COALESCE(path, '') != ''
-            ORDER BY id
-            """
-        ).fetchall()
-
-        con.close()
+            item_rows = cur.execute(
+                """
+                SELECT id, title, artist, album, album_id, disc, track, mb_trackid, path
+                FROM items
+                WHERE COALESCE(path, '') != ''
+                ORDER BY id
+                """
+            ).fetchall()
+        finally:
+            con.close()
     finally:
         release_os_lock(lock)
 
@@ -3706,9 +3726,19 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/library/health":
-            orphan_sample_limit = int(params.get("orphan_sample_limit", [100])[0])
-            duplicate_limit = int(params.get("duplicate_limit", [100])[0])
-            empty_limit = int(params.get("empty_limit", [100])[0])
+            orphan_sample_limit, err = _parse_bounded_int_param(params, "orphan_sample_limit", default=100, min_val=0, max_val=1000)
+            if err:
+                self._send_json(400, {"ok": False, "error": err, "error_code": "INVALID_QUERY_PARAMETER"})
+                return
+            duplicate_limit, err = _parse_bounded_int_param(params, "duplicate_limit", default=100, min_val=0, max_val=1000)
+            if err:
+                self._send_json(400, {"ok": False, "error": err, "error_code": "INVALID_QUERY_PARAMETER"})
+                return
+            empty_limit, err = _parse_bounded_int_param(params, "empty_limit", default=100, min_val=0, max_val=1000)
+            if err:
+                self._send_json(400, {"ok": False, "error": err, "error_code": "INVALID_QUERY_PARAMETER"})
+                return
+
             try:
                 report = _get_library_health_report(
                     orphan_sample_limit=orphan_sample_limit,

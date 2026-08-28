@@ -11287,12 +11287,12 @@ def library_art_repair_report():
             "error_code": "ENGINE_OFFLINE",
         }), 503
     except BeetsAuthError as ex:
-        app.logger.warning("Artwork repair report failed: Auth error")
+        app.logger.error("Artwork repair report failed: Control agent authentication failed (%s)", type(ex).__name__)
         return jsonify({
             "ok": False,
-            "error": "Your session expired. Sign in again.",
-            "error_code": "AUTH_FAILED",
-        }), 401
+            "error": "Beets engine authentication failed.",
+            "error_code": "ENGINE_AUTH_FAILED",
+        }), 503
     except BeetsError as ex:
         app.logger.error("Artwork repair report failed: %s", ex)
         return jsonify({
@@ -30663,7 +30663,14 @@ def _library_health_payload(orphan_sample_limit: int = 100,
 @app.get("/api/clean/library-health")
 def clean_library_health():
     try:
-        return jsonify(_library_health_payload())
+        orphan_sample_limit = request.args.get("orphan_sample_limit", 100)
+        duplicate_limit = request.args.get("duplicate_limit", 100)
+        empty_limit = request.args.get("empty_limit", 100)
+        return jsonify(_library_health_payload(
+            orphan_sample_limit=orphan_sample_limit,
+            duplicate_limit=duplicate_limit,
+            empty_limit=empty_limit,
+        ))
     except BeetsUnavailableError as ex:
         app.logger.warning("Library health scan failed: Beets engine unavailable")
         return jsonify({
@@ -30672,19 +30679,22 @@ def clean_library_health():
             "error_code": "ENGINE_OFFLINE",
         }), 503
     except BeetsAuthError as ex:
-        app.logger.warning("Library health scan failed: Auth error")
+        app.logger.error("Library health scan failed: Control agent authentication failed (%s)", type(ex).__name__)
         return jsonify({
             "ok": False,
-            "error": "Your session expired. Sign in again.",
-            "error_code": "AUTH_FAILED",
-        }), 401
+            "error": "Beets engine authentication failed.",
+            "error_code": "ENGINE_AUTH_FAILED",
+        }), 503
     except BeetsError as ex:
-        app.logger.error("Library health scan failed: %s", ex)
+        status_code = getattr(ex, "status_code", 0) or 500
+        error_code = getattr(ex, "error_code", "") or "LIBRARY_HEALTH_FAILED"
+        app.logger.error("Library health scan failed: %s (code=%s, status=%s)", type(ex).__name__, error_code, status_code)
+        err_msg = "Could not load library health." if status_code == 500 else str(ex).replace("Beets API request error: ", "")
         return jsonify({
             "ok": False,
-            "error": "Could not load library health.",
-            "error_code": "LIBRARY_HEALTH_FAILED",
-        }), 500
+            "error": err_msg,
+            "error_code": error_code,
+        }), status_code
     except Exception as ex:
         app.logger.exception("Library health scan unexpected failure")
         return jsonify({
