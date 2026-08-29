@@ -53,7 +53,7 @@ class TestEngineUnavailableFailures(unittest.TestCase):
                 self.client.plan_album_artwork({"mode": "move", "album_id": 10, "candidates": []})
             self.assertIn("401", str(ctx.exception))
 
-    def test_server_error_500_raises_beets_unavailable_error(self):
+    def test_server_error_500_raises_beets_error_not_unavailable(self):
         class MockHTTP500(urllib.error.HTTPError):
             def __init__(self):
                 super().__init__("http://127.0.0.1:59999/test", 500, "Internal Server Error", {}, None)
@@ -62,9 +62,12 @@ class TestEngineUnavailableFailures(unittest.TestCase):
                 return b'{"error": "Internal database lock error", "error_code": "db_locked"}'
 
         with mock.patch("urllib.request.urlopen", side_effect=MockHTTP500()):
-            with self.assertRaises(BeetsUnavailableError) as ctx:
+            with self.assertRaises(BeetsError) as ctx:
                 self.client.plan_import_folder({"source_folder": "/staging/import1"})
+            self.assertNotIsInstance(ctx.exception, BeetsUnavailableError)
             self.assertIn("Internal database lock error", str(ctx.exception))
+            self.assertEqual(ctx.exception.status_code, 500)
+            self.assertEqual(ctx.exception.error_code, "db_locked")
 
     def test_malformed_json_raises_beets_unavailable_error(self):
         class MockResponse:

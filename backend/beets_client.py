@@ -147,8 +147,6 @@ class BeetsClient:
                     return {}
                 return json.loads(resp_bytes.decode("utf-8"))
         except urllib.error.HTTPError as exc:
-            if exc.code == 401:
-                raise BeetsAuthError("Authentication with Beets Control Agent failed: 401 Unauthorized") from exc
             err_body = ""
             err_code = ""
             err_diagnostics = None
@@ -160,8 +158,13 @@ class BeetsClient:
                 err_diagnostics = err_json.get("diagnostics") if isinstance(err_json.get("diagnostics"), dict) else None
             except Exception:
                 msg = f"HTTP {exc.code}: {err_body[:200]}"
-            if exc.code >= 500:
-                raise BeetsUnavailableError(f"Beets Control Agent error: {msg}", error_code=err_code, status_code=exc.code, diagnostics=err_diagnostics) from exc
+            if exc.code == 401:
+                raise BeetsAuthError(
+                    f"Authentication with Beets Control Agent failed: {msg}",
+                    error_code=err_code or "ENGINE_AUTH_FAILED",
+                    status_code=401,
+                    diagnostics=err_diagnostics,
+                ) from exc
             raise BeetsError(f"Beets API request error: {msg}", error_code=err_code, status_code=exc.code, diagnostics=err_diagnostics) from exc
         except urllib.error.URLError as exc:
             raise BeetsUnavailableError(f"Beets Control Agent is unavailable at {self.base_url}: {exc.reason}") from exc
@@ -170,7 +173,7 @@ class BeetsClient:
         except TimeoutError as exc:
             raise BeetsUnavailableError("Timed out communicating with Beets Control Agent") from exc
         except Exception as exc:
-            raise BeetsUnavailableError("Failed to communicate with Beets Control Agent") from exc
+            raise BeetsUnavailableError(f"Failed to communicate with Beets Control Agent: {exc}") from exc
 
     def health(self) -> Dict[str, Any]:
         """Check Beets agent health status."""
@@ -507,6 +510,11 @@ class BeetsClient:
     def rollback_library_cleanup(self, operation_id: str, *, timeout: float = 60.0) -> Dict[str, Any]:
         """Engine-side library cleanup rollback (SEC-002 / ARCH-003 library_cleanup_v1)."""
         return self._request("POST", "/library/cleanup/rollback", {"operation_id": operation_id}, timeout=timeout)
+
+    def get_library_health(self, orphan_sample_limit: int = 100, duplicate_limit: int = 100, empty_limit: int = 100, timeout: float = 30.0) -> Dict[str, Any]:
+        """Fetch read-only library health report from Beets control agent."""
+        params = f"?orphan_sample_limit={orphan_sample_limit}&duplicate_limit={duplicate_limit}&empty_limit={empty_limit}"
+        return self._request("GET", f"/library/health{params}", timeout=timeout)
 
     def plan_playlist_media_cleanup(self, payload: Dict[str, Any], *, timeout: float = 30.0) -> Dict[str, Any]:
         """Engine-side playlist media cleanup planning (SEC-002 Wave 22 Closure)."""

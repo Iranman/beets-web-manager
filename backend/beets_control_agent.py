@@ -29,6 +29,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
+from collections import Counter
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import parse_qs, urlparse
@@ -3315,6 +3316,323 @@ def _unique_import_review_cleanup_path(path: Path) -> Path:
 
 
 
+def _parse_bounded_int_param(params: dict, key: str, default: int = 100, min_val: int = 0, max_val: int = 1000) -> tuple[Optional[int], Optional[str]]:
+    """Parse query parameter into a bounded integer.
+    Returns (value, None) on success, or (None, error_message) on invalid/out-of-range input.
+    """
+    raw_list = params.get(key)
+    if not raw_list:
+        return default, None
+    raw_str = str(raw_list[0]).strip()
+    if not raw_str:
+        return default, None
+    try:
+        val = int(raw_str)
+    except (ValueError, TypeError):
+        return None, f"Query parameter '{key}' must be an integer"
+    if val < min_val or val > max_val:
+        return None, f"Query parameter '{key}' must be between {min_val} and {max_val}"
+    return val, None
+
+
+def _get_library_health_report(orphan_sample_limit: int = 100,
+                               duplicate_limit: int = 100,
+                               empty_limit: int = 100) -> dict[str, Any]:
+    if not os.path.exists(LIB_PATH):
+        return {
+            "ok": True,
+            "duplicate_albums": [],
+            "duplicate_album_count": 0,
+            "rgid_duplicate_groups": [],
+            "rgid_duplicate_group_count": 0,
+            "rgid_resolved_groups": [],
+            "rgid_resolved_group_count": 0,
+            "orphaned_items": [],
+            "orphaned_item_count": 0,
+            "orphaned_item_ids": [],
+            "empty_albums": [],
+            "empty_album_count": 0,
+            "database_rows_scanned": 0,
+            "album_row_count": 0,
+            "item_row_count": 0,
+            "final_summary": {
+                "database_rows_scanned": 0,
+                "albums_count": 0,
+                "tracks_count": 0,
+                "duplicate_album_groups": 0,
+                "same_release_group_id_groups": 0,
+                "orphaned_items": 0,
+                "empty_albums": 0,
+                "missing_files": 0,
+            },
+        }
+
+    def _norm_track_text(val: object) -> str:
+        s = str(val or "").strip().lower()
+        return re.sub(r"\s+", " ", s)
+
+    lock = acquire_os_lock(read_only=True)
+    try:
+        con = sqlite3.connect(LIB_PATH, timeout=10)
+        try:
+            con.row_factory = sqlite3.Row
+            cur = con.cursor()
+
+            album_rows = cur.execute(
+                """
+                SELECT a.id, a.albumartist, a.album, a.year, a.mb_albumid,
+                       COALESCE(a.mb_releasegroupid, '') AS mb_releasegroupid,
+                       COUNT(i.id) AS track_count
+                FROM albums a
+                LEFT JOIN items i ON i.album_id = a.id
+                GROUP BY a.id
+                ORDER BY lower(COALESCE(a.albumartist,'')), lower(COALESCE(a.album,'')), a.year, a.id
+                """
+            ).fetchall()
+
+            item_rows = cur.execute(
+                """
+                SELECT id, title, artist, album, album_id, disc, track, mb_trackid, path
+                FROM items
+                WHERE COALESCE(path, '') != ''
+                ORDER BY id
+                """
+            ).fetchall()
+        finally:
+            con.close()
+    finally:
+        release_os_lock(lock)
+
+    album_dict_rows = [dict(r) for r in album_rows]
+    item_dict_rows = [dict(r) for r in item_rows]
+
+    total_album_rows = len(album_dict_rows)
+    total_item_rows = len(item_dict_rows)
+
+    items_by_album: dict[int, list[dict[str, Any]]] = {}
+    for row in item_dict_rows:
+        if row.get("album_id") is None:
+            continue
+        items_by_album.setdefault(int(row["album_id"]), []).append(row)
+
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in album_dict_rows:
+        key = (_norm_track_text(row.get("albumartist")), _norm_track_text(row.get("album")))
+        if not key[0] or not key[1]:
+            continue
+        grouped.setdefault(key, []).append(row)
+
+    def _aldir_for_album(album_id: int) -> str:
+        items = items_by_album.get(album_id, [])
+        if not items:
+            return ""
+        dirs = [os.path.dirname(str(r.get("path") or "")) for r in items if r.get("path")]
+        dirs = [d for d in dirs if d]
+        if not dirs:
+            return ""
+        most_common = Counter(dirs).most_common(1)
+        return most_common[0][0] if most_common else ""
+
+    def _merge_safety(rows: list[dict[str, Any]]) -> dict[str, Any]:
+        sorted_rows = sorted(rows, key=lambda r: (-int(r.get("track_count") or 0), int(r.get("id") or 0)))
+        target_id = int(sorted_rows[0]["id"]) if sorted_rows else 0
+        source_ids = [int(r["id"]) for r in sorted_rows[1:]]
+        mbids = [str(r.get("mb_albumid") or "").strip() for r in sorted_rows]
+        rgids = [str(r.get("mb_releasegroupid") or "").strip() for r in sorted_rows]
+        nonblank_mbids = {m for m in mbids if m}
+        nonblank_rgids = {r for r in rgids if r}
+        blockers: list[str] = []
+
+        if not sorted_rows or not source_ids:
+            blockers.append("not enough album rows to merge")
+        if any(not mbid for mbid in mbids):
+            blockers.append("missing MusicBrainz release ID")
+        if len(nonblank_mbids) > 1:
+            if len(nonblank_rgids) > 1:
+                blockers.append(f"different MusicBrainz release-group IDs — these may be separate albums ({', '.join(sorted(nonblank_rgids)[:3])})")
+            elif len(nonblank_rgids) == 1:
+                pass
+            else:
+                blockers.append("different MusicBrainz release IDs")
+
+        positions: dict[tuple[int, int], int] = {}
+        unknown_position_albums: set[int] = set()
+        duplicate_positions: set[tuple[int, int, int]] = set()
+        overlapping_positions: set[tuple[int, int]] = set()
+
+        for row in sorted_rows:
+            aid = int(row["id"])
+            seen_for_album: set[tuple[int, int]] = set()
+            for item in items_by_album.get(aid, []):
+                disc = int(item.get("disc") or 1)
+                track = int(item.get("track") or 0)
+                if track <= 0:
+                    unknown_position_albums.add(aid)
+                    continue
+                key = (disc, track)
+                if key in seen_for_album:
+                    duplicate_positions.add((aid, disc, track))
+                seen_for_album.add(key)
+                previous_album = positions.get(key)
+                if previous_album is not None and previous_album != aid:
+                    overlapping_positions.add(key)
+                else:
+                    positions[key] = aid
+
+        if unknown_position_albums:
+            blockers.append("missing or zero track numbers")
+        if duplicate_positions:
+            blockers.append("duplicate track numbers within an album row")
+        if overlapping_positions:
+            blockers.append("overlapping disc/track numbers across album rows")
+
+        merge_safe = not blockers
+        if merge_safe and len(nonblank_mbids) > 1 and len(nonblank_rgids) == 1:
+            reason = "Same MusicBrainz release group with complementary disc/track positions. Different release IDs suggest different editions — verify before merging."
+        elif merge_safe:
+            reason = "Same MusicBrainz release and complementary disc/track positions."
+        else:
+            reason = "; ".join(blockers) or "Manual review is required."
+
+        return {
+            "merge_safe": merge_safe,
+            "merge_target_album_id": target_id,
+            "merge_source_album_ids": source_ids,
+            "merge_reason": reason,
+            "merge_blockers": blockers,
+        }
+
+    duplicate_albums: list[dict[str, Any]] = []
+    for rows in grouped.values():
+        if len(rows) < 2:
+            continue
+        display = rows[0]
+        safety = _merge_safety(rows)
+        duplicate_albums.append({
+            "albumartist": str(display.get("albumartist") or ""),
+            "album": str(display.get("album") or ""),
+            "count": len(rows),
+            "albums": [
+                {
+                    "album_id": int(r["id"]),
+                    "track_count": int(r.get("track_count") or 0),
+                    "mb_albumid": str(r.get("mb_albumid") or ""),
+                    "mb_releasegroupid": str(r.get("mb_releasegroupid") or ""),
+                    "year": int(r.get("year") or 0),
+                    "aldir": _aldir_for_album(int(r["id"])),
+                }
+                for r in rows
+            ],
+            **safety,
+        })
+    duplicate_albums.sort(key=lambda g: (-int(g["count"]), g["albumartist"].casefold(), g["album"].casefold()))
+
+    rgid_map: dict[str, list[dict[str, Any]]] = {}
+    for r in album_dict_rows:
+        rgid = str(r.get("mb_releasegroupid") or "").strip()
+        if not rgid:
+            continue
+        rgid_map.setdefault(rgid, []).append(r)
+
+    rgid_duplicate_groups: list[dict[str, Any]] = []
+    for rgid, rows in rgid_map.items():
+        if len(rows) < 2:
+            continue
+        rgid_duplicate_groups.append({
+            "mb_releasegroupid": rgid,
+            "count": len(rows),
+            "albums": [
+                {
+                    "album_id": int(r["id"]),
+                    "albumartist": str(r.get("albumartist") or ""),
+                    "album": str(r.get("album") or ""),
+                    "year": int(r.get("year") or 0),
+                    "track_count": int(r.get("track_count") or 0),
+                    "mb_albumid": str(r.get("mb_albumid") or ""),
+                    "aldir": _aldir_for_album(int(r["id"])),
+                }
+                for r in rows
+            ],
+        })
+    rgid_duplicate_groups.sort(key=lambda g: -g["count"])
+
+    empty_albums = [
+        {
+            "album_id": int(r["id"]),
+            "albumartist": str(r.get("albumartist") or ""),
+            "album": str(r.get("album") or ""),
+            "year": int(r.get("year") or 0),
+        }
+        for r in album_dict_rows
+        if int(r.get("track_count") or 0) == 0
+    ]
+
+    orphaned_ids: list[int] = []
+    orphaned_items: list[dict[str, Any]] = []
+    for row in item_dict_rows:
+        raw_path = str(row.get("path") or "")
+        if raw_path:
+            p = Path(raw_path)
+            if not p.is_absolute():
+                p = MUSIC_ROOT / raw_path
+            try:
+                if p.exists() and p.is_file():
+                    continue
+            except Exception:
+                pass
+        iid = int(row["id"])
+        orphaned_ids.append(iid)
+        if len(orphaned_items) < orphan_sample_limit:
+            orphaned_items.append({
+                "id": iid,
+                "title": str(row.get("title") or ""),
+                "artist": str(row.get("artist") or ""),
+                "album": str(row.get("album") or ""),
+                "path": raw_path,
+            })
+
+    final_summary = {
+        "database_rows_scanned": total_album_rows + total_item_rows,
+        "albums_count": total_album_rows,
+        "tracks_count": total_item_rows,
+        "duplicate_album_groups": len(duplicate_albums),
+        "same_release_group_id_groups": len(rgid_duplicate_groups),
+        "orphaned_items": len(orphaned_ids),
+        "empty_albums": len(empty_albums),
+        "missing_files": len(orphaned_ids),
+    }
+
+    return {
+        "ok": True,
+        "duplicate_albums": duplicate_albums[:duplicate_limit],
+        "duplicate_album_count": len(duplicate_albums),
+        # Deliberately NOT truncated here, unlike duplicate_albums/empty_albums
+        # above: app.py's _library_health_payload() must see every group to
+        # correctly split "keep separate"-resolved groups out of the
+        # unresolved set before applying its own final duplicate_limit
+        # truncation to each resulting list. Truncating here first would
+        # silently drop resolved groups that fall outside this window (they
+        # would never reach the resolution-matching loop at all) and produce
+        # wrong rgid_duplicate_group_count/rgid_resolved_group_count values
+        # whenever a library has more RGID-duplicate groups than
+        # duplicate_limit. This dict's own size stays naturally bounded by
+        # the library's real album count, not by an unbounded caller input.
+        "rgid_duplicate_groups": rgid_duplicate_groups,
+        "rgid_duplicate_group_count": len(rgid_duplicate_groups),
+        "rgid_resolved_groups": [],
+        "rgid_resolved_group_count": 0,
+        "orphaned_items": orphaned_items,
+        "orphaned_item_count": len(orphaned_ids),
+        "orphaned_item_ids": orphaned_ids,
+        "empty_albums": empty_albums[:empty_limit],
+        "empty_album_count": len(empty_albums),
+        "database_rows_scanned": total_album_rows + total_item_rows,
+        "album_row_count": total_album_rows,
+        "item_row_count": total_item_rows,
+        "final_summary": final_summary,
+    }
+
+
 class ControlAgentHandler(BaseHTTPRequestHandler):
     def _send_json(self, code: int, data: dict):
         body = json.dumps(data, indent=2, default=_json_default).encode("utf-8")
@@ -3416,6 +3734,36 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 self._send_json(403, {"error": "config.yaml is not readable", "error_code": "config_permission_denied"})
             except OSError as exc:
                 self._send_json(500, {"error": "Could not read config.yaml", "error_code": "config_read_failed", "detail": _redact_agent_status_text(str(exc))})
+            return
+
+        if path == "/library/health":
+            orphan_sample_limit, err = _parse_bounded_int_param(params, "orphan_sample_limit", default=100, min_val=0, max_val=1000)
+            if err:
+                self._send_json(400, {"ok": False, "error": err, "error_code": "INVALID_QUERY_PARAMETER"})
+                return
+            duplicate_limit, err = _parse_bounded_int_param(params, "duplicate_limit", default=100, min_val=0, max_val=1000)
+            if err:
+                self._send_json(400, {"ok": False, "error": err, "error_code": "INVALID_QUERY_PARAMETER"})
+                return
+            empty_limit, err = _parse_bounded_int_param(params, "empty_limit", default=100, min_val=0, max_val=1000)
+            if err:
+                self._send_json(400, {"ok": False, "error": err, "error_code": "INVALID_QUERY_PARAMETER"})
+                return
+
+            try:
+                report = _get_library_health_report(
+                    orphan_sample_limit=orphan_sample_limit,
+                    duplicate_limit=duplicate_limit,
+                    empty_limit=empty_limit,
+                )
+                self._send_json(200, report)
+            except Exception as exc:
+                self._send_json(500, {
+                    "ok": False,
+                    "error": "Library health query failed",
+                    "error_code": "LIBRARY_HEALTH_FAILED",
+                    "detail": type(exc).__name__,
+                })
             return
 
         if path == "/items":
