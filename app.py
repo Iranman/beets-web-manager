@@ -30689,10 +30689,13 @@ def clean_library_health():
         status_code = getattr(ex, "status_code", 0) or 500
         error_code = getattr(ex, "error_code", "") or "LIBRARY_HEALTH_FAILED"
         app.logger.error("Library health scan failed: %s (code=%s, status=%s)", type(ex).__name__, error_code, status_code)
-        err_msg = "Could not load library health." if status_code == 500 else str(ex).replace("Beets API request error: ", "")
+        if error_code == "INVALID_QUERY_PARAMETER":
+            client_msg = "Invalid library health query parameters."
+        else:
+            client_msg = "Could not load library health."
         return jsonify({
             "ok": False,
-            "error": err_msg,
+            "error": client_msg,
             "error_code": error_code,
         }), status_code
     except Exception as ex:

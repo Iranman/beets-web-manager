@@ -217,6 +217,40 @@ class JobsPageEndpointsTestCase(unittest.TestCase):
         self.assertIsNotNone(err)
         self.assertIn("must be between 0 and 1000", err)
 
+    def test_library_health_sanitizes_raw_exception_text_and_prevents_information_disclosure(self):
+        exc = BeetsError(
+            "Beets API request error: HTTP 400: SECRET_INTERNAL_DIAGNOSTIC",
+            error_code="INVALID_QUERY_PARAMETER",
+            status_code=400,
+        )
+        with patch.object(app_module.beets_client, 'get_library_health', side_effect=exc):
+            res = self.client.get('/api/clean/library-health?duplicate_limit=invalid_value', headers={'X-Beets-CSRF': '1'})
+            self.assertEqual(res.status_code, 400)
+            data = res.get_json()
+            self.assertFalse(data.get('ok'))
+            self.assertEqual(data.get('error_code'), 'INVALID_QUERY_PARAMETER')
+            self.assertEqual(data.get('error'), 'Invalid library health query parameters.')
+            raw_text = res.get_data(as_text=True)
+            self.assertNotIn("SECRET_INTERNAL_DIAGNOSTIC", raw_text)
+            self.assertNotIn("Beets API request error", raw_text)
+
+    def test_library_health_unknown_beets_error_sanitizes_raw_exception_text(self):
+        exc = BeetsError(
+            "Beets API request error: HTTP 422: UNKNOWN_EXCEPTION_DATA",
+            error_code="UNPROCESSABLE_ENTITY",
+            status_code=422,
+        )
+        with patch.object(app_module.beets_client, 'get_library_health', side_effect=exc):
+            res = self.client.get('/api/clean/library-health', headers={'X-Beets-CSRF': '1'})
+            self.assertEqual(res.status_code, 422)
+            data = res.get_json()
+            self.assertFalse(data.get('ok'))
+            self.assertEqual(data.get('error_code'), 'UNPROCESSABLE_ENTITY')
+            self.assertEqual(data.get('error'), 'Could not load library health.')
+            raw_text = res.get_data(as_text=True)
+            self.assertNotIn("UNKNOWN_EXCEPTION_DATA", raw_text)
+            self.assertNotIn("Beets API request error", raw_text)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -3751,7 +3751,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                     "ok": False,
                     "error": "Library health query failed",
                     "error_code": "LIBRARY_HEALTH_FAILED",
-                    "detail": _redact_agent_status_text(str(exc)),
+                    "detail": type(exc).__name__,
                 })
             return
 
