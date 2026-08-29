@@ -30622,24 +30622,33 @@ def _library_health_payload(orphan_sample_limit: int = 100,
         empty_limit=empty_limit,
     )
     rgid_resolutions = _load_rgid_resolutions()
-    if rgid_resolutions:
-        rgid_duplicate_groups = res.get("rgid_duplicate_groups", [])
-        rgid_resolved_groups = list(res.get("rgid_resolved_groups", []))
-        unresolved_groups = []
-        for group in rgid_duplicate_groups:
-            rgid = group.get("mb_releasegroupid", "")
-            resolution = rgid_resolutions.get(rgid)
-            if resolution and resolution.get("decision") == "keep_separate":
-                group["resolution"] = resolution
-                rgid_resolved_groups.append(group)
-            else:
-                unresolved_groups.append(group)
-        res["rgid_duplicate_groups"] = unresolved_groups
-        res["rgid_duplicate_group_count"] = len(unresolved_groups)
-        res["rgid_resolved_groups"] = rgid_resolved_groups
-        res["rgid_resolved_group_count"] = len(rgid_resolved_groups)
-        if "final_summary" in res:
-            res["final_summary"]["same_release_group_id_groups"] = len(unresolved_groups)
+    # The engine deliberately returns rgid_duplicate_groups UNTRUNCATED (see
+    # its own comment in _get_library_health_report) precisely so this split
+    # -- and the counts/truncation below -- operate on the true total, not a
+    # window the engine already cut before resolution state (Web-Manager-
+    # owned, unknown to the engine) could be applied. Splitting first and
+    # truncating each resulting list afterward, unconditionally (not only
+    # when rgid_resolutions is non-empty), matches the pre-existing
+    # behavior this endpoint replaced: a "keep separate" group must never be
+    # silently dropped just because it fell outside a pre-split window, and
+    # the reported counts must always reflect the true totals.
+    full_rgid_groups = res.get("rgid_duplicate_groups", [])
+    rgid_resolved_groups = list(res.get("rgid_resolved_groups", []))
+    unresolved_groups = []
+    for group in full_rgid_groups:
+        rgid = group.get("mb_releasegroupid", "")
+        resolution = rgid_resolutions.get(rgid)
+        if resolution and resolution.get("decision") == "keep_separate":
+            group["resolution"] = resolution
+            rgid_resolved_groups.append(group)
+        else:
+            unresolved_groups.append(group)
+    res["rgid_duplicate_group_count"] = len(unresolved_groups)
+    res["rgid_resolved_group_count"] = len(rgid_resolved_groups)
+    res["rgid_duplicate_groups"] = unresolved_groups[:duplicate_limit]
+    res["rgid_resolved_groups"] = rgid_resolved_groups[:duplicate_limit]
+    if "final_summary" in res:
+        res["final_summary"]["same_release_group_id_groups"] = len(unresolved_groups)
 
     if progress:
         summary = res.get("final_summary", {})
@@ -30662,10 +30671,27 @@ def _library_health_payload(orphan_sample_limit: int = 100,
 
 @app.get("/api/clean/library-health")
 def clean_library_health():
+    # request.args.get(..., 100) returns a raw query-string TEXT value
+    # whenever the parameter is actually present (only the "not present"
+    # fallback is the literal int 100) -- _library_health_payload() below
+    # now does its own local Python-level list slicing with duplicate_limit
+    # (unlike before this fix, where it only ever passed the value through
+    # to beets_client.get_library_health(), which just stringifies it into
+    # a URL query string and lets the engine's own _parse_bounded_int_param
+    # validate/cast it). A raw string reaching a `list[:duplicate_limit]`
+    # slice raises TypeError, so these must be real ints before being used
+    # locally at all, not just by the time they reach the engine.
     try:
-        orphan_sample_limit = request.args.get("orphan_sample_limit", 100)
-        duplicate_limit = request.args.get("duplicate_limit", 100)
-        empty_limit = request.args.get("empty_limit", 100)
+        orphan_sample_limit = int(request.args.get("orphan_sample_limit", 100))
+        duplicate_limit = int(request.args.get("duplicate_limit", 100))
+        empty_limit = int(request.args.get("empty_limit", 100))
+    except (TypeError, ValueError):
+        return jsonify({
+            "ok": False,
+            "error": "Invalid library health query parameters.",
+            "error_code": "INVALID_QUERY_PARAMETER",
+        }), 400
+    try:
         return jsonify(_library_health_payload(
             orphan_sample_limit=orphan_sample_limit,
             duplicate_limit=duplicate_limit,

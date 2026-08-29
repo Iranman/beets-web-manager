@@ -3606,7 +3606,18 @@ def _get_library_health_report(orphan_sample_limit: int = 100,
         "ok": True,
         "duplicate_albums": duplicate_albums[:duplicate_limit],
         "duplicate_album_count": len(duplicate_albums),
-        "rgid_duplicate_groups": rgid_duplicate_groups[:duplicate_limit],
+        # Deliberately NOT truncated here, unlike duplicate_albums/empty_albums
+        # above: app.py's _library_health_payload() must see every group to
+        # correctly split "keep separate"-resolved groups out of the
+        # unresolved set before applying its own final duplicate_limit
+        # truncation to each resulting list. Truncating here first would
+        # silently drop resolved groups that fall outside this window (they
+        # would never reach the resolution-matching loop at all) and produce
+        # wrong rgid_duplicate_group_count/rgid_resolved_group_count values
+        # whenever a library has more RGID-duplicate groups than
+        # duplicate_limit. This dict's own size stays naturally bounded by
+        # the library's real album count, not by an unbounded caller input.
+        "rgid_duplicate_groups": rgid_duplicate_groups,
         "rgid_duplicate_group_count": len(rgid_duplicate_groups),
         "rgid_resolved_groups": [],
         "rgid_resolved_group_count": 0,

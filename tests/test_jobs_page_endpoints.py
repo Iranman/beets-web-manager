@@ -251,6 +251,79 @@ class JobsPageEndpointsTestCase(unittest.TestCase):
             self.assertNotIn("UNKNOWN_EXCEPTION_DATA", raw_text)
             self.assertNotIn("Beets API request error", raw_text)
 
+    def test_library_health_keep_separate_group_survives_duplicate_limit_truncation(self):
+        """A "keep separate"-resolved RGID group must not be silently dropped, and
+        rgid_duplicate_group_count/rgid_resolved_group_count must reflect the true
+        totals, when the library has more RGID-duplicate groups than duplicate_limit.
+
+        The engine returns rgid_duplicate_groups UNTRUNCATED so that
+        _library_health_payload() can split by resolution state (a Web-Manager-
+        owned concept the engine has no knowledge of) BEFORE truncating each
+        resulting list. Truncating before splitting would risk dropping a
+        resolved group entirely whenever it falls outside the pre-split window,
+        and would report wrong group counts.
+        """
+        resolved_rgid = "11111111-1111-1111-1111-111111111111"
+        # 5 total groups, but duplicate_limit below is 2 -- resolved_rgid is
+        # deliberately placed OUTSIDE that window (index 4) so a "truncate
+        # first" implementation would drop it before the split ever sees it.
+        all_groups = [
+            {"mb_releasegroupid": f"2222222{i}-2222-2222-2222-222222222222", "albums": []}
+            for i in range(4)
+        ]
+        all_groups.append({"mb_releasegroupid": resolved_rgid, "albums": []})
+        sample_report = {
+            "ok": True,
+            "duplicate_albums": [],
+            "duplicate_album_count": 0,
+            "rgid_duplicate_groups": all_groups,
+            "rgid_duplicate_group_count": len(all_groups),
+            "rgid_resolved_groups": [],
+            "rgid_resolved_group_count": 0,
+            "orphaned_items": [],
+            "orphaned_item_count": 0,
+            "orphaned_item_ids": [],
+            "empty_albums": [],
+            "empty_album_count": 0,
+            "database_rows_scanned": 10,
+            "album_row_count": 2,
+            "item_row_count": 8,
+            "final_summary": {
+                "database_rows_scanned": 10,
+                "albums_count": 2,
+                "tracks_count": 8,
+                "duplicate_album_groups": 0,
+                "same_release_group_id_groups": len(all_groups),
+                "orphaned_items": 0,
+                "empty_albums": 0,
+                "missing_files": 0,
+            },
+        }
+        app_module._set_rgid_resolution(resolved_rgid, "keep_separate", "manually verified distinct releases")
+        try:
+            with patch.object(app_module.beets_client, 'get_library_health', return_value=sample_report):
+                res = self.client.get(
+                    '/api/clean/library-health?duplicate_limit=2',
+                    headers={'X-Beets-CSRF': '1'},
+                )
+                self.assertEqual(res.status_code, 200)
+                data = res.get_json()
+                self.assertTrue(data.get('ok'))
+                # 4 unresolved groups total, truncated to duplicate_limit=2 for
+                # display, but the COUNT must reflect the true unresolved total.
+                self.assertEqual(data.get('rgid_duplicate_group_count'), 4)
+                self.assertEqual(len(data.get('rgid_duplicate_groups')), 2)
+                # The resolved group must survive despite falling outside the
+                # duplicate_limit window in the engine's original (unsplit) list.
+                self.assertEqual(data.get('rgid_resolved_group_count'), 1)
+                resolved_ids = [g.get('mb_releasegroupid') for g in data.get('rgid_resolved_groups')]
+                self.assertIn(resolved_rgid, resolved_ids)
+                self.assertEqual(
+                    data.get('final_summary', {}).get('same_release_group_id_groups'), 4
+                )
+        finally:
+            app_module._clear_rgid_resolution(resolved_rgid)
+
 
 if __name__ == '__main__':
     unittest.main()

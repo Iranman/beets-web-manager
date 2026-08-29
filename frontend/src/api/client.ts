@@ -158,7 +158,13 @@ export async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
 
   if (!response.ok) {
     let errorCode = body?.error_code || body?.code || '';
-    let isEngineOffline = errorCode === 'ENGINE_OFFLINE' || (response.status === 503 && !errorCode && !body?.error?.includes('authentication'));
+    // Classification must rest on the structured error_code/status contract
+    // only -- never on matching substrings in the free-text `error` message
+    // (a message can be rephrased at any time without that being a transport
+    // contract change). An uncoded 503 is treated as engine-offline the same
+    // way lib/api.ts's apiFetch() does; ENGINE_AUTH_FAILED is carried in
+    // errorCode by every route that returns it, so it never reaches here.
+    let isEngineOffline = errorCode === 'ENGINE_OFFLINE' || (response.status === 503 && !errorCode);
     let isEngineAuthError = errorCode === 'ENGINE_AUTH_FAILED';
     let isAuthError = (response.status === 401 || response.status === 403 || errorCode === 'AUTH_FAILED' || errorCode === 'USER_AUTH_FAILED') && !isEngineAuthError;
     let message = body?.error || `HTTP ${response.status}`;
