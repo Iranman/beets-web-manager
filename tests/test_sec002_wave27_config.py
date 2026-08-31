@@ -14,11 +14,13 @@ from types import SimpleNamespace
 
 from backend import beets_control_agent as agent
 from backend import web_manager_config_store as config_store_module
+from backend.beets_client import BeetsAuthError, BeetsError, BeetsUnavailableError
 from backend.web_manager_config_store import (
     WebManagerConfigStore,
     WebManagerConfigStoreConflictError,
     WebManagerConfigStoreError,
 )
+import app as app_module
 from scripts.verify_arch003_mutation_inventory import verify_mutation_inventory
 
 
@@ -326,6 +328,55 @@ class TestWave27InventoryGate(unittest.TestCase):
         self.assertEqual(unresolved_counts.get("library_cleanup", 0), 0)
         self.assertEqual(sum(1 for e in data.get("inventory", []) if e.get("classification") == "NEEDS_REVIEW"), 0)
         self.assertTrue(verify_mutation_inventory(repo_root, check_mode=True))
+
+
+class TestWave27ConfigErrorTaxonomyIntegration(unittest.TestCase):
+    def setUp(self):
+        self.auth_patcher = mock.patch.object(app_module, "_security_auth_disabled", return_value=True)
+        self.auth_patcher.start()
+        self.addCleanup(self.auth_patcher.stop)
+        self.client = app_module.app.test_client()
+
+    def test_engine_config_transport_down_returns_beets_unavailable(self):
+        with mock.patch.object(app_module.beets_client, "get_config", side_effect=BeetsUnavailableError("Control agent down")):
+            res = self.client.get("/api/config", headers={"X-Beets-CSRF": "1"})
+            self.assertEqual(res.status_code, 503)
+            data = res.get_json()
+            self.assertFalse(data.get("ok"))
+            self.assertEqual(data.get("code"), "beets_unavailable")
+            self.assertEqual(data.get("error"), "Beets engine is unavailable.")
+
+    def test_engine_config_reachable_app_failure_not_engine_offline(self):
+        err = BeetsError("Internal config read error")
+        err.error_code = "config_read_failed"
+        with mock.patch.object(app_module.beets_client, "get_config", side_effect=err):
+            res = self.client.get("/api/config", headers={"X-Beets-CSRF": "1"})
+            self.assertEqual(res.status_code, 502)
+            data = res.get_json()
+            self.assertFalse(data.get("ok"))
+            self.assertNotEqual(data.get("code"), "beets_unavailable")
+            self.assertEqual(data.get("code"), "config_read_failed")
+
+    def test_engine_config_token_failure_returns_beets_auth_failed(self):
+        with mock.patch.object(app_module.beets_client, "get_config", side_effect=BeetsAuthError("Invalid token")):
+            res = self.client.get("/api/config", headers={"X-Beets-CSRF": "1"})
+            self.assertEqual(res.status_code, 502)
+            data = res.get_json()
+            self.assertFalse(data.get("ok"))
+            self.assertEqual(data.get("code"), "beets_auth_failed")
+            self.assertEqual(data.get("error"), "Beets engine authentication failed.")
+
+    def test_invalid_config_returns_config_error_not_engine_offline(self):
+        err = BeetsError("Invalid YAML syntax")
+        err.error_code = "config_invalid_yaml"
+        with mock.patch.object(app_module.beets_client, "save_config", side_effect=err):
+            res = self.client.post("/api/config", json={"content": "invalid: [", "expected_revision": "rev1"}, headers={"X-Beets-CSRF": "1"})
+            self.assertEqual(res.status_code, 400)
+            data = res.get_json()
+            self.assertFalse(data.get("ok"))
+            self.assertEqual(data.get("code"), "config_invalid_yaml")
+            self.assertNotEqual(data.get("code"), "beets_unavailable")
+            self.assertNotIn("Invalid YAML syntax", data.get("error"))
 
 
 if __name__ == "__main__":
