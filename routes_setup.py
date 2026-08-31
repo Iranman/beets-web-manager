@@ -1842,7 +1842,7 @@ def _claim_setup_completion_marker() -> bool:
     """Atomically claim the setup-completion marker in Web Manager storage."""
     try:
         store, relative_name = _config_store_for_target(_SETUP_COMPLETE_MARKER)
-        store.save_text(relative_name, "1\n", is_secret=True, expected_revision=None)
+        store.save_text(relative_name, "1", is_secret=True, expected_revision=None)
         return True
     except WebManagerConfigStoreConflictError:
         return False

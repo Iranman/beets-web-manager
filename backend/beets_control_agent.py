@@ -102,11 +102,11 @@ MUSIC_ROOT = Path(MUSIC_LIBRARY_PATH)
 
 
 def _resolved_music_root() -> str:
-    return str(Path(os.environ.get("MUSIC_ROOT") or os.environ.get("BEETS_MUSIC_ROOT") or str(MUSIC_ROOT)).resolve(strict=False))
+    return str(Path(os.environ.get("MUSIC_ROOT") or os.environ.get("BEETS_MUSIC_ROOT") or MUSIC_LIBRARY_PATH).resolve(strict=False))
 
 
 def _resolved_downloads_root() -> str:
-    return str(Path(os.environ.get("DOWNLOADS_ROOT") or str(DOWNLOAD_PATH)).resolve(strict=False))
+    return str(Path(os.environ.get("DOWNLOADS_ROOT") or DOWNLOAD_PATH).resolve(strict=False))
 
 
 def _resolved_staging_root() -> str:
