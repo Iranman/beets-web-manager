@@ -1929,6 +1929,21 @@ def run_wave27_config_scenarios(
 
     print("==> [Wave27] Engine config CAS, real Beets validation, rollback, and durability...")
     config_path = config_dir / "config.yaml"
+
+    def read_config_text() -> str:
+        try:
+            return config_path.read_text(encoding="utf-8", errors="replace")
+        except PermissionError:
+            run(["docker", "exec", engine_container, "chmod", "666", "/config/config.yaml"])
+            return config_path.read_text(encoding="utf-8", errors="replace")
+
+    def read_config_bytes() -> bytes:
+        try:
+            return config_path.read_bytes()
+        except PermissionError:
+            run(["docker", "exec", engine_container, "chmod", "666", "/config/config.yaml"])
+            return config_path.read_bytes()
+
     original_doc = _get_config_document(client, "config-read-original")
     if original_doc is None:
         return
@@ -1938,7 +1953,7 @@ def run_wave27_config_scenarios(
     if not _require_json_ok(status, body, "config-safe-update"):
         return
     first_write_rev = str(body.get("revision") or "")
-    if "threaded: no" not in config_path.read_text(encoding="utf-8", errors="replace"):
+    if "threaded: no" not in read_config_text():
         scenario_fail("config-safe-update-host-file", "host-mounted engine config did not contain the committed setting")
     else:
         scenario_pass("config-safe-update-real-beets-validated")
@@ -2000,11 +2015,11 @@ def run_wave27_config_scenarios(
     if current_doc is None:
         return
     current_content, current_rev = current_doc
-    before_invalid_bytes = config_path.read_bytes()
+    before_invalid_bytes = read_config_bytes()
     status, body = _post_config_document(client, "directory: [unterminated\n", current_rev, "config-invalid-yaml")
     if status != 400 or body.get("code") != "config_invalid_yaml":
         scenario_fail("config-invalid-yaml", f"malformed YAML was not rejected as invalid YAML: {status} {body}")
-    elif config_path.read_bytes() != before_invalid_bytes:
+    elif read_config_bytes() != before_invalid_bytes:
         scenario_fail("config-invalid-yaml-preserved", "engine config changed after malformed YAML rejection")
     else:
         scenario_pass("config-invalid-yaml-preserves-known-good")
@@ -2013,13 +2028,13 @@ def run_wave27_config_scenarios(
     if current_doc is None:
         return
     current_content, current_rev = current_doc
-    before_invalid_beets_bytes = config_path.read_bytes()
+    before_invalid_beets_bytes = read_config_bytes()
     missing_plugin = "wave27_missing_plugin_" + uuid.uuid4().hex[:12]
     beets_invalid = _set_top_level_scalar_yaml(current_content, "plugins", f"fetchart musicbrainz {missing_plugin}")
     status, body = _post_config_document(client, beets_invalid, current_rev, "config-beets-invalid")
     if status != 400 or body.get("code") != "config_beets_validation_failed":
         scenario_fail("config-beets-invalid", f"real Beets-invalid config was not rejected: {status} {body}")
-    elif config_path.read_bytes() != before_invalid_beets_bytes:
+    elif read_config_bytes() != before_invalid_beets_bytes:
         scenario_fail("config-beets-invalid-preserved", "engine config changed after real Beets validation rejection")
     else:
         scenario_pass("config-real-beets-validation-preserves-known-good")
@@ -2029,7 +2044,7 @@ def run_wave27_config_scenarios(
     if current_doc is None:
         return
     current_content, current_rev = current_doc
-    before_offline_bytes = config_path.read_bytes()
+    before_offline_bytes = read_config_bytes()
     status_settings, body_settings = client.request("GET", "/api/setup/settings", timeout=30)
     settings_rev = body_settings.get("revision") if status_settings == 200 and body_settings.get("ok") else None
     stop_res = run(["docker", "stop", engine_container])
@@ -2052,7 +2067,7 @@ def run_wave27_config_scenarios(
             scenario_fail("engine-offline-local-settings", "Web Manager-owned setup settings did not continue to save while engine was offline")
         elif c_status == 200 and c_body.get("ok"):
             scenario_fail("config-engine-offline-fail-closed", f"Beets config mutation succeeded while engine was offline: {c_status} {c_body}")
-        elif config_path.read_bytes() != before_offline_bytes:
+        elif read_config_bytes() != before_offline_bytes:
             scenario_fail("config-engine-offline-preserved", "host-mounted engine config changed while engine was offline")
         else:
             scenario_pass("config-engine-offline-fails-closed-with-local-settings-still-durable")
