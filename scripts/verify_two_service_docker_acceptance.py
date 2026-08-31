@@ -1818,11 +1818,22 @@ def run_wave27_config_scenarios(
     user_file = webdata_dir / ".browser_username"
     state_file = webdata_dir / ".browser_setup_state"
     complete_file = webdata_dir / ".setup_complete"
+
+    def read_webdata_text(rel_name: str) -> str:
+        target = webdata_dir / rel_name
+        try:
+            return target.read_text(encoding="utf-8", errors="replace")
+        except PermissionError:
+            res = run(["docker", "exec", web_container, "cat", f"/web-manager-data/{rel_name}"])
+            if res.returncode == 0:
+                return res.stdout
+            raise
+
     if not (pwd_file.exists() and user_file.exists() and state_file.exists() and complete_file.exists()):
         scenario_fail("fresh-setup-durable-files", "expected browser credential/setup marker files were not written under /web-manager-data")
-    elif password in pwd_file.read_text(encoding="utf-8", errors="replace"):
+    elif password in read_webdata_text(".browser_password"):
         scenario_fail("fresh-setup-password-hashing", "browser password file contains the plaintext password")
-    elif user_file.read_text(encoding="utf-8", errors="replace").strip() != username:
+    elif read_webdata_text(".browser_username").strip() != username:
         scenario_fail("fresh-setup-username", "persisted username does not match the setup user")
     else:
         scenario_pass("fresh-setup-durable-web-manager-state")
