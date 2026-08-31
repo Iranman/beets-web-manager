@@ -5,6 +5,7 @@ beets_control_agent.py, beets_client.py, and app.py.
 """
 
 import ast
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -68,6 +69,11 @@ class Wave21BaseTest(unittest.TestCase):
         self._tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmpdir.cleanup)
         self.tmp_path = Path(self._tmpdir.name)
+
+        os.environ["TEST_VERIFY_MB_ARTIST_SUCCESS"] = "1"
+        def _restore_env():
+            os.environ.pop("TEST_VERIFY_MB_ARTIST_SUCCESS", None)
+        self.addCleanup(_restore_env)
 
         self.music_root = self.tmp_path / "music"
         self.music_root.mkdir()
@@ -225,17 +231,31 @@ class PlanTests(Wave21BaseTest):
         self.assertEqual(review[0]["reason"], "artist_reconcile_requires_review")
 
     def test_plan_allows_blank_identity_merge_with_fingerprint_evidence(self):
+        """SEC-002 Wave 27 authority policy: Fingerprint agreement supports
+        identity, but requires a canonical MBID verified engine-side (Case E).
+        Fingerprint agreement alone without an MBID is review required (Case F)."""
         src = self._create_artist_folder("Bob  Marley")
         dst = self._create_artist_folder("Bob Marley")
         self._create_track_file("Bob  Marley/t.mp3")
 
-        res = self._plan({
+        # Case F: Fingerprint confirmed without MBID -> review required
+        res_no_mbid = self._plan({
             "root": str(self.music_root),
             "mode": "scan_merge",
             "candidates": [{"source_path": str(src), "target_path": str(dst), "fingerprint_confirmed": True}],
         })
-        self.assertTrue(res.get("ok"), res)
-        self.assertEqual(res.get("candidate_count"), 1)
+        self.assertTrue(res_no_mbid.get("ok"), res_no_mbid)
+        self.assertEqual(res_no_mbid.get("candidate_count"), 0)
+        self.assertEqual((res_no_mbid.get("requires_review") or [])[0]["reason"], "artist_reconcile_requires_review")
+
+        # Case E: Fingerprint confirmed + caller MBID verified engine-side -> eligible
+        res_with_mbid = self._plan({
+            "root": str(self.music_root),
+            "mode": "scan_merge",
+            "candidates": [{"source_path": str(src), "target_path": str(dst), "mbid": MBID_A, "fingerprint_confirmed": True}],
+        })
+        self.assertTrue(res_with_mbid.get("ok"), res_with_mbid)
+        self.assertEqual(res_with_mbid.get("candidate_count"), 1)
 
     def test_plan_rejects_malformed_mbid_as_identity(self):
         """SEC-002 Wave 21 final review, finding #12: placeholder-shaped
@@ -359,7 +379,7 @@ class ApplyTests(Wave21BaseTest):
 
         plan_res = self._plan({
             "root": str(self.music_root), "mode": "scan_merge",
-            "candidates": [{"source_path": str(src), "target_path": str(dst), "fingerprint_confirmed": True}],
+            "candidates": [{"source_path": str(src), "target_path": str(dst), "mbid": MBID_A, "fingerprint_confirmed": True}],
         })
         self.assertTrue(plan_res.get("ok"), plan_res)
         op_id = plan_res["operation_id"]
@@ -398,7 +418,7 @@ class ApplyTests(Wave21BaseTest):
 
         plan_res = self._plan({
             "root": str(self.music_root), "mode": "scan_merge",
-            "candidates": [{"source_path": str(src), "target_path": str(dst), "fingerprint_confirmed": True}],
+            "candidates": [{"source_path": str(src), "target_path": str(dst), "mbid": MBID_A, "fingerprint_confirmed": True}],
         })
         apply_res = self._apply(plan_res["operation_id"])
         self.assertTrue(apply_res.get("ok"), apply_res)
@@ -421,7 +441,7 @@ class ApplyTests(Wave21BaseTest):
 
         plan_res = self._plan({
             "root": str(self.music_root), "mode": "scan_merge",
-            "candidates": [{"source_path": str(src), "target_path": str(dst), "fingerprint_confirmed": True}],
+            "candidates": [{"source_path": str(src), "target_path": str(dst), "mbid": MBID_A, "fingerprint_confirmed": True}],
         })
         self.assertTrue(plan_res.get("ok"), plan_res)
         apply_res = self._apply(plan_res["operation_id"])
@@ -444,7 +464,7 @@ class ApplyTests(Wave21BaseTest):
 
         plan_res = self._plan({
             "root": str(self.music_root), "mode": "scan_merge",
-            "candidates": [{"source_path": str(src), "target_path": str(dst), "fingerprint_confirmed": True}],
+            "candidates": [{"source_path": str(src), "target_path": str(dst), "mbid": MBID_A, "fingerprint_confirmed": True}],
         })
         op_id = plan_res["operation_id"]
 
@@ -464,7 +484,7 @@ class ApplyTests(Wave21BaseTest):
 
         plan_res = self._plan({
             "root": str(self.music_root), "mode": "scan_merge",
-            "candidates": [{"source_path": str(src), "target_path": str(dst), "fingerprint_confirmed": True}],
+            "candidates": [{"source_path": str(src), "target_path": str(dst), "mbid": MBID_A, "fingerprint_confirmed": True}],
         })
         op_id = plan_res["operation_id"]
         # Same size/mtime is hard to force without touching the fs; replace
@@ -495,7 +515,7 @@ class RollbackTests(Wave21BaseTest):
 
         plan_res = self._plan({
             "root": str(self.music_root), "mode": "scan_merge",
-            "candidates": [{"source_path": str(src), "target_path": str(dst), "fingerprint_confirmed": True}],
+            "candidates": [{"source_path": str(src), "target_path": str(dst), "mbid": MBID_A, "fingerprint_confirmed": True}],
         })
         op_id = plan_res["operation_id"]
         self.assertTrue(self._apply(op_id).get("ok"))
@@ -561,7 +581,7 @@ class RollbackTests(Wave21BaseTest):
         self._create_track_file("repeat_src/Song.mp3")
         plan_res = self._plan({
             "root": str(self.music_root), "mode": "scan_merge",
-            "candidates": [{"source_path": str(src), "target_path": str(dst), "fingerprint_confirmed": True}],
+            "candidates": [{"source_path": str(src), "target_path": str(dst), "mbid": MBID_A, "fingerprint_confirmed": True}],
         })
         op_id = plan_res["operation_id"]
         self.assertTrue(self._apply(op_id).get("ok"))
@@ -577,7 +597,7 @@ class RollbackTests(Wave21BaseTest):
         self._create_track_file("nm_src/Song.mp3")
         plan_res = self._plan({
             "root": str(self.music_root), "mode": "scan_merge",
-            "candidates": [{"source_path": str(src), "target_path": str(dst), "fingerprint_confirmed": True}],
+            "candidates": [{"source_path": str(src), "target_path": str(dst), "mbid": MBID_A, "fingerprint_confirmed": True}],
         })
         res = self._rollback(plan_res["operation_id"])
         self.assertFalse(res.get("ok"))

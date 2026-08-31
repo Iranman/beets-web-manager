@@ -210,6 +210,24 @@ class GenreRepairPlanApplyRollbackTests(unittest.TestCase):
         self.assertFalse(res["ok"])
         self.assertEqual(res["status"], "Recovery Required")
 
+    def test_plan_fails_when_on_disk_tag_baseline_unavailable(self):
+        with mock.patch.object(txn, "_read_file_genre_tag", return_value={"ok": False, "reason": "unreadable"}):
+            res = txn.create_genre_repair_plan(self.store, {"album_id": 1}, db_path=str(self.db_path))
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["code"], "genre_repair_tag_baseline_unavailable")
+
+    def test_rollback_reports_recovery_required_if_item_db_genre_verification_fails(self):
+        op_id = self._plan()
+        con = sqlite3.connect(self.db_path)
+        con.execute("UPDATE items SET genre='Mismatched Genre' WHERE album_id=1")
+        con.commit()
+        con.close()
+        with mock.patch.object(txn, "_genre_column", side_effect=lambda con, table: "" if table == "items" else "genre"):
+            res = txn.rollback_genre_repair(self.store, op_id, db_path=str(self.db_path))
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["status"], "Recovery Required")
+
 
 if __name__ == "__main__":
     unittest.main()
+

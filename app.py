@@ -13405,20 +13405,19 @@ def _strip_year_from_album_db(aid: int, log: list) -> str:
     (e.g. 'Multiverse (2022) (2022)' → 'Multiverse (2022)').
 
     Returns the (possibly cleaned) album name.
-    Updates metadata via the engine-owned item_metadata_repair_v1 transaction family."""
+    Updates metadata via the engine-owned album_metadata_repair_v1 transaction family."""
     try:
-        with _db(text_factory=str) as con:
-            row = con.execute("SELECT album FROM albums WHERE id = ?", (aid,)).fetchone()
-            if not row:
-                return ""
-            raw_name = row[0] or ""
-            clean_name = _YEAR_SFXRE.sub("", raw_name).strip()
-            if clean_name and clean_name != raw_name:
-                update_res = beets_client.update_album_metadata(aid, {"album": clean_name})
-                _require_attach_stage_success(update_res, "album year-strip metadata update")
-                log.append(f"  ↳ Cleaned album name: {raw_name!r} → {clean_name!r}")
-            elif not clean_name and raw_name:
-                log.append(f"  ↳ Album name is a bare year ({raw_name!r}) — keeping as-is")
+        album_dict = beets_client.get_album(aid)
+        if not album_dict:
+            return ""
+        raw_name = str(album_dict.get("album") or "")
+        clean_name = _YEAR_SFXRE.sub("", raw_name).strip()
+        if clean_name and clean_name != raw_name:
+            update_res = beets_client.update_album_metadata(aid, {"album": clean_name})
+            _require_attach_stage_success(update_res, "album year-strip metadata update")
+            log.append(f"  ↳ Cleaned album name: {raw_name!r} → {clean_name!r}")
+        elif not clean_name and raw_name:
+            log.append(f"  ↳ Album name is a bare year ({raw_name!r}) — keeping as-is")
         return clean_name or raw_name
     except Exception as ex:
         log.append(f"  WARN: album name cleanup failed: {ex}")

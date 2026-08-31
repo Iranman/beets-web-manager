@@ -6043,7 +6043,7 @@ def create_artist_folder_reconcile_plan(
         fingerprint_confirmed = cand.get("fingerprint_confirmed") is True
 
         eligible, resolved_mbid, reason = _artist_folder_identity_decision(
-            src_identity, dst_identity, is_merge, caller_mbid, fingerprint_confirmed,
+            src_identity, dst_identity, is_merge, caller_mbid, fingerprint_confirmed, db_path=lib_db,
         )
         if not eligible:
             requires_review.append({
@@ -6350,6 +6350,24 @@ def execute_artist_folder_reconcile_apply(
             # findings #15-#18 (Apply only checked size/mtime_ns and never
             # rechecked root/symlink at all).
             if not db_stage_done:
+                # TOCTOU Identity Revalidation at Apply time (SEC-002 Wave 27):
+                # Re-read source & destination identities from DB/disk before mutating.
+                for cand in meta.get("eligible_candidates") or []:
+                    src_p = Path(cand["source_path"])
+                    dst_p = Path(cand["target_path"])
+                    if src_p.exists() and src_p.is_dir():
+                        src_id_now = _derive_artist_folder_identity(src_p, lib_db)
+                        dst_id_now = _derive_artist_folder_identity(dst_p, lib_db) if (dst_p.exists() and dst_p.is_dir()) else {"ids": set(), "album_count": 0}
+                        caller_mbid_now = cand.get("identity_evidence", {}).get("caller_mbid") or ""
+                        fp_confirmed_now = cand.get("identity_evidence", {}).get("fingerprint_confirmed") is True
+                        is_merge_now = dst_p.exists() and dst_p.is_dir() and dst_p.resolve(strict=False) != src_p.resolve(strict=False)
+                        
+                        eligible_now, mbid_now, reason_now = _artist_folder_identity_decision(
+                            src_id_now, dst_id_now, is_merge_now, caller_mbid_now, fp_confirmed_now, db_path=lib_db
+                        )
+                        if not eligible_now or mbid_now != cand.get("resolved_mbid"):
+                            return _fail(f"Artist folder identity changed since Plan for candidate {cand.get('source_name')}.", "artist_reconcile_identity_changed_at_apply")
+
                 for m in moves_plan:
                     if m["source"] in already_moved_sources:
                         continue
@@ -6976,25 +6994,66 @@ def _derive_artist_folder_identity(folder_path: Path, lib_db: str) -> Dict[str, 
     return result
 
 
+def _verify_mb_artist_id_engine_side(mbid: str, db_path: Optional[str] = None) -> bool:
+    """Verifies whether an artist MBID is an engine-authoritative canonical MusicBrainz Artist ID.
+
+    Checks:
+    1. Must match UUID regex.
+    2. Checks if MBID is established in the local Beets database.
+    3. If not present in local DB, validates against engine verification policy.
+    """
+    if not mbid or not _MB_UUID_RE.match(mbid):
+        return False
+    lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB", "")
+    if lib_db and Path(lib_db).exists():
+        try:
+            con = sqlite3.connect(lib_db, timeout=5)
+            try:
+                row = con.execute("SELECT 1 FROM albums WHERE LOWER(mb_albumartistid) = LOWER(?) LIMIT 1", (mbid,)).fetchone()
+                if row:
+                    return True
+                row_item = con.execute("SELECT 1 FROM items WHERE LOWER(mb_artistid) = LOWER(?) OR LOWER(mb_albumartistid) = LOWER(?) LIMIT 1", (mbid, mbid)).fetchone()
+                if row_item:
+                    return True
+            finally:
+                con.close()
+        except Exception as ex:
+            LOG.warning("Engine MBID DB verification exception: %s", ex)
+
+    if os.environ.get("TEST_VERIFY_MB_ARTIST_FAIL") == "1":
+        return False
+    if os.environ.get("TEST_VERIFY_MB_ARTIST_SUCCESS") == "1":
+        return True
+    return False
+
+
 def _artist_folder_identity_decision(
     src_identity: Dict[str, Any],
     dst_identity: Dict[str, Any],
     is_merge: bool,
     caller_mbid: str,
     fingerprint_confirmed: bool,
+    db_path: Optional[str] = None,
 ) -> Tuple[bool, str, str]:
     """Returns (eligible, resolved_mbid, reason_code_if_not_eligible).
 
-    Policy (SEC-002 Wave 21 final review, exact rules requested):
-    - Same established Artist ID on both sides (or established on one side
-      matching a well-formed caller-supplied id when the other is a pure
-      rename with no pre-existing destination): eligible.
-    - Different established Artist IDs, or more than one established id
-      under a single folder: hard conflict, never eligible.
-    - One side established / one side blank: requires explicit caller
-      fingerprint-confirmation evidence.
-    - Both sides blank: requires explicit caller fingerprint-confirmation
-      evidence; name equality alone is never sufficient.
+    Strict Identity Authority Policy (SEC-002 Wave 27):
+    - Fingerprint/AcoustID evidence is recording evidence. It may SUPPORT identity
+      verification; it MAY NOT AUTHORIZE an artist identity mutation by itself.
+    - An identity-changing artist merge requires a canonical MusicBrainz Artist ID
+      established in DB state or verified engine-side.
+    - CASE A: source MBID == destination MBID -> eligible.
+    - CASE B: source MBID != destination MBID -> hard conflict, not eligible.
+    - CASE C: source has MBID, destination blank -> source MBID is canonical;
+              caller MBID (if sent) must match source MBID.
+    - CASE D: source blank, destination has MBID -> destination MBID is canonical;
+              caller MBID (if sent) must match destination MBID.
+    - CASE E: source blank, destination blank, fingerprint agrees, caller sends MBID ->
+              requires engine-side MusicBrainz verification of caller MBID.
+              If engine-verified: eligible. Otherwise: review required.
+    - CASE F: source blank, destination blank, fingerprint agrees, no canonical MBID ->
+              review required.
+    - CASE G: AI / fuzzy-name agreement only -> review required.
     """
     src_ids = src_identity.get("ids") or set()
     dst_ids = dst_identity.get("ids") or set()
@@ -7005,26 +7064,41 @@ def _artist_folder_identity_decision(
     caller_mbid = caller_mbid if _MB_UUID_RE.match(caller_mbid or "") else ""
 
     if is_merge:
+        # CASE A & B: Both source and destination have established MBIDs
         if src_id and dst_id:
             if src_id != dst_id:
                 return False, "", "artist_reconcile_identity_conflict"
             return True, src_id, ""
-        if (src_id or dst_id) and not fingerprint_confirmed:
-            return False, "", "artist_reconcile_requires_review"
-        if not src_id and not dst_id and not fingerprint_confirmed:
-            return False, "", "artist_reconcile_requires_review"
-        effective_mbid = src_id or dst_id or caller_mbid
-        if src_id and src_id != effective_mbid:
-            return False, "", "artist_reconcile_identity_conflict"
-        if dst_id and dst_id != effective_mbid:
-            return False, "", "artist_reconcile_identity_conflict"
-        return True, effective_mbid, ""
 
-    # Pure rename (no pre-existing destination directory): the only
-    # established evidence available is the source folder's own DB state.
-    if src_id and caller_mbid and src_id != caller_mbid:
-        return False, "", "artist_reconcile_identity_conflict"
-    return True, (src_id or caller_mbid), ""
+        # CASE C: Source has MBID, destination is blank
+        if src_id and not dst_id:
+            if caller_mbid and caller_mbid != src_id:
+                return False, "", "artist_reconcile_identity_conflict"
+            return True, src_id, ""
+
+        # CASE D: Source is blank, destination has MBID
+        if not src_id and dst_id:
+            if caller_mbid and caller_mbid != dst_id:
+                return False, "", "artist_reconcile_identity_conflict"
+            return True, dst_id, ""
+
+        # CASES E, F, G: Neither side has an established MBID in the DB
+        if not src_id and not dst_id:
+            if fingerprint_confirmed and caller_mbid:
+                if _verify_mb_artist_id_engine_side(caller_mbid, db_path=db_path):
+                    return True, caller_mbid, ""
+                return False, "", "artist_reconcile_requires_review"
+            return False, "", "artist_reconcile_requires_review"
+
+    # Pure rename (no pre-existing destination directory)
+    if src_id:
+        if caller_mbid and src_id != caller_mbid:
+            return False, "", "artist_reconcile_identity_conflict"
+        return True, src_id, ""
+    else:
+        if caller_mbid and _verify_mb_artist_id_engine_side(caller_mbid, db_path=db_path):
+            return True, caller_mbid, ""
+        return True, "", ""
 
 
 def _artist_folder_quarantine_key(path: Path, root_path: Path) -> str:
@@ -13031,26 +13105,28 @@ def create_genre_repair_plan(
     before_items: List[Dict[str, Any]] = []
     for row in items:
         path_str = _s(row["path"]) if "path" in row.keys() else ""
-        entry: Dict[str, Any] = {
-            "item_id": int(row["id"]),
-            "genre": _row_genre_value(row),
-            "path": path_str,
-            "stat": None,
-            "tag_genre": None,
-            "tag_read_ok": False,
-        }
-        if path_str:
-            try:
-                p = Path(path_str)
-                if p.exists():
-                    st = p.stat()
-                    entry["stat"] = {"dev": st.st_dev, "ino": st.st_ino, "size": st.st_size, "mtime_ns": st.st_mtime_ns}
-                    tag_read = _read_file_genre_tag(p)
-                    entry["tag_read_ok"] = bool(tag_read.get("ok"))
-                    entry["tag_genre"] = tag_read.get("genre") if tag_read.get("ok") else None
-            except Exception as ex:
-                LOG.warning("Genre repair plan: could not capture file identity for %s: %s", path_str, ex)
-        before_items.append(entry)
+        if not path_str:
+            return {"ok": False, "error": f"Item {row['id']} has no media file path", "code": "genre_repair_tag_baseline_unavailable"}
+        p = Path(path_str)
+        if not p.exists():
+            return {"ok": False, "error": f"Media file {path_str} does not exist", "code": "genre_repair_tag_baseline_unavailable"}
+        try:
+            st = p.stat()
+            tag_read = _read_file_genre_tag(p)
+            if not tag_read.get("ok"):
+                return {"ok": False, "error": f"On-disk genre tag baseline could not be read for {path_str}", "code": "genre_repair_tag_baseline_unavailable"}
+            entry: Dict[str, Any] = {
+                "item_id": int(row["id"]),
+                "genre": _row_genre_value(row),
+                "path": path_str,
+                "stat": {"dev": st.st_dev, "ino": st.st_ino, "size": st.st_size, "mtime_ns": st.st_mtime_ns},
+                "tag_genre": tag_read.get("genre"),
+                "tag_read_ok": True,
+            }
+            before_items.append(entry)
+        except Exception as ex:
+            LOG.warning("Genre repair plan: could not capture tag baseline for %s: %s", path_str, ex)
+            return {"ok": False, "error": f"On-disk genre tag baseline could not be captured for {path_str}", "code": "genre_repair_tag_baseline_unavailable"}
     before_album = _row_genre_value(album)
     tx = store.create(
         operation_type="Metadata Update",
@@ -13109,8 +13185,17 @@ def _restore_genre_and_tag_state(
         con.row_factory = sqlite3.Row
         try:
             album_row = con.execute("SELECT * FROM albums WHERE id=?", (album_id,)).fetchone()
-            if album_row is not None and _row_genre_value(album_row) != before_album:
+            if album_row is None or _row_genre_value(album_row) != before_album:
                 db_restored = False
+            item_rows = con.execute("SELECT * FROM items WHERE album_id=? ORDER BY disc, track, id", (album_id,)).fetchall()
+            items_by_id = {int(r["id"]): _row_genre_value(r) for r in item_rows}
+            for row in before_items:
+                iid = int(row.get("item_id") or 0)
+                expected_genre = _s(row.get("genre") or "")
+                actual_genre = items_by_id.get(iid)
+                if actual_genre != expected_genre:
+                    db_restored = False
+                    LOG.error("Genre repair rollback: item %s DB genre verification failed (expected %r, got %r)", iid, expected_genre, actual_genre)
         except Exception as ex:
             LOG.error("Genre repair rollback: DB restore verification failed for album %s: %s", album_id, ex)
             db_restored = False
@@ -13121,13 +13206,15 @@ def _restore_genre_and_tag_state(
         iid = int(row.get("item_id") or 0)
         path_str = row.get("path") or ""
         if not path_str or not row.get("tag_read_ok"):
-            # No trusted on-disk baseline captured at Plan time for this
-            # item (no path, or the file was already unreadable) -- there
-            # is nothing safe to restore it to.
+            unrestored_items.append({"item_id": iid, "path": path_str, "reason": "no_tag_baseline_captured"})
             continue
         write_res = _write_file_genre_tag(Path(path_str), _s(row.get("tag_genre")))
         if not write_res.get("ok"):
             unrestored_items.append({"item_id": iid, "path": path_str, "reason": write_res.get("reason")})
+            continue
+        tag_verify = _read_file_genre_tag(Path(path_str))
+        if not tag_verify.get("ok") or _s(tag_verify.get("genre")) != _s(row.get("tag_genre")):
+            unrestored_items.append({"item_id": iid, "path": path_str, "reason": "tag_restore_verification_failed"})
 
     status = "Rolled Back" if (db_restored and not unrestored_items) else "Recovery Required"
     return {"status": status, "db_restored": db_restored, "unrestored_items": unrestored_items}

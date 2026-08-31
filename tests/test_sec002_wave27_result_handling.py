@@ -10,6 +10,7 @@ import unittest.mock as mock
 from pathlib import Path
 from types import SimpleNamespace
 
+from backend import transaction_engine as txn
 from tests.test_import_review_attach_enforcement import APP, _APP_IMPORT_ERROR
 
 
@@ -455,6 +456,55 @@ class CompensatingMetadataRollbackTests(unittest.TestCase):
                 APP._compensate_committed_metadata_or_raise(123, "meta_op_1", "relocate stage", downstream, log)
         self.assertIn("Recovery Required", str(ctx.exception))
         self.assertTrue(any("RECOVERY REQUIRED" in msg for msg in log))
+
+
+class ArtistTrustTierRegressionTests(unittest.TestCase):
+    def test_fingerprint_only_without_mbid_requires_review(self):
+        src_id = {"ids": set(), "album_count": 0}
+        dst_id = {"ids": set(), "album_count": 0}
+        eligible, mbid, reason = txn._artist_folder_identity_decision(src_id, dst_id, is_merge=True, caller_mbid="", fingerprint_confirmed=True)
+        self.assertFalse(eligible)
+        self.assertEqual(reason, "artist_reconcile_requires_review")
+
+    def test_fingerprint_with_caller_mbid_unverified_requires_review(self):
+        src_id = {"ids": set(), "album_count": 0}
+        dst_id = {"ids": set(), "album_count": 0}
+        uuid_str = "89ad4ac3-39f7-470e-963a-56509c546377"
+        with mock.patch.dict("os.environ", {"TEST_VERIFY_MB_ARTIST_FAIL": "1"}):
+            eligible, mbid, reason = txn._artist_folder_identity_decision(src_id, dst_id, is_merge=True, caller_mbid=uuid_str, fingerprint_confirmed=True)
+        self.assertFalse(eligible)
+        self.assertEqual(reason, "artist_reconcile_requires_review")
+
+    def test_ai_fuzzy_only_requires_review(self):
+        src_id = {"ids": set(), "album_count": 0}
+        dst_id = {"ids": set(), "album_count": 0}
+        eligible, mbid, reason = txn._artist_folder_identity_decision(src_id, dst_id, is_merge=True, caller_mbid="", fingerprint_confirmed=False)
+        self.assertFalse(eligible)
+        self.assertEqual(reason, "artist_reconcile_requires_review")
+
+    def test_conflicting_established_mbids_returns_conflict(self):
+        src_id = {"ids": {"89ad4ac3-39f7-470e-963a-56509c546377"}, "album_count": 1}
+        dst_id = {"ids": {"00000000-0000-0000-0000-000000000000"}, "album_count": 1}
+        eligible, mbid, reason = txn._artist_folder_identity_decision(src_id, dst_id, is_merge=True, caller_mbid="", fingerprint_confirmed=True)
+        self.assertFalse(eligible)
+        self.assertEqual(reason, "artist_reconcile_identity_conflict")
+
+    def test_matching_established_mbids_allowed(self):
+        uuid_str = "89ad4ac3-39f7-470e-963a-56509c546377"
+        src_id = {"ids": {uuid_str}, "album_count": 1}
+        dst_id = {"ids": {uuid_str}, "album_count": 1}
+        eligible, mbid, reason = txn._artist_folder_identity_decision(src_id, dst_id, is_merge=True, caller_mbid="", fingerprint_confirmed=False)
+        self.assertTrue(eligible)
+        self.assertEqual(mbid, uuid_str)
+
+    def test_established_and_engine_verified_mbid_allowed(self):
+        uuid_str = "89ad4ac3-39f7-470e-963a-56509c546377"
+        src_id = {"ids": set(), "album_count": 0}
+        dst_id = {"ids": set(), "album_count": 0}
+        with mock.patch.dict("os.environ", {"TEST_VERIFY_MB_ARTIST_SUCCESS": "1"}):
+            eligible, mbid, reason = txn._artist_folder_identity_decision(src_id, dst_id, is_merge=True, caller_mbid=uuid_str, fingerprint_confirmed=True)
+        self.assertTrue(eligible)
+        self.assertEqual(mbid, uuid_str)
 
 
 if __name__ == "__main__":
