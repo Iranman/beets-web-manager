@@ -7009,13 +7009,16 @@ def _artist_folder_identity_decision(
             if src_id != dst_id:
                 return False, "", "artist_reconcile_identity_conflict"
             return True, src_id, ""
-        if src_id or dst_id:
-            if not fingerprint_confirmed:
-                return False, "", "artist_reconcile_requires_review"
-            return True, (src_id or dst_id), ""
-        if not fingerprint_confirmed:
+        if (src_id or dst_id) and not fingerprint_confirmed:
             return False, "", "artist_reconcile_requires_review"
-        return True, caller_mbid, ""
+        if not src_id and not dst_id and not fingerprint_confirmed:
+            return False, "", "artist_reconcile_requires_review"
+        effective_mbid = src_id or dst_id or caller_mbid
+        if src_id and src_id != effective_mbid:
+            return False, "", "artist_reconcile_identity_conflict"
+        if dst_id and dst_id != effective_mbid:
+            return False, "", "artist_reconcile_identity_conflict"
+        return True, effective_mbid, ""
 
     # Pure rename (no pre-existing destination directory): the only
     # established evidence available is the source folder's own DB state.

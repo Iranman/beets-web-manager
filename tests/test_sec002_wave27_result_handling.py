@@ -430,5 +430,32 @@ class ArtistAliasFolderReconcileTests(unittest.TestCase):
                 APP._run_artist_folder_reconcile_for_alias_merge(["Old Name"], "New Name", VALID_ARTIST_ID, log)
 
 
+class CompensatingMetadataRollbackTests(unittest.TestCase):
+    def test_compensate_without_meta_op_id_raises_downstream_exception(self):
+        log = []
+        downstream = RuntimeError("relocate failed")
+        with self.assertRaises(RuntimeError) as ctx:
+            APP._compensate_committed_metadata_or_raise(123, None, "relocate stage", downstream, log)
+        self.assertIs(ctx.exception, downstream)
+
+    def test_compensate_rollback_success_logs_and_raises_rolled_back_exception(self):
+        log = []
+        downstream = RuntimeError("relocate failed")
+        with mock.patch.object(APP.beets_client, "rollback_album_metadata", return_value={"ok": True}):
+            with self.assertRaises(RuntimeError) as ctx:
+                APP._compensate_committed_metadata_or_raise(123, "meta_op_1", "relocate stage", downstream, log)
+        self.assertIn("relocate stage failed and metadata was rolled back", str(ctx.exception))
+        self.assertTrue(any("Metadata rolled back cleanly" in msg for msg in log))
+
+    def test_compensate_rollback_failure_raises_recovery_required(self):
+        log = []
+        downstream = RuntimeError("relocate failed")
+        with mock.patch.object(APP.beets_client, "rollback_album_metadata", return_value={"ok": False, "error": "DB locked"}):
+            with self.assertRaises(RuntimeError) as ctx:
+                APP._compensate_committed_metadata_or_raise(123, "meta_op_1", "relocate stage", downstream, log)
+        self.assertIn("Recovery Required", str(ctx.exception))
+        self.assertTrue(any("RECOVERY REQUIRED" in msg for msg in log))
+
+
 if __name__ == "__main__":
     unittest.main()

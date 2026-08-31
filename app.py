@@ -13400,28 +13400,24 @@ def _invalidate_lib_cache():
 
 
 def _strip_year_from_album_db(aid: int, log: list) -> str:
-    """If the album name in the DB ends with a year suffix like ' (2022)' or ' [2022]',
+    """If the album name ends with a year suffix like ' (2022)' or ' [2022]',
     strip it so the beets path template doesn't produce double-year folder names
     (e.g. 'Multiverse (2022) (2022)' → 'Multiverse (2022)').
 
     Returns the (possibly cleaned) album name.
-    Updates both albums.album and items.album in the SQLite DB directly."""
+    Updates metadata via the engine-owned item_metadata_repair_v1 transaction family."""
     try:
         with _db(text_factory=str) as con:
             row = con.execute("SELECT album FROM albums WHERE id = ?", (aid,)).fetchone()
             if not row:
                 return ""
-            raw_name   = row[0] or ""
-            clean_name = _YEAR_SFXRE.sub('', raw_name).strip()
-            # Only update if stripped name is non-empty AND different
-            # (guard: never wipe the album name down to empty string)
+            raw_name = row[0] or ""
+            clean_name = _YEAR_SFXRE.sub("", raw_name).strip()
             if clean_name and clean_name != raw_name:
-                con.execute("UPDATE albums SET album = ? WHERE id = ?", (clean_name, aid))
-                con.execute("UPDATE items  SET album = ? WHERE album_id = ?", (clean_name, aid))
-                con.commit()
+                update_res = beets_client.update_album_metadata(aid, {"album": clean_name})
+                _require_attach_stage_success(update_res, "album year-strip metadata update")
                 log.append(f"  ↳ Cleaned album name: {raw_name!r} → {clean_name!r}")
             elif not clean_name and raw_name:
-                # The whole album name was a year pattern — don't blank it out
                 log.append(f"  ↳ Album name is a bare year ({raw_name!r}) — keeping as-is")
         return clean_name or raw_name
     except Exception as ex:
@@ -28303,86 +28299,17 @@ def _item_artist_matches_alias(row: sqlite3.Row, source_keys: set) -> bool:
     return any(_artist_alias_key(v) in source_keys for v in values if _s(v).strip())
 
 
-def _apply_artist_alias_db_merge(con, source_names: List[str], canonical: str,
-                                 mbid: str, *, require_mbid: bool,
-                                 include_same_mbid: bool,
-                                 log: List[str]) -> Dict[str, Any]:
-    source_keys = {_artist_alias_key(n) for n in source_names if _artist_alias_key(n)}
-    canonical_key = _artist_alias_key(canonical)
-    album_cols = _sqlite_columns(con, "albums")
-    item_cols = _sqlite_columns(con, "items")
-    album_updates = _artist_alias_updates(canonical, mbid, album=True)
-    item_album_updates = _artist_alias_updates(canonical, mbid, album=True)
-    item_artist_updates = _artist_alias_updates(canonical, mbid, album=False)
-
-    rows = con.execute(
-        "SELECT id, album, albumartist, albumartist_credit, albumartists, "
-        "albumartists_credit, mb_albumartistid, mb_albumartistids "
-        "FROM albums ORDER BY albumartist, album"
-    ).fetchall()
-
-    affected_ids: List[int] = []
-    source_folders: set = set()
-    item_artist_rows = 0
-    albumartist_rows = 0
-
-    for row in rows:
-        ids = _artist_alias_ids(row)
-        id_match = bool(mbid and mbid in ids)
-        if require_mbid and not id_match:
-            continue
-        values = _artist_alias_values(row)
-        name_match = any(_artist_alias_key(v) in source_keys for v in values)
-        current_albumartist = _s(row["albumartist"]).strip()
-        current_key = _artist_alias_key(current_albumartist)
-        same_mbid_alias = include_same_mbid and id_match and current_key != canonical_key
-        if not name_match and not same_mbid_alias:
-            continue
-
-        aid = int(row["id"])
-        affected_ids.append(aid)
-        for value in values + [current_albumartist]:
-            if _artist_alias_key(value) != canonical_key:
-                source_folders.add(_s(value).strip())
-        log.append(f"  album_id:{aid} {current_albumartist!r} -> {canonical!r} ({_s(row['album'])})")
-        albumartist_rows += _sqlite_update(
-            con, "albums", album_updates, "id=?", [aid], album_cols)
-        _sqlite_update(
-            con, "items", item_album_updates, "album_id=?", [aid], item_cols)
-
-        items = con.execute(
-            "SELECT id, artist, artist_credit, artists, artists_credit "
-            "FROM items WHERE album_id=?",
-            (aid,),
-        ).fetchall()
-        for item in items:
-            if _item_artist_matches_alias(item, source_keys or {current_key}):
-                item_artist_rows += _sqlite_update(
-                    con, "items", item_artist_updates, "id=?",
-                    [int(item["id"])], item_cols)
-
-    return {
-        "album_ids": sorted(set(affected_ids)),
-        "source_folders": sorted(
-            n for n in source_folders
-            if n and _artist_alias_key(n) != canonical_key
-        ),
-        "album_rows": albumartist_rows,
-        "item_artist_rows": item_artist_rows,
-    }
-
-
 def _run_artist_folder_reconcile_for_alias_merge(
     source_folders: List[str], canonical: str, mb_artistid: str, log: List[str],
     *, fingerprint_confirmed: bool = False,
 ) -> Dict[str, Any]:
-    """Delegate the on-disk artist-folder move/merge for an artist alias
-    merge to the engine-owned artist_folder_reconcile_v1 transaction family
-    -- the same family the "Clean: artist folder merge" maintenance feature
-    (_apply_artist_folder_groups) already uses -- instead of looping
-    per-album metadata-write + relocate calls that are not composed into
-    any single rollback-capable transaction. No local fallback: if the
-    engine is unreachable or rejects the plan, nothing is moved locally."""
+    """Delegate the artist-folder move/merge for an artist alias merge to the
+    engine-owned artist_folder_reconcile_v1 transaction family -- the same
+    family the "Clean: artist folder merge" maintenance feature
+    (_apply_artist_folder_groups) uses -- instead of running per-album
+    metadata-write + relocate calls that are not composed into a single
+    rollback-capable transaction. No local fallback: if the engine is
+    unreachable or rejects the plan, nothing is moved locally."""
     canonical_key = _artist_alias_key(canonical)
     target_path = MUSIC_ROOT / canonical
     candidates = []
@@ -28395,9 +28322,6 @@ def _run_artist_folder_reconcile_for_alias_merge(
             "target_path": str(target_path),
             "source_name": name,
             "target_name": canonical,
-            # Evidence only, not authority -- the engine independently
-            # re-derives each folder's established Artist ID(s) from Beets
-            # DB state before treating any merge as eligible.
             "source_mbid": mb_artistid,
             "target_mbid": mb_artistid,
             "fingerprint_confirmed": fingerprint_confirmed,
@@ -28484,52 +28408,6 @@ def _warn_artist_alias_remaining_paths(album_ids: List[int], source_names: List[
     return remaining
 
 
-@app.get("/api/library/artist-id-groups")
-def library_artist_id_groups():
-    groups = _artist_id_alias_groups()
-    all_groups = _artist_id_alias_groups(include_rejected=True)
-    return jsonify({
-        "ok": True,
-        "groups": groups,
-        "total": len(groups),
-        "hidden_count": max(0, len(all_groups) - len(groups)),
-    })
-
-
-@app.post("/api/library/artist-id-groups/reject")
-def library_reject_artist_id_group():
-    payload = request.get_json(silent=True) or {}
-    mb_artistid = _s(payload.get("mb_artistid")).strip().lower()
-    reject_key = _s(payload.get("reject_key")).strip()
-    if not _MB_UUID_RE.match(mb_artistid):
-        return jsonify({"ok": False, "error": "Valid MusicBrainz artist ID required"}), 400
-
-    groups = _artist_id_alias_groups(include_rejected=True)
-    group = next(
-        (
-            g for g in groups
-            if g.get("mb_artistid") == mb_artistid
-            and (not reject_key or g.get("reject_key") == reject_key)
-        ),
-        None,
-    )
-    if not group:
-        return jsonify({"ok": False, "error": "No alias group found for that MusicBrainz artist ID"}), 404
-
-    key = _s(group.get("reject_key") or reject_key).strip()
-    if not key:
-        return jsonify({"ok": False, "error": "Could not build alias rejection key"}), 400
-    rejected = _artist_alias_rejected_map()
-    rejected[key] = {
-        "rejected_at": int(time.time()),
-        "mb_artistid": mb_artistid,
-        "canonical": group.get("canonical", ""),
-        "names": [n.get("name", "") for n in group.get("names", []) if isinstance(n, dict)],
-    }
-    _artist_alias_write_rejected_map(rejected)
-    return jsonify({"ok": True, "reject_key": key, "hidden_count": len(rejected)})
-
-
 @app.post("/api/library/merge-artist-id")
 def library_merge_artist_id():
     payload = request.get_json(silent=True) or {}
@@ -28551,39 +28429,14 @@ def library_merge_artist_id():
         log.append(f"MusicBrainz artist ID: {mb_artistid}")
         log.append(f"Canonical artist: {canonical}")
         log.append("Merging aliases: " + ", ".join(source_names))
-        with _db(row_factory=sqlite3.Row) as con:
-            merge = _apply_artist_alias_db_merge(
-                con,
-                source_names,
-                canonical,
-                mb_artistid,
-                require_mbid=True,
-                include_same_mbid=True,
-                log=log,
-            )
-            con.commit()
-        affected_ids = merge["album_ids"]
-        source_folders = merge["source_folders"] or source_names
-        log.append(
-            "DB updated: "
-            f"{len(affected_ids)} album(s), "
-            f"{merge.get('item_artist_rows', 0)} item artist row(s)."
-        )
-
-        if not affected_ids:
-            log.append("No matching albums required changes.")
-            return
-
         if cancel_event and cancel_event.is_set():
             raise RuntimeError("cancelled")
-        log.append(f"Moving {len(source_folders)} artist folder(s) via artist_folder_reconcile_v1 ...")
-        _run_artist_folder_reconcile_for_alias_merge(source_folders, canonical, mb_artistid, log)
+        log.append(f"Executing artist reconciliation via artist_folder_reconcile_v1 ...")
+        _run_artist_folder_reconcile_for_alias_merge(source_names, canonical, mb_artistid, log)
 
-        _cleanup_artist_alias_source_dirs(source_folders, canonical, log)
-        _warn_artist_alias_remaining_paths(affected_ids, source_folders, log)
-
+        _cleanup_artist_alias_source_dirs(source_names, canonical, log)
         _invalidate_lib_cache()
-        log.append(f"Done. Updated {len(affected_ids)} album(s).")
+        log.append(f"Done. Updated artist aliases to {canonical!r}.")
 
     job = jobs.start_python(_do, label=f"Merge artist aliases: {canonical}")
     return jsonify({"ok": True, "job_id": job.job_id})
@@ -28613,50 +28466,17 @@ def library_confirm_artist_alias():
             raise RuntimeError("Could not resolve a MusicBrainz artist ID")
         log.append(f"Confirmed alias: {source!r} -> {canonical!r}")
         log.append(f"MusicBrainz artist ID: {mbid}")
-        with _db(row_factory=sqlite3.Row) as con:
-            merge = _apply_artist_alias_db_merge(
-                con,
-                [source],
-                canonical,
-                mbid,
-                require_mbid=False,
-                include_same_mbid=True,
-                log=log,
-            )
-            con.commit()
-        affected_ids = merge["album_ids"]
-        source_folders = merge["source_folders"] or [source]
-        log.append(
-            "DB updated: "
-            f"{len(affected_ids)} album(s), "
-            f"{merge.get('item_artist_rows', 0)} item artist row(s)."
-        )
-        if not affected_ids:
-            log.append(
-                f"No albums found for {source!r}. Check the source artist spelling "
-                "or use the same-MusicBrainz-ID alias list."
-            )
-            return
-
         if cancel_event and cancel_event.is_set():
             raise RuntimeError("cancelled")
-        log.append(f"Moving {len(source_folders)} artist folder(s) via artist_folder_reconcile_v1 ...")
-        # fingerprint_confirmed is honestly False here -- unlike
-        # merge-artist-id's alias-group flow, mbid may have come from a
-        # fuzzy MusicBrainz name search (_resolve_artist_alias_mbid), not
-        # audio fingerprint evidence, so it cannot claim that trust tier.
-        # The DB stamping above already establishes mb_albumartistid on the
-        # affected albums, which is normally sufficient on its own for the
-        # engine's identity check; a folder with no such established
-        # identity on either side legitimately requires_review instead of
-        # moving, same as it would for any other caller.
-        _run_artist_folder_reconcile_for_alias_merge(source_folders, canonical, mbid, log)
+        log.append(f"Executing artist reconciliation via artist_folder_reconcile_v1 ...")
+        _run_artist_folder_reconcile_for_alias_merge([source], canonical, mbid, log)
 
-        _cleanup_artist_alias_source_dirs(source_folders, canonical, log)
-        _warn_artist_alias_remaining_paths(affected_ids, source_folders, log)
-
+        _cleanup_artist_alias_source_dirs([source], canonical, log)
         _invalidate_lib_cache()
-        log.append(f"Done. Updated {len(affected_ids)} album(s).")
+        log.append(f"Done. Updated artist alias {source!r} -> {canonical!r}.")
+
+    job = jobs.start_python(_do, label=f"Confirm artist alias: {source} -> {canonical}")
+    return jsonify({"ok": True, "job_id": job.job_id})
 
     job = jobs.start_python(_do, label=f"Confirm artist alias: {source} -> {canonical}")
     return jsonify({"ok": True, "job_id": job.job_id})
