@@ -1,141 +1,166 @@
-"""Web Manager Configuration Persistence Primitive (ARCH-003 Wave 27).
+"""Web Manager durable configuration store.
 
-Provides safe, durable, atomic, and root-bound persistence for Web-Manager-owned
-configuration files, application settings, and bootstrap credentials.
-
-Enforces:
-- Fixed root directory (Web-Manager-owned data directory)
-- Path containment & traversal rejection (no '..', no symlinks)
-- Atomic write via temporary file + fsync + os.replace
-- Restrictive permissions (0o600 for secrets, 0o700 for directories)
-- Safe cleanup on error
+This module is for Web-Manager-owned state only: setup/settings files,
+bootstrap credentials, and local app secrets. It deliberately does not own
+Beets engine config or media-library state.
 """
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+import hashlib
 import json
 import os
-import shutil
-import uuid
 from pathlib import Path
-from typing import Any, Dict, Optional
+import tempfile
+from typing import Any, Optional
+
+try:  # pragma: no cover - platform-specific import
+    import fcntl  # type: ignore
+except Exception:  # pragma: no cover
+    fcntl = None  # type: ignore
+
+try:  # pragma: no cover - platform-specific import
+    import msvcrt  # type: ignore
+except Exception:  # pragma: no cover
+    msvcrt = None  # type: ignore
 
 
 class WebManagerConfigStoreError(RuntimeError):
-    """Base exception for Web Manager Config Store errors."""
-    pass
+    """Base exception for Web Manager config-store errors."""
+
+
+class WebManagerConfigStoreConflictError(WebManagerConfigStoreError):
+    """Raised when a CAS write uses a stale or missing revision."""
+
+
+def _revision_for_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _fsync_directory(path: Path) -> None:
+    if os.name != "posix":
+        return
+    fd = os.open(str(path), os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _reject_existing_symlink_components(path: Path) -> None:
+    pieces = []
+    current = path
+    while True:
+        pieces.append(current)
+        if current.parent == current:
+            break
+        current = current.parent
+    for component in reversed(pieces):
+        if component.exists() and (component.is_symlink() or os.path.islink(str(component))):
+            raise WebManagerConfigStoreError("Configuration root contains a symlink component")
 
 
 class WebManagerConfigStore:
     def __init__(self, data_root: Optional[Path | str] = None) -> None:
-        if data_root:
-            self.data_root = Path(data_root).resolve(strict=False)
-        else:
-            env_dir = os.environ.get("WEB_MANAGER_DATA_DIR") or os.environ.get("METADATA_CACHE_DIR")
-            if env_dir:
-                self.data_root = Path(env_dir).resolve(strict=False)
-            else:
-                self.data_root = Path("/data/web-manager-data").resolve(strict=False)
+        if data_root is None:
+            data_root = os.environ.get("WEB_MANAGER_DATA_DIR") or "/web-manager-data"
+        raw_root = Path(data_root).expanduser()
+        if not raw_root.is_absolute():
+            raw_root = Path.cwd() / raw_root
+        self.data_root = raw_root
+        self._ensure_root()
+        self.data_root = self.data_root.resolve(strict=True)
+        _reject_existing_symlink_components(self.data_root)
+        self._lock_path = self.data_root / ".web_manager_config_store.lock"
+
+    def _ensure_root(self) -> None:
+        _reject_existing_symlink_components(self.data_root)
         self.data_root.mkdir(parents=True, exist_ok=True)
-        self._set_restrictive_dir_permissions(self.data_root)
-
-    def _set_restrictive_dir_permissions(self, path: Path) -> None:
+        if self.data_root.is_symlink() or os.path.islink(str(self.data_root)):
+            raise WebManagerConfigStoreError("Configuration root cannot be a symlink")
         if os.name == "posix":
             try:
-                os.chmod(path, 0o700)
+                os.chmod(self.data_root, 0o700)
             except OSError:
                 pass
 
-    def _set_restrictive_file_permissions(self, path: Path) -> None:
-        if os.name == "posix":
+    @contextmanager
+    def _locked(self):
+        self._ensure_root()
+        flags = os.O_RDWR | os.O_CREAT
+        if hasattr(os, "O_BINARY"):
+            flags |= os.O_BINARY
+        fd = os.open(str(self._lock_path), flags, 0o600)
+        fh = os.fdopen(fd, "r+b")
+        try:
+            if fcntl is not None:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            elif msvcrt is not None:
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+            yield
+        finally:
             try:
-                os.chmod(path, 0o600)
-            except OSError:
-                pass
+                if fcntl is not None:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                elif msvcrt is not None:
+                    fh.seek(0)
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+            finally:
+                fh.close()
+
+    def _reject_symlink_components(self, path: Path) -> None:
+        current = self.data_root
+        for part in path.relative_to(self.data_root).parts:
+            current = current / part
+            if current.exists() and (current.is_symlink() or os.path.islink(str(current))):
+                raise WebManagerConfigStoreError("Configuration path contains a symlink component")
 
     def resolve_path(self, relative_name: str) -> Path:
-        """Resolve a relative filename within the authoritative data_root.
-
-        Raises WebManagerConfigStoreError on path traversal or symlink detection.
-        """
-        raw = str(relative_name or "").strip()
-        if not raw:
+        raw = str(relative_name or "")
+        if not raw.strip():
             raise WebManagerConfigStoreError("Configuration filename cannot be empty")
-        
-        if ".." in raw or raw.startswith("/") or raw.startswith("\\") or ":" in raw:
-            raise WebManagerConfigStoreError(f"Path traversal rejected for config file: {relative_name!r}")
-        
-        unresolved_target = self.data_root / raw
-        if unresolved_target.is_symlink() or os.path.islink(str(unresolved_target)):
-            raise WebManagerConfigStoreError(f"Symlink target rejected for config file: {relative_name!r}")
-
-        target = unresolved_target.resolve(strict=False)
-        
+        if "\x00" in raw or "\\" in raw or ":" in raw:
+            raise WebManagerConfigStoreError("Configuration path contains an invalid character")
+        requested = Path(raw)
+        if requested.is_absolute() or any(part in ("", ".", "..") for part in requested.parts):
+            raise WebManagerConfigStoreError("Configuration path traversal rejected")
+        target = (self.data_root / requested).resolve(strict=False)
         try:
             target.relative_to(self.data_root)
-        except ValueError:
-            raise WebManagerConfigStoreError(f"Path escape rejected for config file: {relative_name!r}")
-        
-        if target.is_symlink() or os.path.islink(str(target)):
-            raise WebManagerConfigStoreError(f"Symlink target rejected for config file: {relative_name!r}")
-        
+        except ValueError as exc:
+            raise WebManagerConfigStoreError("Configuration path escaped the data root") from exc
+        self._reject_symlink_components(target)
         return target
 
-    def save_text(self, relative_name: str, content: str, *, is_secret: bool = False) -> Path:
-        """Atomically write text content to a config file inside data_root."""
+    def _read_bytes_if_exists(self, target: Path) -> Optional[bytes]:
+        if not target.exists():
+            return None
+        if target.is_symlink() or os.path.islink(str(target)):
+            raise WebManagerConfigStoreError("Configuration target is a symlink")
+        return target.read_bytes()
+
+    def read_text_record(self, relative_name: str) -> dict[str, Any]:
         target = self.resolve_path(relative_name)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        self._set_restrictive_dir_permissions(target.parent)
-
-        tmp_name = f".tmp_{target.name}_{uuid.uuid4().hex}"
-        tmp_path = target.parent / tmp_name
-
-        try:
-            flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-            if hasattr(os, "O_BINARY"):
-                flags |= os.O_BINARY
-
-            mode = 0o600 if is_secret else 0o644
-            fd = os.open(str(tmp_path), flags, mode)
-            try:
-                data = content.encode("utf-8")
-                os.write(fd, data)
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-
-            if is_secret:
-                self._set_restrictive_file_permissions(tmp_path)
-
-            os.replace(str(tmp_path), str(target))
-            if is_secret:
-                self._set_restrictive_file_permissions(target)
-            return target
-        except Exception as exc:
-            if tmp_path.exists():
-                try:
-                    tmp_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
-            raise WebManagerConfigStoreError(f"Failed to persist config file {relative_name!r}: {exc}") from exc
-
-    def save_json(self, relative_name: str, payload: Any, *, is_secret: bool = False) -> Path:
-        """Atomically write JSON payload to a config file inside data_root."""
-        content = json.dumps(payload, indent=2, sort_keys=True)
-        return self.save_text(relative_name, content, is_secret=is_secret)
+        data = self._read_bytes_if_exists(target)
+        if data is None:
+            return {"exists": False, "path": str(target), "content": None, "revision": None}
+        return {
+            "exists": True,
+            "path": str(target),
+            "content": data.decode("utf-8"),
+            "revision": _revision_for_bytes(data),
+        }
 
     def load_text(self, relative_name: str, default: Optional[str] = None) -> Optional[str]:
-        """Load text content from a config file inside data_root."""
         try:
-            target = self.resolve_path(relative_name)
-            if not target.exists() or os.path.islink(target):
-                return default
-            return target.read_text(encoding="utf-8")
-        except Exception:
+            record = self.read_text_record(relative_name)
+            return record["content"] if record["exists"] else default
+        except WebManagerConfigStoreError:
             return default
 
     def load_json(self, relative_name: str, default: Optional[Any] = None) -> Optional[Any]:
-        """Load JSON payload from a config file inside data_root."""
         raw = self.load_text(relative_name)
         if raw is None:
             return default
@@ -144,25 +169,96 @@ class WebManagerConfigStore:
         except Exception:
             return default
 
-    def remove(self, relative_name: str) -> bool:
-        """Safely remove a config file inside data_root."""
-        try:
+    def save_text(self, relative_name: str, content: str, *, is_secret: bool = False,
+                  expected_revision: Optional[str] = None) -> dict[str, Any]:
+        if not isinstance(content, str):
+            raise WebManagerConfigStoreError("Configuration content must be text")
+        target = self.resolve_path(relative_name)
+        data = content.encode("utf-8")
+        with self._locked():
             target = self.resolve_path(relative_name)
-            if target.exists() and not os.path.islink(target):
-                target.unlink(missing_ok=True)
-                return True
-        except Exception:
-            pass
-        return False
+            target.parent.mkdir(parents=True, exist_ok=True)
+            self._reject_symlink_components(target)
+            if os.name == "posix":
+                try:
+                    os.chmod(target.parent, 0o700)
+                except OSError:
+                    pass
+            current = self._read_bytes_if_exists(target)
+            current_revision = _revision_for_bytes(current) if current is not None else None
+            if current is not None and expected_revision is None:
+                raise WebManagerConfigStoreConflictError("expected_revision is required for existing config file")
+            if expected_revision is not None and expected_revision != current_revision:
+                raise WebManagerConfigStoreConflictError("config revision conflict")
+
+            mode = 0o600 if is_secret else 0o644
+            fd = None
+            tmp_path = None
+            try:
+                fd, tmp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent))
+                tmp_path = Path(tmp_name)
+                if hasattr(os, "O_NOFOLLOW") and os.path.islink(str(tmp_path)):
+                    raise WebManagerConfigStoreError("Temporary config file is a symlink")
+                os.write(fd, data)
+                os.fsync(fd)
+                os.close(fd)
+                fd = None
+                os.chmod(tmp_path, mode)
+                if target.exists() and (target.is_symlink() or os.path.islink(str(target))):
+                    raise WebManagerConfigStoreError("Configuration target became a symlink")
+                os.replace(str(tmp_path), str(target))
+                tmp_path = None
+                if os.name == "posix":
+                    os.chmod(target, mode)
+                    _fsync_directory(target.parent)
+            finally:
+                if fd is not None:
+                    os.close(fd)
+                if tmp_path is not None:
+                    try:
+                        tmp_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+        new_revision = _revision_for_bytes(data)
+        return {
+            "ok": True,
+            "path": str(target),
+            "revision": new_revision,
+            "previous_revision": current_revision,
+        }
+
+    def save_json(self, relative_name: str, payload: Any, *, is_secret: bool = False,
+                  expected_revision: Optional[str] = None) -> dict[str, Any]:
+        return self.save_text(
+            relative_name,
+            json.dumps(payload, indent=2, sort_keys=True),
+            is_secret=is_secret,
+            expected_revision=expected_revision,
+        )
+
+    def remove(self, relative_name: str, *, expected_revision: Optional[str] = None) -> bool:
+        target = self.resolve_path(relative_name)
+        with self._locked():
+            target = self.resolve_path(relative_name)
+            current = self._read_bytes_if_exists(target)
+            if current is None:
+                return False
+            current_revision = _revision_for_bytes(current)
+            if expected_revision is None or expected_revision != current_revision:
+                raise WebManagerConfigStoreConflictError("config revision conflict")
+            target.unlink()
+            if os.name == "posix":
+                _fsync_directory(target.parent)
+            return True
 
 
-# Global default store instance dynamically tracking WEB_MANAGER_DATA_DIR / METADATA_CACHE_DIR
 _default_config_store: Optional[WebManagerConfigStore] = None
 
 
 def get_config_store() -> WebManagerConfigStore:
     global _default_config_store
-    active_root = os.environ.get("WEB_MANAGER_DATA_DIR") or os.environ.get("METADATA_CACHE_DIR") or "/data/web-manager-data"
-    if _default_config_store is None or str(_default_config_store.data_root) != str(Path(active_root).resolve(strict=False)):
-        _default_config_store = WebManagerConfigStore(active_root)
+    active_root = os.environ.get("WEB_MANAGER_DATA_DIR") or "/web-manager-data"
+    resolved = Path(active_root).expanduser().resolve(strict=False)
+    if _default_config_store is None or _default_config_store.data_root != resolved:
+        _default_config_store = WebManagerConfigStore(resolved)
     return _default_config_store

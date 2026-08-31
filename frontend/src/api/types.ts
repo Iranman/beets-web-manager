@@ -2380,11 +2380,13 @@ export interface StatsResponse {
 
 export interface ConfigFileResponse extends ApiOkResponse {
   content: string;
+  revision: string;
   has_backup: boolean;
   backup_ts: number | null;
 }
 
 export interface ConfigSaveResponse extends ApiOkResponse {
+  revision?: string;
   backed_up?: boolean;
 }
 export type MusicFormatLayout = 'mono' | 'stereo' | '2.1' | '5.1' | '7.1' | 'atmos';

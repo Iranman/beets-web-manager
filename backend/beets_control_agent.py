@@ -9,6 +9,7 @@ try:
 except ImportError:
     fcntl = None
 import base64
+from contextlib import contextmanager
 import errno
 import binascii
 import hashlib
@@ -61,18 +62,14 @@ except ImportError:
 PORT = int(os.environ.get("BEETS_AGENT_PORT", "8338"))
 BEETS_API_TOKEN = os.environ.get("BEETS_API_TOKEN", "")
 BEETS_API_TOKEN_MIN_LENGTH = 32
-# Wave 25 Round 4: gates a single, narrowly-named deterministic failpoint
-# (confirmed_import_v1's "after native import, before verification") used
-# ONLY by the dedicated Docker acceptance script's crash/resume scenario --
-# never set in any real deployment topology (docker-compose.yml/
-# docker-compose.full.yml never set it; only
-# docker/acceptance/docker-compose.acceptance.yml does). Read once at
-# import time: this is legitimate container-boot configuration, not a
-# runtime toggle, and is the ONLY thing that makes the
-# `_acceptance_failpoint` request field (see /imports/confirmed/apply)
-# anything other than silently ignored -- a real client can never trigger
-# it against a real deployment no matter what it sends, because a real
-# engine container is never booted with this set.
+# Acceptance-only deterministic failpoints used by this repository's Docker
+# acceptance script (confirmed_import_v1's after-native crash window and
+# attach-recording's dict-shaped failed IPC result). These are never set in
+# real deployment topology (docker-compose.yml/docker-compose.full.yml never
+# set this; only docker/acceptance/docker-compose.acceptance.yml does). Read
+# once at import time: this is legitimate container-boot configuration, not
+# a runtime toggle, and it is the only thing that makes an `_acceptance_failpoint`
+# request field anything other than inert.
 ACCEPTANCE_MODE = os.environ.get("BEETS_ACCEPTANCE_MODE") == "1"
 # Known human-instructional placeholder words -- an obviously-weak value like
 # "changeme" is non-empty and would otherwise silently authenticate every
@@ -105,11 +102,15 @@ MUSIC_ROOT = Path(MUSIC_LIBRARY_PATH)
 
 
 def _resolved_music_root() -> str:
-    return os.environ.get("MUSIC_ROOT") or os.environ.get("BEETS_MUSIC_ROOT") or str(MUSIC_ROOT)
+    return str(Path(os.environ.get("MUSIC_ROOT") or os.environ.get("BEETS_MUSIC_ROOT") or str(MUSIC_ROOT)).resolve(strict=False))
 
 
 def _resolved_downloads_root() -> str:
-    return os.environ.get("DOWNLOADS_ROOT") or str(DOWNLOAD_PATH)
+    return str(Path(os.environ.get("DOWNLOADS_ROOT") or str(DOWNLOAD_PATH)).resolve(strict=False))
+
+
+def _resolved_staging_root() -> str:
+    return str(Path(os.environ.get("STAGING_ROOT") or _resolved_downloads_root()).resolve(strict=False))
 PLAYLIST_DIR = Path(os.environ.get("PLAYLIST_DIR", "/data/media/music/playlists"))
 PLAYLIST_DOWNLOAD_ROOT = Path(os.environ.get(
     "PLAYLIST_DOWNLOAD_ROOT",
@@ -324,58 +325,226 @@ _AGENT_CONFIG_REQUEST_MAX_BYTES = _AGENT_CONFIG_CONTENT_MAX_BYTES + 4096
 _AGENT_CONFIG_LOCK = threading.Lock()
 
 
-def _read_agent_config_file() -> dict[str, Any]:
-    """Read config.yaml from BEETSDIR. Raises OSError on any I/O failure --
-    callers translate that into a structured, stable-coded HTTP response
-    rather than leaking a raw traceback."""
-    with _AGENT_CONFIG_LOCK:
-        with open(_AGENT_CONFIG_PATH, "r", encoding="utf-8") as fh:
-            content = fh.read()
-        has_backup = os.path.exists(_AGENT_CONFIG_BAK_PATH)
-        backup_ts = os.path.getmtime(_AGENT_CONFIG_BAK_PATH) if has_backup else None
-    return {"content": content, "has_backup": has_backup, "backup_ts": backup_ts}
+def _agent_config_raw_root() -> Path:
+    root = Path(BEETSDIR).expanduser()
+    if not root.is_absolute():
+        root = Path.cwd() / root
+    return root
 
 
-def _write_agent_config_file(content: str) -> dict[str, Any]:
-    """Back up the existing config.yaml (if any), then overwrite it.
-    Validates YAML syntax before committing. Raises OSError/ValueError on failure."""
+def _reject_existing_symlink_path(path: Path, message: str) -> None:
+    pieces = []
+    current = path
+    while True:
+        pieces.append(current)
+        if current.parent == current:
+            break
+        current = current.parent
+    for component in reversed(pieces):
+        try:
+            if component.exists() and component.is_symlink():
+                raise PermissionError(message)
+        except PermissionError:
+            raise
+        except Exception as exc:
+            raise PermissionError(message) from exc
+
+
+class ConfigRevisionConflict(RuntimeError):
+    pass
+
+
+class ConfigValidationError(ValueError):
+    error_code = "config_beets_validation_failed"
+
+    def __init__(self, message: str, *, error_code: Optional[str] = None):
+        super().__init__(message)
+        if error_code:
+            self.error_code = error_code
+
+
+class ConfigPostWriteValidationError(ConfigValidationError):
+    error_code = "config_post_write_validation_failed"
+
+
+@contextmanager
+def _agent_config_process_lock():
+    raw_root = _agent_config_raw_root()
+    _reject_existing_symlink_path(raw_root, "config root contains a symlink component")
+    raw_root.mkdir(parents=True, exist_ok=True)
+    _reject_existing_symlink_path(raw_root, "config root contains a symlink component")
+    lock_path = raw_root / ".config.yaml.lock"
+    with open(lock_path, "a+b") as handle:
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        else:
+            _AGENT_CONFIG_LOCK.acquire()
+        try:
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            else:
+                _AGENT_CONFIG_LOCK.release()
+
+
+def _agent_config_paths() -> tuple[Path, Path, Path]:
+    raw_root = _agent_config_raw_root()
+    _reject_existing_symlink_path(raw_root, "config root contains a symlink component")
+    root = raw_root.resolve(strict=True)
+    config_path = (root / "config.yaml").resolve(strict=False)
+    backup_path = (root / "config.yaml.bak").resolve(strict=False)
+    try:
+        config_path.relative_to(root)
+        backup_path.relative_to(root)
+    except ValueError as exc:
+        raise PermissionError("config path escapes BEETSDIR") from exc
+    if _path_has_symlink_component(config_path, root, include_leaf=True):
+        raise PermissionError("config path contains a symlink component")
+    if backup_path.exists() and _path_has_symlink_component(backup_path, root, include_leaf=True):
+        raise PermissionError("config backup path contains a symlink component")
+    return root, config_path, backup_path
+
+
+def _config_revision(path: Path) -> str:
+    st = path.stat()
+    payload = f"{st.st_dev}:{st.st_ino}:{st.st_size}:{st.st_mtime_ns}".encode("ascii", "strict")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _validate_config_yaml_shape(content: str) -> None:
     if len(content.encode("utf-8")) > _AGENT_CONFIG_CONTENT_MAX_BYTES:
-        raise ValueError("config content is too large")
-
+        raise ConfigValidationError("config content is too large", error_code="config_too_large")
     import yaml
     try:
         parsed = yaml.safe_load(content)
-        if parsed is not None and not isinstance(parsed, (dict, list)):
-            raise ValueError("Invalid Beets configuration YAML structure")
     except Exception as exc:
-        raise ValueError(f"Invalid Beets configuration YAML: {exc}") from exc
+        raise ConfigValidationError("Invalid Beets configuration YAML", error_code="config_invalid_yaml") from exc
+    if parsed is not None and not isinstance(parsed, (dict, list)):
+        raise ConfigValidationError("Invalid Beets configuration structure", error_code="config_invalid_structure")
 
-    with _AGENT_CONFIG_LOCK:
-        if os.path.exists(_AGENT_CONFIG_PATH):
-            shutil.copy2(_AGENT_CONFIG_PATH, _AGENT_CONFIG_BAK_PATH)
-        tmp_path = _AGENT_CONFIG_PATH + f".tmp.{uuid.uuid4().hex}"
+
+def _validate_beets_config_candidate(candidate: Path, *, timeout: float = 12.0) -> None:
+    env = os.environ.copy()
+    env["BEETSDIR"] = str(_agent_config_raw_root())
+    res = subprocess.run(
+        [BEET_BIN, "-c", str(candidate), "config"],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        env=env,
+    )
+    combined = f"{res.stderr or ''}\n{res.stdout or ''}"
+    plugin_failures = _diagnostic_failure_lines(combined)
+    if res.returncode != 0 or plugin_failures:
+        detail = plugin_failures[0] if plugin_failures else _redact_agent_status_text((res.stderr or res.stdout or "").strip())[:300]
+        raise ConfigValidationError(detail or "Beets rejected the candidate configuration")
+
+
+def _write_temp_config(root: Path, content: str) -> Path:
+    fd, name = tempfile.mkstemp(prefix="config.yaml.", suffix=".tmp", dir=str(root), text=True)
+    tmp_path = Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp_path, 0o600)
+        return tmp_path
+    except Exception:
         try:
-            with open(tmp_path, "w", encoding="utf-8") as fh:
-                fh.write(content)
-            os.replace(tmp_path, _AGENT_CONFIG_PATH)
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def _read_agent_config_file() -> dict[str, Any]:
+    """Read config.yaml from the engine-owned BEETSDIR with a safe CAS revision."""
+    with _agent_config_process_lock():
+        root, config_path, backup_path = _agent_config_paths()
+        with open(config_path, "r", encoding="utf-8") as fh:
+            content = fh.read()
+        has_backup = backup_path.exists()
+        backup_ts = backup_path.stat().st_mtime if has_backup else None
+        revision = _config_revision(config_path)
+    return {"content": content, "revision": revision, "has_backup": has_backup, "backup_ts": backup_ts}
+
+
+def _write_agent_config_file(content: str, expected_revision: str) -> dict[str, Any]:
+    """CAS-write config.yaml after YAML and real Beets config validation."""
+    if not expected_revision:
+        raise ConfigValidationError("expected_revision is required", error_code="config_missing_revision")
+    _validate_config_yaml_shape(content)
+    tmp_path: Optional[Path] = None
+    candidate_path: Optional[Path] = None
+    with _agent_config_process_lock():
+        root, config_path, backup_path = _agent_config_paths()
+        current_revision = _config_revision(config_path) if config_path.exists() else "missing"
+        if expected_revision != current_revision:
+            raise ConfigRevisionConflict("config revision changed")
+        candidate_path = _write_temp_config(root, content)
+        try:
+            _validate_beets_config_candidate(candidate_path)
+            backed_up = False
+            if config_path.exists():
+                shutil.copy2(config_path, backup_path)
+                os.chmod(backup_path, 0o600)
+                _fsync_file(backup_path)
+                backed_up = True
+            tmp_path = candidate_path
+            candidate_path = None
+            os.replace(str(tmp_path), str(config_path))
+            os.chmod(config_path, 0o600)
+            _fsync_file(config_path)
+            _fsync_directory(root)
+            try:
+                _validate_beets_config_candidate(config_path)
+            except ConfigValidationError as exc:
+                restored = False
+                if backup_path.exists():
+                    restore_tmp = _write_temp_config(root, backup_path.read_text(encoding="utf-8"))
+                    os.replace(str(restore_tmp), str(config_path))
+                    os.chmod(config_path, 0o600)
+                    _fsync_file(config_path)
+                    _fsync_directory(root)
+                    restored = True
+                raise ConfigPostWriteValidationError("Committed config failed Beets validation; previous config restored" if restored else "Committed config failed Beets validation") from exc
+            return {"ok": True, "backed_up": backed_up, "revision": _config_revision(config_path)}
         finally:
-            if os.path.exists(tmp_path):
+            for leftover in (tmp_path, candidate_path):
+                if leftover is not None and leftover.exists():
+                    try:
+                        leftover.unlink()
+                    except OSError:
+                        pass
+
+
+def _revert_agent_config_file(expected_revision: str) -> dict[str, Any]:
+    """CAS-restore config.yaml from its most recent engine-side backup."""
+    if not expected_revision:
+        raise ConfigValidationError("expected_revision is required", error_code="config_missing_revision")
+    with _agent_config_process_lock():
+        root, config_path, backup_path = _agent_config_paths()
+        if not backup_path.exists():
+            raise FileNotFoundError(backup_path)
+        current_revision = _config_revision(config_path) if config_path.exists() else "missing"
+        if expected_revision != current_revision:
+            raise ConfigRevisionConflict("config revision changed")
+        _validate_beets_config_candidate(backup_path)
+        tmp_path = _write_temp_config(root, backup_path.read_text(encoding="utf-8"))
+        try:
+            os.replace(str(tmp_path), str(config_path))
+            os.chmod(config_path, 0o600)
+            _fsync_file(config_path)
+            _fsync_directory(root)
+        finally:
+            if tmp_path.exists():
                 try:
-                    os.unlink(tmp_path)
+                    tmp_path.unlink()
                 except OSError:
                     pass
-        backed_up = os.path.exists(_AGENT_CONFIG_BAK_PATH)
-    return {"ok": True, "backed_up": backed_up}
-
-
-def _revert_agent_config_file() -> dict[str, Any]:
-    """Restore config.yaml from its most recent backup. Raises
-    FileNotFoundError if no backup exists, OSError on other I/O failure."""
-    with _AGENT_CONFIG_LOCK:
-        if not os.path.exists(_AGENT_CONFIG_BAK_PATH):
-            raise FileNotFoundError(_AGENT_CONFIG_BAK_PATH)
-        shutil.copy2(_AGENT_CONFIG_BAK_PATH, _AGENT_CONFIG_PATH)
-    return {"ok": True}
+    return {"ok": True, "revision": _config_revision(config_path)}
 
 
 def _simple_yaml_scalar(raw: str) -> str:
@@ -396,9 +565,9 @@ def _parse_beets_config_summary() -> dict[str, Any]:
         "discogs_token_configured": False,
         "listenbrainz_token_configured": False,
     }
-    config_path = os.path.join(BEETSDIR, "config.yaml")
+    config_path = _agent_config_raw_root() / "config.yaml"
     try:
-        lines = open(config_path, "r", encoding="utf-8").read().splitlines()
+        lines = config_path.read_text(encoding="utf-8").splitlines()
     except Exception:
         return summary
 
@@ -617,11 +786,16 @@ def _agent_status_payload(*, force_refresh: bool = False) -> dict[str, Any]:
             "ok": bool(exists and readable and (writable if require_writable else True)),
         }
 
-    config_path = os.path.join(BEETSDIR, "config.yaml")
+    config_root = str(_agent_config_raw_root().resolve(strict=False))
+    music_root = _resolved_music_root()
+    downloads_root = _resolved_downloads_root()
+    staging_root = _resolved_staging_root()
+    config_path = os.path.join(config_root, "config.yaml")
     remote_paths = {
-        "config": _path_status(BEETSDIR, require_writable=True),
-        "music_library": _path_status(MUSIC_LIBRARY_PATH),
-        "downloads": _path_status(DOWNLOAD_PATH, require_writable=True),
+        "config": _path_status(config_root, require_writable=True),
+        "music_library": _path_status(music_root),
+        "downloads": _path_status(downloads_root, require_writable=True),
+        "staging": _path_status(staging_root, require_writable=True),
         "beets_config": {"path": config_path, "exists": os.path.exists(config_path)},
     }
 
@@ -785,9 +959,9 @@ def _decode_untrusted_path(raw_path: str) -> Optional[str]:
 
 def _allowed_root_paths(allowed_types: list = None) -> list[str]:
     all_roots = {
-        "config": [os.path.abspath(BEETSDIR), "/config"],
-        "music": [os.path.abspath(MUSIC_LIBRARY_PATH), "/data/media/music"],
-        "staging": [os.path.abspath(DOWNLOAD_PATH), "/data/torrents"],
+        "config": [str(_agent_config_raw_root().resolve(strict=False))],
+        "music": [_resolved_music_root()],
+        "staging": [_resolved_downloads_root(), _resolved_staging_root()],
         "tmp": ["/tmp", tempfile.gettempdir()],
     }
     roots_to_check: list[str] = []
@@ -797,7 +971,14 @@ def _allowed_root_paths(allowed_types: list = None) -> list[str]:
     else:
         for root_list in all_roots.values():
             roots_to_check.extend(root_list)
-    return roots_to_check
+    unique: list[str] = []
+    for root in roots_to_check:
+        if not root:
+            continue
+        resolved = str(Path(root).resolve(strict=False))
+        if resolved not in unique:
+            unique.append(resolved)
+    return unique
 
 
 def _path_is_within(candidate: str, root: str) -> bool:
@@ -4087,13 +4268,23 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
 
         if path == "/config":
             content = body.get("content") if isinstance(body, dict) else None
+            expected_revision = str((body or {}).get("expected_revision") or "").strip() if isinstance(body, dict) else ""
             if not isinstance(content, str) or not content.strip():
                 self._send_json(400, {"error": "content must be a non-empty string", "error_code": "config_empty"})
                 return
+            if not expected_revision:
+                self._send_json(428, {"error": "expected_revision is required", "error_code": "config_missing_revision"})
+                return
             try:
-                self._send_json(200, _write_agent_config_file(content))
-            except ValueError:
-                self._send_json(413, {"error": "config content is too large", "error_code": "config_too_large"})
+                self._send_json(200, _write_agent_config_file(content, expected_revision))
+            except ConfigRevisionConflict:
+                self._send_json(409, {"error": "config revision changed", "error_code": "config_revision_conflict"})
+            except ConfigPostWriteValidationError:
+                self._send_json(500, {"error": "Committed config failed Beets validation; previous config was restored", "error_code": "config_post_write_validation_failed"})
+            except ConfigValidationError as exc:
+                code = getattr(exc, "error_code", "config_beets_validation_failed")
+                status = 413 if code == "config_too_large" else 400
+                self._send_json(status, {"error": str(exc) or "Invalid Beets configuration", "error_code": code})
             except PermissionError:
                 self._send_json(403, {"error": "config.yaml is not writable", "error_code": "config_permission_denied"})
             except OSError as exc:
@@ -4101,8 +4292,16 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/config/revert":
+            expected_revision = str((body or {}).get("expected_revision") or "").strip() if isinstance(body, dict) else ""
+            if not expected_revision:
+                self._send_json(428, {"error": "expected_revision is required", "error_code": "config_missing_revision"})
+                return
             try:
-                self._send_json(200, _revert_agent_config_file())
+                self._send_json(200, _revert_agent_config_file(expected_revision))
+            except ConfigRevisionConflict:
+                self._send_json(409, {"error": "config revision changed", "error_code": "config_revision_conflict"})
+            except ConfigValidationError as exc:
+                self._send_json(400, {"error": str(exc) or "Backup config failed Beets validation", "error_code": getattr(exc, "error_code", "config_beets_validation_failed")})
             except FileNotFoundError:
                 self._send_json(404, {"error": "No backup found", "error_code": "config_backup_not_found"})
             except PermissionError:
@@ -4516,6 +4715,19 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 return
             music_root_env = _resolved_music_root()
             write_tags = bool(body.get("write_tags", True))
+            try:
+                _tx = _txn_store.get(op_id)
+                _payload = ((_tx.get("metadata") or {}).get("payload") or {}) if isinstance(_tx, dict) else {}
+            except Exception:
+                _payload = {}
+            if ACCEPTANCE_MODE and str(_payload.get("_acceptance_failpoint") or "") == "attach_recording_apply_failure":
+                self._send_json(200, {
+                    "ok": False,
+                    "error": "Acceptance failpoint triggered before album_mb_track_repair_v1 apply",
+                    "code": "attach_recording_acceptance_failpoint",
+                    "status": "Failed",
+                })
+                return
             res = transaction_engine.execute_album_mb_track_repair_apply(
                 _txn_store, op_id,
                 db_path=LIB_PATH,
@@ -4702,7 +4914,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
 
         if path == "/albums/artwork/plan":
             music_root_env = _resolved_music_root()
-            stg_roots = [_resolved_downloads_root(), os.environ.get("STAGING_ROOT", "/staging")]
+            stg_roots = [_resolved_downloads_root(), _resolved_staging_root()]
             quarantine_root = os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
             res = transaction_engine.create_album_artwork_plan(
                 _txn_store, body,
@@ -4793,7 +5005,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
 
         if path == "/albums/relocation/plan":
             music_root_env = _resolved_music_root()
-            stg_roots = [_resolved_downloads_root(), os.environ.get("STAGING_ROOT", "/staging")]
+            stg_roots = [_resolved_downloads_root(), _resolved_staging_root()]
             res = transaction_engine.create_album_relocation_plan(
                 _txn_store, body,
                 music_allowed_roots=[music_root_env],
@@ -4873,6 +5085,92 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             self._send_json(code, res)
             return
 
+        if path == "/items/metadata/plan":
+            music_root_env = _resolved_music_root()
+            res = transaction_engine.create_item_metadata_plan(
+                _txn_store, body,
+                music_allowed_roots=[music_root_env],
+                db_path=LIB_PATH,
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        if path == "/items/metadata/apply":
+            op_id = str(body.get("operation_id") or "").strip()
+            if not op_id:
+                self._send_json(400, {"ok": False, "error": "operation_id required"})
+                return
+            music_root_env = _resolved_music_root()
+            res = transaction_engine.execute_item_metadata_apply(
+                _txn_store, op_id,
+                music_allowed_roots=[music_root_env],
+                db_path=LIB_PATH,
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        if path == "/items/metadata/rollback":
+            op_id = str(body.get("operation_id") or "").strip()
+            if not op_id:
+                self._send_json(400, {"ok": False, "error": "operation_id required"})
+                return
+            res = transaction_engine.rollback_item_metadata(
+                _txn_store, op_id,
+                db_path=LIB_PATH,
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        if path == "/genres/repair/plan":
+            res = transaction_engine.create_genre_repair_plan(
+                _txn_store, body,
+                db_path=LIB_PATH,
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        if path == "/genres/repair/apply":
+            op_id = str(body.get("operation_id") or "").strip()
+            if not op_id:
+                self._send_json(400, {"ok": False, "error": "operation_id required"})
+                return
+
+            def _genre_beet_runner(command: str, args: list[str]) -> dict[str, Any]:
+                sanitized = _sanitize_command_path_args(args, ["music", "staging", "config", "tmp"])
+                result = _run_beet_subcommand_locked([command] + sanitized, timeout=240.0)
+                ok = result.get("returncode") == 0
+                return {
+                    **result,
+                    "ok": ok,
+                    "error": "" if ok else _redact_agent_status_text(result.get("stderr") or result.get("stdout") or "lastgenre failed"),
+                }
+
+            res = transaction_engine.execute_genre_repair_apply(
+                _txn_store, op_id,
+                db_path=LIB_PATH,
+                run_beet_command_fn=_genre_beet_runner,
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        if path == "/genres/repair/rollback":
+            op_id = str(body.get("operation_id") or "").strip()
+            if not op_id:
+                self._send_json(400, {"ok": False, "error": "operation_id required"})
+                return
+            res = transaction_engine.rollback_genre_repair(
+                _txn_store, op_id,
+                db_path=LIB_PATH,
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
         # ── import_folder_v1 ──────────────────────────────────────────────────
         if path == "/import/plan":
             # Wave 25 Docker acceptance round (found only by actually
@@ -4891,7 +5189,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             # used elsewhere in this file (music_root_env = ... or
             # str(MUSIC_ROOT) or "/music").
             music_root_env = _resolved_music_root()
-            stg_roots = [_resolved_downloads_root(), os.environ.get("STAGING_ROOT") or str(DOWNLOAD_PATH), music_root_env]
+            stg_roots = [_resolved_downloads_root(), _resolved_staging_root(), music_root_env]
             quarantine_root = os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
             res = transaction_engine.create_import_folder_plan(
                 _txn_store, body,
@@ -4957,7 +5255,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
 
         if path == "/imports/confirmed/plan":
             music_root_env = _resolved_music_root()
-            stg_roots = [_resolved_downloads_root(), os.environ.get("STAGING_ROOT") or str(DOWNLOAD_PATH)]
+            stg_roots = [_resolved_downloads_root(), _resolved_staging_root()]
 
             def _inspect_for_confirmed_import(p: str) -> dict:
                 return inspect_import_source(p, "confirmed_import")
@@ -5067,7 +5365,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             staging_roots = _allowed_root_paths(["staging"])
             for raw in (
                 _resolved_downloads_root(),
-                os.environ.get("STAGING_ROOT", "/staging"),
+                _resolved_staging_root(),
                 os.environ.get("DOWNLOAD_PATH", DOWNLOAD_PATH),
                 str(PLAYLIST_DOWNLOAD_ROOT),
             ):
@@ -5097,7 +5395,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             staging_roots = _allowed_root_paths(["staging"])
             for raw in (
                 _resolved_downloads_root(),
-                os.environ.get("STAGING_ROOT", "/staging"),
+                _resolved_staging_root(),
                 os.environ.get("DOWNLOAD_PATH", DOWNLOAD_PATH),
                 str(PLAYLIST_DOWNLOAD_ROOT),
             ):
@@ -5127,7 +5425,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             staging_roots = _allowed_root_paths(["staging"])
             for raw in (
                 _resolved_downloads_root(),
-                os.environ.get("STAGING_ROOT", "/staging"),
+                _resolved_staging_root(),
                 os.environ.get("DOWNLOAD_PATH", DOWNLOAD_PATH),
                 str(PLAYLIST_DOWNLOAD_ROOT),
             ):

@@ -206,14 +206,18 @@ class BeetsClient:
         on a transport failure."""
         return self._request("GET", "/config", timeout=10.0)
 
-    def save_config(self, content: str) -> Dict[str, Any]:
-        """Write config.yaml on the engine, backing up the previous version
-        first. Returns {"ok": True, "backed_up": bool}."""
-        return self._request("POST", "/config", {"content": content}, timeout=10.0)
+    def save_config(self, content: str, expected_revision: str) -> Dict[str, Any]:
+        """CAS-write config.yaml on the engine after Beets validation."""
+        return self._request(
+            "POST",
+            "/config",
+            {"content": content, "expected_revision": expected_revision},
+            timeout=15.0,
+        )
 
-    def revert_config(self) -> Dict[str, Any]:
-        """Restore config.yaml from its most recent engine-side backup."""
-        return self._request("POST", "/config/revert", timeout=10.0)
+    def revert_config(self, expected_revision: str) -> Dict[str, Any]:
+        """CAS-restore config.yaml from its most recent engine-side backup."""
+        return self._request("POST", "/config/revert", {"expected_revision": expected_revision}, timeout=15.0)
 
     def raw_sqlite_query(self, sql: str, params: tuple = (), offset: int = 0, limit: int = 1000) -> List[Dict[str, Any]]:
         """Raw SQL is intentionally unavailable; use structured query helpers."""
@@ -1058,14 +1062,69 @@ class BeetsClient:
         payload = {"album_id": album_id, "updates": updates, "item_updates": item_updates or {}, **kwargs}
         plan_res = self.plan_album_metadata(payload)
         if not plan_res.get("ok"):
-            return {"ok": False, "error": plan_res.get("error") or "Metadata plan rejected"}
+            return {"ok": False, "error": plan_res.get("error") or "Metadata plan rejected", "code": plan_res.get("code")}
         op_id = plan_res.get("operation_id")
         if not op_id:
             return {"ok": True, "album_fields_changed": 0, "items_changed": 0}
         apply_res = self.apply_album_metadata(op_id)
         if not apply_res.get("ok"):
-            return {"ok": False, "error": apply_res.get("error") or "Metadata apply failed"}
+            return {"ok": False, "error": apply_res.get("error") or "Metadata apply failed", "code": apply_res.get("code")}
         return {"ok": True, "album_fields_changed": plan_res.get("album_fields_changed", 0), "items_changed": plan_res.get("items_changed", 0)}
+
+    # -- item_metadata_repair_v1 Pure HTTP Client Methods -----------------------
+
+    def plan_item_metadata(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Request preview plan for item metadata update via HTTP."""
+        return self._request("POST", "/items/metadata/plan", payload)
+
+    def apply_item_metadata(self, operation_id: str) -> Dict[str, Any]:
+        """Execute item metadata apply via HTTP."""
+        return self._request("POST", "/items/metadata/apply", {"operation_id": operation_id})
+
+    def rollback_item_metadata(self, operation_id: str) -> Dict[str, Any]:
+        """Roll back item metadata update via HTTP."""
+        return self._request("POST", "/items/metadata/rollback", {"operation_id": operation_id})
+
+    def update_item_metadata(self, item_id: int, updates: Dict[str, Any], **kwargs) -> Dict[str, Any]:
+        """Update one item through item_metadata_repair_v1 via HTTP."""
+        payload = {"item_id": item_id, "updates": updates, **kwargs}
+        plan_res = self.plan_item_metadata(payload)
+        if not plan_res.get("ok"):
+            return {"ok": False, "error": plan_res.get("error") or "Item metadata plan rejected", "code": plan_res.get("code")}
+        op_id = plan_res.get("operation_id")
+        if not op_id:
+            return {"ok": True, "item_fields_changed": 0}
+        apply_res = self.apply_item_metadata(op_id)
+        if not apply_res.get("ok"):
+            return {"ok": False, "error": apply_res.get("error") or "Item metadata apply failed", "code": apply_res.get("code")}
+        return {"ok": True, "item_fields_changed": plan_res.get("item_fields_changed", 0)}
+
+    # -- genre_repair_v1 Pure HTTP Client Methods -------------------------------
+
+    def plan_album_genre_repair(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Request preview plan for lastgenre-backed album genre repair."""
+        return self._request("POST", "/genres/repair/plan", payload)
+
+    def apply_album_genre_repair(self, operation_id: str) -> Dict[str, Any]:
+        """Execute lastgenre-backed album genre repair."""
+        return self._request("POST", "/genres/repair/apply", {"operation_id": operation_id})
+
+    def rollback_album_genre_repair(self, operation_id: str) -> Dict[str, Any]:
+        """Roll back album genre repair."""
+        return self._request("POST", "/genres/repair/rollback", {"operation_id": operation_id})
+
+    def repair_album_genre(self, album_id: int, force: bool = False, timeout: float = 180.0) -> Dict[str, Any]:
+        """Run controlled album-scoped lastgenre repair through genre_repair_v1."""
+        plan_res = self.plan_album_genre_repair({"album_id": album_id, "force": bool(force), "timeout": timeout})
+        if not plan_res.get("ok"):
+            return {"ok": False, "error": plan_res.get("error") or "Genre repair plan rejected", "code": plan_res.get("code")}
+        op_id = plan_res.get("operation_id")
+        if not op_id:
+            return {"ok": True, "output": plan_res.get("summary") or ""}
+        apply_res = self.apply_album_genre_repair(op_id)
+        if not apply_res.get("ok"):
+            return {"ok": False, "error": apply_res.get("error") or "Genre repair apply failed", "code": apply_res.get("code")}
+        return {"ok": True, "output": apply_res.get("output") or "", "genre_after": apply_res.get("genre_after")}
 
 
 class RemoteSQLiteCursor:

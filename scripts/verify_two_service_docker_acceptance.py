@@ -28,10 +28,14 @@ anything). It now does what it claims:
    HTTP request to the web-manager container's published port, which then
    reaches the engine container purely over the Docker network via
    BeetsClient/BEETS_API_URL, exactly like production.
-8. Stops the engine container and proves mutating Web Manager routes, including /api/dedup/cleanup,
+8. Exercises Wave 27 config-domain closure scenarios through the real Web
+   Manager HTTP surface: fresh setup durability, Web Manager config CAS,
+   engine config CAS/validation/rollback, root reporting, engine-offline
+   fail-closed behavior, and dict-shaped attach-stage failure handling.
+9. Stops the engine container and proves mutating Web Manager routes, including /api/dedup/cleanup,
    fails truthfully with zero local mutation while the engine is down,
    then restarts it.
-9. Fails closed on every step (image build failure, wrong OCI revision,
+10. Fails closed on every step (image build failure, wrong OCI revision,
    unhealthy service, a media mount on the web manager, an unexpected
    successful direct write, an IPC failure, wrong DB/filesystem state,
    engine-offline mutation, or a cleanup that would leave stray
@@ -49,6 +53,7 @@ import json
 import math
 import mimetypes
 import os
+import re
 import shutil
 import socket
 import sqlite3
@@ -319,6 +324,22 @@ class HttpClient:
             time.sleep(0.5)
         raise TimeoutError(f"job {job_id} did not reach a terminal state within {timeout}s")
 
+def _print_process_text(value: str) -> None:
+    text = str(value or "")
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        print(text.encode("ascii", "backslashreplace").decode("ascii"))
+
+
+def print_container_log_tails(*containers: str, tail: str = "200") -> None:
+    for c in containers:
+        if not c:
+            continue
+        print(f"\n==> docker logs {c} (tail {tail}) ==>")
+        logs_res = run(["docker", "logs", "--tail", tail, c])
+        _print_process_text(logs_res.stdout or "")
+        _print_process_text(logs_res.stderr or "")
 
 def wait_healthy(container: str, timeout=180) -> bool:
     deadline = time.time() + timeout
@@ -1687,6 +1708,478 @@ def run_jobs_transport_scenarios(client, engine_container):
         else:
             _fail(f"jobs-recovery-after-engine-restart failed: {status} {body}")
 
+# -- SEC-002 / ARCH-003 Wave 27 Docker acceptance ---------------------------
+# These scenarios are deliberately placed after the Wave 24 fixture has been
+# seeded and before the engine-offline Wave 24/25/26 proofs. They exercise the
+# config-domain corrections through the real Web Manager HTTP boundary: Web
+# Manager owns only /web-manager-data state, while Beets config changes still
+# go Web Manager -> BeetsClient -> engine control agent -> real beets config
+# validation and atomic engine-side replacement.
+
+
+def _set_top_level_scalar_yaml(content: str, key: str, value: str) -> str:
+    """Replace or append a simple top-level YAML scalar/block."""
+    line = f"{key}: {value}"
+    pattern = re.compile(rf"(?ms)^{re.escape(key)}\s*:.*?(?=^\S|\Z)")
+    if pattern.search(content):
+        updated = pattern.sub(line + "\n", content, count=1)
+    else:
+        updated = content.rstrip() + "\n" + line + "\n"
+    return updated if updated.endswith("\n") else updated + "\n"
+
+
+def _basic_json_request(base_url: str, username: str, password: str, method: str, path: str, json_body=None, timeout=30):
+    url = f"{base_url.rstrip('/')}{path}"
+    auth = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+    headers = {"Authorization": f"Basic {auth}", "Content-Type": "application/json"}
+    data = json.dumps(json_body or {}).encode("utf-8") if method != "GET" else None
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+            return resp.status, (json.loads(raw) if raw else {})
+    except urllib.error.HTTPError as exc:
+        raw = exc.read()
+        try:
+            return exc.code, json.loads(raw)
+        except Exception:
+            return exc.code, {"error": raw.decode("utf-8", "replace")}
+
+
+def _require_json_ok(status: int, body: dict, scenario: str) -> bool:
+    if status == 200 and isinstance(body, dict) and body.get("ok") is True:
+        return True
+    _fail(f"{scenario}: expected HTTP 200 ok=true, got {status} {body}")
+    return False
+
+
+def _get_config_document(client: "HttpClient", scenario: str) -> tuple[str, str] | None:
+    status, body = client.request("GET", "/api/config", timeout=30)
+    if status != 200 or not body.get("ok"):
+        _fail(f"{scenario}: GET /api/config failed: {status} {body}")
+        return None
+    revision = str(body.get("revision") or "")
+    content = str(body.get("content") or "")
+    if not revision:
+        _fail(f"{scenario}: GET /api/config did not return a revision")
+        return None
+    return content, revision
+
+
+def _post_config_document(client: "HttpClient", content: str, revision: str, scenario: str):
+    return client.request(
+        "POST", "/api/config",
+        json_body={"content": content, "expected_revision": revision},
+        timeout=45,
+    )
+
+
+def run_wave27_config_scenarios(
+    client: "HttpClient",
+    web_container: str,
+    engine_container: str,
+    config_dir: Path,
+    webdata_dir: Path,
+) -> None:
+    def scenario_pass(name: str) -> None:
+        print(f"[PASS] {name}")
+
+    def scenario_fail(name: str, detail: str) -> None:
+        _fail(f"{name}: {detail}")
+
+    username = "acceptance-admin"
+    password = "Acceptance passphrase 2026!"
+    web_base = client.base_url
+
+    print("==> [Wave27] Fresh setup and Web Manager config-store durability...")
+    status, body = client.request("GET", "/api/setup/status?refresh=1", timeout=30)
+    if status != 200 or not isinstance(body, dict):
+        scenario_fail("fresh-setup-status", f"request failed: {status} {body}")
+    else:
+        scenario_pass("fresh-setup-status-reachable")
+
+    status, body = client.request(
+        "POST", "/api/setup/first-run",
+        json_body={"username": username, "password": password},
+        timeout=30,
+    )
+    if status != 200 or not body.get("ok"):
+        scenario_fail("fresh-setup-first-run", f"request failed: {status} {body}")
+    else:
+        scenario_pass("fresh-setup-first-run-persists-browser-credentials")
+
+    status, body = client.request("POST", "/api/setup/complete", json_body={}, timeout=45)
+    if status != 200 or not body.get("ok"):
+        scenario_fail("fresh-setup-complete", f"request failed: {status} {body}")
+    else:
+        scenario_pass("fresh-setup-complete-marker-created")
+
+    pwd_file = webdata_dir / ".browser_password"
+    user_file = webdata_dir / ".browser_username"
+    state_file = webdata_dir / ".browser_setup_state"
+    complete_file = webdata_dir / ".setup_complete"
+    if not (pwd_file.exists() and user_file.exists() and state_file.exists() and complete_file.exists()):
+        scenario_fail("fresh-setup-durable-files", "expected browser credential/setup marker files were not written under /web-manager-data")
+    elif password in pwd_file.read_text(encoding="utf-8", errors="replace"):
+        scenario_fail("fresh-setup-password-hashing", "browser password file contains the plaintext password")
+    elif user_file.read_text(encoding="utf-8", errors="replace").strip() != username:
+        scenario_fail("fresh-setup-username", "persisted username does not match the setup user")
+    else:
+        scenario_pass("fresh-setup-durable-web-manager-state")
+
+    status, body = _basic_json_request(web_base, username, password, "GET", "/api/auth/me", timeout=30)
+    if status == 200 and body.get("authenticated") is True and body.get("username") == username:
+        scenario_pass("fresh-setup-basic-auth-works")
+    else:
+        scenario_fail("fresh-setup-basic-auth", f"Basic auth did not authenticate: {status} {body}")
+
+    status, body = client.request("GET", "/api/setup/settings", timeout=30)
+    initial_settings_rev = body.get("revision") if status == 200 and body.get("ok") else None
+    if status != 200 or not body.get("ok"):
+        scenario_fail("settings-read-initial", f"request failed: {status} {body}")
+    else:
+        status, body = client.request(
+            "POST", "/api/setup/settings",
+            json_body={"ai_model": "acceptance-model-a", "expected_revision": initial_settings_rev} if initial_settings_rev else {"ai_model": "acceptance-model-a"},
+            timeout=30,
+        )
+        if not _require_json_ok(status, body, "settings-initial-save"):
+            pass
+        elif not (webdata_dir / "app_settings.json").exists():
+            scenario_fail("settings-file-created", "app_settings.json was not written under /web-manager-data")
+        else:
+            scenario_pass("settings-save-uses-web-manager-config-store")
+
+    status_a, body_a = client.request("GET", "/api/setup/settings", timeout=30)
+    status_b, body_b = client.request("GET", "/api/setup/settings", timeout=30)
+    rev_a = body_a.get("revision") if status_a == 200 else None
+    rev_b = body_b.get("revision") if status_b == 200 else None
+    if not rev_a or rev_a != rev_b:
+        scenario_fail("settings-cas-read", f"settings readers did not receive the same revision: {status_a} {body_a} / {status_b} {body_b}")
+    else:
+        status, body = client.request(
+            "POST", "/api/setup/settings",
+            json_body={"ai_model": "acceptance-model-b", "expected_revision": rev_b},
+            timeout=30,
+        )
+        if not _require_json_ok(status, body, "settings-cas-writer-b"):
+            pass
+        else:
+            status, stale_body = client.request(
+                "POST", "/api/setup/settings",
+                json_body={"ai_model": "acceptance-model-a-stale", "expected_revision": rev_a},
+                timeout=30,
+            )
+            status_final, final_body = client.request("GET", "/api/setup/settings", timeout=30)
+            final_settings = final_body.get("settings") or {}
+            if status != 409 or stale_body.get("code") != "settings_revision_conflict":
+                scenario_fail("settings-cas-stale-write", f"stale write was not rejected with 409: {status} {stale_body}")
+            elif status_final != 200 or final_settings.get("ai_model") != "acceptance-model-b":
+                scenario_fail("settings-cas-final-content", f"writer B content was not preserved: {status_final} {final_body}")
+            else:
+                scenario_pass("settings-cas-stale-writes-fail-closed")
+
+    print("==> [Wave27] Web Manager restart preserves Web Manager-owned setup/settings...")
+    restart_res = run(["docker", "restart", web_container])
+    if restart_res.returncode != 0 or not wait_healthy(web_container):
+        scenario_fail("web-restart", f"web container did not restart cleanly: rc={restart_res.returncode}")
+    else:
+        status, body = _basic_json_request(web_base, username, password, "GET", "/api/auth/me", timeout=30)
+        status_settings, body_settings = client.request("GET", "/api/setup/settings", timeout=30)
+        if status != 200 or body.get("authenticated") is not True:
+            scenario_fail("web-restart-basic-auth", f"Basic auth failed after restart: {status} {body}")
+        elif status_settings != 200 or (body_settings.get("settings") or {}).get("ai_model") != "acceptance-model-b":
+            scenario_fail("web-restart-settings", f"settings did not persist after restart: {status_settings} {body_settings}")
+        else:
+            scenario_pass("web-manager-config-persists-across-restart")
+
+    print("==> [Wave27] Engine root-resolution report...")
+    status, body = client.request("GET", "/api/setup/status?refresh=1", timeout=45)
+    remote_paths = (((body or {}).get("beets") or {}).get("paths") or {}) if isinstance(body, dict) else {}
+    expected_paths = {
+        "config": "/config",
+        "music_library": "/data/media/music",
+        "downloads": "/data/torrents",
+        "staging": "/data/torrents",
+    }
+    bad_roots = []
+    for key, expected_path in expected_paths.items():
+        actual = str((remote_paths.get(key) or {}).get("path") or "")
+        if actual != expected_path:
+            bad_roots.append(f"{key}={actual!r}, expected {expected_path!r}")
+    if status != 200:
+        scenario_fail("root-resolution-status", f"setup status failed: {status} {body}")
+    elif bad_roots:
+        scenario_fail("root-resolution", "; ".join(bad_roots))
+    elif any(str((remote_paths.get(key) or {}).get("path") or "") in {"/music", "/downloads", "/staging"} for key in remote_paths):
+        scenario_fail("root-resolution-phantom-default", f"reported phantom root in {remote_paths}")
+    else:
+        scenario_pass("root-resolution-uses-mounted-engine-roots")
+
+    print("==> [Wave27] Engine config CAS, real Beets validation, rollback, and durability...")
+    config_path = config_dir / "config.yaml"
+    original_doc = _get_config_document(client, "config-read-original")
+    if original_doc is None:
+        return
+    original_content, original_rev = original_doc
+    safe_content = _set_top_level_scalar_yaml(original_content, "threaded", "no")
+    status, body = _post_config_document(client, safe_content, original_rev, "config-safe-update")
+    if not _require_json_ok(status, body, "config-safe-update"):
+        return
+    first_write_rev = str(body.get("revision") or "")
+    if "threaded: no" not in config_path.read_text(encoding="utf-8", errors="replace"):
+        scenario_fail("config-safe-update-host-file", "host-mounted engine config did not contain the committed setting")
+    else:
+        scenario_pass("config-safe-update-real-beets-validated")
+
+    restart_res = run(["docker", "restart", engine_container])
+    if restart_res.returncode != 0 or not wait_healthy(engine_container) or not wait_engine_ipc_reachable(web_container):
+        scenario_fail("engine-config-restart", f"engine did not restart cleanly after valid config update: rc={restart_res.returncode}")
+        return
+    restarted_doc = _get_config_document(client, "config-read-after-engine-restart")
+    if restarted_doc is None:
+        return
+    restarted_content, restarted_rev = restarted_doc
+    if "threaded: no" not in restarted_content:
+        scenario_fail("engine-config-durable-after-restart", "committed engine config did not survive engine restart")
+    else:
+        scenario_pass("engine-config-durable-after-restart")
+
+    status, body = client.request(
+        "POST", "/api/config/revert",
+        json_body={"expected_revision": restarted_rev},
+        timeout=45,
+    )
+    if not _require_json_ok(status, body, "config-manual-revert"):
+        return
+    reverted_doc = _get_config_document(client, "config-read-after-revert")
+    if reverted_doc is None:
+        return
+    reverted_content, reverted_rev = reverted_doc
+    if reverted_content == restarted_content or not reverted_rev:
+        scenario_fail("config-manual-revert-content", "manual revert did not restore the previous known-good config")
+    else:
+        scenario_pass("config-manual-revert-restores-backup")
+
+    reader_a = _get_config_document(client, "config-cas-reader-a")
+    reader_b = _get_config_document(client, "config-cas-reader-b")
+    if reader_a is None or reader_b is None:
+        return
+    content_a, rev_a = reader_a
+    content_b, rev_b = reader_b
+    if rev_a != rev_b:
+        scenario_fail("config-cas-read", f"config readers did not receive same revision: {rev_a} vs {rev_b}")
+    else:
+        writer_b_content = _set_top_level_scalar_yaml(content_b, "threaded", "no")
+        status_b, body_b = _post_config_document(client, writer_b_content, rev_b, "config-cas-writer-b")
+        stale_content = _set_top_level_scalar_yaml(content_a, "threaded", "yes")
+        status_a, body_a = _post_config_document(client, stale_content, rev_a, "config-cas-writer-a-stale")
+        final_doc = _get_config_document(client, "config-cas-final")
+        final_content = final_doc[0] if final_doc else ""
+        if status_b != 200 or not body_b.get("ok"):
+            scenario_fail("config-cas-writer-b", f"writer B failed: {status_b} {body_b}")
+        elif status_a != 409 or body_a.get("code") != "config_revision_conflict":
+            scenario_fail("config-cas-stale-write", f"stale write was not rejected with 409: {status_a} {body_a}")
+        elif "threaded: no" not in final_content or "threaded: yes" in final_content:
+            scenario_fail("config-cas-final-content", "writer B content was not preserved after stale write rejection")
+        else:
+            scenario_pass("engine-config-cas-stale-writes-return-409")
+
+    current_doc = _get_config_document(client, "config-read-before-invalid-yaml")
+    if current_doc is None:
+        return
+    current_content, current_rev = current_doc
+    before_invalid_bytes = config_path.read_bytes()
+    status, body = _post_config_document(client, "directory: [unterminated\n", current_rev, "config-invalid-yaml")
+    if status != 400 or body.get("code") != "config_invalid_yaml":
+        scenario_fail("config-invalid-yaml", f"malformed YAML was not rejected as invalid YAML: {status} {body}")
+    elif config_path.read_bytes() != before_invalid_bytes:
+        scenario_fail("config-invalid-yaml-preserved", "engine config changed after malformed YAML rejection")
+    else:
+        scenario_pass("config-invalid-yaml-preserves-known-good")
+
+    current_doc = _get_config_document(client, "config-read-before-invalid-beets")
+    if current_doc is None:
+        return
+    current_content, current_rev = current_doc
+    before_invalid_beets_bytes = config_path.read_bytes()
+    missing_plugin = "wave27_missing_plugin_" + uuid.uuid4().hex[:12]
+    beets_invalid = _set_top_level_scalar_yaml(current_content, "plugins", f"fetchart musicbrainz {missing_plugin}")
+    status, body = _post_config_document(client, beets_invalid, current_rev, "config-beets-invalid")
+    if status != 400 or body.get("code") != "config_beets_validation_failed":
+        scenario_fail("config-beets-invalid", f"real Beets-invalid config was not rejected: {status} {body}")
+    elif config_path.read_bytes() != before_invalid_beets_bytes:
+        scenario_fail("config-beets-invalid-preserved", "engine config changed after real Beets validation rejection")
+    else:
+        scenario_pass("config-real-beets-validation-preserves-known-good")
+
+    print("==> [Wave27] Engine-offline config mutation fails closed while Web Manager settings still work...")
+    current_doc = _get_config_document(client, "config-read-before-engine-offline")
+    if current_doc is None:
+        return
+    current_content, current_rev = current_doc
+    before_offline_bytes = config_path.read_bytes()
+    status_settings, body_settings = client.request("GET", "/api/setup/settings", timeout=30)
+    settings_rev = body_settings.get("revision") if status_settings == 200 and body_settings.get("ok") else None
+    stop_res = run(["docker", "stop", engine_container])
+    if stop_res.returncode != 0:
+        scenario_fail("engine-offline-stop", f"could not stop engine: rc={stop_res.returncode}")
+        return
+    restart_failed = False
+    try:
+        local_settings_ok = False
+        if settings_rev:
+            s_status, s_body = client.request(
+                "POST", "/api/setup/settings",
+                json_body={"ai_model": "acceptance-model-offline", "expected_revision": settings_rev},
+                timeout=30,
+            )
+            local_settings_ok = s_status == 200 and s_body.get("ok") is True
+        offline_content = _set_top_level_scalar_yaml(current_content, "threaded", "yes")
+        c_status, c_body = _post_config_document(client, offline_content, current_rev, "config-engine-offline")
+        if not local_settings_ok:
+            scenario_fail("engine-offline-local-settings", "Web Manager-owned setup settings did not continue to save while engine was offline")
+        elif c_status == 200 and c_body.get("ok"):
+            scenario_fail("config-engine-offline-fail-closed", f"Beets config mutation succeeded while engine was offline: {c_status} {c_body}")
+        elif config_path.read_bytes() != before_offline_bytes:
+            scenario_fail("config-engine-offline-preserved", "host-mounted engine config changed while engine was offline")
+        else:
+            scenario_pass("config-engine-offline-fails-closed-with-local-settings-still-durable")
+    finally:
+        run(["docker", "start", engine_container])
+        if not wait_healthy(engine_container) or not wait_engine_ipc_reachable(web_container):
+            scenario_fail("engine-offline-restart", "engine did not become reachable after offline config proof")
+            restart_failed = True
+    if restart_failed:
+        return
+
+    retry_doc = _get_config_document(client, "config-read-after-engine-online")
+    if retry_doc is None:
+        return
+    retry_content, retry_rev = retry_doc
+    retry_save = _set_top_level_scalar_yaml(retry_content, "threaded", "yes")
+    status, body = _post_config_document(client, retry_save, retry_rev, "config-retry-after-engine-online")
+    if _require_json_ok(status, body, "config-retry-after-engine-online"):
+        scenario_pass("config-retry-succeeds-after-engine-online")
+
+
+def run_wave27_attach_failpoint_scenario(web_container: str, fixture: dict) -> None:
+    print("==> [Wave27] Attach-recording dict-shaped IPC failure fails closed...")
+    target_mbid = "88888888-8888-4888-8888-888888888888"
+    probe = r'''
+import json
+import sys
+import time
+
+import app as APP
+
+item_id = int(sys.argv[1])
+target_mbid = sys.argv[2]
+
+
+def fake_reconstruct(item, iid):
+    current = {
+        "title": getattr(item, "title", "Acceptance Track"),
+        "artist": getattr(item, "artist", "Acceptance Artist"),
+        "album": getattr(item, "album", "Acceptance Album"),
+    }
+    candidate = {
+        "mb_trackid": target_mbid,
+        "recording_id": target_mbid,
+        "title": "Acceptance Track",
+        "artist": "Acceptance Artist",
+        "release_id": "11111111-1111-1111-1111-111111111111",
+        "release_group_id": "22222222-2222-2222-2222-222222222222",
+        "decision_version": "wave27-acceptance",
+        "decision": {
+            "confidence_score": 0.99,
+            "review_required": False,
+            "requires_confirmation": False,
+            "conflicts": [],
+            "warnings": [],
+            "eligibility_reason": "Wave 27 acceptance deterministic safe attach",
+            "action_eligibility": {"attach_without_review": True},
+        },
+        "matching_contract": {"identity": {"resolved_recording_id": target_mbid}},
+    }
+    return current, [candidate], str(getattr(item, "path", "")), "Acceptance Track.wav"
+
+
+APP.app.config["TESTING"] = True
+APP._reconstruct_track_recording_candidates = fake_reconstruct
+APP._fetch_mb_recording_details = lambda rid: {"linked_releases": [], "selected_release": {}}
+APP._trigger_plex_refresh = lambda log: False
+
+client = APP.app.test_client()
+resp = client.post(
+    f"/api/items/{item_id}/attach-recording",
+    json={
+        "mb_trackid": target_mbid,
+        "mode": "safe",
+        "decision_version": "wave27-acceptance",
+        "_acceptance_failpoint": "attach_recording_apply_failure",
+    },
+)
+try:
+    payload = resp.get_json() or {}
+except Exception:
+    payload = {"raw": resp.get_data(as_text=True)}
+if resp.status_code != 200 or payload.get("ok") is not True or not payload.get("job_id"):
+    print(json.dumps({"ok": False, "stage": "dispatch", "status_code": resp.status_code, "payload": payload}, default=str))
+    sys.exit(1)
+job_id = payload["job_id"]
+audit_id = payload.get("audit_id")
+job = None
+for _ in range(120):
+    job = APP.jobs.get(job_id)
+    status = getattr(job, "status", "") if job is not None else ""
+    if status in {"success", "failed", "cancelled", "timeout", "cancel_failed"}:
+        break
+    time.sleep(0.25)
+job_status = getattr(job, "status", "") if job is not None else "missing"
+job_log = list(getattr(job, "log", []) or []) if job is not None else []
+try:
+    tx = APP.transactions.get(audit_id)
+except Exception as exc:
+    tx = {"error": str(exc)}
+tx_status = tx.get("status") if isinstance(tx, dict) else None
+tx_logs = tx.get("logs") or [] if isinstance(tx, dict) else []
+item = APP.lib.get_item(item_id)
+actual_mbid = str(getattr(item, "mb_trackid", "") or "").strip().lower() if item is not None else ""
+combined_logs = "\n".join(str(x) for x in (job_log + tx_logs))
+ok = (
+    job_status == "failed"
+    and tx_status != "Completed"
+    and target_mbid.lower() != actual_mbid
+    and "Recording ID attached and item synced/moved." not in combined_logs
+)
+print(json.dumps({
+    "ok": ok,
+    "job_status": job_status,
+    "tx_status": tx_status,
+    "actual_mbid": actual_mbid,
+    "audit_id": audit_id,
+    "job_log_tail": job_log[-8:],
+    "tx_log_tail": tx_logs[-8:] if isinstance(tx_logs, list) else tx_logs,
+}, default=str))
+sys.exit(0 if ok else 1)
+'''
+    res = run([
+        "docker", "exec",
+        "-e", "BEETS_WEB_AUTH_DISABLED=1",
+        web_container,
+        "python3", "-c", probe,
+        str(fixture["item_id"]), target_mbid,
+    ], timeout=180)
+    output = (res.stdout or "").strip()
+    try:
+        body = json.loads(output.splitlines()[-1]) if output else {}
+    except Exception:
+        body = {"raw_stdout": res.stdout, "raw_stderr": res.stderr}
+    if res.returncode != 0 or body.get("ok") is not True:
+        _fail(f"attach-recording-dict-failure: expected failed job/transaction without success log or mutation, got rc={res.returncode} {body} stderr={res.stderr}")
+    else:
+        print("[PASS] attach-recording-dict-shaped-ipc-failure-stops-before-success")
 
 def main() -> int:
     print("==> Checking Docker daemon / compose availability...")
@@ -1795,9 +2288,11 @@ def main() -> int:
         print("==> Waiting for both services to report healthy...")
         if not wait_healthy(engine_container):
             _fail("beets engine container did not become healthy")
+            print_container_log_tails(engine_container, web_container)
             return 2
         if not wait_healthy(web_container):
             _fail("beets-web-manager container did not become healthy")
+            print_container_log_tails(web_container, engine_container)
             return 2
         _ok("both containers healthy")
 
@@ -1924,6 +2419,10 @@ def main() -> int:
         except Exception as ex:
             _fail(f"could not verify host-mounted DB state: {ex}")
 
+        print("\n==> Wave 27 scenarios (config closure, roots, attach failure) ==>")
+        run_wave27_config_scenarios(client, web_container, engine_container, config_dir, webdata_dir)
+        run_wave27_attach_failpoint_scenario(web_container, fixture)
+
         print("\n==> Wave 25 scenarios (real production import + artwork-acquisition routes) ==>")
         run_jobs_transport_scenarios(client, engine_container)
         run_wave25_artwork_scenarios(client, fixture, db_path)
@@ -1993,11 +2492,7 @@ def main() -> int:
             # alone -- print both services' logs before teardown discards
             # them, same as compose-verification's existing Docker job
             # already does for its own single-container smoke test.
-            for c in (web_container, engine_container):
-                print(f"\n==> docker logs {c} (tail 200) ==>")
-                logs_res = run(["docker", "logs", "--tail", "200", c])
-                print(logs_res.stdout or "")
-                print(logs_res.stderr or "")
+            print_container_log_tails(web_container, engine_container)
             return 1
 
         print("\n[SUCCESS] Two-service Docker acceptance passed.")

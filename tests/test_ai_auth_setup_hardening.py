@@ -356,8 +356,8 @@ class AuthTokenAutoGenerationTests(unittest.TestCase):
             "def _persist_file_atomically(target_file: Path, content: str) -> bool:",
             "\n\ndef _auth_secret_is_usable(",
         )
-        self.assertIn("os.chmod(temp_file, 0o600)", fn)
-        self.assertIn("os.chmod(target_file, 0o600)", fn)
+        self.assertIn("_persist_app_config_text", fn)
+        self.assertIn("is_secret=True", fn)
 
 
 class AuthTokenRegenerateEndpointTests(unittest.TestCase):
@@ -375,7 +375,7 @@ class AuthTokenRegenerateEndpointTests(unittest.TestCase):
         # Must persist through the existing env-file mechanism (backups,
         # process env update) rather than a bespoke write path.
         self.assertIn('_write_env_file({"BEETS_WEB_AUTH_TOKEN": token}, [])', fn)
-        self.assertIn("token_file.write_text(token", fn)
+        self.assertIn("_persist_file_atomically(token_file, token)", fn)
         # Falls back to a local secrets.token_urlsafe(32) if app.py's real
         # generator can't be imported (e.g. routes_setup loaded against the
         # minimal stub `app` module in tests/test_routes_setup.py).

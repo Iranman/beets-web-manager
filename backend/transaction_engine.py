@@ -12688,3 +12688,398 @@ def rollback_album_metadata(
             return {"ok": ok, "operation_id": operation_id, "status": final_status, "tags_restored": tags_restored, "tags_failed": tags_failed}
 
 
+
+
+# -- item_metadata_repair_v1 ---------------------------------------------------
+
+def create_item_metadata_plan(
+    store: TransactionStore,
+    payload: Dict[str, Any],
+    *,
+    music_allowed_roots: Optional[List[str]] = None,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    payload = payload or {}
+    try:
+        item_id = int(payload.get("item_id") or 0)
+    except Exception:
+        item_id = 0
+    if item_id <= 0:
+        return {"ok": False, "error": "item_id required", "code": "item_metadata_invalid_payload"}
+    force_write_tags = bool(payload.get("force_write_tags"))
+    updates, rejected = _normalize_metadata_fields(payload.get("updates") or {}, ITEM_METADATA_FIELDS)
+    if rejected:
+        return {"ok": False, "error": f"Unknown/disallowed item metadata field(s): {sorted(rejected)}", "code": "item_metadata_field_not_allowed"}
+    if not updates and not force_write_tags:
+        return {"ok": True, "operation_id": None, "item_fields_changed": 0}
+
+    lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB", "")
+    if not lib_db or not Path(lib_db).exists():
+        return {"ok": False, "error": "Beets library database not found", "code": "item_metadata_db_not_found"}
+    allowed_roots = music_allowed_roots or [str(os.environ.get("MUSIC_ROOT", "/music"))]
+    con = sqlite3.connect(lib_db, timeout=10)
+    con.row_factory = sqlite3.Row
+    try:
+        row = con.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
+        if not row:
+            return {"ok": False, "error": f"Item {item_id} not found", "code": "item_metadata_item_not_found"}
+        path_str = _s(row["path"] or "") if "path" in row.keys() else ""
+        if not path_str:
+            return {"ok": False, "error": f"Item {item_id} has no path", "code": "item_metadata_missing_path"}
+        item_path = _resolve_db_path(path_str, allowed_roots)
+        if not any(_path_under(item_path, Path(root)) for root in allowed_roots):
+            return {"ok": False, "error": "Item path is outside allowed music roots", "code": "item_metadata_path_out_of_root"}
+        if any(_path_has_symlink_under(item_path, Path(root)) for root in allowed_roots):
+            return {"ok": False, "error": "Symlink rejected in item path", "code": "item_metadata_symlink_rejected"}
+        diff: Dict[str, Dict[str, str]] = {}
+        for key, new_value in updates.items():
+            if key in row.keys():
+                old_value = _s(row[key] or "")
+                if old_value != _s(new_value):
+                    diff[key] = {"before": old_value, "after": _s(new_value)}
+    finally:
+        con.close()
+
+    if not diff and not force_write_tags:
+        return {"ok": True, "operation_id": None, "item_fields_changed": 0}
+    capture_fields = set(diff.keys()) | (ITEM_METADATA_FIELDS if force_write_tags else set())
+    before_state = _capture_media_tag_state(item_path, capture_fields)
+    if force_write_tags and not before_state.get("exists"):
+        return {"ok": False, "error": f"Media file missing for item {item_id}", "code": "item_metadata_media_missing"}
+    tx = store.create(
+        operation_type="Metadata Update",
+        status="Preview",
+        summary=f"Item metadata update: item {item_id} ({len(diff)} field(s))",
+        rollback_available=bool(diff),
+        rollback_reason="Captured previous item metadata and tag values before apply." if diff else "No metadata diff captured.",
+        metadata={
+            "mutation_family": "item_metadata_repair_v1",
+            "item_id": item_id,
+            "item_diff": diff,
+            "item_path": str(item_path),
+            "force_write_tags": force_write_tags,
+            "file_before_stat": before_state.get("stat"),
+            "before_tags": before_state.get("tags") or {},
+            "allowed_roots": allowed_roots,
+            "resource_keys": [f"item:{item_id}"],
+            "created_at": _now(),
+        },
+    )
+    return {"ok": True, "operation_id": tx["id"], "item_id": item_id, "item_fields_changed": len(diff)}
+
+
+def execute_item_metadata_apply(
+    store: TransactionStore,
+    operation_id: str,
+    *,
+    music_allowed_roots: Optional[List[str]] = None,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    if not _TRANSACTION_ID_RE.match(operation_id):
+        return {"ok": False, "error": "Invalid transaction ID format", "code": "item_metadata_invalid_id"}
+    with _get_apply_lock(operation_id):
+        try:
+            tx = store.get(operation_id)
+        except KeyError:
+            return {"ok": False, "error": f"Transaction {operation_id} not found", "code": "item_metadata_not_found"}
+        meta = tx.get("metadata") or {}
+        if meta.get("mutation_family") != "item_metadata_repair_v1":
+            return {"ok": False, "error": "Transaction is not an item_metadata_repair_v1 operation", "code": "item_metadata_family_mismatch"}
+        if tx.get("status") == "Completed":
+            return {"ok": True, "operation_id": operation_id, "status": "Completed", "mutated": True}
+        lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB", "")
+        if not lib_db or not Path(lib_db).exists():
+            return {"ok": False, "error": "Beets library database not found", "code": "item_metadata_db_not_found"}
+        item_id = int(meta.get("item_id") or 0)
+        diff = meta.get("item_diff") or {}
+        item_path = Path(meta.get("item_path") or "")
+        allowed_roots = music_allowed_roots or meta.get("allowed_roots") or [str(os.environ.get("MUSIC_ROOT", "/music"))]
+        music_root = allowed_roots[0]
+
+        def _fail(msg: str, code: str, *, recover: bool = False) -> Dict[str, Any]:
+            if recover:
+                rb = rollback_item_metadata(store, operation_id, db_path=lib_db)
+                if rb.get("status") == "Rolled Back":
+                    return {"ok": False, "error": msg, "code": code, "mutated": False, "status": "Rolled Back"}
+                store.update(operation_id, status="Recovery Required", logs=[f"Apply failed: {msg}"])
+                return {"ok": False, "error": msg, "code": code, "mutated": True, "status": "Recovery Required"}
+            store.update(operation_id, status="Failed", logs=[f"Apply failed: {msg}"])
+            return {"ok": False, "error": msg, "code": code, "mutated": False, "status": "Failed"}
+
+        with _lock_resources(meta.get("resource_keys") or [f"item:{item_id}"]):
+            for key in diff.keys():
+                if key not in ITEM_METADATA_FIELDS:
+                    return _fail(f"Refusing disallowed item field at Apply: {key}", "item_metadata_field_not_allowed")
+            before = meta.get("file_before_stat")
+            if before:
+                if not item_path.exists():
+                    return _fail(f"Media file missing before item metadata apply: {item_path}", "item_metadata_toctou_mismatch")
+                st = item_path.stat()
+                if (st.st_dev != before.get("dev") or st.st_ino != before.get("ino")
+                        or st.st_size != before.get("size") or st.st_mtime_ns != before.get("mtime_ns")):
+                    return _fail(f"Media file changed since plan: {item_path}", "item_metadata_toctou_mismatch")
+            store.update(operation_id, status="Running", metadata={**meta, "mutation_started": True})
+            db_mutated = False
+            if diff:
+                con = sqlite3.connect(lib_db, timeout=10)
+                try:
+                    cols = [f"{key}=?" for key in diff.keys()]
+                    vals = [diff[key]["after"] for key in diff.keys()] + [item_id]
+                    cur = con.execute(f"UPDATE items SET {', '.join(cols)} WHERE id=?", vals)
+                    if cur.rowcount != 1:
+                        con.rollback()
+                        return _fail(f"Expected to update 1 item row for id {item_id}, affected {cur.rowcount}", "item_metadata_rowcount_mismatch")
+                    con.commit()
+                    db_mutated = True
+                finally:
+                    con.close()
+            store.update(operation_id, metadata={**store.get(operation_id).get("metadata", {}), "db_mutated": db_mutated})
+            tags_written = False
+            if diff or meta.get("force_write_tags"):
+                result = native_beets_write_item_tags(lib_db, music_root, item_id)
+                if not result.get("ok"):
+                    fields = {key: value["after"] for key, value in diff.items()}
+                    fallback = _write_media_tag_fields(item_path, fields) if fields else result
+                    if not fallback.get("ok"):
+                        return _fail(
+                            f"Tag write failed for item {item_id}: {fallback.get('error') or result.get('error')}",
+                            fallback.get("code") or result.get("code") or "item_metadata_tag_write_failed",
+                            recover=True,
+                        )
+                tags_written = True
+                store.update(operation_id, metadata={**store.get(operation_id).get("metadata", {}), "tags_written": [item_id]})
+            con = sqlite3.connect(lib_db, timeout=10)
+            con.row_factory = sqlite3.Row
+            try:
+                row = con.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
+                if not row:
+                    return _fail(f"Post-write verification failed: item {item_id} missing from DB", "item_metadata_verification_failed", recover=True)
+                for key, value in diff.items():
+                    if key in row.keys() and _s(row[key] or "") != value["after"]:
+                        return _fail(f"Post-write verification failed for item {item_id} field {key}", "item_metadata_verification_failed", recover=True)
+            finally:
+                con.close()
+            if tags_written and diff:
+                capture = _capture_media_tag_state(item_path, diff.keys())
+                for key, value in diff.items():
+                    actual = _s(capture.get("tags", {}).get(key, ""))
+                    if actual != value["after"]:
+                        return _fail(f"Post-write verification failed: on-disk tag {key} does not match for item {item_id}", "item_metadata_verification_failed", recover=True)
+            store.update(operation_id, status="Completed", metadata={**store.get(operation_id).get("metadata", {}), "completed_at": _now()})
+            return {"ok": True, "operation_id": operation_id, "status": "Completed", "mutated": True, "tags_written_count": 1 if tags_written else 0}
+
+
+def rollback_item_metadata(
+    store: TransactionStore,
+    operation_id: str,
+    *,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    if not _TRANSACTION_ID_RE.match(operation_id):
+        return {"ok": False, "error": "Invalid transaction ID format", "code": "item_metadata_invalid_id"}
+    with _get_apply_lock(operation_id):
+        try:
+            tx = store.get(operation_id)
+        except KeyError:
+            return {"ok": False, "error": f"Transaction {operation_id} not found", "code": "item_metadata_not_found"}
+        meta = tx.get("metadata") or {}
+        if meta.get("mutation_family") != "item_metadata_repair_v1":
+            return {"ok": False, "error": "Transaction is not an item_metadata_repair_v1 operation", "code": "item_metadata_family_mismatch"}
+        lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB", "")
+        if not lib_db or not Path(lib_db).exists():
+            return {"ok": False, "error": "Beets library database not found", "code": "item_metadata_db_not_found"}
+        item_id = int(meta.get("item_id") or 0)
+        diff = meta.get("item_diff") or {}
+        item_path = Path(meta.get("item_path") or "")
+        tags_failed = 0
+        tags_restored = 0
+        if diff and item_id in set(meta.get("tags_written") or []):
+            before_tags = {key: (meta.get("before_tags") or {}).get(key) for key in diff.keys()}
+            tw = _write_media_tag_fields(item_path, before_tags)
+            if tw.get("ok"):
+                tags_restored = 1
+            else:
+                tags_failed = 1
+        db_restored = True
+        if diff:
+            con = sqlite3.connect(lib_db, timeout=10)
+            try:
+                cols = [f"{key}=?" for key in diff.keys() if key in ITEM_METADATA_FIELDS]
+                vals = [diff[key]["before"] for key in diff.keys() if key in ITEM_METADATA_FIELDS] + [item_id]
+                if cols:
+                    cur = con.execute(f"UPDATE items SET {', '.join(cols)} WHERE id=?", vals)
+                    db_restored = cur.rowcount == 1
+                con.commit()
+            finally:
+                con.close()
+        ok = db_restored and tags_failed == 0
+        final_status = "Rolled Back" if ok else ("Partially Rolled Back" if db_restored or tags_restored else "Failed")
+        store.update(operation_id, status=final_status, metadata={**meta, "rollback_available": False, "rolled_back_at": _now(), "tags_restored_count": tags_restored, "tags_failed_count": tags_failed})
+        return {"ok": ok, "operation_id": operation_id, "status": final_status, "tags_restored": tags_restored, "tags_failed": tags_failed}
+
+
+# -- genre_repair_v1 -----------------------------------------------------------
+
+def _row_genre_value(row: sqlite3.Row) -> str:
+    keys = row.keys()
+    if "genres" in keys:
+        return _s(row["genres"] or "")
+    if "genre" in keys:
+        return _s(row["genre"] or "")
+    return ""
+
+
+def _genre_column(con: sqlite3.Connection, table: str) -> str:
+    cols = [str(row[1]) for row in con.execute(f"PRAGMA table_info({table})").fetchall()]
+    if "genres" in cols:
+        return "genres"
+    if "genre" in cols:
+        return "genre"
+    return ""
+
+
+def create_genre_repair_plan(
+    store: TransactionStore,
+    payload: Dict[str, Any],
+    *,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    payload = payload or {}
+    try:
+        album_id = int(payload.get("album_id") or 0)
+    except Exception:
+        album_id = 0
+    if album_id <= 0:
+        return {"ok": False, "error": "album_id required", "code": "genre_repair_invalid_payload"}
+    lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB", "")
+    if not lib_db or not Path(lib_db).exists():
+        return {"ok": False, "error": "Beets library database not found", "code": "genre_repair_db_not_found"}
+    con = sqlite3.connect(lib_db, timeout=10)
+    con.row_factory = sqlite3.Row
+    try:
+        album = con.execute("SELECT * FROM albums WHERE id=?", (album_id,)).fetchone()
+        if not album:
+            return {"ok": False, "error": f"Album {album_id} not found", "code": "genre_repair_album_not_found"}
+        items = con.execute("SELECT * FROM items WHERE album_id=? ORDER BY disc, track, id", (album_id,)).fetchall()
+    finally:
+        con.close()
+    before_items = [{"item_id": int(row["id"]), "genre": _row_genre_value(row)} for row in items]
+    before_album = _row_genre_value(album)
+    tx = store.create(
+        operation_type="Metadata Update",
+        status="Preview",
+        summary=f"Repair genres for album {album_id} using Beets lastgenre",
+        rollback_available=True,
+        rollback_reason="Captured prior Beets genre fields before lastgenre apply.",
+        metadata={
+            "mutation_family": "genre_repair_v1",
+            "album_id": album_id,
+            "force": bool(payload.get("force")),
+            "timeout": float(payload.get("timeout") or 180.0),
+            "before_album_genre": before_album,
+            "before_item_genres": before_items,
+            "resource_keys": [f"album:{album_id}"],
+            "created_at": _now(),
+        },
+    )
+    return {"ok": True, "operation_id": tx["id"], "album_id": album_id, "item_count": len(before_items)}
+
+
+def execute_genre_repair_apply(
+    store: TransactionStore,
+    operation_id: str,
+    *,
+    db_path: Optional[str] = None,
+    run_beet_command_fn: Optional[Any] = None,
+) -> Dict[str, Any]:
+    if not _TRANSACTION_ID_RE.match(operation_id):
+        return {"ok": False, "error": "Invalid transaction ID format", "code": "genre_repair_invalid_id"}
+    if run_beet_command_fn is None:
+        return {"ok": False, "error": "No beet command runner configured", "code": "genre_repair_no_runner"}
+    with _get_apply_lock(operation_id):
+        try:
+            tx = store.get(operation_id)
+        except KeyError:
+            return {"ok": False, "error": f"Transaction {operation_id} not found", "code": "genre_repair_not_found"}
+        meta = tx.get("metadata") or {}
+        if meta.get("mutation_family") != "genre_repair_v1":
+            return {"ok": False, "error": "Transaction is not a genre_repair_v1 operation", "code": "genre_repair_family_mismatch"}
+        if tx.get("status") == "Completed":
+            return {"ok": True, "operation_id": operation_id, "status": "Completed", "mutated": True, "genre_after": meta.get("genre_after")}
+        album_id = int(meta.get("album_id") or 0)
+        lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB", "")
+        if not lib_db or not Path(lib_db).exists():
+            return {"ok": False, "error": "Beets library database not found", "code": "genre_repair_db_not_found"}
+        with _lock_resources(meta.get("resource_keys") or [f"album:{album_id}"]):
+            con = sqlite3.connect(lib_db, timeout=10)
+            con.row_factory = sqlite3.Row
+            try:
+                album = con.execute("SELECT * FROM albums WHERE id=?", (album_id,)).fetchone()
+                if not album:
+                    return {"ok": False, "error": f"Album {album_id} no longer exists", "code": "genre_repair_album_not_found"}
+            finally:
+                con.close()
+            store.update(operation_id, status="Running", metadata={**meta, "mutation_started": True})
+            args = []
+            if meta.get("force"):
+                args.append("-f")
+            args.append(f"album_id:{album_id}")
+            result = run_beet_command_fn("lastgenre", args)
+            if not isinstance(result, dict) or result.get("ok") is not True:
+                store.update(operation_id, status="Failed", logs=["lastgenre apply failed"])
+                return {"ok": False, "error": (result or {}).get("error") if isinstance(result, dict) else "lastgenre failed", "code": "genre_repair_apply_failed", "mutated": False, "status": "Failed"}
+            con = sqlite3.connect(lib_db, timeout=10)
+            con.row_factory = sqlite3.Row
+            try:
+                album_after = con.execute("SELECT * FROM albums WHERE id=?", (album_id,)).fetchone()
+                items_after = con.execute("SELECT * FROM items WHERE album_id=? ORDER BY disc, track, id", (album_id,)).fetchall()
+            finally:
+                con.close()
+            genre_after = _row_genre_value(album_after) if album_after else ""
+            item_genres_after = [{"item_id": int(row["id"]), "genre": _row_genre_value(row)} for row in items_after]
+            store.update(operation_id, status="Completed", metadata={
+                **store.get(operation_id).get("metadata", {}),
+                "genre_after": genre_after,
+                "item_genres_after": item_genres_after,
+                "completed_at": _now(),
+            })
+            return {"ok": True, "operation_id": operation_id, "status": "Completed", "mutated": True, "genre_after": genre_after, "output": result.get("stdout") or result.get("output") or ""}
+
+
+def rollback_genre_repair(
+    store: TransactionStore,
+    operation_id: str,
+    *,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    if not _TRANSACTION_ID_RE.match(operation_id):
+        return {"ok": False, "error": "Invalid transaction ID format", "code": "genre_repair_invalid_id"}
+    with _get_apply_lock(operation_id):
+        try:
+            tx = store.get(operation_id)
+        except KeyError:
+            return {"ok": False, "error": f"Transaction {operation_id} not found", "code": "genre_repair_not_found"}
+        meta = tx.get("metadata") or {}
+        if meta.get("mutation_family") != "genre_repair_v1":
+            return {"ok": False, "error": "Transaction is not a genre_repair_v1 operation", "code": "genre_repair_family_mismatch"}
+        lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB", "")
+        if not lib_db or not Path(lib_db).exists():
+            return {"ok": False, "error": "Beets library database not found", "code": "genre_repair_db_not_found"}
+        album_id = int(meta.get("album_id") or 0)
+        before_album = _s(meta.get("before_album_genre") or "")
+        before_items = meta.get("before_item_genres") or []
+        con = sqlite3.connect(lib_db, timeout=10)
+        try:
+            cur = con.cursor()
+            album_col = _genre_column(con, "albums")
+            item_col = _genre_column(con, "items")
+            if album_col:
+                cur.execute(f"UPDATE albums SET {album_col}=? WHERE id=?", (before_album, album_id))
+            for row in before_items:
+                if item_col:
+                    cur.execute(f"UPDATE items SET {item_col}=? WHERE id=?", (_s(row.get("genre") or ""), int(row.get("item_id") or 0)))
+            con.commit()
+        finally:
+            con.close()
+        store.update(operation_id, status="Rolled Back", metadata={**meta, "rollback_available": False, "rolled_back_at": _now()})
+        return {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}

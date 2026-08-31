@@ -347,7 +347,7 @@ export default function System() {
   const [message, setMessage] = useState('');
   const [configText, setConfigText] = useState('');
   const [savedConfigText, setSavedConfigText] = useState('');
-  const [configMeta, setConfigMeta] = useState<Pick<ConfigFileResponse, 'has_backup' | 'backup_ts'> | null>(null);
+  const [configMeta, setConfigMeta] = useState<Pick<ConfigFileResponse, 'revision' | 'has_backup' | 'backup_ts'> | null>(null);
   const [configLoading, setConfigLoading] = useState(true);
   const [configBusy, setConfigBusy] = useState(false);
   const [configError, setConfigError] = useState('');
@@ -384,7 +384,7 @@ export default function System() {
       const content = cfg.content ?? '';
       setConfigText(content);
       setSavedConfigText(content);
-      setConfigMeta({ has_backup: Boolean(cfg.has_backup), backup_ts: cfg.backup_ts ?? null });
+      setConfigMeta({ revision: cfg.revision || '', has_backup: Boolean(cfg.has_backup), backup_ts: cfg.backup_ts ?? null });
     } catch (err) {
       setConfigError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -445,7 +445,8 @@ export default function System() {
     setConfigMsg('');
     setConfigError('');
     try {
-      const saved = await saveConfigFile(configText);
+      if (!configMeta?.revision) throw new Error('Reload config.yaml before saving.');
+      const saved = await saveConfigFile(configText, configMeta.revision);
       await loadConfig();
       setConfigMsg(saved.backed_up ? 'Saved config.yaml. Backup updated.' : 'Saved config.yaml.');
     } catch (err) {
@@ -461,7 +462,8 @@ export default function System() {
     setConfigMsg('');
     setConfigError('');
     try {
-      await revertConfigFile();
+      if (!configMeta?.revision) throw new Error('Reload config.yaml before reverting.');
+      await revertConfigFile(configMeta.revision);
       await loadConfig();
       setConfigMsg('Reverted config.yaml from backup.');
     } catch (err) {
@@ -815,8 +817,8 @@ export default function System() {
           </div>
           <div className="flex gap-2">
             <Button size="small" variant="outlined" onClick={loadConfig} disabled={configLoading || configBusy}>Reload</Button>
-            <Button size="small" variant="outlined" color="warning" onClick={() => setConfigAction('revert')} disabled={configLoading || configBusy || !configMeta?.has_backup}>Revert</Button>
-            <Button size="small" variant="contained" onClick={() => setConfigAction('save')} disabled={configLoading || configBusy || !configDirty || configEmpty}>Save</Button>
+            <Button size="small" variant="outlined" color="warning" onClick={() => setConfigAction('revert')} disabled={configLoading || configBusy || !configMeta?.has_backup || !configMeta?.revision}>Revert</Button>
+            <Button size="small" variant="contained" onClick={() => setConfigAction('save')} disabled={configLoading || configBusy || !configDirty || configEmpty || !configMeta?.revision}>Save</Button>
           </div>
         </div>
         {configMsg && <Alert severity="success" onClose={() => setConfigMsg('')}>{configMsg}</Alert>}

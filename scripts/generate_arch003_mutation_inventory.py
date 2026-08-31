@@ -82,6 +82,12 @@ _ENGINE_FUNCTION_FAMILY = {
     "create_album_metadata_plan": "album_metadata_repair_v1",
     "execute_album_metadata_apply": "album_metadata_repair_v1",
     "rollback_album_metadata": "album_metadata_repair_v1",
+    "create_item_metadata_plan": "item_metadata_repair_v1",
+    "execute_item_metadata_apply": "item_metadata_repair_v1",
+    "rollback_item_metadata": "item_metadata_repair_v1",
+    "create_genre_repair_plan": "genre_repair_v1",
+    "execute_genre_repair_apply": "genre_repair_v1",
+    "rollback_genre_repair": "genre_repair_v1",
 }
 
 _ENGINE_INFRA_FUNCTIONS = {
@@ -153,11 +159,44 @@ _APP_FUNCTION_CLASSIFICATION = {
     "_cleanup_initial_browser_password_if_replaced": ("CONFIG_STATE", "config_v1", "reviewed-library-cleanup-closure-initial-browser-password"),
     "_playlist_stamp_download_tags": ("STAGING_ONLY", "playlist_staging_v1", "reviewed-library-cleanup-closure-playlist-download-tags"),
     "_enrich_playlist_file_tags": ("STAGING_ONLY", "playlist_staging_v1", "reviewed-library-cleanup-closure-playlist-download-tags"),
-    "_run_item_metadata_restore": ("ENGINE_ADMIN_MUTATION", "", "reviewed-wave27-attach-rollback-metadata-restore"),
-    "_run_item_recording_id_restore": ("ENGINE_ADMIN_MUTATION", "", "reviewed-wave27-attach-rollback-recording-id-restore"),
 }
 
 _REVIEWED_RULE_DETAILS = {
+    "reviewed-wave27-beetsclient-item-metadata-repair": {
+        "domain": "album_metadata",
+        "review_reason": "SEC-002 Wave 27 correction: Web Manager BeetsClient.update_item_metadata composes real engine-side item_metadata_repair_v1 Plan/Apply/Rollback over HTTP; used for attach rollback and item tag restoration without local beet subprocesses.",
+        "reviewed_in_pr": 102,
+    },
+    "reviewed-wave27-beetsclient-album-metadata-repair": {
+        "domain": "album_metadata",
+        "review_reason": "SEC-002 Wave 27 correction: BeetsClient.update_album_metadata composes existing engine-side album_metadata_repair_v1 Plan/Apply/Rollback over HTTP; callers must check returned ok/status before reporting success.",
+        "reviewed_in_pr": 102,
+    },
+    "reviewed-wave27-beetsclient-album-relocation": {
+        "domain": "album_relocation",
+        "review_reason": "SEC-002 Wave 27 correction: BeetsClient.relocate_album composes existing album_relocation_v1 Plan/Apply/Rollback using a real album_id; duplicate resolver no longer passes item_id or album_id=0 as an album-mode hack.",
+        "reviewed_in_pr": 102,
+    },
+    "reviewed-wave27-genre-repair-controlled": {
+        "domain": "album_metadata",
+        "review_reason": "SEC-002 Wave 27 correction: lastgenre is mutating, so Web Manager uses genre_repair_v1 Plan/Apply/Rollback over HTTP; the engine invokes the native lastgenre plugin and verifies Beets DB genre state.",
+        "reviewed_in_pr": 102,
+    },
+    "reviewed-wave27-mbsubmit-read-only": {
+        "domain": "submission",
+        "review_reason": "SEC-002 Wave 27 correction: Beets mbsubmit invocation is a native read-only submission-output operation per Beets documentation and local audit; result is now checked, and no local DB/media/config write is performed.",
+        "reviewed_in_pr": 102,
+    },
+    "reviewed-wave27-web-manager-config-store": {
+        "domain": "config",
+        "review_reason": "SEC-002 Wave 27 correction: backend.web_manager_config_store mutates Web-Manager-owned durable app/config/security state under WEB_MANAGER_DATA_DIR using root containment, symlink rejection, cross-process locking, CAS, atomic replace, chmod, and directory fsync; it does not touch Beets config or media-library state.",
+        "reviewed_in_pr": 102,
+    },
+    "reviewed-wave27-control-agent-config-state": {
+        "domain": "config",
+        "review_reason": "SEC-002 Wave 27 correction: Control Agent config helpers mutate only engine-owned config.yaml/config.yaml.bak under BEETSDIR with expected_revision CAS, real Beets validation, atomic replace, fsync, and backup restore semantics.",
+        "reviewed_in_pr": 102,
+    },
     "reviewed-wave27-attach-rollback-metadata-restore": {
         "domain": "album_metadata",
         "review_reason": "SEC-002 Wave 27 review: rollback executor for attach-recording metadata fields.",
@@ -235,8 +274,14 @@ _CONTROL_AGENT_FUNCTION_CLASSIFICATION = {
     # itself, matching the same reasoning applied to reimport_source_atomic
     # above.
     "run_confirmed_import_native": ("ENGINE_NATIVE_BEETS", "", "engine-native-confirmed-import-v1-native-import-runner"),
-    "_write_agent_config_file": ("ENGINE_CONFIG_STATE", "config_v1", "control-agent-config-file-write"),
-    "_revert_agent_config_file": ("ENGINE_CONFIG_STATE", "config_v1", "control-agent-config-file-revert"),
+    "_agent_config_process_lock": ("ENGINE_CONFIG_STATE", "config_v1", "reviewed-wave27-control-agent-config-state"),
+    "_agent_config_paths": ("ENGINE_CONFIG_STATE", "config_v1", "reviewed-wave27-control-agent-config-state"),
+    "_config_revision": ("ENGINE_CONFIG_STATE", "config_v1", "reviewed-wave27-control-agent-config-state"),
+    "_validate_beets_config_candidate": ("ENGINE_NATIVE_READ_ONLY", "config_v1", "reviewed-wave27-control-agent-config-state"),
+    "_write_temp_config": ("ENGINE_CONFIG_STATE", "config_v1", "reviewed-wave27-control-agent-config-state"),
+    "_read_agent_config_file": ("ENGINE_NATIVE_READ_ONLY", "config_v1", "reviewed-wave27-control-agent-config-state"),
+    "_write_agent_config_file": ("ENGINE_CONFIG_STATE", "config_v1", "reviewed-wave27-control-agent-config-state"),
+    "_revert_agent_config_file": ("ENGINE_CONFIG_STATE", "config_v1", "reviewed-wave27-control-agent-config-state"),
     "_playlist_import_write_state": ("ENGINE_CONFIG_STATE", "config_v1", "playlist-import-job-state"),
     "_beet_version_snapshot": ("ENGINE_NATIVE_READ_ONLY", "infra_v1", "beet-version-diagnostic"),
     "_cleanup_broken_managed_runtime": ("NON_MEDIA_FILESYSTEM", "infra_v1", "control-agent-runtime-cleanup"),
@@ -362,6 +407,8 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
             return "STAGING_ONLY", "", "slskd-staging-download"
         if file == "backend/beets_config.py":
             return "CONFIG_STATE", "", "beets-config-state"
+        if file == "backend/web_manager_config_store.py":
+            return "CONFIG_STATE", "config_v1", "reviewed-wave27-web-manager-config-store"
         if file == "backend/security.py":
             return "NON_MEDIA_FILESYSTEM", "", "security-module"
         if file == "backend/ai_batch_state_store.py":
@@ -371,6 +418,19 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
         return "NEEDS_REVIEW", "", "backend-support-module-not-individually-reviewed"
 
     # 9. app.py (Web Manager main module)
+    if "beets_client.save_config" in text or "beets_client.revert_config" in text:
+        return "ENGINE_CONFIG_STATE", "config_v1", "reviewed-wave27-control-agent-config-state"
+    if "beets_client.run_command" in text and ("\"mbsubmit\"" in text or "'mbsubmit'" in text):
+        return "ENGINE_NATIVE_READ_ONLY", "submission_v1", "reviewed-wave27-mbsubmit-read-only"
+    if "beets_client.repair_album_genre" in text or "beets_client.plan_album_genre_repair" in text or "beets_client.apply_album_genre_repair" in text or "beets_client.rollback_album_genre_repair" in text:
+        return "CONTROLLED_MEDIA_MUTATION", "genre_repair_v1", "reviewed-wave27-genre-repair-controlled"
+    if "beets_client.update_item_metadata" in text or "beets_client.plan_item_metadata" in text or "beets_client.apply_item_metadata" in text or "beets_client.rollback_item_metadata" in text:
+        return "CONTROLLED_MEDIA_MUTATION", "item_metadata_repair_v1", "reviewed-wave27-beetsclient-item-metadata-repair"
+    if "beets_client.update_album_metadata" in text or "beets_client.plan_album_metadata" in text or "beets_client.apply_album_metadata" in text or "beets_client.rollback_album_metadata" in text:
+        return "CONTROLLED_MEDIA_MUTATION", "album_metadata_repair_v1", "reviewed-wave27-beetsclient-album-metadata-repair"
+    if "beets_client.relocate_album" in text or "beets_client.plan_album_relocation" in text or "beets_client.apply_album_relocation" in text or "beets_client.rollback_album_relocation" in text:
+        return "CONTROLLED_MEDIA_MUTATION", "album_relocation_v1", "reviewed-wave27-beetsclient-album-relocation"
+
     mapped = _APP_FUNCTION_CLASSIFICATION.get(func)
     if mapped:
         classification, family, rule = mapped
@@ -466,7 +526,7 @@ def _determine_domain(sink: MutationSink, classification: str, family: str, rule
     # 2. Album Metadata & Identity
     if "attach_recording" in func:
         return "import_reconciliation"
-    if family in ("album_metadata_repair_v1", "album_mb_track_repair_v1") or "mbid" in rule or "tag" in rule:
+    if family in ("album_metadata_repair_v1", "album_mb_track_repair_v1", "item_metadata_repair_v1", "genre_repair_v1") or "mbid" in rule or "tag" in rule:
         return "album_metadata"
     if any(k in func for k in ("fix_metadata", "retag", "stamp_album", "apply_genre")) and "ytdlp" not in func and "cookie" not in text:
         return "album_metadata"

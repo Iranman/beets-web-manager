@@ -344,7 +344,15 @@ def discover_sinks_in_file(path: Path, rel_path: str) -> List[MutationSink]:
                 "subprocess.check_call", "subprocess.check_output",
                 "beets_client.run_command", "beets_client.reimport_source",
                 "beets_client.reimport_disk", "beets_client.modify", "beets_client.retag",
-                "beets_client.write_tags",
+                "beets_client.write_tags", "beets_client.save_config", "beets_client.revert_config",
+                "beets_client.plan_album_relocation", "beets_client.apply_album_relocation",
+                "beets_client.rollback_album_relocation", "beets_client.relocate_album",
+                "beets_client.plan_album_metadata", "beets_client.apply_album_metadata",
+                "beets_client.rollback_album_metadata", "beets_client.update_album_metadata",
+                "beets_client.plan_item_metadata", "beets_client.apply_item_metadata",
+                "beets_client.rollback_item_metadata", "beets_client.update_item_metadata",
+                "beets_client.plan_album_genre_repair", "beets_client.apply_album_genre_repair",
+                "beets_client.rollback_album_genre_repair", "beets_client.repair_album_genre",
                 # Wave 26 correction: beets_client.move_file/delete_file are
                 # GENERIC engine-side filesystem mutation passthroughs
                 # (POST /files/move, /files/delete) -- exactly as

@@ -140,6 +140,10 @@ class _AttachIntegrityTestCase(unittest.TestCase):
         self.engine_apply_fail = set()
         self.engine_apply_raise = {}
         self._track_repair_payloads = []
+        self.rollback_metadata_results = {}
+        self.relocate_results = {}
+        self.item_metadata_calls = []
+        self.relocate_calls = []
         self.addCleanup(APP._ATTACH_RECORDING_RESERVED_ITEMS.clear)
 
         def get_item(iid):
@@ -212,6 +216,26 @@ class _AttachIntegrityTestCase(unittest.TestCase):
                 item.mb_releasegroupid = new_rgid
             return {"ok": True}
 
+        def fake_update_item_metadata(item_id, fields, **kwargs):
+            self.item_metadata_calls.append((item_id, dict(fields or {}), dict(kwargs)))
+            result = self.rollback_metadata_results.get(item_id)
+            if isinstance(result, BaseException):
+                raise result
+            if result is not None:
+                return result
+            item = self.items.get(item_id)
+            if item is not None:
+                for key, value in (fields or {}).items():
+                    setattr(item, key, value)
+            return {"ok": True}
+
+        def fake_relocate_album(album_id, *args, **kwargs):
+            self.relocate_calls.append((album_id, dict(kwargs)))
+            result = self.relocate_results.get(album_id)
+            if isinstance(result, BaseException):
+                raise result
+            return result if result is not None else {"ok": True}
+
         self._patch(mock.patch.object(APP.lib, "get_item", side_effect=get_item))
         self._patch(mock.patch.object(APP, "_acoustid_lookup_cached", side_effect=acoustid_lookup))
         self._patch(mock.patch.object(APP, "_mb_recording_search", side_effect=mb_search))
@@ -219,6 +243,8 @@ class _AttachIntegrityTestCase(unittest.TestCase):
         self._patch(mock.patch.object(APP, "_beet_run", side_effect=fake_beet_run))
         self._patch(mock.patch.object(APP.beets_client, "plan_album_mb_track_repair", side_effect=fake_plan_track_repair))
         self._patch(mock.patch.object(APP.beets_client, "apply_album_mb_track_repair", side_effect=fake_apply_track_repair))
+        self._patch(mock.patch.object(APP.beets_client, "update_item_metadata", side_effect=fake_update_item_metadata))
+        self._patch(mock.patch.object(APP.beets_client, "relocate_album", side_effect=fake_relocate_album))
         self._patch(mock.patch.object(APP, "_invalidate_lib_cache", return_value=None))
         self._patch(mock.patch.object(APP, "_trigger_plex_refresh", return_value=None))
 
@@ -471,30 +497,33 @@ class SubprocessOutcomeTests(_AttachIntegrityTestCase):
                 self.assertNotIn("Bearer", rendered)
 
     def test_rollback_stage_outcomes_never_report_success(self):
-        stages = ["modify", "write", "move"]
-        outcomes = [-9, 124, 1]
-        for stage_idx, stage in enumerate(stages):
-            for rc_idx, rc in enumerate(outcomes):
-                iid = 41000 + stage_idx * 10 + rc_idx
-                with self.subTest(stage=stage, rc=rc):
-                    self.add_item(iid)
-                    resp = self._post_safe(iid)
-                    self.assertEqual(resp.status_code, 200)
-                    audit_id = resp.get_json()["audit_id"]
-                    job = _wait_job(resp.get_json()["job_id"])
-                    self.assertEqual(job.status, "success")
+        outcomes = [
+            {"ok": False, "error": "dict false Authorization: Bearer rollback-secret"},
+            {},
+            RuntimeError("exception Authorization: Bearer rollback-secret"),
+        ]
+        for idx, outcome in enumerate(outcomes):
+            iid = 41000 + idx
+            with self.subTest(outcome=idx):
+                self.add_item(iid)
+                resp = self._post_safe(iid)
+                self.assertEqual(resp.status_code, 200)
+                audit_id = resp.get_json()["audit_id"]
+                job = _wait_job(resp.get_json()["job_id"])
+                self.assertEqual(job.status, "success")
 
-                    self.stage_rc[(iid, stage)] = rc
-                    rb_resp = self.client.post(f"/api/transactions/{audit_id}/rollback")
-                    self.assertEqual(rb_resp.status_code, 200)
-                    rb_job = _wait_job(rb_resp.get_json()["job_id"])
-                    self.assertIn(rb_job.status, ("success", "failed"))
+                self.rollback_metadata_results[iid] = outcome
+                rb_resp = self.client.post(f"/api/transactions/{audit_id}/rollback")
+                self.assertEqual(rb_resp.status_code, 200)
+                rb_job = _wait_job(rb_resp.get_json()["job_id"])
+                self.assertIn(rb_job.status, ("success", "failed"))
 
-                    tx = APP.transactions.get(audit_id)
-                    self.assertNotEqual(tx["status"], "Rolled Back")
+                tx = APP.transactions.get(audit_id)
+                self.assertNotEqual(tx["status"], "Rolled Back")
+                self.assertEqual(self._stages_called_for(iid), [])
 
-                    rendered = json.dumps(tx)
-                    self.assertNotIn("subprocess-stderr-secret", rendered)
+                rendered = json.dumps(tx)
+                self.assertNotIn("rollback-secret", rendered)
 
     def test_rollback_mbsync_failure_with_prior_recording_id_fails_restore(self):
         # Only reachable when the rollback target mb_trackid is non-empty --
@@ -513,12 +542,13 @@ class SubprocessOutcomeTests(_AttachIntegrityTestCase):
         tx = APP.transactions.get(audit_id)
         self.assertEqual(tx["rollback"]["operations"][0]["fields"]["mb_trackid"], PRIOR_RECORDING_ID)
 
-        self.stage_rc[(iid, "mbsync")] = 1
+        self.rollback_metadata_results[iid] = {"ok": False, "error": "identity restore failed"}
         rb_resp = self.client.post(f"/api/transactions/{audit_id}/rollback")
         _wait_job(rb_resp.get_json()["job_id"])
         tx_after = APP.transactions.get(audit_id)
         self.assertNotEqual(tx_after["status"], "Rolled Back")
-        self.assertIn("mbsync", self._stages_called_for(iid)[-3:])
+        self.assertEqual(self._stages_called_for(iid), [])
+        self.assertTrue(any(call[0] == iid and call[2].get("force_write_tags") for call in self.item_metadata_calls))
 
 
 # ── Step 14: persisted-state verification ─────────────────────────────────────
@@ -556,6 +586,21 @@ class PersistedStateVerificationTests(_AttachIntegrityTestCase):
         rendered = json.dumps(tx)
         self.assertNotIn('"status": "Completed"', rendered)
 
+    def test_c_relocation_dict_failure_fails_before_completed_status(self):
+        iid = 43004
+        self.add_item(iid, album_id=77)
+        self.relocate_results[77] = {"ok": False, "error": "relocation failed"}
+        resp = self._post_safe(iid)
+        self.assertEqual(resp.status_code, 200, resp.get_json())
+        audit_id = resp.get_json()["audit_id"]
+        job = _wait_job(resp.get_json()["job_id"])
+        self.assertEqual(job.status, "failed")
+
+        tx = APP.transactions.get(audit_id)
+        self.assertEqual(tx["status"], "Failed")
+        self.assertEqual(self.relocate_calls[-1][0], 77)
+        rendered = json.dumps(tx)
+        self.assertNotIn("Recording ID attached and item synced/moved.", rendered)
     def test_c_different_release_id_persisted_completes_but_audits_truthfully(self):
         iid = 43003
         self.add_item(iid)
