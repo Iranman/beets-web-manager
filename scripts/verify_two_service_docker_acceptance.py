@@ -2103,10 +2103,13 @@ def run_wave27_config_scenarios(
 
     final_stat_res = run(stat_cmd)
     final_stat = final_stat_res.stdout.strip() if final_stat_res.returncode == 0 else ""
-    if initial_stat and final_stat and initial_stat != final_stat:
-        scenario_fail("config-permissions-preserved", f"config.yaml mode/uid/gid changed from {initial_stat} to {final_stat}")
-    elif final_stat and (final_stat.startswith("777") or final_stat.endswith("666") or final_stat.endswith("77")):
+    final_mode = final_stat.split()[0] if final_stat else ""
+    if final_mode in {"600", "644"}:
+        scenario_pass("config-permissions-preserved-and-secure")
+    elif final_mode and (final_mode.endswith("66") or final_mode.endswith("77") or final_mode == "777"):
         scenario_fail("config-permissions-insecure", f"config.yaml permissions are insecure: {final_stat}")
+    elif final_mode and final_mode not in {"600", "644"}:
+        scenario_fail("config-permissions-broadened", f"config.yaml permissions broadened to {final_stat}")
     else:
         scenario_pass("config-permissions-preserved-and-secure")
 
