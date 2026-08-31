@@ -1930,12 +1930,6 @@ def run_wave27_config_scenarios(
     print("==> [Wave27] Engine config CAS, real Beets validation, rollback, and durability...")
     config_path = config_dir / "config.yaml"
 
-    def read_config_text() -> str:
-        res = run(["docker", "exec", engine_container, "cat", "/config/config.yaml"])
-        if res.returncode == 0:
-            return res.stdout
-        raise RuntimeError(f"failed to read /config/config.yaml via container exec: {res.stderr}")
-
     def read_config_bytes() -> bytes:
         cmd = [
             "docker", "exec", engine_container, "python3", "-c",
@@ -1944,7 +1938,20 @@ def run_wave27_config_scenarios(
         res = run(cmd)
         if res.returncode == 0:
             return base64.b64decode(res.stdout.strip())
-        raise RuntimeError(f"failed to read /config/config.yaml bytes via container exec: {res.stderr}")
+
+        with tempfile.NamedTemporaryFile(delete=False) as tmp:
+            tmp_path = Path(tmp.name)
+        try:
+            cp_res = run(["docker", "cp", f"{engine_container}:/config/config.yaml", str(tmp_path)])
+            if cp_res.returncode == 0:
+                return tmp_path.read_bytes()
+            raise RuntimeError(f"failed to read /config/config.yaml via exec or cp: exec={res.stderr}, cp={cp_res.stderr}")
+        finally:
+            if tmp_path.exists():
+                tmp_path.unlink()
+
+    def read_config_text() -> str:
+        return read_config_bytes().decode("utf-8", errors="replace")
 
     stat_cmd = ["docker", "exec", engine_container, "stat", "-c", "%a %u %g", "/config/config.yaml"]
     initial_stat_res = run(stat_cmd)
