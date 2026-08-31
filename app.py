@@ -28477,9 +28477,6 @@ def library_confirm_artist_alias():
     job = jobs.start_python(_do, label=f"Confirm artist alias: {source} -> {canonical}")
     return jsonify({"ok": True, "job_id": job.job_id})
 
-    job = jobs.start_python(_do, label=f"Confirm artist alias: {source} -> {canonical}")
-    return jsonify({"ok": True, "job_id": job.job_id})
-
 
 def _run_normalize_artists_if_needed():
     """Normalize albumartist fields in the entire library:

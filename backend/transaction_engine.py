@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import csv
+import datetime
 import errno
 import hashlib
 import io
@@ -6041,9 +6042,10 @@ def create_artist_folder_reconcile_plan(
         dst_identity = _derive_artist_folder_identity(dst, lib_db) if is_merge else {"ids": set(), "album_count": 0}
         caller_mbid = str(cand.get("source_mbid") or cand.get("target_mbid") or cand.get("mbid") or "").strip().lower()
         fingerprint_confirmed = cand.get("fingerprint_confirmed") is True
-
+        recording_mbids = _extract_recording_mbids(cand, src, lib_db)
         eligible, resolved_mbid, reason = _artist_folder_identity_decision(
-            src_identity, dst_identity, is_merge, caller_mbid, fingerprint_confirmed, db_path=lib_db,
+            src_identity, dst_identity, is_merge, caller_mbid, fingerprint_confirmed,
+            db_path=lib_db, recording_mbids=recording_mbids,
         )
         if not eligible:
             requires_review.append({
@@ -6065,11 +6067,15 @@ def create_artist_folder_reconcile_plan(
             "target_name": cand.get("target_name") or dst.name,
             "resolved_mbid": resolved_mbid,
             "identity_evidence": {
+                "canonical_artist_mbid": resolved_mbid,
                 "source_established_ids": sorted(src_identity["ids"]),
                 "target_established_ids": sorted(dst_identity["ids"]),
                 "caller_mbid": caller_mbid,
+                "recording_mbids": recording_mbids,
                 "fingerprint_confirmed": fingerprint_confirmed,
                 "is_merge": is_merge,
+                "verification_source": "musicbrainz_recording_artist_credit" if resolved_mbid and not src_identity["ids"] and not dst_identity["ids"] else "established_db_state",
+                "verified_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             },
         })
 
@@ -6360,10 +6366,12 @@ def execute_artist_folder_reconcile_apply(
                         dst_id_now = _derive_artist_folder_identity(dst_p, lib_db) if (dst_p.exists() and dst_p.is_dir()) else {"ids": set(), "album_count": 0}
                         caller_mbid_now = cand.get("identity_evidence", {}).get("caller_mbid") or ""
                         fp_confirmed_now = cand.get("identity_evidence", {}).get("fingerprint_confirmed") is True
+                        rec_mbids_now = cand.get("identity_evidence", {}).get("recording_mbids") or []
                         is_merge_now = dst_p.exists() and dst_p.is_dir() and dst_p.resolve(strict=False) != src_p.resolve(strict=False)
                         
                         eligible_now, mbid_now, reason_now = _artist_folder_identity_decision(
-                            src_id_now, dst_id_now, is_merge_now, caller_mbid_now, fp_confirmed_now, db_path=lib_db
+                            src_id_now, dst_id_now, is_merge_now, caller_mbid_now, fp_confirmed_now,
+                            db_path=lib_db, recording_mbids=rec_mbids_now
                         )
                         if not eligible_now or mbid_now != cand.get("resolved_mbid"):
                             return _fail(f"Artist folder identity changed since Plan for candidate {cand.get('source_name')}.", "artist_reconcile_identity_changed_at_apply")
@@ -6994,36 +7002,85 @@ def _derive_artist_folder_identity(folder_path: Path, lib_db: str) -> Dict[str, 
     return result
 
 
-def _verify_mb_artist_id_engine_side(mbid: str, db_path: Optional[str] = None) -> bool:
-    """Verifies whether an artist MBID is an engine-authoritative canonical MusicBrainz Artist ID.
+def _extract_recording_mbids(cand: Dict[str, Any], src_path: Path, db_path: Optional[str] = None) -> List[str]:
+    """Extracts MusicBrainz Recording IDs from candidate payload and local DB items under src_path."""
+    rec_ids: set = set()
+    raw = cand.get("recording_mbids") or cand.get("recording_mbid") or cand.get("mb_trackid") or cand.get("recording_ids") or []
+    if isinstance(raw, str):
+        raw = [raw]
+    for item in raw:
+        s = str(item or "").strip().lower()
+        if _MB_UUID_RE.match(s):
+            rec_ids.add(s)
 
-    Checks:
-    1. Must match UUID regex.
-    2. Checks if MBID is established in the local Beets database.
-    3. If not present in local DB, validates against engine verification policy.
-    """
-    if not mbid or not _MB_UUID_RE.match(mbid):
-        return False
     lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB", "")
-    if lib_db and Path(lib_db).exists():
+    if lib_db and Path(lib_db).exists() and src_path.exists():
         try:
             con = sqlite3.connect(lib_db, timeout=5)
+            con.row_factory = sqlite3.Row
             try:
-                row = con.execute("SELECT 1 FROM albums WHERE LOWER(mb_albumartistid) = LOWER(?) LIMIT 1", (mbid,)).fetchone()
-                if row:
-                    return True
-                row_item = con.execute("SELECT 1 FROM items WHERE LOWER(mb_artistid) = LOWER(?) OR LOWER(mb_albumartistid) = LOWER(?) LIMIT 1", (mbid, mbid)).fetchone()
-                if row_item:
-                    return True
+                prefix = str(src_path.resolve())
+                rows = _rows_by_path_prefix(
+                    con, "items", "DISTINCT mb_trackid, path", "path", prefix, path_result_col="path"
+                )
+                for r in rows:
+                    mb_tid = str(r["mb_trackid"] or "").strip().lower()
+                    if _MB_UUID_RE.match(mb_tid):
+                        rec_ids.add(mb_tid)
             finally:
                 con.close()
-        except Exception as ex:
-            LOG.warning("Engine MBID DB verification exception: %s", ex)
+        except Exception:
+            pass
 
-    if os.environ.get("TEST_VERIFY_MB_ARTIST_FAIL") == "1":
+    return sorted(rec_ids)
+
+
+def _verify_mb_artist_recording_credit(
+    caller_mbid: str,
+    recording_mbids: Optional[List[str]] = None,
+    mb_verifier: Optional[Callable[[str, List[str]], bool]] = None,
+) -> bool:
+    """Verifies engine-side whether caller_mbid is authorized as an artist credit
+    for candidate recording(s) using MusicBrainz Recording artist-credit evidence.
+
+    Returns True ONLY IF an authoritative MusicBrainz Recording's artist-credit
+    includes caller_mbid.
+
+    Does NOT accept:
+    - UUID syntax alone
+    - "MBID exists somewhere in local DB"
+    - GET artist/<id> existence without recording relationship proof
+    - Test environment variable backdoors
+    """
+    if not caller_mbid or not _MB_UUID_RE.match(caller_mbid):
         return False
-    if os.environ.get("TEST_VERIFY_MB_ARTIST_SUCCESS") == "1":
-        return True
+
+    if mb_verifier is not None:
+        return bool(mb_verifier(caller_mbid, recording_mbids or []))
+
+    if not recording_mbids:
+        return False
+
+    try:
+        from helpers_mb import _fetch_mb_recording_details, _MB_UUID_RE as HELPERS_UUID_RE
+        target_mbid = caller_mbid.lower()
+        for rec_id in recording_mbids:
+            if not rec_id or not HELPERS_UUID_RE.match(rec_id):
+                continue
+            details = _fetch_mb_recording_details(rec_id)
+            if not details or not isinstance(details, dict):
+                continue
+            rec_artist_id = str(details.get("mb_artistid") or "").lower()
+            if rec_artist_id == target_mbid:
+                return True
+            for rel in details.get("linked_releases") or []:
+                rel_artist = str(rel.get("mb_artistid") or rel.get("artist_id") or "").lower()
+                if rel_artist == target_mbid:
+                    return True
+    except Exception as ex:
+        LOG.warning("MusicBrainz recording credit verification exception: %s", ex)
+        return False
+
     return False
 
 
@@ -7034,6 +7091,8 @@ def _artist_folder_identity_decision(
     caller_mbid: str,
     fingerprint_confirmed: bool,
     db_path: Optional[str] = None,
+    recording_mbids: Optional[List[str]] = None,
+    mb_verifier: Optional[Callable[[str, List[str]], bool]] = None,
 ) -> Tuple[bool, str, str]:
     """Returns (eligible, resolved_mbid, reason_code_if_not_eligible).
 
@@ -7041,7 +7100,7 @@ def _artist_folder_identity_decision(
     - Fingerprint/AcoustID evidence is recording evidence. It may SUPPORT identity
       verification; it MAY NOT AUTHORIZE an artist identity mutation by itself.
     - An identity-changing artist merge requires a canonical MusicBrainz Artist ID
-      established in DB state or verified engine-side.
+      established in DB state or verified via MusicBrainz Recording artist-credit evidence.
     - CASE A: source MBID == destination MBID -> eligible.
     - CASE B: source MBID != destination MBID -> hard conflict, not eligible.
     - CASE C: source has MBID, destination blank -> source MBID is canonical;
@@ -7049,8 +7108,8 @@ def _artist_folder_identity_decision(
     - CASE D: source blank, destination has MBID -> destination MBID is canonical;
               caller MBID (if sent) must match destination MBID.
     - CASE E: source blank, destination blank, fingerprint agrees, caller sends MBID ->
-              requires engine-side MusicBrainz verification of caller MBID.
-              If engine-verified: eligible. Otherwise: review required.
+              requires MusicBrainz recording-to-artist credit verification.
+              If verified: eligible. Otherwise: review required.
     - CASE F: source blank, destination blank, fingerprint agrees, no canonical MBID ->
               review required.
     - CASE G: AI / fuzzy-name agreement only -> review required.
@@ -7085,7 +7144,7 @@ def _artist_folder_identity_decision(
         # CASES E, F, G: Neither side has an established MBID in the DB
         if not src_id and not dst_id:
             if fingerprint_confirmed and caller_mbid:
-                if _verify_mb_artist_id_engine_side(caller_mbid, db_path=db_path):
+                if _verify_mb_artist_recording_credit(caller_mbid, recording_mbids, mb_verifier):
                     return True, caller_mbid, ""
                 return False, "", "artist_reconcile_requires_review"
             return False, "", "artist_reconcile_requires_review"
@@ -7096,8 +7155,10 @@ def _artist_folder_identity_decision(
             return False, "", "artist_reconcile_identity_conflict"
         return True, src_id, ""
     else:
-        if caller_mbid and _verify_mb_artist_id_engine_side(caller_mbid, db_path=db_path):
-            return True, caller_mbid, ""
+        if caller_mbid:
+            if _verify_mb_artist_recording_credit(caller_mbid, recording_mbids, mb_verifier):
+                return True, caller_mbid, ""
+            return False, "", "artist_reconcile_requires_review"
         return True, "", ""
 
 

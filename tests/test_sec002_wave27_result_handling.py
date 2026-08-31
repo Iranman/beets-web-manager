@@ -459,52 +459,110 @@ class CompensatingMetadataRollbackTests(unittest.TestCase):
 
 
 class ArtistTrustTierRegressionTests(unittest.TestCase):
-    def test_fingerprint_only_without_mbid_requires_review(self):
+    def test_a_caller_mbid_exists_elsewhere_in_db_without_recording_proof_requires_review(self):
+        """Case A (Section 9): Both folders blank, fingerprint true, caller MBID exists elsewhere in local DB
+        but no recording->artist proof -> REVIEW REQUIRED."""
         src_id = {"ids": set(), "album_count": 0}
         dst_id = {"ids": set(), "album_count": 0}
-        eligible, mbid, reason = txn._artist_folder_identity_decision(src_id, dst_id, is_merge=True, caller_mbid="", fingerprint_confirmed=True)
+        caller_mbid = "89ad4ac3-39f7-470e-963a-56509c546377"
+        def _no_recording_proof_verifier(mbid, rec_ids):
+            return False
+        eligible, mbid, reason = txn._artist_folder_identity_decision(
+            src_id, dst_id, is_merge=True, caller_mbid=caller_mbid, fingerprint_confirmed=True, mb_verifier=_no_recording_proof_verifier
+        )
         self.assertFalse(eligible)
         self.assertEqual(reason, "artist_reconcile_requires_review")
 
-    def test_fingerprint_with_caller_mbid_unverified_requires_review(self):
+    def test_b_musicbrainz_artist_exists_without_recording_proof_requires_review(self):
+        """Case B (Section 9): Both folders blank, fingerprint true, caller MBID valid UUID,
+        MusicBrainz Artist itself exists but no recording->artist proof -> REVIEW REQUIRED."""
         src_id = {"ids": set(), "album_count": 0}
         dst_id = {"ids": set(), "album_count": 0}
-        uuid_str = "89ad4ac3-39f7-470e-963a-56509c546377"
-        with mock.patch.dict("os.environ", {"TEST_VERIFY_MB_ARTIST_FAIL": "1"}):
-            eligible, mbid, reason = txn._artist_folder_identity_decision(src_id, dst_id, is_merge=True, caller_mbid=uuid_str, fingerprint_confirmed=True)
+        caller_mbid = "89ad4ac3-39f7-470e-963a-56509c546377"
+        def _no_recording_proof_verifier(mbid, rec_ids):
+            return False
+        eligible, mbid, reason = txn._artist_folder_identity_decision(
+            src_id, dst_id, is_merge=True, caller_mbid=caller_mbid, fingerprint_confirmed=True, mb_verifier=_no_recording_proof_verifier
+        )
         self.assertFalse(eligible)
         self.assertEqual(reason, "artist_reconcile_requires_review")
 
-    def test_ai_fuzzy_only_requires_review(self):
+    def test_c_recording_artist_credit_contains_caller_mbid_eligible(self):
+        """Case C (Section 9): Fingerprint recording resolves to MusicBrainz Recording whose artist-credit
+        contains caller MBID -> ELIGIBLE."""
         src_id = {"ids": set(), "album_count": 0}
         dst_id = {"ids": set(), "album_count": 0}
-        eligible, mbid, reason = txn._artist_folder_identity_decision(src_id, dst_id, is_merge=True, caller_mbid="", fingerprint_confirmed=False)
+        caller_mbid = "89ad4ac3-39f7-470e-963a-56509c546377"
+        def _matching_verifier(mbid, rec_ids):
+            return mbid == caller_mbid and bool(rec_ids)
+        eligible, mbid, reason = txn._artist_folder_identity_decision(
+            src_id, dst_id, is_merge=True, caller_mbid=caller_mbid, fingerprint_confirmed=True,
+            recording_mbids=["11111111-1111-1111-1111-111111111111"], mb_verifier=_matching_verifier
+        )
+        self.assertTrue(eligible)
+        self.assertEqual(mbid, caller_mbid)
+        self.assertEqual(reason, "")
+
+    def test_d_recording_artist_credit_differs_requires_review(self):
+        """Case D (Section 9): Fingerprint recording resolves to different Artist MBID -> REVIEW REQUIRED."""
+        src_id = {"ids": set(), "album_count": 0}
+        dst_id = {"ids": set(), "album_count": 0}
+        caller_mbid = "89ad4ac3-39f7-470e-963a-56509c546377"
+        def _differing_verifier(mbid, rec_ids):
+            return False
+        eligible, mbid, reason = txn._artist_folder_identity_decision(
+            src_id, dst_id, is_merge=True, caller_mbid=caller_mbid, fingerprint_confirmed=True,
+            recording_mbids=["11111111-1111-1111-1111-111111111111"], mb_verifier=_differing_verifier
+        )
         self.assertFalse(eligible)
         self.assertEqual(reason, "artist_reconcile_requires_review")
 
-    def test_conflicting_established_mbids_returns_conflict(self):
-        src_id = {"ids": {"89ad4ac3-39f7-470e-963a-56509c546377"}, "album_count": 1}
-        dst_id = {"ids": {"00000000-0000-0000-0000-000000000000"}, "album_count": 1}
-        eligible, mbid, reason = txn._artist_folder_identity_decision(src_id, dst_id, is_merge=True, caller_mbid="", fingerprint_confirmed=True)
+    def test_e_musicbrainz_lookup_unavailable_fails_closed(self):
+        """Case E (Section 9): MusicBrainz lookup unavailable -> fail closed -> REVIEW REQUIRED."""
+        src_id = {"ids": set(), "album_count": 0}
+        dst_id = {"ids": set(), "album_count": 0}
+        caller_mbid = "89ad4ac3-39f7-470e-963a-56509c546377"
+        with mock.patch("helpers_mb._fetch_mb_recording_details", side_effect=Exception("Network down")):
+            eligible, mbid, reason = txn._artist_folder_identity_decision(
+                src_id, dst_id, is_merge=True, caller_mbid=caller_mbid, fingerprint_confirmed=True,
+                recording_mbids=["11111111-1111-1111-1111-111111111111"]
+            )
         self.assertFalse(eligible)
-        self.assertEqual(reason, "artist_reconcile_identity_conflict")
+        self.assertEqual(reason, "artist_reconcile_requires_review")
 
-    def test_matching_established_mbids_allowed(self):
+    def test_f_ai_only_requires_review(self):
+        """Case F (Section 9): AI only (fingerprint_confirmed=False) -> REVIEW REQUIRED."""
+        src_id = {"ids": set(), "album_count": 0}
+        dst_id = {"ids": set(), "album_count": 0}
+        caller_mbid = "89ad4ac3-39f7-470e-963a-56509c546377"
+        eligible, mbid, reason = txn._artist_folder_identity_decision(
+            src_id, dst_id, is_merge=True, caller_mbid=caller_mbid, fingerprint_confirmed=False
+        )
+        self.assertFalse(eligible)
+        self.assertEqual(reason, "artist_reconcile_requires_review")
+
+    def test_g_matching_established_local_mbids_allowed_without_network(self):
+        """Case G (Section 9): Matching established local MBIDs -> eligible without network dependency."""
         uuid_str = "89ad4ac3-39f7-470e-963a-56509c546377"
         src_id = {"ids": {uuid_str}, "album_count": 1}
         dst_id = {"ids": {uuid_str}, "album_count": 1}
-        eligible, mbid, reason = txn._artist_folder_identity_decision(src_id, dst_id, is_merge=True, caller_mbid="", fingerprint_confirmed=False)
+        eligible, mbid, reason = txn._artist_folder_identity_decision(
+            src_id, dst_id, is_merge=True, caller_mbid="", fingerprint_confirmed=False
+        )
         self.assertTrue(eligible)
         self.assertEqual(mbid, uuid_str)
 
-    def test_established_and_engine_verified_mbid_allowed(self):
-        uuid_str = "89ad4ac3-39f7-470e-963a-56509c546377"
+    def test_pure_path_rename_without_caller_mbid(self):
+        """Pure path rename test (Section 12): is_merge=False, src_id blank, no caller_mbid
+        -> eligible with resolved_mbid="" (path rename only, no artist MBID mutation)."""
         src_id = {"ids": set(), "album_count": 0}
         dst_id = {"ids": set(), "album_count": 0}
-        with mock.patch.dict("os.environ", {"TEST_VERIFY_MB_ARTIST_SUCCESS": "1"}):
-            eligible, mbid, reason = txn._artist_folder_identity_decision(src_id, dst_id, is_merge=True, caller_mbid=uuid_str, fingerprint_confirmed=True)
+        eligible, mbid, reason = txn._artist_folder_identity_decision(
+            src_id, dst_id, is_merge=False, caller_mbid="", fingerprint_confirmed=False
+        )
         self.assertTrue(eligible)
-        self.assertEqual(mbid, uuid_str)
+        self.assertEqual(mbid, "")
+        self.assertEqual(reason, "")
 
 
 if __name__ == "__main__":

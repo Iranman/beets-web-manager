@@ -70,10 +70,9 @@ class Wave21BaseTest(unittest.TestCase):
         self.addCleanup(self._tmpdir.cleanup)
         self.tmp_path = Path(self._tmpdir.name)
 
-        os.environ["TEST_VERIFY_MB_ARTIST_SUCCESS"] = "1"
-        def _restore_env():
-            os.environ.pop("TEST_VERIFY_MB_ARTIST_SUCCESS", None)
-        self.addCleanup(_restore_env)
+        mb_patcher = mock.patch("backend.transaction_engine._verify_mb_artist_recording_credit", return_value=True)
+        mb_patcher.start()
+        self.addCleanup(mb_patcher.stop)
 
         self.music_root = self.tmp_path / "music"
         self.music_root.mkdir()
