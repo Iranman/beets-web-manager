@@ -24,7 +24,7 @@ class AuthTokenPersistenceTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             token_file = Path(tmpdir) / "subfolder" / ".auth_token"
-            with mock.patch.object(app_module, "_GENERATED_AUTH_TOKEN_FILE", token_file):
+            with mock.patch.object(app_module, "WEB_MANAGER_DATA_DIR", Path(tmpdir)), mock.patch.object(app_module, "_GENERATED_AUTH_TOKEN_FILE", token_file):
                 test_token = "a_test_token_with_32_characters_minimum_entropy_12345"
                 app_module._persist_generated_auth_token(test_token)
 
@@ -37,7 +37,7 @@ class AuthTokenPersistenceTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             token_file = Path(tmpdir) / ".auth_token"
-            with mock.patch.object(app_module, "_GENERATED_AUTH_TOKEN_FILE", token_file):
+            with mock.patch.object(app_module, "WEB_MANAGER_DATA_DIR", Path(tmpdir)), mock.patch.object(app_module, "_GENERATED_AUTH_TOKEN_FILE", token_file):
                 app_module._persist_generated_auth_token("a_test_token_with_32_characters_minimum_entropy")
                 mode = stat.S_IMODE(token_file.stat().st_mode)
                 self.assertEqual(mode, 0o600)
@@ -48,7 +48,7 @@ class AuthTokenPersistenceTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             token_file = Path(tmpdir) / ".auth_token"
-            with mock.patch.object(app_module, "_GENERATED_AUTH_TOKEN_FILE", token_file), \
+            with mock.patch.object(app_module, "WEB_MANAGER_DATA_DIR", Path(tmpdir)), mock.patch.object(app_module, "_GENERATED_AUTH_TOKEN_FILE", token_file), \
                  mock.patch("os.fsync", side_effect=OSError("disk full")):
                 app_module._persist_generated_auth_token("a_test_token_with_32_characters_minimum_entropy")
 
@@ -65,7 +65,7 @@ class AuthTokenPersistenceTests(unittest.TestCase):
             original_token = "original_token_value_32_chars_long_entropy_test_string"
             token_file.write_text(original_token, encoding="utf-8")
 
-            with mock.patch.object(app_module, "_GENERATED_AUTH_TOKEN_FILE", token_file), \
+            with mock.patch.object(app_module, "WEB_MANAGER_DATA_DIR", Path(tmpdir)), mock.patch.object(app_module, "_GENERATED_AUTH_TOKEN_FILE", token_file), \
                  mock.patch("os.fsync", side_effect=OSError("disk full")):
                 app_module._persist_generated_auth_token("a_new_token_that_should_never_land_on_disk")
 
@@ -88,7 +88,7 @@ class AuthTokenPersistenceTests(unittest.TestCase):
             # bootstrap call short-circuit at _security_auth_disabled() and
             # never reach the reuse-existing-token logic under test.
             with mock.patch.dict(os.environ, {"BEETS_WEB_AUTH_TOKEN": "", "BEETS_WEB_PASSWORD": "", "BEETS_WEB_AUTH_DISABLED": "0"}, clear=False), \
-                 mock.patch.object(app_module, "_GENERATED_AUTH_TOKEN_FILE", token_file):
+                 mock.patch.object(app_module, "WEB_MANAGER_DATA_DIR", Path(tmpdir)), mock.patch.object(app_module, "_GENERATED_AUTH_TOKEN_FILE", token_file):
                 app_module._bootstrap_auth_token_if_missing()
                 self.assertEqual(os.environ.get("BEETS_WEB_AUTH_TOKEN"), existing_token)
 
@@ -143,7 +143,7 @@ class BootstrapTokenNeverLeaksTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             token_file = Path(tmpdir) / ".auth_token"
-            with mock.patch.object(app_module, "_GENERATED_AUTH_TOKEN_FILE", token_file), \
+            with mock.patch.object(app_module, "WEB_MANAGER_DATA_DIR", Path(tmpdir)), mock.patch.object(app_module, "_GENERATED_AUTH_TOKEN_FILE", token_file), \
                  mock.patch.object(app_module, "generate_secure_auth_token", return_value=_MARKER_TOKEN), \
                  _capture_everything() as (out, err, log_messages):
                 app_module._bootstrap_auth_token_if_missing()
@@ -161,7 +161,7 @@ class BootstrapTokenNeverLeaksTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             token_file = Path(tmpdir) / ".auth_token"
-            with mock.patch.object(app_module, "_GENERATED_AUTH_TOKEN_FILE", token_file), \
+            with mock.patch.object(app_module, "WEB_MANAGER_DATA_DIR", Path(tmpdir)), mock.patch.object(app_module, "_GENERATED_AUTH_TOKEN_FILE", token_file), \
                  mock.patch.object(app_module, "generate_secure_auth_token", return_value=_MARKER_TOKEN), \
                  mock.patch("os.fsync", side_effect=OSError("disk full")), \
                  _capture_everything() as (out, err, log_messages):
@@ -184,7 +184,7 @@ class BootstrapTokenNeverLeaksTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             unwritable_target = Path(tmpdir) / "not-a-real-dir" / ".auth_token"
-            with mock.patch.object(app_module, "_GENERATED_AUTH_TOKEN_FILE", unwritable_target), \
+            with mock.patch.object(app_module, "WEB_MANAGER_DATA_DIR", Path(tmpdir)), mock.patch.object(app_module, "_GENERATED_AUTH_TOKEN_FILE", unwritable_target), \
                  mock.patch.object(app_module, "generate_secure_auth_token", return_value=_MARKER_TOKEN), \
                  mock.patch.object(Path, "mkdir", side_effect=PermissionError("read-only mount")):
                 for _ in range(2):

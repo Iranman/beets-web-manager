@@ -612,6 +612,9 @@ class RoutesSetupSettingsPersistenceTests(unittest.TestCase):
         root = Path(self.tempdir.name)
         self.module._SETTINGS_FILE = root / "app_settings.json"
         self.module._SETUP_COMPLETE_MARKER = root / ".setup_complete"
+        self.env_patch = mock.patch.dict(os.environ, {"WEB_MANAGER_DATA_DIR": str(root)}, clear=False)
+        self.env_patch.start()
+        self.addCleanup(self.env_patch.stop)
         self.addCleanup(self.tempdir.cleanup)
         self.addCleanup(self._cleanup_settings_file)
 

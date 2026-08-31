@@ -200,13 +200,23 @@ _APP_VERSION = _app_version()
 
 
 def _config_store_for_target(target_file: Path) -> Tuple[WebManagerConfigStore, str]:
+    """Resolve the durable, authoritative WebManagerConfigStore for a Web
+    Manager state file. Web Manager durable state lives beneath
+    WEB_MANAGER_DATA_DIR only -- a target that does not resolve under it is
+    rejected rather than promoting its own parent directory to a writable
+    config root (that would let any caller-supplied path widen the trust
+    boundary). Tests may inject WEB_MANAGER_DATA_DIR to a temporary path;
+    every Web Manager state file constant defaults beneath it, so this holds
+    for both production defaults and test injection."""
     target = target_file.expanduser().resolve(strict=False)
     data_root = Path(os.environ.get("WEB_MANAGER_DATA_DIR", "/web-manager-data")).expanduser().resolve(strict=False)
     try:
         rel = target.relative_to(data_root)
-        return WebManagerConfigStore(data_root), rel.as_posix()
-    except ValueError:
-        return WebManagerConfigStore(target.parent), target.name
+    except ValueError as exc:
+        raise WebManagerConfigStoreError(
+            f"{target} is not beneath the Web Manager data root {data_root}"
+        ) from exc
+    return WebManagerConfigStore(data_root), rel.as_posix()
 
 
 def _settings_store_for_target() -> Tuple[WebManagerConfigStore, str]:
@@ -1782,12 +1792,14 @@ def setup_save_settings():
     if not isinstance(payload, dict):
         return jsonify({"ok": False, "error": "expected a JSON object"}), 400
     expected_revision = payload.pop("expected_revision", None)
-    if _SETTINGS_FILE.exists() and not expected_revision:
+    store, relative_name = _settings_store_for_target()
+    record = store.read_text_record(relative_name)
+    if record.get("exists") and not expected_revision:
         return jsonify({"ok": False, "error": "expected_revision is required", "code": "settings_missing_revision"}), 428
-    settings = _load_settings()
+    settings = dict(json.loads(record.get("content") or "{}"))
     settings.update(payload)
     try:
-        result = _save_settings(settings, expected_revision=expected_revision)
+        result = store.save_json(relative_name, settings, is_secret=False, expected_revision=expected_revision)
     except WebManagerConfigStoreConflictError:
         return jsonify({"ok": False, "error": "settings changed; reload before saving", "code": "settings_revision_conflict"}), 409
     except WebManagerConfigStoreError:
@@ -1842,6 +1854,9 @@ def _claim_setup_completion_marker() -> bool:
     """Atomically claim the setup-completion marker in Web Manager storage."""
     try:
         store, relative_name = _config_store_for_target(_SETUP_COMPLETE_MARKER)
+        rec = store.read_text_record(relative_name)
+        if rec.get("exists"):
+            return False
         store.save_text(relative_name, "1", is_secret=True, expected_revision=None)
         return True
     except WebManagerConfigStoreConflictError:

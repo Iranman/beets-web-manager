@@ -480,14 +480,15 @@ def _write_agent_config_file(content: str, expected_revision: str) -> dict[str, 
     candidate_path: Optional[Path] = None
     with _agent_config_process_lock():
         root, config_path, backup_path = _agent_config_paths()
-        current_revision = _config_revision(config_path) if config_path.exists() else "missing"
+        had_previous_config = config_path.exists()
+        current_revision = _config_revision(config_path) if had_previous_config else "missing"
         if expected_revision != current_revision:
             raise ConfigRevisionConflict("config revision changed")
         candidate_path = _write_temp_config(root, content)
         try:
             _validate_beets_config_candidate(candidate_path)
             backed_up = False
-            if config_path.exists():
+            if had_previous_config:
                 shutil.copy2(config_path, backup_path)
                 os.chmod(backup_path, 0o600)
                 _fsync_file(backup_path)
@@ -507,6 +508,19 @@ def _write_agent_config_file(content: str, expected_revision: str) -> dict[str, 
                     os.replace(str(restore_tmp), str(config_path))
                     os.chmod(config_path, 0o600)
                     _fsync_file(config_path)
+                    _fsync_directory(root)
+                    restored = True
+                elif not had_previous_config:
+                    # No config.yaml existed before this write and there is
+                    # no backup to restore from -- the truthful previous
+                    # state is absence, not a failed candidate left on disk.
+                    # Durably remove the file we just committed and fsync
+                    # the parent directory so a crash immediately after
+                    # can't leave the removal only half-durable.
+                    try:
+                        config_path.unlink()
+                    except OSError:
+                        pass
                     _fsync_directory(root)
                     restored = True
                 raise ConfigPostWriteValidationError("Committed config failed Beets validation; previous config restored" if restored else "Committed config failed Beets validation") from exc

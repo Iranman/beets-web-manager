@@ -1791,27 +1791,51 @@ _DEFAULT_MAX_CONTENT_LENGTH = 64 * 1024 * 1024
 _FLASK_SECRET_KEY_FILE = Path(os.environ.get("BEETS_WEB_SECRET_KEY_FILE", "/web-manager-data/.flask_secret_key"))
 
 
-def _persist_bootstrap_secret_file(target_file: Path, content: str) -> bool:
+def _app_config_store_for_target(target_file: Path) -> Tuple[WebManagerConfigStore, str]:
+    """Resolve the durable, authoritative WebManagerConfigStore for a Web
+    Manager state file. Web Manager durable state lives beneath
+    WEB_MANAGER_DATA_DIR only -- a target that does not resolve under it is
+    rejected rather than promoting its own parent directory to a writable
+    config root (that would let any caller-supplied path widen the trust
+    boundary). Tests may inject WEB_MANAGER_DATA_DIR to a temporary path;
+    every Web Manager state file constant defaults beneath it, so this holds
+    for both production defaults and test injection."""
+    target = Path(target_file).expanduser().resolve(strict=False)
+    data_root = WEB_MANAGER_DATA_DIR.expanduser().resolve(strict=False)
     try:
-        target = Path(target_file).expanduser().resolve(strict=False)
-        data_root = WEB_MANAGER_DATA_DIR.expanduser().resolve(strict=False)
-        try:
-            rel = target.relative_to(data_root)
-            store = WebManagerConfigStore(data_root)
-            relative_name = rel.as_posix()
-        except ValueError:
-            store = WebManagerConfigStore(target.parent.resolve(strict=False))
-            relative_name = target.name
+        rel = target.relative_to(data_root)
+    except ValueError as exc:
+        raise WebManagerConfigStoreError(
+            f"{target} is not beneath the Web Manager data root {data_root}"
+        ) from exc
+    return WebManagerConfigStore(data_root), rel.as_posix()
+
+
+def _persist_app_config_text(target_file: Path, content: str, *, is_secret: bool = True) -> bool:
+    try:
+        store, relative_name = _app_config_store_for_target(target_file)
         current = store.read_text_record(relative_name)
         store.save_text(
             relative_name,
             content,
-            is_secret=True,
+            is_secret=is_secret,
             expected_revision=current.get("revision"),
         )
         return True
-    except (WebManagerConfigStoreError, OSError):
+    except (WebManagerConfigStoreError, OSError) as ex:
+        try:
+            app.logger.error("Failed to persist %s: %s", target_file, type(ex).__name__)
+        except Exception:
+            pass
         return False
+
+
+def _persist_bootstrap_secret_file(target_file: Path, content: str) -> bool:
+    return _persist_app_config_text(target_file, content, is_secret=True)
+
+
+def _persist_file_atomically(target_file: Path, content: str) -> bool:
+    return _persist_app_config_text(target_file, content, is_secret=True)
 
 
 def _get_or_create_flask_secret_key() -> str:
@@ -2218,44 +2242,6 @@ def generate_secure_browser_password(length: int = 36) -> str:
         pwd = "".join(chars)
         if not _password_requirements_unmet(pwd) and _browser_password_is_usable(pwd):
             return pwd
-
-
-def _app_config_store_for_target(target_file: Path) -> Tuple[WebManagerConfigStore, str]:
-    target = Path(target_file).expanduser().resolve(strict=False)
-    data_root = WEB_MANAGER_DATA_DIR.expanduser().resolve(strict=False)
-    try:
-        rel = target.relative_to(data_root)
-        return WebManagerConfigStore(data_root), rel.as_posix()
-    except ValueError:
-        root = target.parent.resolve(strict=False)
-        return WebManagerConfigStore(root), target.name
-
-
-def _persist_app_config_text(target_file: Path, content: str, *, is_secret: bool = True) -> bool:
-    try:
-        store, relative_name = _app_config_store_for_target(target_file)
-        current = store.read_text_record(relative_name)
-        store.save_text(
-            relative_name,
-            content,
-            is_secret=is_secret,
-            expected_revision=current.get("revision"),
-        )
-        return True
-    except (WebManagerConfigStoreError, OSError) as ex:
-        try:
-            app.logger.error("Failed to persist %s: %s", target_file, type(ex).__name__)
-        except Exception:
-            pass
-        return False
-
-
-def _persist_bootstrap_secret_file(target_file: Path, content: str) -> bool:
-    return _persist_app_config_text(target_file, content, is_secret=True)
-
-
-def _persist_file_atomically(target_file: Path, content: str) -> bool:
-    return _persist_app_config_text(target_file, content, is_secret=True)
 
 
 def _auth_secret_is_usable(value: str) -> bool:
@@ -3539,6 +3525,60 @@ class AttachRecordingCancelled(RuntimeError):
     tell an intentional cancellation apart from an ordinary failure."""
 
 
+def _compensate_committed_metadata_or_raise(
+    aid: int, meta_op_id: Optional[str], failed_stage: str, downstream_exc: Exception, log,
+) -> None:
+    """A stage that runs after a committed album_metadata_repair_v1 mutation
+    has failed. If meta_op_id identifies that committed operation, attempt a
+    compensating rollback_album_metadata() so the failure doesn't leave a
+    silent partial mutation; otherwise (no operation_id -- nothing was
+    actually mutated, or the caller has no way to identify it) just
+    surface the downstream failure as-is. Always raises: either a
+    "rolled back cleanly" RuntimeError or a "Recovery Required" one when the
+    compensating rollback itself also fails."""
+    if not meta_op_id:
+        raise downstream_exc
+    log.append(f"{failed_stage} failed after a committed metadata update; rolling back metadata (operation_id={meta_op_id})...")
+    try:
+        rollback_result = beets_client.rollback_album_metadata(meta_op_id)
+        _require_attach_stage_success(rollback_result, "album metadata rollback")
+    except Exception as rollback_exc:
+        # Compensating rollback itself failed: the album is left with
+        # committed metadata but the downstream stage never completed, and
+        # no automatic path back to the prior state. Do not report a
+        # generic failure that hides this -- surface it explicitly as
+        # needing manual review.
+        log.append(
+            f"RECOVERY REQUIRED: metadata operation {meta_op_id} committed and could not be "
+            f"rolled back after {failed_stage} failed ({downstream_exc}); rollback error: {rollback_exc}. "
+            f"Album {aid} has metadata applied without the {failed_stage} completing -- manual review needed."
+        )
+        raise RuntimeError(
+            f"Recovery Required: album {aid} metadata was committed (operation_id={meta_op_id}) but "
+            f"{failed_stage} failed and the compensating rollback also failed. Manual recovery needed."
+        ) from rollback_exc
+    log.append(f"Metadata rolled back cleanly; no partial mutation remains for album {aid}.")
+    raise RuntimeError(f"{failed_stage} failed and metadata was rolled back: {downstream_exc}") from downstream_exc
+
+
+def _run_attach_relocation_stage(aid: int, meta_op_id: Optional[str], stage: str, log) -> None:
+    """Run the relocation stage of a metadata-then-relocate sequence
+    (album_add_mbids, match_album) and, if it fails after a metadata
+    mutation already committed, attempt a compensating rollback of that
+    metadata operation rather than leaving a silent partial mutation.
+
+    meta_op_id is the operation_id the prior update_album_metadata() call
+    returned -- None means either nothing was mutated (a no-op plan) or the
+    caller has no way to identify what to compensate, so no rollback is
+    attempted in that case; a relocation failure is simply surfaced as-is,
+    matching pre-existing behavior for that path."""
+    try:
+        relocate_result = beets_client.relocate_album(aid)
+        _require_attach_stage_success(relocate_result, stage)
+    except Exception as relocate_exc:
+        _compensate_committed_metadata_or_raise(aid, meta_op_id, stage, relocate_exc, log)
+
+
 def _require_attach_stage_success(result, stage: str) -> None:
     """Fail closed for every supported attach/rollback IPC result shape."""
     if isinstance(result, dict):
@@ -3857,8 +3897,13 @@ def album_add_mbids(aid: int):
             fields["mb_albumid"] = mb_albumid
         meta_result = beets_client.update_album_metadata(aid, fields)
         _require_attach_stage_success(meta_result, "album MBID metadata update")
-        relocate_result = beets_client.relocate_album(aid)
-        _require_attach_stage_success(relocate_result, "album MBID relocation")
+        # update_album_metadata() commits through its own rollback-capable
+        # album_metadata_repair_v1 transaction and returns that operation_id
+        # (when a mutation actually happened) precisely so a later stage
+        # failing here has something to compensate against instead of
+        # leaving a silently-partial mutation.
+        meta_op_id = meta_result.get("operation_id") if isinstance(meta_result, dict) else None
+        _run_attach_relocation_stage(aid, meta_op_id, "album MBID relocation", log)
         _invalidate_lib_cache()
         _trigger_plex_refresh(log)
         log.append(f"MBIDs applied and album moved to MBID-stamped path.")
@@ -12236,6 +12281,7 @@ def match_album(aid):
         log.append(f"[2/6] Setting mb_albumid={mb_albumid} on matched items + album record ...")
         metadata_result = beets_client.update_album_metadata(aid, {"mb_albumid": mb_albumid})
         _require_attach_stage_success(metadata_result, "match album metadata update")
+        meta_op_id = metadata_result.get("operation_id") if isinstance(metadata_result, dict) else None
         log.append(f"  albums.mb_albumid set to {mb_albumid}")
 
         # 3 ── match & number tracks from MB release data. This local DB pass
@@ -12250,12 +12296,15 @@ def match_album(aid):
 
         # 4 ── sync all metadata (titles, track numbers, artist, year...) from MusicBrainz
         log.append("[4/6] Syncing metadata from MusicBrainz (mbsync) ...")
-        repair_plan = beets_client.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mb_albumid})
-        _require_attach_stage_success(repair_plan, "match album MB track repair plan")
-        operation_id = repair_plan.get("operation_id")
-        if operation_id:
-            repair_apply = beets_client.apply_album_mb_track_repair(operation_id, write_tags=True)
-            _require_attach_stage_success(repair_apply, "match album MB track repair apply")
+        try:
+            repair_plan = beets_client.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mb_albumid})
+            _require_attach_stage_success(repair_plan, "match album MB track repair plan")
+            operation_id = repair_plan.get("operation_id")
+            if operation_id:
+                repair_apply = beets_client.apply_album_mb_track_repair(operation_id, write_tags=True)
+                _require_attach_stage_success(repair_apply, "match album MB track repair apply")
+        except Exception as repair_exc:
+            _compensate_committed_metadata_or_raise(aid, meta_op_id, "match album MB track repair", repair_exc, log)
 
         # Strip trailing year from album name before move (avoid "Album (2025) (2025)")
         _strip_year_from_album_db(aid, log)
@@ -12264,11 +12313,17 @@ def match_album(aid):
         log.append("[5/6] Writing tags to audio files ...")
         write_result = beets_client.update_album_metadata(aid, {}, force_write_tags=True)
         _require_attach_stage_success(write_result, "match album tag write")
+        # A relocation failure after this point should compensate the most
+        # recently committed metadata operation (this tag write), not the
+        # earlier mb_albumid-only one from step 2 -- rolling back a
+        # superseded operation against the album's now-current state would
+        # be incorrect.
+        if isinstance(write_result, dict) and write_result.get("operation_id"):
+            meta_op_id = write_result.get("operation_id")
 
         # 6 ── move / rename files into Artist/Album/Track - Title structure
         log.append("[6/6] Moving files into library structure ...")
-        relocation_result = beets_client.relocate_album(aid)
-        _require_attach_stage_success(relocation_result, "match album relocation")
+        _run_attach_relocation_stage(aid, meta_op_id, "match album relocation", log)
 
         _invalidate_lib_cache()
 

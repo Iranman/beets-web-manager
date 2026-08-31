@@ -227,6 +227,26 @@ class TestWave27EngineConfigValidation(unittest.TestCase):
                 agent._write_agent_config_file("directory: /changed\nlibrary: /config/library.blb\n", expected_revision=revision)
         self.assertEqual(self.config_path.read_text(encoding="utf-8"), self.initial)
 
+    def test_post_write_validation_failure_with_no_prior_config_removes_failed_file(self):
+        """Blocker 9: config.yaml did not exist before this write. Pre-write
+        validation passes, the candidate is committed, but post-write Beets
+        validation fails and there is no backup (none could exist -- there
+        was nothing to back up). The previous state was "absent"; the
+        failed candidate must not be left on disk as a false config.yaml,
+        and no backup file should be fabricated either."""
+        self.config_path.unlink()
+        self.backup_path.unlink(missing_ok=True)
+
+        def fake_run(cmd, **kwargs):
+            if str(self.config_path) in cmd:
+                return SimpleNamespace(returncode=1, stdout="", stderr="post write failure")
+            return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+        with mock.patch.object(agent.subprocess, "run", side_effect=fake_run):
+            with self.assertRaises(agent.ConfigPostWriteValidationError):
+                agent._write_agent_config_file("directory: /new\nlibrary: /config/library.blb\n", expected_revision="missing")
+        self.assertFalse(self.config_path.exists())
+        self.assertFalse(self.backup_path.exists())
+
     def test_revert_requires_revision_and_validates_backup(self):
         self.backup_path.write_text("directory: /backup\nlibrary: /config/library.blb\n", encoding="utf-8")
         revision = self._revision()

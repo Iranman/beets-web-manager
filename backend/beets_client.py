@@ -1069,7 +1069,18 @@ class BeetsClient:
         apply_res = self.apply_album_metadata(op_id)
         if not apply_res.get("ok"):
             return {"ok": False, "error": apply_res.get("error") or "Metadata apply failed", "code": apply_res.get("code")}
-        return {"ok": True, "album_fields_changed": plan_res.get("album_fields_changed", 0), "items_changed": plan_res.get("items_changed", 0)}
+        # operation_id is retained (additive field, existing callers that
+        # only read ok/album_fields_changed/items_changed are unaffected) so
+        # a caller composing this stage with a later one -- e.g.
+        # album_add_mbids's metadata-then-relocate sequence -- can issue a
+        # compensating rollback_album_metadata(operation_id) if the later
+        # stage fails after this one has already committed.
+        return {
+            "ok": True,
+            "album_fields_changed": plan_res.get("album_fields_changed", 0),
+            "items_changed": plan_res.get("items_changed", 0),
+            "operation_id": op_id,
+        }
 
     # -- item_metadata_repair_v1 Pure HTTP Client Methods -----------------------
 

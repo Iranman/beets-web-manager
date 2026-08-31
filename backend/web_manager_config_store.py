@@ -111,8 +111,16 @@ class WebManagerConfigStore:
                 fh.close()
 
     def _reject_symlink_components(self, path: Path) -> None:
+        try:
+            relative_parts = path.relative_to(self.data_root).parts
+        except ValueError:
+            # Not under data_root at all (e.g. a root-anchored path that
+            # escaped the join on this platform). Leave containment
+            # rejection to the caller's resolve()+relative_to check, which
+            # raises the intended "escaped the data root" error.
+            return
         current = self.data_root
-        for part in path.relative_to(self.data_root).parts:
+        for part in relative_parts:
             current = current / part
             if current.exists() and (current.is_symlink() or os.path.islink(str(current))):
                 raise WebManagerConfigStoreError("Configuration path contains a symlink component")
@@ -124,13 +132,22 @@ class WebManagerConfigStore:
         if "\x00" in raw or "\\" in raw or ":" in raw:
             raise WebManagerConfigStoreError("Configuration path contains an invalid character")
         requested = Path(raw)
-        if requested.is_absolute() or any(part in ("", ".", "..") for part in requested.parts):
+        if raw.startswith("/") or requested.is_absolute() or any(part in ("", ".", "..") for part in requested.parts):
             raise WebManagerConfigStoreError("Configuration path traversal rejected")
-        target = (self.data_root / requested).resolve(strict=False)
+        # Inspect the original, unresolved path components first (lstat-style,
+        # never following a symlink) so a symlinked leaf or intermediate
+        # parent is rejected before resolution can quietly follow it and
+        # erase the evidence. Only after that check passes do we resolve the
+        # path to verify final containment under data_root.
+        unresolved_target = self.data_root / requested
+        self._reject_symlink_components(unresolved_target)
+        target = unresolved_target.resolve(strict=False)
         try:
             target.relative_to(self.data_root)
         except ValueError as exc:
             raise WebManagerConfigStoreError("Configuration path escaped the data root") from exc
+        # Re-check post-resolution as defense in depth against a TOCTOU
+        # component swap between the check above and this point.
         self._reject_symlink_components(target)
         return target
 
