@@ -6021,14 +6021,13 @@ def create_artist_folder_reconcile_plan(
     eligible_candidates: List[Dict[str, Any]] = []
 
     for idx, cand in enumerate(candidates_raw):
-        src = Path(cand["source_path"])
-        dst = Path(cand["target_path"])
-
-        if not _path_under(src, root_path) or not _path_under(dst, root_path):
+        src_valid = validate_path_under_allowed_roots(cand.get("source_path"), allowed_roots, reject_symlinks=True)
+        dst_valid = validate_path_under_allowed_roots(cand.get("target_path"), allowed_roots, reject_symlinks=True)
+        if src_valid is None or dst_valid is None:
             return {"ok": False, "error": "Path outside root.", "code": "artist_reconcile_path_out_of_root"}
 
-        if _path_has_symlink_under(src, root_path) or _path_has_symlink_under(dst, root_path):
-            return {"ok": False, "error": "Symlink rejected.", "code": "artist_reconcile_symlink_rejected"}
+        src = src_valid
+        dst = dst_valid
 
         if not src.exists() or not src.is_dir():
             requires_review.append({"source_path": str(src), "target_path": str(dst), "reason": "artist_reconcile_source_missing"})
@@ -6038,11 +6037,11 @@ def create_artist_folder_reconcile_plan(
         # Artist ID(s) from Beets DB state -- never trust the caller-supplied
         # id as authority (SEC-002 Wave 21 final review, findings #4-#7).
         is_merge = dst.exists() and dst.is_dir() and dst.resolve(strict=False) != src.resolve(strict=False)
-        src_identity = _derive_artist_folder_identity(src, lib_db)
-        dst_identity = _derive_artist_folder_identity(dst, lib_db) if is_merge else {"ids": set(), "album_count": 0}
+        src_identity = _derive_artist_folder_identity(src, lib_db, allowed_roots=allowed_roots)
+        dst_identity = _derive_artist_folder_identity(dst, lib_db, allowed_roots=allowed_roots) if is_merge else {"ids": set(), "album_count": 0}
         caller_mbid = str(cand.get("source_mbid") or cand.get("target_mbid") or cand.get("mbid") or "").strip().lower()
         fingerprint_confirmed = cand.get("fingerprint_confirmed") is True
-        recording_mbids = _extract_recording_mbids(cand, src, lib_db)
+        recording_mbids = _extract_recording_mbids(cand, src, lib_db, allowed_roots=allowed_roots)
         eligible, resolved_mbid, reason = _artist_folder_identity_decision(
             src_identity, dst_identity, is_merge, caller_mbid, fingerprint_confirmed,
             db_path=lib_db, recording_mbids=recording_mbids,
@@ -6359,11 +6358,13 @@ def execute_artist_folder_reconcile_apply(
                 # TOCTOU Identity Revalidation at Apply time (SEC-002 Wave 27):
                 # Re-read source & destination identities from DB/disk before mutating.
                 for cand in meta.get("eligible_candidates") or []:
-                    src_p = Path(cand["source_path"])
-                    dst_p = Path(cand["target_path"])
+                    src_p = validate_path_under_allowed_roots(cand.get("source_path"), allowed_roots, reject_symlinks=True)
+                    dst_p = validate_path_under_allowed_roots(cand.get("target_path"), allowed_roots, reject_symlinks=True)
+                    if src_p is None or dst_p is None:
+                        return _fail("Candidate path outside allowed roots", "artist_reconcile_path_out_of_root")
                     if src_p.exists() and src_p.is_dir():
-                        src_id_now = _derive_artist_folder_identity(src_p, lib_db)
-                        dst_id_now = _derive_artist_folder_identity(dst_p, lib_db) if (dst_p.exists() and dst_p.is_dir()) else {"ids": set(), "album_count": 0}
+                        src_id_now = _derive_artist_folder_identity(src_p, lib_db, allowed_roots=allowed_roots)
+                        dst_id_now = _derive_artist_folder_identity(dst_p, lib_db, allowed_roots=allowed_roots) if (dst_p.exists() and dst_p.is_dir()) else {"ids": set(), "album_count": 0}
                         caller_mbid_now = cand.get("identity_evidence", {}).get("caller_mbid") or ""
                         fp_confirmed_now = cand.get("identity_evidence", {}).get("fingerprint_confirmed") is True
                         rec_mbids_now = cand.get("identity_evidence", {}).get("recording_mbids") or []
@@ -6964,7 +6965,11 @@ def _album_cleanup_duplicate_file_choice(candidate: Path, existing: Path) -> str
     return "candidate" if cand_size > exist_size else "existing"
 
 
-def _derive_artist_folder_identity(folder_path: Path, lib_db: str) -> Dict[str, Any]:
+def _derive_artist_folder_identity(
+    folder_path: Path,
+    lib_db: str,
+    allowed_roots: Optional[List[str]] = None,
+) -> Dict[str, Any]:
     """Independently establish Artist ID(s) for a folder directly from
     Beets DB state (distinct non-blank mb_albumartistid values among
     albums whose item paths live under this folder) -- SEC-002 Wave 21
@@ -6972,11 +6977,18 @@ def _derive_artist_folder_identity(folder_path: Path, lib_db: str) -> Dict[str, 
     More than one distinct established id under the same folder is itself
     a conflict signal (returned via "ids" having len > 1)."""
     result: Dict[str, Any] = {"ids": set(), "album_count": 0}
-    if not lib_db or not Path(lib_db).exists():
+    if not lib_db:
         return result
-    prefix = str(folder_path).encode("utf-8") + os.sep.encode("utf-8")
+    roots = allowed_roots or [str(os.environ.get("MUSIC_ROOT", "/music"))]
+    valid_folder = validate_path_under_allowed_roots(folder_path, roots, reject_symlinks=True)
+    if valid_folder is None or not valid_folder.exists():
+        return result
+    valid_db = validate_path_under_allowed_roots(lib_db, [str(Path(lib_db).parent)], reject_symlinks=False) or Path(lib_db)
+    if not valid_db.exists():
+        return result
+    prefix = str(valid_folder).encode("utf-8") + os.sep.encode("utf-8")
     try:
-        con = sqlite3.connect(lib_db, timeout=10)
+        con = sqlite3.connect(str(valid_db), timeout=10)
         con.row_factory = sqlite3.Row
         try:
             rows = _rows_by_path_prefix(
@@ -7002,37 +7014,63 @@ def _derive_artist_folder_identity(folder_path: Path, lib_db: str) -> Dict[str, 
     return result
 
 
-def _extract_recording_mbids(cand: Dict[str, Any], src_path: Path, db_path: Optional[str] = None) -> List[str]:
-    """Extracts MusicBrainz Recording IDs from candidate payload and local DB items under src_path."""
-    rec_ids: set = set()
+def _extract_recording_mbids(
+    cand: Dict[str, Any],
+    src_path: Path,
+    db_path: Optional[str] = None,
+    allowed_roots: Optional[List[str]] = None,
+) -> List[str]:
+    """Extracts MusicBrainz Recording IDs established under src_path from local DB items.
+    Candidate payload recording IDs are treated as suggestions/hints ONLY and must be
+    independently corroborated by established engine item track state under src_path.
+    """
+    lib_db = os.environ.get("BEETS_LIBRARY_DB", "")
+    if db_path and db_path == os.environ.get("BEETS_LIBRARY_DB", ""):
+        lib_db = db_path
+    if not lib_db:
+        return []
+
+    roots = allowed_roots or [str(os.environ.get("MUSIC_ROOT", "/music"))]
+    valid_src = validate_path_under_allowed_roots(src_path, roots, reject_symlinks=True)
+    if valid_src is None or not valid_src.exists():
+        return []
+
+    valid_db = validate_path_under_allowed_roots(lib_db, [str(Path(lib_db).parent)], reject_symlinks=False) or Path(lib_db)
+    if not valid_db.exists():
+        return []
+
+    established_rec_ids: set = set()
+    try:
+        con = sqlite3.connect(str(valid_db), timeout=5)
+        con.row_factory = sqlite3.Row
+        try:
+            prefix = str(valid_src) + os.sep
+            rows = _rows_by_path_prefix(
+                con, "items", "DISTINCT mb_trackid, path", "path", prefix, path_result_col="path"
+            )
+            for r in rows:
+                mb_tid = str(r["mb_trackid"] or "").strip().lower()
+                if _MB_UUID_RE.match(mb_tid):
+                    established_rec_ids.add(mb_tid)
+        finally:
+            con.close()
+    except Exception:
+        pass
+
     raw = cand.get("recording_mbids") or cand.get("recording_mbid") or cand.get("mb_trackid") or cand.get("recording_ids") or []
     if isinstance(raw, str):
         raw = [raw]
+    caller_hints: set = set()
     for item in raw:
         s = str(item or "").strip().lower()
         if _MB_UUID_RE.match(s):
-            rec_ids.add(s)
+            caller_hints.add(s)
 
-    lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB", "")
-    if lib_db and Path(lib_db).exists() and src_path.exists():
-        try:
-            con = sqlite3.connect(lib_db, timeout=5)
-            con.row_factory = sqlite3.Row
-            try:
-                prefix = str(src_path.resolve())
-                rows = _rows_by_path_prefix(
-                    con, "items", "DISTINCT mb_trackid, path", "path", prefix, path_result_col="path"
-                )
-                for r in rows:
-                    mb_tid = str(r["mb_trackid"] or "").strip().lower()
-                    if _MB_UUID_RE.match(mb_tid):
-                        rec_ids.add(mb_tid)
-            finally:
-                con.close()
-        except Exception:
-            pass
+    if caller_hints:
+        # Candidate hints are ONLY included if corroborated by established engine item MBIDs
+        return sorted(established_rec_ids.intersection(caller_hints))
 
-    return sorted(rec_ids)
+    return sorted(established_rec_ids)
 
 
 def _verify_mb_artist_recording_credit(
@@ -7043,14 +7081,8 @@ def _verify_mb_artist_recording_credit(
     """Verifies engine-side whether caller_mbid is authorized as an artist credit
     for candidate recording(s) using MusicBrainz Recording artist-credit evidence.
 
-    Returns True ONLY IF an authoritative MusicBrainz Recording's artist-credit
-    includes caller_mbid.
-
-    Does NOT accept:
-    - UUID syntax alone
-    - "MBID exists somewhere in local DB"
-    - GET artist/<id> existence without recording relationship proof
-    - Test environment variable backdoors
+    Returns True ONLY IF every established MusicBrainz Recording under the source folder
+    has an artist credit matching caller_mbid.
     """
     if not caller_mbid or not _MB_UUID_RE.match(caller_mbid):
         return False
@@ -7064,24 +7096,28 @@ def _verify_mb_artist_recording_credit(
     try:
         from helpers_mb import _fetch_mb_recording_details, _MB_UUID_RE as HELPERS_UUID_RE
         target_mbid = caller_mbid.lower()
+        match_count = 0
         for rec_id in recording_mbids:
             if not rec_id or not HELPERS_UUID_RE.match(rec_id):
-                continue
+                return False
             details = _fetch_mb_recording_details(rec_id)
             if not details or not isinstance(details, dict):
-                continue
+                return False
             rec_artist_id = str(details.get("mb_artistid") or "").lower()
-            if rec_artist_id == target_mbid:
-                return True
-            for rel in details.get("linked_releases") or []:
-                rel_artist = str(rel.get("mb_artistid") or rel.get("artist_id") or "").lower()
-                if rel_artist == target_mbid:
-                    return True
+            found = rec_artist_id == target_mbid
+            if not found:
+                for rel in details.get("linked_releases") or []:
+                    rel_artist = str(rel.get("mb_artistid") or rel.get("artist_id") or "").lower()
+                    if rel_artist == target_mbid:
+                        found = True
+                        break
+            if not found:
+                return False
+            match_count += 1
+        return match_count > 0
     except Exception as ex:
         LOG.warning("MusicBrainz recording credit verification exception: %s", ex)
         return False
-
-    return False
 
 
 def _artist_folder_identity_decision(

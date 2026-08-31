@@ -564,6 +564,73 @@ class ArtistTrustTierRegressionTests(unittest.TestCase):
         self.assertEqual(mbid, "")
         self.assertEqual(reason, "")
 
+    def test_spoofed_recording_not_established_on_source_item_requires_review(self):
+        """Spoofed recording test: Caller supplies recording R and fingerprint_confirmed=True,
+        where MB says R -> A, but R is NOT established on any source item under src_path in DB.
+        _extract_recording_mbids returns [] because R is uncorroborated hint.
+        Result: REVIEW REQUIRED."""
+        cand = {"recording_mbid": "11111111-1111-1111-1111-111111111111", "fingerprint_confirmed": True}
+        # In DB, items under src_path have no established mb_trackid
+        with mock.patch("backend.transaction_engine._rows_by_path_prefix", return_value=[]):
+            rec_ids = txn._extract_recording_mbids(cand, Path("/music/Artist"), db_path="")
+        self.assertEqual(rec_ids, [])
+        eligible, mbid, reason = txn._artist_folder_identity_decision(
+            {"ids": set(), "album_count": 0}, {"ids": set(), "album_count": 0},
+            is_merge=True, caller_mbid="89ad4ac3-39f7-470e-963a-56509c546377", fingerprint_confirmed=True,
+            recording_mbids=rec_ids
+        )
+        self.assertFalse(eligible)
+        self.assertEqual(reason, "artist_reconcile_requires_review")
+
+    def test_engine_established_recording_authorizes_candidate(self):
+        """Engine-established recording test: Source item under src_path in DB has established mb_trackid=R.
+        Caller supplies hint R (or no hint). MB confirms R -> A.
+        Result: ELIGIBLE."""
+        rec_id = "11111111-1111-1111-1111-111111111111"
+        caller_mbid = "89ad4ac3-39f7-470e-963a-56509c546377"
+        cand = {"recording_mbid": rec_id, "fingerprint_confirmed": True}
+        def _verifier(m, r_ids):
+            return m == caller_mbid and rec_id in r_ids
+        eligible, mbid, reason = txn._artist_folder_identity_decision(
+            {"ids": set(), "album_count": 0}, {"ids": set(), "album_count": 0},
+            is_merge=True, caller_mbid=caller_mbid, fingerprint_confirmed=True,
+            recording_mbids=[rec_id], mb_verifier=_verifier
+        )
+        self.assertTrue(eligible)
+        self.assertEqual(mbid, caller_mbid)
+        self.assertEqual(reason, "")
+
+    def test_recording_conflict_uncorroborated_caller_hint_ignored(self):
+        """Recording conflict test: Engine DB establishes R1 on source item. Caller supplies hint R2.
+        R2 is not established against source audio, so R2 is ignored.
+        If established R1 does not credit caller MBID A -> REVIEW REQUIRED."""
+        r1 = "11111111-1111-1111-1111-111111111111"
+        r2 = "22222222-2222-2222-2222-222222222222"
+        cand = {"recording_mbid": r2}
+        fake_rows = [{"mb_trackid": r1, "path": "/music/Artist/song.mp3"}]
+        with mock.patch("backend.transaction_engine.validate_path_under_allowed_roots", side_effect=lambda p, *args, **kwargs: Path(str(p))):
+            with mock.patch("backend.transaction_engine.Path.exists", return_value=True):
+                with mock.patch("backend.transaction_engine._rows_by_path_prefix", return_value=fake_rows):
+                    with mock.patch("os.environ.get", return_value="/tmp/lib.db"):
+                        rec_ids = txn._extract_recording_mbids(cand, Path("/music/Artist"), db_path="/tmp/lib.db")
+        # R2 was uncorroborated, so rec_ids is [] (since intersection of {r1} and {r2} is empty)
+        self.assertEqual(rec_ids, [])
+
+    def test_multiple_established_recordings_contradictory_fails_closed(self):
+        """Multiple recordings conflict test: Folder has R1 and R2 established.
+        R1 credits A, but R2 does not credit A.
+        _verify_mb_artist_recording_credit fails closed -> REVIEW REQUIRED."""
+        r1 = "11111111-1111-1111-1111-111111111111"
+        r2 = "22222222-2222-2222-2222-222222222222"
+        caller_mbid = "89ad4ac3-39f7-470e-963a-56509c546377"
+        def _mock_mb(rec_id):
+            if rec_id == r1:
+                return {"mb_artistid": caller_mbid}
+            return {"mb_artistid": "99999999-9999-9999-9999-999999999999"}
+        with mock.patch("helpers_mb._fetch_mb_recording_details", side_effect=_mock_mb):
+            verified = txn._verify_mb_artist_recording_credit(caller_mbid, [r1, r2])
+        self.assertFalse(verified)
+
 
 if __name__ == "__main__":
     unittest.main()

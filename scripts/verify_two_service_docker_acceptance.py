@@ -1931,18 +1931,24 @@ def run_wave27_config_scenarios(
     config_path = config_dir / "config.yaml"
 
     def read_config_text() -> str:
-        try:
-            return config_path.read_text(encoding="utf-8", errors="replace")
-        except PermissionError:
-            run(["docker", "exec", engine_container, "chmod", "666", "/config/config.yaml"])
-            return config_path.read_text(encoding="utf-8", errors="replace")
+        res = run(["docker", "exec", engine_container, "cat", "/config/config.yaml"])
+        if res.returncode == 0:
+            return res.stdout
+        raise RuntimeError(f"failed to read /config/config.yaml via container exec: {res.stderr}")
 
     def read_config_bytes() -> bytes:
-        try:
-            return config_path.read_bytes()
-        except PermissionError:
-            run(["docker", "exec", engine_container, "chmod", "666", "/config/config.yaml"])
-            return config_path.read_bytes()
+        cmd = [
+            "docker", "exec", engine_container, "python3", "-c",
+            "import base64; print(base64.b64encode(open('/config/config.yaml','rb').read()).decode())"
+        ]
+        res = run(cmd)
+        if res.returncode == 0:
+            return base64.b64decode(res.stdout.strip())
+        raise RuntimeError(f"failed to read /config/config.yaml bytes via container exec: {res.stderr}")
+
+    stat_cmd = ["docker", "exec", engine_container, "stat", "-c", "%a %u %g", "/config/config.yaml"]
+    initial_stat_res = run(stat_cmd)
+    initial_stat = initial_stat_res.stdout.strip() if initial_stat_res.returncode == 0 else ""
 
     original_doc = _get_config_document(client, "config-read-original")
     if original_doc is None:
@@ -2087,6 +2093,15 @@ def run_wave27_config_scenarios(
     status, body = _post_config_document(client, retry_save, retry_rev, "config-retry-after-engine-online")
     if _require_json_ok(status, body, "config-retry-after-engine-online"):
         scenario_pass("config-retry-succeeds-after-engine-online")
+
+    final_stat_res = run(stat_cmd)
+    final_stat = final_stat_res.stdout.strip() if final_stat_res.returncode == 0 else ""
+    if initial_stat and final_stat and initial_stat != final_stat:
+        scenario_fail("config-permissions-preserved", f"config.yaml mode/uid/gid changed from {initial_stat} to {final_stat}")
+    elif final_stat and (final_stat.startswith("777") or final_stat.endswith("666") or final_stat.endswith("77")):
+        scenario_fail("config-permissions-insecure", f"config.yaml permissions are insecure: {final_stat}")
+    else:
+        scenario_pass("config-permissions-preserved-and-secure")
 
 
 def run_wave27_attach_failpoint_scenario(web_container: str, fixture: dict) -> None:
