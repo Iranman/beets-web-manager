@@ -12929,6 +12929,68 @@ def _row_genre_value(row: sqlite3.Row) -> str:
     return ""
 
 
+def _read_file_genre_tag(file_path: Path) -> Dict[str, Any]:
+    """Read the on-disk genre tag for one media file. Mirrors
+    _read_file_audio_tags's {"ok", value, "reason"} contract so a failed
+    read is never confused with a genuinely blank tag."""
+    path_str = str(file_path)
+    try:
+        exists = file_path.exists()
+    except OSError as ex:
+        LOG.warning("Genre tag read: stat failed for %s: %s", path_str, ex)
+        return {"ok": False, "genre": None, "reason": "io_error"}
+    if not exists:
+        return {"ok": False, "genre": None, "reason": "not_found"}
+    try:
+        import mediafile
+    except ImportError as ex:
+        LOG.error("Genre tag read: mediafile package unavailable: %s", ex)
+        return {"ok": False, "genre": None, "reason": "backend_unavailable"}
+    try:
+        mf = mediafile.MediaFile(file_path)
+        genre = str(getattr(mf, "genre", "") or "")
+    except mediafile.UnreadableFileError as ex:
+        LOG.warning("Genre tag read: unreadable file %s: %s", path_str, ex)
+        return {"ok": False, "genre": None, "reason": "unreadable"}
+    except OSError as ex:
+        LOG.warning("Genre tag read: io error for %s: %s", path_str, ex)
+        return {"ok": False, "genre": None, "reason": "io_error"}
+    except Exception as ex:
+        LOG.error("Genre tag read: unexpected error for %s: %s", path_str, ex)
+        return {"ok": False, "genre": None, "reason": "unknown_error"}
+    return {"ok": True, "genre": genre, "reason": None}
+
+
+def _write_file_genre_tag(file_path: Path, genre: str) -> Dict[str, Any]:
+    """Write the genre tag to disk and verify by an independent read-back
+    (not the writer's own in-memory state) -- mirrors _write_file_audio_tags.
+    A write only counts as successful once the exact requested value is
+    independently read back from the file."""
+    path_str = str(file_path)
+    try:
+        import mediafile
+    except ImportError as ex:
+        LOG.error("Genre tag write: mediafile package unavailable: %s", ex)
+        return {"ok": False, "reason": "backend_unavailable"}
+    try:
+        mf = mediafile.MediaFile(file_path)
+        mf.genre = genre
+        mf.save()
+    except mediafile.UnreadableFileError as ex:
+        LOG.warning("Genre tag write: unreadable file %s: %s", path_str, ex)
+        return {"ok": False, "reason": "unreadable"}
+    except OSError as ex:
+        LOG.warning("Genre tag write: io error for %s: %s", path_str, ex)
+        return {"ok": False, "reason": "io_error"}
+    except Exception as ex:
+        LOG.error("Genre tag write: unexpected error for %s: %s", path_str, ex)
+        return {"ok": False, "reason": "unknown_error"}
+    verify = _read_file_genre_tag(file_path)
+    if not verify.get("ok") or _s(verify.get("genre")) != _s(genre):
+        return {"ok": False, "reason": "verify_mismatch"}
+    return {"ok": True, "reason": None}
+
+
 def _genre_column(con: sqlite3.Connection, table: str) -> str:
     cols = [str(row[1]) for row in con.execute(f"PRAGMA table_info({table})").fetchall()]
     if "genres" in cols:
@@ -12963,7 +13025,29 @@ def create_genre_repair_plan(
         items = con.execute("SELECT * FROM items WHERE album_id=? ORDER BY disc, track, id", (album_id,)).fetchall()
     finally:
         con.close()
-    before_items = [{"item_id": int(row["id"]), "genre": _row_genre_value(row)} for row in items]
+    before_items: List[Dict[str, Any]] = []
+    for row in items:
+        path_str = _s(row["path"]) if "path" in row.keys() else ""
+        entry: Dict[str, Any] = {
+            "item_id": int(row["id"]),
+            "genre": _row_genre_value(row),
+            "path": path_str,
+            "stat": None,
+            "tag_genre": None,
+            "tag_read_ok": False,
+        }
+        if path_str:
+            try:
+                p = Path(path_str)
+                if p.exists():
+                    st = p.stat()
+                    entry["stat"] = {"dev": st.st_dev, "ino": st.st_ino, "size": st.st_size, "mtime_ns": st.st_mtime_ns}
+                    tag_read = _read_file_genre_tag(p)
+                    entry["tag_read_ok"] = bool(tag_read.get("ok"))
+                    entry["tag_genre"] = tag_read.get("genre") if tag_read.get("ok") else None
+            except Exception as ex:
+                LOG.warning("Genre repair plan: could not capture file identity for %s: %s", path_str, ex)
+        before_items.append(entry)
     before_album = _row_genre_value(album)
     tx = store.create(
         operation_type="Metadata Update",
@@ -12983,6 +13067,67 @@ def create_genre_repair_plan(
         },
     )
     return {"ok": True, "operation_id": tx["id"], "album_id": album_id, "item_count": len(before_items)}
+
+
+def _restore_genre_and_tag_state(
+    lib_db: str, album_id: int, before_album: str, before_items: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Restore DB genre columns AND on-disk genre tags to their captured
+    Plan-time values, independently verifying each restoration rather than
+    assuming a write succeeded. Shared by rollback_genre_repair() and the
+    automatic compensating rollback inside execute_genre_repair_apply() when
+    a failed lastgenre run turns out to have partially mutated state.
+
+    Returns {"status": "Rolled Back" | "Recovery Required", "db_restored":
+    bool, "unrestored_items": [...]}. Only "Rolled Back" is a promise that
+    both DB and file-tag state have been proven restored.
+    """
+    unrestored_items: List[Dict[str, Any]] = []
+    db_restored = True
+    con = sqlite3.connect(lib_db, timeout=10)
+    try:
+        cur = con.cursor()
+        album_col = _genre_column(con, "albums")
+        item_col = _genre_column(con, "items")
+        if album_col:
+            cur.execute(f"UPDATE albums SET {album_col}=? WHERE id=?", (before_album, album_id))
+        for row in before_items:
+            if item_col:
+                cur.execute(f"UPDATE items SET {item_col}=? WHERE id=?", (_s(row.get("genre") or ""), int(row.get("item_id") or 0)))
+        con.commit()
+    except Exception as ex:
+        LOG.error("Genre repair rollback: DB restore failed for album %s: %s", album_id, ex)
+        db_restored = False
+    finally:
+        con.close()
+
+    if db_restored:
+        con = sqlite3.connect(lib_db, timeout=10)
+        con.row_factory = sqlite3.Row
+        try:
+            album_row = con.execute("SELECT * FROM albums WHERE id=?", (album_id,)).fetchone()
+            if album_row is not None and _row_genre_value(album_row) != before_album:
+                db_restored = False
+        except Exception as ex:
+            LOG.error("Genre repair rollback: DB restore verification failed for album %s: %s", album_id, ex)
+            db_restored = False
+        finally:
+            con.close()
+
+    for row in before_items:
+        iid = int(row.get("item_id") or 0)
+        path_str = row.get("path") or ""
+        if not path_str or not row.get("tag_read_ok"):
+            # No trusted on-disk baseline captured at Plan time for this
+            # item (no path, or the file was already unreadable) -- there
+            # is nothing safe to restore it to.
+            continue
+        write_res = _write_file_genre_tag(Path(path_str), _s(row.get("tag_genre")))
+        if not write_res.get("ok"):
+            unrestored_items.append({"item_id": iid, "path": path_str, "reason": write_res.get("reason")})
+
+    status = "Rolled Back" if (db_restored and not unrestored_items) else "Recovery Required"
+    return {"status": status, "db_restored": db_restored, "unrestored_items": unrestored_items}
 
 
 def execute_genre_repair_apply(
@@ -13010,6 +13155,8 @@ def execute_genre_repair_apply(
         lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB", "")
         if not lib_db or not Path(lib_db).exists():
             return {"ok": False, "error": "Beets library database not found", "code": "genre_repair_db_not_found"}
+        before_album = _s(meta.get("before_album_genre") or "")
+        before_items = meta.get("before_item_genres") or []
         with _lock_resources(meta.get("resource_keys") or [f"album:{album_id}"]):
             con = sqlite3.connect(lib_db, timeout=10)
             con.row_factory = sqlite3.Row
@@ -13025,9 +13172,14 @@ def execute_genre_repair_apply(
                 args.append("-f")
             args.append(f"album_id:{album_id}")
             result = run_beet_command_fn("lastgenre", args)
-            if not isinstance(result, dict) or result.get("ok") is not True:
-                store.update(operation_id, status="Failed", logs=["lastgenre apply failed"])
-                return {"ok": False, "error": (result or {}).get("error") if isinstance(result, dict) else "lastgenre failed", "code": "genre_repair_apply_failed", "mutated": False, "status": "Failed"}
+            beet_reported_ok = isinstance(result, dict) and result.get("ok") is True
+
+            # A nonzero/failed native result does NOT prove nothing was
+            # mutated -- lastgenre can write some items' tags/DB rows before
+            # erroring out on a later one. Always re-read actual current DB
+            # + on-disk tag state and diff it against the Plan snapshot,
+            # regardless of the reported return code, instead of trusting
+            # the return code to imply mutated=False.
             con = sqlite3.connect(lib_db, timeout=10)
             con.row_factory = sqlite3.Row
             try:
@@ -13036,14 +13188,79 @@ def execute_genre_repair_apply(
             finally:
                 con.close()
             genre_after = _row_genre_value(album_after) if album_after else ""
-            item_genres_after = [{"item_id": int(row["id"]), "genre": _row_genre_value(row)} for row in items_after]
+            items_after_by_id = {int(r["id"]): r for r in items_after}
+
+            item_genres_after: List[Dict[str, Any]] = []
+            # A list keyed by "item_id", not a dict keyed by the int item
+            # id -- TransactionStore persists metadata as JSON, which would
+            # silently stringify int dict keys on the next read, matching
+            # the list shape item_genres_after already uses.
+            tag_genres_after: List[Dict[str, Any]] = []
+            mutated = genre_after != before_album
+            for before in before_items:
+                iid = int(before.get("item_id") or 0)
+                row = items_after_by_id.get(iid)
+                db_genre_after = _row_genre_value(row) if row is not None else before.get("genre", "")
+                item_genres_after.append({"item_id": iid, "genre": db_genre_after})
+                if db_genre_after != before.get("genre", ""):
+                    mutated = True
+
+                path_str = before.get("path") or ""
+                tag_read_ok_after = False
+                tag_genre_after = None
+                if path_str:
+                    tag_read = _read_file_genre_tag(Path(path_str))
+                    tag_read_ok_after = bool(tag_read.get("ok"))
+                    tag_genre_after = tag_read.get("genre")
+                tag_genres_after.append({"item_id": iid, "path": path_str, "genre": tag_genre_after, "read_ok": tag_read_ok_after})
+                if before.get("tag_read_ok"):
+                    if tag_read_ok_after:
+                        if _s(tag_genre_after) != _s(before.get("tag_genre")):
+                            mutated = True
+                    else:
+                        # Was readable at Plan time, is not now -- cannot
+                        # prove nothing changed; treat conservatively as a
+                        # possible mutation rather than a confirmed no-op.
+                        mutated = True
+
+            if not beet_reported_ok:
+                if not mutated:
+                    store.update(operation_id, status="Failed", logs=["lastgenre apply failed"], metadata={
+                        **store.get(operation_id).get("metadata", {}),
+                        "genre_after": genre_after, "item_genres_after": item_genres_after,
+                    })
+                    return {
+                        "ok": False,
+                        "error": (result or {}).get("error") if isinstance(result, dict) else "lastgenre failed",
+                        "code": "genre_repair_apply_failed", "mutated": False, "status": "Failed",
+                    }
+                # Partial mutation despite a failed/nonzero result: attempt
+                # a verified compensating rollback of both DB and on-disk
+                # tags before ever reporting a rolled-back state.
+                restore_res = _restore_genre_and_tag_state(lib_db, album_id, before_album, before_items)
+                store.update(operation_id, status=restore_res["status"], metadata={
+                    **store.get(operation_id).get("metadata", {}),
+                    "genre_after": genre_after, "item_genres_after": item_genres_after,
+                    "tag_genres_after": tag_genres_after,
+                    "partial_failure_reason": (result or {}).get("error") if isinstance(result, dict) else "lastgenre failed",
+                    "rollback_detail": restore_res,
+                })
+                code = "genre_repair_rolled_back" if restore_res["status"] == "Rolled Back" else "genre_repair_recovery_required"
+                return {
+                    "ok": False,
+                    "error": f"lastgenre failed after partially mutating album {album_id}; {restore_res['status'].lower()}",
+                    "code": code, "mutated": True, "status": restore_res["status"],
+                    "recovery_detail": restore_res,
+                }
+
             store.update(operation_id, status="Completed", metadata={
                 **store.get(operation_id).get("metadata", {}),
                 "genre_after": genre_after,
                 "item_genres_after": item_genres_after,
+                "tag_genres_after": tag_genres_after,
                 "completed_at": _now(),
             })
-            return {"ok": True, "operation_id": operation_id, "status": "Completed", "mutated": True, "genre_after": genre_after, "output": result.get("stdout") or result.get("output") or ""}
+            return {"ok": True, "operation_id": operation_id, "status": "Completed", "mutated": mutated, "genre_after": genre_after, "output": result.get("stdout") or result.get("output") or ""}
 
 
 def rollback_genre_repair(
@@ -13068,18 +13285,15 @@ def rollback_genre_repair(
         album_id = int(meta.get("album_id") or 0)
         before_album = _s(meta.get("before_album_genre") or "")
         before_items = meta.get("before_item_genres") or []
-        con = sqlite3.connect(lib_db, timeout=10)
-        try:
-            cur = con.cursor()
-            album_col = _genre_column(con, "albums")
-            item_col = _genre_column(con, "items")
-            if album_col:
-                cur.execute(f"UPDATE albums SET {album_col}=? WHERE id=?", (before_album, album_id))
-            for row in before_items:
-                if item_col:
-                    cur.execute(f"UPDATE items SET {item_col}=? WHERE id=?", (_s(row.get("genre") or ""), int(row.get("item_id") or 0)))
-            con.commit()
-        finally:
-            con.close()
+        restore_res = _restore_genre_and_tag_state(lib_db, album_id, before_album, before_items)
+        if restore_res["status"] != "Rolled Back":
+            store.update(operation_id, status="Recovery Required", metadata={
+                **meta, "recovery_required_at": _now(), "rollback_detail": restore_res,
+            })
+            return {
+                "ok": False, "operation_id": operation_id, "status": "Recovery Required",
+                "error": "Genre rollback could not be fully verified (DB and/or on-disk tags)",
+                "recovery_detail": restore_res,
+            }
         store.update(operation_id, status="Rolled Back", metadata={**meta, "rollback_available": False, "rolled_back_at": _now()})
         return {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}

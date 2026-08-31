@@ -360,5 +360,75 @@ class BeetsClientRequiredWrapperTests(unittest.TestCase):
         self.assertEqual(res.get("code"), "apply")
 
 
+@unittest.skipIf(APP is None, f"app.py could not be imported: {_APP_IMPORT_ERROR}")
+class ArtistAliasFolderReconcileTests(unittest.TestCase):
+    """Blocker 7: artist alias merge must delegate the on-disk folder move
+    to the engine-owned artist_folder_reconcile_v1 transaction family
+    instead of looping per-album update_album_metadata+relocate_album
+    calls that were never actually that transaction."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.music_root = Path(self.tmp.name)
+        (self.music_root / "Old Name").mkdir()
+        self.patches = [mock.patch.object(APP, "MUSIC_ROOT", self.music_root)]
+        for p in self.patches:
+            p.start()
+            self.addCleanup(p.stop)
+        self.addCleanup(self.tmp.cleanup)
+
+    def test_plan_uses_source_and_target_paths_under_music_root(self):
+        with mock.patch.object(APP.beets_client, "plan_artist_folder_reconcile",
+                                return_value={"ok": True, "operation_id": "txn_1"}) as plan, \
+             mock.patch.object(APP.beets_client, "apply_artist_folder_reconcile",
+                                return_value={"ok": True, "moved_files": 3, "quarantined_files": 0, "removed_dirs": 1}) as apply:
+            log = []
+            res = APP._run_artist_folder_reconcile_for_alias_merge(["Old Name"], "New Name", VALID_ARTIST_ID, log)
+        self.assertTrue(res["ok"])
+        plan.assert_called_once()
+        payload = plan.call_args[0][0]
+        self.assertEqual(payload["mode"], "scan_merge")
+        self.assertEqual(len(payload["candidates"]), 1)
+        cand = payload["candidates"][0]
+        self.assertEqual(cand["source_path"], str(self.music_root / "Old Name"))
+        self.assertEqual(cand["target_path"], str(self.music_root / "New Name"))
+        self.assertEqual(cand["source_mbid"], VALID_ARTIST_ID)
+        apply.assert_called_once_with("txn_1")
+
+    def test_nonexistent_source_folder_is_skipped_without_calling_engine(self):
+        with mock.patch.object(APP.beets_client, "plan_artist_folder_reconcile") as plan:
+            log = []
+            res = APP._run_artist_folder_reconcile_for_alias_merge(["Never Existed"], "New Name", VALID_ARTIST_ID, log)
+        self.assertTrue(res["ok"])
+        plan.assert_not_called()
+
+    def test_engine_unavailable_fails_closed_not_silently(self):
+        with mock.patch.object(APP.beets_client, "plan_artist_folder_reconcile",
+                                side_effect=APP.BeetsUnavailableError("down")), \
+             mock.patch.object(APP.beets_client, "apply_artist_folder_reconcile") as apply:
+            log = []
+            with self.assertRaises(RuntimeError):
+                APP._run_artist_folder_reconcile_for_alias_merge(["Old Name"], "New Name", VALID_ARTIST_ID, log)
+        apply.assert_not_called()
+
+    def test_plan_rejection_fails_closed_without_apply(self):
+        with mock.patch.object(APP.beets_client, "plan_artist_folder_reconcile",
+                                return_value={"ok": False, "error": "identity conflict"}), \
+             mock.patch.object(APP.beets_client, "apply_artist_folder_reconcile") as apply:
+            log = []
+            with self.assertRaises(RuntimeError):
+                APP._run_artist_folder_reconcile_for_alias_merge(["Old Name"], "New Name", VALID_ARTIST_ID, log)
+        apply.assert_not_called()
+
+    def test_apply_failure_is_not_reported_as_success(self):
+        with mock.patch.object(APP.beets_client, "plan_artist_folder_reconcile",
+                                return_value={"ok": True, "operation_id": "txn_1"}), \
+             mock.patch.object(APP.beets_client, "apply_artist_folder_reconcile",
+                                return_value={"ok": False, "error": "move failed"}):
+            log = []
+            with self.assertRaises(RuntimeError):
+                APP._run_artist_folder_reconcile_for_alias_merge(["Old Name"], "New Name", VALID_ARTIST_ID, log)
+
+
 if __name__ == "__main__":
     unittest.main()

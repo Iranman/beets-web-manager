@@ -28372,6 +28372,66 @@ def _apply_artist_alias_db_merge(con, source_names: List[str], canonical: str,
     }
 
 
+def _run_artist_folder_reconcile_for_alias_merge(
+    source_folders: List[str], canonical: str, mb_artistid: str, log: List[str],
+    *, fingerprint_confirmed: bool = False,
+) -> Dict[str, Any]:
+    """Delegate the on-disk artist-folder move/merge for an artist alias
+    merge to the engine-owned artist_folder_reconcile_v1 transaction family
+    -- the same family the "Clean: artist folder merge" maintenance feature
+    (_apply_artist_folder_groups) already uses -- instead of looping
+    per-album metadata-write + relocate calls that are not composed into
+    any single rollback-capable transaction. No local fallback: if the
+    engine is unreachable or rejects the plan, nothing is moved locally."""
+    canonical_key = _artist_alias_key(canonical)
+    target_path = MUSIC_ROOT / canonical
+    candidates = []
+    for name in sorted({n for n in source_folders if _artist_alias_key(n) != canonical_key}, key=lambda s: s.casefold()):
+        src_path = MUSIC_ROOT / name
+        if not src_path.is_dir():
+            continue
+        candidates.append({
+            "source_path": str(src_path),
+            "target_path": str(target_path),
+            "source_name": name,
+            "target_name": canonical,
+            # Evidence only, not authority -- the engine independently
+            # re-derives each folder's established Artist ID(s) from Beets
+            # DB state before treating any merge as eligible.
+            "source_mbid": mb_artistid,
+            "target_mbid": mb_artistid,
+            "fingerprint_confirmed": fingerprint_confirmed,
+        })
+    if not candidates:
+        log.append("  No on-disk artist folder(s) to move (DB already reflects the merge).")
+        return {"ok": True, "moved_files": 0, "quarantined_files": 0, "removed_dirs": 0}
+
+    op_payload = {"root": str(MUSIC_ROOT), "mode": "scan_merge", "candidates": candidates}
+    try:
+        plan_res = beets_client.plan_artist_folder_reconcile(op_payload)
+    except (BeetsUnavailableError, BeetsError) as ex:
+        raise RuntimeError(f"Engine unavailable; artist folder move was not performed: {ex}") from ex
+    if not plan_res.get("ok"):
+        raise RuntimeError(f"Engine refused artist folder reconcile plan: {plan_res.get('error')}")
+    op_id = plan_res.get("operation_id")
+    if not op_id:
+        log.append(f"  {plan_res.get('message') or 'No artist folder move was required.'}")
+        return {"ok": True, "moved_files": 0, "quarantined_files": 0, "removed_dirs": 0}
+    try:
+        apply_res = beets_client.apply_artist_folder_reconcile(op_id)
+    except (BeetsUnavailableError, BeetsError) as ex:
+        raise RuntimeError(f"Engine unavailable during artist folder move apply: {ex}") from ex
+    if not apply_res.get("ok"):
+        raise RuntimeError(f"Engine artist folder reconcile apply failed: {apply_res.get('error')}")
+    log.append(
+        f"  Engine artist_folder_reconcile_v1 (op_id={op_id}): "
+        f"{apply_res.get('moved_files', 0)} file(s) moved, "
+        f"{apply_res.get('quarantined_files', 0)} duplicate(s) quarantined, "
+        f"{apply_res.get('removed_dirs', 0)} empty folder(s) removed."
+    )
+    return apply_res
+
+
 def _cleanup_artist_alias_source_dirs(source_names: List[str], canonical: str,
                                       log: List[str]) -> int:
     removed = 0
@@ -28514,14 +28574,10 @@ def library_merge_artist_id():
             log.append("No matching albums required changes.")
             return
 
-        for i, aid in enumerate(affected_ids, 1):
-            if cancel_event and cancel_event.is_set():
-                raise RuntimeError("cancelled")
-            log.append(f"[{i}/{len(affected_ids)}] Writing and moving album_id:{aid}")
-            tag_result = beets_client.update_album_metadata(aid, {}, force_write_tags=True)
-            _require_attach_stage_success(tag_result, f"artist alias tag write album_id:{aid}")
-            relocate_result = beets_client.relocate_album(aid, mode="rename")
-            _require_attach_stage_success(relocate_result, f"artist alias relocation album_id:{aid}")
+        if cancel_event and cancel_event.is_set():
+            raise RuntimeError("cancelled")
+        log.append(f"Moving {len(source_folders)} artist folder(s) via artist_folder_reconcile_v1 ...")
+        _run_artist_folder_reconcile_for_alias_merge(source_folders, canonical, mb_artistid, log)
 
         _cleanup_artist_alias_source_dirs(source_folders, canonical, log)
         _warn_artist_alias_remaining_paths(affected_ids, source_folders, log)
@@ -28582,14 +28638,19 @@ def library_confirm_artist_alias():
             )
             return
 
-        for i, aid in enumerate(affected_ids, 1):
-            if cancel_event and cancel_event.is_set():
-                raise RuntimeError("cancelled")
-            log.append(f"[{i}/{len(affected_ids)}] Writing and moving album_id:{aid}")
-            tag_result = beets_client.update_album_metadata(aid, {}, force_write_tags=True)
-            _require_attach_stage_success(tag_result, f"artist alias tag write album_id:{aid}")
-            relocate_result = beets_client.relocate_album(aid, mode="rename")
-            _require_attach_stage_success(relocate_result, f"artist alias relocation album_id:{aid}")
+        if cancel_event and cancel_event.is_set():
+            raise RuntimeError("cancelled")
+        log.append(f"Moving {len(source_folders)} artist folder(s) via artist_folder_reconcile_v1 ...")
+        # fingerprint_confirmed is honestly False here -- unlike
+        # merge-artist-id's alias-group flow, mbid may have come from a
+        # fuzzy MusicBrainz name search (_resolve_artist_alias_mbid), not
+        # audio fingerprint evidence, so it cannot claim that trust tier.
+        # The DB stamping above already establishes mb_albumartistid on the
+        # affected albums, which is normally sufficient on its own for the
+        # engine's identity check; a folder with no such established
+        # identity on either side legitimately requires_review instead of
+        # moving, same as it would for any other caller.
+        _run_artist_folder_reconcile_for_alias_merge(source_folders, canonical, mbid, log)
 
         _cleanup_artist_alias_source_dirs(source_folders, canonical, log)
         _warn_artist_alias_remaining_paths(affected_ids, source_folders, log)
