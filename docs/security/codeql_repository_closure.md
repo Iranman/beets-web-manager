@@ -390,7 +390,49 @@ per-alert, not assumed, per the mission rules (no blanket dismissal).
 `_folder_release_preflight`, deliberately left `NEEDS_REVIEW` — see the entry above explaining the
 reverted fix attempt and why it needs a dedicated per-caller trace rather than a rushed disposition).
 
-## 3. Remaining alerts
+## 3. Reconciliation (2026-09-01, re-verified against live GitHub state, not trusted from prior report)
+
+The previous checkpoint's prose summary contained a genuine self-contradiction: it said `#6093`/`#6095`
+were still open `py/path-injection` findings, then in the same message claimed the 50 remaining alerts
+included none — those two statements can't both be true, and the second one was simply wrong prose (the
+underlying inventory data was correct throughout; this was a reporting error, not a data error).
+
+Re-pulling live GitHub state during reconciliation also surfaced one real bookkeeping gap, now fixed:
+alerts `#237`/`#238`/`#239` had been traced, judged `SAFE_BUT_CODEQL_BLIND`, and written into the local
+inventory with that disposition during the very first `/api/import` cluster pass — but a bug in that
+batch's update script (`dismissed_on_github = False` applied blanket to the whole batch, correct for the
+`REAL_VULNERABILITY` rows in it but wrong for these 3 `SAFE` rows) meant the GitHub dismissal API call
+was never actually made for them. Live GitHub still showed all 3 open. Dismissed them now with their
+original (correct, already-written) rationale.
+
+**Authoritative accounting, live-verified**:
+
+| Category | Count |
+| --- | ---: |
+| Original baseline | 171 |
+| Real vulnerabilities fixed (code-fixed, not dismissed — auto-close on post-merge rescan) | 19 |
+| False positives individually dismissed on GitHub | 102 |
+| Stale/superseded alerts | 0 |
+| New alerts introduced on this branch | 0 |
+| Open `py/path-injection` | 21 (19 real-fixed pending merge + 2 `NEEDS_REVIEW`: `#6093`/`#6095`) |
+| Open `py/polynomial-redos` | 17 |
+| Open `js/incomplete-url-substring-sanitization` | 14 |
+| Open `js/xss-through-dom` | 2 |
+| Open `py/stack-trace-exposure` | 5 |
+| Open `py/clear-text-storage-sensitive-data` | 4 |
+| Open `py/regex-injection` | 1 |
+| Open `js/insecure-randomness` | 1 |
+| Open `py/bad-tag-filter` | 1 |
+| Other open rules (`py/incomplete-url-substring-sanitization`, Python-side) | 3 |
+| **Total open (live-verified against GitHub, not PR-scoped)** | **69** |
+
+Arithmetic check: `171 (baseline) − 102 (dismissed) = 69 (open)`, matching the live pull exactly.
+`19 + 2 = 21` open path-injection, matching the by-rule live pull exactly. `21+17+14+2+5+4+1+1+1+3 = 69`.
+
+Machine-readable inventory (`security/codeql_main_alert_inventory.json`) and this document are both now
+consistent with live GitHub state as of this reconciliation.
+
+## 4. Remaining alerts
 
 50 of 171 alerts remain **NEEDS_REVIEW** as of this checkpoint (45 dispositioned: 2 critical
 command-injection dismissed, 8 path-injection fixed as real vulnerabilities, 35 path-injection confirmed
@@ -399,7 +441,7 @@ alert-by-alert (or pattern-class-by-pattern-class for the remaining `py/path-inj
 still clustered in `app.py`, a 48,286-line file) rather than being declared closed. **Repository-wide
 CodeQL security closure is NOT complete.**
 
-## 4. Test verification log
+## 5. Test verification log
 
 - Full backend suite (`python -m unittest discover -s tests -p "test_*.py"`), run 1 (early in session):
   2763 tests, 0 failures, 129 skipped (pre-existing, require live engine/Docker).

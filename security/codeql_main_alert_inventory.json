@@ -1166,7 +1166,7 @@
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/237",
     "disposition": "SAFE_BUT_CODEQL_BLIND",
-    "dismissed_on_github": false,
+    "dismissed_on_github": true,
     "notes": "app.py: Path(row[\"path\"]).resolve() operates on a value derived from the now-validated scan_path via os.walk(), never raw request text"
   },
   {
@@ -1181,7 +1181,7 @@
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/238",
     "disposition": "SAFE_BUT_CODEQL_BLIND",
-    "dismissed_on_github": false,
+    "dismissed_on_github": true,
     "notes": "app.py /api/browse: this line IS the containment check itself (_path_is_under/.resolve() against _BROWSE_ALLOWED_ROOTS); pre-existing correct pattern"
   },
   {
@@ -1196,7 +1196,7 @@
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/239",
     "disposition": "SAFE_BUT_CODEQL_BLIND",
-    "dismissed_on_github": false,
+    "dismissed_on_github": true,
     "notes": "app.py _dedup_norm_path(): pure path-string normalization for cache-key comparison, never used to read/enumerate/mutate the filesystem"
   },
   {
