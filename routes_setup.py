@@ -1479,6 +1479,15 @@ def setup_status():
         try:
             payload = _build_setup_status_payload()
         except Exception as ex:
+            # SEC-002 CodeQL repository-wide closure finding:
+            # _build_setup_status_payload() aggregates config/plugin/path/
+            # integration diagnostics from many sources (file reads, beets
+            # plugin probes, provider connectivity checks) -- a genuinely
+            # broad except whose exception text must never reach the client
+            # unsanitized, matching the established pattern already applied
+            # elsewhere in this file (setup_save_env/setup_test_ai/etc.,
+            # SEC-002 Wave 2).
+            app.logger.warning("setup_status rebuild failed: %s: %s", type(ex).__name__, ex)
             has_prior = _STATUS_CACHE_DATA is not None
             age = (now - _STATUS_CACHE_TS) if has_prior else None
             if has_prior and age < _STATUS_CACHE_MAX_STALE_SECONDS:
@@ -1486,9 +1495,9 @@ def setup_status():
                 res["cached"] = True
                 res["stale"] = True
                 res["cache_age_seconds"] = round(age, 2)
-                res["refresh_error"] = str(ex)
+                res["refresh_error"] = "Could not refresh setup status."
                 return jsonify(res)
-            return jsonify({"error": str(ex), "status": "failed"}), 503
+            return jsonify({"error": "Could not build setup status.", "status": "failed"}), 503
 
         _STATUS_CACHE_DATA = payload
         _STATUS_CACHE_TS = now
@@ -1510,7 +1519,10 @@ def setup_diagnostics():
     try:
         payload = _build_setup_status_payload()
     except Exception as ex:
-        return jsonify({"error": str(ex), "status": "failed"}), 503
+        # SEC-002 CodeQL repository-wide closure finding: same broad-except
+        # sanitization as setup_status() above.
+        app.logger.warning("setup_diagnostics rebuild failed: %s: %s", type(ex).__name__, ex)
+        return jsonify({"error": "Could not build setup diagnostics.", "status": "failed"}), 503
     with _STATUS_CACHE_LOCK:
         _STATUS_CACHE_DATA = payload
         _STATUS_CACHE_TS = time.monotonic()

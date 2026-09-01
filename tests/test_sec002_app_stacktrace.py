@@ -124,6 +124,45 @@ class SpotifyFetchErrorSafeMessageTests(unittest.TestCase):
         self.assertNotIn("10.0.0.5", str(ctx.exception))
 
 
+class ReviewFilesCleanupAndLibraryPageExceptionSanitizationTests(unittest.TestCase):
+    """Repository-wide CodeQL closure session, 2026-09-01: two remaining
+    genuinely-broad-except sinks that leaked exception text verbatim,
+    following the same Wave 3 pattern as ConfigYamlExceptionSanitizationTests
+    below -- log the real exception server-side, return a fixed message."""
+
+    def test_cleanup_import_review_files_beets_error_is_sanitized(self):
+        leak = "LEAK_MARKER <html>Traceback (most recent call last)</html>"
+        with app_module.app.test_request_context(
+            "/api/import/review-files/cleanup", method="POST",
+            data=json.dumps({"path": "/data/media/music/Some Album", "review_item_id": "x", "files": []}),
+            content_type="application/json",
+        ), mock.patch.object(
+            app_module, "_pending_review_matches", return_value=True,
+        ), mock.patch.object(
+            app_module.beets_client, "plan_import_review_cleanup",
+            side_effect=app_module.BeetsError(leak, error_code="cleanup_failed", status_code=500),
+        ):
+            response = app_module.cleanup_import_review_files()
+        status = response[1]
+        data = response[0].get_json()
+        self.assertEqual(status, 400)
+        self.assertNotIn("LEAK_MARKER", json.dumps(data))
+        self.assertNotIn("Traceback", json.dumps(data))
+
+    def test_library_full_paginated_unavailable_is_sanitized(self):
+        leak = "Beets Control Agent unreachable at 10.0.0.5:8338 (connection refused)"
+        with app_module.app.test_request_context("/api/library?limit=50"), mock.patch.object(
+            app_module.beets_client, "get_items_page",
+            side_effect=app_module.BeetsUnavailableError(leak),
+        ):
+            response = app_module.library_full()
+        status = response[1]
+        data = response[0].get_json()
+        self.assertEqual(status, 503)
+        self.assertEqual(data.get("error_code"), "ENGINE_OFFLINE")
+        self.assertNotIn("10.0.0.5", json.dumps(data))
+
+
 class ConfigYamlExceptionSanitizationTests(unittest.TestCase):
     """Alerts #96/#97/#98 (py/stack-trace-exposure): /api/config GET/POST
     and /api/config/revert returned raw filesystem exception text for

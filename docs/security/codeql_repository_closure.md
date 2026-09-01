@@ -571,16 +571,72 @@ remain `NEEDS_REVIEW`.**
   replace... without understanding how it must be used"), this is a genuine false positive — swapping in
   `crypto.randomUUID()` would be pure churn with no security benefit.
 
-## 5. Remaining alerts
+## 5. Phase 5A/5B — Sensitive data handling, then stack-trace exposure (2026-09-01)
 
-31 of 171 alerts remain **NEEDS_REVIEW** as of this checkpoint (45 dispositioned: 2 critical
-command-injection dismissed, 8 path-injection fixed as real vulnerabilities, 35 path-injection confirmed
-safe) — see `security/codeql_main_alert_inventory.json` for the full raw list. Work continues
-alert-by-alert (or pattern-class-by-pattern-class for the remaining `py/path-injection` instances
-still clustered in `app.py`, a 48,286-line file) rather than being declared closed. **Repository-wide
-CodeQL security closure is NOT complete.**
+### Alerts 553, 554, 551, 552 — `py/clear-text-storage-sensitive-data`, high — `scripts/verify_first_run_acceptance.py` (2), `tests/test_first_run_browser_auth.py` (1), `tests/test_first_run_browser_bootstrap.py` (1)
 
-## 6. Test verification log
+- **Disposition**: `TEST_ONLY_FALSE_POSITIVE` (all 4).
+- All 4 write a password value to a disposable tempfile as part of exercising the first-run browser-auth
+  setup/migration flow. Traced each value's origin: `scripts/verify_first_run_acceptance.py`'s
+  `_USER_PASSWORD` and `tests/test_first_run_browser_bootstrap.py`'s `_VALID_TEST_PASSWORD` are both
+  hardcoded literal constants (`"MyCustomAdminPassword123!Aa1234567"`, `"Aa1!" + "x"*32`) — never derived
+  from a real credential. `tests/test_first_run_browser_auth.py`'s `pwd` is freshly generated per test run
+  via the app's own `generate_secure_browser_password(36)`. All 4 write into a `tempfile.TemporaryDirectory()`
+  cleaned up automatically (script exit / `tearDown`). Confirmed `scripts/verify_first_run_acceptance.py`
+  is never imported by any production module (standalone acceptance-test runner only).
+- **Note for a future CI hardening pass**: all 4 sites already carry an inline `# codeql[py/clear-text-storage-sensitive-data]`
+  suppression comment, which GitHub Code Scanning apparently isn't honoring for this rule/analysis
+  configuration (they still showed as open, live-verified). Worth checking whether this repository's
+  CodeQL setup has inline-suppression comments enabled, since the intent to suppress these exact 4 was
+  already expressed in source and not acted on by the scanner.
+- **GitHub disposition**: all 4 dismissed 2026-09-01, reason `used in tests`.
+
+### Alert 771 — `py/stack-trace-exposure`, high — `app.py`, `cleanup_import_review_files`
+
+- **Disposition**: `REAL_VULNERABILITY` — genuine, fixed.
+- `except BeetsError as ex: return jsonify({"ok": False, "error": str(ex), ...}), 400` — `BeetsError`'s
+  message can carry up to 200 raw response-body characters for any non-JSON/unrecognized engine error
+  response (per `BeetsClient._request()`'s own documented fallback behavior, and per the sibling
+  `reimport_disk()` function's already-hardened handling of this exact exception type, which explains
+  the risk directly in a comment). Never interpolated safely here.
+- **Fix**: log the real exception server-side (`app.logger.warning`, full exception text server-side
+  only), return the same fixed message the adjacent `except Exception` branch already used.
+
+### Alert 489 — `py/stack-trace-exposure`, high — `app.py`, `library_full` (`/api/library?limit=N`)
+
+- **Disposition**: `REAL_VULNERABILITY` — genuine, fixed.
+- The paginated-listing fallback embedded `{ex}` directly into an f-string returned to the client for
+  `BeetsUnavailableError`/`TimeoutError`. An established, already-safe pattern for exactly this exists
+  elsewhere in the same file (`library_art_repair_report()`'s `"error_code": "ENGINE_OFFLINE"` with a
+  fixed message) — applied here for consistency.
+
+### Alerts 490, 491, 492 — `py/stack-trace-exposure`, high — `routes_setup.py`, `setup_status`/`setup_diagnostics`
+
+- **Disposition**: `REAL_VULNERABILITY` — genuine, fixed (3 alerts, 2 call sites).
+- `_build_setup_status_payload()` aggregates config/plugin/path/provider-integration diagnostics from
+  many sources — a genuinely broad `except Exception` whose text reached the client in 3 places (the
+  stale-cache `refresh_error` field, the no-prior-cache 503 fallback, and `setup_diagnostics()`'s
+  equivalent). `routes_setup.py` was extensively hardened for this exact pattern in Wave 2
+  (`docs/TECHNICAL_DEBT.md`) at 6 other call sites — these 2 functions were evidently missed.
+- **Fix**: log server-side (`app.logger.warning`, type name + text, server log only), return the
+  established fixed-message pattern; the stale-cache fallback behavior itself (serving a marked-stale
+  prior snapshot) is preserved exactly, only the leaked text is removed.
+
+**Tests**: `tests/test_sec002_app_stacktrace.py::ReviewFilesCleanupAndLibraryPageExceptionSanitizationTests`
+(2 tests) and `tests/test_routes_setup.py::RoutesSetupStatusBuildFailureSanitizationTests` (3 tests,
+including proof the stale-cache fallback path still activates correctly with the leak removed).
+
+**This closes every `py/clear-text-storage-sensitive-data` and `py/stack-trace-exposure` alert in the
+repository: 0 remain `NEEDS_REVIEW` for either rule.**
+
+## 6. Remaining alerts
+
+22 of 171 alerts remain **NEEDS_REVIEW**: 17 `py/polynomial-redos`, 3 Python-side
+`py/incomplete-url-substring-sanitization`, 1 `py/regex-injection`, 1 `py/bad-tag-filter` — see
+`security/codeql_main_alert_inventory.json` for the full list. **Repository-wide CodeQL security closure
+is NOT complete.**
+
+## 7. Test verification log
 
 - Full backend suite (`python -m unittest discover -s tests -p "test_*.py"`), run 1 (early in session):
   2763 tests, 0 failures, 129 skipped (pre-existing, require live engine/Docker).

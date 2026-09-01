@@ -280,9 +280,9 @@
     "end_line": 144,
     "created_at": "2026-08-10T23:07:57Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/553",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "TEST_ONLY_FALSE_POSITIVE: hardcoded dummy _USER_PASSWORD in disposable tempfile"
   },
   {
     "number": 554,
@@ -295,9 +295,9 @@
     "end_line": 167,
     "created_at": "2026-08-10T23:07:57Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/554",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "TEST_ONLY_FALSE_POSITIVE: same as prior, upgrade-migration test"
   },
   {
     "number": 551,
@@ -310,9 +310,9 @@
     "end_line": 88,
     "created_at": "2026-08-10T23:07:57Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/551",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "TEST_ONLY_FALSE_POSITIVE: freshly-generated password in TemporaryDirectory, cleaned up in tearDown"
   },
   {
     "number": 552,
@@ -325,9 +325,9 @@
     "end_line": 133,
     "created_at": "2026-08-10T23:07:57Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/552",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "TEST_ONLY_FALSE_POSITIVE: hardcoded dummy _VALID_TEST_PASSWORD in disposable tempfile"
   },
   {
     "number": 1009,
@@ -2500,9 +2500,9 @@
     "end_line": 13060,
     "created_at": "2026-08-19T18:14:09Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/771",
-    "disposition": "NEEDS_REVIEW",
+    "disposition": "REAL_VULNERABILITY",
     "dismissed_on_github": false,
-    "notes": ""
+    "notes": "REAL bug (fixed): cleanup_import_review_files() forwarded str(BeetsError) verbatim, which can carry up to 200 raw response-body chars; now logs server-side + fixed message"
   },
   {
     "number": 489,
@@ -2515,9 +2515,9 @@
     "end_line": 14145,
     "created_at": "2026-08-05T23:02:21Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/489",
-    "disposition": "NEEDS_REVIEW",
+    "disposition": "REAL_VULNERABILITY",
     "dismissed_on_github": false,
-    "notes": ""
+    "notes": "REAL bug (fixed): library_full()/get_items_page unavailable path interpolated raw exception text; now uses the established ENGINE_OFFLINE pattern"
   },
   {
     "number": 490,
@@ -2530,9 +2530,9 @@
     "end_line": 1490,
     "created_at": "2026-08-06T04:25:46Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/490",
-    "disposition": "NEEDS_REVIEW",
+    "disposition": "REAL_VULNERABILITY",
     "dismissed_on_github": false,
-    "notes": ""
+    "notes": "REAL bug (fixed): setup_status() stale-cache refresh_error path forwarded str(ex) verbatim"
   },
   {
     "number": 491,
@@ -2545,9 +2545,9 @@
     "end_line": 1491,
     "created_at": "2026-08-06T04:25:46Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/491",
-    "disposition": "NEEDS_REVIEW",
+    "disposition": "REAL_VULNERABILITY",
     "dismissed_on_github": false,
-    "notes": ""
+    "notes": "REAL bug (fixed): setup_status() no-prior-cache fallback forwarded str(ex) verbatim"
   },
   {
     "number": 492,
@@ -2560,8 +2560,8 @@
     "end_line": 1513,
     "created_at": "2026-08-06T04:25:46Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/492",
-    "disposition": "NEEDS_REVIEW",
+    "disposition": "REAL_VULNERABILITY",
     "dismissed_on_github": false,
-    "notes": ""
+    "notes": "REAL bug (fixed): setup_diagnostics() forwarded str(ex) verbatim, same broad-except pattern as setup_status()"
   }
 ]

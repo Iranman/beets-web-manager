@@ -13084,7 +13084,15 @@ def cleanup_import_review_files():
             "log": log,
         })
     except BeetsError as ex:
-        return jsonify({"ok": False, "error": str(ex), "log": log}), 400
+        # SEC-002 CodeQL repository-wide closure finding: BeetsClient._request()
+        # falls back to embedding up to 200 raw response-body characters in
+        # this exception's message for any non-JSON/unrecognized engine
+        # error response (e.g. an unexpected proxy/framework error page),
+        # which could carry stack-trace-shaped text -- never interpolate it
+        # directly into a client-facing response (see reimport_disk()'s
+        # identical, already-hardened handling of this exact exception type).
+        app.logger.warning("cleanup_import_review_files BeetsError for %r: %s", folder_path, ex)
+        return jsonify({"ok": False, "error": "Could not cleanup review files.", "log": log}), 400
     except Exception as ex:
         app.logger.exception("cleanup_import_review_files failed for %r", folder_path)
         return jsonify({"ok": False, "error": "Could not cleanup review files.", "log": log}), 500
@@ -14169,8 +14177,14 @@ def library_full():
             })
         except Exception as ex:
             if isinstance(ex, (BeetsUnavailableError, TimeoutError)):
+                # SEC-002 CodeQL repository-wide closure finding: never
+                # interpolate the raw exception text into a client-facing
+                # response -- matches the established ENGINE_OFFLINE
+                # pattern used elsewhere (e.g. library_art_repair_report()).
+                app.logger.warning("get_items_page unavailable: %s: %s", type(ex).__name__, ex)
                 return jsonify({
-                    "error": f"Beets Control Agent is unavailable: {ex}",
+                    "error": "Beets Control Agent is unavailable.",
+                    "error_code": "ENGINE_OFFLINE",
                     "status": "unavailable"
                 }), 503
             raise
