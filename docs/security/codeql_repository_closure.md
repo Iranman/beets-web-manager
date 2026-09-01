@@ -749,7 +749,84 @@ this pass does not have. **Do not read "0 NEEDS_REVIEW" as "0 open on GitHub" �
 questions**, and conflating them is exactly the error this closure effort's own mission documents warned
 against repeatedly.
 
-## 8. Test verification log
+## 8. PR #102/Wave 27 reconciliation (2026-09-01)
+
+Between this branch's push and its readiness for review, `PR #102` ("SEC-002/ARCH-003 Wave 27 Complete
+Configuration Domain Closure") merged into `main` (`7b05844` → `2eef2e6c...`), leaving this branch 1
+commit behind and reporting `CONFLICTING` on GitHub. Integrated via `git merge origin/main` (not
+rebase/squash, preserving all prior commit history per this branch's own established practice) — merge
+commit `70f52f2`.
+
+**Conflicts**: exactly one, `security/endpoint_inventory.json` (a generated file) — resolved by
+regenerating through `scripts/generate_endpoint_inventory.py`, not hand-merged. Every other file
+auto-merged cleanly via git's 3-way merge (`app.py`, `docs/TECHNICAL_DEBT.md`, `routes_setup.py`, and
+several test files) — zero textual overlap between this branch's CodeQL fixes and Wave 27's config-domain
+work. `git grep` for unresolved conflict markers found none.
+
+**Semantic re-verification, not just a clean auto-merge**: Wave 27 substantially changed
+`backend/beets_control_agent.py` (565 changed lines) and `backend/transaction_engine.py` (921 changed
+lines) — files this branch never edited but which contain 12 of the 171 baseline alerts' dispositions
+(the command-line-injection, M3U-export, and TOCTOU/tag-capture clusters documented above). Re-traced
+every one against Wave 27's actual current code rather than assuming the clean merge meant nothing
+changed:
+- `_run_beet_subcommand_locked` gained a third caller (Wave 27's new `/genres/repair/apply` feature,
+  `_genre_beet_runner`). Verified: hardcoded `"lastgenre"` command literal + `_sanitize_command_path_args()`
+  on `args`, identical safety shape to the two already-verified callers. Disposition for alert `#1010`
+  holds.
+- `_capture_media_tag_state` gained two new call sites (Wave 27's new item-metadata-update feature).
+  Verified both: DB-derived `item_path`, explicitly re-validated for containment (`_path_under`) and
+  symlink rejection (`_path_has_symlink_under`) before use — consistent with the other 5 already-verified
+  sites. Disposition for alert `#1008` holds.
+- `_MB_UUID_RE`/`reimport_source_atomic`'s validation gate and `_playlist_m3u_path_for_key`'s containment
+  + symlink-component rejection: confirmed unchanged.
+
+All 12 dispositions in these two files remain accurate under the actual merged code, not merely assumed
+from the absence of a git conflict marker.
+
+**Generated inventories regenerated** through their official generators against the merged tree:
+`security/endpoint_inventory.json` (244 routes, 0 need manual review — down from 246 pre-merge, consistent
+with Wave 27 consolidating some config-related routes into the new `WebManagerConfigStore`-backed ones)
+and `security/arch003_mutation_inventory.json` (486 sinks, 79 unresolved in the `other` domain — matching
+Wave 27's own reported baseline exactly: `config`/`ai_import`/`import_reconciliation`/`library_cleanup`
+all remain 0 unresolved). This PR's CodeQL alert-disposition closure is explicitly **not** the same claim
+as ARCH-003 architectural closure — the 79 `other`-domain blockers are unrelated pre-existing debt this
+PR neither introduces nor claims to resolve.
+
+**PR #102/Wave 27 protections spot-verified intact**: `WebManagerConfigStore`'s CAS revision enforcement,
+`0o600`/`0o700` permissions, symlink-leaf and symlink-parent-component rejection, atomic replace, and
+directory fsync (`backend/web_manager_config_store.py`, a new file this branch never touched); the
+fail-closed root-promotion rejection in `_app_config_store_for_target`/`_config_store_for_target`
+(rejects any target not beneath `WEB_MANAGER_DATA_DIR` rather than promoting an arbitrary parent to a
+writable root).
+
+**Docker acceptance re-evaluated against the merged head, not carried forward from stale wording**: the
+identical `scripts/verify_two_service_docker_acceptance.py` run against the reconciled branch+Wave-27
+head reproduced the exact same 5 `ARCH-020` failures (`fresh-import-untagged-confirmed`,
+`confirmed-import-idempotent`, `crash-resume-no-duplicate`, `ai-reviewed-import-confirmed`,
+`crash-resume-ai-batch`), same `copy_failed` root cause, clean teardown. This is now confirmed across
+three independent runs (branch alone, unmodified pre-Wave-27 `main`, and the reconciled head) — Wave 27
+neither fixed, introduced, nor altered the issue. See `docs/TECHNICAL_DEBT.md` `ARCH-020`'s reconciliation
+update for full detail.
+
+**Focused regression**: one test (`test_a_safe_plus_safe_same_item_second_gets_409`, a concurrency
+test) failed once inside a large combined 15-module/516-test batch, then passed 3/3 in isolation and
+35/35 as its own file — confirmed as resource-contention flakiness matching the already-documented
+`ARCH-019` pattern, not a merge regression.
+
+**Full suite, twice, on the merged tree**: run 1 — 2906 tests, 0 failures, 132 skipped, exit 0
+(a different, larger total than the pre-merge 2814, expected since Wave 27 added its own test files:
+`test_sec002_wave27_config.py`, `test_sec002_wave27_genre_repair.py`,
+`test_sec002_wave27_result_handling.py`, plus additions to several existing files). Run 2 — identical:
+2906 tests, 0 failures, 132 skipped, exit 0. No order-dependence or flakiness.
+
+**Frontend, re-run on the merged tree** (Wave 27 touched `frontend/src/api/client.ts`,
+`frontend/src/api/types.ts`, `frontend/src/views/System.tsx`): `npm ci` clean, `typecheck` clean, `lint`
+clean, `npm test -- --run` — 58/58 (unchanged), production build succeeded (13 static pages), `npm audit
+--audit-level=high` — 0 vulnerabilities.
+
+Backup ref preserved (not deleted): `backup/pr108-before-main-reconcile-20260901-140354`.
+
+## 9. Test verification log
 
 - Full backend suite (`python -m unittest discover -s tests -p "test_*.py"`), run 1 (early in session):
   2763 tests, 0 failures, 129 skipped (pre-existing, require live engine/Docker).

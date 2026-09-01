@@ -694,9 +694,24 @@ Independent review did not accept green tests/CI as proof this wiring was safe o
   on Windows.
 - Priority: P2 (blocks local Windows acceptance testing; severity depends on the still-unconfirmed
   Linux-CI reproduction above).
+- **Reconciliation update (2026-09-01, PR #108 x PR #102/Wave 27 integration)**: PR #102/Wave 27
+  (config-domain closure, `2eef2e6`) merged into `main` and into this branch
+  (`security/codeql-repowide-closure`) between the original finding above and this update. Despite Wave
+  27 touching `backend/beets_control_agent.py` substantially (565 changed lines) and
+  `backend/transaction_engine.py` even more (921 changed lines) -- files directly relevant to this
+  entry -- **`preserve_import_source()`/`_import_source_signature()` themselves were not among Wave 27's
+  changes** (config-domain work; unrelated code paths). Re-ran the identical acceptance script a third
+  time, now against the merged head (branch + Wave 27 combined): **the same 5 scenario names failed,
+  same `copy_failed` root cause, same script exit code** -- identical to both the original branch-only
+  run and the unmodified-pre-Wave-27-`main` run. This is now confirmed across three independent runs
+  (branch alone, unmodified pre-Wave-27 `main`, and the reconciled branch+Wave-27 head): Wave 27 neither
+  fixed nor introduced nor altered this issue in any way. It remains exactly what it was originally
+  assessed to be -- a pre-existing defect orthogonal to both PRs. Docker teardown confirmed clean on
+  this run too (`docker ps -a` empty afterward).
 - Status: Open. Not fixed this pass -- out of scope for a CodeQL security-closure effort (no CodeQL
-  alert referenced this code, and the affected files are unmodified by this session). Flagged with
-  reproduction evidence on both the branch and unmodified `main`, not silently noticed and dropped.
+  alert referenced this code, and the affected files are unmodified by this session, and unaffected by
+  the separately-merged Wave 27 work). Flagged with reproduction evidence across three independent runs
+  (branch, unmodified `main`, and the reconciled head), not silently noticed and dropped.
 
 ### Wave 9: Playlist, Plex Sync & Staging-Manifest Path Security (22 alerts)
 
