@@ -1285,9 +1285,9 @@
     "end_line": 31728,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/249",
-    "disposition": "NEEDS_REVIEW",
+    "disposition": "REAL_VULNERABILITY",
     "dismissed_on_github": false,
-    "notes": ""
+    "notes": "REAL bug: mb_albumid had no format check before being joined into the cache path (read side); fixed via _is_valid_mb_uuid() at the shared cache-path builder"
   },
   {
     "number": 250,
@@ -1300,9 +1300,9 @@
     "end_line": 31743,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/250",
-    "disposition": "NEEDS_REVIEW",
+    "disposition": "REAL_VULNERABILITY",
     "dismissed_on_github": false,
-    "notes": ""
+    "notes": "REAL bug: same as 249, write-side mkdir()"
   },
   {
     "number": 251,
@@ -1315,9 +1315,9 @@
     "end_line": 31745,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/251",
-    "disposition": "NEEDS_REVIEW",
+    "disposition": "REAL_VULNERABILITY",
     "dismissed_on_github": false,
-    "notes": ""
+    "notes": "REAL bug: same as 249, write-side write_text() -- arbitrary file write primitive if attacker-controlled"
   },
   {
     "number": 252,
@@ -1330,9 +1330,9 @@
     "end_line": 31749,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/252",
-    "disposition": "NEEDS_REVIEW",
+    "disposition": "REAL_VULNERABILITY",
     "dismissed_on_github": false,
-    "notes": ""
+    "notes": "REAL bug: same as 249, write-side tmp_path.replace(cache_path)"
   },
   {
     "number": 417,
@@ -1825,9 +1825,9 @@
     "end_line": 40560,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/292",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "root is MUSIC_ROOT itself or _artist_folder_repair_root()-validated to resolve to exactly MUSIC_ROOT"
   },
   {
     "number": 293,
@@ -1840,9 +1840,9 @@
     "end_line": 40755,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/293",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "new_path built from _safe_artist_folder_name()-sanitized name + validated root"
   },
   {
     "number": 294,
@@ -1855,9 +1855,9 @@
     "end_line": 40771,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/294",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "new_path.exists() on the same sanitized-name/validated-root path"
   },
   {
     "number": 298,
@@ -1870,9 +1870,9 @@
     "end_line": 42599,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/298",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "_playlist_resolve_item_path() is itself the validator (in-root path or guaranteed-safe sentinel)"
   },
   {
     "number": 299,
@@ -1885,9 +1885,9 @@
     "end_line": 42624,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/299",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "resolved_path.exists() on _playlist_resolve_item_path() output"
   },
   {
     "number": 300,
@@ -1900,9 +1900,9 @@
     "end_line": 42898,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/300",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "same _playlist_resolve_item_path() validator"
   },
   {
     "number": 301,
@@ -1915,9 +1915,9 @@
     "end_line": 42922,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/301",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "same _playlist_resolve_item_path() validator"
   },
   {
     "number": 636,

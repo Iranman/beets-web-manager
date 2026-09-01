@@ -31823,8 +31823,23 @@ def _album_item_abs_path(raw_path: str) -> str:
     return p
 
 
-def _mb_release_tracklist_cache_path(mb_albumid: str) -> Path:
-    release_id = (mb_albumid or "").strip().lower()
+def _mb_release_tracklist_cache_path(mb_albumid: str) -> Optional[Path]:
+    # SEC-002 CodeQL repository-wide closure finding: this previously
+    # lowercased/stripped mb_albumid with no format check at all before
+    # joining it onto _MB_RELEASE_TRACKLIST_CACHE_DIR -- unlike the sibling
+    # release-art cache (_release_art_cache_info/_release_art_download),
+    # which anchors on _RELEASE_ART_MBID_RE before ever touching a path.
+    # _fetch_mb_release_tracklist() has ~28 call sites across this file;
+    # rather than audit every one for whether its mb_albumid ultimately
+    # traces to attacker-controlled text, validate here at the single
+    # shared cache-path builder both the read and write sides funnel
+    # through -- a value that isn't a real MusicBrainz UUID can never
+    # reach the filesystem, and a real MBID has an identical resolved
+    # path either way, so this is a pure hardening with no behavior
+    # change for any legitimate caller.
+    if not _is_valid_mb_uuid(mb_albumid):
+        return None
+    release_id = _s(mb_albumid).strip().lower()
     return _MB_RELEASE_TRACKLIST_CACHE_DIR / release_id[:2] / f"{release_id}.json"
 
 
@@ -31832,6 +31847,8 @@ def _mb_release_tracklist_read_disk(mb_albumid: str, now: float) -> Optional[Dic
     if _MB_RELEASE_TRACKLIST_DISK_CACHE_TTL <= 0:
         return None
     cache_path = _mb_release_tracklist_cache_path(mb_albumid)
+    if cache_path is None:
+        return None
     try:
         cached = json.loads(cache_path.read_text(encoding="utf-8"))
         payload = cached.get("payload")
@@ -31847,6 +31864,8 @@ def _mb_release_tracklist_write_disk(mb_albumid: str, payload: Dict[str, Any]) -
     if _MB_RELEASE_TRACKLIST_DISK_CACHE_TTL <= 0:
         return
     cache_path = _mb_release_tracklist_cache_path(mb_albumid)
+    if cache_path is None:
+        return
     try:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = cache_path.with_suffix(f".{os.getpid()}.tmp")

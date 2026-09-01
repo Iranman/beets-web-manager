@@ -344,9 +344,55 @@ per-alert, not assumed, per the mission rules (no blanket dismissal).
 **Every `py/path-injection` alert outside `app.py` is now closed** (`backend/transaction_engine.py`:
 0 remaining, `backend/beets_control_agent.py`: 0 remaining).
 
+### Alerts 249, 250, 251, 252 — `py/path-injection`, high — `app.py:31728-31749`, MusicBrainz release-tracklist disk cache (4 alerts)
+
+- **Disposition**: `REAL_VULNERABILITY` — genuine, fixed (not dismissed; will auto-close on post-merge
+  rescan).
+- `_mb_release_tracklist_cache_path(mb_albumid)` lowercased/stripped `mb_albumid` with **no format check
+  at all** before joining it onto `_MB_RELEASE_TRACKLIST_CACHE_DIR` — unlike the sibling release-art
+  cache (`_release_art_cache_info`/`_release_art_download`, already verified above), which anchors on
+  `_RELEASE_ART_MBID_RE` first. Because the path was built with `release_id[:2]` and
+  `f"{release_id}.json"` directly from the unvalidated value, an `mb_albumid` containing `/` or `..`
+  segments could escape the cache directory on both the read side
+  (`json.loads(cache_path.read_text(...))`) and, more seriously, the **write side**
+  (`cache_path.parent.mkdir(parents=True, exist_ok=True)`, `tmp_path.write_text(...)`,
+  `tmp_path.replace(cache_path)`) — an arbitrary-file-write primitive if any of
+  `_fetch_mb_release_tracklist()`'s ~28 call sites across this file ever passes attacker-controlled text.
+  Given the scope of auditing 28 call sites individually, fixed at the single shared choke point instead.
+- **Fix**: validate `mb_albumid` via the existing `_is_valid_mb_uuid()`/`_MB_UUID_RE` (already used
+  broadly elsewhere in this file) inside `_mb_release_tracklist_cache_path()`, returning `None` for an
+  invalid value; both callers (`_mb_release_tracklist_read_disk`/`_mb_release_tracklist_write_disk`)
+  treat `None` as a cache-miss/no-op, matching this codebase's established graceful-degradation style for
+  best-effort caches. No behavior change for any legitimate caller — a real MBID resolves to the
+  identical path either way.
+- **Tests**: `tests/test_codeql_repowide_closure_mb_tracklist_cache.py` (6 tests) — absolute-path escape,
+  relative-traversal escape, embedded-separator escape all rejected (return `None`, no directory/file
+  created); a valid MBID still resolves under the cache dir and round-trips through read/write correctly.
+
+### Alerts 292, 293, 294, 298, 299, 300, 301 — `py/path-injection`, high — `app.py` artist-folder-stamp scan / playlist item-path resolution (7 alerts)
+
+- **Disposition**: `SAFE_BUT_CODEQL_BLIND` (all 7).
+- `_stamp_artist_folder_scan`'s `root.resolve()`/`new_path.exists()`/`.resolve()` (292, 293, 294): `root`
+  is always either the hardcoded `MUSIC_ROOT` constant or `_artist_folder_repair_root()`-validated to
+  resolve to **exactly** `MUSIC_ROOT` (a fail-closed validator that explicitly rejects any descendant,
+  per its own docstring: accepting one would let folder-merge logic conflate album folders with artist
+  folders). `new_path` is `root / new_name` where `new_name` comes from
+  `_artist_folder_canonical_name()`/`_safe_artist_folder_name()`-sanitized text.
+- `_playlist_resolve_item_path()`'s `.resolve()`/`.exists()` call sites (298, 299, 300, 301): the function
+  itself is the validator — it returns either a path confirmed under one of `MUSIC_ROOT`/
+  `PLAYLIST_DOWNLOAD_ROOT`/`DOWNLOADS_ROOT`/configured aliases, or a deliberately-chosen, permanently
+  nonexistent, permanently out-of-root sentinel path (`_PLAYLIST_UNRESOLVED_PATH`) for anything that
+  doesn't validate — a documented, deliberate fail-closed design (see the source comment explaining why
+  this shape was chosen over `Optional[Path]` across its ~11 call sites).
+- **GitHub disposition**: all 7 dismissed 2026-09-01, `false positive`, sink-specific rationale.
+
+**This closes every `py/path-injection` alert in `app.py` except 2** (`#6093`/`#6095`,
+`_folder_release_preflight`, deliberately left `NEEDS_REVIEW` — see the entry above explaining the
+reverted fix attempt and why it needs a dedicated per-caller trace rather than a rushed disposition).
+
 ## 3. Remaining alerts
 
-61 of 171 alerts remain **NEEDS_REVIEW** as of this checkpoint (45 dispositioned: 2 critical
+50 of 171 alerts remain **NEEDS_REVIEW** as of this checkpoint (45 dispositioned: 2 critical
 command-injection dismissed, 8 path-injection fixed as real vulnerabilities, 35 path-injection confirmed
 safe) — see `security/codeql_main_alert_inventory.json` for the full raw list. Work continues
 alert-by-alert (or pattern-class-by-pattern-class for the remaining `py/path-injection` instances
