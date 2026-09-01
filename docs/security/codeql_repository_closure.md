@@ -786,8 +786,9 @@ against repeatedly.
   skipped, exit code 0.
 - Full suite, run 9 (**final** — after Phase 5C/5D, all 171 alerts dispositioned, 0 remain
   `NEEDS_REVIEW`): 2814 tests, 0 failures, 129 skipped, exit code 0.
-- Full suite, run 10 (final order-dependence/flakiness re-check, same code state as run 9): see the
-  commit that follows this one for the confirmed count.
+- Full suite, run 10 (final order-dependence/flakiness re-check, same code state as run 9): 2814 tests,
+  0 failures, 129 skipped, exit code 0 -- identical count to run 9, confirming no order-dependence or
+  flakiness across the two runs.
 - Final Python security gates (all 4): `security_secret_scan.py` passed; `validate_compose_security.py`
   → `{"ok": true, "errors": [], "warnings": []}`; `verify_arch003_mutation_inventory.py --check` passed
   (469 entries, 107 unresolved, matches baseline); `generate_endpoint_inventory.py --check` regenerated
