@@ -445,9 +445,9 @@
     "end_line": 8641,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/137",
-    "disposition": "NEEDS_REVIEW",
+    "disposition": "REAL_VULNERABILITY",
     "dismissed_on_github": false,
-    "notes": ""
+    "notes": "REAL bug: same fix as alert 138 (source.is_dir gate)"
   },
   {
     "number": 138,
@@ -460,9 +460,9 @@
     "end_line": 8643,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/138",
-    "disposition": "NEEDS_REVIEW",
+    "disposition": "REAL_VULNERABILITY",
     "dismissed_on_github": false,
-    "notes": ""
+    "notes": "REAL bug: _folder_track_search_titles() had no containment check, unlike its already-fixed sibling _folder_import_track_count() (Wave 1, #334/#335); fixed by reusing the same check"
   },
   {
     "number": 139,

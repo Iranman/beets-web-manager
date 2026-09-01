@@ -124,6 +124,38 @@ class FolderImportTrackCountRootContainmentTests(unittest.TestCase):
                 shutil.rmtree(album_dir, ignore_errors=True)
 
 
+class FolderTrackSearchTitlesRootContainmentTests(unittest.TestCase):
+    """Repository-wide CodeQL closure session, 2026-09-01 (alerts #8641/#8643
+    at baseline, py/path-injection, app.py Path.is_dir/rglob sinks):
+    _folder_track_search_titles() had no containment check on source_folder
+    at all -- a real gap in the exact same pattern as
+    FolderImportTrackCountRootContainmentTests above (#334/#335, Wave 1),
+    just in a sibling function Wave 1 didn't reach. Same fix reused."""
+
+    def test_outside_root_folder_returns_db_titles_only_without_walking_it(self):
+        outside = tempfile.mkdtemp(prefix="sec002-outside-root-")
+        try:
+            Path(outside, "track.flac").write_text("x", encoding="utf-8")
+            with mock.patch.object(Path, "rglob") as mock_rglob:
+                titles = app_module._folder_track_search_titles(outside)
+            mock_rglob.assert_not_called()
+            self.assertEqual(titles, [])
+        finally:
+            import shutil
+            shutil.rmtree(outside, ignore_errors=True)
+
+    def test_folder_under_music_root_is_still_scanned(self):
+        with mock.patch.object(app_module, "MUSIC_ROOT", Path(tempfile.gettempdir())):
+            album_dir = Path(tempfile.mkdtemp(dir=tempfile.gettempdir(), prefix="sec002-inroot-"))
+            try:
+                (album_dir / "01 - Opening Track.flac").write_text("x", encoding="utf-8")
+                titles = app_module._folder_track_search_titles(str(album_dir))
+                self.assertTrue(titles)
+            finally:
+                import shutil
+                shutil.rmtree(album_dir, ignore_errors=True)
+
+
 class AlbumArtDeleteExceptionSanitizationTests(unittest.TestCase):
     """Alert #401 (py/stack-trace-exposure): album_delete_art() must not
     return raw filesystem or engine exception text in public JSON errors."""

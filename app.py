@@ -8638,7 +8638,13 @@ def _folder_track_search_titles(source_folder: str, existing_album_id: int = 0,
             pass
     try:
         source = Path(source_folder)
-        if source.is_dir():
+        # SEC-002 CodeQL repository-wide closure finding: same missing
+        # containment check as _folder_release_preflight() above -- and the
+        # exact pattern _folder_import_track_count() (a few lines above
+        # this function) was already fixed for in Wave 1.
+        if (
+            _path_is_under(source, MUSIC_ROOT) or _path_is_under(source, DOWNLOADS_ROOT)
+        ) and source.is_dir():
             files = sorted(
                 [p for p in source.rglob("*")
                  if p.is_file() and p.suffix.lower() in AUDIO_EXT],

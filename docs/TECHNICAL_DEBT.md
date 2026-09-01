@@ -1400,13 +1400,40 @@ all 32 dismissed on GitHub with sink-specific rationale, backed by Wave 4's stil
 after unrelated commits can make already-fixed work look like fresh backlog — worth checking "does this
 line's function already look hardened" before assuming a live alert means unfixed code.
 
-Remaining after this session: 126 open (45 of 171 baseline alerts dispositioned: 2 critical dismissed, 8
-path-injection fixed as real vulnerabilities, 35 path-injection confirmed safe and dismissed), all still
-`NEEDS_REVIEW` for the rest — not yet individually traced. **Not closed.** Continuing this thread in a
-future wave should sweep `app.py`'s remaining `py/path-injection` alerts by functional cluster (the same
-approach Waves 4-8 used, and the folder-cleanup recheck above), starting with any route that takes a
-filesystem path directly from a request body/query string with no visible allowlist call nearby —
-`/api/import`+`/api/dedup/scan` (this session) both fit that exact shape and had gone unreviewed since
-the 2026-07-20 baseline scan despite 6 intervening path-injection waves, suggesting a few more of the
-same shape likely remain among the ~90 still-`NEEDS_REVIEW` `app.py` path-injection alerts.
+**Third and fourth clusters, same session**: Import Review target-preview source-file listing (12
+alerts: 9 `SAFE_BUT_CODEQL_BLIND` on `_target_preview_source_files`/`_remaining_audio_files`/`album_path`,
+plus a real low-severity fix in `_build_import_target_preview()` — `row["source_path"]` from the request
+body reached `.resolve()` with no containment check, unlike its siblings; fixed via the existing
+`_resolve_import_review_cleanup_file()` helper, 3 new tests in
+`tests/test_codeql_repowide_closure_import_review_preview.py`); and the playlist atomic-JSON-write
+helper (8 alerts, all `SAFE_BUT_CODEQL_BLIND` — `_playlist_atomic_json_replace()` validates against fixed
+server-config globals before its `try:` block, `_playlist_read_manifest()` only ever builds a
+single-component sanitized filename).
+
+**Fifth: `_folder_track_search_titles()` (alerts #8641/#8643) — a real bug, fixed** by reusing its
+sibling `_folder_import_track_count()`'s existing Wave-1 fix (`#334`/`#335`): identical missing
+containment check on `source_folder` before `.is_dir()`/`.rglob()`, in a sibling function defined a few
+lines away that Wave 1 evidently didn't reach. 2 new tests in
+`tests/test_sec002_codeql_backlog.py::FolderTrackSearchTitlesRootContainmentTests`, mirroring the
+existing sibling-fix test class.
+
+**Related, reverted attempt**: `_folder_release_preflight()` (alerts #6093/#6095, still `NEEDS_REVIEW`)
+has the same unguarded `Path.is_dir()`/`.rglob()` pattern and looked like the identical bug at first
+read. Copying the same containment gate broke 2 established tests in
+`tests/test_sec002_wave14_mb_identity_matching.py` that deliberately exercise real local-file matching
+against arbitrary non-`MUSIC_ROOT` temp directories. This function has ~14 call sites across
+reimport/repair flows; at least some legitimately expect best-effort local scanning outside the narrow
+`MUSIC_ROOT`/`DOWNLOADS_ROOT` pair used elsewhere in this file. Reverted the fix rather than land
+something that weakens tested matching behavior to close a CodeQL alert — needs either the correct
+broader allowed-roots set for this specific function or a full per-caller trace, flagged here for a
+dedicated future pass rather than forced into this session's pace.
+
+Remaining after this session: 91 open (80 of 171 baseline alerts dispositioned: 2 critical dismissed, 13
+path-injection fixed as real vulnerabilities, 67 path-injection confirmed safe and dismissed +
+2 command-injection dismissed = 69 SAFE_BUT_CODEQL_BLIND total). Continuing this thread in a future wave
+should keep sweeping `app.py`'s remaining `py/path-injection` alerts by functional cluster (the same
+approach Waves 4-8 used), give `_folder_release_preflight()` a proper dedicated per-caller trace, and
+start on the other rule groups entirely untouched so far this session: `py/polynomial-redos` (17),
+`js/incomplete-url-substring-sanitization` (14), `py/stack-trace-exposure` (5),
+`py/clear-text-storage-sensitive-data` (4), and the smaller single/double-alert rule groups.
 

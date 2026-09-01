@@ -228,9 +228,33 @@ per-alert, not assumed, per the mission rules (no blanket dismissal).
   never a caller-supplied full path.
 - **GitHub disposition**: all 8 dismissed 2026-09-01, `false positive`, sink-specific rationale.
 
+### Alerts 138, 137 — `py/path-injection`, high — `app.py:8641-8643`, `_folder_track_search_titles` (2 alerts)
+
+- **Disposition**: `REAL_VULNERABILITY` — genuine, fixed (not dismissed; will auto-close on post-merge
+  rescan).
+- `_folder_track_search_titles(source_folder, ...)` had **no containment check at all** before
+  `source.is_dir()`/`source.rglob("*")` — the identical pattern its sibling function,
+  `_folder_import_track_count()` (defined a few lines above it in the same file), was already fixed for
+  in `docs/TECHNICAL_DEBT.md`'s SEC-002 backlog Wave 1 (alerts `#334`/`#335`). Wave 1 evidently fixed one
+  sibling and missed the other. Fixed by adding the same `_path_is_under(source, MUSIC_ROOT) or
+  _path_is_under(source, DOWNLOADS_ROOT)` gate.
+- **Attempted, reverted fix for a related function**: `_folder_release_preflight()` (alerts 6093/6095,
+  still `NEEDS_REVIEW`) has the same unguarded pattern and looked like the same bug at first read. Adding
+  the identical containment gate broke 2 established tests in `tests/test_sec002_wave14_mb_identity_matching.py`
+  that deliberately exercise real local-file matching against arbitrary (non-`MUSIC_ROOT`) temp
+  directories — this function is called from ~14 sites across reimport/repair flows, and at least some of
+  those legitimately expect best-effort local scanning outside the narrow `MUSIC_ROOT`/`DOWNLOADS_ROOT`
+  pair. A correct fix here needs either a broader/correct allowed-roots set for this specific function or
+  a full per-caller trace, not a copy-paste of the sibling's fix. Reverted rather than land a fix that
+  weakens established, tested matching behavior — flagged in `docs/TECHNICAL_DEBT.md` for a dedicated
+  pass instead of forcing a rushed disposition.
+- **Tests**: `tests/test_sec002_codeql_backlog.py::FolderTrackSearchTitlesRootContainmentTests` (2 tests,
+  mirroring the existing sibling-fix test class exactly) — outside-root folder returns DB-only titles
+  without walking it (mocked `rglob` asserted not called), in-root folder still scanned normally.
+
 ## 3. Remaining alerts
 
-93 of 171 alerts remain **NEEDS_REVIEW** as of this checkpoint (45 dispositioned: 2 critical
+91 of 171 alerts remain **NEEDS_REVIEW** as of this checkpoint (45 dispositioned: 2 critical
 command-injection dismissed, 8 path-injection fixed as real vulnerabilities, 35 path-injection confirmed
 safe) — see `security/codeql_main_alert_inventory.json` for the full raw list. Work continues
 alert-by-alert (or pattern-class-by-pattern-class for the remaining `py/path-injection` instances
