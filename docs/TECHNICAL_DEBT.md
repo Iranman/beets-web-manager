@@ -650,6 +650,52 @@ Independent review did not accept green tests/CI as proof this wiring was safe o
   flake (not a Wave 26 regression) via an immediate clean re-run of the exact same commit, not
   worked around or silently ignored.
 
+## ARCH-020 Two-Service Docker Acceptance: `preserve_import_source()` Fails Its Own Post-Copy Signature Check On Every Torrent-Staged Import
+
+- Affected area: `backend/beets_control_agent.py`'s `preserve_import_source()` (the disposable-copy
+  path used whenever `beet import` would touch a torrent-staged source) and its
+  `_import_source_signature()` helper. Both untouched by the repository-wide CodeQL closure session
+  (2026-09-01) -- `git diff <baseline SHA> -- backend/beets_control_agent.py backend/transaction_engine.py`
+  is empty; this pass only dismissed CodeQL alerts referencing these files, no source lines changed.
+- Found while running `scripts/verify_two_service_docker_acceptance.py` (Phase 7 of the CodeQL closure
+  continuation) against the security branch: **5 of the script's scenarios failed** --
+  `fresh-import-untagged-confirmed`, `confirmed-import-idempotent`, `crash-resume-no-duplicate`,
+  `ai-reviewed-import-confirmed`, `crash-resume-ai-batch` -- every one cascading from the identical
+  underlying error, `error_code: "copy_failed"` / `"Preservation copy post-verification failed"`, raised
+  when `preserve_import_source()` copies staged files via `shutil.copy2()` then re-inspects the copy and
+  finds `_import_source_signature()`'s value (`sha256` over each file's `relative_path:size:mtime_ns`)
+  no longer matches the original.
+- **Independently reproduced on unmodified `main`** before recording this entry, not assumed from the
+  code diff alone: checked out the exact pre-session baseline SHA into a separate `git worktree`, ran the
+  identical acceptance script there. Result: the same 5 scenario names failed, with the same
+  `copy_failed` root cause and the same script exit code; `diff` of the two runs' `[FAIL]` scenario-name
+  lists was empty. This is conclusive, not circumstantial -- the failure exists on `main` today,
+  independent of the CodeQL closure branch entirely.
+- Likely mechanism (not yet confirmed to this level of certainty): the acceptance script seeds its
+  synthetic library directly onto the **Windows host** side of a Docker Desktop bind mount (per the
+  script's own docstring), then relies on `mtime_ns` nanosecond precision surviving `shutil.copy2()`
+  across that host<->container boundary. Nanosecond-mtime rounding/loss on Windows Docker Desktop bind
+  mounts is a known category of cross-platform filesystem quirk; `_import_source_signature()` including
+  raw `mtime_ns` in its fingerprint would make the post-copy re-inspection sensitive to exactly that.
+  Not verified by direct inspection of the actual before/after `mtime_ns` values on this host -- the
+  next step for full certainty, not yet done.
+- Secondary, unrelated finding in the acceptance script itself: it crashed with `UnicodeEncodeError` on
+  Windows' `cp1252` console encoding while printing captured `docker logs` output containing a `→`
+  (U+2192) character, after its own summary/teardown had already run. Cosmetic (Docker teardown
+  completed cleanly either way, confirmed via `docker ps -a` after both runs) but worth a `print(...,
+  errors="replace")`-style fix so the script's own final exit path is legible on a Windows console.
+- Current risk: Blocks a clean Docker acceptance run on Windows Docker Desktop specifically; unknown
+  whether it reproduces on Linux CI (where GitHub Actions actually runs this repo's automated checks) --
+  a native Linux filesystem/bind-mount wouldn't have the same host-OS mtime-precision boundary. If it
+  reproduces there too, this is a real production-reachable defect (torrent-staged imports would always
+  fail); if it's Windows-Docker-Desktop-specific, it only affects local development/acceptance testing
+  on Windows.
+- Priority: P2 (blocks local Windows acceptance testing; severity depends on the still-unconfirmed
+  Linux-CI reproduction above).
+- Status: Open. Not fixed this pass -- out of scope for a CodeQL security-closure effort (no CodeQL
+  alert referenced this code, and the affected files are unmodified by this session). Flagged with
+  reproduction evidence on both the branch and unmodified `main`, not silently noticed and dropped.
+
 ### Wave 9: Playlist, Plex Sync & Staging-Manifest Path Security (22 alerts)
 
 - Starting main SHA: `98d490ec3c40f331dd23061d522e2ac79b015576` (PR #81 / v0.1.13 release commit).
