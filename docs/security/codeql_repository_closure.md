@@ -144,11 +144,35 @@ per-alert, not assumed, per the mission rules (no blanket dismissal).
   `_BROWSE_ALLOWED_ROOTS`) — a pre-existing, already-correct instance of the same allowlist pattern
   used to fix the alerts above. CodeQL flags the `.resolve()` call inside the validator itself.
 
+### Alerts 417, 257, 256, 258, 260, 259, 261, 262, 263, 264, 265, 267, 266, 269, 268, 270, 272, 271, 418, 275, 274, 276, 277, 420, 419, 280, 281, 282, 283, 284, 285, 421 — `py/path-injection`, high — `app.py` folder-cleanup/rename/merge cluster (32 alerts)
+
+- **Disposition**: `SAFE_BUT_CODEQL_BLIND` (all 32).
+- This is the `/api/clean/folder-placeholder/*` route family (`_folder_cleanup_path`,
+  `_folder_cleanup_is_approved_root`, `_folder_cleanup_file_inventory`, `_folder_cleanup_is_empty`,
+  `_folder_cleanup_db_items`, `_folder_cleanup_merge_preview`, `_folder_cleanup_review_for`,
+  `apply_folder_placeholder_action_api`, `apply_safe_folder_placeholder_renames_job`) — already hardened
+  in `docs/TECHNICAL_DEBT.md`'s **Wave 4 (path-injection wave 1)**, re-verified fresh this session rather
+  than trusted from that record. GitHub reassigned new alert numbers after later commits shifted line
+  numbers, so these 32 live alerts needed independent re-verification even though the underlying code
+  was already correct.
+- **Validation chain traced for every sink**: every filesystem operation in this cluster operates on a
+  `Path` that is either (a) the direct return value of `_folder_cleanup_path()` (which resolves the
+  input, then rejects anything not `_path_under(resolved, MUSIC_ROOT)`), (b) a value derived from such a
+  validated path via real filesystem enumeration (`rglob()`/`relative_to()`, which cannot reintroduce a
+  traversal segment), or (c) explicitly re-validated with a second `_path_under()` check immediately
+  before a destructive call (`rename()`, `shutil.move()`) as defense against preview-token staleness.
+  Traced every call site of every helper in this cluster (not sampled) to confirm no path reaches this
+  cluster without going through `_folder_cleanup_path()` first.
+- **Regression evidence**: `tests/test_sec002_app_path_folder_cleanup.py` (pre-existing, Wave 4, 12
+  tests, still passing) plus the fresh full-suite runs this session.
+- **GitHub disposition**: all 32 dismissed 2026-09-01, reason `false positive`, each with a
+  sink-specific (not blanket) rationale referencing the exact helper/branch involved.
+
 ## 3. Remaining alerts
 
-158 of 171 alerts remain **NEEDS_REVIEW** as of this checkpoint (13 dispositioned: 2 critical
-command-injection dismissed, 8 path-injection fixed as real vulnerabilities, 3 path-injection confirmed
+126 of 171 alerts remain **NEEDS_REVIEW** as of this checkpoint (45 dispositioned: 2 critical
+command-injection dismissed, 8 path-injection fixed as real vulnerabilities, 35 path-injection confirmed
 safe) — see `security/codeql_main_alert_inventory.json` for the full raw list. Work continues
-alert-by-alert (or pattern-class-by-pattern-class for the ~100 remaining `py/path-injection` instances
+alert-by-alert (or pattern-class-by-pattern-class for the remaining `py/path-injection` instances
 still clustered in `app.py`, a 48,286-line file) rather than being declared closed. **Repository-wide
 CodeQL security closure is NOT complete.**

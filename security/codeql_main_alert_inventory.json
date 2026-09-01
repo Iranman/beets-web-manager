@@ -1345,9 +1345,9 @@
     "end_line": 37269,
     "created_at": "2026-07-30T23:58:21Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/417",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "validator itself (_folder_cleanup_path) -- Wave 4 (docs/TECHNICAL_DEBT.md) hardening, re-verified and dismissed this session"
   },
   {
     "number": 257,
@@ -1360,9 +1360,9 @@
     "end_line": 37292,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/257",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "root param always _folder_cleanup_path()-validated (_folder_cleanup_file_inventory) -- Wave 4 (docs/TECHNICAL_DEBT.md) hardening, re-verified and dismissed this session"
   },
   {
     "number": 256,
@@ -1375,9 +1375,9 @@
     "end_line": 37292,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/256",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "root param always _folder_cleanup_path()-validated (_folder_cleanup_file_inventory) -- Wave 4 (docs/TECHNICAL_DEBT.md) hardening, re-verified and dismissed this session"
   },
   {
     "number": 258,
@@ -1390,9 +1390,9 @@
     "end_line": 37294,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/258",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "rglob() on already-validated root (_folder_cleanup_file_inventory) -- Wave 4 (docs/TECHNICAL_DEBT.md) hardening, re-verified and dismissed this session"
   },
   {
     "number": 260,
@@ -1405,9 +1405,9 @@
     "end_line": 37312,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/260",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "root param always _folder_cleanup_path()-validated (_folder_cleanup_is_empty) -- Wave 4 (docs/TECHNICAL_DEBT.md) hardening, re-verified and dismissed this session"
   },
   {
     "number": 259,
@@ -1420,9 +1420,9 @@
     "end_line": 37312,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/259",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "root param always _folder_cleanup_path()-validated (_folder_cleanup_is_empty) -- Wave 4 (docs/TECHNICAL_DEBT.md) hardening, re-verified and dismissed this session"
   },
   {
     "number": 261,
@@ -1435,9 +1435,9 @@
     "end_line": 37325,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/261",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "folder param always _folder_cleanup_path()-validated (_folder_cleanup_db_items) -- Wave 4 (docs/TECHNICAL_DEBT.md) hardening, re-verified and dismissed this session"
   },
   {
     "number": 262,
@@ -1450,9 +1450,9 @@
     "end_line": 37328,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/262",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "resolve() on already-validated folder param (_folder_cleanup_db_items) -- Wave 4 (docs/TECHNICAL_DEBT.md) hardening, re-verified and dismissed this session"
   },
   {
     "number": 263,
@@ -1465,9 +1465,9 @@
     "end_line": 37463,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/263",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "source param always validated (_folder_cleanup_review_for) -- Wave 4 (docs/TECHNICAL_DEBT.md) hardening, re-verified and dismissed this session"
   },
   {
     "number": 264,
@@ -1480,9 +1480,9 @@
     "end_line": 37464,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/264",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "proposed param validated or safely derived from source.name (_folder_cleanup_review_for) -- Wave 4 (docs/TECHNICAL_DEBT.md) hardening, re-verified and dismissed this session"
   },
   {
     "number": 265,
@@ -1495,9 +1495,9 @@
     "end_line": 37498,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/265",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "source param always validated (_folder_cleanup_review_for) -- Wave 4 (docs/TECHNICAL_DEBT.md) hardening, re-verified and dismissed this session"
   },
   {
     "number": 267,
@@ -1510,9 +1510,9 @@
     "end_line": 37594,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/267",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "source/target params always validated (_folder_cleanup_merge_preview) -- Wave 4 (docs/TECHNICAL_DEBT.md) hardening, re-verified and dismissed this session"
   },
   {
     "number": 266,
@@ -1525,9 +1525,9 @@
     "end_line": 37594,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/266",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "source/target params always validated (_folder_cleanup_merge_preview) -- Wave 4 (docs/TECHNICAL_DEBT.md) hardening, re-verified and dismissed this session"
   },
   {
     "number": 269,
@@ -1540,9 +1540,9 @@
     "end_line": 37596,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/269",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "target param always validated (_folder_cleanup_merge_preview) -- Wave 4 (docs/TECHNICAL_DEBT.md) hardening, re-verified and dismissed this session"
   },
   {
     "number": 268,
@@ -1555,9 +1555,9 @@
     "end_line": 37596,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/268",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "target param always validated (_folder_cleanup_merge_preview) -- Wave 4 (docs/TECHNICAL_DEBT.md) hardening, re-verified and dismissed this session"
   },
   {
     "number": 270,
@@ -1570,9 +1570,9 @@
     "end_line": 37604,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/270",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "target_parent derived from validated-root rglob enumeration only (_folder_cleanup_merge_preview) -- Wave 4 (docs/TECHNICAL_DEBT.md) hardening, re-verified and dismissed this session"
   },
   {
     "number": 272,
@@ -1585,9 +1585,9 @@
     "end_line": 37664,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/272",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "source validated at apply_folder_placeholder_action_api() entry -- Wave 4 (docs/TECHNICAL_DEBT.md) hardening, re-verified and dismissed this session"
   },
   {
     "number": 271,
@@ -1600,9 +1600,9 @@
     "end_line": 37664,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/271",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "source validated at apply_folder_placeholder_action_api() entry -- Wave 4 (docs/TECHNICAL_DEBT.md) hardening, re-verified and dismissed this session"
   },
   {
     "number": 418,
@@ -1615,9 +1615,9 @@
     "end_line": 37672,
     "created_at": "2026-07-30T23:58:21Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/418",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "source.rmdir() on already-validated source (remove_empty_source branch) -- Wave 4 (docs/TECHNICAL_DEBT.md) hardening, re-verified and dismissed this session"
   },
   {
     "number": 275,
@@ -1630,9 +1630,9 @@
     "end_line": 37685,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/275",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "source validated at function entry (safe_rename branch) -- Wave 4 (docs/TECHNICAL_DEBT.md) hardening, re-verified and dismissed this session"
   },
   {
     "number": 274,
@@ -1645,9 +1645,9 @@
     "end_line": 37685,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/274",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "source validated at function entry (safe_rename branch) -- Wave 4 (docs/TECHNICAL_DEBT.md) hardening, re-verified and dismissed this session"
   },
   {
     "number": 276,
@@ -1660,9 +1660,9 @@
     "end_line": 37687,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/276",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "target validated via _folder_cleanup_path() 2 lines earlier (safe_rename branch) -- Wave 4 (docs/TECHNICAL_DEBT.md) hardening, re-verified and dismissed this session"
   },
   {
     "number": 277,
@@ -1675,9 +1675,9 @@
     "end_line": 37692,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/277",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "this line IS a second explicit _path_under re-check before rename() -- Wave 4 (docs/TECHNICAL_DEBT.md) hardening, re-verified and dismissed this session"
   },
   {
     "number": 420,
@@ -1690,9 +1690,9 @@
     "end_line": 37695,
     "created_at": "2026-07-30T23:58:21Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/420",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "rename() reached only after validation + second _path_under re-check -- Wave 4 (docs/TECHNICAL_DEBT.md) hardening, re-verified and dismissed this session"
   },
   {
     "number": 419,
@@ -1705,9 +1705,9 @@
     "end_line": 37695,
     "created_at": "2026-07-30T23:58:21Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/419",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "rename() reached only after validation + second _path_under re-check -- Wave 4 (docs/TECHNICAL_DEBT.md) hardening, re-verified and dismissed this session"
   },
   {
     "number": 280,
@@ -1720,9 +1720,9 @@
     "end_line": 37719,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/280",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "merge branch re-validates src/dst via _path_under() immediately before use -- Wave 4 (docs/TECHNICAL_DEBT.md) hardening, re-verified and dismissed this session"
   },
   {
     "number": 281,
@@ -1735,9 +1735,9 @@
     "end_line": 37724,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/281",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "dst.exists() runs after src/dst containment re-check -- Wave 4 (docs/TECHNICAL_DEBT.md) hardening, re-verified and dismissed this session"
   },
   {
     "number": 282,
@@ -1750,9 +1750,9 @@
     "end_line": 37726,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/282",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "dst.parent.exists() runs after src/dst containment re-check -- Wave 4 (docs/TECHNICAL_DEBT.md) hardening, re-verified and dismissed this session"
   },
   {
     "number": 283,
@@ -1765,9 +1765,9 @@
     "end_line": 37728,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/283",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "shutil.move() runs only after explicit _path_under re-validation -- Wave 4 (docs/TECHNICAL_DEBT.md) hardening, re-verified and dismissed this session"
   },
   {
     "number": 284,
@@ -1780,9 +1780,9 @@
     "end_line": 37731,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/284",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "source.rglob() cleanup loop walks already-validated source -- Wave 4 (docs/TECHNICAL_DEBT.md) hardening, re-verified and dismissed this session"
   },
   {
     "number": 285,
@@ -1795,9 +1795,9 @@
     "end_line": 37735,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/285",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "final cleanup operates on already-validated source -- Wave 4 (docs/TECHNICAL_DEBT.md) hardening, re-verified and dismissed this session"
   },
   {
     "number": 421,
@@ -1810,9 +1810,9 @@
     "end_line": 37736,
     "created_at": "2026-07-30T23:58:21Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/421",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "source.rmdir() final cleanup operates on already-validated source -- Wave 4 (docs/TECHNICAL_DEBT.md) hardening, re-verified and dismissed this session"
   },
   {
     "number": 292,

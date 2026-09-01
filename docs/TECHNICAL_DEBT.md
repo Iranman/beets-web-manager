@@ -1386,11 +1386,27 @@ This session's dispositions (13 of 171):
   case, the `/api/browse` containment check flagging itself, and a pure path-normalization helper
   (`_dedup_norm_path`) that never touches the filesystem.
 
-Remaining after this session: 158 open (150 `py/path-injection` in `app.py`, plus the other rule groups
-above), all still `NEEDS_REVIEW` — not yet individually traced. **Not closed.** Continuing this thread in
-a future wave should sweep `app.py`'s remaining `py/path-injection` alerts by functional cluster (the
-same approach Waves 4-8 used), starting with any route that takes a filesystem path directly from a
-request body/query string with no visible allowlist call nearby — `/api/import`+`/api/dedup/scan` (this
-session) both fit that exact shape and had gone unreviewed since the 2026-07-20 baseline scan despite 6
-intervening path-injection waves, suggesting a few more of the same shape likely remain.
+**Second cluster, same session: `app.py` folder-cleanup/rename/merge (32 alerts, `#417,257,256,258,260,
+259,261,262,263,264,265,267,266,269,268,270,272,271,418,275,274,276,277,420,419,280,281,282,283,284,285,
+421`)** — this is literally Wave 4's cluster (`/api/clean/folder-placeholder/*`), re-numbered by GitHub
+after later commits shifted line numbers, so it still showed as 32 live open alerts despite being fixed
+in Wave 4. Independently re-traced every sink in `_folder_cleanup_path`, `_folder_cleanup_file_inventory`,
+`_folder_cleanup_is_empty`, `_folder_cleanup_db_items`, `_folder_cleanup_merge_preview`,
+`_folder_cleanup_review_for`, and `apply_folder_placeholder_action_api` rather than trusting Wave 4's
+record at face value — confirmed every one still resolves to a `_folder_cleanup_path()`-validated value
+(or a value re-validated a second time immediately before a destructive call). No code change needed;
+all 32 dismissed on GitHub with sink-specific rationale, backed by Wave 4's still-passing
+`tests/test_sec002_app_path_folder_cleanup.py`. **Lesson for future waves**: a GitHub alert renumbering
+after unrelated commits can make already-fixed work look like fresh backlog — worth checking "does this
+line's function already look hardened" before assuming a live alert means unfixed code.
+
+Remaining after this session: 126 open (45 of 171 baseline alerts dispositioned: 2 critical dismissed, 8
+path-injection fixed as real vulnerabilities, 35 path-injection confirmed safe and dismissed), all still
+`NEEDS_REVIEW` for the rest — not yet individually traced. **Not closed.** Continuing this thread in a
+future wave should sweep `app.py`'s remaining `py/path-injection` alerts by functional cluster (the same
+approach Waves 4-8 used, and the folder-cleanup recheck above), starting with any route that takes a
+filesystem path directly from a request body/query string with no visible allowlist call nearby —
+`/api/import`+`/api/dedup/scan` (this session) both fit that exact shape and had gone unreviewed since
+the 2026-07-20 baseline scan despite 6 intervening path-injection waves, suggesting a few more of the
+same shape likely remain among the ~90 still-`NEEDS_REVIEW` `app.py` path-injection alerts.
 
