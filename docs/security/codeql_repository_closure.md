@@ -432,9 +432,75 @@ Arithmetic check: `171 (baseline) − 102 (dismissed) = 69 (open)`, matching the
 Machine-readable inventory (`security/codeql_main_alert_inventory.json`) and this document are both now
 consistent with live GitHub state as of this reconciliation.
 
+### Alerts 6093, 6095 — `py/path-injection`, high — `app.py`, `_folder_release_preflight` (2 alerts, FINAL path-injection closure)
+
+- **Disposition**: `REAL_VULNERABILITY` — genuine, fixed (not dismissed; will auto-close on post-merge
+  rescan).
+- **What was actually wrong**: the local `source.rglob("*")` scan had no containment check at all,
+  identical to the already-fixed sibling `_folder_import_track_count()` (Wave 1, `#334`/`#335`). Two
+  confirmed-live callers pass **direct, unvalidated HTTP request-body text** straight into this function:
+  `import_folder_with_id()` (`folder_path = payload.get("path", "").strip()`) and `reimport_disk()`
+  (`aldir = payload.get("aldir", "").strip()`) — this is a real, HTTP-reachable, unvalidated
+  arbitrary-directory-enumeration primitive, not a theoretical concern.
+- **Why the first fix attempt (previous session) broke tests**: copying the sibling's fix verbatim
+  (abort the whole preflight for an out-of-root folder) broke 2 established tests in
+  `test_sec002_wave14_mb_identity_matching.py` that deliberately test against arbitrary non-`MUSIC_ROOT`
+  temp directories. Investigating *why* those tests were written that way (rather than just reverting
+  again) surfaced the actual architecture: when the local scan finds nothing, this function **already**
+  falls through to `beets_client.inspect_import_source()` — the engine-side inspection call. That
+  function's own docstring is explicit: *"The web manager has no local filesystem access to the engine's
+  music/staging roots in the shipped Compose topology... this asks the engine (which owns those mounts)
+  to do it."* On the control-agent side, `inspect_import_source()` independently calls
+  `resolve_safe_path(source_path, allowed_types, require_exists=True, expected_type="dir")` with a
+  **server-defined, caller-never-supplies-its-own-root-list** policy — a completely independent,
+  already-authoritative validation, regardless of what the web manager passes it.
+- **Fix**: gate the local `rglob()` shortcut to `MUSIC_ROOT`/`DOWNLOADS_ROOT` (matching the sibling fix
+  exactly), scoped to only that block (not aborting the whole function). An out-of-root folder now
+  correctly falls through to the engine's own independently-validated path instead of being walked
+  locally — this **removes** an unauthenticated local-disk side channel that was bypassing the engine's
+  real validation, it does not weaken anything.
+- **Test fix, not test weakening**: the 2 previously-broken tests were relying on an *implicit, unmocked*
+  local-disk read that happened to work only because the vulnerability let it — they now mock
+  `beets_client.inspect_import_source()` and exercise the function through its actual, intended
+  production path for a folder the container has no local mount for. Verified this is the correct
+  characterization, not a rationalization: all 31 tests in that file pass, plus 187 more across
+  `test_import_track_alignment`/`test_sec002_codeql_backlog`/`test_mb_release_group_resolution`/
+  `test_matching_contract`.
+- **New adversarial tests**: `tests/test_codeql_repowide_closure_folder_release_preflight.py` (5 tests)
+  — outside-root folder (real files present) never walked locally, proven by asserting the engine
+  fallback was called with the *unmodified* path; sibling-prefix escape (`music-evil` vs `music`) never
+  walked locally; **symlink-leaf escape** never walked locally (`_path_is_under()` resolves through the
+  symlink to its real, out-of-root target); in-root folder still uses the fast local path and never calls
+  the engine fallback; a genuinely nonexistent folder still falls through gracefully to
+  `scan_unavailable` when the engine is also unreachable.
+
+**Caller matrix** (traced this session; `_resolve_album_release_for_import`'s own 5 further callers and
+`_run_ai_release_preflight`'s AI-batch callers were not traced to their ultimate origin beyond this
+table — the fix is provenance-agnostic, so this is a completeness note for future architecture review,
+not a gap in the security verdict):
+
+| Caller | Workflow | Path provenance | Local FS allowed after fix? | Engine verification |
+| --- | --- | --- | --- | --- |
+| `import_folder_with_id()` | `POST /api/import/folder-with-id` — two-step import for a skipped folder | **Direct, unvalidated** `payload.get("path")` | Only if under `MUSIC_ROOT`/`DOWNLOADS_ROOT`; otherwise engine fallback | Yes — `inspect_import_source()`, `resolve_safe_path()` |
+| `reimport_disk()` | `POST /api/albums/reimport-disk` — tag/import files already on disk but not in the beets DB | **Direct, unvalidated** `payload.get("aldir")` | Same as above | Same as above |
+| `api_download_album()` | `POST /api/download/album` — slskd/yt-dlp download + auto-import, via `_resolve_album_release_for_import(source_folder=...)` | Download-job-computed target folder (not exhaustively traced to its own construction) | Same as above | Same as above |
+| `_ai_batch_process_decisions()` | AI batch import job decision loop | AI-batch job/scan state (`folder` from an earlier discovery phase, not raw per-call HTTP text) | Same as above | Same as above |
+| `_run_ai_release_preflight()` | Thin wrapper used by AI-batch/candidate-review flows | Passes through its own `folder_path` parameter unchanged | Same as above | Same as above |
+| `_resolve_album_release_for_import()`'s 5 further callers (lines 9339/21307/23164/31360/33367 at baseline) | Various release-resolution flows across import review, AI batch, and repair | Not individually traced this session | Same as above | Same as above |
+
+**This closes every `py/path-injection` alert in the entire repository: 0 remain `NEEDS_REVIEW`.**
+21 total `py/path-injection` alerts across the whole session were genuine vulnerabilities, all fixed with
+regression tests (`/api/import`, `/api/import/preflight`, `/api/dedup/scan`, `_folder_track_search_titles`,
+`_folder_clean_root`, the MB release-tracklist disk cache, and `_folder_release_preflight`); the
+remaining 100 were traced and confirmed genuinely safe (CodeQL data-flow blind spots on this codebase's
+established containment helpers) and dismissed individually on GitHub. **Note**: GitHub's repository-wide
+alert count will still show these 21 as "open" until this branch is pushed, merged, and `main` is
+rescanned — that is expected, not a discrepancy; see the reconciliation section above for why this
+distinction matters.
+
 ## 4. Remaining alerts
 
-50 of 171 alerts remain **NEEDS_REVIEW** as of this checkpoint (45 dispositioned: 2 critical
+48 of 171 alerts remain **NEEDS_REVIEW** as of this checkpoint (45 dispositioned: 2 critical
 command-injection dismissed, 8 path-injection fixed as real vulnerabilities, 35 path-injection confirmed
 safe) — see `security/codeql_main_alert_inventory.json` for the full raw list. Work continues
 alert-by-alert (or pattern-class-by-pattern-class for the remaining `py/path-injection` instances

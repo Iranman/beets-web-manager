@@ -350,7 +350,18 @@ class TestSEC002Wave14MbIdentityMatching(unittest.TestCase):
                 "tracks": [{"title": "Track 1", "track": 1}],
             }
 
-            with patch("app._fetch_mb_release_tracklist", return_value=mb_mock_data):
+            # Repository-wide CodeQL closure session, 2026-09-01: the local
+            # rglob() scan is now gated to MUSIC_ROOT/DOWNLOADS_ROOT only
+            # (alerts #6093/#6095 -- this tempdir is neither), so this test
+            # must go through the same engine-side inspect_import_source()
+            # fallback a folder with no local mount would use in production,
+            # rather than relying on the web manager reading local disk
+            # directly (the vulnerability being closed).
+            with patch("app._fetch_mb_release_tracklist", return_value=mb_mock_data), \
+                 patch("app.beets_client.inspect_import_source", return_value={
+                     "ok": True,
+                     "audio_files": [{"relative_path": "track01.mp3", "properties": {}}],
+                 }):
                 res = _folder_release_preflight(str(album_dir), "11111111-1111-1111-1111-111111111111")
 
             m_dec = res.get("matching_decision") or {}
@@ -601,7 +612,16 @@ class TestSEC002Wave14ProductionCallerWiring(unittest.TestCase):
                 "release_group": "",
                 "tracks": [{"title": "Track One", "track": 1}],
             }
-            with patch("app._fetch_mb_release_tracklist", return_value=mb_mock_data):
+            # Repository-wide CodeQL closure session, 2026-09-01: see the
+            # identical note in test_preflight_anti_circularity above --
+            # this tempdir is outside MUSIC_ROOT/DOWNLOADS_ROOT, so the
+            # fixed local-scan gate (#6093/#6095) routes this through the
+            # engine-side inspect_import_source() fallback instead.
+            with patch("app._fetch_mb_release_tracklist", return_value=mb_mock_data), \
+                 patch("app.beets_client.inspect_import_source", return_value={
+                     "ok": True,
+                     "audio_files": [{"relative_path": "01 Track One.mp3", "properties": {}}],
+                 }):
                 res = _folder_release_preflight(str(album_dir), "11111111-1111-1111-1111-111111111111")
 
         decision = res.get("matching_decision") or {}

@@ -415,9 +415,9 @@
     "end_line": 6093,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/135",
-    "disposition": "NEEDS_REVIEW",
+    "disposition": "REAL_VULNERABILITY",
     "dismissed_on_github": false,
-    "notes": ""
+    "notes": "REAL bug (fixed): local rglob() had no containment check; gated to MUSIC_ROOT/DOWNLOADS_ROOT, falls through to engine-side inspect_import_source() (independently validated) otherwise"
   },
   {
     "number": 136,
@@ -430,9 +430,9 @@
     "end_line": 6095,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/136",
-    "disposition": "NEEDS_REVIEW",
+    "disposition": "REAL_VULNERABILITY",
     "dismissed_on_github": false,
-    "notes": ""
+    "notes": "REAL bug (fixed): same as 135, rglob() call itself"
   },
   {
     "number": 137,

@@ -6090,7 +6090,31 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
     audio_files: List[Path] = []
     inspect_evidence: Optional[Dict[str, Any]] = None
     try:
-        if source.is_dir():
+        # SEC-002 CodeQL repository-wide closure finding (alerts #6093/#6095):
+        # this walk had no containment check at all, unlike the sibling
+        # _folder_import_track_count() (fixed in Wave 1, SEC-002 main
+        # backlog #334/#335) which checks the exact same pattern.
+        #
+        # Scoped to just this local-enumeration block (not the whole
+        # function, and not aborting the preflight) -- a folder outside
+        # MUSIC_ROOT/DOWNLOADS_ROOT is a normal, expected case here, not
+        # necessarily an attack: this container frequently has no local
+        # media mount at all (see beets_client.inspect_import_source's own
+        # docstring), and the code a few lines below already has a real
+        # fallback for exactly that case -- when the local scan finds
+        # nothing, it asks the *engine* to inspect the source instead
+        # (beets_client.inspect_import_source), which independently
+        # re-validates folder_path against its own resolve_safe_path()
+        # allowed-root policy on the engine side (backend/beets_control_agent.py
+        # inspect_import_source()) regardless of what this function passes
+        # it. Gating the local shortcut here does not weaken security --
+        # it removes an unauthenticated local-disk side channel that
+        # bypassed the engine's own authoritative check entirely, and lets
+        # every caller safely fall through to that already-validated path.
+        if (
+            (_path_is_under(source, MUSIC_ROOT) or _path_is_under(source, DOWNLOADS_ROOT))
+            and source.is_dir()
+        ):
             audio_files = sorted(
                 [p for p in source.rglob("*")
                  if p.is_file() and p.suffix.lower() in AUDIO_EXT],
