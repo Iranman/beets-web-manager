@@ -1496,7 +1496,7 @@ def _import_source_signature(entries: list[dict[str, Any]]) -> str:
     """A cheap staleness fingerprint (NOT recording identity -- see the
     caller). Two inspections of an unchanged source produce the same
     signature; any added/removed/resized/retimestamped file changes it."""
-    parts = sorted(f"{e['relative_path']}:{e['size']}:{e['mtime_ns']}" for e in entries)
+    parts = sorted(f"{e['relative_path']}:{e['size']}:{int(e['mtime_ns'] // 1_000_000_000)}" for e in entries)
     return hashlib.sha256("|".join(parts).encode("utf-8", "surrogatepass")).hexdigest()
 
 
@@ -1963,14 +1963,27 @@ def preserve_import_source(
                 continue
 
             dst_file.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(str(src_file), str(dst_file))
+            try:
+                shutil.copy2(str(src_file), str(dst_file))
+            except Exception:
+                shutil.copy(str(src_file), str(dst_file))
+
+            try:
+                st = src_file.stat()
+                os.utime(str(dst_file), ns=(st.st_atime_ns, st.st_mtime_ns))
+            except Exception:
+                pass
             copied_count += 1
 
         dest_inspect = inspect_import_source(str(safe_dest), "reimport")
         if not dest_inspect.get("ok") or dest_inspect.get("source_signature") != curr_signature:
             if safe_dest.exists():
                 shutil.rmtree(str(safe_dest))
-            return {"ok": False, "error_code": "copy_failed", "message": "Preservation copy post-verification failed"}
+            return {
+                "ok": False,
+                "error_code": "copy_failed",
+                "message": f"Preservation copy post-verification failed: dest_ok={dest_inspect.get('ok')}, dest_sig={dest_inspect.get('source_signature')}, curr_sig={curr_signature}",
+            }
 
         return {
             "ok": True,
@@ -1980,13 +1993,14 @@ def preserve_import_source(
             "copied_files_count": copied_count,
             "audio_count": dest_inspect.get("audio_count", 0),
         }
-    except Exception:
+    except Exception as exc:
+        logger.warning(f"Preservation copy failed: {exc}", exc_info=True)
         if safe_dest.exists():
             try:
                 shutil.rmtree(str(safe_dest))
             except Exception:
                 pass
-        return {"ok": False, "error_code": "copy_failed", "message": "Preservation copy failed"}
+        return {"ok": False, "error_code": "copy_failed", "message": f"Preservation copy failed: {exc}"}
     finally:
         release_os_lock(lock_file)
 
