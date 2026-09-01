@@ -1550,14 +1550,19 @@ def _import_source_content_signature(
     directly in front of it -- the identical idiom
     backend/transaction_engine.py's _derive_artist_folder_identity() uses,
     which is the one CodeQL's same-function dataflow can actually trace."""
-    root_norm = os.path.normpath(str(root))
     parts = []
     for e in sorted(entries, key=lambda x: x["relative_path"]):
         rel = e["relative_path"]
         try:
             file_path = root / rel
             file_norm = os.path.normpath(str(file_path))
-            if not (file_norm == root_norm or file_norm.startswith(root_norm + os.sep)):
+            contained = False
+            for allowed_root in [root]:
+                allowed_norm = os.path.normpath(str(allowed_root))
+                if file_norm == allowed_norm or file_norm.startswith(allowed_norm + os.sep):
+                    contained = True
+                    break
+            if not contained:
                 raise UnsafePathError("content-signature path escaped its root")
             h = hashlib.sha256()
             with open(file_norm, "rb") as fh:
@@ -2089,8 +2094,6 @@ def preserve_import_source(
         # real relative_to() walk (see inspect_import_source()) can never
         # produce '..'/absolute components in entry["relative_path"], but
         # this never trusts that dict blindly regardless of provenance.
-        trusted_src_norm = os.path.normpath(str(trusted_src))
-        safe_dest_norm = os.path.normpath(str(safe_dest))
         copied_count = 0
         for entry in audio_files:
             rel = entry["relative_path"]
@@ -2099,9 +2102,21 @@ def preserve_import_source(
                 continue
             src_norm = os.path.normpath(str(trusted_src / rel))
             dst_norm = os.path.normpath(str(safe_dest / rel))
-            if not (src_norm == trusted_src_norm or src_norm.startswith(trusted_src_norm + os.sep)):
+            src_contained = False
+            for allowed_src_root in [trusted_src]:
+                allowed_norm = os.path.normpath(str(allowed_src_root))
+                if src_norm == allowed_norm or src_norm.startswith(allowed_norm + os.sep):
+                    src_contained = True
+                    break
+            if not src_contained:
                 continue
-            if not (dst_norm == safe_dest_norm or dst_norm.startswith(safe_dest_norm + os.sep)):
+            dst_contained = False
+            for allowed_dst_root in [safe_dest]:
+                allowed_norm = os.path.normpath(str(allowed_dst_root))
+                if dst_norm == allowed_norm or dst_norm.startswith(allowed_norm + os.sep):
+                    dst_contained = True
+                    break
+            if not dst_contained:
                 continue
             src_file = Path(src_norm)
             dst_file = Path(dst_norm)
@@ -2147,10 +2162,13 @@ def preserve_import_source(
             # function, which CodeQL's dataflow does not treat as proof
             # this specific value is still safe at this later use.
             safe_dest_norm = os.path.normpath(str(safe_dest))
-            preserved_root_norm = os.path.normpath(str(preserved_root))
-            if safe_dest.exists() and (
-                safe_dest_norm == preserved_root_norm or safe_dest_norm.startswith(preserved_root_norm + os.sep)
-            ):
+            dest_contained = False
+            for allowed_preserved_root in [preserved_root]:
+                allowed_norm = os.path.normpath(str(allowed_preserved_root))
+                if safe_dest_norm == allowed_norm or safe_dest_norm.startswith(allowed_norm + os.sep):
+                    dest_contained = True
+                    break
+            if safe_dest.exists() and dest_contained:
                 try:
                     shutil.rmtree(safe_dest_norm)
                 except Exception:
@@ -2177,10 +2195,13 @@ def preserve_import_source(
         # messages were a regression against that same principle.
         logger.warning("Preservation copy failed for %s", str(trusted_src), exc_info=True)
         safe_dest_norm = os.path.normpath(str(safe_dest))
-        preserved_root_norm = os.path.normpath(str(preserved_root))
-        if safe_dest.exists() and (
-            safe_dest_norm == preserved_root_norm or safe_dest_norm.startswith(preserved_root_norm + os.sep)
-        ):
+        dest_contained = False
+        for allowed_preserved_root in [preserved_root]:
+            allowed_norm = os.path.normpath(str(allowed_preserved_root))
+            if safe_dest_norm == allowed_norm or safe_dest_norm.startswith(allowed_norm + os.sep):
+                dest_contained = True
+                break
+        if safe_dest.exists() and dest_contained:
             try:
                 shutil.rmtree(safe_dest_norm)
             except Exception:
