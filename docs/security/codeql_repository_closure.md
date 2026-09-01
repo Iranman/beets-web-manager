@@ -168,11 +168,36 @@ per-alert, not assumed, per the mission rules (no blanket dismissal).
 - **GitHub disposition**: all 32 dismissed 2026-09-01, reason `false positive`, each with a
   sink-specific (not blanket) rationale referencing the exact helper/branch involved.
 
+### Alerts 139-149, 151, 150 — `py/path-injection`, high — `app.py` artist/release-art image cache (13 alerts)
+
+- **Disposition**: `SAFE_BUT_CODEQL_BLIND` (all 13).
+- `_artist_image_cache_info`/`_cache_artist_image` (11 alerts, lines 10082-10162): every filesystem path
+  is built from `_artist_image_cache_key(artist_name)`, which SHA1-hashes the input and strips it to
+  `[a-z0-9-]` — no raw text ever reaches a path regardless of `artist_name`'s content — plus a file
+  extension drawn only from a fixed 5-item allowlist (`_artist_image_ext`). `_release_art_cache_info`/
+  `_release_art_save_miss`/`_release_art_download` (same cluster): `mbid` is validated against the
+  anchored `_RELEASE_ART_MBID_RE` either at the sink function's own entry, or by its single caller
+  (`_ensure_release_group_art`) immediately before the call — traced to confirm each of these 3 helper
+  functions has no other caller anywhere in the file.
+- Alerts 151/150 (`app.py:10550`): `SAFE_BUT_CODEQL_BLIND` — this line is `_path_is_under()`'s own
+  containment-check body (the codebase's core sanitizer, ~60 call sites per `docs/TECHNICAL_DEBT.md`
+  Wave 6), the same "validator flagging itself" pattern as `/api/browse` (alert 238, above).
+- **GitHub disposition**: all 13 dismissed 2026-09-01, `false positive`, sink-specific rationale.
+
 ## 3. Remaining alerts
 
-126 of 171 alerts remain **NEEDS_REVIEW** as of this checkpoint (45 dispositioned: 2 critical
+113 of 171 alerts remain **NEEDS_REVIEW** as of this checkpoint (45 dispositioned: 2 critical
 command-injection dismissed, 8 path-injection fixed as real vulnerabilities, 35 path-injection confirmed
 safe) — see `security/codeql_main_alert_inventory.json` for the full raw list. Work continues
 alert-by-alert (or pattern-class-by-pattern-class for the remaining `py/path-injection` instances
 still clustered in `app.py`, a 48,286-line file) rather than being declared closed. **Repository-wide
 CodeQL security closure is NOT complete.**
+
+## 4. Test verification log
+
+- Full backend suite (`python -m unittest discover -s tests -p "test_*.py"`), run 1: 2763 tests, 0
+  failures, 129 skipped (pre-existing, require live engine/Docker).
+- Same suite, run 2 (order-dependence/flakiness check): completed, exit code 0 (background run;
+  detailed output was lost to a local logging mistake, but the process's own exit code confirms a clean
+  pass — re-run on request if independent confirmation of the full text is needed).
+- `python -m py_compile app.py`: clean after every code edit this session.
