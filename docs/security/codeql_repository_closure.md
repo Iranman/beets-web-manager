@@ -184,9 +184,37 @@ per-alert, not assumed, per the mission rules (no blanket dismissal).
   Wave 6), the same "validator flagging itself" pattern as `/api/browse` (alert 238, above).
 - **GitHub disposition**: all 13 dismissed 2026-09-01, `false positive`, sink-specific rationale.
 
+### Alerts 480, 196, 194, 482, 483, 197, 210, 212, 211 — `py/path-injection`, high — `app.py` Import Review target-preview source-file listing (9 alerts)
+
+- **Disposition**: `SAFE_BUT_CODEQL_BLIND` (all 9).
+- `_target_preview_source_files`/`_remaining_audio_files`: `source` is always the return value of
+  `_resolve_import_review_source_path()` (a defense-in-depth validator: lexical-containment check,
+  symlink-component check, symlink-leaf check, *then* resolve + re-check — all before any
+  `.exists()`/`.is_file()`/`.rglob()` call). `album_path.exists()`/`.resolve()`: `album_path` is built
+  only from `_safe_path_component()`-sanitized components, which strip `/`, `\`, control characters, and
+  Unicode bidi-override/format characters — no traversal segment can survive it regardless of input.
+
+### Alerts 208, 209, 207 — `py/path-injection`, high — `app.py:19672-19673`, `_build_import_target_preview` (3 alerts)
+
+- **Disposition**: `REAL_VULNERABILITY` — genuine, low-severity, fixed (not dismissed; will auto-close
+  when GitHub re-scans this branch post-merge).
+- `_build_import_target_preview()` (`POST /api/folders/import-target-preview`) took
+  `track_mapping[i]["source_path"]` straight from the request body (`source_file = Path(row_source_str)`)
+  with **no containment check**, unlike every sibling Import Review helper. Real impact was narrow — this
+  function performs no filesystem writes (per its own docstring: "It performs no filesystem writes and
+  never calls beets"), so the exposure was an unvalidated `.resolve()`/`.exists()` comparison, not a
+  read/write/enumerate primitive — but it was a real, inconsistent exception to the codebase's own
+  established validated-source-file pattern, found by reading past the CodeQL sink into the actual data
+  flow rather than assuming the cluster's dominant safe pattern applied everywhere in it.
+- **Fix**: route `row["source_path"]` through the same `_resolve_import_review_cleanup_file()` helper its
+  siblings already use, scoped to the request's own validated `trusted_source_path`.
+- **Tests**: `tests/test_codeql_repowide_closure_import_review_preview.py` (3 tests) — malicious absolute
+  path rejected, relative-traversal path rejected, legitimate in-root path still accepted (using real
+  tempdir Paths throughout, not POSIX-literal strings, for cross-platform correctness).
+
 ## 3. Remaining alerts
 
-113 of 171 alerts remain **NEEDS_REVIEW** as of this checkpoint (45 dispositioned: 2 critical
+101 of 171 alerts remain **NEEDS_REVIEW** as of this checkpoint (45 dispositioned: 2 critical
 command-injection dismissed, 8 path-injection fixed as real vulnerabilities, 35 path-injection confirmed
 safe) — see `security/codeql_main_alert_inventory.json` for the full raw list. Work continues
 alert-by-alert (or pattern-class-by-pattern-class for the remaining `py/path-injection` instances

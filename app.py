@@ -19645,11 +19645,22 @@ def _build_import_target_preview(payload: Dict[str, Any]) -> Dict[str, Any]:
 
         source_file: Optional[Path] = None
         row_source_str = _s(row.get("source_path")).strip()
-        if row_source_str:
-            try:
-                source_file = Path(row_source_str)
-            except Exception:
-                pass
+        if row_source_str and trusted_source_path is not None:
+            # SEC-002 CodeQL repository-wide closure finding: this preview
+            # endpoint took row["source_path"] straight from the request
+            # body with no containment check, unlike every sibling
+            # Import Review helper (_resolve_import_review_selected_audio_file
+            # / _remaining_audio_files / _target_preview_source_files), which
+            # all route through _resolve_import_review_source_path() first.
+            # Low real impact here (this function performs no filesystem
+            # writes -- see its docstring -- so the worst case was an
+            # unvalidated .resolve()/.suffix comparison), but tightened to
+            # match the established validated-source-file pattern rather
+            # than leaving an inconsistent, CodeQL-flagged exception to it.
+            resolved_row_source, _row_source_error = _resolve_import_review_cleanup_file(
+                row_source_str, trusted_source_path
+            )
+            source_file = resolved_row_source
         if source_file is None:
             if source_index < len(source_files):
                 source_file = source_files[source_index]
