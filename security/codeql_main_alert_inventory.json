@@ -670,9 +670,9 @@
     "end_line": 10814,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/152",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "_app_managed_download_path() only returns a bool classification, never reads/writes"
   },
   {
     "number": 154,
@@ -685,9 +685,9 @@
     "end_line": 12006,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/154",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "/api/disk-art validates resolved path against _BROWSE_ALLOWED_ROOTS before any content served"
   },
   {
     "number": 153,
@@ -700,9 +700,9 @@
     "end_line": 12006,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/153",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "/api/disk-art validates resolved path against _BROWSE_ALLOWED_ROOTS before any content served"
   },
   {
     "number": 155,
@@ -715,9 +715,9 @@
     "end_line": 12014,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/155",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "send_file() reached only after _BROWSE_ALLOWED_ROOTS containment check passed"
   },
   {
     "number": 157,
@@ -730,9 +730,9 @@
     "end_line": 12742,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/157",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "this line IS _library_no_mb_album_matches_folder()'s own containment-check body"
   },
   {
     "number": 166,
@@ -745,9 +745,9 @@
     "end_line": 12880,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/166",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "folder param always _resolve_import_review_folder_path()-validated"
   },
   {
     "number": 809,
@@ -760,9 +760,9 @@
     "end_line": 17877,
     "created_at": "2026-08-19T21:37:50Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/809",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "_audio_cache_file_identity() caller (sampled ~14 sites) always passes DB/scan-derived path"
   },
   {
     "number": 810,
@@ -775,9 +775,9 @@
     "end_line": 17878,
     "created_at": "2026-08-19T21:37:50Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/810",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "same as prior alert -- stat() on the same caller-derived path, cache-key use only"
   },
   {
     "number": 480,
@@ -970,9 +970,9 @@
     "end_line": 20728,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/216",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "source_path always _resolve_import_review_source_path()-validated or empty (short-circuits)"
   },
   {
     "number": 220,

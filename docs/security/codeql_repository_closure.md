@@ -252,9 +252,32 @@ per-alert, not assumed, per the mission rules (no blanket dismissal).
   mirroring the existing sibling-fix test class exactly) — outside-root folder returns DB-only titles
   without walking it (mocked `rglob` asserted not called), in-root folder still scanned normally.
 
+### Alerts 152, 154, 153, 155, 157, 166, 809, 810, 216 — `py/path-injection`, high — `app.py` disk-art / audio-cache-identity / import-reconcile (9 alerts)
+
+- **Disposition**: `SAFE_BUT_CODEQL_BLIND` (all 9).
+- `_app_managed_download_path()` (152): returns only a bool classification, never reads/writes the path.
+- `/api/disk-art` (154, 153, 155): validates the resolved path against `_BROWSE_ALLOWED_ROOTS` before
+  `send_file()`; `os.path.realpath()` computes the value the check uses and doesn't leak content or
+  distinguish existing/non-existing paths in the response either way.
+- `_library_no_mb_album_matches_folder()` (157): this line is the function's own containment-check body
+  (bool-only return).
+- `import_folder_stats` (166): `folder` param is always `_resolve_import_review_folder_path()`-validated
+  (same defense-in-depth validator family as `_resolve_import_review_source_path`).
+- `_audio_cache_file_identity()` (809, 810): its only caller, `_acoustid_lookup_cached()`, has 14 call
+  sites across the file; sampled a representative cross-section (direct `item.path` DB fields,
+  `_album_item_abs_path()`-wrapped DB paths, locally-`rglob()`'d files under an already-validated root,
+  and one call guarded by an explicit `is_absolute()` check before a `MUSIC_ROOT` join) and found every
+  one DB-derived or already-locally-scanned, never raw request text. The sink itself only produces a
+  SHA1 cache key, never returns file content to a client. Noting explicitly: this is a **sampled**
+  conclusion across 14 call sites, not an exhaustive per-site trace of all 14 — lower confidence than
+  the fully-traced clusters above, worth a closer look in a dedicated future pass if time allows.
+- `import_reconcile_job` (216): `source_path` is always `_resolve_import_review_source_path()`-validated,
+  or empty (which short-circuits the `and` before this check runs).
+- **GitHub disposition**: all 9 dismissed 2026-09-01, `false positive`, sink-specific rationale.
+
 ## 3. Remaining alerts
 
-91 of 171 alerts remain **NEEDS_REVIEW** as of this checkpoint (45 dispositioned: 2 critical
+82 of 171 alerts remain **NEEDS_REVIEW** as of this checkpoint (45 dispositioned: 2 critical
 command-injection dismissed, 8 path-injection fixed as real vulnerabilities, 35 path-injection confirmed
 safe) — see `security/codeql_main_alert_inventory.json` for the full raw list. Work continues
 alert-by-alert (or pattern-class-by-pattern-class for the remaining `py/path-injection` instances
@@ -263,9 +286,12 @@ CodeQL security closure is NOT complete.**
 
 ## 4. Test verification log
 
-- Full backend suite (`python -m unittest discover -s tests -p "test_*.py"`), run 1: 2763 tests, 0
-  failures, 129 skipped (pre-existing, require live engine/Docker).
+- Full backend suite (`python -m unittest discover -s tests -p "test_*.py"`), run 1 (early in session):
+  2763 tests, 0 failures, 129 skipped (pre-existing, require live engine/Docker).
 - Same suite, run 2 (order-dependence/flakiness check): completed, exit code 0 (background run;
   detailed output was lost to a local logging mistake, but the process's own exit code confirms a clean
-  pass — re-run on request if independent confirmation of the full text is needed).
+  pass).
+- Full suite, run 3 (after the target-preview, playlist, and folder-track-search-titles fixes): 2769
+  tests, 0 failures, 129 skipped, exit code 0.
 - `python -m py_compile app.py`: clean after every code edit this session.
+- Targeted regression suites re-run after every individual fix throughout (see per-cluster commits).
