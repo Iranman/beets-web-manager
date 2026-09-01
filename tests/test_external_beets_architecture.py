@@ -46,9 +46,27 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class TestBeetsControlAgentSecurity(unittest.TestCase):
     def test_is_safe_path_valid(self):
-        self.assertTrue(is_safe_path("/config/config.yaml", ["config"]))
-        self.assertTrue(is_safe_path("/data/media/music/Artist/Album", ["music"]))
-        self.assertTrue(is_safe_path("/data/torrents/downloads", ["staging"]))
+        # BEETSDIR/MUSIC_LIBRARY_PATH/DOWNLOAD_PATH are process-wide module
+        # state, and several other test modules deliberately patch os.environ
+        # at collection time (see test_ai_batch_retry_race.py's setUpModule
+        # docstring) without restoring it until interpreter exit -- so under
+        # `python -m unittest discover`, whichever such module happens to
+        # import first can leave these roots pointed at that module's own
+        # tmp directory for the rest of the run. Pin known values for the
+        # duration of this test so it verifies is_safe_path()'s containment
+        # logic deterministically instead of depending on import order.
+        with mock.patch("backend.beets_control_agent.BEETSDIR", "/config"), \
+             mock.patch.dict(os.environ, {
+                 "MUSIC_ROOT": "/data/media/music",
+                 "DOWNLOADS_ROOT": "/data/torrents",
+             }, clear=False):
+            self.assertTrue(is_safe_path("/config/config.yaml", ["config"]))
+            self.assertTrue(is_safe_path("/data/media/music/Artist/Album", ["music"]))
+            self.assertTrue(is_safe_path("/data/torrents/downloads", ["staging"]))
+        # "/tmp" is an unconditional literal root in _allowed_root_paths()
+        # (alongside tempfile.gettempdir()), not derived from any env var
+        # another module could have repointed, so this one is safe to leave
+        # as a plain literal.
         self.assertTrue(is_safe_path("/tmp/test_file.tmp", ["tmp"]))
 
     def test_is_safe_path_relative_traversal(self):
