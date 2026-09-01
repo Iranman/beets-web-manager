@@ -29,7 +29,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from flask import jsonify, request, session
 
@@ -37,6 +37,11 @@ from flask import jsonify, request, session
 # matches routes_jobs.py / routes_lidarr.py).
 from app import app  # noqa: E402
 from backend.beets_client import BeetsAuthError, BeetsError, BeetsUnavailableError, beets_client  # noqa: E402
+from backend.web_manager_config_store import (  # noqa: E402
+    WebManagerConfigStore,
+    WebManagerConfigStoreConflictError,
+    WebManagerConfigStoreError,
+)
 # The auth-bootstrap helpers below are imported lazily, inside the functions
 # that use them, rather than here at module scope: tests/test_routes_setup.py
 # exercises this module against a minimal stub `app` module (just a bare
@@ -194,18 +199,65 @@ def _app_version() -> str:
 _APP_VERSION = _app_version()
 
 
-def _load_settings() -> Dict[str, Any]:
+def _config_store_for_target(target_file: Path) -> Tuple[WebManagerConfigStore, str]:
+    """Resolve the durable, authoritative WebManagerConfigStore for a Web
+    Manager state file. Web Manager durable state lives beneath
+    WEB_MANAGER_DATA_DIR only -- a target that does not resolve under it is
+    rejected rather than promoting its own parent directory to a writable
+    config root (that would let any caller-supplied path widen the trust
+    boundary). Tests may inject WEB_MANAGER_DATA_DIR to a temporary path;
+    every Web Manager state file constant defaults beneath it, so this holds
+    for both production defaults and test injection."""
+    target = target_file.expanduser().resolve(strict=False)
+    data_root = Path(os.environ.get("WEB_MANAGER_DATA_DIR", "/web-manager-data")).expanduser().resolve(strict=False)
     try:
-        return json.loads(_SETTINGS_FILE.read_text(encoding="utf-8"))
+        rel = target.relative_to(data_root)
+    except ValueError as exc:
+        raise WebManagerConfigStoreError(
+            f"{target} is not beneath the Web Manager data root {data_root}"
+        ) from exc
+    return WebManagerConfigStore(data_root), rel.as_posix()
+
+
+def _settings_store_for_target() -> Tuple[WebManagerConfigStore, str]:
+    return _config_store_for_target(_SETTINGS_FILE)
+
+
+def _remove_config_file(target_file: Path) -> bool:
+    store, relative_name = _config_store_for_target(target_file)
+    record = store.read_text_record(relative_name)
+    if not record.get("exists"):
+        return False
+    store.remove(relative_name, expected_revision=record.get("revision"))
+    return True
+
+
+def _load_settings_record() -> Dict[str, Any]:
+    try:
+        store, relative_name = _settings_store_for_target()
+        record = store.read_text_record(relative_name)
+        if not record.get("exists"):
+            return {"settings": {}, "revision": None}
+        return {
+            "settings": json.loads(record.get("content") or "{}"),
+            "revision": record.get("revision"),
+        }
     except Exception:
-        return {}
+        return {"settings": {}, "revision": None}
 
 
-def _save_settings(data: Dict[str, Any]) -> None:
-    _SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    tmp = _SETTINGS_FILE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
-    tmp.replace(_SETTINGS_FILE)
+def _load_settings() -> Dict[str, Any]:
+    return dict(_load_settings_record().get("settings") or {})
+
+
+def _save_settings(data: Dict[str, Any], *, expected_revision: Optional[str] = None) -> Dict[str, Any]:
+    store, relative_name = _settings_store_for_target()
+    return store.save_json(
+        relative_name,
+        data,
+        is_secret=False,
+        expected_revision=expected_revision,
+    )
 
 
 def _setup_csrf_failure():
@@ -473,13 +525,13 @@ def _write_env_file(updates: Dict[str, str], clear: List[str]) -> str:
         if updates.get("BEETS_WEB_PASSWORD"):
             from werkzeug.security import generate_password_hash
             _persist_file_atomically(_PERSISTED_BROWSER_PASSWORD_FILE, generate_password_hash(updates["BEETS_WEB_PASSWORD"]))
-        elif "BEETS_WEB_PASSWORD" in clear and _PERSISTED_BROWSER_PASSWORD_FILE.exists():
-            _PERSISTED_BROWSER_PASSWORD_FILE.unlink(missing_ok=True)
+        elif "BEETS_WEB_PASSWORD" in clear:
+            _remove_config_file(_PERSISTED_BROWSER_PASSWORD_FILE)
 
         if updates.get("BEETS_WEB_USERNAME"):
             _persist_file_atomically(_PERSISTED_BROWSER_USERNAME_FILE, updates["BEETS_WEB_USERNAME"])
-        elif "BEETS_WEB_USERNAME" in clear and _PERSISTED_BROWSER_USERNAME_FILE.exists():
-            _PERSISTED_BROWSER_USERNAME_FILE.unlink(missing_ok=True)
+        elif "BEETS_WEB_USERNAME" in clear:
+            _remove_config_file(_PERSISTED_BROWSER_USERNAME_FILE)
 
         _cleanup_initial_browser_password_if_replaced()
     except Exception:
@@ -1723,8 +1775,9 @@ def setup_test_plex():
 
 @app.get("/api/setup/settings")
 def setup_get_settings():
-    settings = _load_settings()
-    return jsonify({"ok": True, "settings": {
+    record = _load_settings_record()
+    settings = dict(record.get("settings") or {})
+    return jsonify({"ok": True, "revision": record.get("revision"), "settings": {
         k: (_mask(v) if "key" in k.lower() or "token" in k.lower() else v) for k, v in settings.items()
     }})
 
@@ -1733,15 +1786,25 @@ def setup_get_settings():
 def setup_save_settings():
     """Persist wizard-configured values that don't have a dedicated env var
     (e.g. selected AI model). Real secrets should be set via .env / Docker
-    secrets, not through this endpoint — this file is not treated as a secret
+    secrets, not through this endpoint -- this file is not treated as a secret
     store, only as a record of non-secret selections."""
     payload = request.get_json(silent=True) or {}
     if not isinstance(payload, dict):
         return jsonify({"ok": False, "error": "expected a JSON object"}), 400
-    settings = _load_settings()
+    expected_revision = payload.pop("expected_revision", None)
+    store, relative_name = _settings_store_for_target()
+    record = store.read_text_record(relative_name)
+    if record.get("exists") and not expected_revision:
+        return jsonify({"ok": False, "error": "expected_revision is required", "code": "settings_missing_revision"}), 428
+    settings = dict(json.loads(record.get("content") or "{}"))
     settings.update(payload)
-    _save_settings(settings)
-    return jsonify({"ok": True})
+    try:
+        result = store.save_json(relative_name, settings, is_secret=False, expected_revision=expected_revision)
+    except WebManagerConfigStoreConflictError:
+        return jsonify({"ok": False, "error": "settings changed; reload before saving", "code": "settings_revision_conflict"}), 409
+    except WebManagerConfigStoreError:
+        return jsonify({"ok": False, "error": "Could not save settings", "code": "settings_save_failed"}), 500
+    return jsonify({"ok": True, "revision": result.get("revision")})
 
 
 @app.post("/api/setup/auth-token/regenerate")
@@ -1771,8 +1834,8 @@ def setup_regenerate_auth_token():
         app.logger.warning("Could not save environment file: %s", type(ex).__name__)
         return jsonify({"ok": False, "error": "Could not save environment file."}), 500
     try:
-        token_file.parent.mkdir(parents=True, exist_ok=True)
-        token_file.write_text(token, encoding="utf-8")
+        from app import _persist_file_atomically
+        _persist_file_atomically(token_file, token)
     except Exception:
         pass
     _invalidate_setup_status_cache()
@@ -1788,49 +1851,22 @@ _FIRST_RUN_LOCK = threading.Lock()
 
 
 def _claim_setup_completion_marker() -> bool:
-    """Atomically claim the setup-completion marker with O_CREAT|O_EXCL.
-
-    This is the durable, cross-process safety guarantee for "only one
-    initial setup completion can ever succeed". _FIRST_RUN_LOCK above only
-    serializes threads inside a single process -- correct today because
-    this app's server entry point (see app.py's `if __name__ == "__main__"`
-    block) deliberately runs one Waitress process with worker *threads*,
-    never a pre-fork/multi-process model, specifically because job stores
-    and caches are module-level state. O_EXCL here means the "only one
-    completion" invariant holds at the filesystem level too, independent of
-    that process-model assumption -- e.g. if it were ever violated by a
-    future deployment change (multiple containers/workers sharing the same
-    /web-manager-data volume), two racing creators still cannot both win.
-    Returns True only if this call was the one that created the file.
-    """
+    """Atomically claim the setup-completion marker in Web Manager storage."""
     try:
-        _SETUP_COMPLETE_MARKER.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(str(_SETUP_COMPLETE_MARKER), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    except FileExistsError:
+        store, relative_name = _config_store_for_target(_SETUP_COMPLETE_MARKER)
+        rec = store.read_text_record(relative_name)
+        if rec.get("exists"):
+            return False
+        store.save_text(relative_name, "1", is_secret=True, expected_revision=None)
+        return True
+    except WebManagerConfigStoreConflictError:
         return False
     except Exception as ex:
         try:
-            app.logger.error("Could not claim setup completion marker: %s", ex)
+            app.logger.error("Could not claim setup completion marker: %s", type(ex).__name__)
         except Exception:
             pass
         return False
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write("1")
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.chmod(_SETUP_COMPLETE_MARKER, 0o600)
-    except Exception as ex:
-        try:
-            app.logger.error("Could not write setup completion marker: %s", ex)
-        except Exception:
-            pass
-        try:
-            _SETUP_COMPLETE_MARKER.unlink(missing_ok=True)
-        except Exception:
-            pass
-        return False
-    return True
 
 
 def _migrate_legacy_setup_complete_if_established() -> None:

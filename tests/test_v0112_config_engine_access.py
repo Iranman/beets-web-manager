@@ -228,7 +228,7 @@ class ConfigUnavailableTests(unittest.TestCase):
     def test_save_config_engine_unavailable(self):
         with app_module.app.test_request_context(
             "/api/config", method="POST",
-            data=json.dumps({"content": "musicbrainz:\n  ratelimit: 5\n"}),
+            data=json.dumps({"content": "musicbrainz:\n  ratelimit: 5\n", "expected_revision": "rev1"}),
             content_type="application/json",
         ), mock.patch.object(app_module.beets_client, "save_config", side_effect=BeetsUnavailableError("timeout")):
             status, body = _split(app_module.save_config())
@@ -330,7 +330,7 @@ class ConfigSaveValidationTests(unittest.TestCase):
     def test_save_config_rejects_oversized_content_before_engine_call(self):
         with app_module.app.test_request_context(
             "/api/config", method="POST",
-            data=json.dumps({"content": "x" * 9}),
+            data=json.dumps({"content": "x" * 9, "expected_revision": "rev1"}),
             content_type="application/json",
         ), mock.patch.object(app_module, "_CONFIG_CONTENT_MAX_CHARS", 8), \
              mock.patch.object(app_module.beets_client, "save_config") as mock_save:
@@ -343,7 +343,7 @@ class ConfigSaveValidationTests(unittest.TestCase):
         placeholder = 'discogs:\n  user_token: "[REDACTED]"\n'
         with app_module.app.test_request_context(
             "/api/config", method="POST",
-            data=json.dumps({"content": placeholder}),
+            data=json.dumps({"content": placeholder, "expected_revision": "rev1"}),
             content_type="application/json",
         ):
             status, body = _split(app_module.save_config())
@@ -353,7 +353,7 @@ class ConfigSaveValidationTests(unittest.TestCase):
     def test_save_config_engine_too_large_preserves_413(self):
         with app_module.app.test_request_context(
             "/api/config", method="POST",
-            data=json.dumps({"content": "musicbrainz:\n  ratelimit: 5\n"}),
+            data=json.dumps({"content": "musicbrainz:\n  ratelimit: 5\n", "expected_revision": "rev1"}),
             content_type="application/json",
         ), mock.patch.object(
             app_module.beets_client,
@@ -367,21 +367,21 @@ class ConfigSaveValidationTests(unittest.TestCase):
     def test_save_config_success(self):
         with app_module.app.test_request_context(
             "/api/config", method="POST",
-            data=json.dumps({"content": "musicbrainz:\n  ratelimit: 5\n"}),
+            data=json.dumps({"content": "musicbrainz:\n  ratelimit: 5\n", "expected_revision": "rev1"}),
             content_type="application/json",
         ), mock.patch.object(app_module.beets_client, "save_config",
-                              return_value={"ok": True, "backed_up": True}) as mock_save:
+                              return_value={"ok": True, "backed_up": True, "revision": "rev2"}) as mock_save:
             response = app_module.save_config()
         self.assertEqual(response.status_code, 200)
         body = response.get_json()
         self.assertTrue(body["ok"])
         self.assertTrue(body["backed_up"])
-        mock_save.assert_called_once_with("musicbrainz:\n  ratelimit: 5\n")
+        mock_save.assert_called_once_with("musicbrainz:\n  ratelimit: 5\n", expected_revision="rev1")
 
 
 class ConfigRevertTests(unittest.TestCase):
     def test_revert_config_no_backup(self):
-        with app_module.app.test_request_context("/api/config/revert", method="POST"), \
+        with app_module.app.test_request_context("/api/config/revert", method="POST", data=json.dumps({"expected_revision": "rev1"}), content_type="application/json"), \
              mock.patch.object(app_module.beets_client, "revert_config",
                                 side_effect=BeetsError("no backup", error_code="config_backup_not_found", status_code=404)):
             status, body = _split(app_module.revert_config())
@@ -389,11 +389,12 @@ class ConfigRevertTests(unittest.TestCase):
         self.assertEqual(body["code"], "config_backup_not_found")
 
     def test_revert_config_success(self):
-        with app_module.app.test_request_context("/api/config/revert", method="POST"), \
-             mock.patch.object(app_module.beets_client, "revert_config", return_value={"ok": True}):
+        with app_module.app.test_request_context("/api/config/revert", method="POST", data=json.dumps({"expected_revision": "rev1"}), content_type="application/json"), \
+             mock.patch.object(app_module.beets_client, "revert_config", return_value={"ok": True, "revision": "rev2"}) as mock_revert:
             response = app_module.revert_config()
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.get_json()["ok"])
+        mock_revert.assert_called_once_with(expected_revision="rev1")
 
 
 class ControlAgentConfigEndpointTests(unittest.TestCase):
@@ -409,8 +410,8 @@ class ControlAgentConfigEndpointTests(unittest.TestCase):
         self.config_path = root / "config.yaml"
         self.backup_path = root / "config.yaml.bak"
         self.patches = [
-            mock.patch.object(control_agent_module, "_AGENT_CONFIG_PATH", str(self.config_path)),
-            mock.patch.object(control_agent_module, "_AGENT_CONFIG_BAK_PATH", str(self.backup_path)),
+            mock.patch.object(control_agent_module, "BEETSDIR", str(root)),
+            mock.patch.object(control_agent_module, "_validate_beets_config_candidate", return_value=None),
         ]
         for p in self.patches:
             p.start()
@@ -450,7 +451,7 @@ class ControlAgentConfigEndpointTests(unittest.TestCase):
         self.assertEqual(data["error_code"], "config_not_found")
 
     def test_post_then_get_config_round_trips(self):
-        code, data = self._post("/config", {"content": "musicbrainz:\n  ratelimit: 5\n"})
+        code, data = self._post("/config", {"content": "musicbrainz:\n  ratelimit: 5\n", "expected_revision": "missing"})
         self.assertEqual(code, 200)
         self.assertTrue(data["ok"])
         self.assertFalse(data["backed_up"], "no prior file existed, so nothing to back up yet")
@@ -461,8 +462,9 @@ class ControlAgentConfigEndpointTests(unittest.TestCase):
         self.assertFalse(data["has_backup"])
 
     def test_second_save_creates_backup_and_revert_restores_it(self):
-        self._post("/config", {"content": "version: 1\n"})
-        code, data = self._post("/config", {"content": "version: 2\n"})
+        self._post("/config", {"content": "version: 1\n", "expected_revision": "missing"})
+        revision = control_agent_module._config_revision(self.config_path)
+        code, data = self._post("/config", {"content": "version: 2\n", "expected_revision": revision})
         self.assertEqual(code, 200)
         self.assertTrue(data["backed_up"])
 
@@ -470,7 +472,8 @@ class ControlAgentConfigEndpointTests(unittest.TestCase):
         self.assertEqual(data["content"], "version: 2\n")
         self.assertTrue(data["has_backup"])
 
-        code, data = self._post("/config/revert", {})
+        revision = control_agent_module._config_revision(self.config_path)
+        code, data = self._post("/config/revert", {"expected_revision": revision})
         self.assertEqual(code, 200)
         self.assertTrue(data["ok"])
 
@@ -478,7 +481,7 @@ class ControlAgentConfigEndpointTests(unittest.TestCase):
         self.assertEqual(data["content"], "version: 1\n")
 
     def test_revert_without_backup_returns_404(self):
-        code, data = self._post("/config/revert", {})
+        code, data = self._post("/config/revert", {"expected_revision": "missing"})
         self.assertEqual(code, 404)
         self.assertEqual(data["error_code"], "config_backup_not_found")
 
@@ -507,7 +510,7 @@ class ControlAgentConfigEndpointTests(unittest.TestCase):
     def test_post_config_rejects_oversized_content(self):
         with mock.patch.object(control_agent_module, "_AGENT_CONFIG_CONTENT_MAX_BYTES", 8), \
              mock.patch.object(control_agent_module, "_AGENT_CONFIG_REQUEST_MAX_BYTES", 1024):
-            code, data = self._post("/config", {"content": "x" * 9})
+            code, data = self._post("/config", {"content": "x" * 9, "expected_revision": "missing"})
         self.assertEqual(code, 413)
         self.assertEqual(data["error_code"], "config_too_large")
         self.assertFalse(self.config_path.exists())
@@ -532,9 +535,16 @@ class ControlAgentConfigEndpointTests(unittest.TestCase):
                 with counter_lock:
                     active_copy -= 1
 
+        successes = []
+        conflicts = []
+
         def worker(i):
             try:
-                control_agent_module._write_agent_config_file(f"version: {i}\n")
+                revision = control_agent_module._config_revision(self.config_path)
+                control_agent_module._write_agent_config_file(f"version: {i}\n", expected_revision=revision)
+                successes.append(i)
+            except control_agent_module.ConfigRevisionConflict:
+                conflicts.append(i)
             except Exception as exc:  # pragma: no cover - failure path only
                 errors.append(exc)
 
@@ -546,6 +556,7 @@ class ControlAgentConfigEndpointTests(unittest.TestCase):
                 thread.join(timeout=10)
 
         self.assertEqual(errors, [])
+        self.assertGreaterEqual(len(successes), 1)
         self.assertEqual(max_active_copy, 1, "config backup/write operations must not overlap under ThreadingHTTPServer")
         self.assertIn(self.config_path.read_text(encoding="utf-8"), {f"version: {i}\n" for i in range(1, 8)})
         self.assertEqual(list(self.config_path.parent.glob("config.yaml.tmp.*")), [])

@@ -218,6 +218,18 @@ class AttachRecordingEnforcementTests(unittest.TestCase):
 
         self.fake_plan_track_repair = fake_plan_track_repair
         self.fake_apply_track_repair = fake_apply_track_repair
+        self.item_metadata_calls = []
+        self.relocate_calls = []
+
+        def fake_update_item_metadata(item_id, fields, **kwargs):
+            self.item_metadata_calls.append((item_id, dict(fields or {}), dict(kwargs)))
+            for key, value in (fields or {}).items():
+                setattr(self.item, key, value)
+            return {"ok": True}
+
+        def fake_relocate_album(album_id, *args, **kwargs):
+            self.relocate_calls.append((album_id, dict(kwargs)))
+            return {"ok": True}
 
         self._patch(mock.patch.object(APP.lib, "get_item", side_effect=lambda iid: self.item))
         self._patch(mock.patch.object(APP, "_acoustid_lookup_cached",
@@ -228,6 +240,8 @@ class AttachRecordingEnforcementTests(unittest.TestCase):
         self._patch(mock.patch.object(APP, "_beet_run", side_effect=fake_beet_run))
         self._patch(mock.patch.object(APP.beets_client, "plan_album_mb_track_repair", side_effect=fake_plan_track_repair))
         self._patch(mock.patch.object(APP.beets_client, "apply_album_mb_track_repair", side_effect=fake_apply_track_repair))
+        self._patch(mock.patch.object(APP.beets_client, "update_item_metadata", side_effect=fake_update_item_metadata))
+        self._patch(mock.patch.object(APP.beets_client, "relocate_album", side_effect=fake_relocate_album))
         self._patch(mock.patch.object(APP, "_invalidate_lib_cache", return_value=None))
         self._patch(mock.patch.object(APP, "_trigger_plex_refresh", return_value=None))
 
@@ -476,9 +490,11 @@ class AttachRecordingEnforcementTests(unittest.TestCase):
 
         tx = APP.transactions.get(audit_id)
         self.assertEqual(tx["status"], "Rolled Back")
-        restore_calls = [c for c in self.beet_calls if "modify" in c and "mb_trackid=" in " ".join(c)]
-        self.assertTrue(any("mb_trackid=" in part and RECORDING_ID not in part
-                             for call in restore_calls for part in call if part.startswith("mb_trackid=")))
+        self.assertTrue(self.item_metadata_calls)
+        item_id, fields, kwargs = self.item_metadata_calls[-1]
+        self.assertEqual(item_id, 9001)
+        self.assertEqual(fields["mb_trackid"], "")
+        self.assertTrue(kwargs.get("force_write_tags"))
 
     # ---- serialization safety --------------------------------------------
 
@@ -559,6 +575,14 @@ class ManualIdAttachIntegrationTests(unittest.TestCase):
                 )
             return {"ok": True}
 
+        def fake_update_item_metadata(item_id, fields, **kwargs):
+            for key, value in (fields or {}).items():
+                setattr(self.item, key, value)
+            return {"ok": True}
+
+        def fake_relocate_album(album_id, *args, **kwargs):
+            return {"ok": True}
+
         self._patch(mock.patch.object(APP.lib, "get_item", side_effect=lambda iid: self.item))
         self._patch(mock.patch.object(APP, "_acoustid_lookup_cached",
                                        side_effect=lambda path: self._acoustid_candidates))
@@ -568,6 +592,8 @@ class ManualIdAttachIntegrationTests(unittest.TestCase):
         self._patch(mock.patch.object(APP, "_beet_run", side_effect=fake_beet_run))
         self._patch(mock.patch.object(APP.beets_client, "plan_album_mb_track_repair", side_effect=fake_plan_track_repair))
         self._patch(mock.patch.object(APP.beets_client, "apply_album_mb_track_repair", side_effect=fake_apply_track_repair))
+        self._patch(mock.patch.object(APP.beets_client, "update_item_metadata", side_effect=fake_update_item_metadata))
+        self._patch(mock.patch.object(APP.beets_client, "relocate_album", side_effect=fake_relocate_album))
         self._patch(mock.patch.object(APP, "_invalidate_lib_cache", return_value=None))
         self._patch(mock.patch.object(APP, "_trigger_plex_refresh", return_value=None))
 

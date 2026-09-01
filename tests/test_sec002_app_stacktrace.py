@@ -128,7 +128,7 @@ class ConfigYamlExceptionSanitizationTests(unittest.TestCase):
     def test_save_config_write_failure_is_sanitized(self):
         with app_module.app.test_request_context(
             "/api/config", method="POST",
-            data=json.dumps({"content": "beets:\n  library: /config/musiclibrary.blb\n"}),
+            data=json.dumps({"content": "beets:\n  library: /config/musiclibrary.blb\n", "expected_revision": "rev1"}),
             content_type="application/json",
         ), mock.patch.object(app_module.beets_client, "save_config",
                               side_effect=app_module.BeetsError("LEAK_MARKER /data/config.yaml", error_code="config_write_failed", status_code=500)):
@@ -139,7 +139,7 @@ class ConfigYamlExceptionSanitizationTests(unittest.TestCase):
         self.assertNotIn("LEAK_MARKER", json.dumps(data))
 
     def test_revert_config_failure_is_sanitized(self):
-        with app_module.app.test_request_context("/api/config/revert", method="POST"), \
+        with app_module.app.test_request_context("/api/config/revert", method="POST", data=json.dumps({"expected_revision": "rev1"}), content_type="application/json"), \
              mock.patch.object(app_module.beets_client, "revert_config",
                                 side_effect=app_module.BeetsError("LEAK_MARKER /data/config.yaml.bak", error_code="config_revert_failed", status_code=500)):
             response = app_module.revert_config()

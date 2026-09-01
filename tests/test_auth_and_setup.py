@@ -41,12 +41,14 @@ class AuthAndSetupTests(unittest.TestCase):
                 "BEETS_WEB_USERNAME": "",
                 "BEETS_WEB_AUTH_TOKEN": "valid_test_bearer_token_32_chars_minimum!",
                 "BEETS_WEB_AUTH_DISABLED": "0",
+                "WEB_MANAGER_DATA_DIR": str(self.data_dir),
             },
             clear=False,
         )
         self.env_patch.start()
 
         self.patches = [
+            mock.patch.object(app_module, "WEB_MANAGER_DATA_DIR", self.data_dir),
             mock.patch.object(app_module, "_INITIAL_BROWSER_PASSWORD_FILE", self.initial_pwd_file),
             mock.patch.object(app_module, "_PERSISTED_BROWSER_PASSWORD_FILE", self.persisted_pwd_file),
             mock.patch.object(app_module, "_PERSISTED_BROWSER_USERNAME_FILE", self.persisted_user_file),

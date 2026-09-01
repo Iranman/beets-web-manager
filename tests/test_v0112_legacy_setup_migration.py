@@ -44,6 +44,7 @@ class LegacySetupCompleteMigrationTests(unittest.TestCase):
         self.setup_state_file = root / ".browser_setup_state"
 
         self.patches = [
+            mock.patch.object(app_module, "WEB_MANAGER_DATA_DIR", root),
             mock.patch.object(routes_setup, "_SETUP_COMPLETE_MARKER", self.marker),
             mock.patch.object(app_module, "_INITIAL_BROWSER_PASSWORD_FILE", self.initial_pwd_file),
             mock.patch.object(app_module, "_PERSISTED_BROWSER_PASSWORD_FILE", self.persisted_pwd_file),
@@ -52,7 +53,12 @@ class LegacySetupCompleteMigrationTests(unittest.TestCase):
         ]
         self.env_patch = mock.patch.dict(
             __import__("os").environ,
-            {"BEETS_WEB_PASSWORD": "", "BEETS_WEB_USERNAME": "", "BEETS_WEB_AUTH_DISABLED": "0"},
+            {
+                "BEETS_WEB_PASSWORD": "",
+                "BEETS_WEB_USERNAME": "",
+                "BEETS_WEB_AUTH_DISABLED": "0",
+                "WEB_MANAGER_DATA_DIR": str(root),
+            },
             clear=False,
         )
         self.env_patch.start()

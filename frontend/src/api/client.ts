@@ -1194,12 +1194,12 @@ export function getConfigFile(): Promise<ConfigFileResponse> {
   return apiJson<ConfigFileResponse>('/api/config');
 }
 
-export function saveConfigFile(content: string): Promise<ConfigSaveResponse> {
-  return apiJson<ConfigSaveResponse>('/api/config', jsonRequest('POST', { content }));
+export function saveConfigFile(content: string, expectedRevision: string): Promise<ConfigSaveResponse> {
+  return apiJson<ConfigSaveResponse>('/api/config', jsonRequest('POST', { content, expected_revision: expectedRevision }));
 }
 
-export function revertConfigFile(): Promise<ApiOkResponse> {
-  return apiJson<ApiOkResponse>('/api/config/revert', { method: 'POST' });
+export function revertConfigFile(expectedRevision: string): Promise<ConfigSaveResponse> {
+  return apiJson<ConfigSaveResponse>('/api/config/revert', jsonRequest('POST', { expected_revision: expectedRevision }));
 }
 export function getMusicFormatPreferences(): Promise<MusicFormatPreferencesResponse> {
   return apiJson<MusicFormatPreferencesResponse>('/api/settings/music-format');

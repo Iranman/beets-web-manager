@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import csv
+import datetime
 import errno
 import hashlib
 import io
@@ -6020,14 +6021,13 @@ def create_artist_folder_reconcile_plan(
     eligible_candidates: List[Dict[str, Any]] = []
 
     for idx, cand in enumerate(candidates_raw):
-        src = Path(cand["source_path"])
-        dst = Path(cand["target_path"])
-
-        if not _path_under(src, root_path) or not _path_under(dst, root_path):
+        src_valid = validate_path_under_allowed_roots(cand.get("source_path"), allowed_roots, reject_symlinks=True)
+        dst_valid = validate_path_under_allowed_roots(cand.get("target_path"), allowed_roots, reject_symlinks=True)
+        if src_valid is None or dst_valid is None:
             return {"ok": False, "error": "Path outside root.", "code": "artist_reconcile_path_out_of_root"}
 
-        if _path_has_symlink_under(src, root_path) or _path_has_symlink_under(dst, root_path):
-            return {"ok": False, "error": "Symlink rejected.", "code": "artist_reconcile_symlink_rejected"}
+        src = src_valid
+        dst = dst_valid
 
         if not src.exists() or not src.is_dir():
             requires_review.append({"source_path": str(src), "target_path": str(dst), "reason": "artist_reconcile_source_missing"})
@@ -6037,13 +6037,14 @@ def create_artist_folder_reconcile_plan(
         # Artist ID(s) from Beets DB state -- never trust the caller-supplied
         # id as authority (SEC-002 Wave 21 final review, findings #4-#7).
         is_merge = dst.exists() and dst.is_dir() and dst.resolve(strict=False) != src.resolve(strict=False)
-        src_identity = _derive_artist_folder_identity(src, lib_db)
-        dst_identity = _derive_artist_folder_identity(dst, lib_db) if is_merge else {"ids": set(), "album_count": 0}
+        src_identity = _derive_artist_folder_identity(src, lib_db, allowed_roots=allowed_roots)
+        dst_identity = _derive_artist_folder_identity(dst, lib_db, allowed_roots=allowed_roots) if is_merge else {"ids": set(), "album_count": 0}
         caller_mbid = str(cand.get("source_mbid") or cand.get("target_mbid") or cand.get("mbid") or "").strip().lower()
         fingerprint_confirmed = cand.get("fingerprint_confirmed") is True
-
+        recording_mbids = _extract_recording_mbids(cand, src, lib_db, allowed_roots=allowed_roots)
         eligible, resolved_mbid, reason = _artist_folder_identity_decision(
             src_identity, dst_identity, is_merge, caller_mbid, fingerprint_confirmed,
+            db_path=lib_db, recording_mbids=recording_mbids,
         )
         if not eligible:
             requires_review.append({
@@ -6065,11 +6066,15 @@ def create_artist_folder_reconcile_plan(
             "target_name": cand.get("target_name") or dst.name,
             "resolved_mbid": resolved_mbid,
             "identity_evidence": {
+                "canonical_artist_mbid": resolved_mbid,
                 "source_established_ids": sorted(src_identity["ids"]),
                 "target_established_ids": sorted(dst_identity["ids"]),
                 "caller_mbid": caller_mbid,
+                "recording_mbids": recording_mbids,
                 "fingerprint_confirmed": fingerprint_confirmed,
                 "is_merge": is_merge,
+                "verification_source": "musicbrainz_recording_artist_credit" if resolved_mbid and not src_identity["ids"] and not dst_identity["ids"] else "established_db_state",
+                "verified_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             },
         })
 
@@ -6350,6 +6355,28 @@ def execute_artist_folder_reconcile_apply(
             # findings #15-#18 (Apply only checked size/mtime_ns and never
             # rechecked root/symlink at all).
             if not db_stage_done:
+                # TOCTOU Identity Revalidation at Apply time (SEC-002 Wave 27):
+                # Re-read source & destination identities from DB/disk before mutating.
+                for cand in meta.get("eligible_candidates") or []:
+                    src_p = validate_path_under_allowed_roots(cand.get("source_path"), allowed_roots, reject_symlinks=True)
+                    dst_p = validate_path_under_allowed_roots(cand.get("target_path"), allowed_roots, reject_symlinks=True)
+                    if src_p is None or dst_p is None:
+                        return _fail("Candidate path outside allowed roots", "artist_reconcile_path_out_of_root")
+                    if src_p.exists() and src_p.is_dir():
+                        src_id_now = _derive_artist_folder_identity(src_p, lib_db, allowed_roots=allowed_roots)
+                        dst_id_now = _derive_artist_folder_identity(dst_p, lib_db, allowed_roots=allowed_roots) if (dst_p.exists() and dst_p.is_dir()) else {"ids": set(), "album_count": 0}
+                        caller_mbid_now = cand.get("identity_evidence", {}).get("caller_mbid") or ""
+                        fp_confirmed_now = cand.get("identity_evidence", {}).get("fingerprint_confirmed") is True
+                        rec_mbids_now = cand.get("identity_evidence", {}).get("recording_mbids") or []
+                        is_merge_now = dst_p.exists() and dst_p.is_dir() and dst_p.resolve(strict=False) != src_p.resolve(strict=False)
+                        
+                        eligible_now, mbid_now, reason_now = _artist_folder_identity_decision(
+                            src_id_now, dst_id_now, is_merge_now, caller_mbid_now, fp_confirmed_now,
+                            db_path=lib_db, recording_mbids=rec_mbids_now
+                        )
+                        if not eligible_now or mbid_now != cand.get("resolved_mbid"):
+                            return _fail(f"Artist folder identity changed since Plan for candidate {cand.get('source_name')}.", "artist_reconcile_identity_changed_at_apply")
+
                 for m in moves_plan:
                     if m["source"] in already_moved_sources:
                         continue
@@ -6938,19 +6965,65 @@ def _album_cleanup_duplicate_file_choice(candidate: Path, existing: Path) -> str
     return "candidate" if cand_size > exist_size else "existing"
 
 
-def _derive_artist_folder_identity(folder_path: Path, lib_db: str) -> Dict[str, Any]:
+def _derive_artist_folder_identity(
+    folder_path: Path,
+    lib_db: str,
+    allowed_roots: Optional[List[str]] = None,
+) -> Dict[str, Any]:
     """Independently establish Artist ID(s) for a folder directly from
     Beets DB state (distinct non-blank mb_albumartistid values among
     albums whose item paths live under this folder) -- SEC-002 Wave 21
     final review: a caller-supplied MBID is evidence, never authority.
     More than one distinct established id under the same folder is itself
-    a conflict signal (returned via "ids" having len > 1)."""
+    a conflict signal (returned via "ids" having len > 1).
+
+    Both current callers (create_artist_folder_reconcile_plan's Plan loop
+    and execute_artist_folder_reconcile_apply's TOCTOU revalidation loop)
+    already validate folder_path with validate_path_under_allowed_roots()
+    immediately before calling here and fail closed on None -- but CodeQL's
+    interprocedural dataflow could not verify that sanitization end to end
+    across the call boundary (CodeQL #1016/#1017, then #1018/#1019 after a
+    first attempt that trusted the caller without re-proving containment
+    here). The containment check below is therefore proven again, inline,
+    in this function's own body -- deliberately not delegated to another
+    function call -- so CodeQL's same-function analysis can trace it
+    directly: normalize with os.path.normpath, then require the
+    normalized candidate to start with a normalized allowed root, matching
+    CodeQL's own documented py/path-injection remediation pattern.
+    """
     result: Dict[str, Any] = {"ids": set(), "album_count": 0}
-    if not lib_db or not Path(lib_db).exists():
+    if not lib_db or not isinstance(folder_path, Path):
+        return result
+    roots = allowed_roots or [str(os.environ.get("MUSIC_ROOT", "/music"))]
+    folder_norm = os.path.normpath(str(folder_path))
+    contained = False
+    matched_root = ""
+    for root in roots:
+        root_norm = os.path.normpath(str(root))
+        if folder_norm == root_norm or folder_norm.startswith(root_norm + os.sep):
+            contained = True
+            matched_root = root_norm
+            break
+    if not contained:
+        return result
+    if _path_has_symlink_under(Path(folder_norm), Path(matched_root)):
+        return result
+    if not os.path.exists(folder_norm):
+        return result
+    folder_path = Path(folder_norm)
+    # lib_db is never caller-controlled: every call site sources it from
+    # server-owned engine configuration (BEETS_LIBRARY_DB / LIB_PATH), never
+    # from request payload, transaction metadata, or candidate data -- so it
+    # is checked directly rather than "validated" against a root derived
+    # from itself (every path is trivially under its own parent, so that
+    # proves nothing) with a fail-open fallback to the unvalidated value on
+    # failure.
+    valid_db = Path(lib_db)
+    if not valid_db.exists():
         return result
     prefix = str(folder_path).encode("utf-8") + os.sep.encode("utf-8")
     try:
-        con = sqlite3.connect(lib_db, timeout=10)
+        con = sqlite3.connect(str(valid_db), timeout=10)
         con.row_factory = sqlite3.Row
         try:
             rows = _rows_by_path_prefix(
@@ -6976,25 +7049,165 @@ def _derive_artist_folder_identity(folder_path: Path, lib_db: str) -> Dict[str, 
     return result
 
 
+def _extract_recording_mbids(
+    cand: Dict[str, Any],
+    src_path: Path,
+    db_path: Optional[str] = None,
+    allowed_roots: Optional[List[str]] = None,
+) -> List[str]:
+    """Extracts MusicBrainz Recording IDs established under src_path from local DB items.
+    Candidate payload recording IDs are treated as suggestions/hints ONLY and must be
+    independently corroborated by established engine item track state under src_path.
+
+    The caller (create_artist_folder_reconcile_plan's Plan loop) already
+    validates src_path with validate_path_under_allowed_roots() immediately
+    before calling here and fails closed on None -- see
+    _derive_artist_folder_identity's docstring for why that alone was not
+    enough for CodeQL's interprocedural dataflow (CodeQL #1016/#1017, then
+    #1018/#1019) and why the containment check below is proven again,
+    inline, in this function's own body instead.
+    """
+    lib_db = os.environ.get("BEETS_LIBRARY_DB", "")
+    if db_path and db_path == os.environ.get("BEETS_LIBRARY_DB", ""):
+        lib_db = db_path
+    if not lib_db or not isinstance(src_path, Path):
+        return []
+
+    roots = allowed_roots or [str(os.environ.get("MUSIC_ROOT", "/music"))]
+    src_norm = os.path.normpath(str(src_path))
+    contained = False
+    matched_root = ""
+    for root in roots:
+        root_norm = os.path.normpath(str(root))
+        if src_norm == root_norm or src_norm.startswith(root_norm + os.sep):
+            contained = True
+            matched_root = root_norm
+            break
+    if not contained:
+        return []
+    if _path_has_symlink_under(Path(src_norm), Path(matched_root)):
+        return []
+    if not os.path.exists(src_norm):
+        return []
+    src_path = Path(src_norm)
+
+    # lib_db is never caller-controlled (see _derive_artist_folder_identity)
+    # -- checked directly, not "validated" against a root derived from
+    # itself with a fail-open fallback to the unvalidated value.
+    valid_db = Path(lib_db)
+    if not valid_db.exists():
+        return []
+
+    established_rec_ids: set = set()
+    try:
+        con = sqlite3.connect(str(valid_db), timeout=5)
+        con.row_factory = sqlite3.Row
+        try:
+            prefix = str(src_path) + os.sep
+            rows = _rows_by_path_prefix(
+                con, "items", "DISTINCT mb_trackid, path", "path", prefix, path_result_col="path"
+            )
+            for r in rows:
+                mb_tid = str(r["mb_trackid"] or "").strip().lower()
+                if _MB_UUID_RE.match(mb_tid):
+                    established_rec_ids.add(mb_tid)
+        finally:
+            con.close()
+    except Exception:
+        pass
+
+    raw = cand.get("recording_mbids") or cand.get("recording_mbid") or cand.get("mb_trackid") or cand.get("recording_ids") or []
+    if isinstance(raw, str):
+        raw = [raw]
+    caller_hints: set = set()
+    for item in raw:
+        s = str(item or "").strip().lower()
+        if _MB_UUID_RE.match(s):
+            caller_hints.add(s)
+
+    if caller_hints:
+        # Candidate hints are ONLY included if corroborated by established engine item MBIDs
+        return sorted(established_rec_ids.intersection(caller_hints))
+
+    return sorted(established_rec_ids)
+
+
+def _verify_mb_artist_recording_credit(
+    caller_mbid: str,
+    recording_mbids: Optional[List[str]] = None,
+    mb_verifier: Optional[Callable[[str, List[str]], bool]] = None,
+) -> bool:
+    """Verifies engine-side whether caller_mbid is authorized as an artist credit
+    for candidate recording(s) using MusicBrainz Recording artist-credit evidence.
+
+    Returns True ONLY IF every established MusicBrainz Recording under the source folder
+    has an artist credit matching caller_mbid.
+    """
+    if not caller_mbid or not _MB_UUID_RE.match(caller_mbid):
+        return False
+
+    if mb_verifier is not None:
+        return bool(mb_verifier(caller_mbid, recording_mbids or []))
+
+    if not recording_mbids:
+        return False
+
+    try:
+        from helpers_mb import _fetch_mb_recording_details, _MB_UUID_RE as HELPERS_UUID_RE
+        target_mbid = caller_mbid.lower()
+        match_count = 0
+        for rec_id in recording_mbids:
+            if not rec_id or not HELPERS_UUID_RE.match(rec_id):
+                return False
+            details = _fetch_mb_recording_details(rec_id)
+            if not details or not isinstance(details, dict):
+                return False
+            rec_artist_id = str(details.get("mb_artistid") or "").lower()
+            found = rec_artist_id == target_mbid
+            if not found:
+                for rel in details.get("linked_releases") or []:
+                    rel_artist = str(rel.get("mb_artistid") or rel.get("artist_id") or "").lower()
+                    if rel_artist == target_mbid:
+                        found = True
+                        break
+            if not found:
+                return False
+            match_count += 1
+        return match_count > 0
+    except Exception as ex:
+        LOG.warning("MusicBrainz recording credit verification exception: %s", ex)
+        return False
+
+
 def _artist_folder_identity_decision(
     src_identity: Dict[str, Any],
     dst_identity: Dict[str, Any],
     is_merge: bool,
     caller_mbid: str,
     fingerprint_confirmed: bool,
+    db_path: Optional[str] = None,
+    recording_mbids: Optional[List[str]] = None,
+    mb_verifier: Optional[Callable[[str, List[str]], bool]] = None,
 ) -> Tuple[bool, str, str]:
     """Returns (eligible, resolved_mbid, reason_code_if_not_eligible).
 
-    Policy (SEC-002 Wave 21 final review, exact rules requested):
-    - Same established Artist ID on both sides (or established on one side
-      matching a well-formed caller-supplied id when the other is a pure
-      rename with no pre-existing destination): eligible.
-    - Different established Artist IDs, or more than one established id
-      under a single folder: hard conflict, never eligible.
-    - One side established / one side blank: requires explicit caller
-      fingerprint-confirmation evidence.
-    - Both sides blank: requires explicit caller fingerprint-confirmation
-      evidence; name equality alone is never sufficient.
+    Strict Identity Authority Policy (SEC-002 Wave 27):
+    - Fingerprint/AcoustID evidence is recording evidence. It may SUPPORT identity
+      verification; it MAY NOT AUTHORIZE an artist identity mutation by itself.
+    - An identity-changing artist merge requires a canonical MusicBrainz Artist ID
+      established in DB state or verified via MusicBrainz Recording artist-credit evidence.
+    - CASE A: source MBID == destination MBID -> eligible.
+    - CASE B: source MBID != destination MBID -> hard conflict, not eligible.
+    - CASE C: source has MBID, destination blank -> source MBID is canonical;
+              caller MBID (if sent) must match source MBID.
+    - CASE D: source blank, destination has MBID -> destination MBID is canonical;
+              caller MBID (if sent) must match destination MBID.
+    - CASE E: source blank, destination blank, fingerprint agrees, caller sends MBID ->
+              requires MusicBrainz recording-to-artist credit verification.
+              If verified: eligible. Otherwise: review required.
+    - CASE F: source blank, destination blank, fingerprint agrees, no canonical MBID ->
+              review required.
+    - CASE G: AI / fuzzy-name agreement only -> review required.
     """
     src_ids = src_identity.get("ids") or set()
     dst_ids = dst_identity.get("ids") or set()
@@ -7005,23 +7218,43 @@ def _artist_folder_identity_decision(
     caller_mbid = caller_mbid if _MB_UUID_RE.match(caller_mbid or "") else ""
 
     if is_merge:
+        # CASE A & B: Both source and destination have established MBIDs
         if src_id and dst_id:
             if src_id != dst_id:
                 return False, "", "artist_reconcile_identity_conflict"
             return True, src_id, ""
-        if src_id or dst_id:
-            if not fingerprint_confirmed:
-                return False, "", "artist_reconcile_requires_review"
-            return True, (src_id or dst_id), ""
-        if not fingerprint_confirmed:
-            return False, "", "artist_reconcile_requires_review"
-        return True, caller_mbid, ""
 
-    # Pure rename (no pre-existing destination directory): the only
-    # established evidence available is the source folder's own DB state.
-    if src_id and caller_mbid and src_id != caller_mbid:
-        return False, "", "artist_reconcile_identity_conflict"
-    return True, (src_id or caller_mbid), ""
+        # CASE C: Source has MBID, destination is blank
+        if src_id and not dst_id:
+            if caller_mbid and caller_mbid != src_id:
+                return False, "", "artist_reconcile_identity_conflict"
+            return True, src_id, ""
+
+        # CASE D: Source is blank, destination has MBID
+        if not src_id and dst_id:
+            if caller_mbid and caller_mbid != dst_id:
+                return False, "", "artist_reconcile_identity_conflict"
+            return True, dst_id, ""
+
+        # CASES E, F, G: Neither side has an established MBID in the DB
+        if not src_id and not dst_id:
+            if fingerprint_confirmed and caller_mbid:
+                if _verify_mb_artist_recording_credit(caller_mbid, recording_mbids, mb_verifier):
+                    return True, caller_mbid, ""
+                return False, "", "artist_reconcile_requires_review"
+            return False, "", "artist_reconcile_requires_review"
+
+    # Pure rename (no pre-existing destination directory)
+    if src_id:
+        if caller_mbid and src_id != caller_mbid:
+            return False, "", "artist_reconcile_identity_conflict"
+        return True, src_id, ""
+    else:
+        if caller_mbid:
+            if _verify_mb_artist_recording_credit(caller_mbid, recording_mbids, mb_verifier):
+                return True, caller_mbid, ""
+            return False, "", "artist_reconcile_requires_review"
+        return True, "", ""
 
 
 def _artist_folder_quarantine_key(path: Path, root_path: Path) -> str:
@@ -12688,3 +12921,625 @@ def rollback_album_metadata(
             return {"ok": ok, "operation_id": operation_id, "status": final_status, "tags_restored": tags_restored, "tags_failed": tags_failed}
 
 
+
+
+# -- item_metadata_repair_v1 ---------------------------------------------------
+
+def create_item_metadata_plan(
+    store: TransactionStore,
+    payload: Dict[str, Any],
+    *,
+    music_allowed_roots: Optional[List[str]] = None,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    payload = payload or {}
+    try:
+        item_id = int(payload.get("item_id") or 0)
+    except Exception:
+        item_id = 0
+    if item_id <= 0:
+        return {"ok": False, "error": "item_id required", "code": "item_metadata_invalid_payload"}
+    force_write_tags = bool(payload.get("force_write_tags"))
+    updates, rejected = _normalize_metadata_fields(payload.get("updates") or {}, ITEM_METADATA_FIELDS)
+    if rejected:
+        return {"ok": False, "error": f"Unknown/disallowed item metadata field(s): {sorted(rejected)}", "code": "item_metadata_field_not_allowed"}
+    if not updates and not force_write_tags:
+        return {"ok": True, "operation_id": None, "item_fields_changed": 0}
+
+    lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB", "")
+    if not lib_db or not Path(lib_db).exists():
+        return {"ok": False, "error": "Beets library database not found", "code": "item_metadata_db_not_found"}
+    allowed_roots = music_allowed_roots or [str(os.environ.get("MUSIC_ROOT", "/music"))]
+    con = sqlite3.connect(lib_db, timeout=10)
+    con.row_factory = sqlite3.Row
+    try:
+        row = con.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
+        if not row:
+            return {"ok": False, "error": f"Item {item_id} not found", "code": "item_metadata_item_not_found"}
+        path_str = _s(row["path"] or "") if "path" in row.keys() else ""
+        if not path_str:
+            return {"ok": False, "error": f"Item {item_id} has no path", "code": "item_metadata_missing_path"}
+        item_path = _resolve_db_path(path_str, allowed_roots)
+        if not any(_path_under(item_path, Path(root)) for root in allowed_roots):
+            return {"ok": False, "error": "Item path is outside allowed music roots", "code": "item_metadata_path_out_of_root"}
+        if any(_path_has_symlink_under(item_path, Path(root)) for root in allowed_roots):
+            return {"ok": False, "error": "Symlink rejected in item path", "code": "item_metadata_symlink_rejected"}
+        diff: Dict[str, Dict[str, str]] = {}
+        for key, new_value in updates.items():
+            if key in row.keys():
+                old_value = _s(row[key] or "")
+                if old_value != _s(new_value):
+                    diff[key] = {"before": old_value, "after": _s(new_value)}
+    finally:
+        con.close()
+
+    if not diff and not force_write_tags:
+        return {"ok": True, "operation_id": None, "item_fields_changed": 0}
+    capture_fields = set(diff.keys()) | (ITEM_METADATA_FIELDS if force_write_tags else set())
+    before_state = _capture_media_tag_state(item_path, capture_fields)
+    if force_write_tags and not before_state.get("exists"):
+        return {"ok": False, "error": f"Media file missing for item {item_id}", "code": "item_metadata_media_missing"}
+    tx = store.create(
+        operation_type="Metadata Update",
+        status="Preview",
+        summary=f"Item metadata update: item {item_id} ({len(diff)} field(s))",
+        rollback_available=bool(diff),
+        rollback_reason="Captured previous item metadata and tag values before apply." if diff else "No metadata diff captured.",
+        metadata={
+            "mutation_family": "item_metadata_repair_v1",
+            "item_id": item_id,
+            "item_diff": diff,
+            "item_path": str(item_path),
+            "force_write_tags": force_write_tags,
+            "file_before_stat": before_state.get("stat"),
+            "before_tags": before_state.get("tags") or {},
+            "allowed_roots": allowed_roots,
+            "resource_keys": [f"item:{item_id}"],
+            "created_at": _now(),
+        },
+    )
+    return {"ok": True, "operation_id": tx["id"], "item_id": item_id, "item_fields_changed": len(diff)}
+
+
+def execute_item_metadata_apply(
+    store: TransactionStore,
+    operation_id: str,
+    *,
+    music_allowed_roots: Optional[List[str]] = None,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    if not _TRANSACTION_ID_RE.match(operation_id):
+        return {"ok": False, "error": "Invalid transaction ID format", "code": "item_metadata_invalid_id"}
+    with _get_apply_lock(operation_id):
+        try:
+            tx = store.get(operation_id)
+        except KeyError:
+            return {"ok": False, "error": f"Transaction {operation_id} not found", "code": "item_metadata_not_found"}
+        meta = tx.get("metadata") or {}
+        if meta.get("mutation_family") != "item_metadata_repair_v1":
+            return {"ok": False, "error": "Transaction is not an item_metadata_repair_v1 operation", "code": "item_metadata_family_mismatch"}
+        if tx.get("status") == "Completed":
+            return {"ok": True, "operation_id": operation_id, "status": "Completed", "mutated": True}
+        lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB", "")
+        if not lib_db or not Path(lib_db).exists():
+            return {"ok": False, "error": "Beets library database not found", "code": "item_metadata_db_not_found"}
+        item_id = int(meta.get("item_id") or 0)
+        diff = meta.get("item_diff") or {}
+        item_path = Path(meta.get("item_path") or "")
+        allowed_roots = music_allowed_roots or meta.get("allowed_roots") or [str(os.environ.get("MUSIC_ROOT", "/music"))]
+        music_root = allowed_roots[0]
+
+        def _fail(msg: str, code: str, *, recover: bool = False) -> Dict[str, Any]:
+            if recover:
+                rb = rollback_item_metadata(store, operation_id, db_path=lib_db)
+                if rb.get("status") == "Rolled Back":
+                    return {"ok": False, "error": msg, "code": code, "mutated": False, "status": "Rolled Back"}
+                store.update(operation_id, status="Recovery Required", logs=[f"Apply failed: {msg}"])
+                return {"ok": False, "error": msg, "code": code, "mutated": True, "status": "Recovery Required"}
+            store.update(operation_id, status="Failed", logs=[f"Apply failed: {msg}"])
+            return {"ok": False, "error": msg, "code": code, "mutated": False, "status": "Failed"}
+
+        with _lock_resources(meta.get("resource_keys") or [f"item:{item_id}"]):
+            for key in diff.keys():
+                if key not in ITEM_METADATA_FIELDS:
+                    return _fail(f"Refusing disallowed item field at Apply: {key}", "item_metadata_field_not_allowed")
+            before = meta.get("file_before_stat")
+            if before:
+                if not item_path.exists():
+                    return _fail(f"Media file missing before item metadata apply: {item_path}", "item_metadata_toctou_mismatch")
+                st = item_path.stat()
+                if (st.st_dev != before.get("dev") or st.st_ino != before.get("ino")
+                        or st.st_size != before.get("size") or st.st_mtime_ns != before.get("mtime_ns")):
+                    return _fail(f"Media file changed since plan: {item_path}", "item_metadata_toctou_mismatch")
+            store.update(operation_id, status="Running", metadata={**meta, "mutation_started": True})
+            db_mutated = False
+            if diff:
+                con = sqlite3.connect(lib_db, timeout=10)
+                try:
+                    cols = [f"{key}=?" for key in diff.keys()]
+                    vals = [diff[key]["after"] for key in diff.keys()] + [item_id]
+                    cur = con.execute(f"UPDATE items SET {', '.join(cols)} WHERE id=?", vals)
+                    if cur.rowcount != 1:
+                        con.rollback()
+                        return _fail(f"Expected to update 1 item row for id {item_id}, affected {cur.rowcount}", "item_metadata_rowcount_mismatch")
+                    con.commit()
+                    db_mutated = True
+                finally:
+                    con.close()
+            store.update(operation_id, metadata={**store.get(operation_id).get("metadata", {}), "db_mutated": db_mutated})
+            tags_written = False
+            if diff or meta.get("force_write_tags"):
+                result = native_beets_write_item_tags(lib_db, music_root, item_id)
+                if not result.get("ok"):
+                    fields = {key: value["after"] for key, value in diff.items()}
+                    fallback = _write_media_tag_fields(item_path, fields) if fields else result
+                    if not fallback.get("ok"):
+                        return _fail(
+                            f"Tag write failed for item {item_id}: {fallback.get('error') or result.get('error')}",
+                            fallback.get("code") or result.get("code") or "item_metadata_tag_write_failed",
+                            recover=True,
+                        )
+                tags_written = True
+                store.update(operation_id, metadata={**store.get(operation_id).get("metadata", {}), "tags_written": [item_id]})
+            con = sqlite3.connect(lib_db, timeout=10)
+            con.row_factory = sqlite3.Row
+            try:
+                row = con.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
+                if not row:
+                    return _fail(f"Post-write verification failed: item {item_id} missing from DB", "item_metadata_verification_failed", recover=True)
+                for key, value in diff.items():
+                    if key in row.keys() and _s(row[key] or "") != value["after"]:
+                        return _fail(f"Post-write verification failed for item {item_id} field {key}", "item_metadata_verification_failed", recover=True)
+            finally:
+                con.close()
+            if tags_written and diff:
+                capture = _capture_media_tag_state(item_path, diff.keys())
+                for key, value in diff.items():
+                    actual = _s(capture.get("tags", {}).get(key, ""))
+                    if actual != value["after"]:
+                        return _fail(f"Post-write verification failed: on-disk tag {key} does not match for item {item_id}", "item_metadata_verification_failed", recover=True)
+            store.update(operation_id, status="Completed", metadata={**store.get(operation_id).get("metadata", {}), "completed_at": _now()})
+            return {"ok": True, "operation_id": operation_id, "status": "Completed", "mutated": True, "tags_written_count": 1 if tags_written else 0}
+
+
+def rollback_item_metadata(
+    store: TransactionStore,
+    operation_id: str,
+    *,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    if not _TRANSACTION_ID_RE.match(operation_id):
+        return {"ok": False, "error": "Invalid transaction ID format", "code": "item_metadata_invalid_id"}
+    with _get_apply_lock(operation_id):
+        try:
+            tx = store.get(operation_id)
+        except KeyError:
+            return {"ok": False, "error": f"Transaction {operation_id} not found", "code": "item_metadata_not_found"}
+        meta = tx.get("metadata") or {}
+        if meta.get("mutation_family") != "item_metadata_repair_v1":
+            return {"ok": False, "error": "Transaction is not an item_metadata_repair_v1 operation", "code": "item_metadata_family_mismatch"}
+        lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB", "")
+        if not lib_db or not Path(lib_db).exists():
+            return {"ok": False, "error": "Beets library database not found", "code": "item_metadata_db_not_found"}
+        item_id = int(meta.get("item_id") or 0)
+        diff = meta.get("item_diff") or {}
+        item_path = Path(meta.get("item_path") or "")
+        tags_failed = 0
+        tags_restored = 0
+        if diff and item_id in set(meta.get("tags_written") or []):
+            before_tags = {key: (meta.get("before_tags") or {}).get(key) for key in diff.keys()}
+            tw = _write_media_tag_fields(item_path, before_tags)
+            if tw.get("ok"):
+                tags_restored = 1
+            else:
+                tags_failed = 1
+        db_restored = True
+        if diff:
+            con = sqlite3.connect(lib_db, timeout=10)
+            try:
+                cols = [f"{key}=?" for key in diff.keys() if key in ITEM_METADATA_FIELDS]
+                vals = [diff[key]["before"] for key in diff.keys() if key in ITEM_METADATA_FIELDS] + [item_id]
+                if cols:
+                    cur = con.execute(f"UPDATE items SET {', '.join(cols)} WHERE id=?", vals)
+                    db_restored = cur.rowcount == 1
+                con.commit()
+            finally:
+                con.close()
+        ok = db_restored and tags_failed == 0
+        final_status = "Rolled Back" if ok else ("Partially Rolled Back" if db_restored or tags_restored else "Failed")
+        store.update(operation_id, status=final_status, metadata={**meta, "rollback_available": False, "rolled_back_at": _now(), "tags_restored_count": tags_restored, "tags_failed_count": tags_failed})
+        return {"ok": ok, "operation_id": operation_id, "status": final_status, "tags_restored": tags_restored, "tags_failed": tags_failed}
+
+
+# -- genre_repair_v1 -----------------------------------------------------------
+
+def _row_genre_value(row: sqlite3.Row) -> str:
+    keys = row.keys()
+    if "genres" in keys:
+        return _s(row["genres"] or "")
+    if "genre" in keys:
+        return _s(row["genre"] or "")
+    return ""
+
+
+def _read_file_genre_tag(file_path: Path) -> Dict[str, Any]:
+    """Read the on-disk genre tag for one media file. Mirrors
+    _read_file_audio_tags's {"ok", value, "reason"} contract so a failed
+    read is never confused with a genuinely blank tag."""
+    path_str = str(file_path)
+    try:
+        exists = file_path.exists()
+    except OSError as ex:
+        LOG.warning("Genre tag read: stat failed for %s: %s", path_str, ex)
+        return {"ok": False, "genre": None, "reason": "io_error"}
+    if not exists:
+        return {"ok": False, "genre": None, "reason": "not_found"}
+    try:
+        import mediafile
+    except ImportError as ex:
+        LOG.error("Genre tag read: mediafile package unavailable: %s", ex)
+        return {"ok": False, "genre": None, "reason": "backend_unavailable"}
+    try:
+        mf = mediafile.MediaFile(file_path)
+        genre = str(getattr(mf, "genre", "") or "")
+    except mediafile.UnreadableFileError as ex:
+        LOG.warning("Genre tag read: unreadable file %s: %s", path_str, ex)
+        return {"ok": False, "genre": None, "reason": "unreadable"}
+    except OSError as ex:
+        LOG.warning("Genre tag read: io error for %s: %s", path_str, ex)
+        return {"ok": False, "genre": None, "reason": "io_error"}
+    except Exception as ex:
+        LOG.error("Genre tag read: unexpected error for %s: %s", path_str, ex)
+        return {"ok": False, "genre": None, "reason": "unknown_error"}
+    return {"ok": True, "genre": genre, "reason": None}
+
+
+def _write_file_genre_tag(file_path: Path, genre: str) -> Dict[str, Any]:
+    """Write the genre tag to disk and verify by an independent read-back
+    (not the writer's own in-memory state) -- mirrors _write_file_audio_tags.
+    A write only counts as successful once the exact requested value is
+    independently read back from the file."""
+    path_str = str(file_path)
+    try:
+        import mediafile
+    except ImportError as ex:
+        LOG.error("Genre tag write: mediafile package unavailable: %s", ex)
+        return {"ok": False, "reason": "backend_unavailable"}
+    try:
+        mf = mediafile.MediaFile(file_path)
+        mf.genre = genre
+        mf.save()
+    except mediafile.UnreadableFileError as ex:
+        LOG.warning("Genre tag write: unreadable file %s: %s", path_str, ex)
+        return {"ok": False, "reason": "unreadable"}
+    except OSError as ex:
+        LOG.warning("Genre tag write: io error for %s: %s", path_str, ex)
+        return {"ok": False, "reason": "io_error"}
+    except Exception as ex:
+        LOG.error("Genre tag write: unexpected error for %s: %s", path_str, ex)
+        return {"ok": False, "reason": "unknown_error"}
+    verify = _read_file_genre_tag(file_path)
+    if not verify.get("ok") or _s(verify.get("genre")) != _s(genre):
+        return {"ok": False, "reason": "verify_mismatch"}
+    return {"ok": True, "reason": None}
+
+
+def _genre_column(con: sqlite3.Connection, table: str) -> str:
+    cols = [str(row[1]) for row in con.execute(f"PRAGMA table_info({table})").fetchall()]
+    if "genres" in cols:
+        return "genres"
+    if "genre" in cols:
+        return "genre"
+    return ""
+
+
+def create_genre_repair_plan(
+    store: TransactionStore,
+    payload: Dict[str, Any],
+    *,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    payload = payload or {}
+    try:
+        album_id = int(payload.get("album_id") or 0)
+    except Exception:
+        album_id = 0
+    if album_id <= 0:
+        return {"ok": False, "error": "album_id required", "code": "genre_repair_invalid_payload"}
+    lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB", "")
+    if not lib_db or not Path(lib_db).exists():
+        return {"ok": False, "error": "Beets library database not found", "code": "genre_repair_db_not_found"}
+    con = sqlite3.connect(lib_db, timeout=10)
+    con.row_factory = sqlite3.Row
+    try:
+        album = con.execute("SELECT * FROM albums WHERE id=?", (album_id,)).fetchone()
+        if not album:
+            return {"ok": False, "error": f"Album {album_id} not found", "code": "genre_repair_album_not_found"}
+        items = con.execute("SELECT * FROM items WHERE album_id=? ORDER BY disc, track, id", (album_id,)).fetchall()
+    finally:
+        con.close()
+    before_items: List[Dict[str, Any]] = []
+    for row in items:
+        path_str = _s(row["path"]) if "path" in row.keys() else ""
+        if not path_str:
+            return {"ok": False, "error": f"Item {row['id']} has no media file path", "code": "genre_repair_tag_baseline_unavailable"}
+        p = Path(path_str)
+        if not p.exists():
+            return {"ok": False, "error": f"Media file {path_str} does not exist", "code": "genre_repair_tag_baseline_unavailable"}
+        try:
+            st = p.stat()
+            tag_read = _read_file_genre_tag(p)
+            if not tag_read.get("ok"):
+                return {"ok": False, "error": f"On-disk genre tag baseline could not be read for {path_str}", "code": "genre_repair_tag_baseline_unavailable"}
+            entry: Dict[str, Any] = {
+                "item_id": int(row["id"]),
+                "genre": _row_genre_value(row),
+                "path": path_str,
+                "stat": {"dev": st.st_dev, "ino": st.st_ino, "size": st.st_size, "mtime_ns": st.st_mtime_ns},
+                "tag_genre": tag_read.get("genre"),
+                "tag_read_ok": True,
+            }
+            before_items.append(entry)
+        except Exception as ex:
+            LOG.warning("Genre repair plan: could not capture tag baseline for %s: %s", path_str, ex)
+            return {"ok": False, "error": f"On-disk genre tag baseline could not be captured for {path_str}", "code": "genre_repair_tag_baseline_unavailable"}
+    before_album = _row_genre_value(album)
+    tx = store.create(
+        operation_type="Metadata Update",
+        status="Preview",
+        summary=f"Repair genres for album {album_id} using Beets lastgenre",
+        rollback_available=True,
+        rollback_reason="Captured prior Beets genre fields before lastgenre apply.",
+        metadata={
+            "mutation_family": "genre_repair_v1",
+            "album_id": album_id,
+            "force": bool(payload.get("force")),
+            "timeout": float(payload.get("timeout") or 180.0),
+            "before_album_genre": before_album,
+            "before_item_genres": before_items,
+            "resource_keys": [f"album:{album_id}"],
+            "created_at": _now(),
+        },
+    )
+    return {"ok": True, "operation_id": tx["id"], "album_id": album_id, "item_count": len(before_items)}
+
+
+def _restore_genre_and_tag_state(
+    lib_db: str, album_id: int, before_album: str, before_items: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Restore DB genre columns AND on-disk genre tags to their captured
+    Plan-time values, independently verifying each restoration rather than
+    assuming a write succeeded. Shared by rollback_genre_repair() and the
+    automatic compensating rollback inside execute_genre_repair_apply() when
+    a failed lastgenre run turns out to have partially mutated state.
+
+    Returns {"status": "Rolled Back" | "Recovery Required", "db_restored":
+    bool, "unrestored_items": [...]}. Only "Rolled Back" is a promise that
+    both DB and file-tag state have been proven restored.
+    """
+    unrestored_items: List[Dict[str, Any]] = []
+    db_restored = True
+    con = sqlite3.connect(lib_db, timeout=10)
+    try:
+        cur = con.cursor()
+        album_col = _genre_column(con, "albums")
+        item_col = _genre_column(con, "items")
+        if album_col:
+            cur.execute(f"UPDATE albums SET {album_col}=? WHERE id=?", (before_album, album_id))
+        for row in before_items:
+            if item_col:
+                cur.execute(f"UPDATE items SET {item_col}=? WHERE id=?", (_s(row.get("genre") or ""), int(row.get("item_id") or 0)))
+        con.commit()
+    except Exception as ex:
+        LOG.error("Genre repair rollback: DB restore failed for album %s: %s", album_id, ex)
+        db_restored = False
+    finally:
+        con.close()
+
+    if db_restored:
+        con = sqlite3.connect(lib_db, timeout=10)
+        con.row_factory = sqlite3.Row
+        try:
+            album_row = con.execute("SELECT * FROM albums WHERE id=?", (album_id,)).fetchone()
+            if album_row is None or _row_genre_value(album_row) != before_album:
+                db_restored = False
+            item_rows = con.execute("SELECT * FROM items WHERE album_id=? ORDER BY disc, track, id", (album_id,)).fetchall()
+            items_by_id = {int(r["id"]): _row_genre_value(r) for r in item_rows}
+            for row in before_items:
+                iid = int(row.get("item_id") or 0)
+                expected_genre = _s(row.get("genre") or "")
+                actual_genre = items_by_id.get(iid)
+                if actual_genre != expected_genre:
+                    db_restored = False
+                    LOG.error("Genre repair rollback: item %s DB genre verification failed (expected %r, got %r)", iid, expected_genre, actual_genre)
+        except Exception as ex:
+            LOG.error("Genre repair rollback: DB restore verification failed for album %s: %s", album_id, ex)
+            db_restored = False
+        finally:
+            con.close()
+
+    for row in before_items:
+        iid = int(row.get("item_id") or 0)
+        path_str = row.get("path") or ""
+        if not path_str or not row.get("tag_read_ok"):
+            unrestored_items.append({"item_id": iid, "path": path_str, "reason": "no_tag_baseline_captured"})
+            continue
+        write_res = _write_file_genre_tag(Path(path_str), _s(row.get("tag_genre")))
+        if not write_res.get("ok"):
+            unrestored_items.append({"item_id": iid, "path": path_str, "reason": write_res.get("reason")})
+            continue
+        tag_verify = _read_file_genre_tag(Path(path_str))
+        if not tag_verify.get("ok") or _s(tag_verify.get("genre")) != _s(row.get("tag_genre")):
+            unrestored_items.append({"item_id": iid, "path": path_str, "reason": "tag_restore_verification_failed"})
+
+    status = "Rolled Back" if (db_restored and not unrestored_items) else "Recovery Required"
+    return {"status": status, "db_restored": db_restored, "unrestored_items": unrestored_items}
+
+
+def execute_genre_repair_apply(
+    store: TransactionStore,
+    operation_id: str,
+    *,
+    db_path: Optional[str] = None,
+    run_beet_command_fn: Optional[Any] = None,
+) -> Dict[str, Any]:
+    if not _TRANSACTION_ID_RE.match(operation_id):
+        return {"ok": False, "error": "Invalid transaction ID format", "code": "genre_repair_invalid_id"}
+    if run_beet_command_fn is None:
+        return {"ok": False, "error": "No beet command runner configured", "code": "genre_repair_no_runner"}
+    with _get_apply_lock(operation_id):
+        try:
+            tx = store.get(operation_id)
+        except KeyError:
+            return {"ok": False, "error": f"Transaction {operation_id} not found", "code": "genre_repair_not_found"}
+        meta = tx.get("metadata") or {}
+        if meta.get("mutation_family") != "genre_repair_v1":
+            return {"ok": False, "error": "Transaction is not a genre_repair_v1 operation", "code": "genre_repair_family_mismatch"}
+        if tx.get("status") == "Completed":
+            return {"ok": True, "operation_id": operation_id, "status": "Completed", "mutated": True, "genre_after": meta.get("genre_after")}
+        album_id = int(meta.get("album_id") or 0)
+        lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB", "")
+        if not lib_db or not Path(lib_db).exists():
+            return {"ok": False, "error": "Beets library database not found", "code": "genre_repair_db_not_found"}
+        before_album = _s(meta.get("before_album_genre") or "")
+        before_items = meta.get("before_item_genres") or []
+        with _lock_resources(meta.get("resource_keys") or [f"album:{album_id}"]):
+            con = sqlite3.connect(lib_db, timeout=10)
+            con.row_factory = sqlite3.Row
+            try:
+                album = con.execute("SELECT * FROM albums WHERE id=?", (album_id,)).fetchone()
+                if not album:
+                    return {"ok": False, "error": f"Album {album_id} no longer exists", "code": "genre_repair_album_not_found"}
+            finally:
+                con.close()
+            store.update(operation_id, status="Running", metadata={**meta, "mutation_started": True})
+            args = []
+            if meta.get("force"):
+                args.append("-f")
+            args.append(f"album_id:{album_id}")
+            result = run_beet_command_fn("lastgenre", args)
+            beet_reported_ok = isinstance(result, dict) and result.get("ok") is True
+
+            # A nonzero/failed native result does NOT prove nothing was
+            # mutated -- lastgenre can write some items' tags/DB rows before
+            # erroring out on a later one. Always re-read actual current DB
+            # + on-disk tag state and diff it against the Plan snapshot,
+            # regardless of the reported return code, instead of trusting
+            # the return code to imply mutated=False.
+            con = sqlite3.connect(lib_db, timeout=10)
+            con.row_factory = sqlite3.Row
+            try:
+                album_after = con.execute("SELECT * FROM albums WHERE id=?", (album_id,)).fetchone()
+                items_after = con.execute("SELECT * FROM items WHERE album_id=? ORDER BY disc, track, id", (album_id,)).fetchall()
+            finally:
+                con.close()
+            genre_after = _row_genre_value(album_after) if album_after else ""
+            items_after_by_id = {int(r["id"]): r for r in items_after}
+
+            item_genres_after: List[Dict[str, Any]] = []
+            # A list keyed by "item_id", not a dict keyed by the int item
+            # id -- TransactionStore persists metadata as JSON, which would
+            # silently stringify int dict keys on the next read, matching
+            # the list shape item_genres_after already uses.
+            tag_genres_after: List[Dict[str, Any]] = []
+            mutated = genre_after != before_album
+            for before in before_items:
+                iid = int(before.get("item_id") or 0)
+                row = items_after_by_id.get(iid)
+                db_genre_after = _row_genre_value(row) if row is not None else before.get("genre", "")
+                item_genres_after.append({"item_id": iid, "genre": db_genre_after})
+                if db_genre_after != before.get("genre", ""):
+                    mutated = True
+
+                path_str = before.get("path") or ""
+                tag_read_ok_after = False
+                tag_genre_after = None
+                if path_str:
+                    tag_read = _read_file_genre_tag(Path(path_str))
+                    tag_read_ok_after = bool(tag_read.get("ok"))
+                    tag_genre_after = tag_read.get("genre")
+                tag_genres_after.append({"item_id": iid, "path": path_str, "genre": tag_genre_after, "read_ok": tag_read_ok_after})
+                if before.get("tag_read_ok"):
+                    if tag_read_ok_after:
+                        if _s(tag_genre_after) != _s(before.get("tag_genre")):
+                            mutated = True
+                    else:
+                        # Was readable at Plan time, is not now -- cannot
+                        # prove nothing changed; treat conservatively as a
+                        # possible mutation rather than a confirmed no-op.
+                        mutated = True
+
+            if not beet_reported_ok:
+                if not mutated:
+                    store.update(operation_id, status="Failed", logs=["lastgenre apply failed"], metadata={
+                        **store.get(operation_id).get("metadata", {}),
+                        "genre_after": genre_after, "item_genres_after": item_genres_after,
+                    })
+                    return {
+                        "ok": False,
+                        "error": (result or {}).get("error") if isinstance(result, dict) else "lastgenre failed",
+                        "code": "genre_repair_apply_failed", "mutated": False, "status": "Failed",
+                    }
+                # Partial mutation despite a failed/nonzero result: attempt
+                # a verified compensating rollback of both DB and on-disk
+                # tags before ever reporting a rolled-back state.
+                restore_res = _restore_genre_and_tag_state(lib_db, album_id, before_album, before_items)
+                store.update(operation_id, status=restore_res["status"], metadata={
+                    **store.get(operation_id).get("metadata", {}),
+                    "genre_after": genre_after, "item_genres_after": item_genres_after,
+                    "tag_genres_after": tag_genres_after,
+                    "partial_failure_reason": (result or {}).get("error") if isinstance(result, dict) else "lastgenre failed",
+                    "rollback_detail": restore_res,
+                })
+                code = "genre_repair_rolled_back" if restore_res["status"] == "Rolled Back" else "genre_repair_recovery_required"
+                return {
+                    "ok": False,
+                    "error": f"lastgenre failed after partially mutating album {album_id}; {restore_res['status'].lower()}",
+                    "code": code, "mutated": True, "status": restore_res["status"],
+                    "recovery_detail": restore_res,
+                }
+
+            store.update(operation_id, status="Completed", metadata={
+                **store.get(operation_id).get("metadata", {}),
+                "genre_after": genre_after,
+                "item_genres_after": item_genres_after,
+                "tag_genres_after": tag_genres_after,
+                "completed_at": _now(),
+            })
+            return {"ok": True, "operation_id": operation_id, "status": "Completed", "mutated": mutated, "genre_after": genre_after, "output": result.get("stdout") or result.get("output") or ""}
+
+
+def rollback_genre_repair(
+    store: TransactionStore,
+    operation_id: str,
+    *,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    if not _TRANSACTION_ID_RE.match(operation_id):
+        return {"ok": False, "error": "Invalid transaction ID format", "code": "genre_repair_invalid_id"}
+    with _get_apply_lock(operation_id):
+        try:
+            tx = store.get(operation_id)
+        except KeyError:
+            return {"ok": False, "error": f"Transaction {operation_id} not found", "code": "genre_repair_not_found"}
+        meta = tx.get("metadata") or {}
+        if meta.get("mutation_family") != "genre_repair_v1":
+            return {"ok": False, "error": "Transaction is not a genre_repair_v1 operation", "code": "genre_repair_family_mismatch"}
+        lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB", "")
+        if not lib_db or not Path(lib_db).exists():
+            return {"ok": False, "error": "Beets library database not found", "code": "genre_repair_db_not_found"}
+        album_id = int(meta.get("album_id") or 0)
+        before_album = _s(meta.get("before_album_genre") or "")
+        before_items = meta.get("before_item_genres") or []
+        restore_res = _restore_genre_and_tag_state(lib_db, album_id, before_album, before_items)
+        if restore_res["status"] != "Rolled Back":
+            store.update(operation_id, status="Recovery Required", metadata={
+                **meta, "recovery_required_at": _now(), "rollback_detail": restore_res,
+            })
+            return {
+                "ok": False, "operation_id": operation_id, "status": "Recovery Required",
+                "error": "Genre rollback could not be fully verified (DB and/or on-disk tags)",
+                "recovery_detail": restore_res,
+            }
+        store.update(operation_id, status="Rolled Back", metadata={**meta, "rollback_available": False, "rolled_back_at": _now()})
+        return {"ok": True, "operation_id": operation_id, "status": "Rolled Back"}
