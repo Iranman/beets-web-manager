@@ -212,9 +212,25 @@ per-alert, not assumed, per the mission rules (no blanket dismissal).
   path rejected, relative-traversal path rejected, legitimate in-root path still accepted (using real
   tempdir Paths throughout, not POSIX-literal strings, for cross-platform correctness).
 
+### Alerts 636, 303, 304, 305, 306, 307, 308, 637 — `py/path-injection`, high — `app.py` playlist atomic-JSON-write helper (8 alerts)
+
+- **Disposition**: `SAFE_BUT_CODEQL_BLIND` (all 8).
+- `_playlist_atomic_json_replace(path, payload, ...)`: validates `path`/`tmp` against a fixed set of
+  server-config globals (`WEB_MANAGER_DATA_DIR`, `PLAYLIST_STATE_ROOT`, `PLAYLIST_MANIFESTS_DIR`,
+  `PLAYLIST_JOB_STATE_DIR`, `PLAYLIST_MEMBERSHIP_DIR` — none request-derived) via `_path_is_under()`/
+  `relative_to()`, **raising `ValueError` before the `try:` block that performs any actual write** —
+  every sink CodeQL flags inside that block (`tmp.open()`, `tmp.exists()`, `tmp.replace()`,
+  `path.exists()`, cleanup-branch `tmp.exists()`/`tmp.unlink()`) is provably unreachable for a
+  non-contained path.
+- `_playlist_read_manifest`'s `path.read_text()`: `path` always comes from `_playlist_manifest_path()`,
+  built only from `_clean_playlist_name()` (strips `<>:"/\|?*`, repeatedly collapses `..`, strips control
+  and Unicode bidi-override characters) plus a validated internal playlist id — a single path component,
+  never a caller-supplied full path.
+- **GitHub disposition**: all 8 dismissed 2026-09-01, `false positive`, sink-specific rationale.
+
 ## 3. Remaining alerts
 
-101 of 171 alerts remain **NEEDS_REVIEW** as of this checkpoint (45 dispositioned: 2 critical
+93 of 171 alerts remain **NEEDS_REVIEW** as of this checkpoint (45 dispositioned: 2 critical
 command-injection dismissed, 8 path-injection fixed as real vulnerabilities, 35 path-injection confirmed
 safe) — see `security/codeql_main_alert_inventory.json` for the full raw list. Work continues
 alert-by-alert (or pattern-class-by-pattern-class for the remaining `py/path-injection` instances
