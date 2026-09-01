@@ -2050,9 +2050,9 @@
     "end_line": 5372,
     "created_at": "2026-08-19T01:08:29Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/679",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "safe_file_path resolve_safe_path()-validated before this exists() check (/tags/read)"
   },
   {
     "number": 633,
@@ -2065,9 +2065,9 @@
     "end_line": 6691,
     "created_at": "2026-08-17T21:38:18Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/633",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "safe_m3u validated via _playlist_m3u_path_for_key() immediately before, re-validated under OS lock"
   },
   {
     "number": 635,
@@ -2080,9 +2080,9 @@
     "end_line": 6704,
     "created_at": "2026-08-17T21:38:18Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/635",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "tmp_m3u.replace(safe_m3u) reached only after safe_m3u passed validation under OS lock"
   },
   {
     "number": 634,
@@ -2095,9 +2095,9 @@
     "end_line": 6704,
     "created_at": "2026-08-17T21:38:18Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/634",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "tmp_m3u.replace(safe_m3u) reached only after safe_m3u passed validation under OS lock"
   },
   {
     "number": 1001,

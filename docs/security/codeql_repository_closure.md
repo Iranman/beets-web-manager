@@ -329,9 +329,24 @@ per-alert, not assumed, per the mission rules (no blanket dismissal).
   earlier-planned/DB-row-derived item path within the Plan→Apply pipeline (never raw external input).
 - **GitHub disposition**: all 8 dismissed 2026-09-01, `false positive`, sink-specific rationale.
 
+### Alerts 679, 633, 635, 634 — `py/path-injection`, high — `backend/beets_control_agent.py` (4 alerts, all of this file's remaining path-injection alerts)
+
+- **Disposition**: `SAFE_BUT_CODEQL_BLIND` (all 4).
+- `/tags/read`'s `safe_file_path.exists()` (679): `safe_file_path` is `resolve_safe_path()`-validated 4
+  lines above, before this check.
+- `/playlists/m3u/export`'s `safe_m3u.parent.mkdir()` and `tmp_m3u.replace(safe_m3u)` (633, 635, 634):
+  `safe_m3u` comes from `_playlist_m3u_path_for_key()` (raises `UnsafePathError` → HTTP 403 otherwise),
+  called **again immediately before mutation while holding the OS lock** — the source carries an explicit
+  comment explaining this is a deliberate TOCTOU re-validation, since the app-level lock alone doesn't
+  guarantee a parent path can't change between an earlier check and this mutation.
+- **GitHub disposition**: all 4 dismissed 2026-09-01, `false positive`, sink-specific rationale.
+
+**Every `py/path-injection` alert outside `app.py` is now closed** (`backend/transaction_engine.py`:
+0 remaining, `backend/beets_control_agent.py`: 0 remaining).
+
 ## 3. Remaining alerts
 
-65 of 171 alerts remain **NEEDS_REVIEW** as of this checkpoint (45 dispositioned: 2 critical
+61 of 171 alerts remain **NEEDS_REVIEW** as of this checkpoint (45 dispositioned: 2 critical
 command-injection dismissed, 8 path-injection fixed as real vulnerabilities, 35 path-injection confirmed
 safe) — see `security/codeql_main_alert_inventory.json` for the full raw list. Work continues
 alert-by-alert (or pattern-class-by-pattern-class for the remaining `py/path-injection` instances
