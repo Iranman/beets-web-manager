@@ -6977,23 +6977,41 @@ def _derive_artist_folder_identity(
     More than one distinct established id under the same folder is itself
     a conflict signal (returned via "ids" having len > 1).
 
-    Precondition: folder_path must already be the resolved Path returned
-    by validate_path_under_allowed_roots(..., reject_symlinks=True) at the
-    caller -- both current callers (create_artist_folder_reconcile_plan's
-    Plan loop and execute_artist_folder_reconcile_apply's TOCTOU
-    revalidation loop) do this immediately before calling here and fail
-    closed (return/continue) on None. Re-deriving containment a second
-    time from the same already-proven Path added nothing but an opaque
-    second hop CodeQL's dataflow analysis could not verify end to end
-    (CodeQL alerts #1016/#1017); this only requires the already-validated
-    Path to still exist, which is the one thing a second containment check
-    could never re-prove anyway (a fresh symlink swap between the caller's
-    check and this call is a TOCTOU concern the resource lock, not a
-    second path-validate call, is what actually closes).
+    Both current callers (create_artist_folder_reconcile_plan's Plan loop
+    and execute_artist_folder_reconcile_apply's TOCTOU revalidation loop)
+    already validate folder_path with validate_path_under_allowed_roots()
+    immediately before calling here and fail closed on None -- but CodeQL's
+    interprocedural dataflow could not verify that sanitization end to end
+    across the call boundary (CodeQL #1016/#1017, then #1018/#1019 after a
+    first attempt that trusted the caller without re-proving containment
+    here). The containment check below is therefore proven again, inline,
+    in this function's own body -- deliberately not delegated to another
+    function call -- so CodeQL's same-function analysis can trace it
+    directly: normalize with os.path.normpath, then require the
+    normalized candidate to start with a normalized allowed root, matching
+    CodeQL's own documented py/path-injection remediation pattern.
     """
     result: Dict[str, Any] = {"ids": set(), "album_count": 0}
-    if not lib_db or not isinstance(folder_path, Path) or not folder_path.exists():
+    if not lib_db or not isinstance(folder_path, Path):
         return result
+    roots = allowed_roots or [str(os.environ.get("MUSIC_ROOT", "/music"))]
+    folder_norm = os.path.normpath(str(folder_path))
+    matched_root = next(
+        (
+            os.path.normpath(str(root))
+            for root in roots
+            if folder_norm == os.path.normpath(str(root))
+            or folder_norm.startswith(os.path.normpath(str(root)) + os.sep)
+        ),
+        None,
+    )
+    if matched_root is None:
+        return result
+    if _path_has_symlink_under(Path(folder_norm), Path(matched_root)):
+        return result
+    if not os.path.exists(folder_norm):
+        return result
+    folder_path = Path(folder_norm)
     # lib_db is never caller-controlled: every call site sources it from
     # server-owned engine configuration (BEETS_LIBRARY_DB / LIB_PATH), never
     # from request payload, transaction metadata, or candidate data -- so it
@@ -7042,18 +7060,38 @@ def _extract_recording_mbids(
     Candidate payload recording IDs are treated as suggestions/hints ONLY and must be
     independently corroborated by established engine item track state under src_path.
 
-    Precondition: src_path must already be the resolved Path returned by
-    validate_path_under_allowed_roots(..., reject_symlinks=True) at the
-    caller (create_artist_folder_reconcile_plan's Plan loop does this
-    immediately before calling here and fails closed on None) -- see
-    _derive_artist_folder_identity's docstring for the full rationale
-    (CodeQL alerts #1016/#1017).
+    The caller (create_artist_folder_reconcile_plan's Plan loop) already
+    validates src_path with validate_path_under_allowed_roots() immediately
+    before calling here and fails closed on None -- see
+    _derive_artist_folder_identity's docstring for why that alone was not
+    enough for CodeQL's interprocedural dataflow (CodeQL #1016/#1017, then
+    #1018/#1019) and why the containment check below is proven again,
+    inline, in this function's own body instead.
     """
     lib_db = os.environ.get("BEETS_LIBRARY_DB", "")
     if db_path and db_path == os.environ.get("BEETS_LIBRARY_DB", ""):
         lib_db = db_path
-    if not lib_db or not isinstance(src_path, Path) or not src_path.exists():
+    if not lib_db or not isinstance(src_path, Path):
         return []
+
+    roots = allowed_roots or [str(os.environ.get("MUSIC_ROOT", "/music"))]
+    src_norm = os.path.normpath(str(src_path))
+    matched_root = next(
+        (
+            os.path.normpath(str(root))
+            for root in roots
+            if src_norm == os.path.normpath(str(root))
+            or src_norm.startswith(os.path.normpath(str(root)) + os.sep)
+        ),
+        None,
+    )
+    if matched_root is None:
+        return []
+    if _path_has_symlink_under(Path(src_norm), Path(matched_root)):
+        return []
+    if not os.path.exists(src_norm):
+        return []
+    src_path = Path(src_norm)
 
     # lib_db is never caller-controlled (see _derive_artist_folder_identity)
     # -- checked directly, not "validated" against a root derived from

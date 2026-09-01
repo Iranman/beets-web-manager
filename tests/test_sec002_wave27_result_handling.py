@@ -633,23 +633,23 @@ class ArtistTrustTierRegressionTests(unittest.TestCase):
 
 
 class ArtistFolderDbPathTrustTests(unittest.TestCase):
-    """CodeQL #1016/#1017 (py/path-injection): _derive_artist_folder_identity
-    and _extract_recording_mbids used to "validate" lib_db against a root
-    computed from lib_db's own parent (never a real trust boundary -- every
-    path is under its own parent) and fell open to the unvalidated path
-    when that "validation" returned None. Both functions now use lib_db
-    directly (it is always server-owned config -- see
-    test_control_agent_db_path_audit.py -- never request/candidate data)
-    with no fallback, and no longer re-derive folder-path containment from
-    a request-tainted value inside the callee at all -- only the caller's
-    validated Path is trusted, so there is nothing here to "fall open" if
-    it doesn't validate."""
+    """CodeQL #1016/#1017 -> #1018/#1019 (py/path-injection):
+    _derive_artist_folder_identity and _extract_recording_mbids used to
+    "validate" lib_db against a root computed from lib_db's own parent
+    (never a real trust boundary -- every path is under its own parent)
+    and fell open to the unvalidated path when that "validation" returned
+    None. lib_db is now used directly with no fallback (it is always
+    server-owned config -- see test_control_agent_db_path_audit.py --
+    never request/candidate data). folder_path/src_path containment is
+    proven again inline in each function's own body (an approach that
+    trusted the caller's prior validation without re-proving it here was
+    not recognized by CodeQL's interprocedural dataflow either)."""
 
     def test_derive_identity_fails_closed_when_lib_db_does_not_exist(self):
         with tempfile.TemporaryDirectory() as tmp:
             folder = Path(tmp) / "Some Artist"
             folder.mkdir()
-            result = txn._derive_artist_folder_identity(folder, "/nonexistent/library.blb")
+            result = txn._derive_artist_folder_identity(folder, "/nonexistent/library.blb", allowed_roots=[tmp])
         self.assertEqual(result, {"ids": set(), "album_count": 0})
 
     def test_derive_identity_never_falls_back_to_an_unvalidated_db_path(self):
@@ -661,7 +661,21 @@ class ArtistFolderDbPathTrustTests(unittest.TestCase):
             folder = Path(tmp) / "Some Artist"
             folder.mkdir()
             with mock.patch("backend.transaction_engine.sqlite3.connect") as connect:
-                result = txn._derive_artist_folder_identity(folder, "")
+                result = txn._derive_artist_folder_identity(folder, "", allowed_roots=[tmp])
+        connect.assert_not_called()
+        self.assertEqual(result, {"ids": set(), "album_count": 0})
+
+    def test_derive_identity_rejects_folder_outside_allowed_roots(self):
+        """A candidate cannot smuggle an alternate identity-derivation
+        folder in either: a folder_path outside every allowed root fails
+        closed regardless of an otherwise-valid lib_db."""
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as other:
+            db_path = Path(tmp) / "library.blb"
+            db_path.write_text("", encoding="utf-8")
+            outside_folder = Path(other) / "Some Artist"
+            outside_folder.mkdir()
+            with mock.patch("backend.transaction_engine.sqlite3.connect") as connect:
+                result = txn._derive_artist_folder_identity(outside_folder, str(db_path), allowed_roots=[tmp])
         connect.assert_not_called()
         self.assertEqual(result, {"ids": set(), "album_count": 0})
 
@@ -669,7 +683,7 @@ class ArtistFolderDbPathTrustTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             folder = Path(tmp) / "Some Artist"
             folder.mkdir()
-            rec_ids = txn._extract_recording_mbids({}, folder, db_path="/nonexistent/library.blb")
+            rec_ids = txn._extract_recording_mbids({}, folder, db_path="/nonexistent/library.blb", allowed_roots=[tmp])
         self.assertEqual(rec_ids, [])
 
     def test_extract_recording_mbids_never_opens_sqlite_without_a_real_db_path(self):
@@ -677,20 +691,47 @@ class ArtistFolderDbPathTrustTests(unittest.TestCase):
             folder = Path(tmp) / "Some Artist"
             folder.mkdir()
             with mock.patch("backend.transaction_engine.sqlite3.connect") as connect:
-                rec_ids = txn._extract_recording_mbids({}, folder, db_path="")
+                rec_ids = txn._extract_recording_mbids({}, folder, db_path="", allowed_roots=[tmp])
+        connect.assert_not_called()
+        self.assertEqual(rec_ids, [])
+
+    def test_extract_recording_mbids_rejects_src_path_outside_allowed_roots(self):
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as other:
+            db_path = Path(tmp) / "library.blb"
+            db_path.write_text("", encoding="utf-8")
+            outside_folder = Path(other) / "Some Artist"
+            outside_folder.mkdir()
+            with mock.patch("backend.transaction_engine.sqlite3.connect") as connect:
+                rec_ids = txn._extract_recording_mbids({}, outside_folder, db_path=str(db_path), allowed_roots=[tmp])
         connect.assert_not_called()
         self.assertEqual(rec_ids, [])
 
     def test_derive_identity_fails_closed_when_folder_path_missing(self):
-        """folder_path is trusted as an already-validated caller-supplied
-        Path (see docstring), but a missing directory must still fail
-        closed rather than proceed to open the DB."""
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "library.blb"
             db_path.write_text("", encoding="utf-8")
             missing_folder = Path(tmp) / "does-not-exist"
-            result = txn._derive_artist_folder_identity(missing_folder, str(db_path))
+            result = txn._derive_artist_folder_identity(missing_folder, str(db_path), allowed_roots=[tmp])
         self.assertEqual(result, {"ids": set(), "album_count": 0})
+
+    def test_derive_identity_succeeds_for_a_folder_genuinely_under_the_allowed_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "library.blb"
+            con = sqlite3.connect(db_path)
+            con.executescript(
+                "CREATE TABLE albums (id INTEGER PRIMARY KEY, mb_albumartistid TEXT);"
+                "CREATE TABLE items (id INTEGER PRIMARY KEY, album_id INTEGER, path BLOB);"
+            )
+            con.execute("INSERT INTO albums (id, mb_albumartistid) VALUES (1, '89ad4ac3-39f7-470e-963a-56509c546377')")
+            folder = Path(tmp) / "Some Artist"
+            folder.mkdir()
+            item_path = folder / "track.mp3"
+            item_path.write_bytes(b"")
+            con.execute("INSERT INTO items (id, album_id, path) VALUES (1, 1, ?)", (str(item_path).encode("utf-8"),))
+            con.commit()
+            con.close()
+            result = txn._derive_artist_folder_identity(folder, str(db_path), allowed_roots=[tmp])
+        self.assertEqual(result["ids"], {"89ad4ac3-39f7-470e-963a-56509c546377"})
 
 
 if __name__ == "__main__":
