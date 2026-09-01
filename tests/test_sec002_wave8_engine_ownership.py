@@ -673,7 +673,7 @@ class PreserveImportSourceRootPolicyTests(unittest.TestCase):
     # fail-closed collision policy, and the byte-copy/metadata-preservation
     # split). These use real temp directories and real file bytes throughout
     # -- no mocking of the signature/digest functions themselves -- so they
-    # actually exercise _file_content_digest()/_import_source_content_signature().
+    # actually exercise _import_source_content_signature()'s real byte-digest loop.
 
     def test_unchanged_source_content_signature_is_stable_across_two_inspections(self):
         album = self.staging_root / "Artist" / "Album"

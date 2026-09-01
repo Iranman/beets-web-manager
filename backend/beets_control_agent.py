@@ -1516,17 +1516,9 @@ def _import_source_signature(entries: list[dict[str, Any]]) -> str:
     return hashlib.sha256("|".join(parts).encode("utf-8", "surrogatepass")).hexdigest()
 
 
-def _file_content_digest(path: Path, *, chunk_size: int = 1024 * 1024) -> str:
-    """SHA-256 of a file's actual bytes, streamed in fixed-size chunks so
-    memory use is bounded regardless of file size."""
-    h = hashlib.sha256()
-    with open(path, "rb") as fh:
-        for chunk in iter(lambda: fh.read(chunk_size), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def _import_source_content_signature(root: Path, entries: list[dict[str, Any]]) -> str:
+def _import_source_content_signature(
+    root: Path, entries: list[dict[str, Any]], *, chunk_size: int = 1024 * 1024,
+) -> str:
     """A genuine content-equality signature for cross-filesystem COPY
     verification: per file, (relative_path, size, sha-256 of the file's
     actual bytes), combined into one manifest digest.
@@ -1542,12 +1534,36 @@ def _import_source_content_signature(root: Path, entries: list[dict[str, Any]]) 
     A path+size-only signature (the previous implementation) cannot
     distinguish two files with the same relative path and size but
     different bytes, which defeats the entire point of a copy-equivalence
-    check."""
+    check.
+
+    `root` is always the already-validated `trusted`/`safe_dest` Path a
+    caller got back from resolve_safe_path() (see inspect_import_source()'s
+    only caller of this function), and `rel` always comes from a real
+    os.walk-style directory walk of that same root (inspect_import_source()
+    builds `entries` via child.relative_to(trusted), never from raw request
+    data) -- so `root / rel` can never actually escape `root`. CodeQL's
+    interprocedural dataflow cannot see that proof (it was previously in a
+    separate _file_content_digest() helper, one call boundary away from
+    this loop and two away from inspect_import_source()'s own validation),
+    so the byte-open below is inlined into this same function body with its
+    own fresh, plain (non-generator, non-delegated) containment re-proof
+    directly in front of it -- the identical idiom
+    backend/transaction_engine.py's _derive_artist_folder_identity() uses,
+    which is the one CodeQL's same-function dataflow can actually trace."""
+    root_norm = os.path.normpath(str(root))
     parts = []
     for e in sorted(entries, key=lambda x: x["relative_path"]):
         rel = e["relative_path"]
         try:
-            digest = _file_content_digest(root / rel)
+            file_path = root / rel
+            file_norm = os.path.normpath(str(file_path))
+            if not (file_norm == root_norm or file_norm.startswith(root_norm + os.sep)):
+                raise UnsafePathError("content-signature path escaped its root")
+            h = hashlib.sha256()
+            with open(file_norm, "rb") as fh:
+                for chunk in iter(lambda: fh.read(chunk_size), b""):
+                    h.update(chunk)
+            digest = h.hexdigest()
         except Exception:
             # Unreadable file: still fold *something* stable into the
             # manifest so a source that becomes unreadable never produces
@@ -1951,33 +1967,6 @@ def discover_import_sources(
     }
 
 
-def _preservation_relative_path_is_safe(rel: str, src_root: Path, dst_root: Path) -> Optional[Tuple[Path, Path]]:
-    """Independent review finding (CodeQL py/path-injection on this exact
-    function): re-prove containment for each per-file path this loop
-    builds from a directory-walk-derived relative_path, entirely inline in
-    this function's own body -- no delegated call, no generator -- which
-    is the specific structural form CodeQL's same-function dataflow could
-    actually trace for the identical pattern in
-    backend/transaction_engine.py's _derive_artist_folder_identity(). A
-    real relative_to() walk (see inspect_import_source()) can never
-    produce '..'/absolute components, but this never trusts a dict blindly
-    regardless of provenance. Returns (src_file, dst_file) or None."""
-    parts = Path(rel).parts
-    if not parts or any(p in ("", ".", "..") for p in parts):
-        return None
-    src_file = src_root / rel
-    dst_file = dst_root / rel
-    src_norm = os.path.normpath(str(src_file))
-    dst_norm = os.path.normpath(str(dst_file))
-    src_root_norm = os.path.normpath(str(src_root))
-    dst_root_norm = os.path.normpath(str(dst_root))
-    if not (src_norm == src_root_norm or src_norm.startswith(src_root_norm + os.sep)):
-        return None
-    if not (dst_norm == dst_root_norm or dst_norm.startswith(dst_root_norm + os.sep)):
-        return None
-    return Path(src_norm), Path(dst_norm)
-
-
 def preserve_import_source(
     source_path: object,
     expected_source_signature: str = None,
@@ -2086,13 +2075,36 @@ def preserve_import_source(
             return {"ok": False, "error_code": "insufficient_space", "message": "Not enough free space for preservation copy"}
 
         safe_dest.mkdir(parents=True, exist_ok=True)
+        # Independent review finding (CodeQL py/path-injection on this exact
+        # function, 6 alerts): a delegated helper that re-proved containment
+        # and returned (src_file, dst_file) was not enough -- CodeQL's
+        # interprocedural dataflow does not carry "already validated" status
+        # across a call boundary (the same limitation Wave 27's final review
+        # documented and fixed for backend/transaction_engine.py's
+        # _derive_artist_folder_identity()/_extract_recording_mbids()). The
+        # containment re-proof is therefore inlined directly into this loop
+        # body -- no delegated call, no generator -- normalizing with
+        # os.path.normpath and requiring a normalized-root prefix match,
+        # CodeQL's own documented py/path-injection remediation pattern. A
+        # real relative_to() walk (see inspect_import_source()) can never
+        # produce '..'/absolute components in entry["relative_path"], but
+        # this never trusts that dict blindly regardless of provenance.
+        trusted_src_norm = os.path.normpath(str(trusted_src))
+        safe_dest_norm = os.path.normpath(str(safe_dest))
         copied_count = 0
         for entry in audio_files:
             rel = entry["relative_path"]
-            resolved = _preservation_relative_path_is_safe(rel, trusted_src, safe_dest)
-            if resolved is None:
+            parts = Path(rel).parts
+            if not parts or any(p in ("", ".", "..") for p in parts):
                 continue
-            src_file, dst_file = resolved
+            src_norm = os.path.normpath(str(trusted_src / rel))
+            dst_norm = os.path.normpath(str(safe_dest / rel))
+            if not (src_norm == trusted_src_norm or src_norm.startswith(trusted_src_norm + os.sep)):
+                continue
+            if not (dst_norm == safe_dest_norm or dst_norm.startswith(safe_dest_norm + os.sep)):
+                continue
+            src_file = Path(src_norm)
+            dst_file = Path(dst_norm)
 
             if src_file.is_symlink():
                 continue
@@ -2109,14 +2121,14 @@ def preserve_import_source(
             # preservation of those does not affect correctness, and the
             # content-digest verification below still catches everything
             # that actually matters.
-            shutil.copyfile(str(src_file), str(dst_file))
+            shutil.copyfile(src_norm, dst_norm)
             try:
-                shutil.copymode(str(src_file), str(dst_file))
+                shutil.copymode(src_norm, dst_norm)
             except Exception:
                 pass
             try:
                 st = src_file.stat()
-                os.utime(str(dst_file), ns=(st.st_atime_ns, st.st_mtime_ns))
+                os.utime(dst_norm, ns=(st.st_atime_ns, st.st_mtime_ns))
             except Exception:
                 pass
             copied_count += 1
@@ -2128,11 +2140,21 @@ def preserve_import_source(
                 "Preservation copy post-verification failed for %s: dest_ok=%s",
                 str(safe_dest), dest_inspect.get("ok"),
             )
-            if safe_dest.exists():
+            # Same inline containment re-proof as the copy loop above (own
+            # CodeQL py/path-injection alert on this exact rmtree call):
+            # safe_dest already came from resolve_safe_path(), but that
+            # validation happened several statements earlier in this same
+            # function, which CodeQL's dataflow does not treat as proof
+            # this specific value is still safe at this later use.
+            safe_dest_norm = os.path.normpath(str(safe_dest))
+            preserved_root_norm = os.path.normpath(str(preserved_root))
+            if safe_dest.exists() and (
+                safe_dest_norm == preserved_root_norm or safe_dest_norm.startswith(preserved_root_norm + os.sep)
+            ):
                 try:
-                    shutil.rmtree(str(safe_dest))
+                    shutil.rmtree(safe_dest_norm)
                 except Exception:
-                    logger.warning("Could not clean up failed preservation copy at %s", str(safe_dest), exc_info=True)
+                    logger.warning("Could not clean up failed preservation copy at %s", safe_dest_norm, exc_info=True)
             return {
                 "ok": False,
                 "error_code": "copy_failed",
@@ -2154,9 +2176,13 @@ def preserve_import_source(
         # protections; this function's raw f"...{exc}" client-facing
         # messages were a regression against that same principle.
         logger.warning("Preservation copy failed for %s", str(trusted_src), exc_info=True)
-        if safe_dest.exists():
+        safe_dest_norm = os.path.normpath(str(safe_dest))
+        preserved_root_norm = os.path.normpath(str(preserved_root))
+        if safe_dest.exists() and (
+            safe_dest_norm == preserved_root_norm or safe_dest_norm.startswith(preserved_root_norm + os.sep)
+        ):
             try:
-                shutil.rmtree(str(safe_dest))
+                shutil.rmtree(safe_dest_norm)
             except Exception:
                 pass
         return {"ok": False, "error_code": "copy_failed", "message": "Preservation copy failed"}
