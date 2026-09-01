@@ -40960,7 +40960,18 @@ def _playlist_title_variants(value):
     # 16,000-character input). Bounded to 100 chars -- no legitimate
     # parenthetical annotation in a track/album title is remotely that
     # long -- which measured linear-time for the same adversarial input.
-    variants.add(re.sub(r"\s*[\(\[][^\)\]]{1,100}[\)\]]\s*", " ", raw))
+    # SEC-002 CodeQL PR-scoped re-check (post-Wave-27 rebase, GitHub alert
+    # #1029): the {1,100} content bound alone was insufficient -- the
+    # *leading* \s* was still unbounded, and an unanchored re.sub() retried
+    # at every offset of a long whitespace run (before a single unclosed
+    # bracket) is quadratic regardless of the content bound (empirically
+    # confirmed: ~5.4s at a 32,000-character adversarial "long whitespace
+    # run + one bracket" input -- a materially different adversarial shape
+    # than the "many small brackets" one originally tested, which this
+    # bound alone did not cover). Bounding the leading whitespace too
+    # (realistic titles never have more than a handful of separator
+    # spaces) measured linear time against both adversarial shapes.
+    variants.add(re.sub(r"\s{0,20}[\(\[][^\)\]]{1,100}[\)\]]\s{0,20}", " ", raw))
     variants.add(re.sub(r"\b(?:ft\.?|feat\.?|featuring)\b.+$", " ", raw, flags=re.I))
     variants.add(re.sub(r"\b(?:unreleased)\b", " ", raw, flags=re.I))
     variants.add(re.sub(
@@ -41047,7 +41058,11 @@ def _playlist_strip_artist_channel_noise(value: str) -> str:
     # SEC-002 CodeQL repository-wide closure finding (py/polynomial-redos):
     # same unbounded-content-between-delimiters shape as
     # _playlist_title_variants() above -- bounded for the same reason.
-    text = re.sub(r"\s*\[[^\]]{0,100}\]\s*$", "", text).strip()
+    # SEC-002 CodeQL PR-scoped re-check (post-Wave-27 rebase, GitHub alert
+    # #1030): see the identical note on _playlist_title_variants() above --
+    # the leading \s* was still unbounded and still quadratic for a long
+    # whitespace run before a single unclosed bracket. Bounded it too.
+    text = re.sub(r"\s{0,20}\[[^\]]{0,100}\]\s{0,20}$", "", text).strip()
     text = _PLAYLIST_ARTIST_CHANNEL_NOISE_RE.sub("", text)
     return " ".join(text.split()).strip(" -_/")
 
@@ -41066,7 +41081,11 @@ def _playlist_artist_name_variants(value):
     # SEC-002 CodeQL repository-wide closure finding (py/polynomial-redos):
     # same unbounded-content-between-delimiters shape as
     # _playlist_title_variants() above -- bounded for the same reason.
-    cleaned = re.sub(r"\s*\([^)]{0,100}\)\s*$", "", raw).strip()
+    # SEC-002 CodeQL PR-scoped re-check (post-Wave-27 rebase, GitHub alert
+    # #1031): see the identical note on _playlist_title_variants() above --
+    # the leading \s* was still unbounded and still quadratic for a long
+    # whitespace run before a single unclosed bracket. Bounded it too.
+    cleaned = re.sub(r"\s{0,20}\([^)]{0,100}\)\s{0,20}$", "", raw).strip()
     add(raw)
     add(cleaned)
     add(_playlist_strip_artist_channel_noise(raw))
@@ -45304,8 +45323,11 @@ def playlist_parse():
             # (docs/security/codeql_repository_closure.md) -- not itself
             # CodeQL-flagged at this line, but the identical, already-
             # empirically-proven-quadratic pattern, fixed the same way.
+            # PR-scoped re-check (post-Wave-27 rebase) additionally found
+            # the leading \s* also needed bounding (see the identical note
+            # on _playlist_title_variants()) -- fixed here proactively too.
             _JUNK_RE = re.compile(
-                r'\s*[\(\[]'
+                r'\s{0,20}[\(\[]'
                 r'(?:official\s+(?:video|audio|lyric|music\s+video|visualizer)|'
                 r'lyric(?:s|\s+video)?|audio|video|mv|visualizer|hd|4k|explicit|'
                 r'live|acoustic|remix|instrumental|karaoke|cover|ft\.?|feat\.?)[^\)\]]{0,100}'

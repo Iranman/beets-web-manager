@@ -708,10 +708,24 @@ Independent review did not accept green tests/CI as proof this wiring was safe o
   fixed nor introduced nor altered this issue in any way. It remains exactly what it was originally
   assessed to be -- a pre-existing defect orthogonal to both PRs. Docker teardown confirmed clean on
   this run too (`docker ps -a` empty afterward).
-- Status: Open. Not fixed this pass -- out of scope for a CodeQL security-closure effort (no CodeQL
-  alert referenced this code, and the affected files are unmodified by this session, and unaffected by
-  the separately-merged Wave 27 work). Flagged with reproduction evidence across three independent runs
-  (branch, unmodified `main`, and the reconciled head), not silently noticed and dropped.
+- **Linux CI reproduction question, resolved (2026-09-01, PR #108 GitHub Actions run)**: `gh pr checks
+  108 --repo Iranman/beets-web-manager` shows the `two-service-docker-acceptance` job **passing** on
+  GitHub's Linux runners (`pass`, ~5m13s) against the exact same reconciled branch+Wave-27 head that
+  failed all 5 scenarios locally on Windows Docker Desktop, in the same run. This answers the previously
+  open question directly: the failure does **not** reproduce on Linux CI. Combined with the likely
+  mechanism above (`mtime_ns` nanosecond precision across a Windows-host<->container bind-mount
+  boundary, which a native Linux filesystem/bind-mount does not have), this confirms the defect is
+  Windows-Docker-Desktop-bind-mount-specific, not production/Linux-reachable. Torrent-staged imports are
+  not actually broken in the topology GitHub Actions (and real deployment, which targets Linux hosts)
+  exercises.
+- Status: Open, but downgraded. Not fixed this pass -- still out of scope for a CodeQL security-closure
+  effort (no CodeQL alert referenced this code, and the affected files are unmodified by this session,
+  and unaffected by the separately-merged Wave 27 work). Flagged with reproduction evidence across three
+  independent local runs (branch, unmodified `main`, and the reconciled head) plus one independent
+  Linux-CI run confirming non-reproduction there. Priority revised from P2 to **P3**: this is a Windows
+  local-development acceptance-testing annoyance only, not a defect reachable in the actual (Linux)
+  deployment target. Worth fixing eventually (so Windows contributors get a clean local acceptance run),
+  but does not block any merge or deployment decision on its own.
 
 ### Wave 9: Playlist, Plex Sync & Staging-Manifest Path Security (22 alerts)
 

@@ -1,4 +1,4 @@
-"""Regression coverage for real py/polynomial-redos vulnerabilities found
+r"""Regression coverage for real py/polynomial-redos vulnerabilities found
 during the repository-wide CodeQL closure pass (alerts #114/#41019,
 #115/#41103, #116/#41119, #122/#41214, app.py at baseline commit
 7b05844d58d657ce6f1ae6c5b1724f5ba70ee257) -- all in the playlist
@@ -18,6 +18,21 @@ linear-time against the same adversarial inputs during triage.
 These 4 functions are reachable from user-pasted playlist text (Playlists
 view's "paste a list of tracks" mode), so unbounded attacker-controlled
 input length is a realistic path, not merely theoretical.
+
+IMPORTANT LESSON, recorded here so it isn't lost: the first version of this
+fix (bounding only the delimiter-content quantifier, e.g. `[^)]{0,100}`)
+was INCOMPLETE. GitHub's own CodeQL PR-scoped re-check (after this branch
+was rebased onto PR #102/Wave 27) still flagged these exact lines
+(alerts #1029/#1030/#1031) as polynomial-redos. Investigating rather than
+dismissing the "new" alert found the real gap empirically: the *leading*
+`\s*` in each pattern was still unbounded, and a long run of whitespace
+before a single unclosed delimiter -- a materially different adversarial
+shape than the "many small brackets" one originally tested -- was still
+quadratic (~5.4s at 32,000 characters) regardless of the content bound.
+`PlaylistCleaningRegexPerformanceTests` below now covers BOTH adversarial
+shapes for every fixed function, specifically so a future regression in
+either dimension is caught, not just the one that happened to be tested
+first.
 """
 
 import time
@@ -45,12 +60,27 @@ class PlaylistCleaningRegexPerformanceTests(unittest.TestCase):
         adversarial = ("  (" * (self.ADVERSARIAL_SIZE // 3)) + "X" * self.ADVERSARIAL_SIZE
         self._assert_fast(app_module._playlist_title_variants, adversarial)
 
+    def test_playlist_title_variants_is_not_quadratic_long_leading_whitespace(self):
+        # The adversarial shape the first fix attempt missed: a long
+        # whitespace run before a single unclosed bracket, not many small
+        # ones. See the module docstring.
+        adversarial = (" " * self.ADVERSARIAL_SIZE) + "(" + ("x" * 200)
+        self._assert_fast(app_module._playlist_title_variants, adversarial)
+
     def test_playlist_strip_artist_channel_noise_is_not_quadratic(self):
         adversarial = ("  [" * (self.ADVERSARIAL_SIZE // 3)) + "X" * self.ADVERSARIAL_SIZE
         self._assert_fast(app_module._playlist_strip_artist_channel_noise, adversarial)
 
+    def test_playlist_strip_artist_channel_noise_is_not_quadratic_long_leading_whitespace(self):
+        adversarial = (" " * self.ADVERSARIAL_SIZE) + "[" + ("x" * 200)
+        self._assert_fast(app_module._playlist_strip_artist_channel_noise, adversarial)
+
     def test_playlist_artist_name_variants_is_not_quadratic(self):
         adversarial = ("  (" * (self.ADVERSARIAL_SIZE // 3)) + "X" * self.ADVERSARIAL_SIZE
+        self._assert_fast(app_module._playlist_artist_name_variants, adversarial)
+
+    def test_playlist_artist_name_variants_is_not_quadratic_long_leading_whitespace(self):
+        adversarial = (" " * self.ADVERSARIAL_SIZE) + "(" + ("x" * 200)
         self._assert_fast(app_module._playlist_artist_name_variants, adversarial)
 
     def test_playlist_split_artist_title_is_not_quadratic(self):

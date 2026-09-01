@@ -872,3 +872,64 @@ Backup ref preserved (not deleted): `backup/pr108-before-main-reconcile-20260901
   once more (line-number drift only, 0 routes need manual review) and now up to date.
 - Final frontend gates (no frontend files changed in Phase 5, re-run for completeness): `npm run
   typecheck` clean; `npm run lint` clean; `npm test -- --run` — 58/58 passed.
+- Full suite, run 11 (Section 10 — after the leading-whitespace ReDoS fix and 3 new regression tests, on
+  top of the reconciled branch+Wave-27 head): **2909 tests, 0 failures, 132 skipped, exit code 0**
+  (2906 + 3 new tests, as expected; read from the actual background-process log output, not from the
+  task-notification's summary line, per this session's own established rule). `python -m py_compile
+  app.py`: clean. Endpoint inventory regenerated (244 routes, 0 need manual review — pure line-number
+  drift from the ReDoS fix, no routes added/removed, matches Wave 27's own baseline exactly). Secret scan
+  passed. Compose security validation: `{"ok": true, "errors": [], "warnings": []}`.
+
+## 10. PR #108 post-Wave-27-rescan closure (2026-09-01)
+
+After pushing the reconciliation commit (Section 8) and opening PR #108, GitHub's own PR-scoped CodeQL
+re-analysis of the merged head found **10 new alerts** (`#1028`–`#1037`) not present in the 171-alert
+repository-wide baseline (Section 1–7). This section is deliberately kept distinct from that baseline —
+these are a second, smaller, PR-scoped batch, tracked in
+`security/codeql_pr108_wave27_rescan_addendum.json`, not folded into the 171/35/136/0 counts above.
+
+Individually traced, no bulk dismissal:
+
+- **7 confirmed `SAFE_BUT_CODEQL_BLIND`** (`#1028` stack-trace-exposure; `#1032`, `#1033`, `#1034`,
+  `#1035`, `#1036`, `#1037` path-injection): all 7 map exactly to this same PR's own already-fixed
+  defensive validator/containment code (`_folder_release_preflight`, `_folder_track_search_titles`,
+  `_resolve_import_source_path`, `_resolve_dedup_scan_path`, `_folder_clean_root`,
+  `cleanup_import_review_files`'s `except BeetsError` handler) — the same validator-flags-itself and
+  fixed-literal-response patterns already established throughout Sections 2–6. Dismissed via
+  `gh api -X PATCH .../code-scanning/alerts/<n>` with `dismissed_reason=false positive` and an individual
+  sink-specific `dismissed_comment` for each.
+- **3 genuinely real** (`#1029`, `#1030`, `#1031`, all `py/polynomial-redos`, in
+  `_playlist_title_variants`/`_playlist_strip_artist_channel_noise`/`_playlist_artist_name_variants`):
+  this session's own earlier ReDoS fix (Section 6) was **incomplete** — it bounded only the
+  delimiter-content quantifier and left the leading `\s*` unbounded. GitHub's rescan caught what the
+  original triage's adversarial-input shape ("many small brackets") missed: a long whitespace run before
+  a single unclosed delimiter is a materially different shape, and it was still empirically quadratic
+  (~5.4s at 32,000 characters). Fixed by also bounding the leading whitespace to `\s{0,20}` in all 3
+  patterns, plus proactively fixing the same gap in a previously-unreported sibling pattern (`_JUNK_RE`,
+  inside `playlist_parse()`'s yt-dlp branch) that CodeQL had not (yet) separately flagged. 3 new
+  regression tests added (`tests/test_codeql_repowide_closure_playlist_redos.py`,
+  `*_long_leading_whitespace` variants) specifically covering the missed adversarial shape, alongside an
+  explanatory docstring paragraph recording the lesson so it isn't lost.
+
+**Verification**: `python -m py_compile app.py` clean. Full ReDoS regression file: 12/12 passed (0.057s).
+All playlist-domain tests (13 files, `test_*playlist*.py`): 219/219 passed, 14 skipped (pre-existing,
+require live engine). Full backend suite re-run after this fix (see run log below).
+
+**GitHub state at the time of this section's writing**: `gh pr checks 108` — every job green
+(`Analyze` ×3, `python-tests` ×2, `security` ×2, `frontend-lint`/`frontend-typecheck` ×2,
+`build`/`Build & Publish GHCR Image`, `beets-engine-verification` ×2,
+`beets-engine-latest-compat (informational)`, `compose-verification`, `two-service-docker-acceptance`
+pass 5m13s) **except** the GitHub-native "CodeQL" PR-scoped summary check, which was still `fail` because
+the 3 real ReDoS alerts above were not yet fixed in the pushed commit at that check's evaluation time.
+`gh api code-scanning/alerts?pr=108&state=open` returned exactly `3` — the 3 ReDoS alerts, consistent with
+the 7 already-dismissed and the 3 still awaiting a fresh CodeQL run against the not-yet-pushed fix commit.
+Pushing this section's fix commit and waiting for GitHub's next CodeQL analysis of the new head is the
+remaining step to confirm those 3 auto-close; see the final report delivered in-conversation for the
+push/re-check outcome as of that message.
+
+**`two-service-docker-acceptance` Linux-CI question, now answered**: `gh pr checks 108` shows this job
+**passing** on GitHub's Linux runners against the same head that fails locally on Windows Docker Desktop.
+This resolves `ARCH-020`'s previously-open question — the failure is Windows-Docker-Desktop-bind-mount-specific
+(consistent with the `mtime_ns` cross-boundary-precision hypothesis already recorded there), not a
+production/Linux-reachable defect. `docs/TECHNICAL_DEBT.md`'s `ARCH-020` entry updated accordingly,
+priority revised from P2 to P3.
