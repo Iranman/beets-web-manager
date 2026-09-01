@@ -40944,6 +40944,8 @@ def _playlist_clean_video_text(value):
 
 def _playlist_strip_video_title_suffix(value):
     text = _playlist_clean_video_text(value)
+    if "|" not in text:
+        return text
     parts = [p.strip() for p in re.split(r"\s+\|\s+", text) if p.strip()]
     if len(parts) >= 3 and re.search(r"[A-Za-z0-9]", parts[0]):
         return parts[0]
@@ -40983,9 +40985,42 @@ def _playlist_clean_variant_title(value):
 
 def _playlist_split_artist_title(value):
     text = _playlist_strip_video_title_suffix(_playlist_strip_track_prefix(value))
-    parts = [p.strip() for p in re.split(r"\s+[-–—]\s+|(?<=[A-Za-z0-9])[-–—](?=[A-Z0-9])", text, maxsplit=1) if p.strip()]
-    if len(parts) == 2 and parts[0] and parts[1]:
-        return _playlist_clean_video_text(parts[0]), _playlist_clean_video_text(parts[1])
+    if not text:
+        return None
+    # Deterministic linear-time parser without regular expression backtracking.
+    # Finds the first valid separator in text:
+    # 1. Spaced dash: dash surrounded by whitespace on both sides (\s+[-–—]\s+)
+    # 2. Compact dash: dash between ASCII alphanumeric and uppercase/digit ([A-Za-z0-9][-–—][A-Z0-9])
+    n = len(text)
+    i = 0
+    while i < n:
+        ch = text[i]
+        if ch in ("-", "–", "—"):
+            # Check for spaced dash
+            if i > 0 and text[i - 1].isspace() and i + 1 < n and text[i + 1].isspace():
+                start = i - 1
+                while start > 0 and text[start - 1].isspace():
+                    start -= 1
+                end = i + 1
+                while end < n and text[end].isspace():
+                    end += 1
+                left = text[:start].strip()
+                right = text[end:].strip()
+                if left and right:
+                    return _playlist_clean_video_text(left), _playlist_clean_video_text(right)
+                return None
+            # Check for compact dash without spaces
+            elif i > 0 and i + 1 < n:
+                prev = text[i - 1]
+                nxt = text[i + 1]
+                if (("a" <= prev <= "z" or "A" <= prev <= "Z" or "0" <= prev <= "9") and
+                        ("A" <= nxt <= "Z" or "0" <= nxt <= "9")):
+                    left = text[:i].strip()
+                    right = text[i + 1:].strip()
+                    if left and right:
+                        return _playlist_clean_video_text(left), _playlist_clean_video_text(right)
+                    return None
+        i += 1
     return None
 
 
@@ -41054,7 +41089,7 @@ _PLAYLIST_CHANNEL_ARTIST_RE = re.compile(
     r"\bvevo\b|"
     r"\bofficial\b|"
     r"\b(?:records?|music|entertainment|media|films?|productions?|tv)\b$|"
-    r"\s+-\s+topic$"
+    r"[-–—]\s*topic$"
     r")"
 )
 
