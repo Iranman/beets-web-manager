@@ -329,5 +329,7 @@ CodeQL security closure is NOT complete.**
   pass).
 - Full suite, run 3 (after the target-preview, playlist, and folder-track-search-titles fixes): 2769
   tests, 0 failures, 129 skipped, exit code 0.
+- Full suite, run 4 (checkpoint after the _folder_clean_root fix, 98/171 alerts dispositioned): 2772
+  tests, 0 failures, 129 skipped, exit code 0.
 - `python -m py_compile app.py`: clean after every code edit this session.
 - Targeted regression suites re-run after every individual fix throughout (see per-cluster commits).
