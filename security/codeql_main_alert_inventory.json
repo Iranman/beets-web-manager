@@ -10,9 +10,9 @@
     "end_line": 146,
     "created_at": "2026-07-20T14:16:56Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/4",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "platformLabel() returns fixed literals only; hardened to real hostname parsing anyway"
   },
   {
     "number": 5,
@@ -25,9 +25,9 @@
     "end_line": 149,
     "created_at": "2026-07-20T14:16:56Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/5",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "same platformLabel() finding, Spotify branch"
   },
   {
     "number": 6,
@@ -40,9 +40,9 @@
     "end_line": 152,
     "created_at": "2026-07-20T14:16:56Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/6",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "same platformLabel() finding, SoundCloud branch"
   },
   {
     "number": 7,
@@ -55,9 +55,9 @@
     "end_line": 155,
     "created_at": "2026-07-20T14:16:56Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/7",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "same platformLabel() finding, Apple Music branch"
   },
   {
     "number": 8,
@@ -70,9 +70,9 @@
     "end_line": 2471,
     "created_at": "2026-07-20T14:16:56Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/8",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "Spotify-note display check, same platformHost hardening applied"
   },
   {
     "number": 9,
@@ -85,9 +85,9 @@
     "end_line": 5213,
     "created_at": "2026-07-20T14:16:56Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/9",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "detectPlatform() returns fixed literals only; hardened to real hostname parsing anyway"
   },
   {
     "number": 10,
@@ -100,9 +100,9 @@
     "end_line": 5214,
     "created_at": "2026-07-20T14:16:56Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/10",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "same detectPlatform() finding, YouTube branch"
   },
   {
     "number": 11,
@@ -115,9 +115,9 @@
     "end_line": 5215,
     "created_at": "2026-07-20T14:16:56Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/11",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "same detectPlatform() finding, Spotify branch"
   },
   {
     "number": 12,
@@ -130,9 +130,9 @@
     "end_line": 5216,
     "created_at": "2026-07-20T14:16:56Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/12",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "same detectPlatform() finding, SoundCloud branch"
   },
   {
     "number": 13,
@@ -145,9 +145,9 @@
     "end_line": 5217,
     "created_at": "2026-07-20T14:16:56Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/13",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "same detectPlatform() finding, Apple Music branch"
   },
   {
     "number": 14,
@@ -160,9 +160,9 @@
     "end_line": 5218,
     "created_at": "2026-07-20T14:16:56Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/14",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "same detectPlatform() finding, Tidal branch"
   },
   {
     "number": 15,
@@ -175,9 +175,9 @@
     "end_line": 5219,
     "created_at": "2026-07-20T14:16:56Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/15",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "same detectPlatform() finding, Bandcamp branch"
   },
   {
     "number": 16,
@@ -190,9 +190,9 @@
     "end_line": 5220,
     "created_at": "2026-07-20T14:16:56Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/16",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "same detectPlatform() finding, Deezer branch"
   },
   {
     "number": 17,
@@ -205,9 +205,9 @@
     "end_line": 5223,
     "created_at": "2026-07-20T14:16:56Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/17",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "Spotify-note display check in index.html, same _plUrlHost/_plHostIs hardening applied"
   },
   {
     "number": 1,
@@ -220,9 +220,9 @@
     "end_line": 2432,
     "created_at": "2026-07-20T14:16:56Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/1",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "uid is used only as a DOM element-id suffix, never a security/session/CSRF value"
   },
   {
     "number": 2,
@@ -235,9 +235,9 @@
     "end_line": 3888,
     "created_at": "2026-07-20T14:16:56Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/2",
-    "disposition": "NEEDS_REVIEW",
+    "disposition": "REAL_VULNERABILITY",
     "dismissed_on_github": false,
-    "notes": ""
+    "notes": "REAL bug (fixed): mbLink.href set from unvalidated manual input; the UUID-format UI gate was not enforced at the point of use. Fixed with MB_RELEASE_UUID_RE check before href assignment"
   },
   {
     "number": 3,
@@ -250,9 +250,9 @@
     "end_line": 4207,
     "created_at": "2026-07-20T14:16:56Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/3",
-    "disposition": "NEEDS_REVIEW",
+    "disposition": "REAL_VULNERABILITY",
     "dismissed_on_github": false,
-    "notes": ""
+    "notes": "REAL bug (fixed): folder-browse path/dirname interpolated raw into inline onclick attribute strings -- HTML-escaping does not prevent JS-string breakout there (entity decoding happens before JS parsing). Fixed with data-* attributes + dataset reads"
   },
   {
     "number": 126,

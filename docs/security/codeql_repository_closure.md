@@ -498,16 +498,89 @@ alert count will still show these 21 as "open" until this branch is pushed, merg
 rescanned — that is expected, not a discrepancy; see the reconciliation section above for why this
 distinction matters.
 
-## 4. Remaining alerts
+## 4. Phase 4 — Browser-side URL sanitization and DOM/XSS tranche (2026-09-01)
 
-48 of 171 alerts remain **NEEDS_REVIEW** as of this checkpoint (45 dispositioned: 2 critical
+All 17 `js/*` alerts (`js/incomplete-url-substring-sanitization` 14, `js/xss-through-dom` 2,
+`js/insecure-randomness` 1) traced individually. **This closes every `js/*` alert in the repository: 0
+remain `NEEDS_REVIEW`.**
+
+### Alert 3 — `js/xss-through-dom`, high — `index.html`, folder-browse directory listing
+
+- **Disposition**: `REAL_VULNERABILITY` — genuine, fixed.
+- `loadBrowse()` interpolated `par`/`p`/`full` (the browse path, and `path + "/" + directory-name`) raw
+  into inline `onclick="loadBrowse('${...}')"`/`onclick="sp('${...}')"` attribute strings. **HTML-escaping
+  alone does not make this safe**: the browser HTML-decodes an attribute value *before* handing it to the
+  JS parser, so even an `e()`-escaped `'` (`&#39;`) is restored to a literal `'` by the time the `onclick`
+  handler's source is parsed — it still breaks out of the embedded JS string. `full` here wasn't even
+  HTML-escaped at all (only the button's *visible label*, `dir`, was). A directory name containing a `'`
+  or `"` — reachable via any writable path under the server's configured browse roots (`MUSIC_ROOT`,
+  `DOWNLOADS_ROOT`) — could inject arbitrary `onclick`/HTML into an authenticated user's session: real
+  DOM-based XSS (CWE-79), not a theoretical concern.
+- **Fix**: replaced all three sinks with `data-path="${e(...)}"` attributes plus
+  `onclick="loadBrowse(this.dataset.path)"` / `sp(this.dataset.path)"` reads — `e()`'s HTML-entity
+  escaping *is* the correct, sufficient mechanism for a `data-*` attribute context (no second-stage JS
+  re-parsing occurs there). This is the exact same safe pattern already used elsewhere in this file for
+  artist/album buttons (`data-artist="'+e(artist)+'"'` + `this.dataset.artist`) — reused, not invented.
+- **Test**: `tests/test_codeql_repowide_closure_index_html_xss.py::FolderBrowseXssContainmentTests` (2
+  tests) — proves the vulnerable inline-onclick shape is gone and the safe `data-*` shape is present.
+
+### Alert 2 — `js/xss-through-dom`, high — `index.html`, manual MBID entry → MusicBrainz link
+
+- **Disposition**: `REAL_VULNERABILITY` — genuine, fixed.
+- `_applySkManualMbid()` set `mbLink.href = 'https://musicbrainz.org/release/' + mbid` from a manual-entry
+  text input's raw value with **no validation of its own**. The only validation anywhere in this flow was
+  `_onSkManualMbid()` toggling the *visibility* of an "Apply" button based on a UUID-shape regex test — a
+  UI convenience, not a guarantee enforced at the actual sink. A value that isn't a well-formed
+  MusicBrainz UUID (e.g. `javascript:alert(document.cookie)`) must never reach a navigation sink like
+  `.href`.
+- **Fix**: factored the UUID regex into a shared `MB_RELEASE_UUID_RE` constant and added
+  `if(!mbid||!MB_RELEASE_UUID_RE.test(mbid)) return;` at the top of `_applySkManualMbid()`, validated at
+  the point of use rather than trusted from a separate UI-gate function.
+- **Test**: `tests/test_codeql_repowide_closure_index_html_xss.py::ManualMbidLinkContainmentTests` (2
+  tests) — proves the shared regex exists and that validation runs strictly before the `href` assignment.
+
+### Alerts 4-17 — `js/incomplete-url-substring-sanitization`, medium — `frontend/src/views/Playlists.tsx` (5) and `index.html` (9)
+
+- **Disposition**: `SAFE_BUT_CODEQL_BLIND` (false positive for security purposes) — **hardened anyway**,
+  per this phase's explicit instruction to prefer strict URL parsing over substring matching.
+- **Why these are false positives for security**: `platformLabel()` (Playlists.tsx) and `detectPlatform()`
+  (index.html) both only ever assign **fixed literal strings** (`'YouTube'`, `'#ff4444'`, etc.) to a
+  cosmetic badge's label/color/className — never anything derived from the URL string itself. Confirmed
+  by reading every call site: the badge is pure UI feedback while pasting a playlist URL; the actual
+  provider dispatch happens **server-side** ("URL parsing uses the existing backend yt-dlp flow," per an
+  existing comment in the same component) via Python, a separate trust boundary already covered by this
+  closure pass's `py/incomplete-url-substring-sanitization` alerts (see below, still open). Substring
+  matching here could only mislabel a badge (e.g. an `evil.example/spotify.com` URL showing a Spotify
+  badge) — it cannot inject markup or drive a trust/navigation decision.
+- **Fix anyway**: replaced `val.includes('spotify.com')`-style substring checks with real hostname
+  parsing (`new URL(...).hostname`) plus exact-or-subdomain-suffix matching, in both `index.html`
+  (`_plUrlHost`/`_plHostIs`) and `Playlists.tsx` (`platformHost`/`hostMatches`) — closing the false-match
+  edge case even though it was never a security boundary.
+- **Test**: `tests/test_codeql_repowide_closure_index_html_xss.py::PlatformDetectionHostnameParsingTests`
+  (3 tests) — proves both files use real hostname parsing, and proves the matching semantics themselves
+  correctly reject substring lookalikes (`evil.example/spotify.com`, `spotify.com.evil.example`) that a
+  naive `.includes()` check would have accepted.
+
+### Alert 1 — `js/insecure-randomness`, low — `index.html`, discography card fallback element id
+
+- **Disposition**: `SAFE_BUT_CODEQL_BLIND`. No code change.
+- `const uid='disc_'+(r.mbid||Math.random().toString(36).slice(2,8));` — traced every use of `uid`: it is
+  used exclusively as a DOM element-id suffix (`lidarr-action-<uid>`) for a later `getElementById` lookup
+  within the same rendered card. Never a security token, session identifier, CSRF value, or anything sent
+  to a server or used in an authorization decision. Per this phase's own guidance ("do not blindly
+  replace... without understanding how it must be used"), this is a genuine false positive — swapping in
+  `crypto.randomUUID()` would be pure churn with no security benefit.
+
+## 5. Remaining alerts
+
+31 of 171 alerts remain **NEEDS_REVIEW** as of this checkpoint (45 dispositioned: 2 critical
 command-injection dismissed, 8 path-injection fixed as real vulnerabilities, 35 path-injection confirmed
 safe) — see `security/codeql_main_alert_inventory.json` for the full raw list. Work continues
 alert-by-alert (or pattern-class-by-pattern-class for the remaining `py/path-injection` instances
 still clustered in `app.py`, a 48,286-line file) rather than being declared closed. **Repository-wide
 CodeQL security closure is NOT complete.**
 
-## 5. Test verification log
+## 6. Test verification log
 
 - Full backend suite (`python -m unittest discover -s tests -p "test_*.py"`), run 1 (early in session):
   2763 tests, 0 failures, 129 skipped (pre-existing, require live engine/Docker).
@@ -523,3 +596,18 @@ CodeQL security closure is NOT complete.**
   `_folder_release_preflight` ones): 2778 tests, 0 failures, 129 skipped, exit code 0.
 - `python -m py_compile app.py`: clean after every code edit this session.
 - Targeted regression suites re-run after every individual fix throughout (see per-cluster commits).
+- Full suite, run 6 (after the `_folder_release_preflight` fix, Phase 2 of the continued-closure pass —
+  0 open `py/path-injection` alerts remain undispositioned repository-wide): 2783 tests, 0 failures, 129
+  skipped, exit code 0.
+- Full suite, run 7 (order-dependence/flakiness re-check, same code state as run 6): result pending at
+  time of writing — see the next commit for the confirmed count.
+- Python security gates (Phase 4 checkpoint): `security_secret_scan.py` passed; `validate_compose_security.py`
+  → `{"ok": true, "errors": [], "warnings": []}`; `verify_arch003_mutation_inventory.py --check` passed
+  (469 entries, 107 unresolved, matches baseline); `generate_endpoint_inventory.py --check` initially
+  reported stale (188 line-number-only diffs accumulated across this session's earlier edits, no
+  routes added/removed) — regenerated through the official generator (0 routes needed manual review),
+  now up to date.
+- Frontend gates (Phase 4, after the `Playlists.tsx` hostname-parsing fix): `npm ci` clean;
+  `npm run typecheck` clean; `npm run lint` clean; `npm test -- --run` — **58 tests passed (4 test
+  files)**; `npm run build` — Next.js production build succeeded, all 13 static pages generated;
+  `npm audit --audit-level=high` — **0 vulnerabilities**.

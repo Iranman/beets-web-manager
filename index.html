@@ -3870,16 +3870,26 @@ function dismissSkipPanel(sid) {
   const el=document.getElementById('sk-sug-'+sid);
   if(el) el.style.display='none';
 }
+// SEC-002 CodeQL repository-wide closure finding (alert #2,
+// js/xss-through-dom): _applySkManualMbid() set mbLink.href from this
+// manual-entry input's raw value with no validation of its own -- only
+// _onSkManualMbid()'s Apply-button visibility toggle checked the UUID
+// shape, which is a UI convenience, not a guarantee the value used here
+// is safe (nothing stops this function being invoked with an
+// unvalidated value through any other path). A value that is not a
+// well-formed MusicBrainz UUID (e.g. "javascript:alert(1)") must never
+// reach a navigation sink like .href. Shared regex, checked at the
+// point of use, not just at the UI-gate call site.
+const MB_RELEASE_UUID_RE=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 function _onSkManualMbid(sid) {
   const inp=document.getElementById('sk-manual-mbid-'+sid);
   const applyBtn=document.getElementById('sk-manual-apply-'+sid);
-  const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  if(applyBtn) applyBtn.style.display=uuid.test((inp?inp.value:'').trim())?'':'none';
+  if(applyBtn) applyBtn.style.display=MB_RELEASE_UUID_RE.test((inp?inp.value:'').trim())?'':'none';
 }
 function _applySkManualMbid(sid) {
   const inp=document.getElementById('sk-manual-mbid-'+sid);
   const mbid=(inp?inp.value:'').trim();
-  if(!mbid) return;
+  if(!mbid||!MB_RELEASE_UUID_RE.test(mbid)) return;
   if(!_skipAiSuggestions[sid]) _skipAiSuggestions[sid]={path:'',suggestion:{mb_valid:false,mb_albumid:'',confidence:'low'}};
   _skipAiSuggestions[sid].suggestion.mb_albumid=mbid;
   _skipAiSuggestions[sid].suggestion.mb_valid=true;
@@ -4194,14 +4204,28 @@ async function loadBrowse(p) {
     if (!d.ok) { document.getElementById('bdirs').innerHTML=`<p class="empty" style="color:#f87171">${e(d.error)}</p>`; return; }
     if (!d.dirs.length) { document.getElementById('bdirs').innerHTML='<p class="empty">No subdirectories.</p>'; return; }
     // parent dir link
+    // SEC-002 CodeQL repository-wide closure finding (alert #3,
+    // js/xss-through-dom): par/p/full were previously interpolated raw
+    // into an inline onclick="fn('...')" string. HTML-escaping alone
+    // (e()) does not make that safe -- the browser HTML-decodes the
+    // attribute value BEFORE the JS parser ever sees it, so an escaped
+    // quote (&#39;) is restored to a literal ' and still breaks out of
+    // the embedded JS string (and an unescaped " would break out of the
+    // onclick="..." attribute itself); a directory name containing a
+    // quote character (reachable via any writable path under the
+    // configured browse roots) could inject arbitrary onclick/JS. Fixed
+    // by using data-* attributes (where e()'s HTML-entity escaping is
+    // the correct, sufficient context) plus this.dataset reads, the same
+    // safe pattern already used elsewhere in this file (see the
+    // data-artist/data-album buttons above).
     const par=p.split('/').slice(0,-1).join('/')||'/';
     let html=`<div style="display:flex;flex-wrap:wrap;gap:.35rem;align-items:center;margin-bottom:.4rem">`;
-    html+=`<button class="g sm" onclick="loadBrowse('${par}')" title="Up">⬆ Up</button>`;
-    html+=`<button class="sm" onclick="sp('${p}')">✓ Use this folder</button></div>`;
+    html+=`<button class="g sm" data-path="${e(par)}" onclick="loadBrowse(this.dataset.path)" title="Up">⬆ Up</button>`;
+    html+=`<button class="sm" data-path="${e(p)}" onclick="sp(this.dataset.path)">✓ Use this folder</button></div>`;
     html+=`<div style="display:flex;flex-wrap:wrap;gap:.3rem">`;
     for (const dir of d.dirs) {
       const full=p.replace(/[/]+$/,'')+'/'+dir;
-      html+=`<button class="g sm" style="font-size:.72rem" onclick="loadBrowse('${full}')">${e(dir)}</button>`;
+      html+=`<button class="g sm" style="font-size:.72rem" data-path="${e(full)}" onclick="loadBrowse(this.dataset.path)">${e(dir)}</button>`;
     }
     html+='</div>';
     document.getElementById('bdirs').innerHTML=html;
@@ -5205,22 +5229,39 @@ function plSourceChange() {
   document.getElementById('pl-url-wrap').style.display=src==='url'?'':'none';
   document.getElementById('pl-text-wrap').style.display=src==='text'?'':'none';
 }
+// SEC-002 CodeQL repository-wide closure finding (alerts #9-#17,
+// js/incomplete-url-substring-sanitization): detectPlatform() only ever
+// sets `label`/`note` visibility from fixed literal strings (never from
+// `val` itself), so this was a false positive for security purposes --
+// substring matching here can only mislabel a badge/note, it cannot
+// drive innerHTML injection or any trust/navigation decision. Fixed to
+// use real hostname parsing anyway, matching the mission's stated
+// preference for strict parsing over substring matching and closing
+// the false-match edge case (e.g. "https://evil.example/spotify.com"
+// previously matched the Spotify badge).
+function _plUrlHost(val) {
+  try { return new URL(val).hostname.toLowerCase(); } catch(err) { return ''; }
+}
+function _plHostIs(host, domain) {
+  return !!host && (host===domain || host.endsWith('.'+domain));
+}
 function detectPlatform(val) {
   const bdg=document.getElementById('pl-platform-bdg');
   const note=document.getElementById('pl-spotify-note');
   if(!bdg) return;
   let label='Paste a URL', color='#64748b', bg='#1e293b', border='#2d3154';
-  if(val.includes('music.youtube.com'))    { label='&#127925; YouTube Music'; color='#ff4444'; bg='#2a0a0a'; border='#7f1d1d'; }
-  else if(val.includes('youtube.com')||val.includes('youtu.be')) { label='&#9654; YouTube'; color='#ff4444'; bg='#2a0a0a'; border='#7f1d1d'; }
-  else if(val.includes('spotify.com'))     { label='&#9679; Spotify'; color='#1db954'; bg='#0a2a14'; border='#14532d'; }
-  else if(val.includes('soundcloud.com'))  { label='&#9729; SoundCloud'; color='#ff5500'; bg='#2a1000'; border='#7c2d12'; }
-  else if(val.includes('music.apple.com')) { label='&#9835; Apple Music'; color='#fc3c44'; bg='#2a0a0a'; border='#7f1d1d'; }
-  else if(val.includes('tidal.com'))       { label='&#127754; Tidal'; color='#00cccc'; bg='#0a1e1e'; border='#134e4a'; }
-  else if(val.includes('bandcamp.com'))    { label='&#127932; Bandcamp'; color='#1da0c3'; bg='#0a1a22'; border='#0e4766'; }
-  else if(val.includes('deezer.com'))      { label='&#127925; Deezer'; color='#a259ff'; bg='#18012a'; border='#581c87'; }
-  else if(val.length>10)                   { label='&#128279; URL'; color='#94a3b8'; bg='#1e293b'; border='#334155'; }
+  const host=_plUrlHost(val);
+  if(_plHostIs(host,'music.youtube.com'))    { label='&#127925; YouTube Music'; color='#ff4444'; bg='#2a0a0a'; border='#7f1d1d'; }
+  else if(_plHostIs(host,'youtube.com')||_plHostIs(host,'youtu.be')) { label='&#9654; YouTube'; color='#ff4444'; bg='#2a0a0a'; border='#7f1d1d'; }
+  else if(_plHostIs(host,'spotify.com'))     { label='&#9679; Spotify'; color='#1db954'; bg='#0a2a14'; border='#14532d'; }
+  else if(_plHostIs(host,'soundcloud.com'))  { label='&#9729; SoundCloud'; color='#ff5500'; bg='#2a1000'; border='#7c2d12'; }
+  else if(_plHostIs(host,'music.apple.com')) { label='&#9835; Apple Music'; color='#fc3c44'; bg='#2a0a0a'; border='#7f1d1d'; }
+  else if(_plHostIs(host,'tidal.com'))       { label='&#127754; Tidal'; color='#00cccc'; bg='#0a1e1e'; border='#134e4a'; }
+  else if(_plHostIs(host,'bandcamp.com'))    { label='&#127932; Bandcamp'; color='#1da0c3'; bg='#0a1a22'; border='#0e4766'; }
+  else if(_plHostIs(host,'deezer.com'))      { label='&#127925; Deezer'; color='#a259ff'; bg='#18012a'; border='#581c87'; }
+  else if(val.length>10)                     { label='&#128279; URL'; color='#94a3b8'; bg='#1e293b'; border='#334155'; }
   bdg.innerHTML=label; bdg.style.color=color; bdg.style.background=bg; bdg.style.borderColor=border;
-  if(note) note.style.display=val.includes('spotify.com')?'block':'none';
+  if(note) note.style.display=_plHostIs(host,'spotify.com')?'block':'none';
 }
 async function parseTracks() {
   const source=document.getElementById('pl-source').value;
