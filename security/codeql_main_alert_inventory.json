@@ -985,9 +985,9 @@
     "end_line": 24338,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/220",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "resolve() only builds a same-request dedup set key, no I/O beyond that"
   },
   {
     "number": 484,
@@ -1000,9 +1000,9 @@
     "end_line": 24729,
     "created_at": "2026-08-05T15:46:01Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/484",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "_same_path() is a pure comparison helper (resolve+equality, bool-only)"
   },
   {
     "number": 221,
@@ -1015,9 +1015,9 @@
     "end_line": 24781,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/221",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "_same_path() is a pure comparison helper (resolve+equality, bool-only)"
   },
   {
     "number": 414,
@@ -1030,9 +1030,9 @@
     "end_line": 27539,
     "created_at": "2026-07-30T23:58:21Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/414",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "draft_path sanitized + explicitly re-validated via _path_is_under() before mkdir"
   },
   {
     "number": 229,
@@ -1045,9 +1045,9 @@
     "end_line": 27560,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/229",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "draft_path sanitized + explicitly re-validated before write_text"
   },
   {
     "number": 230,
@@ -1060,9 +1060,9 @@
     "end_line": 27561,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/230",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "draft_path sanitized + explicitly re-validated before write_text"
   },
   {
     "number": 231,
@@ -1240,9 +1240,9 @@
     "end_line": 30178,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/246",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "_resolved_path() is a generic wrapper; safety depends on caller containment (verified per-caller)"
   },
   {
     "number": 416,
@@ -1255,9 +1255,9 @@
     "end_line": 30185,
     "created_at": "2026-07-30T23:58:21Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/416",
-    "disposition": "NEEDS_REVIEW",
+    "disposition": "REAL_VULNERABILITY",
     "dismissed_on_github": false,
-    "notes": ""
+    "notes": "REAL bug (low severity, info disclosure): exists()/is_dir() probed before containment check, letting callers distinguish exists-outside-root from not-found via distinct client-visible error messages; fixed by reordering containment before existence"
   },
   {
     "number": 415,
@@ -1270,9 +1270,9 @@
     "end_line": 30185,
     "created_at": "2026-07-30T23:58:21Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/415",
-    "disposition": "NEEDS_REVIEW",
+    "disposition": "REAL_VULNERABILITY",
     "dismissed_on_github": false,
-    "notes": ""
+    "notes": "REAL bug: same fix as alert 416 (2nd dataflow to same line)"
   },
   {
     "number": 249,

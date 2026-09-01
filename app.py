@@ -30279,13 +30279,23 @@ def _resolved_path(path: Path) -> Path:
 
 
 def _folder_clean_root(raw_root: str) -> Path:
+    # SEC-002 CodeQL repository-wide closure finding: the exists()/is_dir()
+    # probe below and the containment check further down both raise a
+    # distinct RuntimeError that reaches the client verbatim
+    # (delete_no_audio_folders_api/scan_no_audio_folders_api: `str(ex)` in
+    # the JSON error response) -- probing existence before containment let
+    # an authenticated caller distinguish "path exists" from "path is
+    # outside the allowed roots" for any absolute path on the filesystem,
+    # not just ones already known to be in-root. Containment must be
+    # checked first so the existence probe only ever runs against a
+    # path already confirmed to be inside FOLDER_CLEAN_ROOTS.
     root = Path((raw_root or str(MUSIC_ROOT)).strip())
-    if not root.exists() or not root.is_dir():
-        raise RuntimeError("Path not found.")
     root_res = _resolved_path(root)
     allowed = [_resolved_path(p) for p in FOLDER_CLEAN_ROOTS]
     if not any(_path_under(root_res, ar) or root_res == ar for ar in allowed):
         raise RuntimeError("Root must be under /data/media/music, /data/torrents/music, or downloads")
+    if not root_res.exists() or not root_res.is_dir():
+        raise RuntimeError("Path not found.")
     return root_res
 
 

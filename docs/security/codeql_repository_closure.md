@@ -275,9 +275,45 @@ per-alert, not assumed, per the mission rules (no blanket dismissal).
   or empty (which short-circuits the `and` before this check runs).
 - **GitHub disposition**: all 9 dismissed 2026-09-01, `false positive`, sink-specific rationale.
 
+### Alerts 220, 484, 221, 414, 229, 230, 246 — `py/path-injection`, high — `app.py` unmatched-draft / dedup-key / folder-clean-root wrapper (7 alerts)
+
+- **Disposition**: `SAFE_BUT_CODEQL_BLIND` (all 7).
+- `library_import_all`'s dedup-key `.resolve()` (220): builds a same-request-scoped `set` membership key
+  only — no `.exists()`/`.rglob()`/content read, no side channel observable by the caller. Note: `aldir`
+  itself (client-supplied, unvalidated at this specific line) flows to other functions later in the same
+  route; those are separately-scoped concerns, not this alert.
+- `_same_path()` (484, 221): a pure comparison helper (`resolve()` + equality, bool-only return).
+- `create_unmatched_draft`'s `draft_path` (414, 229, 230): built from `_safe_path_component()`-sanitized
+  `artist`/`album`, then **explicitly re-validated** via `_path_is_under(draft_path_resolved,
+  draft_root_resolved)` immediately before any `mkdir()`/`write_text()` — the source even carries an
+  explicit comment calling this out as deliberate defense-in-depth.
+- `_resolved_path()` (246): a generic `resolve()`-with-fallback wrapper; each of its call sites was
+  checked individually elsewhere in this pass (see `_folder_clean_root` below, `_is_top_level_music_artist_folder`,
+  `_scan_no_audio_folder_candidates`).
+- **GitHub disposition**: all 7 dismissed 2026-09-01, `false positive`, sink-specific rationale.
+
+### Alerts 416, 415 — `py/path-injection`, high — `app.py`, `_folder_clean_root` (2 alerts)
+
+- **Disposition**: `REAL_VULNERABILITY` — genuine, low-severity, fixed (not dismissed; will auto-close on
+  post-merge rescan).
+- `_folder_clean_root(raw_root)` called `root.exists()`/`root.is_dir()` **before** its containment check
+  against `FOLDER_CLEAN_ROOTS`, and both branches raise a distinct `RuntimeError` that reaches the client
+  verbatim (`delete_no_audio_folders_api`/`scan_no_audio_folders_api`: `jsonify({"error": str(ex)})`).
+  This let an authenticated caller distinguish "path exists" from "path is outside the allowed roots" for
+  **any** absolute path on the filesystem, not only ones already confirmed in-root — a real, if narrow,
+  existence-oracle (CWE-22-adjacent information disclosure), and exactly the "validation probe as sink"
+  pattern this closure pass was specifically told to watch for.
+- **Fix**: reordered — containment check first, existence/is-dir check second, so the existence probe
+  only ever runs against a path already confirmed inside `FOLDER_CLEAN_ROOTS`.
+- **Existing test updated**: `tests/test_sec002_app_stacktrace.py::FolderCleanRootFalsePositiveTests`'s
+  `test_missing_path_raises_fixed_message` asserted the *vulnerable* ordering (a nonexistent,
+  out-of-root path returning `"Path not found."`) — renamed and rewritten to assert the corrected
+  containment-first message, plus a new test proving a nonexistent path that *is* inside an allowed root
+  still gets the original `"Path not found."` message.
+
 ## 3. Remaining alerts
 
-82 of 171 alerts remain **NEEDS_REVIEW** as of this checkpoint (45 dispositioned: 2 critical
+73 of 171 alerts remain **NEEDS_REVIEW** as of this checkpoint (45 dispositioned: 2 critical
 command-injection dismissed, 8 path-injection fixed as real vulnerabilities, 35 path-injection confirmed
 safe) — see `security/codeql_main_alert_inventory.json` for the full raw list. Work continues
 alert-by-alert (or pattern-class-by-pattern-class for the remaining `py/path-injection` instances

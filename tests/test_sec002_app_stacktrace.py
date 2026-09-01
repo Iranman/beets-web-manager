@@ -67,9 +67,28 @@ class FolderCleanRootFalsePositiveTests(unittest.TestCase):
     found: {root}" variant embedded a filesystem path and has been
     tightened to a fixed string too."""
 
-    def test_missing_path_raises_fixed_message(self):
+    def test_missing_path_outside_allowed_roots_raises_containment_message_not_existence(self):
+        # Repository-wide CodeQL closure session, 2026-09-01: this used to
+        # assert "Path not found." here, which depended on the vulnerable
+        # ordering the same session's fix closed (exists()/is_dir() ran
+        # before the containment check, letting a caller distinguish
+        # "exists but outside allowed roots" from "does not exist" for any
+        # absolute path -- an existence oracle, since both messages reach
+        # the client verbatim). Containment must fail first for a path
+        # that is both nonexistent AND outside every allowed root, so no
+        # existence information about arbitrary outside paths ever leaks.
         with self.assertRaises(RuntimeError) as ctx:
             app_module._folder_clean_root("/definitely/not/a/real/path/xyz")
+        self.assertIn("must be under", str(ctx.exception))
+
+    def test_missing_path_inside_allowed_root_raises_fixed_not_found_message(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            allowed_root = Path(tmp) / "allowed"
+            allowed_root.mkdir()
+            missing = allowed_root / "does-not-exist"
+            with mock.patch.object(app_module, "FOLDER_CLEAN_ROOTS", [allowed_root]):
+                with self.assertRaises(RuntimeError) as ctx:
+                    app_module._folder_clean_root(str(missing))
         self.assertEqual(str(ctx.exception), "Path not found.")
 
     def test_outside_allowed_roots_raises_fixed_message(self):
