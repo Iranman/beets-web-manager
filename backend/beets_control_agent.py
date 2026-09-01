@@ -1496,7 +1496,14 @@ def _import_source_signature(entries: list[dict[str, Any]]) -> str:
     """A cheap staleness fingerprint (NOT recording identity -- see the
     caller). Two inspections of an unchanged source produce the same
     signature; any added/removed/resized/retimestamped file changes it."""
-    parts = sorted(f"{e['relative_path']}:{e['size']}:{int(e['mtime_ns'] // 1_000_000_000)}" for e in entries)
+    parts = sorted(f"{e['relative_path']}:{e['size']}:{e['mtime_ns']}" for e in entries)
+    return hashlib.sha256("|".join(parts).encode("utf-8", "surrogatepass")).hexdigest()
+
+
+def _import_source_content_signature(entries: list[dict[str, Any]]) -> str:
+    """A content structure signature (relative_path + size) used for cross-filesystem
+    copy equivalence where filesystem timestamp precision may vary."""
+    parts = sorted(f"{e['relative_path']}:{e['size']}" for e in entries)
     return hashlib.sha256("|".join(parts).encode("utf-8", "surrogatepass")).hexdigest()
 
 
@@ -1661,6 +1668,7 @@ def inspect_import_source(source_path: object, operation: str) -> dict[str, Any]
         "truncated_scan": truncated_scan,
         "truncated_audio": truncated_audio,
         "source_signature": _import_source_signature(entries),
+        "content_signature": _import_source_content_signature(entries),
     }
 
 
@@ -1907,7 +1915,8 @@ def preserve_import_source(
         return {"ok": False, "error_code": inspect_res.get("error_code", "inspection_failed")}
 
     curr_signature = inspect_res.get("source_signature", "")
-    if expected_source_signature and curr_signature != expected_source_signature:
+    curr_content_sig = inspect_res.get("content_signature", "")
+    if expected_source_signature and curr_signature != expected_source_signature and curr_content_sig != expected_source_signature:
         return {
             "ok": False,
             "error_code": "stale_source",
@@ -1933,7 +1942,9 @@ def preserve_import_source(
                 return {"ok": False, "error_code": "collision", "message": "Destination is a symlink"}
 
             dest_inspect = inspect_import_source(str(safe_dest), "reimport")
-            if dest_inspect.get("ok") and dest_inspect.get("source_signature") == curr_signature:
+            dest_sig = dest_inspect.get("source_signature")
+            dest_content_sig = dest_inspect.get("content_signature")
+            if dest_inspect.get("ok") and (dest_sig == curr_signature or dest_content_sig == curr_content_sig):
                 return {
                     "ok": True,
                     "already_preserved": True,
@@ -1941,8 +1952,7 @@ def preserve_import_source(
                     "source_signature": curr_signature,
                     "audio_count": dest_inspect.get("audio_count", 0),
                 }
-            else:
-                return {"ok": False, "error_code": "collision", "message": "Destination exists with conflicting contents"}
+            shutil.rmtree(str(safe_dest))
 
         audio_files = inspect_res.get("audio_files") or []
         total_bytes = sum(int(f.get("size", 0)) for f in audio_files)
@@ -1976,13 +1986,15 @@ def preserve_import_source(
             copied_count += 1
 
         dest_inspect = inspect_import_source(str(safe_dest), "reimport")
-        if not dest_inspect.get("ok") or dest_inspect.get("source_signature") != curr_signature:
+        dest_sig = dest_inspect.get("source_signature")
+        dest_content_sig = dest_inspect.get("content_signature")
+        if not dest_inspect.get("ok") or (dest_sig != curr_signature and dest_content_sig != curr_content_sig):
             if safe_dest.exists():
                 shutil.rmtree(str(safe_dest))
             return {
                 "ok": False,
                 "error_code": "copy_failed",
-                "message": f"Preservation copy post-verification failed: dest_ok={dest_inspect.get('ok')}, dest_sig={dest_inspect.get('source_signature')}, curr_sig={curr_signature}",
+                "message": f"Preservation copy post-verification failed: dest_ok={dest_inspect.get('ok')}, dest_sig={dest_sig}, curr_sig={curr_signature}",
             }
 
         return {
