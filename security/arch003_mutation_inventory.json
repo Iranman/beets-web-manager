@@ -2,7 +2,7 @@
   "version": "2.1",
   "generator": "scripts/generate_arch003_mutation_inventory.py (AST discovery with explicit domain mapping)",
   "arch003_status": "in_progress",
-  "total_sinks": 488,
+  "total_sinks": 487,
   "classification_counts": {
     "NON_MEDIA_FILESYSTEM": 14,
     "STAGING_ONLY": 32,
@@ -13,7 +13,7 @@
     "APP_STATE": 68,
     "READ_ONLY_FALSE_POSITIVE": 5,
     "ARCH003_BLOCKER": 59,
-    "ENGINE_NATIVE_BEETS": 28,
+    "ENGINE_NATIVE_BEETS": 27,
     "ENGINE_CONFIG_STATE": 18,
     "TRANSACTION_STATE": 19,
     "ENGINE_ADMIN_MUTATION": 16,
@@ -28,7 +28,7 @@
     "submission": 7,
     "library_cleanup": 40,
     "album_artwork": 27,
-    "import_reconciliation": 55,
+    "import_reconciliation": 54,
     "album_retirement": 26,
     "generic_admin": 1
   },
@@ -4234,38 +4234,6 @@
       "reviewed_in_pr": null
     },
     {
-      "key": "backend/beets_control_agent.py:preserve_import_source:7f2ab2c7bc26",
-      "file": "backend/beets_control_agent.py",
-      "function": "preserve_import_source",
-      "line": 1977,
-      "kind": "filesystem",
-      "call_text": "shutil.copy2(str(src_file), str(dst_file))",
-      "classification": "ENGINE_NATIVE_BEETS",
-      "transaction_family": "",
-      "domain": "import_reconciliation",
-      "rule": "engine-native-atomic-reimport-not-import-folder-v1",
-      "machine_classified": true,
-      "human_reviewed": false,
-      "review_reason": "",
-      "reviewed_in_pr": null
-    },
-    {
-      "key": "backend/beets_control_agent.py:preserve_import_source:4d1a9906cec5",
-      "file": "backend/beets_control_agent.py",
-      "function": "preserve_import_source",
-      "line": 1979,
-      "kind": "filesystem",
-      "call_text": "shutil.copy(str(src_file), str(dst_file))",
-      "classification": "ENGINE_NATIVE_BEETS",
-      "transaction_family": "",
-      "domain": "import_reconciliation",
-      "rule": "engine-native-atomic-reimport-not-import-folder-v1",
-      "machine_classified": true,
-      "human_reviewed": false,
-      "review_reason": "",
-      "reviewed_in_pr": null
-    },
-    {
       "key": "backend/beets_control_agent.py:preserve_import_source:c2912eb4a206",
       "file": "backend/beets_control_agent.py",
       "function": "preserve_import_source",
@@ -7848,6 +7816,22 @@
       "human_reviewed": true,
       "review_reason": "individually investigated during SEC-002/ARCH-003 review",
       "reviewed_in_pr": 97
+    },
+    {
+      "key": "backend/beets_control_agent.py:preserve_import_source:3efc683406c5",
+      "file": "backend/beets_control_agent.py",
+      "function": "preserve_import_source",
+      "line": 2112,
+      "kind": "filesystem",
+      "call_text": "shutil.copyfile(str(src_file), str(dst_file))",
+      "classification": "ENGINE_NATIVE_BEETS",
+      "transaction_family": "",
+      "domain": "import_reconciliation",
+      "rule": "engine-native-atomic-reimport-not-import-folder-v1",
+      "machine_classified": false,
+      "human_reviewed": true,
+      "review_reason": "Wave 28 independent review: byte-copy call migrated from shutil.copy2()/shutil.copy() (the old copy2-then-copy fallback, now removed -- see review finding on the broad except-Exception fallback) to a single hard shutil.copyfile() so a real copy failure is never silently masked by a second, different copy attempt. Same staging-only preservation-area classification as its removed predecessors and every sibling filesystem call in this function: this never touches MUSIC_LIBRARY_PATH or the authoritative Beets DB, only the engine-owned .preserved_staging scratch area.",
+      "reviewed_in_pr": 107
     }
   ]
 }

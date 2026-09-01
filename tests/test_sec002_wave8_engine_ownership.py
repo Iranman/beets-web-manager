@@ -653,14 +653,219 @@ class PreserveImportSourceRootPolicyTests(unittest.TestCase):
         self.assertEqual(second["preserved_path"], first["preserved_path"])
 
     def test_error_message_never_leaks_raw_exception_text(self):
+        # Wave 28 independent review: the byte-copy call moved from
+        # shutil.copy2() to shutil.copyfile() (metadata preservation is now
+        # a separate, best-effort step) -- this must patch the function that
+        # actually performs the copy, or the mock silently never intercepts
+        # anything and the test would pass for the wrong reason (the real
+        # copy would just succeed).
         album = self.staging_root / "Artist" / "Album"
         album.mkdir(parents=True)
         (album / "01.flac").write_bytes(b"not-real-audio")
-        with mock.patch("shutil.copy2", side_effect=OSError("/some/internal/host/path: disk quota exceeded")):
+        with mock.patch("shutil.copyfile", side_effect=OSError("/some/internal/host/path: disk quota exceeded")):
             result = CONTROL_AGENT.preserve_import_source(str(album))
         self.assertFalse(result["ok"])
         self.assertNotIn("/some/internal/host/path", result.get("message", ""))
         self.assertNotIn("disk quota exceeded", result.get("message", ""))
+
+    # -- Wave 28 independent review, item 7: 12 new regression tests for
+    # preservation-copy semantics (content-signature correctness, the
+    # fail-closed collision policy, and the byte-copy/metadata-preservation
+    # split). These use real temp directories and real file bytes throughout
+    # -- no mocking of the signature/digest functions themselves -- so they
+    # actually exercise _file_content_digest()/_import_source_content_signature().
+
+    def test_unchanged_source_content_signature_is_stable_across_two_inspections(self):
+        album = self.staging_root / "Artist" / "Album"
+        album.mkdir(parents=True)
+        (album / "01.flac").write_bytes(b"identical-bytes")
+        first = CONTROL_AGENT.inspect_import_source(str(album), "reimport", compute_content_signature=True)
+        second = CONTROL_AGENT.inspect_import_source(str(album), "reimport", compute_content_signature=True)
+        self.assertTrue(first["ok"] and second["ok"])
+        self.assertEqual(first["content_signature"], second["content_signature"])
+        self.assertNotEqual(first["content_signature"], "")
+
+    def test_same_second_modification_is_still_detected_as_stale(self):
+        # A same-source TOCTOU check (_import_source_signature, path+size+
+        # mtime_ns) must catch a real content change even when the whole
+        # thing happens inside one wall-clock second -- mtime_ns has
+        # nanosecond resolution even though the filesystem's *displayed*
+        # mtime may read as unchanged at second granularity.
+        album = self.staging_root / "Artist" / "Album"
+        album.mkdir(parents=True)
+        f = album / "01.flac"
+        f.write_bytes(b"original-bytes")
+        inspect_res = CONTROL_AGENT.inspect_import_source(str(album), "reimport")
+        sig = inspect_res["source_signature"]
+        f.write_bytes(b"changed-bytes-different-size")
+        result = CONTROL_AGENT.preserve_import_source(str(album), expected_source_signature=sig)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_code"], "stale_source")
+
+    def test_same_path_and_size_different_bytes_is_not_content_equivalent(self):
+        album_a = self.staging_root / "A"
+        album_b = self.staging_root / "B"
+        album_a.mkdir(parents=True)
+        album_b.mkdir(parents=True)
+        (album_a / "01.flac").write_bytes(b"AAAAAAAAAA")
+        (album_b / "01.flac").write_bytes(b"BBBBBBBBBB")
+        sig_a = CONTROL_AGENT.inspect_import_source(str(album_a), "reimport", compute_content_signature=True)["content_signature"]
+        sig_b = CONTROL_AGENT.inspect_import_source(str(album_b), "reimport", compute_content_signature=True)["content_signature"]
+        self.assertNotEqual(sig_a, sig_b)
+
+    def test_different_size_is_not_content_equivalent(self):
+        album_a = self.staging_root / "A"
+        album_b = self.staging_root / "B"
+        album_a.mkdir(parents=True)
+        album_b.mkdir(parents=True)
+        (album_a / "01.flac").write_bytes(b"short")
+        (album_b / "01.flac").write_bytes(b"a-much-longer-payload-than-short")
+        sig_a = CONTROL_AGENT.inspect_import_source(str(album_a), "reimport", compute_content_signature=True)["content_signature"]
+        sig_b = CONTROL_AGENT.inspect_import_source(str(album_b), "reimport", compute_content_signature=True)["content_signature"]
+        self.assertNotEqual(sig_a, sig_b)
+
+    def test_added_file_is_not_content_equivalent(self):
+        album_a = self.staging_root / "A"
+        album_b = self.staging_root / "B"
+        album_a.mkdir(parents=True)
+        album_b.mkdir(parents=True)
+        (album_a / "01.flac").write_bytes(b"same")
+        (album_b / "01.flac").write_bytes(b"same")
+        (album_b / "02.flac").write_bytes(b"extra")
+        sig_a = CONTROL_AGENT.inspect_import_source(str(album_a), "reimport", compute_content_signature=True)["content_signature"]
+        sig_b = CONTROL_AGENT.inspect_import_source(str(album_b), "reimport", compute_content_signature=True)["content_signature"]
+        self.assertNotEqual(sig_a, sig_b)
+
+    def test_removed_file_is_not_content_equivalent(self):
+        album_a = self.staging_root / "A"
+        album_b = self.staging_root / "B"
+        album_a.mkdir(parents=True)
+        album_b.mkdir(parents=True)
+        (album_a / "01.flac").write_bytes(b"same")
+        (album_a / "02.flac").write_bytes(b"extra")
+        (album_b / "01.flac").write_bytes(b"same")
+        sig_a = CONTROL_AGENT.inspect_import_source(str(album_a), "reimport", compute_content_signature=True)["content_signature"]
+        sig_b = CONTROL_AGENT.inspect_import_source(str(album_b), "reimport", compute_content_signature=True)["content_signature"]
+        self.assertNotEqual(sig_a, sig_b)
+
+    def test_renamed_file_is_not_content_equivalent(self):
+        album_a = self.staging_root / "A"
+        album_b = self.staging_root / "B"
+        album_a.mkdir(parents=True)
+        album_b.mkdir(parents=True)
+        (album_a / "01.flac").write_bytes(b"same-bytes")
+        (album_b / "01-renamed.flac").write_bytes(b"same-bytes")
+        sig_a = CONTROL_AGENT.inspect_import_source(str(album_a), "reimport", compute_content_signature=True)["content_signature"]
+        sig_b = CONTROL_AGENT.inspect_import_source(str(album_b), "reimport", compute_content_signature=True)["content_signature"]
+        self.assertNotEqual(sig_a, sig_b)
+
+    def test_reduced_timestamp_precision_after_real_copy_is_still_content_equivalent(self):
+        # Simulates a filesystem/copy path that truncates mtime precision
+        # (e.g. a coarser-precision target filesystem): the content
+        # signature must be based on real bytes only, never mtime, so a
+        # genuine byte-for-byte copy with degraded timestamp precision is
+        # still recognized as content-equivalent.
+        album = self.staging_root / "Artist" / "Album"
+        album.mkdir(parents=True)
+        (album / "01.flac").write_bytes(b"payload-bytes")
+        first = CONTROL_AGENT.inspect_import_source(str(album), "reimport", compute_content_signature=True)
+        # Truncate this file's own mtime to whole-second precision in place,
+        # exactly what a coarser filesystem's copy would produce, without
+        # touching the bytes at all.
+        st = (album / "01.flac").stat()
+        os.utime(str(album / "01.flac"), ns=((st.st_atime_ns // 10**9) * 10**9, (st.st_mtime_ns // 10**9) * 10**9))
+        second = CONTROL_AGENT.inspect_import_source(str(album), "reimport", compute_content_signature=True)
+        self.assertEqual(first["content_signature"], second["content_signature"])
+
+    def test_copymode_failure_does_not_fail_a_successful_byte_copy(self):
+        # Metadata preservation (mode bits) is best-effort per the review
+        # finding -- a real byte copy that fully succeeds must not be
+        # reported as a failure just because shutil.copymode() couldn't set
+        # permission bits (e.g. a filesystem that doesn't support them).
+        album = self.staging_root / "Artist" / "Album"
+        album.mkdir(parents=True)
+        (album / "01.flac").write_bytes(b"real-audio-bytes")
+        with mock.patch("shutil.copymode", side_effect=OSError("operation not supported")):
+            result = CONTROL_AGENT.preserve_import_source(str(album))
+        self.assertTrue(result["ok"], result)
+        preserved = Path(result["preserved_path"])
+        self.assertEqual((preserved / "01.flac").read_bytes(), b"real-audio-bytes")
+
+    def test_real_byte_copy_failure_fails_closed_not_masked_by_a_fallback(self):
+        # The previous `except Exception: shutil.copy(...)` fallback could
+        # convert a genuine byte-copy failure into an apparent success via a
+        # second copy attempt. The rewritten code has no such fallback:
+        # shutil.copyfile() failing must propagate as a real, reported
+        # failure, and must never silently retry via a different copy
+        # function.
+        album = self.staging_root / "Artist" / "Album"
+        album.mkdir(parents=True)
+        (album / "01.flac").write_bytes(b"real-audio-bytes")
+        with mock.patch("shutil.copyfile", side_effect=OSError("disk full")), \
+             mock.patch("shutil.copy", side_effect=AssertionError(
+                 "preserve_import_source must never fall back to shutil.copy()")):
+            result = CONTROL_AGENT.preserve_import_source(str(album))
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_code"], "copy_failed")
+
+    def test_destination_collision_with_unverified_content_does_not_destroy_existing_data(self):
+        # Review finding: the previous behavior on a destination-name
+        # collision was an unconditional shutil.rmtree() + recreate. A
+        # collision with content that does NOT verifiably match the current
+        # source must fail closed and leave whatever is actually at the
+        # destination completely untouched.
+        album = self.staging_root / "Artist" / "Album"
+        album.mkdir(parents=True)
+        (album / "01.flac").write_bytes(b"original-bytes")
+        first = CONTROL_AGENT.preserve_import_source(str(album), plan_id="collision-plan")
+        self.assertTrue(first["ok"], first)
+        preserved = Path(first["preserved_path"])
+        sentinel = preserved / "unrelated_marker.txt"
+        sentinel.write_bytes(b"do-not-delete-me")
+        # Change the source's content (keeping the same relative path/size
+        # shape irrelevant -- what matters is the content digest no longer
+        # matches) so the destination folder name collides but the content
+        # signature does not.
+        (album / "01.flac").write_bytes(b"different-bytes!")
+        second = CONTROL_AGENT.preserve_import_source(str(album), plan_id="collision-plan")
+        self.assertFalse(second["ok"])
+        self.assertEqual(second["error_code"], "collision")
+        # The pre-existing destination (and the sentinel file proving it's
+        # the SAME directory, not a fresh recreation) must still be there.
+        self.assertTrue(preserved.is_dir())
+        self.assertTrue(sentinel.exists())
+        self.assertEqual(sentinel.read_bytes(), b"do-not-delete-me")
+
+    def test_raw_exception_path_and_signature_values_never_reach_the_http_response(self):
+        # Broader than the single copy2/copyfile-specific leak test above:
+        # proves the *post-copy verification* failure path (a different
+        # branch of preserve_import_source than the outer exception handler)
+        # also never serializes raw content-signature hex or internal host
+        # paths into the client-facing message.
+        album = self.staging_root / "Artist" / "Album"
+        album.mkdir(parents=True)
+        (album / "01.flac").write_bytes(b"real-audio-bytes")
+        original_inspect = CONTROL_AGENT.inspect_import_source
+        call_count = {"n": 0}
+
+        def flaky_inspect(path, operation, **kwargs):
+            call_count["n"] += 1
+            res = original_inspect(path, operation, **kwargs)
+            # Corrupt only the post-copy destination re-inspection (the
+            # second call for this destination path) so verification fails
+            # without touching the initial source inspection.
+            if call_count["n"] > 1 and kwargs.get("compute_content_signature"):
+                res = dict(res)
+                res["content_signature"] = "deliberately-mismatched-" + str(path)
+            return res
+
+        with mock.patch.object(CONTROL_AGENT, "inspect_import_source", side_effect=flaky_inspect):
+            result = CONTROL_AGENT.preserve_import_source(str(album))
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_code"], "copy_failed")
+        message = result.get("message", "")
+        self.assertNotIn(str(self.staging_root), message)
+        self.assertNotIn("deliberately-mismatched-", message)
 
 
 class ReimportTimeoutScalingTests(unittest.TestCase):

@@ -200,6 +200,72 @@ class TestArch003FinalClosure(unittest.TestCase):
             )
             self.assertTrue(verify_mutation_inventory(tmp_root, check_mode=True))
 
+    def test_anti_laundering_rejects_raw_app_py_sql_labeled_controlled(self):
+        """Independent review finding: naming a real transaction_family next
+        to an inventory entry does not by itself prove the mutation runs
+        through that family's engine-side boundary. A raw app.py SQL
+        statement against the authoritative Beets library DB (the
+        raw-beets-library-dml rule) must never pass as
+        CONTROLLED_MEDIA_MUTATION merely because the family name is real."""
+        with tempfile.TemporaryDirectory() as td:
+            tmp_root = Path(td)
+            (tmp_root / "security").mkdir()
+            (tmp_root / "backend").mkdir()
+            (tmp_root / "backend" / "transaction_engine.py").write_text(
+                'mutation_family = "album_metadata_repair_v1"\n', encoding="utf-8",
+            )
+            app_py = tmp_root / "app.py"
+            app_py.write_text(
+                "def sneaky_direct_write(con, item_id, title):\n"
+                '    con.execute("UPDATE items SET title=? WHERE id=?", (title, item_id))\n',
+                encoding="utf-8",
+            )
+            sinks = discover_sinks_in_file(app_py, "app.py")
+            self.assertEqual(len(sinks), 1)
+            self.assertEqual(sinks[0].kind, "sql")
+            (tmp_root / "security" / "arch003_mutation_inventory.json").write_text(
+                json.dumps({
+                    "inventory": [{
+                        "key": sinks[0].key, "file": "app.py", "function": "sneaky_direct_write",
+                        "line": sinks[0].lineno, "kind": "sql", "call_text": sinks[0].call_text,
+                        "classification": "CONTROLLED_MEDIA_MUTATION",
+                        "transaction_family": "album_metadata_repair_v1",
+                        "rule": "raw-beets-library-dml",
+                    }],
+                    "unresolved_baseline": 0,
+                }),
+                encoding="utf-8",
+            )
+            self.assertFalse(verify_mutation_inventory(tmp_root, check_mode=True))
+
+    def test_anti_laundering_accepts_a_real_beets_client_routed_entry(self):
+        """The positive counterpart: a subprocess-kind entry whose call_text
+        genuinely composes a beets_client.* HTTP call into the engine is the
+        real controlled boundary for this codebase and must still pass."""
+        with tempfile.TemporaryDirectory() as td:
+            tmp_root = Path(td)
+            (tmp_root / "security").mkdir()
+            (tmp_root / "backend").mkdir()
+            (tmp_root / "backend" / "transaction_engine.py").write_text(
+                'mutation_family = "album_metadata_repair_v1"\n', encoding="utf-8",
+            )
+            (tmp_root / "app.py").write_text("", encoding="utf-8")
+            (tmp_root / "security" / "arch003_mutation_inventory.json").write_text(
+                json.dumps({
+                    "inventory": [{
+                        "key": "app.py:real_caller:abc123", "file": "app.py", "function": "real_caller",
+                        "line": 1, "kind": "subprocess",
+                        "call_text": "beets_client.update_item_metadata(item_id, fields)",
+                        "classification": "CONTROLLED_MEDIA_MUTATION",
+                        "transaction_family": "album_metadata_repair_v1",
+                        "rule": "reviewed-beetsclient-item-metadata-repair",
+                    }],
+                    "unresolved_baseline": 0,
+                }),
+                encoding="utf-8",
+            )
+            self.assertTrue(verify_mutation_inventory(tmp_root, check_mode=True))
+
     def test_gate_fails_when_unresolved_count_grows_beyond_baseline(self):
         """Growing the number of ARCH003_BLOCKER/NEEDS_REVIEW entries
         beyond the recorded baseline must fail, even if every sink does

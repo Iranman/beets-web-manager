@@ -16,6 +16,7 @@ import hashlib
 import io
 import hmac
 import json
+import logging
 import os
 import re
 import shutil
@@ -32,7 +33,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from collections import Counter
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
 # Portable helper module (stdlib + ffprobe only, no Flask/app.py coupling).
@@ -57,6 +58,21 @@ try:
     import matching_contract
 except ImportError:
     from backend import matching_contract
+
+# Wave 28 independent review: this file previously had no server-side
+# logging at all -- error paths either returned a plain dict or (worse, see
+# preserve_import_source() below) attempted to serialize raw exception text
+# directly into the HTTP-facing response. A real logger is the other half
+# of "sanitize the client-facing message but never just drop the detail":
+# operators still need to be able to see the real path/exception/signature
+# values server-side, in the container's own stderr, without those same
+# values ever crossing the HTTP boundary. Stdlib logging is deliberately
+# used unconfigured here (no explicit handler/level) -- this file is a
+# standalone, dependency-free script when copied into the engine image (see
+# the audio_preferences import fallback above), and logging's own "handler
+# of last resort" already writes WARNING+ records to stderr with zero setup,
+# which is exactly the server-side-only channel this needs.
+logger = logging.getLogger(__name__)
 
 # Configuration
 PORT = int(os.environ.get("BEETS_AGENT_PORT", "8338"))
@@ -1500,10 +1516,46 @@ def _import_source_signature(entries: list[dict[str, Any]]) -> str:
     return hashlib.sha256("|".join(parts).encode("utf-8", "surrogatepass")).hexdigest()
 
 
-def _import_source_content_signature(entries: list[dict[str, Any]]) -> str:
-    """A content structure signature (relative_path + size) used for cross-filesystem
-    copy equivalence where filesystem timestamp precision may vary."""
-    parts = sorted(f"{e['relative_path']}:{e['size']}" for e in entries)
+def _file_content_digest(path: Path, *, chunk_size: int = 1024 * 1024) -> str:
+    """SHA-256 of a file's actual bytes, streamed in fixed-size chunks so
+    memory use is bounded regardless of file size."""
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(chunk_size), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _import_source_content_signature(root: Path, entries: list[dict[str, Any]]) -> str:
+    """A genuine content-equality signature for cross-filesystem COPY
+    verification: per file, (relative_path, size, sha-256 of the file's
+    actual bytes), combined into one manifest digest.
+
+    This is deliberately NOT the same concept as _import_source_signature()
+    (path+size+mtime_ns): that one is a cheap, same-source TOCTOU check
+    that a real filesystem re-read is sufficient for -- "did the source
+    directory I'm about to act on change since I looked at it". This one
+    answers a different question -- "does a copy on a different filesystem
+    (which may have coarser mtime precision, or no meaningful mtime
+    relationship to the source at all) actually contain the same bytes as
+    the source" -- and only a real per-file content digest can answer that.
+    A path+size-only signature (the previous implementation) cannot
+    distinguish two files with the same relative path and size but
+    different bytes, which defeats the entire point of a copy-equivalence
+    check."""
+    parts = []
+    for e in sorted(entries, key=lambda x: x["relative_path"]):
+        rel = e["relative_path"]
+        try:
+            digest = _file_content_digest(root / rel)
+        except Exception:
+            # Unreadable file: still fold *something* stable into the
+            # manifest so a source that becomes unreadable never produces
+            # the same overall signature as one that didn't, but never
+            # silently skip the entry (which could make the manifest
+            # digest ignore a missing/broken file entirely).
+            digest = "unreadable"
+        parts.append(f"{rel}:{e['size']}:{digest}")
     return hashlib.sha256("|".join(parts).encode("utf-8", "surrogatepass")).hexdigest()
 
 
@@ -1557,7 +1609,9 @@ def _read_media_tags_best_effort(safe_file_path: Path) -> dict[str, Any]:
     return tags
 
 
-def inspect_import_source(source_path: object, operation: str) -> dict[str, Any]:
+def inspect_import_source(
+    source_path: object, operation: str, *, compute_content_signature: bool = False,
+) -> dict[str, Any]:
     """Engine-authoritative validation + bounded audio inventory for an
     import/reimport source. Returns a plain result dict (never raises for
     caller-facing conditions) so /imports/source/inspect can map it to a
@@ -1568,6 +1622,15 @@ def inspect_import_source(source_path: object, operation: str) -> dict[str, Any]
     Compose topology, so it cannot validate existence, reject symlinks, or
     inspect audio properties itself. The engine can and must do all of
     that, since it is the only place those roots are actually mounted.
+
+    compute_content_signature defaults to False: computing it means
+    reading every audio file's actual bytes (see
+    _import_source_content_signature()), which is real I/O cost this
+    function's many lightweight callers (AI batch discovery, reimport
+    inspection, confirmed-import source checks) do not need and should not
+    pay for. preserve_import_source() is the one caller that actually
+    needs true cross-filesystem content-equality evidence, and opts in
+    explicitly.
     """
     allowed_types = IMPORT_SOURCE_OPERATIONS.get(operation)
     if allowed_types is None:
@@ -1668,7 +1731,9 @@ def inspect_import_source(source_path: object, operation: str) -> dict[str, Any]
         "truncated_scan": truncated_scan,
         "truncated_audio": truncated_audio,
         "source_signature": _import_source_signature(entries),
-        "content_signature": _import_source_content_signature(entries),
+        "content_signature": (
+            _import_source_content_signature(trusted, entries) if compute_content_signature else ""
+        ),
     }
 
 
@@ -1886,6 +1951,33 @@ def discover_import_sources(
     }
 
 
+def _preservation_relative_path_is_safe(rel: str, src_root: Path, dst_root: Path) -> Optional[Tuple[Path, Path]]:
+    """Independent review finding (CodeQL py/path-injection on this exact
+    function): re-prove containment for each per-file path this loop
+    builds from a directory-walk-derived relative_path, entirely inline in
+    this function's own body -- no delegated call, no generator -- which
+    is the specific structural form CodeQL's same-function dataflow could
+    actually trace for the identical pattern in
+    backend/transaction_engine.py's _derive_artist_folder_identity(). A
+    real relative_to() walk (see inspect_import_source()) can never
+    produce '..'/absolute components, but this never trusts a dict blindly
+    regardless of provenance. Returns (src_file, dst_file) or None."""
+    parts = Path(rel).parts
+    if not parts or any(p in ("", ".", "..") for p in parts):
+        return None
+    src_file = src_root / rel
+    dst_file = dst_root / rel
+    src_norm = os.path.normpath(str(src_file))
+    dst_norm = os.path.normpath(str(dst_file))
+    src_root_norm = os.path.normpath(str(src_root))
+    dst_root_norm = os.path.normpath(str(dst_root))
+    if not (src_norm == src_root_norm or src_norm.startswith(src_root_norm + os.sep)):
+        return None
+    if not (dst_norm == dst_root_norm or dst_norm.startswith(dst_root_norm + os.sep)):
+        return None
+    return Path(src_norm), Path(dst_norm)
+
+
 def preserve_import_source(
     source_path: object,
     expected_source_signature: str = None,
@@ -1910,13 +2002,25 @@ def preserve_import_source(
         except Exception:
             continue
 
-    inspect_res = inspect_import_source(str(trusted_src), "reimport")
+    inspect_res = inspect_import_source(str(trusted_src), "reimport", compute_content_signature=True)
     if not inspect_res.get("ok"):
         return {"ok": False, "error_code": inspect_res.get("error_code", "inspection_failed")}
 
+    # Two distinct identity concepts, never mixed: curr_signature (path +
+    # size + mtime_ns) is the cheap SAME-SOURCE staleness/TOCTOU check --
+    # "did this exact source directory change since I inspected it".
+    # curr_content_sig (path + size + real byte digest) is SOURCE-vs-COPY
+    # content equivalence -- "does a copy of this elsewhere actually
+    # contain the same bytes". expected_source_signature is compared only
+    # against curr_signature: every real caller of this function passes
+    # the same-source signature here (never a content signature -- see
+    # backend/beets_client.py and this file's own reimport_disk()/
+    # confirmed-import call sites), so also comparing it against
+    # curr_content_sig was dead code that only invited the kind of
+    # accidental cross-type comparison this review flagged.
     curr_signature = inspect_res.get("source_signature", "")
     curr_content_sig = inspect_res.get("content_signature", "")
-    if expected_source_signature and curr_signature != expected_source_signature and curr_content_sig != expected_source_signature:
+    if expected_source_signature and curr_signature != expected_source_signature:
         return {
             "ok": False,
             "error_code": "stale_source",
@@ -1941,10 +2045,9 @@ def preserve_import_source(
             if safe_dest.is_symlink():
                 return {"ok": False, "error_code": "collision", "message": "Destination is a symlink"}
 
-            dest_inspect = inspect_import_source(str(safe_dest), "reimport")
-            dest_sig = dest_inspect.get("source_signature")
+            dest_inspect = inspect_import_source(str(safe_dest), "reimport", compute_content_signature=True)
             dest_content_sig = dest_inspect.get("content_signature")
-            if dest_inspect.get("ok") and (dest_sig == curr_signature or dest_content_sig == curr_content_sig):
+            if dest_inspect.get("ok") and dest_content_sig == curr_content_sig:
                 return {
                     "ok": True,
                     "already_preserved": True,
@@ -1952,7 +2055,27 @@ def preserve_import_source(
                     "source_signature": curr_signature,
                     "audio_count": dest_inspect.get("audio_count", 0),
                 }
-            shutil.rmtree(str(safe_dest))
+            # A pre-existing destination that does NOT verifiably match
+            # this source's content is a genuine, unverified conflict, not
+            # authorization to erase whatever is actually there (review
+            # finding: the previous behavior was an unconditional
+            # shutil.rmtree() + recreate here). The destination folder
+            # name is deterministic from the source path, so this really
+            # can happen for a legitimate reason (a prior preservation
+            # attempt for a source that has since changed, or a
+            # differently-shaped concurrent request) -- fail closed and
+            # let the caller decide, rather than silently destroying
+            # unknown state.
+            logger.warning(
+                "Preservation destination collision (unverified content match) for %s -- "
+                "leaving existing destination in place",
+                str(safe_dest),
+            )
+            return {
+                "ok": False,
+                "error_code": "collision",
+                "message": "Preservation destination already exists with unverified content; not overwritten",
+            }
 
         audio_files = inspect_res.get("audio_files") or []
         total_bytes = sum(int(f.get("size", 0)) for f in audio_files)
@@ -1966,18 +2089,31 @@ def preserve_import_source(
         copied_count = 0
         for entry in audio_files:
             rel = entry["relative_path"]
-            src_file = trusted_src / rel
-            dst_file = safe_dest / rel
+            resolved = _preservation_relative_path_is_safe(rel, trusted_src, safe_dest)
+            if resolved is None:
+                continue
+            src_file, dst_file = resolved
 
             if src_file.is_symlink():
                 continue
 
             dst_file.parent.mkdir(parents=True, exist_ok=True)
+            # Byte copy is the correctness-critical operation and must
+            # remain a real failure on error (review finding: the previous
+            # `except Exception: shutil.copy(...)` fallback converted ANY
+            # copy2 exception -- permission, I/O, disk-full, a source that
+            # changed mid-copy -- into a second attempt with a different
+            # copy function, which could itself "succeed" and silently
+            # mask the original failure). Metadata (mode bits, timestamps)
+            # is genuinely best-effort and safe to tolerate: losing exact
+            # preservation of those does not affect correctness, and the
+            # content-digest verification below still catches everything
+            # that actually matters.
+            shutil.copyfile(str(src_file), str(dst_file))
             try:
-                shutil.copy2(str(src_file), str(dst_file))
+                shutil.copymode(str(src_file), str(dst_file))
             except Exception:
-                shutil.copy(str(src_file), str(dst_file))
-
+                pass
             try:
                 st = src_file.stat()
                 os.utime(str(dst_file), ns=(st.st_atime_ns, st.st_mtime_ns))
@@ -1985,16 +2121,22 @@ def preserve_import_source(
                 pass
             copied_count += 1
 
-        dest_inspect = inspect_import_source(str(safe_dest), "reimport")
-        dest_sig = dest_inspect.get("source_signature")
+        dest_inspect = inspect_import_source(str(safe_dest), "reimport", compute_content_signature=True)
         dest_content_sig = dest_inspect.get("content_signature")
-        if not dest_inspect.get("ok") or (dest_sig != curr_signature and dest_content_sig != curr_content_sig):
+        if not dest_inspect.get("ok") or dest_content_sig != curr_content_sig:
+            logger.warning(
+                "Preservation copy post-verification failed for %s: dest_ok=%s",
+                str(safe_dest), dest_inspect.get("ok"),
+            )
             if safe_dest.exists():
-                shutil.rmtree(str(safe_dest))
+                try:
+                    shutil.rmtree(str(safe_dest))
+                except Exception:
+                    logger.warning("Could not clean up failed preservation copy at %s", str(safe_dest), exc_info=True)
             return {
                 "ok": False,
                 "error_code": "copy_failed",
-                "message": f"Preservation copy post-verification failed: dest_ok={dest_inspect.get('ok')}, dest_sig={dest_sig}, curr_sig={curr_signature}",
+                "message": "Preservation copy post-verification failed",
             }
 
         return {
@@ -2005,14 +2147,19 @@ def preserve_import_source(
             "copied_files_count": copied_count,
             "audio_count": dest_inspect.get("audio_count", 0),
         }
-    except Exception as exc:
-        logger.warning(f"Preservation copy failed: {exc}", exc_info=True)
+    except Exception:
+        # Full detail (which can include internal host paths, quota/disk
+        # errors, etc.) is logged server-side only -- never serialized into
+        # the HTTP-facing response. See PR #103's information-exposure
+        # protections; this function's raw f"...{exc}" client-facing
+        # messages were a regression against that same principle.
+        logger.warning("Preservation copy failed for %s", str(trusted_src), exc_info=True)
         if safe_dest.exists():
             try:
                 shutil.rmtree(str(safe_dest))
             except Exception:
                 pass
-        return {"ok": False, "error_code": "copy_failed", "message": f"Preservation copy failed: {exc}"}
+        return {"ok": False, "error_code": "copy_failed", "message": "Preservation copy failed"}
     finally:
         release_os_lock(lock_file)
 
