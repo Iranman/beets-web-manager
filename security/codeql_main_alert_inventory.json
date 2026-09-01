@@ -2110,9 +2110,9 @@
     "end_line": 2959,
     "created_at": "2026-08-26T23:03:38Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/1001",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "this line IS the TOCTOU re-verifier's own symlink-leaf check (_bulk_replacement_toctou_check)"
   },
   {
     "number": 1002,
@@ -2125,9 +2125,9 @@
     "end_line": 2962,
     "created_at": "2026-08-26T23:03:38Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/1002",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "this line IS the TOCTOU re-verifier's own symlink-leaf check, 2nd form"
   },
   {
     "number": 1003,
@@ -2140,9 +2140,9 @@
     "end_line": 2971,
     "created_at": "2026-08-26T23:03:38Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/1003",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "this line IS the TOCTOU re-verifier's own resolve(), followed by fresh containment recheck"
   },
   {
     "number": 1004,
@@ -2155,9 +2155,9 @@
     "end_line": 2974,
     "created_at": "2026-08-26T23:03:38Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/1004",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "this line IS the TOCTOU re-verifier's own post-resolve symlink-target check"
   },
   {
     "number": 1006,
@@ -2170,9 +2170,9 @@
     "end_line": 2978,
     "created_at": "2026-08-26T23:03:38Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/1006",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "reached only after all symlink/containment checks above passed (TOCTOU re-verifier)"
   },
   {
     "number": 1005,
@@ -2185,9 +2185,9 @@
     "end_line": 2978,
     "created_at": "2026-08-26T23:03:38Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/1005",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "reached only after all symlink/containment checks above passed (TOCTOU re-verifier)"
   },
   {
     "number": 1007,
@@ -2200,9 +2200,9 @@
     "end_line": 2981,
     "created_at": "2026-08-26T23:03:38Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/1007",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "stat() reached only after all symlink/containment checks above passed"
   },
   {
     "number": 1008,
@@ -2215,9 +2215,9 @@
     "end_line": 8249,
     "created_at": "2026-08-26T23:03:38Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/1008",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "all 5 callers pass an already-validated or DB-row-derived path within the same Plan/Apply pipeline (checked exhaustively)"
   },
   {
     "number": 107,

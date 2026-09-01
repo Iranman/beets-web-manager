@@ -311,9 +311,27 @@ per-alert, not assumed, per the mission rules (no blanket dismissal).
   containment-first message, plus a new test proving a nonexistent path that *is* inside an allowed root
   still gets the original `"Path not found."` message.
 
+### Alerts 1001-1008 — `py/path-injection`, high — `backend/transaction_engine.py` (8 alerts, all of this file's path-injection alerts)
+
+- **Disposition**: `SAFE_BUT_CODEQL_BLIND` (all 8).
+- 7 of the 8 (1001-1007) are lines *inside* `_bulk_replacement_toctou_check()` itself — a dedicated,
+  extremely thorough pre-mutation TOCTOU/containment re-verifier that independently checks, in order:
+  symlink at leaf (`os.path.islink` and `Path.is_symlink`, both forms), root containment via lexical
+  parent-walk, symlink component anywhere under the root (`_path_has_symlink_under`), `resolve()`, a
+  *second* root-containment check post-resolve, symlink-at-target post-resolve, existence/is-file, and
+  finally full dev/inode/size/`mtime_ns` identity comparison against a captured expected-stat snapshot —
+  covering essentially every adversarial case section 5 of this closure pass's own mission called for
+  (symlink leaf, symlink parent component, inode/device/size/mtime change). Every flagged line is one of
+  these checks or a value used only after the checks preceding it passed.
+- The 8th (1008), `_capture_media_tag_state()`'s `path.stat()`: checked **all 5 call sites**
+  exhaustively (not sampled) — every one passes a path already validated via `_path_under()` +
+  `_path_has_symlink_under()` in the same function, or a path read from the same transaction's own
+  earlier-planned/DB-row-derived item path within the Plan→Apply pipeline (never raw external input).
+- **GitHub disposition**: all 8 dismissed 2026-09-01, `false positive`, sink-specific rationale.
+
 ## 3. Remaining alerts
 
-73 of 171 alerts remain **NEEDS_REVIEW** as of this checkpoint (45 dispositioned: 2 critical
+65 of 171 alerts remain **NEEDS_REVIEW** as of this checkpoint (45 dispositioned: 2 critical
 command-injection dismissed, 8 path-injection fixed as real vulnerabilities, 35 path-injection confirmed
 safe) — see `security/codeql_main_alert_inventory.json` for the full raw list. Work continues
 alert-by-alert (or pattern-class-by-pattern-class for the remaining `py/path-injection` instances
