@@ -265,9 +265,9 @@
     "end_line": 3035,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/126",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "_INLINE_SCRIPT_RE only scans this server's own outgoing response body for CSP hash generation, never untrusted HTML"
   },
   {
     "number": 553,
@@ -370,9 +370,9 @@
     "end_line": 45292,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/103",
-    "disposition": "NEEDS_REVIEW",
+    "disposition": "REAL_VULNERABILITY",
     "dismissed_on_github": false,
-    "notes": ""
+    "notes": "REAL bug (fixed): spotify.com substring check -- routing decision, not cosmetic; fixed with real hostname parsing"
   },
   {
     "number": 104,
@@ -385,9 +385,9 @@
     "end_line": 45328,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/104",
-    "disposition": "NEEDS_REVIEW",
+    "disposition": "REAL_VULNERABILITY",
     "dismissed_on_github": false,
-    "notes": ""
+    "notes": "REAL bug (fixed): youtube.com/youtu.be substring check feeding extractor_args selection; fixed with hostname parsing"
   },
   {
     "number": 105,
@@ -400,9 +400,9 @@
     "end_line": 45332,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/105",
-    "disposition": "NEEDS_REVIEW",
+    "disposition": "REAL_VULNERABILITY",
     "dismissed_on_github": false,
-    "notes": ""
+    "notes": "REAL bug (fixed): soundcloud.com substring check gated _apply_ytdlp_netrc() credential attachment -- a lookalike URL would have exfiltrated stored netrc credentials to an attacker-controlled host. Fixed with hostname parsing"
   },
   {
     "number": 135,
@@ -2230,9 +2230,9 @@
     "end_line": 5518,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/107",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "empirically linear on adversarial input up to 16k+ chars"
   },
   {
     "number": 108,
@@ -2245,9 +2245,9 @@
     "end_line": 5519,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/108",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "simple negated class, no delimiter pair, linear"
   },
   {
     "number": 109,
@@ -2260,9 +2260,9 @@
     "end_line": 17263,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/109",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "regex concatenation but year is captured from (?:19|20)\\d{4}, always exactly 4 digits"
   },
   {
     "number": 110,
@@ -2275,9 +2275,9 @@
     "end_line": 17276,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/110",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "simple bounded pattern, empirically linear"
   },
   {
     "number": 111,
@@ -2290,9 +2290,9 @@
     "end_line": 17310,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/111",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "simple \\s*-\\s* split, no ambiguous overlap, linear"
   },
   {
     "number": 112,
@@ -2305,9 +2305,9 @@
     "end_line": 19574,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/112",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "_YEAR_SFXRE bracket content is bounded \\d{4}, not unbounded"
   },
   {
     "number": 113,
@@ -2320,9 +2320,9 @@
     "end_line": 27271,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/113",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "_FEAT_RE ends in unanchored .* with nothing following to backtrack against"
   },
   {
     "number": 114,
@@ -2335,9 +2335,9 @@
     "end_line": 41019,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/114",
-    "disposition": "NEEDS_REVIEW",
+    "disposition": "REAL_VULNERABILITY",
     "dismissed_on_github": false,
-    "notes": ""
+    "notes": "REAL bug (fixed): _playlist_title_variants unbounded [^)\\]]+ between delimiters is quadratic (4.5s at 16k chars); bounded to 100 chars"
   },
   {
     "number": 115,
@@ -2350,9 +2350,9 @@
     "end_line": 41103,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/115",
-    "disposition": "NEEDS_REVIEW",
+    "disposition": "REAL_VULNERABILITY",
     "dismissed_on_github": false,
-    "notes": ""
+    "notes": "REAL bug (fixed): _playlist_strip_artist_channel_noise same quadratic shape; bounded to 100 chars"
   },
   {
     "number": 116,
@@ -2365,9 +2365,9 @@
     "end_line": 41119,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/116",
-    "disposition": "NEEDS_REVIEW",
+    "disposition": "REAL_VULNERABILITY",
     "dismissed_on_github": false,
-    "notes": ""
+    "notes": "REAL bug (fixed): _playlist_artist_name_variants same quadratic shape; bounded to 100 chars"
   },
   {
     "number": 117,
@@ -2380,9 +2380,9 @@
     "end_line": 41126,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/117",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "alternation of short literal tokens in re.split, empirically linear"
   },
   {
     "number": 118,
@@ -2395,9 +2395,9 @@
     "end_line": 41164,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/118",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "anchored with ^, only ever attempted at position 0"
   },
   {
     "number": 119,
@@ -2410,9 +2410,9 @@
     "end_line": 41175,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/119",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "simple \\s+\\|\\s+ split, empirically linear"
   },
   {
     "number": 120,
@@ -2425,9 +2425,9 @@
     "end_line": 41200,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/120",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "empirically linear at multiple sizes up to 16k chars"
   },
   {
     "number": 121,
@@ -2440,9 +2440,9 @@
     "end_line": 41205,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/121",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "empirically linear"
   },
   {
     "number": 122,
@@ -2455,9 +2455,9 @@
     "end_line": 41214,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/122",
-    "disposition": "NEEDS_REVIEW",
+    "disposition": "REAL_VULNERABILITY",
     "dismissed_on_github": false,
-    "notes": ""
+    "notes": "REAL bug (fixed): _playlist_split_artist_title unbounded \\s+ scanned at O(n) offsets is quadratic (1.4s at 16k chars); bounded to 20 chars"
   },
   {
     "number": 123,
@@ -2470,9 +2470,9 @@
     "end_line": 41294,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/123",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "alternation of short literal words/phrases, no unbounded nesting"
   },
   {
     "number": 125,
@@ -2485,9 +2485,9 @@
     "end_line": 17262,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/125",
-    "disposition": "NEEDS_REVIEW",
-    "dismissed_on_github": false,
-    "notes": ""
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
+    "dismissed_on_github": true,
+    "notes": "year value captured from (?:19|20)\\d{4}, always exactly 4 digits, no metacharacters possible"
   },
   {
     "number": 771,

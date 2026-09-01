@@ -41181,7 +41181,14 @@ def _norm(s):
 def _playlist_title_variants(value):
     raw = _normalize_name(_s(value))
     variants = {raw}
-    variants.add(re.sub(r"\s*[\(\[][^\)\]]+[\)\]]\s*", " ", raw))
+    # SEC-002 CodeQL repository-wide closure finding (py/polynomial-redos):
+    # an unbounded [^)\]]+ between two literal delimiters, scanned via an
+    # unanchored re.sub(), is quadratic in input length for adversarial
+    # text with no closing bracket (empirically confirmed: ~4.5s at a
+    # 16,000-character input). Bounded to 100 chars -- no legitimate
+    # parenthetical annotation in a track/album title is remotely that
+    # long -- which measured linear-time for the same adversarial input.
+    variants.add(re.sub(r"\s*[\(\[][^\)\]]{1,100}[\)\]]\s*", " ", raw))
     variants.add(re.sub(r"\b(?:ft\.?|feat\.?|featuring)\b.+$", " ", raw, flags=re.I))
     variants.add(re.sub(r"\b(?:unreleased)\b", " ", raw, flags=re.I))
     variants.add(re.sub(
@@ -41265,7 +41272,10 @@ def _playlist_strip_artist_channel_noise(value: str) -> str:
     left in, it silently drags down artist-match scores against a real
     downloaded file's tags/filename, which don't carry that branding."""
     text = _s(value)
-    text = re.sub(r"\s*\[[^\]]*\]\s*$", "", text).strip()
+    # SEC-002 CodeQL repository-wide closure finding (py/polynomial-redos):
+    # same unbounded-content-between-delimiters shape as
+    # _playlist_title_variants() above -- bounded for the same reason.
+    text = re.sub(r"\s*\[[^\]]{0,100}\]\s*$", "", text).strip()
     text = _PLAYLIST_ARTIST_CHANNEL_NOISE_RE.sub("", text)
     return " ".join(text.split()).strip(" -_/")
 
@@ -41281,7 +41291,10 @@ def _playlist_artist_name_variants(value):
         if text and _norm(text) not in {_norm(v) for v in variants}:
             variants.append(text)
 
-    cleaned = re.sub(r"\s*\([^)]*\)\s*$", "", raw).strip()
+    # SEC-002 CodeQL repository-wide closure finding (py/polynomial-redos):
+    # same unbounded-content-between-delimiters shape as
+    # _playlist_title_variants() above -- bounded for the same reason.
+    cleaned = re.sub(r"\s*\([^)]{0,100}\)\s*$", "", raw).strip()
     add(raw)
     add(cleaned)
     add(_playlist_strip_artist_channel_noise(raw))
@@ -41376,7 +41389,14 @@ def _playlist_clean_variant_title(value):
 
 def _playlist_split_artist_title(value):
     text = _playlist_strip_video_title_suffix(_playlist_strip_track_prefix(value))
-    parts = [p.strip() for p in re.split(r"\s+[-–—]\s+|(?<=[A-Za-z0-9])[-–—](?=[A-Z0-9])", text, maxsplit=1) if p.strip()]
+    # SEC-002 CodeQL repository-wide closure finding (py/polynomial-redos):
+    # unanchored re.split() with an unbounded \s+ tried at every offset of
+    # a long run is quadratic in input length (empirically confirmed:
+    # ~1.4s at a 16,000-character input of "spaces then dashes"). Realistic
+    # "Artist - Title" separator whitespace is never more than a handful
+    # of characters; bounded to 20, which measured linear-time for the
+    # same adversarial input.
+    parts = [p.strip() for p in re.split(r"\s{1,20}[-–—]\s{1,20}|(?<=[A-Za-z0-9])[-–—](?=[A-Z0-9])", text, maxsplit=1) if p.strip()]
     if len(parts) == 2 and parts[0] and parts[1]:
         return _playlist_clean_video_text(parts[0]), _playlist_clean_video_text(parts[1])
     return None
@@ -45410,6 +45430,23 @@ def _fetch_spotify_playlist_tracks(pid: str, cid: str, cs: str) -> List[Dict[str
     return tracks
 
 
+def _playlist_url_host(value: str) -> str:
+    """Parsed hostname of a caller-supplied playlist source URL, or ''
+    if it doesn't parse. Used for provider-routing decisions in
+    playlist_parse() -- must be real hostname parsing, not substring
+    matching, since one branch attaches stored credentials based on the
+    result (see the SEC-002 CodeQL repository-wide closure finding
+    documented at that call site)."""
+    try:
+        return (_up.urlsplit(value).hostname or "").lower()
+    except Exception:
+        return ""
+
+
+def _playlist_url_host_is(host: str, domain: str) -> bool:
+    return bool(host) and (host == domain or host.endswith("." + domain))
+
+
 @app.post("/api/playlist/parse")
 def playlist_parse():
     payload = request.get_json(silent=True) or {}
@@ -45452,9 +45489,26 @@ def playlist_parse():
     elif source == "url":
         # Generic URL: Spotify (if creds set) → Spotify API; everything else → yt-dlp.
         # Also reached when source=="spotify" isn't used.
+        #
+        # SEC-002 CodeQL repository-wide closure finding
+        # (py/incomplete-url-substring-sanitization, 3 alerts): the
+        # provider-routing checks below used to be plain substring tests
+        # ("spotify.com" in content, "youtube.com"/"soundcloud.com" in
+        # parse_lower). Unlike the cosmetic frontend badge findings in the
+        # same rule class (see docs/security/codeql_repository_closure.md
+        # Phase 4), this one is a genuine trust decision: the soundcloud.com
+        # branch attaches the operator's stored netrc credentials
+        # (_apply_ytdlp_netrc) to whatever URL yt-dlp is given. A URL that
+        # merely CONTAINS "soundcloud.com" as a substring without actually
+        # being a soundcloud.com URL (e.g. "https://evil.example/soundcloud.com/x")
+        # would previously have had those credentials attached and sent to
+        # the attacker-controlled host -- real credential exfiltration, not
+        # just a mislabeled UI badge. Fixed with real hostname parsing
+        # (_playlist_url_host()/_playlist_url_host_is(), module-level).
         cid = os.environ.get("SPOTIFY_CLIENT_ID","").strip()
         cs  = os.environ.get("SPOTIFY_CLIENT_SECRET","").strip()
-        if "spotify.com" in content and cid and cs:
+        _content_host = _playlist_url_host(content)
+        if _playlist_url_host_is(_content_host, "spotify.com") and cid and cs:
             # Route to Spotify API
             m = re.search(r"playlist[/:]([A-Za-z0-9]+)", content)
             if not m:
@@ -45472,11 +45526,17 @@ def playlist_parse():
             except ImportError:
                 return jsonify({"ok": False, "error": "yt-dlp could not be installed — check container pip access"})
 
+            # SEC-002 CodeQL repository-wide closure finding
+            # (py/polynomial-redos): the same unbounded-content-between-
+            # delimiters shape as the playlist title/artist cleaners
+            # (docs/security/codeql_repository_closure.md) -- not itself
+            # CodeQL-flagged at this line, but the identical, already-
+            # empirically-proven-quadratic pattern, fixed the same way.
             _JUNK_RE = re.compile(
                 r'\s*[\(\[]'
                 r'(?:official\s+(?:video|audio|lyric|music\s+video|visualizer)|'
                 r'lyric(?:s|\s+video)?|audio|video|mv|visualizer|hd|4k|explicit|'
-                r'live|acoustic|remix|instrumental|karaoke|cover|ft\.?|feat\.?)[^\)\]]*'
+                r'live|acoustic|remix|instrumental|karaoke|cover|ft\.?|feat\.?)[^\)\]]{0,100}'
                 r'[\)\]]',
                 re.IGNORECASE)
 
@@ -45489,12 +45549,11 @@ def playlist_parse():
                 "js_runtimes": _ytdlp_js_runtime_options(),
                 "remote_components": _ytdlp_remote_components(),
             }
-            parse_lower = content.lower()
-            if "youtube.com" in parse_lower or "youtu.be" in parse_lower:
+            if _playlist_url_host_is(_content_host, "youtube.com") or _playlist_url_host_is(_content_host, "youtu.be"):
                 extractor_args = _ytdlp_source_extractor_args("ytdlp")
                 if extractor_args:
                     ydl_opts["extractor_args"] = extractor_args
-            elif "soundcloud.com" in parse_lower:
+            elif _playlist_url_host_is(_content_host, "soundcloud.com"):
                 _apply_ytdlp_netrc(ydl_opts)
             try:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:

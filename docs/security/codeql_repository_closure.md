@@ -629,14 +629,127 @@ including proof the stale-cache fallback path still activates correctly with the
 **This closes every `py/clear-text-storage-sensitive-data` and `py/stack-trace-exposure` alert in the
 repository: 0 remain `NEEDS_REVIEW` for either rule.**
 
-## 6. Remaining alerts
+## 6. Phase 5C/5D — Regex security (ReDoS, regex-injection), and remaining one-offs (2026-09-01)
 
-22 of 171 alerts remain **NEEDS_REVIEW**: 17 `py/polynomial-redos`, 3 Python-side
-`py/incomplete-url-substring-sanitization`, 1 `py/regex-injection`, 1 `py/bad-tag-filter` — see
-`security/codeql_main_alert_inventory.json` for the full list. **Repository-wide CodeQL security closure
-is NOT complete.**
+All 22 remaining alerts (17 `py/polynomial-redos`, 3 Python-side `py/incomplete-url-substring-sanitization`,
+1 `py/regex-injection`, 1 `py/bad-tag-filter`) traced individually, several **empirically timed** against
+adversarial input rather than judged by inspection alone. **This closes every remaining rule in the
+repository: 0 alerts remain `NEEDS_REVIEW` anywhere. All 171 baseline alerts now have a final,
+individually-justified disposition.**
 
-## 7. Test verification log
+### Methodology: empirical timing, not just pattern inspection
+
+For every `py/polynomial-redos` alert, timed the actual compiled pattern against adversarial input
+(strings shaped to maximize backtracking: long runs of one delimiter with no matching close, or long
+whitespace/dash runs) at increasing sizes (500 → 16,000+ characters) in an isolated subprocess, comparing
+growth rate to distinguish genuine polynomial blowup from CodeQL's static heuristic over-flagging a
+pattern that is actually linear in practice (Python's `re` engine, anchors, and lack of ambiguous overlap
+between adjacent quantifiers all affect this in ways that aren't always obvious from reading the pattern
+alone). This surfaced one important lesson mid-triage: an early, careless test run used the wrong
+delimiter character for a square-bracket pattern (round parens against a `\[` pattern), which made it
+look artificially safe — re-running with the correct adversarial shape reversed that verdict.
+
+### Alerts 114/#41019, 115/#41103, 116/#41119, 122/#41214 — `py/polynomial-redos`, high — `app.py`, playlist artist/title-cleaning helpers (4 alerts)
+
+- **Disposition**: `REAL_VULNERABILITY` — genuine, fixed.
+- All 4 share the same root cause: an unanchored `re.sub()`/`re.split()` with an unbounded quantifier
+  (`[^)\]]+`, `[^\]]*`, `[^)]*`, or `\s+`) that gets retried at every character offset of adversarial
+  input with no matching closing delimiter (or no terminating whitespace) — **empirically confirmed
+  quadratic**: `_playlist_title_variants()`'s pattern took **4.5 seconds** against a 16,000-character
+  adversarial string (up from 0.007s at 500 chars — the growth curve alone rules out linear); the
+  `\s+`-based split in `_playlist_split_artist_title()` took **1.4 seconds** at the same scale.
+- **Why this is reachable, not just theoretical**: all 4 functions run on playlist track/artist text that
+  can originate from user-pasted playlist text (`Playlists.tsx`'s "paste a list of tracks" mode) —
+  attacker-controlled length is realistic, not a stretch.
+- **Fix**: bounded the previously-unbounded quantifiers (100 characters for parenthetical/bracket
+  content, 20 characters for separator whitespace runs) — no legitimate track/artist title comes
+  remotely close to either bound, and the bounded patterns measured **linear time** against the same
+  adversarial inputs (confirmed before editing the source, not assumed).
+- **Unreported instance fixed too**: found and fixed the identical unbounded-content shape in a nearby
+  `_JUNK_RE` pattern (`app.py`, yt-dlp playlist-title cleanup) that CodeQL had not flagged at all —
+  per this pass's own instruction not to limit fixes to only what the scanner reported.
+- **Tests**: `tests/test_codeql_repowide_closure_playlist_redos.py` (9 tests) — 4 performance tests
+  proving each fixed function completes in well under 2 seconds against 20,000-character adversarial
+  input (actual: <0.1s total for all 4 combined), plus 5 behavior-preservation tests proving normal
+  "Artist - Title (feat. Someone) [Official Video]"-shaped input still cleans correctly.
+
+### Alerts 103, 104, 105 — `py/incomplete-url-substring-sanitization`, medium — `app.py`, `playlist_parse()` (3 alerts)
+
+- **Disposition**: `REAL_VULNERABILITY` — genuine, fixed. **Materially different from the Phase 4 JS
+  findings in the same rule** — not cosmetic.
+- `playlist_parse()`'s provider-routing logic used `"spotify.com" in content` and `"youtube.com"`/
+  `"youtu.be"`/`"soundcloud.com"` `in parse_lower` substring checks to decide which of three real,
+  consequential actions to take. The soundcloud branch calls `_apply_ytdlp_netrc(ydl_opts)`, which
+  instructs yt-dlp to attach the **operator's stored netrc credentials** to the outbound request. A URL
+  that merely *contains* the substring `"soundcloud.com"` without actually being hosted there (e.g.
+  `https://evil.example/soundcloud.com/x`) would previously have had those credentials attached and sent
+  to the attacker-controlled host — **real credential exfiltration**, not a mislabeled UI badge like the
+  cosmetic `platformLabel()`/`detectPlatform()` findings closed in Phase 4.
+- **Fix**: real hostname parsing (`_playlist_url_host()`/`_playlist_url_host_is()`, hoisted to module
+  level, exact-host-or-subdomain-suffix matching via `urllib.parse.urlsplit`) replaces all 3 substring
+  checks.
+- **Tests**: `tests/test_codeql_repowide_closure_playlist_url_host.py` (10 tests) — 8 unit tests on the
+  hostname parser/matcher (including the exact `evil.example/soundcloud.com` spoof and a
+  `soundcloud.com.evil.example` suffix-lookalike, both correctly rejected; genuine `soundcloud.com` and
+  its subdomains correctly accepted) plus 2 integration tests driving the real `playlist_parse()` route
+  with a faked `yt_dlp` module, proving `_apply_ytdlp_netrc()` is **not called** for the spoofed URL and
+  **is still called** for a genuine `soundcloud.com` URL (behavior preserved for the legitimate case).
+
+### Alerts 109/#17263, 125/#17262 — `py/regex-injection` and the redos alert at the same line — `app.py`, `_ai_evidence_extract_year`
+
+- **Disposition**: `SAFE_BUT_CODEQL_BLIND` (both).
+- `re.sub(r"\s*[\(\[]" + year + r"[\)\]]", "", text)` builds a regex from a runtime value — but `year`
+  is itself `m.group(1)` captured a few lines above from the pattern `(?:19|20)\d{4}` (sic; 2-digit
+  century + `\d{2}` in the actual source), which can **only ever match a string composed of exactly 4
+  digits**. A value that is provably constrained to `[0-9]{4}` by the same regex engine that produced it
+  cannot introduce a regex metacharacter — no injection is possible regardless of what the *original*
+  input to this function was.
+
+### Alert 126 — `py/bad-tag-filter`, medium — `app.py`, `_inline_script_csp_hashes`
+
+- **Disposition**: `SAFE_BUT_CODEQL_BLIND`.
+- CodeQL's `bad-tag-filter` rule is a generic heuristic against using regex to filter/detect HTML tags as
+  a *security boundary* on untrusted input. Traced the actual data flow: `_INLINE_SCRIPT_RE` is used only
+  by `_content_security_policy()`, called from a global `@app.after_request` hook with
+  `html_for_csp = response.get_data(as_text=True)` — **this server's own outgoing response body**, to
+  compute `sha256-` hashes of its own inline `<script>` tags for the `Content-Security-Policy` header's
+  allowlist. It never parses attacker-supplied or otherwise untrusted HTML; it is a build/response-time
+  introspection tool, not an XSS filter.
+
+### The other 13 `py/polynomial-redos` alerts
+
+- **Disposition**: `SAFE_BUT_CODEQL_BLIND` (all 13), each empirically timed (not merely inspected) and
+  confirmed linear/flat against adversarial input at up to 16,000+ characters. Root causes varied:
+  lazy `.*?` quantifiers with a required terminator and no overlap (alert 107); simple negated character
+  classes with no delimiter-pair ambiguity (108, 112); bounded repetition (`\d{4}`, not unbounded `+`/`*`)
+  (112); a pattern anchored with `^` so `re.sub()` only ever attempts a match at position 0, never
+  retried at O(n) offsets (118); alternations of short literal tokens with no unbounded nesting
+  (110, 111, 113, 117, 119, 123); and two patterns (120, 121) that looked like they might be growing at
+  small input sizes but proved flat once tested up to 8,000–16,000 characters — a reminder that small-n
+  timing noise can mislead without pushing the test far enough to see the true asymptote.
+
+## 7. Repository-wide CodeQL security closure — final status
+
+**All 171 baseline alerts have a final, individually-justified disposition — 0 remain `NEEDS_REVIEW`.**
+
+| Category | Count |
+| --- | ---: |
+| Total baseline alerts | 171 |
+| Real vulnerabilities found and fixed (code changes, regression-tested) | 35 |
+| Confirmed genuinely safe and dismissed on GitHub (`false positive` / `used in tests`) | 136 |
+| Alerts remaining `NEEDS_REVIEW` | **0** |
+
+This is **branch-local, verified, individual-disposition closure** — every alert has been traced,
+understood, and either fixed-with-tests or proven safe-with-evidence, none dismissed by rule type or in
+bulk without a sink-specific rationale. It is **not yet repository/`main` closure**: the 35 real fixes
+remain "open" on GitHub's live view until this branch is pushed, reviewed, merged, and `main` is
+rescanned by CodeQL — per this document's own repeated distinction (see the Reconciliation section
+above), and per this repository's `AGENT_WORKFLOW.md`, pushing/merging requires explicit authorization
+this pass does not have. **Do not read "0 NEEDS_REVIEW" as "0 open on GitHub" — they answer different
+questions**, and conflating them is exactly the error this closure effort's own mission documents warned
+against repeatedly.
+
+## 8. Test verification log
 
 - Full backend suite (`python -m unittest discover -s tests -p "test_*.py"`), run 1 (early in session):
   2763 tests, 0 failures, 129 skipped (pre-existing, require live engine/Docker).
@@ -667,3 +780,17 @@ is NOT complete.**
   `npm run typecheck` clean; `npm run lint` clean; `npm test -- --run` — **58 tests passed (4 test
   files)**; `npm run build` — Next.js production build succeeded, all 13 static pages generated;
   `npm audit --audit-level=high` — **0 vulnerabilities**.
+- Python security gates (Phase 5A/5B checkpoint): all 4 gates re-run and pass; endpoint inventory
+  regenerated again (further line-number drift only).
+- Full suite, run 8 (Phase 5A/5B checkpoint, 149/171 alerts dispositioned): 2795 tests, 0 failures, 129
+  skipped, exit code 0.
+- Full suite, run 9 (**final** — after Phase 5C/5D, all 171 alerts dispositioned, 0 remain
+  `NEEDS_REVIEW`): 2814 tests, 0 failures, 129 skipped, exit code 0.
+- Full suite, run 10 (final order-dependence/flakiness re-check, same code state as run 9): see the
+  commit that follows this one for the confirmed count.
+- Final Python security gates (all 4): `security_secret_scan.py` passed; `validate_compose_security.py`
+  → `{"ok": true, "errors": [], "warnings": []}`; `verify_arch003_mutation_inventory.py --check` passed
+  (469 entries, 107 unresolved, matches baseline); `generate_endpoint_inventory.py --check` regenerated
+  once more (line-number drift only, 0 routes need manual review) and now up to date.
+- Final frontend gates (no frontend files changed in Phase 5, re-run for completeness): `npm run
+  typecheck` clean; `npm run lint` clean; `npm test -- --run` — 58/58 passed.
