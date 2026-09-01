@@ -11971,7 +11971,7 @@ def album_deduplicate(aid):
                 log.append(f"  WARN engine deduplicate request failed: {ex}")
 
         # ── Step 5: Strip year suffix from album name (anti-double-year) ──────
-        _strip_year_from_album_db(aid, log)
+        _strip_year_from_album_name(aid, log)
 
         # ── Step 6: Relocate album via engine ──────────────────────────────────
         try:
@@ -12307,7 +12307,7 @@ def match_album(aid):
             _compensate_committed_metadata_or_raise(aid, meta_op_id, "match album MB track repair", repair_exc, log)
 
         # Strip trailing year from album name before move (avoid "Album (2025) (2025)")
-        _strip_year_from_album_db(aid, log)
+        _strip_year_from_album_name(aid, log)
 
         # 5 ── write tags to audio files
         log.append("[5/6] Writing tags to audio files ...")
@@ -13399,7 +13399,7 @@ def _invalidate_lib_cache():
         pass
 
 
-def _strip_year_from_album_db(aid: int, log: list) -> str:
+def _strip_year_from_album_name(aid: int, log: list) -> str:
     """If the album name ends with a year suffix like ' (2022)' or ' [2022]',
     strip it so the beets path template doesn't produce double-year folder names
     (e.g. 'Multiverse (2022) (2022)' → 'Multiverse (2022)').
@@ -22333,7 +22333,7 @@ def import_folder_with_id():
                 except Exception as _se:
                     log.append(f"  mbsync transaction warning: {_se}")
 
-                cur_album = _strip_year_from_album_db(aid, log)
+                cur_album = _strip_year_from_album_name(aid, log)
 
                 log.append("[3/4] Writing tags to audio files via engine transaction…")
                 try:
@@ -23088,7 +23088,7 @@ def reimport_disk():
                 raise RuntimeError(f"Engine apply_album_mb_track_repair failed for album {aid}")
 
             log.append("[3/3] Writing tags and moving existing album...")
-            _strip_year_from_album_db(aid, log)
+            _strip_year_from_album_name(aid, log)
             up_res = beets_client.update_album_metadata(aid, {}, force_write_tags=True)
             if not up_res.get("ok"):
                 raise RuntimeError(f"Engine update_album_metadata failed for album {aid}")
@@ -24049,7 +24049,7 @@ def reimport_disk():
 
             # Strip any trailing year suffix from album name BEFORE rename so the
             # path template $album (%left{$year,4}) doesn't produce "Album (2022) (2022)"
-            _strip_year_from_album_db(aid, log)
+            _strip_year_from_album_name(aid, log)
 
             up_res = beets_client.update_album_metadata(aid, {}, force_write_tags=True)
             if not up_res.get("ok"):
@@ -24098,7 +24098,7 @@ def reimport_disk():
         # _find_ids_in_db found WITHOUT an album_id -- i.e. standalone
         # tracks Beets did not group into an album row. The previous
         # version of this loop resolved each item's real album_id (below,
-        # for _strip_year_from_album_db) but then discarded it, passing
+        # for _strip_year_from_album_name) but then discarded it, passing
         # the item's own row id to update_album_metadata()/relocate_album()
         # /plan_album_mb_track_repair() as if it WERE an album_id. Those
         # functions take an album_id; an item id can numerically collide
@@ -24126,7 +24126,7 @@ def reimport_disk():
                 continue
             _item_repaired_album_ids.add(_real_aid)
 
-            _strip_year_from_album_db(_real_aid, log)
+            _strip_year_from_album_name(_real_aid, log)
 
             p_res = beets_client.plan_album_mb_track_repair({"album_id": _real_aid, "mb_albumid": mb_albumid})
             if not p_res.get("ok") or not p_res.get("operation_id"):

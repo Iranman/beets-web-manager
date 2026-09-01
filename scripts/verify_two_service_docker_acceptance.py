@@ -2104,14 +2104,35 @@ def run_wave27_config_scenarios(
     final_stat_res = run(stat_cmd)
     final_stat = final_stat_res.stdout.strip() if final_stat_res.returncode == 0 else ""
     final_mode = final_stat.split()[0] if final_stat else ""
-    if final_mode in {"600", "644"}:
+    # config.yaml can contain credentials (Discogs/Last.fm tokens, etc.) and
+    # production _write_agent_config_file()/_revert_agent_config_file()
+    # always os.chmod() it 0o600 -- every call site, no exception. 0o644
+    # (group/world readable) is not an alternate acceptable mode, it is a
+    # regression: accepting it here previously let that regression pass
+    # silently even though the PR's own claimed contract is 0600-only.
+    if final_mode == "600":
         scenario_pass("config-permissions-preserved-and-secure")
-    elif final_mode and (final_mode.endswith("66") or final_mode.endswith("77") or final_mode == "777"):
-        scenario_fail("config-permissions-insecure", f"config.yaml permissions are insecure: {final_stat}")
-    elif final_mode and final_mode not in {"600", "644"}:
-        scenario_fail("config-permissions-broadened", f"config.yaml permissions broadened to {final_stat}")
+    elif final_mode:
+        scenario_fail("config-permissions-insecure", f"config.yaml must be mode 600, found: {final_stat}")
     else:
-        scenario_pass("config-permissions-preserved-and-secure")
+        scenario_fail("config-permissions-unreadable", "could not stat config.yaml to verify its permissions")
+
+    # initial_stat was captured before any of this scenario's writes so it
+    # is actually compared, not just captured and discarded: ownership
+    # (uid/gid) must not drift across CAS writes, backup restores, and the
+    # engine-offline/retry cycle this scenario just exercised.
+    initial_parts = initial_stat.split()
+    final_parts = final_stat.split()
+    if len(initial_parts) == 3 and len(final_parts) == 3:
+        _, initial_uid, initial_gid = initial_parts
+        _, final_uid, final_gid = final_parts
+        if (initial_uid, initial_gid) != (final_uid, final_gid):
+            scenario_fail(
+                "config-ownership-drift",
+                f"config.yaml owner changed from uid={initial_uid} gid={initial_gid} to uid={final_uid} gid={final_gid}",
+            )
+        else:
+            scenario_pass("config-ownership-stable")
 
 
 def run_wave27_attach_failpoint_scenario(web_container: str, fixture: dict) -> None:

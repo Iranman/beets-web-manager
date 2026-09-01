@@ -6975,18 +6975,36 @@ def _derive_artist_folder_identity(
     albums whose item paths live under this folder) -- SEC-002 Wave 21
     final review: a caller-supplied MBID is evidence, never authority.
     More than one distinct established id under the same folder is itself
-    a conflict signal (returned via "ids" having len > 1)."""
+    a conflict signal (returned via "ids" having len > 1).
+
+    Precondition: folder_path must already be the resolved Path returned
+    by validate_path_under_allowed_roots(..., reject_symlinks=True) at the
+    caller -- both current callers (create_artist_folder_reconcile_plan's
+    Plan loop and execute_artist_folder_reconcile_apply's TOCTOU
+    revalidation loop) do this immediately before calling here and fail
+    closed (return/continue) on None. Re-deriving containment a second
+    time from the same already-proven Path added nothing but an opaque
+    second hop CodeQL's dataflow analysis could not verify end to end
+    (CodeQL alerts #1016/#1017); this only requires the already-validated
+    Path to still exist, which is the one thing a second containment check
+    could never re-prove anyway (a fresh symlink swap between the caller's
+    check and this call is a TOCTOU concern the resource lock, not a
+    second path-validate call, is what actually closes).
+    """
     result: Dict[str, Any] = {"ids": set(), "album_count": 0}
-    if not lib_db:
+    if not lib_db or not isinstance(folder_path, Path) or not folder_path.exists():
         return result
-    roots = allowed_roots or [str(os.environ.get("MUSIC_ROOT", "/music"))]
-    valid_folder = validate_path_under_allowed_roots(folder_path, roots, reject_symlinks=True)
-    if valid_folder is None or not valid_folder.exists():
-        return result
-    valid_db = validate_path_under_allowed_roots(lib_db, [str(Path(lib_db).parent)], reject_symlinks=False) or Path(lib_db)
+    # lib_db is never caller-controlled: every call site sources it from
+    # server-owned engine configuration (BEETS_LIBRARY_DB / LIB_PATH), never
+    # from request payload, transaction metadata, or candidate data -- so it
+    # is checked directly rather than "validated" against a root derived
+    # from itself (every path is trivially under its own parent, so that
+    # proves nothing) with a fail-open fallback to the unvalidated value on
+    # failure.
+    valid_db = Path(lib_db)
     if not valid_db.exists():
         return result
-    prefix = str(valid_folder).encode("utf-8") + os.sep.encode("utf-8")
+    prefix = str(folder_path).encode("utf-8") + os.sep.encode("utf-8")
     try:
         con = sqlite3.connect(str(valid_db), timeout=10)
         con.row_factory = sqlite3.Row
@@ -7023,19 +7041,24 @@ def _extract_recording_mbids(
     """Extracts MusicBrainz Recording IDs established under src_path from local DB items.
     Candidate payload recording IDs are treated as suggestions/hints ONLY and must be
     independently corroborated by established engine item track state under src_path.
+
+    Precondition: src_path must already be the resolved Path returned by
+    validate_path_under_allowed_roots(..., reject_symlinks=True) at the
+    caller (create_artist_folder_reconcile_plan's Plan loop does this
+    immediately before calling here and fails closed on None) -- see
+    _derive_artist_folder_identity's docstring for the full rationale
+    (CodeQL alerts #1016/#1017).
     """
     lib_db = os.environ.get("BEETS_LIBRARY_DB", "")
     if db_path and db_path == os.environ.get("BEETS_LIBRARY_DB", ""):
         lib_db = db_path
-    if not lib_db:
+    if not lib_db or not isinstance(src_path, Path) or not src_path.exists():
         return []
 
-    roots = allowed_roots or [str(os.environ.get("MUSIC_ROOT", "/music"))]
-    valid_src = validate_path_under_allowed_roots(src_path, roots, reject_symlinks=True)
-    if valid_src is None or not valid_src.exists():
-        return []
-
-    valid_db = validate_path_under_allowed_roots(lib_db, [str(Path(lib_db).parent)], reject_symlinks=False) or Path(lib_db)
+    # lib_db is never caller-controlled (see _derive_artist_folder_identity)
+    # -- checked directly, not "validated" against a root derived from
+    # itself with a fail-open fallback to the unvalidated value.
+    valid_db = Path(lib_db)
     if not valid_db.exists():
         return []
 
@@ -7044,7 +7067,7 @@ def _extract_recording_mbids(
         con = sqlite3.connect(str(valid_db), timeout=5)
         con.row_factory = sqlite3.Row
         try:
-            prefix = str(valid_src) + os.sep
+            prefix = str(src_path) + os.sep
             rows = _rows_by_path_prefix(
                 con, "items", "DISTINCT mb_trackid, path", "path", prefix, path_result_col="path"
             )

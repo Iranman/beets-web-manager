@@ -155,7 +155,7 @@ class MatchAlbumRequiredStageTests(unittest.TestCase):
                 "unmatched_items": [],
             }),
             mock.patch.object(APP, "_match_tracks_from_mb", return_value=1),
-            mock.patch.object(APP, "_strip_year_from_album_db"),
+            mock.patch.object(APP, "_strip_year_from_album_name"),
             mock.patch.object(APP, "_invalidate_lib_cache"),
         ]
         for patcher in self.patches:
@@ -630,6 +630,67 @@ class ArtistTrustTierRegressionTests(unittest.TestCase):
         with mock.patch("helpers_mb._fetch_mb_recording_details", side_effect=_mock_mb):
             verified = txn._verify_mb_artist_recording_credit(caller_mbid, [r1, r2])
         self.assertFalse(verified)
+
+
+class ArtistFolderDbPathTrustTests(unittest.TestCase):
+    """CodeQL #1016/#1017 (py/path-injection): _derive_artist_folder_identity
+    and _extract_recording_mbids used to "validate" lib_db against a root
+    computed from lib_db's own parent (never a real trust boundary -- every
+    path is under its own parent) and fell open to the unvalidated path
+    when that "validation" returned None. Both functions now use lib_db
+    directly (it is always server-owned config -- see
+    test_control_agent_db_path_audit.py -- never request/candidate data)
+    with no fallback, and no longer re-derive folder-path containment from
+    a request-tainted value inside the callee at all -- only the caller's
+    validated Path is trusted, so there is nothing here to "fall open" if
+    it doesn't validate."""
+
+    def test_derive_identity_fails_closed_when_lib_db_does_not_exist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp) / "Some Artist"
+            folder.mkdir()
+            result = txn._derive_artist_folder_identity(folder, "/nonexistent/library.blb")
+        self.assertEqual(result, {"ids": set(), "album_count": 0})
+
+    def test_derive_identity_never_falls_back_to_an_unvalidated_db_path(self):
+        """A candidate cannot smuggle an alternate DB path in: lib_db is a
+        plain positional argument, not derived from folder_path in any way,
+        and a missing/rejected lib_db must return the empty result -- never
+        silently substitute some other path and proceed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp) / "Some Artist"
+            folder.mkdir()
+            with mock.patch("backend.transaction_engine.sqlite3.connect") as connect:
+                result = txn._derive_artist_folder_identity(folder, "")
+        connect.assert_not_called()
+        self.assertEqual(result, {"ids": set(), "album_count": 0})
+
+    def test_extract_recording_mbids_fails_closed_when_lib_db_does_not_exist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp) / "Some Artist"
+            folder.mkdir()
+            rec_ids = txn._extract_recording_mbids({}, folder, db_path="/nonexistent/library.blb")
+        self.assertEqual(rec_ids, [])
+
+    def test_extract_recording_mbids_never_opens_sqlite_without_a_real_db_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp) / "Some Artist"
+            folder.mkdir()
+            with mock.patch("backend.transaction_engine.sqlite3.connect") as connect:
+                rec_ids = txn._extract_recording_mbids({}, folder, db_path="")
+        connect.assert_not_called()
+        self.assertEqual(rec_ids, [])
+
+    def test_derive_identity_fails_closed_when_folder_path_missing(self):
+        """folder_path is trusted as an already-validated caller-supplied
+        Path (see docstring), but a missing directory must still fail
+        closed rather than proceed to open the DB."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "library.blb"
+            db_path.write_text("", encoding="utf-8")
+            missing_folder = Path(tmp) / "does-not-exist"
+            result = txn._derive_artist_folder_identity(missing_folder, str(db_path))
+        self.assertEqual(result, {"ids": set(), "album_count": 0})
 
 
 if __name__ == "__main__":
