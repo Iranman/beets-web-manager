@@ -1075,9 +1075,9 @@
     "end_line": 28811,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/231",
-    "disposition": "NEEDS_REVIEW",
+    "disposition": "REAL_VULNERABILITY",
     "dismissed_on_github": false,
-    "notes": ""
+    "notes": "app.py /api/import: unvalidated path.mkdir() before any root check; fixed via _resolve_import_source_path()"
   },
   {
     "number": 232,
@@ -1090,9 +1090,9 @@
     "end_line": 28814,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/232",
-    "disposition": "NEEDS_REVIEW",
+    "disposition": "REAL_VULNERABILITY",
     "dismissed_on_github": false,
-    "notes": ""
+    "notes": "app.py /api/import: unvalidated path.exists() before any root check; fixed via _resolve_import_source_path()"
   },
   {
     "number": 234,
@@ -1105,9 +1105,9 @@
     "end_line": 28863,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/234",
-    "disposition": "NEEDS_REVIEW",
+    "disposition": "REAL_VULNERABILITY",
     "dismissed_on_github": false,
-    "notes": ""
+    "notes": "app.py /api/import/preflight: second dataflow path to the same .exists() call; fixed via _resolve_import_source_path()"
   },
   {
     "number": 233,
@@ -1120,9 +1120,9 @@
     "end_line": 28863,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/233",
-    "disposition": "NEEDS_REVIEW",
+    "disposition": "REAL_VULNERABILITY",
     "dismissed_on_github": false,
-    "notes": ""
+    "notes": "app.py /api/import/preflight: unvalidated scan_path.exists() before any root check; fixed via _resolve_import_source_path()"
   },
   {
     "number": 235,
@@ -1135,9 +1135,9 @@
     "end_line": 28866,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/235",
-    "disposition": "NEEDS_REVIEW",
+    "disposition": "REAL_VULNERABILITY",
     "dismissed_on_github": false,
-    "notes": ""
+    "notes": "app.py /api/import/preflight: unvalidated scan_path.resolve() before any root check; fixed via _resolve_import_source_path()"
   },
   {
     "number": 236,
@@ -1150,9 +1150,9 @@
     "end_line": 28873,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/236",
-    "disposition": "NEEDS_REVIEW",
+    "disposition": "REAL_VULNERABILITY",
     "dismissed_on_github": false,
-    "notes": ""
+    "notes": "app.py /api/import/preflight: unvalidated os.walk(scan_path) -- arbitrary filesystem enumeration; fixed via _resolve_import_source_path()"
   },
   {
     "number": 237,
@@ -1165,9 +1165,9 @@
     "end_line": 28924,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/237",
-    "disposition": "NEEDS_REVIEW",
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
     "dismissed_on_github": false,
-    "notes": ""
+    "notes": "app.py: Path(row[\"path\"]).resolve() operates on a value derived from the now-validated scan_path via os.walk(), never raw request text"
   },
   {
     "number": 238,
@@ -1180,9 +1180,9 @@
     "end_line": 28975,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/238",
-    "disposition": "NEEDS_REVIEW",
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
     "dismissed_on_github": false,
-    "notes": ""
+    "notes": "app.py /api/browse: this line IS the containment check itself (_path_is_under/.resolve() against _BROWSE_ALLOWED_ROOTS); pre-existing correct pattern"
   },
   {
     "number": 239,
@@ -1195,9 +1195,9 @@
     "end_line": 28994,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/239",
-    "disposition": "NEEDS_REVIEW",
+    "disposition": "SAFE_BUT_CODEQL_BLIND",
     "dismissed_on_github": false,
-    "notes": ""
+    "notes": "app.py _dedup_norm_path(): pure path-string normalization for cache-key comparison, never used to read/enumerate/mutate the filesystem"
   },
   {
     "number": 240,
@@ -1210,9 +1210,9 @@
     "end_line": 29043,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/240",
-    "disposition": "NEEDS_REVIEW",
+    "disposition": "REAL_VULNERABILITY",
     "dismissed_on_github": false,
-    "notes": ""
+    "notes": "app.py _scan_scope_label() via /api/dedup/scan: scan_path.resolve() ran before any root check; fixed via _resolve_dedup_scan_path()"
   },
   {
     "number": 241,
@@ -1225,9 +1225,9 @@
     "end_line": 29190,
     "created_at": "2026-07-20T14:17:34Z",
     "html_url": "https://github.com/Iranman/beets-web-manager/security/code-scanning/241",
-    "disposition": "NEEDS_REVIEW",
+    "disposition": "REAL_VULNERABILITY",
     "dismissed_on_github": false,
-    "notes": ""
+    "notes": "app.py /api/dedup/scan: unvalidated scan_path.exists() + downstream scan_path.rglob(\"*\") -- arbitrary filesystem enumeration; fixed via _resolve_dedup_scan_path()"
   },
   {
     "number": 246,

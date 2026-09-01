@@ -28797,10 +28797,54 @@ if _legacy_local_scan_enabled():
 
 # ── Import ────────────────────────────────────────────────────────────────────
 
+_IMPORT_SOURCE_ALLOWED_ROOTS = tuple(TORRENT_SOURCE_ROOTS) + (MUSIC_ROOT,)
+
+
+def _resolve_import_source_path(raw: Any) -> Tuple[Optional[Path], Optional[str]]:
+    """Validate a caller-supplied import source path against the configured
+    torrent-source roots (or the music library root, for the "already
+    organized, just untracked" reimport case) before any filesystem
+    operation touches it. Mirrors the _folder_cleanup_path()/_path_is_under()
+    allowlist pattern already used elsewhere in this file.
+
+    SEC-002 CodeQL repository-wide closure finding: /api/import and
+    /api/import/preflight previously called Path(path).mkdir(), .exists()
+    and os.walk(path) against the raw request body value with no
+    containment check at all -- an authenticated caller could point `path`
+    at any absolute filesystem path the container process can reach,
+    causing arbitrary-directory creation (mkdir) and filesystem-layout
+    enumeration (os.walk) outside the intended torrent-source/library
+    roots. This validator must run before any of those operations, not
+    just before the eventual beets_client hand-off (the engine-side
+    reimport_source_atomic() validation is a separate, later boundary and
+    does not protect the web-manager-side probes made before it runs).
+    """
+    text = _s(raw).strip()
+    if not text:
+        return None, "Path is required"
+    try:
+        candidate = Path(text)
+        if not candidate.is_absolute():
+            return None, "Path must be absolute"
+        resolved = candidate.resolve(strict=False)
+    except Exception:
+        return None, "Invalid path."
+    if not any(
+        _path_is_under(resolved, root) or resolved == root.resolve(strict=False)
+        for root in _IMPORT_SOURCE_ALLOWED_ROOTS
+    ):
+        return None, "Path is outside the allowed import source roots"
+    return resolved, None
+
+
 @app.post("/api/import")
 def start_import():
     payload  = request.get_json(silent=True) or {}
-    path     = payload.get("path", "/data/torrents/music")
+    path_raw = payload.get("path", "/data/torrents/music")
+    validated_path, path_error = _resolve_import_source_path(path_raw)
+    if path_error:
+        return jsonify({"ok": False, "error": path_error}), 400
+    path     = str(validated_path)
     fallback = payload.get("fallback", "asis")   # asis | skip
     write    = payload.get("write", True)
     move     = payload.get("move", False)
@@ -28859,11 +28903,14 @@ def start_import():
 @app.post("/api/import/preflight")
 def import_preflight():
     payload = request.get_json(silent=True) or {}
-    scan_path = Path((payload.get("path") or "/data/torrents/music").strip())
+    path_raw = (payload.get("path") or "/data/torrents/music").strip()
+    scan_path, path_error = _resolve_import_source_path(path_raw)
+    if path_error:
+        return jsonify({"ok": False, "error": path_error}), 400
     if not scan_path.exists() or not scan_path.is_dir():
         return jsonify({"ok": False, "error": f"Path not found: {scan_path}"})
 
-    root_res = scan_path.resolve(strict=False)
+    root_res = scan_path
     folder_rows: List[Dict[str, Any]] = []
     total_audio = 0
     unsupported = 0
@@ -29182,11 +29229,45 @@ def _resolve_album_title_duplicate_candidate(
     return None, ""
 
 
+def _resolve_dedup_scan_path(raw: Any) -> Tuple[Optional[Path], Optional[str]]:
+    """Validate the dedup-scan source path against the same allowlist as
+    /api/browse (library + downloads roots) before any filesystem
+    operation touches it.
+
+    SEC-002 CodeQL repository-wide closure finding: /api/dedup/scan
+    previously called Path(path).exists() and scan_path.rglob("*") against
+    the raw request body value with no containment check at all, allowing
+    an authenticated caller to enumerate audio-file names (and, via the
+    later per-file stat() calls in dedup_scan's _run(), file sizes) under
+    any path the container process can read -- not just the intended
+    library/downloads scope.
+    """
+    text = _s(raw).strip()
+    if not text:
+        return None, "Path is required"
+    try:
+        candidate = Path(text)
+        if not candidate.is_absolute():
+            return None, "Path must be absolute"
+        resolved = candidate.resolve(strict=False)
+    except Exception:
+        return None, "Invalid path."
+    if not any(
+        _path_is_under(resolved, root) or resolved == root.resolve(strict=False)
+        for root in _BROWSE_ALLOWED_ROOTS
+    ):
+        return None, "Path is outside the allowed scan roots"
+    return resolved, None
+
+
 @app.post("/api/dedup/scan")
 def dedup_scan():
     """Start a background dedup scan; returns job_id immediately."""
     payload   = request.get_json(silent=True) or {}
-    scan_path = Path(payload.get("path", "/data/torrents/music"))
+    path_raw  = payload.get("path", "/data/torrents/music")
+    scan_path, path_error = _resolve_dedup_scan_path(path_raw)
+    if path_error:
+        return jsonify({"ok": False, "error": path_error}), 400
     if not scan_path.exists():
         return jsonify({"ok": False, "error": f"Path not found: {scan_path}"})
 

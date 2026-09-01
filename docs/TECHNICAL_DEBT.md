@@ -1354,3 +1354,43 @@ not true and the scanner itself had real correctness bugs. Full detail:
 - **Verification Matrix**: `verify_arch003_mutation_inventory.py --check` passed cleanly (464 total candidate sinks, 107 unresolved baseline, 0 unresolved `ai_import`, 0 unresolved `import_reconciliation`, 0 unresolved `library_cleanup`). Unit tests in `tests/test_ai_batch_state_store.py` passed cleanly (5/5). Full Python test suite passed cleanly with 0 failures and 0 errors.
 - **Status**: **Draft PR Opened (DO NOT MERGE — Claude has sole merge authority).**
 
+## SEC-002 Repository-Wide CodeQL Closure — 2026-09-01 session (independent of PR #102/Wave 27's config-domain scope)
+
+Resumes the CodeQL-alert-closure thread from Waves 1-8 above (which drove the backlog from 320 to 188),
+picked back up after several waves' attention shifted to the SEC-002/ARCH-003 controlled-mutation work
+(Waves 9-26 above). Live re-baseline against GitHub's repository-wide (not PR-scoped) Code Scanning API,
+independently verified rather than trusted from any prior report: **171 open alerts** on `main` at
+`7b05844d58d657ce6f1ae6c5b1724f5ba70ee257` (2 critical, 164 high, 5 medium; `py/path-injection` 121 —
+109 in `app.py`, `py/polynomial-redos` 17, `js/incomplete-url-substring-sanitization` 14,
+`py/stack-trace-exposure` 5, `py/clear-text-storage-sensitive-data` 4, `py/incomplete-url-substring-sanitization`
+3, `py/command-line-injection` 2 critical, `js/xss-through-dom` 2, `py/bad-tag-filter` 1,
+`py/regex-injection` 1, `js/insecure-randomness` 1). Full baseline, per-alert inventory, and per-alert
+disposition detail: `docs/security/codeql_repository_closure.md` and
+`security/codeql_main_alert_inventory.json`.
+
+This session's dispositions (13 of 171):
+- **2 critical `py/command-line-injection`** (`backend/beets_control_agent.py`, alerts 1009/1010):
+  `SAFE_BUT_CODEQL_BLIND`, traced end-to-end (anchored `_MB_UUID_RE` gate; shared sink's only 2 callers
+  both allowlist+sanitize before calling). Dismissed individually on GitHub with sink-specific rationale.
+- **8 `py/path-injection` in `app.py`, REAL_VULNERABILITY, fixed**: `/api/import`, `/api/import/preflight`,
+  and `/api/dedup/scan` ran `mkdir()`/`.exists()`/`os.walk()`/`.rglob()` directly against the raw request
+  path with no allowed-root check anywhere before them — the same "unguarded path-resolution helper"
+  root-cause class Wave 2 found in `routes_submissions._abs_resolved()`, here in three `app.py` routes
+  Waves 4-8 didn't reach. Fixed with two new validators (`_resolve_import_source_path()`,
+  `_resolve_dedup_scan_path()`) mirroring the established `_folder_cleanup_path()`/`/api/browse`
+  allowlist pattern — no new resolver primitive introduced. Tests:
+  `tests/test_codeql_repowide_closure_import_path.py` (12 tests, includes sibling-prefix-escape and
+  symlink-leaf-escape coverage, and route-level proof the dangerous call is never reached, not merely
+  "validated afterward").
+- **3 `py/path-injection` in `app.py`, `SAFE_BUT_CODEQL_BLIND`**: one derived-from-already-validated-value
+  case, the `/api/browse` containment check flagging itself, and a pure path-normalization helper
+  (`_dedup_norm_path`) that never touches the filesystem.
+
+Remaining after this session: 158 open (150 `py/path-injection` in `app.py`, plus the other rule groups
+above), all still `NEEDS_REVIEW` — not yet individually traced. **Not closed.** Continuing this thread in
+a future wave should sweep `app.py`'s remaining `py/path-injection` alerts by functional cluster (the
+same approach Waves 4-8 used), starting with any route that takes a filesystem path directly from a
+request body/query string with no visible allowlist call nearby — `/api/import`+`/api/dedup/scan` (this
+session) both fit that exact shape and had gone unreviewed since the 2026-07-20 baseline scan despite 6
+intervening path-injection waves, suggesting a few more of the same shape likely remain.
+

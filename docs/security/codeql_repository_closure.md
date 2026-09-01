@@ -90,10 +90,65 @@ per-alert, not assumed, per the mission rules (no blanket dismissal).
   exposure ever widens.
 - **GitHub disposition**: dismissed 2026-09-01, reason `false positive`.
 
+### Alerts 231-236, 240-241 — `py/path-injection`, high — `app.py` `/api/import`, `/api/import/preflight`, `/api/dedup/scan`
+
+- **Disposition**: `REAL_VULNERABILITY` (8 alerts) — genuine, fixed.
+- **Source**: `payload.get("path")` from the JSON body of three authenticated POST routes.
+- **Sinks**: `Path(path).mkdir(parents=True, exist_ok=True)` (231), `Path(path).exists()` (232, 233,
+  234), `Path(path).resolve()` (235, 240), `os.walk(scan_path)` (236), `scan_path.rglob("*")` (241, via
+  `dedup_scan`'s `_run()`).
+- **What was actually wrong**: `/api/import`, `/api/import/preflight`, and `/api/dedup/scan` ran these
+  filesystem operations directly against the raw request-body path with **no allowed-root check
+  anywhere before them**. An authenticated caller could set `path` to any absolute filesystem path the
+  container process can reach:
+  - `/api/import` would `mkdir(parents=True, exist_ok=True)` at that path — arbitrary directory
+    creation outside the configured torrent-source/library roots.
+  - `/api/import/preflight` would `os.walk()` the path — arbitrary directory-tree enumeration
+    (filenames, audio-file counts) anywhere readable.
+  - `/api/dedup/scan` would `rglob("*")` the path and later `stat()` every audio file found —
+    arbitrary filesystem enumeration plus file-size disclosure.
+  The engine-side `reimport_source_atomic()` validation in `backend/beets_control_agent.py` is a
+  separate, *later* trust boundary (only reached once a background job actually calls
+  `beets_client.reimport_source(...)`) and does not protect these earlier, web-manager-side probes —
+  exactly the "validation probe itself is the sink" pattern this closure pass was told to watch for.
+- **Fix**: added `_resolve_import_source_path()` (gates against `TORRENT_SOURCE_ROOTS ∪ {MUSIC_ROOT}`)
+  and `_resolve_dedup_scan_path()` (gates against the existing `_BROWSE_ALLOWED_ROOTS = (MUSIC_ROOT,
+  DOWNLOADS_ROOT)`), mirroring the pre-existing `_folder_cleanup_path()`/`/api/browse` allowlist
+  pattern already used elsewhere in this file. Both validators run **before** any filesystem operation,
+  reject non-absolute paths, resolve symlinks via `.resolve(strict=False)` before the containment check
+  (closing the symlink-leaf case), and reject any path that only shares a string prefix with an allowed
+  root (sibling-prefix escape, e.g. `/data/torrents/music-evil` vs. `/data/torrents/music`) by using
+  `Path.relative_to()` semantics (`_path_is_under()`), not substring matching.
+- **Regression tests**: `tests/test_codeql_repowide_closure_import_path.py` (12 tests) — outside-root
+  rejection, sibling-prefix escape, symlink-leaf escape, relative-path rejection, valid-path acceptance
+  for both allowed roots, and route-level proof that the dangerous call (`mkdir`, `os.walk`, `rglob`) is
+  never reached for a rejected path (mocked and asserted `not_called()`), not merely "validated
+  afterward".
+- **Verification**: `python -m py_compile app.py` clean; full backend suite (`python -m unittest
+  discover -s tests -p "test_*.py"`) run twice, 2763 tests, 0 failures, 129 skipped (pre-existing —
+  require a live engine/Docker), both runs.
+
+### Alerts 237, 239 — `py/path-injection`, high — `app.py`
+
+- **Disposition**: `SAFE_BUT_CODEQL_BLIND`.
+- Alert 237: `Path(row["path"]).resolve()` inside `import_preflight()` operates on a value derived from
+  the *now-validated* `scan_path` via `os.walk()`, never on raw request text directly.
+- Alert 239: `_dedup_norm_path()` is a pure path-string normalization helper used only to build
+  cache-key comparisons (`_dedup_resolve_source_scan()`); it never reads, enumerates, or mutates the
+  filesystem, and never returns filesystem contents to the caller.
+
+### Alert 238 — `py/path-injection`, high — `app.py:29024` (`/api/browse`)
+
+- **Disposition**: `SAFE_BUT_CODEQL_BLIND`. This line *is* the containment check itself
+  (`_path_is_under(p, root) or p.resolve(strict=False) == root.resolve(strict=False)` against
+  `_BROWSE_ALLOWED_ROOTS`) — a pre-existing, already-correct instance of the same allowlist pattern
+  used to fix the alerts above. CodeQL flags the `.resolve()` call inside the validator itself.
+
 ## 3. Remaining alerts
 
-169 of 171 alerts remain **NEEDS_REVIEW** as of this checkpoint — see
-`security/codeql_main_alert_inventory.json` for the full raw list. Work continues alert-by-alert (or
-pattern-class-by-pattern-class for the 109 `py/path-injection` instances clustered in `app.py`, a
-48,286-line file) rather than being declared closed. **Repository-wide CodeQL security closure is NOT
-complete.**
+158 of 171 alerts remain **NEEDS_REVIEW** as of this checkpoint (13 dispositioned: 2 critical
+command-injection dismissed, 8 path-injection fixed as real vulnerabilities, 3 path-injection confirmed
+safe) — see `security/codeql_main_alert_inventory.json` for the full raw list. Work continues
+alert-by-alert (or pattern-class-by-pattern-class for the ~100 remaining `py/path-injection` instances
+still clustered in `app.py`, a 48,286-line file) rather than being declared closed. **Repository-wide
+CodeQL security closure is NOT complete.**
