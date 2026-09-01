@@ -599,8 +599,8 @@ CodeQL security closure is NOT complete.**
 - Full suite, run 6 (after the `_folder_release_preflight` fix, Phase 2 of the continued-closure pass —
   0 open `py/path-injection` alerts remain undispositioned repository-wide): 2783 tests, 0 failures, 129
   skipped, exit code 0.
-- Full suite, run 7 (order-dependence/flakiness re-check, same code state as run 6): result pending at
-  time of writing — see the next commit for the confirmed count.
+- Full suite, run 7 (order-dependence/flakiness re-check, same code state as run 6): 2790 tests, 0
+  failures, 129 skipped, exit code 0. No flakiness or order-dependence detected.
 - Python security gates (Phase 4 checkpoint): `security_secret_scan.py` passed; `validate_compose_security.py`
   → `{"ok": true, "errors": [], "warnings": []}`; `verify_arch003_mutation_inventory.py --check` passed
   (469 entries, 107 unresolved, matches baseline); `generate_endpoint_inventory.py --check` initially
