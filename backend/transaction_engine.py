@@ -6996,16 +6996,15 @@ def _derive_artist_folder_identity(
         return result
     roots = allowed_roots or [str(os.environ.get("MUSIC_ROOT", "/music"))]
     folder_norm = os.path.normpath(str(folder_path))
-    matched_root = next(
-        (
-            os.path.normpath(str(root))
-            for root in roots
-            if folder_norm == os.path.normpath(str(root))
-            or folder_norm.startswith(os.path.normpath(str(root)) + os.sep)
-        ),
-        None,
-    )
-    if matched_root is None:
+    contained = False
+    matched_root = ""
+    for root in roots:
+        root_norm = os.path.normpath(str(root))
+        if folder_norm == root_norm or folder_norm.startswith(root_norm + os.sep):
+            contained = True
+            matched_root = root_norm
+            break
+    if not contained:
         return result
     if _path_has_symlink_under(Path(folder_norm), Path(matched_root)):
         return result
@@ -7076,16 +7075,15 @@ def _extract_recording_mbids(
 
     roots = allowed_roots or [str(os.environ.get("MUSIC_ROOT", "/music"))]
     src_norm = os.path.normpath(str(src_path))
-    matched_root = next(
-        (
-            os.path.normpath(str(root))
-            for root in roots
-            if src_norm == os.path.normpath(str(root))
-            or src_norm.startswith(os.path.normpath(str(root)) + os.sep)
-        ),
-        None,
-    )
-    if matched_root is None:
+    contained = False
+    matched_root = ""
+    for root in roots:
+        root_norm = os.path.normpath(str(root))
+        if src_norm == root_norm or src_norm.startswith(root_norm + os.sep):
+            contained = True
+            matched_root = root_norm
+            break
+    if not contained:
         return []
     if _path_has_symlink_under(Path(src_norm), Path(matched_root)):
         return []
