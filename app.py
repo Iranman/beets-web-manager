@@ -40944,9 +40944,25 @@ def _playlist_clean_video_text(value):
 
 def _playlist_strip_video_title_suffix(value):
     text = _playlist_clean_video_text(value)
+    # PR #109 independent review finding: `if "|" not in text: return text`
+    # is a real, load-bearing ReDoS mitigation, not an unrelated scope
+    # addition -- the regex below has the same unbounded-whitespace-before-
+    # a-required-literal shape as the other Wave 27/28 playlist patterns
+    # (empirically confirmed: ~7.3s for a 60,000-char no-"|" adversarial
+    # string against the unguarded regex, vs. near-instant with this
+    # O(n) `in` check short-circuiting first). But the guard alone is
+    # NOT sufficient: a string that DOES contain one "|" somewhere still
+    # reaches the regex, and a separate long whitespace run elsewhere in
+    # that same string that is not immediately followed by "|" is still
+    # quadratic (empirically confirmed: ~8.1s for "a|" + 60,000 spaces +
+    # "x") -- the guard only ever protects the entirely-"|"-free case.
+    # Bounding the quantifier itself (real "Title | Channel | Extra"
+    # separators are always exactly one space on each side) closes that
+    # remaining gap the same way every other pattern in this closure
+    # effort was fixed, without depending on the guard for full coverage.
     if "|" not in text:
         return text
-    parts = [p.strip() for p in re.split(r"\s+\|\s+", text) if p.strip()]
+    parts = [p.strip() for p in re.split(r"\s{1,20}\|\s{1,20}", text) if p.strip()]
     if len(parts) >= 3 and re.search(r"[A-Za-z0-9]", parts[0]):
         return parts[0]
     return text
@@ -40988,38 +41004,67 @@ def _playlist_split_artist_title(value):
     if not text:
         return None
     # Deterministic linear-time parser without regular expression backtracking.
-    # Finds the first valid separator in text:
-    # 1. Spaced dash: dash surrounded by whitespace on both sides (\s+[-–—]\s+)
-    # 2. Compact dash: dash between ASCII alphanumeric and uppercase/digit ([A-Za-z0-9][-–—][A-Z0-9])
+    #
+    # PR #109 independent review finding: the original single left-to-right
+    # scan decided "spaced dash" vs. "compact dash" independently AT EACH
+    # dash position and returned on whichever fired FIRST -- so a compact
+    # hyphen inside a hyphenated artist name (Jay-Z, Blink-182, T-Pain,
+    # A-Ha, Run-D.M.C.) pre-empted the real, much stronger spaced " - "
+    # separator that came later in the same string, e.g. "Jay-Z - Empire
+    # State of Mind" split as ("Jay", "Z - Empire State of Mind") instead
+    # of ("Jay-Z", "Empire State of Mind"). This was not a regression this
+    # PR introduced -- the pre-fix regex
+    # (r"\s+[-–—]\s+|(?<=[A-Za-z0-9])[-–—](?=[A-Z0-9])") had the identical
+    # bug: re's leftmost-match semantics prefer whichever alternative
+    # starts earliest in the string, not the semantically stronger one.
+    #
+    # Fixed with two full linear passes instead of one combined scan: a
+    # spaced separator anywhere in the string is a far less ambiguous
+    # artist/title boundary than a bare compact hyphen (which is
+    # frequently just part of an artist's own name), so the first pass
+    # looks for a spaced dash ANYWHERE before ever considering a compact
+    # one. Only if the whole string has no spaced separator at all does
+    # the second pass fall back to the first compact dash -- preserved
+    # for genuinely un-spaced "Artist-Title" pastes, which is still a
+    # real, supported input shape (see PlaylistSplitArtistTitleTests).
+    # Two O(n) passes is still O(n) overall, not O(n^2): no backtracking,
+    # no nested scan restarts.
     n = len(text)
+
     i = 0
     while i < n:
         ch = text[i]
-        if ch in ("-", "–", "—"):
-            # Check for spaced dash
-            if i > 0 and text[i - 1].isspace() and i + 1 < n and text[i + 1].isspace():
-                start = i - 1
-                while start > 0 and text[start - 1].isspace():
-                    start -= 1
-                end = i + 1
-                while end < n and text[end].isspace():
-                    end += 1
-                left = text[:start].strip()
-                right = text[end:].strip()
+        if (
+            ch in ("-", "–", "—")
+            and i > 0 and text[i - 1].isspace()
+            and i + 1 < n and text[i + 1].isspace()
+        ):
+            start = i - 1
+            while start > 0 and text[start - 1].isspace():
+                start -= 1
+            end = i + 1
+            while end < n and text[end].isspace():
+                end += 1
+            left = text[:start].strip()
+            right = text[end:].strip()
+            if left and right:
+                return _playlist_clean_video_text(left), _playlist_clean_video_text(right)
+            return None
+        i += 1
+
+    i = 0
+    while i < n:
+        ch = text[i]
+        if ch in ("-", "–", "—") and i > 0 and i + 1 < n:
+            prev = text[i - 1]
+            nxt = text[i + 1]
+            if (("a" <= prev <= "z" or "A" <= prev <= "Z" or "0" <= prev <= "9") and
+                    ("A" <= nxt <= "Z" or "0" <= nxt <= "9")):
+                left = text[:i].strip()
+                right = text[i + 1:].strip()
                 if left and right:
                     return _playlist_clean_video_text(left), _playlist_clean_video_text(right)
                 return None
-            # Check for compact dash without spaces
-            elif i > 0 and i + 1 < n:
-                prev = text[i - 1]
-                nxt = text[i + 1]
-                if (("a" <= prev <= "z" or "A" <= prev <= "Z" or "0" <= prev <= "9") and
-                        ("A" <= nxt <= "Z" or "0" <= nxt <= "9")):
-                    left = text[:i].strip()
-                    right = text[i + 1:].strip()
-                    if left and right:
-                        return _playlist_clean_video_text(left), _playlist_clean_video_text(right)
-                    return None
         i += 1
     return None
 
@@ -41089,9 +41134,27 @@ _PLAYLIST_CHANNEL_ARTIST_RE = re.compile(
     r"\bvevo\b|"
     r"\bofficial\b|"
     r"\b(?:records?|music|entertainment|media|films?|productions?|tv)\b$|"
-    r"[-–—]\s*topic$"
+    r"\s{1,20}[-–—]\s{0,20}topic$"
     r")"
 )
+# PR #109 independent review finding: the prior version of the last
+# alternative, `[-–—]\s*topic$` (itself a fix for CodeQL's flagged
+# `\s+-\s+topic$`, which was linear-scannable but unbounded), dropped the
+# leading-whitespace requirement entirely instead of merely bounding it.
+# That widened the match to any dash immediately followed by "topic" with
+# NO space required before the dash at all -- so a plain artist/title
+# string like "Artist-Topic" (no space) was misclassified as a YouTube
+# auto-generated "<Artist> - Topic" channel name, which always has a real
+# space before the dash (confirmed against real YouTube channel naming).
+# Restoring `\s{1,20}` (bounded, not `\s+`) before the dash fixes the false
+# positive without reintroducing the unbounded-whitespace-before-a-required-
+# literal shape this whole Wave 28 pass exists to close: an unbounded
+# `\s+`/`\s*` immediately before a required literal, scanned via an
+# unanchored `.search()`, is quadratic for a long non-matching whitespace
+# run (the identical class CodeQL flagged and this repo's other Wave 27/28
+# playlist-regex fixes already bound the same way). `\s{0,20}` after the
+# dash is unchanged in effect (real channel names use exactly one space)
+# but bounded for the same reason, for consistency and defense in depth.
 
 
 def _playlist_artist_looks_like_channel(artist: Any) -> bool:
