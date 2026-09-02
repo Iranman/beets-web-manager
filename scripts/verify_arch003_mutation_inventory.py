@@ -126,6 +126,39 @@ def verify_mutation_inventory(repo_root: Path, check_mode: bool = True) -> bool:
             real_families = _real_transaction_families(repo_root)
             if family not in real_families:
                 errors.append(f"Unknown/stale transaction family '{family}' for controlled entry {symbol} in {file_path}")
+            # Anti-laundering guard (independent review finding): a real
+            # transaction_family name next to an entry does not by itself
+            # prove the mutation actually executes through that family's
+            # engine-side Plan/Apply boundary -- it only proves someone
+            # wrote a real family name in the JSON. A raw app.py SQL
+            # statement against the authoritative Beets library DB
+            # (discover_mutation_sinks.py tags these "raw-beets-library-dml")
+            # is never CONTROLLED_MEDIA_MUTATION, full stop; it is Web
+            # Manager code mutating the library directly, which is exactly
+            # the ARCH-003 gap this inventory exists to track honestly.
+            if file_path == "app.py" and entry.get("kind") == "sql" and entry.get("rule") == "raw-beets-library-dml":
+                errors.append(
+                    f"Anti-laundering: {symbol} in app.py is classified CONTROLLED_MEDIA_MUTATION "
+                    f"but is tagged raw-beets-library-dml (a direct SQL statement against the "
+                    f"authoritative Beets DB) -- naming a real transaction_family does not make a "
+                    f"raw app.py DML statement controlled. Reclassify as ARCH003_BLOCKER, or migrate "
+                    f"the mutation to actually execute through that family's engine-side call."
+                )
+            # Same principle for the subprocess kind: every currently-real
+            # CONTROLLED_MEDIA_MUTATION subprocess entry composes a
+            # beets_client.* HTTP call into the engine (that IS the
+            # controlled boundary for this codebase -- see
+            # backend/beets_client.py). A subprocess-kind entry claiming
+            # this classification without actually calling through
+            # beets_client is the same laundering pattern for a different
+            # sink kind.
+            if entry.get("kind") == "subprocess" and "beets_client" not in (entry.get("call_text") or ""):
+                errors.append(
+                    f"Anti-laundering: {symbol} in {file_path} is classified CONTROLLED_MEDIA_MUTATION "
+                    f"(kind=subprocess) but its call_text does not go through beets_client -- the "
+                    f"controlled boundary for subprocess-kind entries in this codebase is a "
+                    f"beets_client.* HTTP call into the engine, not a local subprocess invocation."
+                )
         if key:
             by_key[key] = entry
 

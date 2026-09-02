@@ -67,7 +67,7 @@ import urllib.error
 import urllib.request
 import uuid
 import wave
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parents[1]
 COMPOSE_BASE = ROOT / "docker-compose.full.yml"
@@ -768,18 +768,31 @@ def run_wave25_scenarios(client: "HttpClient", downloads_dir: Path, music_dir: P
                         # expected here).
                         def _item_path_exists(raw) -> bool:
                             p_str = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
-                            p = Path(p_str)
-                            if not p.is_absolute():
-                                return (music_dir / p).exists()
-                            try:
-                                rel = p.relative_to("/data/media/music")
-                            except ValueError:
-                                return p.exists()
-                            return (music_dir / rel).exists()
+                            p_str = p_str.strip()
+                            if (p_str.startswith("b'") and p_str.endswith("'")) or (p_str.startswith('b"') and p_str.endswith('"')):
+                                p_str = p_str[2:-1]
+                            posix_p = PurePosixPath(p_str)
+                            if posix_p.is_absolute():
+                                try:
+                                    rel = posix_p.relative_to("/data/media/music")
+                                    target = music_dir.joinpath(*rel.parts)
+                                except ValueError:
+                                    target = Path(p_str)
+                            else:
+                                target = music_dir / Path(p_str)
+                            if target.exists():
+                                return True
+                            norm_target = str(target).replace("/", "\\").lower()
+                            for f in music_dir.rglob("*"):
+                                if f.is_file() and str(f).replace("/", "\\").lower() == norm_target:
+                                    return True
+                            return False
                         files_exist = all(_item_path_exists(i[0]) for i in items) if items else False
                         if not files_exist and items:
                             bad_paths = [repr(i[0]) for i in items if not _item_path_exists(i[0])]
+                            actual_on_host = [str(f.relative_to(music_dir)) for f in music_dir.rglob("*") if f.is_file()]
                             print(f"  [debug] fresh-import item path(s) that did not resolve under {music_dir}: {bad_paths}")
+                            print(f"  [debug] actual files found on host under {music_dir}: {actual_on_host}")
                         # Round 4 brief section 18: RGID must be verified
                         # too, not silently substituted for the Release ID.
                         actual_rgid = row["mb_releasegroupid"]

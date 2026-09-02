@@ -238,7 +238,7 @@ _REVIEWED_RULE_DETAILS = {
         "reviewed_in_pr": WAVE26_AI_IMPORT_PR,
     },
 }
-_CONTROL_AGENT_FUNCTION_CLASSIFICATION = {
+_EXPLICIT_FUNCTION_CLASSIFICATION = {
     "_handle_delete_album": ("ENGINE_CONTROLLED_TRANSACTION", "album_maintenance_v1", "reviewed-control-agent-delete-album-transaction"),
     "_normalise_album_art_image": ("ENGINE_NATIVE_BEETS", "album_artwork_v1", "artwork-normalisation-helper"),
     "_trusted_music_db_path": ("ENGINE_NATIVE_READ_ONLY", "infra_v1", "trusted-music-path-resolver"),
@@ -295,6 +295,19 @@ _CONTROL_AGENT_FUNCTION_CLASSIFICATION = {
     # itself an HTTP request handler. Same real nature, same
     # classification -- only the enclosing function name changed.
     "_run_beet_subcommand_locked": ("ENGINE_ADMIN_MUTATION", "admin_command_v1", "control-agent-admin-command-endpoint"),
+    # Wave 28 Final Pass: Explicit non-media application state, cache, staging,
+    # and template read-only classifications with sink-specific evidence.
+    "_artist_alias_write_rejected_map": ("APP_STATE", "app_state_v1", "web-manager-rejected-artist-alias-map-state"),
+    "_mb_release_tracklist_write_disk": ("CACHE_STATE", "cache_v1", "mb-release-tracklist-disk-cache"),
+    "_plex_client_identifier": ("APP_STATE", "app_state_v1", "plex-client-identifier-state"),
+    "_record_scan": ("APP_STATE", "app_state_v1", "library-scan-timestamp-state"),
+    "_save_acq_download_all_last": ("APP_STATE", "app_state_v1", "acquisition-last-download-history-state"),
+    "_save_rgid_resolutions": ("APP_STATE", "app_state_v1", "rgid-resolutions-decision-state"),
+    "_spotiflac_download_url": ("STAGING_ONLY", "staging_v1", "spotiflac-download-staging-dir"),
+    "create_unmatched_draft": ("STAGING_ONLY", "staging_v1", "unmatched-draft-submission-state"),
+    "render_index": ("READ_ONLY_FALSE_POSITIVE", "none", "in-memory-template-string-replace"),
+    "_prune_empty_review_dirs": ("NON_MEDIA_FILESYSTEM", "infra_v1", "prune-empty-review-staging-dirs"),
+    "_delete_no_audio_folders": ("NON_MEDIA_FILESYSTEM", "infra_v1", "delete-no-audio-staging-folders"),
 }
 
 
@@ -326,14 +339,14 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
             return "CONTROLLED_MEDIA_MUTATION", "", "engine-transaction-filesystem-mutation"
         return "TRANSACTION_STATE", "", "engine-transaction-internal"
 
-    # 2. backend/beets_control_agent.py -- function-level classification
-    # only, never a blanket file-level exemption (Wave 23 finding #3,
-    # reintroduced and reverted again in Wave 24).
+    # 2. Function-level explicit classifications (app.py, beets_control_agent.py, etc.)
+    mapped = _EXPLICIT_FUNCTION_CLASSIFICATION.get(func)
+    if mapped:
+        classification, family, rule = mapped
+        return classification, family, rule
+
+    # 2b. backend/beets_control_agent.py do_POST/do_DELETE/etc handlers
     if file == "backend/beets_control_agent.py":
-        mapped = _CONTROL_AGENT_FUNCTION_CLASSIFICATION.get(func)
-        if mapped:
-            classification, family, rule = mapped
-            return classification, family, rule
         if func in ("ControlAgentHandler.do_POST", "ControlAgentHandler.do_DELETE", "ControlAgentHandler.do_PATCH", "ControlAgentHandler.do_GET"):
             if "UPDATE items SET path" in text or "UPDATE albums SET artpath" in text:
                 return "CONTROLLED_MEDIA_MUTATION", "album_relocation_v1", "library-rewrite-path-endpoint"
