@@ -933,3 +933,44 @@ This resolves `ARCH-020`'s previously-open question — the failure is Windows-D
 (consistent with the `mtime_ns` cross-boundary-precision hypothesis already recorded there), not a
 production/Linux-reachable defect. `docs/TECHNICAL_DEBT.md`'s `ARCH-020` entry updated accordingly,
 priority revised from P2 to P3.
+
+## 11. Independent adversarial final review — ARCH-020 correction and second `main` reconciliation (2026-09-01)
+
+An independent, adversarial final review of this PR (explicitly instructed to verify prior reports'
+material claims from the repository rather than trust them) found that `main` had advanced past Section
+10's reconciliation with PR #107/Wave 28 (`c224de4`, "Preservation-Copy Content-Signature Correctness &
+Anti-Laundering Guard") — unrelated work that independently found and fixed a real defect in
+`backend/beets_control_agent.py`'s `preserve_import_source()`/`_import_source_signature()`, the exact
+code `ARCH-020` (Section 6/10) had characterized as a benign, Windows-only `mtime_ns` timing quirk safe
+to leave open at P3.
+
+That characterization was corrected, not merely re-asserted: Wave 28's own independent review found the
+underlying design (comparing a same-source staleness signature as if it were a cross-filesystem
+copy-equivalence proof) to be a genuine defect, and replaced the `mtime_ns` comparison with a real
+SHA-256 content digest. **Empirically re-verified, not accepted on description alone**: re-ran
+`scripts/verify_two_service_docker_acceptance.py` on the same Windows machine against unmodified `main`
+at `c224de4` — all 5 scenarios that had failed identically across three prior independent runs (branch
+alone, unmodified pre-Wave-27 `main`, the reconciled branch+Wave-27 head) now **passed**,
+`[SUCCESS] Two-service Docker acceptance passed.` This is direct, reproduced evidence the Wave 28 fix —
+not merely Linux/Windows filesystem differences — is what actually resolves the symptom.
+
+Merged current `main` (`c224de4`) into `security/codeql-repowide-closure` a second time, following the
+identical reconciliation pattern already used once for Wave 27 (Section 8): `git merge --no-commit --no-ff
+origin/main`, zero conflicts (this branch never touched `backend/beets_control_agent.py`),
+`arch003_mutation_inventory.json` regenerated from source (486 entries, 59 unresolved, matching Wave 28's
+own baseline exactly — down from 486/79 pre-merge, entirely from Wave 28's own other-domain
+reclassification work), `endpoint_inventory.json` regenerated (244 routes, 0 manual review, line-number
+drift only). `docs/TECHNICAL_DEBT.md`'s `ARCH-020` entry corrected in place with the true root cause, the
+Wave 28 fix, and this empirical re-verification, rather than left standing on a disproven P3 conclusion.
+
+Verification: `python -m py_compile` clean; secret scan and compose validation pass; focused Wave 28
+tests (`tests/test_arch003_final_closure.py` + `tests/test_sec002_wave8_engine_ownership.py`, 83 tests,
+39 skipped — POSIX-only, expected on Windows, matching Wave 28's own documented constraint) all pass;
+full backend suite **2923 tests, 0 failures, 144 skipped**, exit 0 (read from the actual log, not a
+task-notification's claimed exit code, per this session's own standing rule).
+
+This section documents a genuine correction found by adversarial re-verification, not a routine update —
+recorded per the review's own explicit instruction to distinguish directly-verified facts from prior
+reports' claims that could not be independently reproduced. The prior claim ("P3, Windows-only, safe to
+leave open") could not be reproduced once `main`'s own independent fix was empirically tested; it is
+superseded by this section, not silently replaced.
