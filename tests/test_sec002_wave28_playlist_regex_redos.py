@@ -44,6 +44,7 @@ catch a real reintroduced O(n^2)/O(2^n) regression.
 
 from __future__ import annotations
 
+import inspect
 import re
 import time
 import unittest
@@ -156,9 +157,56 @@ class PlaylistSplitArtistTitleHyphenatedArtistTests(unittest.TestCase):
             with self.subTest(input=inp):
                 self.assertEqual(app_module._playlist_split_artist_title(inp), expected)
 
+    def test_non_spaced_whitespace_variants_around_the_separator(self):
+        """Tabs and newlines count as whitespace for the spaced-separator
+        check the same way plain spaces do (Python's str.isspace())."""
+        cases = [
+            ("Artist\t-\tTitle", ("Artist", "Title")),
+            ("Artist\n-\nTitle", ("Artist", "Title")),
+            ("Artist - Title", ("Artist", "Title")),  # non-breaking space
+        ]
+        for inp, expected in cases:
+            with self.subTest(input=repr(inp)):
+                self.assertEqual(app_module._playlist_split_artist_title(inp), expected)
+
+    def test_non_ascii_artist_and_title_names(self):
+        cases = [
+            ("Björk - Venus as a Boy", ("Björk", "Venus as a Boy")),
+            ("Sigur Rós - Hoppípolla", ("Sigur Rós", "Hoppípolla")),
+        ]
+        for inp, expected in cases:
+            with self.subTest(input=inp):
+                self.assertEqual(app_module._playlist_split_artist_title(inp), expected)
+
+    def test_multiple_spaced_separators_splits_on_the_first(self):
+        self.assertEqual(
+            app_module._playlist_split_artist_title("A - B - C - D"),
+            ("A", "B - C - D"),
+        )
+
+    def test_compact_hyphen_inside_title_after_a_real_spaced_separator(self):
+        """A compact hyphen that appears in the TITLE (after the real
+        separator) must not confuse the scan -- pass 1 already returned
+        by the time it would be reached."""
+        self.assertEqual(
+            app_module._playlist_split_artist_title("DJ Snake - Middle-Ground"),
+            ("DJ Snake", "Middle-Ground"),
+        )
+
 
 class PlaylistSplitArtistTitleAdversarialTests(unittest.TestCase):
     """Security: all cases must remain effectively linear-time."""
+
+    def test_production_implementation_uses_no_regex_at_all(self):
+        """Durable, hardware-independent structural proof: the two-pass
+        scanner is pure string indexing (no `re.` calls), so it cannot
+        exhibit regex backtracking by construction -- not merely "runs
+        fast on the inputs this test suite happened to try"."""
+        source = inspect.getsource(app_module._playlist_split_artist_title)
+        self.assertNotIn("re.split", source)
+        self.assertNotIn("re.search", source)
+        self.assertNotIn("re.match", source)
+        self.assertNotIn("re.compile", source)
 
     def _assert_fast(self, fn, *args):
         t0 = time.perf_counter()
@@ -281,6 +329,20 @@ class PlaylistChannelArtistCorrectnessTests(unittest.TestCase):
 class PlaylistChannelArtistAdversarialTests(unittest.TestCase):
     """Security: all cases must remain effectively linear-time."""
 
+    def test_production_pattern_has_bounded_quantifiers_only(self):
+        """Durable, hardware-independent structural proof: every
+        quantifier in the compiled pattern is bounded to a small
+        constant, so backtracking work per search-start position is
+        capped regardless of input length -- not merely "measured fast
+        on the adversarial inputs this suite happened to try"."""
+        pattern = app_module._PLAYLIST_CHANNEL_ARTIST_RE.pattern
+        self.assertIn(r"\s{1,20}", pattern)
+        self.assertIn(r"\s{0,20}", pattern)
+        # No bare unbounded quantifier (`+` or standalone `*`) immediately
+        # preceding a required literal -- the exact shape CodeQL flagged.
+        self.assertNotRegex(pattern, r"\\s\+")
+        self.assertNotRegex(pattern, r"\\s\*(?!\{)")
+
     def _assert_fast(self, fn, *args):
         t0 = time.perf_counter()
         result = fn(*args)
@@ -324,20 +386,28 @@ class PlaylistStripVideoTitleSuffixTests(unittest.TestCase):
         self.assertEqual(app_module._playlist_strip_video_title_suffix("No Pipes Here"), "No Pipes Here")
         self.assertEqual(app_module._playlist_strip_video_title_suffix("A | B"), "A | B")
 
-    def test_unbounded_regex_is_genuinely_quadratic_without_the_guard(self):
-        """Proves the `"|" not in text` guard is load-bearing, not
-        decorative: the raw (unbounded, pre-fix-shape) pattern really is
-        quadratic against a long no-"|" string."""
-        unbounded = re.compile(r"\s+\|\s+")
-        adversarial = (" " * 60000) + "x"  # long whitespace run, no "|" at all
-        t0 = time.perf_counter()
-        unbounded.split(adversarial)
-        elapsed = time.perf_counter() - t0
-        self.assertGreater(
-            elapsed, 1.0,
-            "expected the UNBOUNDED regex to be measurably slow here, proving the "
-            "guard matters -- if this starts failing, the adversarial input below "
-            "may need to grow to keep demonstrating the same point",
+    def test_production_pattern_is_structurally_bounded_not_merely_fast_today(self):
+        """Independent review finding (PR #109 second pass): timing the
+        OLD unbounded pattern directly (a prior version of this test
+        asserted it took >1.0s against a 60,000-char adversarial string)
+        is not a durable security test -- it is CPU/Python-implementation-
+        dependent (could flake on a fast runner or a future regex-engine
+        optimization) and deliberately burns CI time exercising a pattern
+        that is not even in production. A structural check on the actual
+        deployed source is durable regardless of hardware: it proves the
+        quantifiers are bounded by construction, not merely that today's
+        adversarial input happens to run fast. The genuinely load-bearing
+        behavioral property -- the fixed implementation stays fast on
+        both the no-"|" and "|"-present-with-a-separate-whitespace-run
+        adversarial shapes -- is covered by the two tests below instead."""
+        source = inspect.getsource(app_module._playlist_strip_video_title_suffix)
+        self.assertIn(
+            r"\s{1,20}\|\s{1,20}", source,
+            "expected the bounded pipe-split pattern to be present verbatim",
+        )
+        self.assertNotRegex(
+            source, r"\\s\+\\\|\\s\+",
+            "the unbounded \\s+\\|\\s+ shape must not be present in production source",
         )
 
     def test_guard_alone_is_not_sufficient_pipe_present_with_separate_whitespace_run(self):
