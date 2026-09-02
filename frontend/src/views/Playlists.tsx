@@ -140,19 +140,47 @@ The Beatles - Come Together`;
 const PLAYLIST_JOB_STORAGE_KEY = 'beets-playlist-download-job-id';
 const PLAYLIST_LAST_JOB_STORAGE_KEY = 'beets-playlist-download-last-job-id';
 
+// SEC-002 CodeQL repository-wide closure finding (alerts #4-#8,
+// js/incomplete-url-substring-sanitization): platformLabel() only ever
+// returns fixed literal label/tone strings (never derived from `value`
+// itself), rendered as plain React text/className -- so this was a
+// false positive for security purposes (substring matching here can
+// only mislabel a badge, it never drives injection or a trust/
+// navigation decision; the actual playlist URL is validated server-side
+// by the existing backend yt-dlp flow). Fixed anyway to use real
+// hostname parsing, matching the mission's stated preference for strict
+// parsing over substring matching and closing the false-match edge case
+// (e.g. "https://evil.example/spotify.com" previously matched Spotify).
+function platformHost(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return '';
+  for (const candidate of [trimmed, `https://${trimmed}`]) {
+    try {
+      return new URL(candidate).hostname.toLowerCase();
+    } catch {
+      // try the next candidate
+    }
+  }
+  return '';
+}
+
+function hostMatches(host: string, domain: string): boolean {
+  return !!host && (host === domain || host.endsWith(`.${domain}`));
+}
+
 function platformLabel(value: string): { label: string; tone: string } {
-  const url = value.toLowerCase();
-  if (!url.trim()) return { label: 'Paste a URL', tone: 'border-graphite-700 bg-graphite-900 text-zinc-500' };
-  if (url.includes('music.youtube') || url.includes('youtube.com') || url.includes('youtu.be')) {
+  if (!value.trim()) return { label: 'Paste a URL', tone: 'border-graphite-700 bg-graphite-900 text-zinc-500' };
+  const host = platformHost(value);
+  if (hostMatches(host, 'music.youtube.com') || hostMatches(host, 'youtube.com') || hostMatches(host, 'youtu.be')) {
     return { label: 'YouTube', tone: 'border-red-900 bg-red-950 text-red-300' };
   }
-  if (url.includes('spotify.com')) {
+  if (hostMatches(host, 'spotify.com')) {
     return { label: 'Spotify', tone: 'border-emerald-900 bg-emerald-950 text-emerald-300' };
   }
-  if (url.includes('soundcloud.com')) {
+  if (hostMatches(host, 'soundcloud.com')) {
     return { label: 'SoundCloud', tone: 'border-orange-900 bg-orange-950 text-orange-300' };
   }
-  if (url.includes('music.apple.com')) {
+  if (hostMatches(host, 'music.apple.com')) {
     return { label: 'Apple Music', tone: 'border-rose-900 bg-rose-950 text-rose-300' };
   }
   return { label: 'URL', tone: 'border-graphite-700 bg-graphite-900 text-zinc-300' };
@@ -2468,7 +2496,7 @@ export default function Playlists() {
                 {detected.label}
               </div>
             </div>
-            {url.toLowerCase().includes('spotify.com') ? (
+            {hostMatches(platformHost(url), 'spotify.com') ? (
               <p className="text-xs text-zinc-500">
                 Spotify uses configured API credentials when available; public playlist fallback is handled by yt-dlp.
               </p>

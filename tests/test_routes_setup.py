@@ -169,6 +169,56 @@ class RoutesSetupStatusTests(unittest.TestCase):
             del os.environ["DEMO_MODE"]
 
 
+class RoutesSetupStatusBuildFailureSanitizationTests(unittest.TestCase):
+    """Repository-wide CodeQL closure session, 2026-09-01 (py/stack-trace-exposure):
+    /api/setup/status and /api/setup/diagnostics both returned
+    str(ex)/f"...{ex}" verbatim when _build_setup_status_payload() itself
+    raised (a genuinely broad except around a large diagnostics
+    aggregation), unlike the already-hardened get_status() RuntimeError
+    path covered by test_status_sanitizes_remote_diagnostic_exceptions
+    above. Both now log server-side and return a fixed message."""
+
+    def setUp(self):
+        self.flask_app, self.module = _load_routes_setup_against_stub_app(self)
+        self.client = self.flask_app.test_client()
+
+    def test_status_build_failure_is_sanitized_with_no_prior_cache(self):
+        leak = "LEAK_MARKER token=super-secret-key /internal/db/path"
+        with mock.patch.object(self.module, "_build_setup_status_payload", side_effect=RuntimeError(leak)):
+            response = self.client.get("/api/setup/status")
+        self.assertEqual(response.status_code, 503)
+        body = response.get_json()
+        self.assertEqual(body["error"], "Could not build setup status.")
+        text = response.get_data(as_text=True)
+        self.assertNotIn("LEAK_MARKER", text)
+        self.assertNotIn("super-secret-key", text)
+
+    def test_status_build_failure_falls_back_to_sanitized_stale_cache(self):
+        leak = "LEAK_MARKER token=super-secret-key /internal/db/path"
+        # Prime the cache with one real success first.
+        self.client.get("/api/setup/status")
+        with mock.patch.object(self.module, "_build_setup_status_payload", side_effect=RuntimeError(leak)):
+            response = self.client.get("/api/setup/status?refresh=1")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertTrue(body.get("stale"))
+        self.assertEqual(body["refresh_error"], "Could not refresh setup status.")
+        text = response.get_data(as_text=True)
+        self.assertNotIn("LEAK_MARKER", text)
+        self.assertNotIn("super-secret-key", text)
+
+    def test_diagnostics_build_failure_is_sanitized(self):
+        leak = "LEAK_MARKER token=super-secret-key /internal/db/path"
+        with mock.patch.object(self.module, "_build_setup_status_payload", side_effect=RuntimeError(leak)):
+            response = self.client.get("/api/setup/diagnostics")
+        self.assertEqual(response.status_code, 503)
+        body = response.get_json()
+        self.assertEqual(body["error"], "Could not build setup diagnostics.")
+        text = response.get_data(as_text=True)
+        self.assertNotIn("LEAK_MARKER", text)
+        self.assertNotIn("super-secret-key", text)
+
+
 class RoutesSetupRemoteBeetsDiagnosticsTests(unittest.TestCase):
     """Setup-status diagnostics must come from the authenticated Beets control
     agent, not a local beet executable or local Beets imports in the web

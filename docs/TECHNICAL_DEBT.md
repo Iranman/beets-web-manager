@@ -656,6 +656,114 @@ Independent review did not accept green tests/CI as proof this wiring was safe o
   flake (not a Wave 26 regression) via an immediate clean re-run of the exact same commit, not
   worked around or silently ignored.
 
+## ARCH-020 Two-Service Docker Acceptance: `preserve_import_source()` Fails Its Own Post-Copy Signature Check On Every Torrent-Staged Import
+
+- Affected area: `backend/beets_control_agent.py`'s `preserve_import_source()` (the disposable-copy
+  path used whenever `beet import` would touch a torrent-staged source) and its
+  `_import_source_signature()` helper. Both untouched by the repository-wide CodeQL closure session
+  (2026-09-01) -- `git diff <baseline SHA> -- backend/beets_control_agent.py backend/transaction_engine.py`
+  is empty; this pass only dismissed CodeQL alerts referencing these files, no source lines changed.
+- Found while running `scripts/verify_two_service_docker_acceptance.py` (Phase 7 of the CodeQL closure
+  continuation) against the security branch: **5 of the script's scenarios failed** --
+  `fresh-import-untagged-confirmed`, `confirmed-import-idempotent`, `crash-resume-no-duplicate`,
+  `ai-reviewed-import-confirmed`, `crash-resume-ai-batch` -- every one cascading from the identical
+  underlying error, `error_code: "copy_failed"` / `"Preservation copy post-verification failed"`, raised
+  when `preserve_import_source()` copies staged files via `shutil.copy2()` then re-inspects the copy and
+  finds `_import_source_signature()`'s value (`sha256` over each file's `relative_path:size:mtime_ns`)
+  no longer matches the original.
+- **Independently reproduced on unmodified `main`** before recording this entry, not assumed from the
+  code diff alone: checked out the exact pre-session baseline SHA into a separate `git worktree`, ran the
+  identical acceptance script there. Result: the same 5 scenario names failed, with the same
+  `copy_failed` root cause and the same script exit code; `diff` of the two runs' `[FAIL]` scenario-name
+  lists was empty. This is conclusive, not circumstantial -- the failure exists on `main` today,
+  independent of the CodeQL closure branch entirely.
+- Likely mechanism (not yet confirmed to this level of certainty): the acceptance script seeds its
+  synthetic library directly onto the **Windows host** side of a Docker Desktop bind mount (per the
+  script's own docstring), then relies on `mtime_ns` nanosecond precision surviving `shutil.copy2()`
+  across that host<->container boundary. Nanosecond-mtime rounding/loss on Windows Docker Desktop bind
+  mounts is a known category of cross-platform filesystem quirk; `_import_source_signature()` including
+  raw `mtime_ns` in its fingerprint would make the post-copy re-inspection sensitive to exactly that.
+  Not verified by direct inspection of the actual before/after `mtime_ns` values on this host -- the
+  next step for full certainty, not yet done.
+- Secondary, unrelated finding in the acceptance script itself: it crashed with `UnicodeEncodeError` on
+  Windows' `cp1252` console encoding while printing captured `docker logs` output containing a `→`
+  (U+2192) character, after its own summary/teardown had already run. Cosmetic (Docker teardown
+  completed cleanly either way, confirmed via `docker ps -a` after both runs) but worth a `print(...,
+  errors="replace")`-style fix so the script's own final exit path is legible on a Windows console.
+- Current risk: Blocks a clean Docker acceptance run on Windows Docker Desktop specifically; unknown
+  whether it reproduces on Linux CI (where GitHub Actions actually runs this repo's automated checks) --
+  a native Linux filesystem/bind-mount wouldn't have the same host-OS mtime-precision boundary. If it
+  reproduces there too, this is a real production-reachable defect (torrent-staged imports would always
+  fail); if it's Windows-Docker-Desktop-specific, it only affects local development/acceptance testing
+  on Windows.
+- Priority: P2 (blocks local Windows acceptance testing; severity depends on the still-unconfirmed
+  Linux-CI reproduction above).
+- **Reconciliation update (2026-09-01, PR #108 x PR #102/Wave 27 integration)**: PR #102/Wave 27
+  (config-domain closure, `2eef2e6`) merged into `main` and into this branch
+  (`security/codeql-repowide-closure`) between the original finding above and this update. Despite Wave
+  27 touching `backend/beets_control_agent.py` substantially (565 changed lines) and
+  `backend/transaction_engine.py` even more (921 changed lines) -- files directly relevant to this
+  entry -- **`preserve_import_source()`/`_import_source_signature()` themselves were not among Wave 27's
+  changes** (config-domain work; unrelated code paths). Re-ran the identical acceptance script a third
+  time, now against the merged head (branch + Wave 27 combined): **the same 5 scenario names failed,
+  same `copy_failed` root cause, same script exit code** -- identical to both the original branch-only
+  run and the unmodified-pre-Wave-27-`main` run. This is now confirmed across three independent runs
+  (branch alone, unmodified pre-Wave-27 `main`, and the reconciled branch+Wave-27 head): Wave 27 neither
+  fixed nor introduced nor altered this issue in any way. It remains exactly what it was originally
+  assessed to be -- a pre-existing defect orthogonal to both PRs. Docker teardown confirmed clean on
+  this run too (`docker ps -a` empty afterward).
+- **Linux CI reproduction question, resolved (2026-09-01, PR #108 GitHub Actions run)**: `gh pr checks
+  108 --repo Iranman/beets-web-manager` shows the `two-service-docker-acceptance` job **passing** on
+  GitHub's Linux runners (`pass`, ~5m13s) against the exact same reconciled branch+Wave-27 head that
+  failed all 5 scenarios locally on Windows Docker Desktop, in the same run. This answers the previously
+  open question directly: the failure does **not** reproduce on Linux CI. Combined with the likely
+  mechanism above (`mtime_ns` nanosecond precision across a Windows-host<->container bind-mount
+  boundary, which a native Linux filesystem/bind-mount does not have), this confirms the defect is
+  Windows-Docker-Desktop-bind-mount-specific, not production/Linux-reachable. Torrent-staged imports are
+  not actually broken in the topology GitHub Actions (and real deployment, which targets Linux hosts)
+  exercises.
+- **Correction -- this was not merely a benign Windows-only timing quirk (2026-09-01, PR #108 independent
+  final review)**: the P3/"downgraded" conclusion above, and the framing that this entry is purely an
+  environmental artifact safe to leave open indefinitely, was wrong. `main` advanced past this entry's
+  last update with PR #107/Wave 28 (`c224de4`, "Preservation-Copy Content-Signature Correctness &
+  Anti-Laundering Guard"), an independent review of unrelated work that read `preserve_import_source()`'s
+  and `_import_source_signature()`'s actual code (not this entry, not this PR) and found the underlying
+  design this entry describes -- comparing the same-source TOCTOU staleness signature (path+size+
+  `mtime_ns`) as if it were a cross-filesystem copy-equivalence proof -- to be a genuine defect: two files
+  with the same path and size but different bytes produced an identical signature, `mtime_ns` does not
+  reliably survive a cross-filesystem copy at all, and the resulting `copy_failed` path had its own
+  further bugs (an unconditional `shutil.rmtree()` on an unverified collision, a `copy2`-fallback that
+  could mask a real copy failure, and unhandled-`NameError` "sanitized" error branches in a module with
+  no `logging` import). Wave 28 replaced the `mtime_ns`-based post-copy comparison with a real streamed
+  SHA-256 content digest, which is filesystem/mtime-precision-agnostic. **Empirical proof this was the
+  actual root cause, not merely a plausible-sounding one**: re-ran `scripts/verify_two_service_docker_acceptance.py`
+  on this exact Windows machine against unmodified `main` at `c224de4` (Wave 28 present) -- all 5
+  previously-failing scenarios (`fresh-import-untagged-confirmed`, `confirmed-import-idempotent`,
+  `crash-resume-no-duplicate`, `ai-reviewed-import-confirmed`, `crash-resume-ai-batch`) **passed**,
+  `[SUCCESS] Two-service Docker acceptance passed.` This is the fourth independent Windows run of this
+  exact script against this exact machine (branch alone, unmodified pre-Wave-27 `main`, the reconciled
+  branch+Wave-27 head, all four failed identically; `main`+Wave-28 is the first to pass) -- conclusive,
+  not circumstantial. The "does this reproduce on Linux CI" finding above still stands (it does not, and
+  the `mtime_ns`/bind-mount mechanism is real and Windows-specific) -- but "Linux CI already passes" was
+  never proof the underlying code was correct, only that Linux's filesystem semantics happened not to
+  trigger this particular symptom of it. `security/codeql-repowide-closure` merged current `main`
+  (`c224de4`, Wave 28) a second time (following the same reconciliation pattern already used once for
+  Wave 27) specifically so this branch carries the real fix rather than leaving a known-defective
+  `preserve_import_source()` in place on the strength of a mischaracterized entry. Verified after the
+  merge: `git merge --no-commit --no-ff origin/main` produced zero conflicts (this branch never touched
+  `backend/beets_control_agent.py`), `python -m py_compile` clean, `arch003_mutation_inventory.json`
+  regenerated to Wave 28's own 486/59 baseline exactly, focused Wave 28 tests (83, `tests/test_arch003_final_closure.py`
+  + `tests/test_sec002_wave8_engine_ownership.py`) all pass (39 skipped, POSIX-only -- expected on
+  Windows, matching Wave 28's own noted constraint), full backend suite passes.
+- Status: **Resolved on `main` by PR #107/Wave 28, and now present on this branch via reconciliation.**
+  Not something this CodeQL closure session needed to fix directly (no CodeQL alert ever referenced this
+  code, and the actual fix landed through independent, unrelated work) -- but this entry is corrected
+  rather than left standing on a P3/environmental-quirk conclusion that a direct empirical test has since
+  disproven. Priority: N/A (fixed). The Windows-Docker-Desktop-bind-mount `mtime_ns` mechanism identified
+  above is real and did contribute to reproducing the symptom locally, but it was a symptom of a genuine
+  code defect, not an isolated platform quirk safe to wave off on its own next time something like it is
+  found.
+
 ### Wave 9: Playlist, Plex Sync & Staging-Manifest Path Security (22 alerts)
 
 - Starting main SHA: `98d490ec3c40f331dd23061d522e2ac79b015576` (PR #81 / v0.1.13 release commit).
@@ -1359,4 +1467,87 @@ not true and the scanner itself had real correctness bugs. Full detail:
   - Replaced local subprocess `mbsync`/`write`/`move` and filesystem `rmdir` in `_root_folder_repair_apply_safe` with `BeetsClient` IPC calls.
 - **Verification Matrix**: `verify_arch003_mutation_inventory.py --check` passed cleanly (464 total candidate sinks, 107 unresolved baseline, 0 unresolved `ai_import`, 0 unresolved `import_reconciliation`, 0 unresolved `library_cleanup`). Unit tests in `tests/test_ai_batch_state_store.py` passed cleanly (5/5). Full Python test suite passed cleanly with 0 failures and 0 errors.
 - **Status**: **Draft PR Opened (DO NOT MERGE — Claude has sole merge authority).**
+
+## SEC-002 Repository-Wide CodeQL Closure — 2026-09-01 session (independent of PR #102/Wave 27's config-domain scope)
+
+Resumes the CodeQL-alert-closure thread from Waves 1-8 above (which drove the backlog from 320 to 188),
+picked back up after several waves' attention shifted to the SEC-002/ARCH-003 controlled-mutation work
+(Waves 9-26 above). Live re-baseline against GitHub's repository-wide (not PR-scoped) Code Scanning API,
+independently verified rather than trusted from any prior report: **171 open alerts** on `main` at
+`7b05844d58d657ce6f1ae6c5b1724f5ba70ee257` (2 critical, 164 high, 5 medium; `py/path-injection` 121 —
+109 in `app.py`, `py/polynomial-redos` 17, `js/incomplete-url-substring-sanitization` 14,
+`py/stack-trace-exposure` 5, `py/clear-text-storage-sensitive-data` 4, `py/incomplete-url-substring-sanitization`
+3, `py/command-line-injection` 2 critical, `js/xss-through-dom` 2, `py/bad-tag-filter` 1,
+`py/regex-injection` 1, `js/insecure-randomness` 1). Full baseline, per-alert inventory, and per-alert
+disposition detail: `docs/security/codeql_repository_closure.md` and
+`security/codeql_main_alert_inventory.json`.
+
+This session's dispositions (13 of 171):
+- **2 critical `py/command-line-injection`** (`backend/beets_control_agent.py`, alerts 1009/1010):
+  `SAFE_BUT_CODEQL_BLIND`, traced end-to-end (anchored `_MB_UUID_RE` gate; shared sink's only 2 callers
+  both allowlist+sanitize before calling). Dismissed individually on GitHub with sink-specific rationale.
+- **8 `py/path-injection` in `app.py`, REAL_VULNERABILITY, fixed**: `/api/import`, `/api/import/preflight`,
+  and `/api/dedup/scan` ran `mkdir()`/`.exists()`/`os.walk()`/`.rglob()` directly against the raw request
+  path with no allowed-root check anywhere before them — the same "unguarded path-resolution helper"
+  root-cause class Wave 2 found in `routes_submissions._abs_resolved()`, here in three `app.py` routes
+  Waves 4-8 didn't reach. Fixed with two new validators (`_resolve_import_source_path()`,
+  `_resolve_dedup_scan_path()`) mirroring the established `_folder_cleanup_path()`/`/api/browse`
+  allowlist pattern — no new resolver primitive introduced. Tests:
+  `tests/test_codeql_repowide_closure_import_path.py` (12 tests, includes sibling-prefix-escape and
+  symlink-leaf-escape coverage, and route-level proof the dangerous call is never reached, not merely
+  "validated afterward").
+- **3 `py/path-injection` in `app.py`, `SAFE_BUT_CODEQL_BLIND`**: one derived-from-already-validated-value
+  case, the `/api/browse` containment check flagging itself, and a pure path-normalization helper
+  (`_dedup_norm_path`) that never touches the filesystem.
+
+**Second cluster, same session: `app.py` folder-cleanup/rename/merge (32 alerts, `#417,257,256,258,260,
+259,261,262,263,264,265,267,266,269,268,270,272,271,418,275,274,276,277,420,419,280,281,282,283,284,285,
+421`)** — this is literally Wave 4's cluster (`/api/clean/folder-placeholder/*`), re-numbered by GitHub
+after later commits shifted line numbers, so it still showed as 32 live open alerts despite being fixed
+in Wave 4. Independently re-traced every sink in `_folder_cleanup_path`, `_folder_cleanup_file_inventory`,
+`_folder_cleanup_is_empty`, `_folder_cleanup_db_items`, `_folder_cleanup_merge_preview`,
+`_folder_cleanup_review_for`, and `apply_folder_placeholder_action_api` rather than trusting Wave 4's
+record at face value — confirmed every one still resolves to a `_folder_cleanup_path()`-validated value
+(or a value re-validated a second time immediately before a destructive call). No code change needed;
+all 32 dismissed on GitHub with sink-specific rationale, backed by Wave 4's still-passing
+`tests/test_sec002_app_path_folder_cleanup.py`. **Lesson for future waves**: a GitHub alert renumbering
+after unrelated commits can make already-fixed work look like fresh backlog — worth checking "does this
+line's function already look hardened" before assuming a live alert means unfixed code.
+
+**Third and fourth clusters, same session**: Import Review target-preview source-file listing (12
+alerts: 9 `SAFE_BUT_CODEQL_BLIND` on `_target_preview_source_files`/`_remaining_audio_files`/`album_path`,
+plus a real low-severity fix in `_build_import_target_preview()` — `row["source_path"]` from the request
+body reached `.resolve()` with no containment check, unlike its siblings; fixed via the existing
+`_resolve_import_review_cleanup_file()` helper, 3 new tests in
+`tests/test_codeql_repowide_closure_import_review_preview.py`); and the playlist atomic-JSON-write
+helper (8 alerts, all `SAFE_BUT_CODEQL_BLIND` — `_playlist_atomic_json_replace()` validates against fixed
+server-config globals before its `try:` block, `_playlist_read_manifest()` only ever builds a
+single-component sanitized filename).
+
+**Fifth: `_folder_track_search_titles()` (alerts #8641/#8643) — a real bug, fixed** by reusing its
+sibling `_folder_import_track_count()`'s existing Wave-1 fix (`#334`/`#335`): identical missing
+containment check on `source_folder` before `.is_dir()`/`.rglob()`, in a sibling function defined a few
+lines away that Wave 1 evidently didn't reach. 2 new tests in
+`tests/test_sec002_codeql_backlog.py::FolderTrackSearchTitlesRootContainmentTests`, mirroring the
+existing sibling-fix test class.
+
+**Related, reverted attempt**: `_folder_release_preflight()` (alerts #6093/#6095, still `NEEDS_REVIEW`)
+has the same unguarded `Path.is_dir()`/`.rglob()` pattern and looked like the identical bug at first
+read. Copying the same containment gate broke 2 established tests in
+`tests/test_sec002_wave14_mb_identity_matching.py` that deliberately exercise real local-file matching
+against arbitrary non-`MUSIC_ROOT` temp directories. This function has ~14 call sites across
+reimport/repair flows; at least some legitimately expect best-effort local scanning outside the narrow
+`MUSIC_ROOT`/`DOWNLOADS_ROOT` pair used elsewhere in this file. Reverted the fix rather than land
+something that weakens tested matching behavior to close a CodeQL alert — needs either the correct
+broader allowed-roots set for this specific function or a full per-caller trace, flagged here for a
+dedicated future pass rather than forced into this session's pace.
+
+Remaining after this session: 91 open (80 of 171 baseline alerts dispositioned: 2 critical dismissed, 13
+path-injection fixed as real vulnerabilities, 67 path-injection confirmed safe and dismissed +
+2 command-injection dismissed = 69 SAFE_BUT_CODEQL_BLIND total). Continuing this thread in a future wave
+should keep sweeping `app.py`'s remaining `py/path-injection` alerts by functional cluster (the same
+approach Waves 4-8 used), give `_folder_release_preflight()` a proper dedicated per-caller trace, and
+start on the other rule groups entirely untouched so far this session: `py/polynomial-redos` (17),
+`js/incomplete-url-substring-sanitization` (14), `py/stack-trace-exposure` (5),
+`py/clear-text-storage-sensitive-data` (4), and the smaller single/double-alert rule groups.
 
