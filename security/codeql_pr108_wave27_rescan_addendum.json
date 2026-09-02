@@ -1,0 +1,112 @@
+{
+  "_description": "PR-scoped CodeQL alerts newly raised by GitHub's re-analysis of PR #108's head AFTER the PR #102/Wave 27 main-branch merge (git merge origin/main -> security/codeql-repowide-closure). These 10 alerts (#1028-#1037) are NOT part of, and must not be folded into, the 171-alert repository-wide baseline recorded in codeql_main_alert_inventory.json -- that baseline was established and fully dispositioned (35 REAL_VULNERABILITY fixed, 136 SAFE_BUT_CODEQL_BLIND/TEST_ONLY_FALSE_POSITIVE, 0 NEEDS_REVIEW) before the Wave 27 merge. This file tracks only this second, smaller, PR-scoped batch discovered by GitHub's automated re-scan of the merged head, kept in a separate file specifically so the two counts are never conflated in reporting.",
+  "source_check": "gh api repos/Iranman/beets-web-manager/code-scanning/alerts?pr=108",
+  "discovered": "2026-09-01, after merging origin/main (PR #102/Wave 27, config-domain closure) into security/codeql-repowide-closure",
+  "alerts": [
+    {
+      "number": 1028,
+      "rule_id": "py/stack-trace-exposure",
+      "path": "app.py",
+      "line": 13097,
+      "disposition": "SAFE_BUT_CODEQL_BLIND",
+      "dismissed_on_github": true,
+      "notes": "Flagged line is cleanup_import_review_files()'s already-fixed except BeetsError handler: ex is logged server-side via app.logger.warning, only a fixed literal string is returned to the client. Proven by test_cleanup_import_review_files_beets_error_is_sanitized (asserts no leak marker in response). CodeQL is tracking ex's flow into the intentional server-side log call, not into the response."
+    },
+    {
+      "number": 1029,
+      "rule_id": "py/polynomial-redos",
+      "path": "app.py",
+      "line": 40963,
+      "function": "_playlist_title_variants",
+      "disposition": "REAL_VULNERABILITY",
+      "fixed": true,
+      "notes": "Original fix (this session, pre-Wave-27) bounded only the delimiter-content quantifier ([^)\\]]{1,100}) and left the leading \\s* unbounded. Empirically proven still quadratic (~5.4s @ 32,000 chars) against a 'long whitespace run + one unclosed bracket' adversarial shape not covered by the original test suite. Fixed by also bounding leading whitespace to \\s{0,20}. Covered by test_playlist_title_variants_is_not_quadratic_long_leading_whitespace."
+    },
+    {
+      "number": 1030,
+      "rule_id": "py/polynomial-redos",
+      "path": "app.py",
+      "line": 41050,
+      "function": "_playlist_strip_artist_channel_noise",
+      "disposition": "REAL_VULNERABILITY",
+      "fixed": true,
+      "notes": "Same incomplete-bound issue and same fix as #1029 (\\s{0,20} added ahead of the bracket). Covered by test_playlist_strip_artist_channel_noise_is_not_quadratic_long_leading_whitespace."
+    },
+    {
+      "number": 1031,
+      "rule_id": "py/polynomial-redos",
+      "path": "app.py",
+      "line": 41069,
+      "function": "_playlist_artist_name_variants",
+      "disposition": "REAL_VULNERABILITY",
+      "fixed": true,
+      "notes": "Same incomplete-bound issue and same fix as #1029 (\\s{0,20} added ahead of the parenthesis). Covered by test_playlist_artist_name_variants_is_not_quadratic_long_leading_whitespace. A previously-unreported sibling pattern (_JUNK_RE, inside playlist_parse()'s yt-dlp branch) had the identical gap and was proactively fixed the same way even though CodeQL had not (yet) flagged it separately."
+    },
+    {
+      "number": 1032,
+      "rule_id": "py/path-injection",
+      "path": "app.py",
+      "line": 6133,
+      "function": "_folder_release_preflight",
+      "disposition": "SAFE_BUT_CODEQL_BLIND",
+      "dismissed_on_github": true,
+      "notes": "Flagged line is this function's own containment gate (_path_is_under against MUSIC_ROOT/DOWNLOADS_ROOT) added by this PR. Local rglob() scan only runs after this check passes; otherwise falls through to engine-side inspect_import_source()."
+    },
+    {
+      "number": 1033,
+      "rule_id": "py/path-injection",
+      "path": "app.py",
+      "line": 8688,
+      "function": "_folder_track_search_titles",
+      "disposition": "SAFE_BUT_CODEQL_BLIND",
+      "dismissed_on_github": true,
+      "notes": "Flagged line is this function's own containment gate, reusing the same pattern as _folder_import_track_count, added by this PR."
+    },
+    {
+      "number": 1034,
+      "rule_id": "py/path-injection",
+      "path": "app.py",
+      "line": 28663,
+      "function": "_resolve_import_source_path",
+      "disposition": "SAFE_BUT_CODEQL_BLIND",
+      "dismissed_on_github": true,
+      "notes": "Flagged line is the validator's own body (resolve(strict=False) then containment check) added by this PR to fix the /api/import cluster's arbitrary directory creation/enumeration bug. CodeQL flags the validator's own resolve() call, not a downstream use of unvalidated input."
+    },
+    {
+      "number": 1035,
+      "rule_id": "py/path-injection",
+      "path": "app.py",
+      "line": 29086,
+      "function": "_resolve_dedup_scan_path",
+      "disposition": "SAFE_BUT_CODEQL_BLIND",
+      "dismissed_on_github": true,
+      "notes": "Same validator-flags-itself pattern as #1034, added by this PR to fix /api/dedup/scan."
+    },
+    {
+      "number": 1036,
+      "rule_id": "py/path-injection",
+      "path": "app.py",
+      "line": 30114,
+      "function": "_folder_clean_root",
+      "disposition": "SAFE_BUT_CODEQL_BLIND",
+      "dismissed_on_github": true,
+      "notes": "Flagged line is the post-containment existence probe (root_res.exists()/is_dir()), reached only after the containment check on the preceding line passes -- the fix for the existence-oracle-before-containment ordering bug this PR closed."
+    },
+    {
+      "number": 1037,
+      "rule_id": "py/path-injection",
+      "path": "app.py",
+      "line": 30114,
+      "function": "_folder_clean_root",
+      "disposition": "SAFE_BUT_CODEQL_BLIND",
+      "dismissed_on_github": true,
+      "notes": "Second CodeQL dataflow path to the same post-containment existence probe as #1036; same disposition and rationale."
+    }
+  ],
+  "summary": {
+    "total": 10,
+    "real_vulnerability_fixed": 3,
+    "safe_but_codeql_blind_dismissed": 7,
+    "needs_review": 0
+  }
+}

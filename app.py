@@ -6107,7 +6107,31 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
     audio_files: List[Path] = []
     inspect_evidence: Optional[Dict[str, Any]] = None
     try:
-        if source.is_dir():
+        # SEC-002 CodeQL repository-wide closure finding (alerts #6093/#6095):
+        # this walk had no containment check at all, unlike the sibling
+        # _folder_import_track_count() (fixed in Wave 1, SEC-002 main
+        # backlog #334/#335) which checks the exact same pattern.
+        #
+        # Scoped to just this local-enumeration block (not the whole
+        # function, and not aborting the preflight) -- a folder outside
+        # MUSIC_ROOT/DOWNLOADS_ROOT is a normal, expected case here, not
+        # necessarily an attack: this container frequently has no local
+        # media mount at all (see beets_client.inspect_import_source's own
+        # docstring), and the code a few lines below already has a real
+        # fallback for exactly that case -- when the local scan finds
+        # nothing, it asks the *engine* to inspect the source instead
+        # (beets_client.inspect_import_source), which independently
+        # re-validates folder_path against its own resolve_safe_path()
+        # allowed-root policy on the engine side (backend/beets_control_agent.py
+        # inspect_import_source()) regardless of what this function passes
+        # it. Gating the local shortcut here does not weaken security --
+        # it removes an unauthenticated local-disk side channel that
+        # bypassed the engine's own authoritative check entirely, and lets
+        # every caller safely fall through to that already-validated path.
+        if (
+            (_path_is_under(source, MUSIC_ROOT) or _path_is_under(source, DOWNLOADS_ROOT))
+            and source.is_dir()
+        ):
             audio_files = sorted(
                 [p for p in source.rglob("*")
                  if p.is_file() and p.suffix.lower() in AUDIO_EXT],
@@ -8655,7 +8679,13 @@ def _folder_track_search_titles(source_folder: str, existing_album_id: int = 0,
             pass
     try:
         source = Path(source_folder)
-        if source.is_dir():
+        # SEC-002 CodeQL repository-wide closure finding: same missing
+        # containment check as _folder_release_preflight() above -- and the
+        # exact pattern _folder_import_track_count() (a few lines above
+        # this function) was already fixed for in Wave 1.
+        if (
+            _path_is_under(source, MUSIC_ROOT) or _path_is_under(source, DOWNLOADS_ROOT)
+        ) and source.is_dir():
             files = sorted(
                 [p for p in source.rglob("*")
                  if p.is_file() and p.suffix.lower() in AUDIO_EXT],
@@ -13056,7 +13086,15 @@ def cleanup_import_review_files():
             "log": log,
         })
     except BeetsError as ex:
-        return jsonify({"ok": False, "error": str(ex), "log": log}), 400
+        # SEC-002 CodeQL repository-wide closure finding: BeetsClient._request()
+        # falls back to embedding up to 200 raw response-body characters in
+        # this exception's message for any non-JSON/unrecognized engine
+        # error response (e.g. an unexpected proxy/framework error page),
+        # which could carry stack-trace-shaped text -- never interpolate it
+        # directly into a client-facing response (see reimport_disk()'s
+        # identical, already-hardened handling of this exact exception type).
+        app.logger.warning("cleanup_import_review_files BeetsError for %r: %s", folder_path, ex)
+        return jsonify({"ok": False, "error": "Could not cleanup review files.", "log": log}), 400
     except Exception as ex:
         app.logger.exception("cleanup_import_review_files failed for %r", folder_path)
         return jsonify({"ok": False, "error": "Could not cleanup review files.", "log": log}), 500
@@ -14136,8 +14174,14 @@ def library_full():
             })
         except Exception as ex:
             if isinstance(ex, (BeetsUnavailableError, TimeoutError)):
+                # SEC-002 CodeQL repository-wide closure finding: never
+                # interpolate the raw exception text into a client-facing
+                # response -- matches the established ENGINE_OFFLINE
+                # pattern used elsewhere (e.g. library_art_repair_report()).
+                app.logger.warning("get_items_page unavailable: %s: %s", type(ex).__name__, ex)
                 return jsonify({
-                    "error": f"Beets Control Agent is unavailable: {ex}",
+                    "error": "Beets Control Agent is unavailable.",
+                    "error_code": "ENGINE_OFFLINE",
                     "status": "unavailable"
                 }), 503
             raise
@@ -19642,11 +19686,22 @@ def _build_import_target_preview(payload: Dict[str, Any]) -> Dict[str, Any]:
 
         source_file: Optional[Path] = None
         row_source_str = _s(row.get("source_path")).strip()
-        if row_source_str:
-            try:
-                source_file = Path(row_source_str)
-            except Exception:
-                pass
+        if row_source_str and trusted_source_path is not None:
+            # SEC-002 CodeQL repository-wide closure finding: this preview
+            # endpoint took row["source_path"] straight from the request
+            # body with no containment check, unlike every sibling
+            # Import Review helper (_resolve_import_review_selected_audio_file
+            # / _remaining_audio_files / _target_preview_source_files), which
+            # all route through _resolve_import_review_source_path() first.
+            # Low real impact here (this function performs no filesystem
+            # writes -- see its docstring -- so the worst case was an
+            # unvalidated .resolve()/.suffix comparison), but tightened to
+            # match the established validated-source-file pattern rather
+            # than leaving an inconsistent, CodeQL-flagged exception to it.
+            resolved_row_source, _row_source_error = _resolve_import_review_cleanup_file(
+                row_source_str, trusted_source_path
+            )
+            source_file = resolved_row_source
         if source_file is None:
             if source_index < len(source_files):
                 source_file = source_files[source_index]
@@ -28576,10 +28631,54 @@ if _legacy_local_scan_enabled():
 
 # ── Import ────────────────────────────────────────────────────────────────────
 
+_IMPORT_SOURCE_ALLOWED_ROOTS = tuple(TORRENT_SOURCE_ROOTS) + (MUSIC_ROOT,)
+
+
+def _resolve_import_source_path(raw: Any) -> Tuple[Optional[Path], Optional[str]]:
+    """Validate a caller-supplied import source path against the configured
+    torrent-source roots (or the music library root, for the "already
+    organized, just untracked" reimport case) before any filesystem
+    operation touches it. Mirrors the _folder_cleanup_path()/_path_is_under()
+    allowlist pattern already used elsewhere in this file.
+
+    SEC-002 CodeQL repository-wide closure finding: /api/import and
+    /api/import/preflight previously called Path(path).mkdir(), .exists()
+    and os.walk(path) against the raw request body value with no
+    containment check at all -- an authenticated caller could point `path`
+    at any absolute filesystem path the container process can reach,
+    causing arbitrary-directory creation (mkdir) and filesystem-layout
+    enumeration (os.walk) outside the intended torrent-source/library
+    roots. This validator must run before any of those operations, not
+    just before the eventual beets_client hand-off (the engine-side
+    reimport_source_atomic() validation is a separate, later boundary and
+    does not protect the web-manager-side probes made before it runs).
+    """
+    text = _s(raw).strip()
+    if not text:
+        return None, "Path is required"
+    try:
+        candidate = Path(text)
+        if not candidate.is_absolute():
+            return None, "Path must be absolute"
+        resolved = candidate.resolve(strict=False)
+    except Exception:
+        return None, "Invalid path."
+    if not any(
+        _path_is_under(resolved, root) or resolved == root.resolve(strict=False)
+        for root in _IMPORT_SOURCE_ALLOWED_ROOTS
+    ):
+        return None, "Path is outside the allowed import source roots"
+    return resolved, None
+
+
 @app.post("/api/import")
 def start_import():
     payload  = request.get_json(silent=True) or {}
-    path     = payload.get("path", "/data/torrents/music")
+    path_raw = payload.get("path", "/data/torrents/music")
+    validated_path, path_error = _resolve_import_source_path(path_raw)
+    if path_error:
+        return jsonify({"ok": False, "error": path_error}), 400
+    path     = str(validated_path)
     fallback = payload.get("fallback", "asis")   # asis | skip
     write    = payload.get("write", True)
     move     = payload.get("move", False)
@@ -28638,11 +28737,14 @@ def start_import():
 @app.post("/api/import/preflight")
 def import_preflight():
     payload = request.get_json(silent=True) or {}
-    scan_path = Path((payload.get("path") or "/data/torrents/music").strip())
+    path_raw = (payload.get("path") or "/data/torrents/music").strip()
+    scan_path, path_error = _resolve_import_source_path(path_raw)
+    if path_error:
+        return jsonify({"ok": False, "error": path_error}), 400
     if not scan_path.exists() or not scan_path.is_dir():
         return jsonify({"ok": False, "error": f"Path not found: {scan_path}"})
 
-    root_res = scan_path.resolve(strict=False)
+    root_res = scan_path
     folder_rows: List[Dict[str, Any]] = []
     total_audio = 0
     unsupported = 0
@@ -28961,11 +29063,45 @@ def _resolve_album_title_duplicate_candidate(
     return None, ""
 
 
+def _resolve_dedup_scan_path(raw: Any) -> Tuple[Optional[Path], Optional[str]]:
+    """Validate the dedup-scan source path against the same allowlist as
+    /api/browse (library + downloads roots) before any filesystem
+    operation touches it.
+
+    SEC-002 CodeQL repository-wide closure finding: /api/dedup/scan
+    previously called Path(path).exists() and scan_path.rglob("*") against
+    the raw request body value with no containment check at all, allowing
+    an authenticated caller to enumerate audio-file names (and, via the
+    later per-file stat() calls in dedup_scan's _run(), file sizes) under
+    any path the container process can read -- not just the intended
+    library/downloads scope.
+    """
+    text = _s(raw).strip()
+    if not text:
+        return None, "Path is required"
+    try:
+        candidate = Path(text)
+        if not candidate.is_absolute():
+            return None, "Path must be absolute"
+        resolved = candidate.resolve(strict=False)
+    except Exception:
+        return None, "Invalid path."
+    if not any(
+        _path_is_under(resolved, root) or resolved == root.resolve(strict=False)
+        for root in _BROWSE_ALLOWED_ROOTS
+    ):
+        return None, "Path is outside the allowed scan roots"
+    return resolved, None
+
+
 @app.post("/api/dedup/scan")
 def dedup_scan():
     """Start a background dedup scan; returns job_id immediately."""
     payload   = request.get_json(silent=True) or {}
-    scan_path = Path(payload.get("path", "/data/torrents/music"))
+    path_raw  = payload.get("path", "/data/torrents/music")
+    scan_path, path_error = _resolve_dedup_scan_path(path_raw)
+    if path_error:
+        return jsonify({"ok": False, "error": path_error}), 400
     if not scan_path.exists():
         return jsonify({"ok": False, "error": f"Path not found: {scan_path}"})
 
@@ -29960,13 +30096,23 @@ def _resolved_path(path: Path) -> Path:
 
 
 def _folder_clean_root(raw_root: str) -> Path:
+    # SEC-002 CodeQL repository-wide closure finding: the exists()/is_dir()
+    # probe below and the containment check further down both raise a
+    # distinct RuntimeError that reaches the client verbatim
+    # (delete_no_audio_folders_api/scan_no_audio_folders_api: `str(ex)` in
+    # the JSON error response) -- probing existence before containment let
+    # an authenticated caller distinguish "path exists" from "path is
+    # outside the allowed roots" for any absolute path on the filesystem,
+    # not just ones already known to be in-root. Containment must be
+    # checked first so the existence probe only ever runs against a
+    # path already confirmed to be inside FOLDER_CLEAN_ROOTS.
     root = Path((raw_root or str(MUSIC_ROOT)).strip())
-    if not root.exists() or not root.is_dir():
-        raise RuntimeError("Path not found.")
     root_res = _resolved_path(root)
     allowed = [_resolved_path(p) for p in FOLDER_CLEAN_ROOTS]
     if not any(_path_under(root_res, ar) or root_res == ar for ar in allowed):
         raise RuntimeError("Root must be under /data/media/music, /data/torrents/music, or downloads")
+    if not root_res.exists() or not root_res.is_dir():
+        raise RuntimeError("Path not found.")
     return root_res
 
 
@@ -31494,8 +31640,23 @@ def _album_item_abs_path(raw_path: str) -> str:
     return p
 
 
-def _mb_release_tracklist_cache_path(mb_albumid: str) -> Path:
-    release_id = (mb_albumid or "").strip().lower()
+def _mb_release_tracklist_cache_path(mb_albumid: str) -> Optional[Path]:
+    # SEC-002 CodeQL repository-wide closure finding: this previously
+    # lowercased/stripped mb_albumid with no format check at all before
+    # joining it onto _MB_RELEASE_TRACKLIST_CACHE_DIR -- unlike the sibling
+    # release-art cache (_release_art_cache_info/_release_art_download),
+    # which anchors on _RELEASE_ART_MBID_RE before ever touching a path.
+    # _fetch_mb_release_tracklist() has ~28 call sites across this file;
+    # rather than audit every one for whether its mb_albumid ultimately
+    # traces to attacker-controlled text, validate here at the single
+    # shared cache-path builder both the read and write sides funnel
+    # through -- a value that isn't a real MusicBrainz UUID can never
+    # reach the filesystem, and a real MBID has an identical resolved
+    # path either way, so this is a pure hardening with no behavior
+    # change for any legitimate caller.
+    if not _is_valid_mb_uuid(mb_albumid):
+        return None
+    release_id = _s(mb_albumid).strip().lower()
     return _MB_RELEASE_TRACKLIST_CACHE_DIR / release_id[:2] / f"{release_id}.json"
 
 
@@ -31503,6 +31664,8 @@ def _mb_release_tracklist_read_disk(mb_albumid: str, now: float) -> Optional[Dic
     if _MB_RELEASE_TRACKLIST_DISK_CACHE_TTL <= 0:
         return None
     cache_path = _mb_release_tracklist_cache_path(mb_albumid)
+    if cache_path is None:
+        return None
     try:
         cached = json.loads(cache_path.read_text(encoding="utf-8"))
         payload = cached.get("payload")
@@ -31518,6 +31681,8 @@ def _mb_release_tracklist_write_disk(mb_albumid: str, payload: Dict[str, Any]) -
     if _MB_RELEASE_TRACKLIST_DISK_CACHE_TTL <= 0:
         return
     cache_path = _mb_release_tracklist_cache_path(mb_albumid)
+    if cache_path is None:
+        return
     try:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = cache_path.with_suffix(f".{os.getpid()}.tmp")
@@ -40788,7 +40953,25 @@ def _norm(s):
 def _playlist_title_variants(value):
     raw = _normalize_name(_s(value))
     variants = {raw}
-    variants.add(re.sub(r"\s*[\(\[][^\)\]]+[\)\]]\s*", " ", raw))
+    # SEC-002 CodeQL repository-wide closure finding (py/polynomial-redos):
+    # an unbounded [^)\]]+ between two literal delimiters, scanned via an
+    # unanchored re.sub(), is quadratic in input length for adversarial
+    # text with no closing bracket (empirically confirmed: ~4.5s at a
+    # 16,000-character input). Bounded to 100 chars -- no legitimate
+    # parenthetical annotation in a track/album title is remotely that
+    # long -- which measured linear-time for the same adversarial input.
+    # SEC-002 CodeQL PR-scoped re-check (post-Wave-27 rebase, GitHub alert
+    # #1029): the {1,100} content bound alone was insufficient -- the
+    # *leading* \s* was still unbounded, and an unanchored re.sub() retried
+    # at every offset of a long whitespace run (before a single unclosed
+    # bracket) is quadratic regardless of the content bound (empirically
+    # confirmed: ~5.4s at a 32,000-character adversarial "long whitespace
+    # run + one bracket" input -- a materially different adversarial shape
+    # than the "many small brackets" one originally tested, which this
+    # bound alone did not cover). Bounding the leading whitespace too
+    # (realistic titles never have more than a handful of separator
+    # spaces) measured linear time against both adversarial shapes.
+    variants.add(re.sub(r"\s{0,20}[\(\[][^\)\]]{1,100}[\)\]]\s{0,20}", " ", raw))
     variants.add(re.sub(r"\b(?:ft\.?|feat\.?|featuring)\b.+$", " ", raw, flags=re.I))
     variants.add(re.sub(r"\b(?:unreleased)\b", " ", raw, flags=re.I))
     variants.add(re.sub(
@@ -40872,7 +41055,14 @@ def _playlist_strip_artist_channel_noise(value: str) -> str:
     left in, it silently drags down artist-match scores against a real
     downloaded file's tags/filename, which don't carry that branding."""
     text = _s(value)
-    text = re.sub(r"\s*\[[^\]]*\]\s*$", "", text).strip()
+    # SEC-002 CodeQL repository-wide closure finding (py/polynomial-redos):
+    # same unbounded-content-between-delimiters shape as
+    # _playlist_title_variants() above -- bounded for the same reason.
+    # SEC-002 CodeQL PR-scoped re-check (post-Wave-27 rebase, GitHub alert
+    # #1030): see the identical note on _playlist_title_variants() above --
+    # the leading \s* was still unbounded and still quadratic for a long
+    # whitespace run before a single unclosed bracket. Bounded it too.
+    text = re.sub(r"\s{0,20}\[[^\]]{0,100}\]\s{0,20}$", "", text).strip()
     text = _PLAYLIST_ARTIST_CHANNEL_NOISE_RE.sub("", text)
     return " ".join(text.split()).strip(" -_/")
 
@@ -40888,7 +41078,14 @@ def _playlist_artist_name_variants(value):
         if text and _norm(text) not in {_norm(v) for v in variants}:
             variants.append(text)
 
-    cleaned = re.sub(r"\s*\([^)]*\)\s*$", "", raw).strip()
+    # SEC-002 CodeQL repository-wide closure finding (py/polynomial-redos):
+    # same unbounded-content-between-delimiters shape as
+    # _playlist_title_variants() above -- bounded for the same reason.
+    # SEC-002 CodeQL PR-scoped re-check (post-Wave-27 rebase, GitHub alert
+    # #1031): see the identical note on _playlist_title_variants() above --
+    # the leading \s* was still unbounded and still quadratic for a long
+    # whitespace run before a single unclosed bracket. Bounded it too.
+    cleaned = re.sub(r"\s{0,20}\([^)]{0,100}\)\s{0,20}$", "", raw).strip()
     add(raw)
     add(cleaned)
     add(_playlist_strip_artist_channel_noise(raw))
@@ -41005,18 +41202,24 @@ def _playlist_split_artist_title(value):
         return None
     # Deterministic linear-time parser without regular expression backtracking.
     #
-    # PR #109 independent review finding: the original single left-to-right
-    # scan decided "spaced dash" vs. "compact dash" independently AT EACH
-    # dash position and returned on whichever fired FIRST -- so a compact
-    # hyphen inside a hyphenated artist name (Jay-Z, Blink-182, T-Pain,
-    # A-Ha, Run-D.M.C.) pre-empted the real, much stronger spaced " - "
-    # separator that came later in the same string, e.g. "Jay-Z - Empire
-    # State of Mind" split as ("Jay", "Z - Empire State of Mind") instead
-    # of ("Jay-Z", "Empire State of Mind"). This was not a regression this
-    # PR introduced -- the pre-fix regex
-    # (r"\s+[-–—]\s+|(?<=[A-Za-z0-9])[-–—](?=[A-Z0-9])") had the identical
-    # bug: re's leftmost-match semantics prefer whichever alternative
-    # starts earliest in the string, not the semantically stronger one.
+    # Reconciliation note (PR #108 x PR #109 merge): PR #108's own earlier
+    # remediation of this same function (SEC-002 repository-wide CodeQL
+    # closure, py/polynomial-redos) used a bounded regex split call on the
+    # pattern r"\s{1,20}[-–—]\s{1,20}|(?<=[A-Za-z0-9])[-–—](?=[A-Z0-9])"
+    # (maxsplit=1) -- which fixed the ReDoS but not the correctness defect
+    # below (re's leftmost-match semantics still prefer whichever
+    # alternative starts earliest in the string, not the semantically
+    # stronger one). PR #109's implementation, kept here, fixes both.
+    #
+    # PR #109 independent review finding: a single left-to-right scan that
+    # decides "spaced dash" vs. "compact dash" independently AT EACH dash
+    # position and returns on whichever fired FIRST lets a compact hyphen
+    # inside a hyphenated artist name (Jay-Z, Blink-182, T-Pain, A-Ha,
+    # Run-D.M.C.) pre-empt the real, much stronger spaced " - " separator
+    # that comes later in the same string, e.g. "Jay-Z - Empire State of
+    # Mind" split as ("Jay", "Z - Empire State of Mind") instead of
+    # ("Jay-Z", "Empire State of Mind"). Not a regression PR #109
+    # introduced -- the original pre-both-PRs regex had the identical bug.
     #
     # Fixed with two full linear passes instead of one combined scan: a
     # spaced separator anywhere in the string is a far less ambiguous
@@ -41028,7 +41231,7 @@ def _playlist_split_artist_title(value):
     # for genuinely un-spaced "Artist-Title" pastes, which is still a
     # real, supported input shape (see PlaylistSplitArtistTitleTests).
     # Two O(n) passes is still O(n) overall, not O(n^2): no backtracking,
-    # no nested scan restarts.
+    # no nested scan restarts, and no regex engine involved at all.
     n = len(text)
 
     i = 0
@@ -45115,6 +45318,23 @@ def _fetch_spotify_playlist_tracks(pid: str, cid: str, cs: str) -> List[Dict[str
     return tracks
 
 
+def _playlist_url_host(value: str) -> str:
+    """Parsed hostname of a caller-supplied playlist source URL, or ''
+    if it doesn't parse. Used for provider-routing decisions in
+    playlist_parse() -- must be real hostname parsing, not substring
+    matching, since one branch attaches stored credentials based on the
+    result (see the SEC-002 CodeQL repository-wide closure finding
+    documented at that call site)."""
+    try:
+        return (_up.urlsplit(value).hostname or "").lower()
+    except Exception:
+        return ""
+
+
+def _playlist_url_host_is(host: str, domain: str) -> bool:
+    return bool(host) and (host == domain or host.endswith("." + domain))
+
+
 @app.post("/api/playlist/parse")
 def playlist_parse():
     payload = request.get_json(silent=True) or {}
@@ -45157,9 +45377,26 @@ def playlist_parse():
     elif source == "url":
         # Generic URL: Spotify (if creds set) → Spotify API; everything else → yt-dlp.
         # Also reached when source=="spotify" isn't used.
+        #
+        # SEC-002 CodeQL repository-wide closure finding
+        # (py/incomplete-url-substring-sanitization, 3 alerts): the
+        # provider-routing checks below used to be plain substring tests
+        # ("spotify.com" in content, "youtube.com"/"soundcloud.com" in
+        # parse_lower). Unlike the cosmetic frontend badge findings in the
+        # same rule class (see docs/security/codeql_repository_closure.md
+        # Phase 4), this one is a genuine trust decision: the soundcloud.com
+        # branch attaches the operator's stored netrc credentials
+        # (_apply_ytdlp_netrc) to whatever URL yt-dlp is given. A URL that
+        # merely CONTAINS "soundcloud.com" as a substring without actually
+        # being a soundcloud.com URL (e.g. "https://evil.example/soundcloud.com/x")
+        # would previously have had those credentials attached and sent to
+        # the attacker-controlled host -- real credential exfiltration, not
+        # just a mislabeled UI badge. Fixed with real hostname parsing
+        # (_playlist_url_host()/_playlist_url_host_is(), module-level).
         cid = os.environ.get("SPOTIFY_CLIENT_ID","").strip()
         cs  = os.environ.get("SPOTIFY_CLIENT_SECRET","").strip()
-        if "spotify.com" in content and cid and cs:
+        _content_host = _playlist_url_host(content)
+        if _playlist_url_host_is(_content_host, "spotify.com") and cid and cs:
             # Route to Spotify API
             m = re.search(r"playlist[/:]([A-Za-z0-9]+)", content)
             if not m:
@@ -45177,11 +45414,20 @@ def playlist_parse():
             except ImportError:
                 return jsonify({"ok": False, "error": "yt-dlp could not be installed — check container pip access"})
 
+            # SEC-002 CodeQL repository-wide closure finding
+            # (py/polynomial-redos): the same unbounded-content-between-
+            # delimiters shape as the playlist title/artist cleaners
+            # (docs/security/codeql_repository_closure.md) -- not itself
+            # CodeQL-flagged at this line, but the identical, already-
+            # empirically-proven-quadratic pattern, fixed the same way.
+            # PR-scoped re-check (post-Wave-27 rebase) additionally found
+            # the leading \s* also needed bounding (see the identical note
+            # on _playlist_title_variants()) -- fixed here proactively too.
             _JUNK_RE = re.compile(
-                r'\s*[\(\[]'
+                r'\s{0,20}[\(\[]'
                 r'(?:official\s+(?:video|audio|lyric|music\s+video|visualizer)|'
                 r'lyric(?:s|\s+video)?|audio|video|mv|visualizer|hd|4k|explicit|'
-                r'live|acoustic|remix|instrumental|karaoke|cover|ft\.?|feat\.?)[^\)\]]*'
+                r'live|acoustic|remix|instrumental|karaoke|cover|ft\.?|feat\.?)[^\)\]]{0,100}'
                 r'[\)\]]',
                 re.IGNORECASE)
 
@@ -45194,12 +45440,11 @@ def playlist_parse():
                 "js_runtimes": _ytdlp_js_runtime_options(),
                 "remote_components": _ytdlp_remote_components(),
             }
-            parse_lower = content.lower()
-            if "youtube.com" in parse_lower or "youtu.be" in parse_lower:
+            if _playlist_url_host_is(_content_host, "youtube.com") or _playlist_url_host_is(_content_host, "youtu.be"):
                 extractor_args = _ytdlp_source_extractor_args("ytdlp")
                 if extractor_args:
                     ydl_opts["extractor_args"] = extractor_args
-            elif "soundcloud.com" in parse_lower:
+            elif _playlist_url_host_is(_content_host, "soundcloud.com"):
                 _apply_ytdlp_netrc(ydl_opts)
             try:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:

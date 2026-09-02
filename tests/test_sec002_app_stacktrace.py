@@ -67,9 +67,28 @@ class FolderCleanRootFalsePositiveTests(unittest.TestCase):
     found: {root}" variant embedded a filesystem path and has been
     tightened to a fixed string too."""
 
-    def test_missing_path_raises_fixed_message(self):
+    def test_missing_path_outside_allowed_roots_raises_containment_message_not_existence(self):
+        # Repository-wide CodeQL closure session, 2026-09-01: this used to
+        # assert "Path not found." here, which depended on the vulnerable
+        # ordering the same session's fix closed (exists()/is_dir() ran
+        # before the containment check, letting a caller distinguish
+        # "exists but outside allowed roots" from "does not exist" for any
+        # absolute path -- an existence oracle, since both messages reach
+        # the client verbatim). Containment must fail first for a path
+        # that is both nonexistent AND outside every allowed root, so no
+        # existence information about arbitrary outside paths ever leaks.
         with self.assertRaises(RuntimeError) as ctx:
             app_module._folder_clean_root("/definitely/not/a/real/path/xyz")
+        self.assertIn("must be under", str(ctx.exception))
+
+    def test_missing_path_inside_allowed_root_raises_fixed_not_found_message(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            allowed_root = Path(tmp) / "allowed"
+            allowed_root.mkdir()
+            missing = allowed_root / "does-not-exist"
+            with mock.patch.object(app_module, "FOLDER_CLEAN_ROOTS", [allowed_root]):
+                with self.assertRaises(RuntimeError) as ctx:
+                    app_module._folder_clean_root(str(missing))
         self.assertEqual(str(ctx.exception), "Path not found.")
 
     def test_outside_allowed_roots_raises_fixed_message(self):
@@ -103,6 +122,45 @@ class SpotifyFetchErrorSafeMessageTests(unittest.TestCase):
                 app_module._fetch_spotify_playlist_tracks("playlist123", "client-id", "client-secret")
         self.assertEqual(str(ctx.exception), "Spotify authentication failed.")
         self.assertNotIn("10.0.0.5", str(ctx.exception))
+
+
+class ReviewFilesCleanupAndLibraryPageExceptionSanitizationTests(unittest.TestCase):
+    """Repository-wide CodeQL closure session, 2026-09-01: two remaining
+    genuinely-broad-except sinks that leaked exception text verbatim,
+    following the same Wave 3 pattern as ConfigYamlExceptionSanitizationTests
+    below -- log the real exception server-side, return a fixed message."""
+
+    def test_cleanup_import_review_files_beets_error_is_sanitized(self):
+        leak = "LEAK_MARKER <html>Traceback (most recent call last)</html>"
+        with app_module.app.test_request_context(
+            "/api/import/review-files/cleanup", method="POST",
+            data=json.dumps({"path": "/data/media/music/Some Album", "review_item_id": "x", "files": []}),
+            content_type="application/json",
+        ), mock.patch.object(
+            app_module, "_pending_review_matches", return_value=True,
+        ), mock.patch.object(
+            app_module.beets_client, "plan_import_review_cleanup",
+            side_effect=app_module.BeetsError(leak, error_code="cleanup_failed", status_code=500),
+        ):
+            response = app_module.cleanup_import_review_files()
+        status = response[1]
+        data = response[0].get_json()
+        self.assertEqual(status, 400)
+        self.assertNotIn("LEAK_MARKER", json.dumps(data))
+        self.assertNotIn("Traceback", json.dumps(data))
+
+    def test_library_full_paginated_unavailable_is_sanitized(self):
+        leak = "Beets Control Agent unreachable at 10.0.0.5:8338 (connection refused)"
+        with app_module.app.test_request_context("/api/library?limit=50"), mock.patch.object(
+            app_module.beets_client, "get_items_page",
+            side_effect=app_module.BeetsUnavailableError(leak),
+        ):
+            response = app_module.library_full()
+        status = response[1]
+        data = response[0].get_json()
+        self.assertEqual(status, 503)
+        self.assertEqual(data.get("error_code"), "ENGINE_OFFLINE")
+        self.assertNotIn("10.0.0.5", json.dumps(data))
 
 
 class ConfigYamlExceptionSanitizationTests(unittest.TestCase):

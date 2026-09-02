@@ -117,4 +117,7 @@ docs/operations/*
 !docs/incidents/
 docs/incidents/*
 !docs/incidents/*.md
+!docs/security/
+docs/security/*
+!docs/security/*.md
 .playwright-mcp/
