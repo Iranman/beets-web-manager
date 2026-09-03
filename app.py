@@ -30912,6 +30912,15 @@ def _clean_remove_orphaned_items(item_ids: List[int], *,
                                  dry_run: bool,
                                  log: List[str],
                                  trigger_plex: bool = True) -> Dict[str, Any]:
+    """Remove item rows whose backing audio file no longer exists.
+
+    Selection (which items are "orphaned") is a read-only, non-mutating
+    file-existence check done here; the actual deletion is performed
+    per-album through album_maintenance_v1's remove_tracks/remove_album
+    modes via the engine transaction boundary -- files are already gone
+    for these items by definition, so delete_files=False (nothing real
+    to unlink; the engine skips missing files gracefully either way).
+    """
     ids = sorted({int(i) for i in item_ids if str(i).isdigit() and int(i) > 0})
     if not ids:
         return {"ok": True, "dry_run": dry_run, "selected": 0, "removed": 0, "skipped": 0}
@@ -30923,8 +30932,8 @@ def _clean_remove_orphaned_items(item_ids: List[int], *,
             ids,
         ).fetchall()
 
-    stale_ids: List[int] = []
-    album_ids: set[int] = set()
+    stale_by_album: Dict[int, List[int]] = {}
+    unowned_stale_ids: List[int] = []
     skipped = 0
     for row in rows:
         raw_path = _s(row["path"])
@@ -30932,56 +30941,83 @@ def _clean_remove_orphaned_items(item_ids: List[int], *,
             skipped += 1
             continue
         iid = int(row["id"])
-        stale_ids.append(iid)
-        if row["album_id"]:
-            album_ids.add(int(row["album_id"]))
+        aid = int(row["album_id"] or 0)
         label = f"{_s(row['artist'])} - {_s(row['title'])}".strip(" -")
         log.append(f"  {'Would remove' if dry_run else 'Removing'} orphaned item id={iid}: {label}")
+        if aid > 0:
+            stale_by_album.setdefault(aid, []).append(iid)
+        else:
+            # album_maintenance_v1 requires a positive album_id; an item
+            # with no album row cannot go through this engine family.
+            # Fail safe (leave the row in place, log it) rather than
+            # inventing a bypass or a new mutation path for an edge case
+            # no real caller has been observed to hit.
+            unowned_stale_ids.append(iid)
 
-    if dry_run or not stale_ids:
+    stale_ids_total = sum(len(v) for v in stale_by_album.values()) + len(unowned_stale_ids)
+
+    if dry_run or stale_ids_total == 0:
+        if unowned_stale_ids:
+            log.append(
+                f"  WARN: {len(unowned_stale_ids)} orphaned item(s) have no album_id and "
+                "cannot be removed through the engine's album_maintenance_v1 boundary; skipped."
+            )
         return {
             "ok": True,
             "dry_run": dry_run,
             "selected": len(ids),
-            "removed": len(stale_ids) if dry_run else 0,
+            "removed": stale_ids_total if dry_run else 0,
             "skipped": skipped + max(0, len(ids) - len(rows)),
         }
 
+    removed_items = 0
     removed_albums = 0
-    with _db() as con:
-        con.execute(
-            "DELETE FROM items WHERE id IN (" + ",".join("?" for _ in stale_ids) + ")",
-            stale_ids,
-        )
+    for aid, aid_item_ids in sorted(stale_by_album.items()):
         try:
-            con.execute(
-                "DELETE FROM item_attributes WHERE entity_id IN ("
-                + ",".join("?" for _ in stale_ids) + ")",
-                stale_ids,
-            )
-        except Exception as ex:
-            log.append(f"  item_attributes cleanup skipped: {ex}")
-        if album_ids:
-            aid_list = sorted(album_ids)
-            cur = con.execute(
-                "DELETE FROM albums WHERE id IN (" + ",".join("?" for _ in aid_list) + ") "
-                "AND NOT EXISTS (SELECT 1 FROM items WHERE items.album_id = albums.id)",
-                aid_list,
-            )
-            removed_albums = max(0, cur.rowcount)
-        con.commit()
+            plan_res = beets_client.plan_album_maintenance({
+                "mode": "remove_tracks",
+                "album_id": aid,
+                "item_ids": aid_item_ids,
+                "delete_files": False,
+                "clean_empty_folders": False,
+            })
+        except (BeetsUnavailableError, BeetsError) as ex:
+            log.append(f"  Engine unavailable for orphaned-item cleanup on album_id {aid}: {ex}")
+            continue
+        if not plan_res.get("ok"):
+            log.append(f"  Engine rejected orphaned-item cleanup plan for album_id {aid}: {plan_res.get('error') or 'unknown error'}")
+            continue
+        op_id = plan_res.get("operation_id")
+        if not op_id:
+            continue
+        try:
+            apply_res = beets_client.apply_album_maintenance(op_id)
+        except (BeetsUnavailableError, BeetsError) as ex:
+            log.append(f"  Engine unavailable applying orphaned-item cleanup for album_id {aid}: {ex}")
+            continue
+        if not apply_res.get("ok"):
+            log.append(f"  Engine rejected orphaned-item cleanup apply for album_id {aid}: {apply_res.get('error') or 'unknown error'}")
+            continue
+        removed_items += int(apply_res.get("deleted_items") or 0)
+        removed_albums += int(apply_res.get("deleted_albums") or 0)
+
+    if unowned_stale_ids:
+        log.append(
+            f"  WARN: {len(unowned_stale_ids)} orphaned item(s) have no album_id and "
+            "cannot be removed through the engine's album_maintenance_v1 boundary; skipped."
+        )
 
     _invalidate_lib_cache()
     if trigger_plex:
         _trigger_plex_refresh(log)
-    log.append(f"Done: removed {len(stale_ids)} orphaned item row(s) and {removed_albums} empty album row(s).")
+    log.append(f"Done: removed {removed_items} orphaned item row(s) and {removed_albums} empty album row(s).")
     return {
         "ok": True,
         "dry_run": False,
         "selected": len(ids),
-        "removed": len(stale_ids),
+        "removed": removed_items,
         "empty_albums_removed": removed_albums,
-        "skipped": skipped + max(0, len(ids) - len(rows)),
+        "skipped": skipped + max(0, len(ids) - len(rows)) + len(unowned_stale_ids),
     }
 
 
@@ -31039,14 +31075,17 @@ def _clean_remove_empty_albums(album_ids: List[int], *,
             "skipped": skipped,
         }
 
-    with _db() as con:
-        cur = con.execute(
-            "DELETE FROM albums WHERE id IN (" + ",".join("?" for _ in removable) + ") "
-            "AND NOT EXISTS (SELECT 1 FROM items WHERE items.album_id = albums.id)",
-            removable,
-        )
-        removed = max(0, cur.rowcount)
-        con.commit()
+    removed = 0
+    for aid in removable:
+        try:
+            res = beets_client.delete_album(aid, delete_files=False)
+        except (BeetsUnavailableError, BeetsError) as ex:
+            log.append(f"  Engine unavailable removing empty album_id {aid}: {ex}")
+            continue
+        if not res.get("ok"):
+            log.append(f"  Engine rejected removal of empty album_id {aid}: {res.get('error') or 'unknown error'}")
+            continue
+        removed += 1
 
     _invalidate_lib_cache()
     _trigger_plex_refresh(log)

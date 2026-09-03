@@ -8030,6 +8030,15 @@ def execute_album_maintenance_apply(
                             con.rollback()
                             return _fail(f"Expected to delete exactly 1 item row for id={d['id']}, affected {cur.rowcount}.", "album_maintenance_rowcount_mismatch")
                         deleted_items_count += 1
+                        # Best-effort orphaned-attribute cleanup: item_attributes
+                        # is a side table keyed by entity_id with no DB-level FK
+                        # cascade, so a deleted item would otherwise leave
+                        # orphaned rows behind. Non-fatal if the table doesn't
+                        # exist in this schema (older/test DBs).
+                        try:
+                            con.execute("DELETE FROM item_attributes WHERE entity_id=?", (d["id"],))
+                        except sqlite3.Error:
+                            pass
 
                     for aid in db_album_deletes:
                         # Re-verify zero items remaining before deleting album row
