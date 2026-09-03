@@ -34535,41 +34535,6 @@ def _album_template_token_cleanup_candidates(album_id: int) -> List[Dict[str, An
         })
     return candidates
 
-def _update_item_path_after_rename(old_path: Path, new_path: Path) -> int:
-    old_abs = str(old_path)
-    new_abs = str(new_path)
-    old_rel = _db_path_value(old_path)
-    new_rel = _db_path_value(new_path)
-    changed = 0
-    with _db() as con:
-        cur = con.execute(
-            "UPDATE items SET path=? WHERE path=? OR path=?",
-            (new_rel, old_rel, old_abs),
-        )
-        changed += int(cur.rowcount or 0)
-        cur = con.execute(
-            "UPDATE items SET path=? WHERE path=? OR path=?",
-            (new_rel.encode(), old_rel.encode(), old_abs.encode()),
-        )
-        changed += int(cur.rowcount or 0)
-        con.commit()
-    return changed
-
-
-def _force_item_path_after_rename(item_id: int, new_path: Path) -> int:
-    try:
-        iid = int(item_id or 0)
-    except Exception:
-        iid = 0
-    if iid <= 0:
-        return 0
-    new_rel = _db_path_value(new_path)
-    with _db() as con:
-        cur = con.execute("UPDATE items SET path=? WHERE id=?", (new_rel, iid))
-        con.commit()
-        return int(cur.rowcount or 0)
-
-
 def _template_token_cleanup_candidates(paths: Iterable[Path],
                                        *,
                                        recursive: bool) -> List[Dict[str, Any]]:
@@ -34623,25 +34588,6 @@ def _template_token_cleanup_candidates(paths: Iterable[Path],
                 "duplicate_check_required": conflict,
             })
     return candidates
-
-def _delete_item_path_after_quarantine(item_id: int, old_path: Path) -> int:
-    try:
-        iid = int(item_id or 0)
-    except Exception:
-        iid = 0
-    old_abs = str(old_path)
-    old_rel = _db_path_value(old_path)
-    with _db() as con:
-        if iid > 0:
-            cur = con.execute("DELETE FROM items WHERE id=?", (iid,))
-        else:
-            cur = con.execute(
-                "DELETE FROM items WHERE path=? OR path=? OR path=? OR path=?",
-                (old_rel, old_abs, old_rel.encode(), old_abs.encode()),
-            )
-        con.commit()
-        return int(cur.rowcount or 0)
-
 
 def _filename_cleanup_duplicate_quarantine_path(old_path: Path) -> Path:
     return _unique_import_review_cleanup_path(
