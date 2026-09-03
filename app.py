@@ -28264,27 +28264,40 @@ def _run_normalize_artists_if_needed():
         if not to_fix:
             return
         def _do(log, cancel_event=None):
-            with _db() as con:
-                affected_ids = []
-                for old_aa, new_aa in to_fix:
+            # Selection (which album rows currently hold the un-normalized
+            # value) is a local, non-mutating read; the actual rename is one
+            # album_metadata_repair_v1 call per affected album --
+            # updates={"albumartist": new_aa} already propagates to every
+            # item row of that album too (create_album_metadata_plan merges
+            # album-level identity fields into each item's diff when the
+            # item doesn't already set its own), so no separate
+            # UPDATE items SET albumartist=... step is needed.
+            affected_ids: List[int] = []
+            for old_aa, new_aa in to_fix:
+                with _db(row_factory=sqlite3.Row) as con:
                     rows = con.execute("SELECT id FROM albums WHERE albumartist = ?", (old_aa,)).fetchall()
-                    affected_ids.extend(r[0] for r in rows)
-                    log.append(f"  Renamed: {old_aa!r} → {new_aa!r}")
-                    con.execute("UPDATE albums SET albumartist = ? WHERE albumartist = ?", (new_aa, old_aa))
-                    con.execute("UPDATE items  SET albumartist = ? WHERE albumartist = ?", (new_aa, old_aa))
-                con.commit()
-            cfg = "/config/config.yaml"
+                log.append(f"  Renamed: {old_aa!r} → {new_aa!r}")
+                for row in rows:
+                    aid = int(row["id"])
+                    try:
+                        res = beets_client.update_album_metadata(aid, {"albumartist": new_aa}, force_write_tags=True)
+                    except (BeetsUnavailableError, BeetsError) as ex:
+                        log.append(f"  Engine unavailable normalizing album_id {aid}: {ex}")
+                        continue
+                    if not res.get("ok"):
+                        log.append(f"  Engine rejected normalize for album_id {aid}: {res.get('error') or 'unknown error'}")
+                        continue
+                    affected_ids.append(aid)
             for i, aid in enumerate(affected_ids, 1):
                 log.append(f"[{i}/{len(affected_ids)}] Moving album_id={aid}…")
                 try:
-                    beets_client.update_album_metadata(aid, {}, force_write_tags=True)
                     rel_res = beets_client.relocate_album(aid, mode="rename")
                     if rel_res.get("ok"):
                         log.append(f"  ✓ Relocated album {aid} to: {rel_res.get('dest_dir')}")
                 except Exception as _ex:
                     log.append(f"  relocate warning: {_ex}")
             _invalidate_lib_cache()
-            log.append(f"Auto-normalized {len(to_fix)} artist name(s).")
+            log.append(f"Auto-normalized {len(affected_ids)} album(s) across {len(to_fix)} artist name(s).")
         jobs.start_python(_do, label="Auto-normalize artist names")
     except Exception:
         pass
