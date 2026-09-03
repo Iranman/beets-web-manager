@@ -27154,30 +27154,61 @@ def library_sync_deleted():
                 })
             return
 
-        try:
-            with _db() as con3:
-                _batch = 500
-                for i in range(0, len(rm_item_ids), _batch):
-                    ch = rm_item_ids[i:i+_batch]
-                    con3.execute(f"DELETE FROM items WHERE id IN ({','.join('?'*len(ch))})", ch)
-                for i in range(0, len(rm_album_ids), _batch):
-                    ch = rm_album_ids[i:i+_batch]
-                    con3.execute(f"DELETE FROM albums WHERE id IN ({','.join('?'*len(ch))})", ch)
-        except Exception as ex:
-            log.append(f"ERROR deleting from DB: {ex}"); return
+        # Deletion goes through album_maintenance_v1 per album (files are
+        # already confirmed gone above -- delete_files=False, nothing real
+        # to unlink; remove_tracks mode already deletes the album row too
+        # once every one of its items is included in one call).
+        removed_item_total = 0
+        removed_album_total = 0
+        for aid_i, missing_ids in album_missing.items():
+            if cancel_event and cancel_event.is_set():
+                log.append("[cancelled]"); return
+            try:
+                plan_res = beets_client.plan_album_maintenance({
+                    "mode": "remove_tracks",
+                    "album_id": aid_i,
+                    "item_ids": missing_ids,
+                    "delete_files": False,
+                    "clean_empty_folders": False,
+                })
+            except (BeetsUnavailableError, BeetsError) as ex:
+                log.append(f"  ERROR: engine unavailable syncing album_id {aid_i}: {ex}")
+                continue
+            if not plan_res.get("ok"):
+                log.append(f"  ERROR: engine rejected sync plan for album_id {aid_i}: {plan_res.get('error') or 'unknown error'}")
+                continue
+            op_id = plan_res.get("operation_id")
+            if not op_id:
+                continue
+            try:
+                apply_res = beets_client.apply_album_maintenance(op_id)
+            except (BeetsUnavailableError, BeetsError) as ex:
+                log.append(f"  ERROR: engine unavailable applying sync for album_id {aid_i}: {ex}")
+                continue
+            if not apply_res.get("ok"):
+                log.append(f"  ERROR: engine rejected sync apply for album_id {aid_i}: {apply_res.get('error') or 'unknown error'}")
+                continue
+            removed_item_total += int(apply_res.get("deleted_items") or 0)
+            removed_album_total += int(apply_res.get("deleted_albums") or 0)
+
+        if orphan_item_ids:
+            log.append(
+                f"  WARN: {len(orphan_item_ids)} missing-file item(s) have no album_id and "
+                "cannot be removed through the engine's album_maintenance_v1 boundary; skipped."
+            )
 
         _invalidate_lib_cache()
-        log.append(f"Done - removed {len(rm_album_ids)} album(s), "
-                   f"{len(rm_item_ids)} track(s) from DB (files already gone from disk)")
+        log.append(f"Done - removed {removed_album_total} album(s), "
+                   f"{removed_item_total} track(s) from DB (files already gone from disk)")
         if update_state:
             update_state({
                 "current_task": "Missing-file DB sync applied",
-                "affected_count": len(rm_item_ids),
-                "changed_count": len(rm_album_ids) + len(rm_item_ids),
+                "affected_count": removed_item_total,
+                "changed_count": removed_album_total + removed_item_total,
                 "final_summary": {
                     "DB rows scanned": len(all_items),
-                    "Missing item rows removed": len(rm_item_ids),
-                    "Album rows removed": len(rm_album_ids),
+                    "Missing item rows removed": removed_item_total,
+                    "Album rows removed": removed_album_total,
                     "Mode": "Applied after confirmation",
                 },
             })
