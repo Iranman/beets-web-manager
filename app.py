@@ -30494,11 +30494,11 @@ def clean_merge_duplicate_album():
     def _do(log, cancel_event=None):
         with _db(row_factory=sqlite3.Row) as con:
             target_row = con.execute(
-                "SELECT id, albumartist, album, mb_albumid, year, label FROM albums WHERE id=?",
+                "SELECT id, albumartist, album FROM albums WHERE id=?",
                 (target_id,),
             ).fetchone()
             source_row = con.execute(
-                "SELECT id, albumartist, album, mb_albumid, year, label FROM albums WHERE id=?",
+                "SELECT id, albumartist, album FROM albums WHERE id=?",
                 (source_id,),
             ).fetchone()
         if not target_row:
@@ -30510,33 +30510,14 @@ def clean_merge_duplicate_album():
         s_label = f"{_s(source_row['albumartist'])} — {_s(source_row['album'])} (id={source_id})"
         log.append(f"Merging: {s_label}  →  {t_label}")
 
-        with _db() as con:
-            moved = con.execute(
-                "UPDATE items SET album_id=? WHERE album_id=?",
-                (target_id, source_id),
-            ).rowcount
-            log.append(f"  Moved {moved} item(s) to target album")
-
-            # Inherit any non-blank metadata target is missing
-            updates: list = []
-            params: list = []
-            for col in ("mb_albumid", "year", "label"):
-                t_val = _s(target_row[col]).strip() if target_row[col] is not None else ""
-                s_val = _s(source_row[col]).strip() if source_row[col] is not None else ""
-                if not t_val and s_val:
-                    updates.append(f"{col}=?")
-                    params.append(source_row[col])
-                    log.append(f"  Inherited {col}={s_val!r} from source")
-            if updates:
-                params.append(target_id)
-                con.execute(
-                    f"UPDATE albums SET {', '.join(updates)} WHERE id=?",
-                    params,
-                )
-
-            con.execute("DELETE FROM albums WHERE id=?", (source_id,))
-            log.append(f"  Deleted source album row {source_id}")
-            con.commit()
+        merge_res = beets_client.merge_duplicate_albums(target_id, source_id)
+        if not merge_res.get("ok"):
+            raise RuntimeError(merge_res.get("error") or "Engine rejected duplicate album merge")
+        moved = int(merge_res.get("moved") or 0)
+        log.append(f"  Moved {moved} item(s) to target album")
+        for col, val in (merge_res.get("inherit_fields") or {}).items():
+            log.append(f"  Inherited {col}={_s(val)!r} from source")
+        log.append(f"  Deleted source album row {source_id}")
 
         _invalidate_lib_cache()
         log.append("Done.")
@@ -30676,37 +30657,25 @@ def clean_rgid_group_merge():
     def _do(log, cancel_event=None):
         with _db(row_factory=sqlite3.Row) as con:
             target_row = con.execute(
-                "SELECT id, albumartist, album, mb_albumid, year, label FROM albums WHERE id=?",
+                "SELECT id, albumartist, album FROM albums WHERE id=?",
                 (target_id,),
             ).fetchone()
             source_row = con.execute(
-                "SELECT id, albumartist, album, mb_albumid, year, label FROM albums WHERE id=?",
+                "SELECT id, albumartist, album FROM albums WHERE id=?",
                 (source_id,),
             ).fetchone()
         if not target_row or not source_row:
             raise RuntimeError("album row(s) not found")
 
         log.append(f"Merging release-group {rgid} cluster: album {source_id} → {target_id}")
-        with _db() as con:
-            moved = con.execute(
-                "UPDATE items SET album_id=? WHERE album_id=?", (target_id, source_id),
-            ).rowcount
-            log.append(f"  Moved {moved} item(s) to target album")
-            updates: list = []
-            params: list = []
-            for col in ("mb_albumid", "year", "label"):
-                t_val = _s(target_row[col]).strip() if target_row[col] is not None else ""
-                s_val = _s(source_row[col]).strip() if source_row[col] is not None else ""
-                if not t_val and s_val:
-                    updates.append(f"{col}=?")
-                    params.append(source_row[col])
-                    log.append(f"  Inherited {col}={s_val!r} from source")
-            if updates:
-                params.append(target_id)
-                con.execute(f"UPDATE albums SET {', '.join(updates)} WHERE id=?", params)
-            con.execute("DELETE FROM albums WHERE id=?", (source_id,))
-            log.append(f"  Deleted source album row {source_id}")
-            con.commit()
+        merge_res = beets_client.merge_duplicate_albums(target_id, source_id)
+        if not merge_res.get("ok"):
+            raise RuntimeError(merge_res.get("error") or "Engine rejected release-group duplicate merge")
+        moved = int(merge_res.get("moved") or 0)
+        log.append(f"  Moved {moved} item(s) to target album")
+        for col, val in (merge_res.get("inherit_fields") or {}).items():
+            log.append(f"  Inherited {col}={_s(val)!r} from source")
+        log.append(f"  Deleted source album row {source_id}")
 
         _clear_rgid_resolution(rgid)
         _invalidate_lib_cache()
@@ -30832,15 +30801,12 @@ def clean_rgid_group_relink():
             cand = _fetch_mb_release_candidate(target_mbid) or {}
             target_rgid = _s(cand.get("mb_releasegroupid") or "").strip().lower()
 
-        with _db() as con:
-            if target_rgid:
-                con.execute(
-                    "UPDATE albums SET mb_albumid=?, mb_releasegroupid=? WHERE id=?",
-                    (target_mbid, target_rgid, album_id),
-                )
-            else:
-                con.execute("UPDATE albums SET mb_albumid=? WHERE id=?", (target_mbid, album_id))
-            con.commit()
+        relink_updates: Dict[str, Any] = {"mb_albumid": target_mbid}
+        if target_rgid:
+            relink_updates["mb_releasegroupid"] = target_rgid
+        relink_res = beets_client.update_album_metadata(album_id, relink_updates)
+        if not relink_res.get("ok"):
+            raise RuntimeError(relink_res.get("error") or "Engine rejected release relink")
         log.append(
             f"Relinked album_id {album_id} to release {target_mbid}"
             + (f" (release group {target_rgid})" if target_rgid else "")

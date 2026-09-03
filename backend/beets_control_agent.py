@@ -5146,6 +5146,41 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             self._send_json(code, res)
             return
 
+        if path == "/albums/duplicate-merge/plan":
+            res = transaction_engine.create_album_duplicate_merge_plan(
+                _txn_store, body,
+                db_path=LIB_PATH,
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        if path == "/albums/duplicate-merge/apply":
+            op_id = str(body.get("operation_id") or "").strip()
+            if not op_id:
+                self._send_json(400, {"ok": False, "error": "operation_id required"})
+                return
+            res = transaction_engine.execute_album_duplicate_merge_apply(
+                _txn_store, op_id,
+                db_path=LIB_PATH,
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        if path == "/albums/duplicate-merge/rollback":
+            op_id = str(body.get("operation_id") or "").strip()
+            if not op_id:
+                self._send_json(400, {"ok": False, "error": "operation_id required"})
+                return
+            res = transaction_engine.rollback_album_duplicate_merge(
+                _txn_store, op_id,
+                db_path=LIB_PATH,
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
         if path == "/albums/artwork/plan":
             music_root_env = _resolved_music_root()
             stg_roots = [_resolved_downloads_root(), _resolved_staging_root()]

@@ -476,6 +476,41 @@ class BeetsClient:
         """Engine-side album maintenance rollback (SEC-002 Wave 22)."""
         return self._request("POST", "/albums/maintenance/rollback", {"operation_id": operation_id}, timeout=timeout)
 
+    def plan_album_duplicate_merge(self, payload: Dict[str, Any], *, timeout: float = 30.0) -> Dict[str, Any]:
+        """Engine-side duplicate-album-row merge planning (ARCH-003 Wave 30)."""
+        return self._request("POST", "/albums/duplicate-merge/plan", payload, timeout=timeout)
+
+    def apply_album_duplicate_merge(self, operation_id: str, *, timeout: float = 60.0) -> Dict[str, Any]:
+        """Engine-side duplicate-album-row merge application (ARCH-003 Wave 30)."""
+        return self._request("POST", "/albums/duplicate-merge/apply", {"operation_id": operation_id}, timeout=timeout)
+
+    def rollback_album_duplicate_merge(self, operation_id: str, *, timeout: float = 60.0) -> Dict[str, Any]:
+        """Engine-side duplicate-album-row merge rollback (ARCH-003 Wave 30)."""
+        return self._request("POST", "/albums/duplicate-merge/rollback", {"operation_id": operation_id}, timeout=timeout)
+
+    def merge_duplicate_albums(self, target_album_id: int, source_album_id: int) -> Dict[str, Any]:
+        """Merge source album's items into target and retire source through album_duplicate_merge_v1."""
+        plan_res = self.plan_album_duplicate_merge({
+            "target_album_id": target_album_id,
+            "source_album_id": source_album_id,
+        })
+        if not plan_res.get("ok"):
+            return {"ok": False, "error": plan_res.get("error") or "Duplicate merge plan rejected", "code": plan_res.get("code")}
+        op_id = plan_res.get("operation_id")
+        if not op_id:
+            return {"ok": True, "moved": 0}
+        apply_res = self.apply_album_duplicate_merge(op_id)
+        if not apply_res.get("ok"):
+            return {"ok": False, "error": apply_res.get("error") or "Duplicate merge apply failed", "code": apply_res.get("code")}
+        return {
+            "ok": True,
+            "moved": apply_res.get("moved", 0),
+            "target_album_id": target_album_id,
+            "source_album_id": source_album_id,
+            "operation_id": op_id,
+            "inherit_fields": plan_res.get("inherit_fields") or {},
+        }
+
     def plan_album_artwork(self, payload: Dict[str, Any], *, timeout: float = 30.0) -> Dict[str, Any]:
         """Engine-side album artwork planning (SEC-002 Wave 22)."""
         return self._request("POST", "/albums/artwork/plan", payload, timeout=timeout)

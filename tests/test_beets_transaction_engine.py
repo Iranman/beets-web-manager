@@ -673,6 +673,99 @@ class TestBeetsTransactionEngineFamilies(unittest.TestCase):
             self.assertEqual(r1[0], "77777777-7777-7777-7777-777777777777")
             self.assertEqual(r1[1], 1)
 
+    # ── album_duplicate_merge_v1 (Wave 30) ────────────────────────────────────
+
+    def test_duplicate_merge_moves_items_inherits_fields_and_retires_source(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO albums (id, album, albumartist, mb_albumid, year, label) VALUES (301, 'Album', 'Artist', '', 0, '')")
+            conn.execute("INSERT INTO albums (id, album, albumartist, mb_albumid, year, label) VALUES (302, 'Album', 'Artist', '88888888-8888-8888-8888-888888888888', 1999, 'Indie Label')")
+            conn.execute("INSERT INTO items (id, album_id, title) VALUES (701, 302, 'Track 1')")
+            conn.execute("INSERT INTO items (id, album_id, title) VALUES (702, 302, 'Track 2')")
+
+        plan = transaction_engine.create_album_duplicate_merge_plan(
+            self.store, {"target_album_id": 301, "source_album_id": 302}, db_path=str(self.db_path),
+        )
+        self.assertTrue(plan.get("ok"), msg=plan.get("error"))
+        self.assertEqual(plan.get("moved_item_count"), 2)
+        self.assertEqual(plan.get("inherit_fields"), {"mb_albumid": "88888888-8888-8888-8888-888888888888", "year": 1999, "label": "Indie Label"})
+        op_id = plan["operation_id"]
+
+        apply_res = transaction_engine.execute_album_duplicate_merge_apply(self.store, op_id, db_path=str(self.db_path))
+        self.assertTrue(apply_res.get("ok"), msg=apply_res.get("error"))
+        self.assertEqual(apply_res.get("moved"), 2)
+
+        with sqlite3.connect(self.db_path) as conn:
+            rows = conn.execute("SELECT album_id FROM items WHERE id IN (701, 702)").fetchall()
+            self.assertEqual({r[0] for r in rows}, {301})
+            target = conn.execute("SELECT mb_albumid, year, label FROM albums WHERE id=301").fetchone()
+            self.assertEqual(target, ("88888888-8888-8888-8888-888888888888", 1999, "Indie Label"))
+            source = conn.execute("SELECT id FROM albums WHERE id=302").fetchone()
+            self.assertIsNone(source)
+
+    def test_duplicate_merge_apply_rejects_toctou_item_set_change(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO albums (id, album, albumartist) VALUES (301, 'Album', 'Artist')")
+            conn.execute("INSERT INTO albums (id, album, albumartist) VALUES (302, 'Album', 'Artist')")
+            conn.execute("INSERT INTO items (id, album_id, title) VALUES (701, 302, 'Track 1')")
+
+        plan = transaction_engine.create_album_duplicate_merge_plan(
+            self.store, {"target_album_id": 301, "source_album_id": 302}, db_path=str(self.db_path),
+        )
+        self.assertTrue(plan.get("ok"), msg=plan.get("error"))
+        op_id = plan["operation_id"]
+
+        # A new item lands in the source album after Plan but before Apply.
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO items (id, album_id, title) VALUES (702, 302, 'Track 2')")
+
+        apply_res = transaction_engine.execute_album_duplicate_merge_apply(self.store, op_id, db_path=str(self.db_path))
+        self.assertFalse(apply_res.get("ok"))
+        self.assertEqual(apply_res.get("code"), "album_duplicate_merge_toctou_mismatch")
+
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute("SELECT id FROM albums WHERE id=302").fetchone()
+            self.assertIsNotNone(row, "source album must not be deleted when Apply refuses a stale plan")
+
+    def test_duplicate_merge_rollback_restores_source_album_and_items(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO albums (id, album, albumartist, mb_albumid) VALUES (301, 'Album', 'Artist', '')")
+            conn.execute("INSERT INTO albums (id, album, albumartist, mb_albumid) VALUES (302, 'Album', 'Artist', '99999999-9999-9999-9999-999999999999')")
+            conn.execute("INSERT INTO items (id, album_id, title) VALUES (701, 302, 'Track 1')")
+
+        plan = transaction_engine.create_album_duplicate_merge_plan(
+            self.store, {"target_album_id": 301, "source_album_id": 302}, db_path=str(self.db_path),
+        )
+        op_id = plan["operation_id"]
+        apply_res = transaction_engine.execute_album_duplicate_merge_apply(self.store, op_id, db_path=str(self.db_path))
+        self.assertTrue(apply_res.get("ok"), msg=apply_res.get("error"))
+
+        rollback_res = transaction_engine.rollback_album_duplicate_merge(self.store, op_id, db_path=str(self.db_path))
+        self.assertTrue(rollback_res.get("ok"), msg=rollback_res)
+        self.assertEqual(rollback_res.get("status"), "Rolled Back")
+
+        with sqlite3.connect(self.db_path) as conn:
+            source = conn.execute("SELECT id FROM albums WHERE id=302").fetchone()
+            self.assertIsNotNone(source)
+            item = conn.execute("SELECT album_id FROM items WHERE id=701").fetchone()
+            self.assertEqual(item[0], 302)
+            target = conn.execute("SELECT mb_albumid FROM albums WHERE id=301").fetchone()
+            self.assertEqual(target[0], "")
+
+    def test_duplicate_merge_rejects_same_or_missing_album_ids(self):
+        same = transaction_engine.create_album_duplicate_merge_plan(
+            self.store, {"target_album_id": 301, "source_album_id": 301}, db_path=str(self.db_path),
+        )
+        self.assertFalse(same.get("ok"))
+        self.assertEqual(same.get("code"), "album_duplicate_merge_invalid_payload")
+
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO albums (id, album, albumartist) VALUES (301, 'Album', 'Artist')")
+        missing = transaction_engine.create_album_duplicate_merge_plan(
+            self.store, {"target_album_id": 301, "source_album_id": 999}, db_path=str(self.db_path),
+        )
+        self.assertFalse(missing.get("ok"))
+        self.assertEqual(missing.get("code"), "album_duplicate_merge_album_missing")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -8260,6 +8260,300 @@ def rollback_album_maintenance(
             }
 
 
+# ── album_duplicate_merge_v1 ──────────────────────────────────────────────────
+# Wave 30: a narrow, DB-only family for merging two library album rows that
+# are the same real album -- move every item from source to target, inherit
+# any of a fixed field set (mb_albumid, mb_releasegroupid, year, label) the
+# target is missing but the source has, then retire the (now-empty) source
+# album row. No filesystem paths are involved at all (audio files are never
+# touched), so no root/symlink validation applies -- this is exactly what
+# the pre-migration app.py callers (clean_merge_duplicate_album,
+# clean_rgid_group_merge) did, just moved behind Plan/Apply/rollback with
+# real TOCTOU revalidation instead of one uncontrolled local transaction.
+# No existing family fits: album_maintenance_v1 only ever deletes items, it
+# has no bulk item.album_id reassignment; existing_album_reconcile_v1 is a
+# different, stricter shape (requires each moved item's file to exist on
+# disk and re-verifies its path/stat/symlink -- appropriate for its actual
+# import-reconciliation use case, wrong for a DB-only duplicate-row merge
+# with no file involvement, and it has no target-field-inheritance step).
+
+_ALBUM_DUPLICATE_MERGE_INHERIT_FIELDS = ("mb_albumid", "mb_releasegroupid", "year", "label")
+
+
+def create_album_duplicate_merge_plan(
+    store: TransactionStore,
+    payload: Dict[str, Any],
+    *,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Create a non-mutating preview plan for merging two duplicate album rows."""
+    try:
+        target_id = int(payload.get("target_album_id") or 0)
+    except Exception:
+        target_id = 0
+    try:
+        source_id = int(payload.get("source_album_id") or 0)
+    except Exception:
+        source_id = 0
+    if target_id <= 0 or source_id <= 0 or target_id == source_id:
+        return {"ok": False, "error": "target_album_id and source_album_id are required and must differ", "code": "album_duplicate_merge_invalid_payload"}
+
+    lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB", "")
+    if not lib_db or not Path(lib_db).exists():
+        return {"ok": False, "error": "Beets library database not found", "code": "album_duplicate_merge_db_not_found"}
+
+    con = sqlite3.connect(lib_db, timeout=10)
+    con.row_factory = sqlite3.Row
+    try:
+        target_row = con.execute("SELECT * FROM albums WHERE id=?", (target_id,)).fetchone()
+        source_row = con.execute("SELECT * FROM albums WHERE id=?", (source_id,)).fetchone()
+        if not target_row:
+            return {"ok": False, "error": f"Target album_id {target_id} not found", "code": "album_duplicate_merge_album_missing"}
+        if not source_row:
+            return {"ok": False, "error": f"Source album_id {source_id} not found", "code": "album_duplicate_merge_album_missing"}
+        target_before = _row_to_dict(target_row)
+        source_before = _row_to_dict(source_row)
+
+        source_item_rows = con.execute("SELECT id FROM items WHERE album_id=?", (source_id,)).fetchall()
+        source_item_ids = sorted(int(r["id"]) for r in source_item_rows)
+    finally:
+        con.close()
+
+    inherit_fields: Dict[str, Any] = {}
+    for col in _ALBUM_DUPLICATE_MERGE_INHERIT_FIELDS:
+        t_val = _s(target_before.get(col)).strip()
+        s_val = _s(source_before.get(col)).strip()
+        if not t_val and s_val:
+            inherit_fields[col] = source_before.get(col)
+
+    resource_keys = {f"album:{target_id}", f"album:{source_id}"}
+    for iid in source_item_ids:
+        resource_keys.add(f"item:{iid}")
+
+    tx = store.create(
+        operation_type="Merge Album",
+        status="Pending",
+        summary=f"Merge duplicate album {source_id} into {target_id} ({len(source_item_ids)} item(s))",
+        rollback_available=True,
+        metadata={
+            "mutation_family": "album_duplicate_merge_v1",
+            "target_album_id": target_id,
+            "source_album_id": source_id,
+            "source_item_ids": source_item_ids,
+            "inherit_fields": inherit_fields,
+            "target_before": target_before,
+            "source_before": source_before,
+            "resource_keys": sorted(resource_keys),
+        },
+    )
+    return {
+        "ok": True,
+        "operation_id": tx["id"],
+        "target_album_id": target_id,
+        "source_album_id": source_id,
+        "moved_item_count": len(source_item_ids),
+        "inherit_fields": inherit_fields,
+    }
+
+
+def execute_album_duplicate_merge_apply(
+    store: TransactionStore,
+    operation_id: str,
+    *,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    if not _TRANSACTION_ID_RE.match(operation_id):
+        return {"ok": False, "error": "Invalid transaction ID format", "code": "album_duplicate_merge_invalid_id"}
+    with _get_apply_lock(operation_id):
+        try:
+            tx = store.get(operation_id)
+        except KeyError:
+            return {"ok": False, "error": f"Transaction {operation_id} not found", "code": "album_duplicate_merge_not_found"}
+        meta = tx.get("metadata") or {}
+        if meta.get("mutation_family") != "album_duplicate_merge_v1":
+            return {"ok": False, "error": "Transaction is not an album_duplicate_merge_v1 operation", "code": "album_duplicate_merge_family_mismatch"}
+        if tx.get("status") == "Completed":
+            return {"ok": True, "operation_id": operation_id, "status": "Completed", "mutated": True}
+
+        lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB", "")
+        if not lib_db or not Path(lib_db).exists():
+            return {"ok": False, "error": "Beets library database not found", "code": "album_duplicate_merge_db_not_found"}
+
+        target_id = int(meta.get("target_album_id") or 0)
+        source_id = int(meta.get("source_album_id") or 0)
+        source_item_ids = sorted(int(i) for i in (meta.get("source_item_ids") or []))
+        inherit_fields = meta.get("inherit_fields") or {}
+
+        def _fail(msg: str, code: str) -> Dict[str, Any]:
+            store.update(operation_id, status="Failed", logs=[f"Apply failed: {msg}"])
+            return {"ok": False, "error": msg, "code": code, "mutated": False, "status": "Failed"}
+
+        with _lock_resources(meta.get("resource_keys") or [f"album:{target_id}", f"album:{source_id}"]):
+            con = sqlite3.connect(lib_db, timeout=10)
+            con.row_factory = sqlite3.Row
+            try:
+                if not con.execute("SELECT 1 FROM albums WHERE id=?", (target_id,)).fetchone():
+                    return _fail(f"Target album_id {target_id} no longer exists", "album_duplicate_merge_album_missing")
+                if not con.execute("SELECT 1 FROM albums WHERE id=?", (source_id,)).fetchone():
+                    return _fail(f"Source album_id {source_id} no longer exists", "album_duplicate_merge_album_missing")
+
+                # TOCTOU: source's item set must be exactly what Plan saw --
+                # not more (an item added since Plan would be silently
+                # swept into the merge without ever having been reviewed)
+                # and not fewer (a concurrent operation already moved/
+                # deleted one, so Plan's captured rollback data no longer
+                # describes reality).
+                live_rows = con.execute("SELECT id FROM items WHERE album_id=?", (source_id,)).fetchall()
+                live_ids = sorted(int(r["id"]) for r in live_rows)
+                if live_ids != source_item_ids:
+                    return _fail(
+                        f"Source album_id {source_id}'s item set changed since plan "
+                        f"(expected {len(source_item_ids)} item(s), found {len(live_ids)})",
+                        "album_duplicate_merge_toctou_mismatch",
+                    )
+
+                store.update(operation_id, status="Running", metadata={**meta, "mutation_started": True})
+
+                moved = 0
+                if source_item_ids:
+                    q_marks = ",".join("?" for _ in source_item_ids)
+                    cur = con.execute(
+                        f"UPDATE items SET album_id=? WHERE album_id=? AND id IN ({q_marks})",
+                        [target_id, source_id] + source_item_ids,
+                    )
+                    moved = cur.rowcount
+                    if moved != len(source_item_ids):
+                        con.rollback()
+                        return _fail(
+                            f"Expected to move {len(source_item_ids)} item(s), moved {moved}",
+                            "album_duplicate_merge_rowcount_mismatch",
+                        )
+
+                if inherit_fields:
+                    cols = [f"{k}=?" for k in inherit_fields]
+                    vals = list(inherit_fields.values()) + [target_id]
+                    cur = con.execute(f"UPDATE albums SET {', '.join(cols)} WHERE id=?", vals)
+                    if cur.rowcount != 1:
+                        con.rollback()
+                        return _fail(f"Expected to update exactly 1 target album row, affected {cur.rowcount}", "album_duplicate_merge_rowcount_mismatch")
+
+                remaining = con.execute("SELECT COUNT(*) FROM items WHERE album_id=?", (source_id,)).fetchone()[0]
+                if int(remaining or 0) != 0:
+                    con.rollback()
+                    return _fail(f"Source album_id {source_id} still has items after move; refusing to delete its row", "album_duplicate_merge_rowcount_mismatch")
+                cur = con.execute("DELETE FROM albums WHERE id=?", (source_id,))
+                if cur.rowcount != 1:
+                    con.rollback()
+                    return _fail(f"Expected to delete exactly 1 source album row, affected {cur.rowcount}", "album_duplicate_merge_rowcount_mismatch")
+                con.commit()
+            finally:
+                con.close()
+
+            store.update(operation_id, status="Completed", metadata={
+                **store.get(operation_id).get("metadata", {}),
+                "db_mutated": True,
+                "moved_count": moved,
+                "completed_at": _now(),
+            })
+            return {
+                "ok": True,
+                "operation_id": operation_id,
+                "status": "Completed",
+                "mutated": True,
+                "moved": moved,
+                "target_album_id": target_id,
+                "source_album_id": source_id,
+            }
+
+
+def rollback_album_duplicate_merge(
+    store: TransactionStore,
+    operation_id: str,
+    *,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    if not _TRANSACTION_ID_RE.match(operation_id):
+        return {"ok": False, "error": "Invalid transaction ID format", "code": "album_duplicate_merge_invalid_id"}
+    with _get_apply_lock(operation_id):
+        try:
+            tx = store.get(operation_id)
+        except KeyError:
+            return {"ok": False, "error": f"Transaction {operation_id} not found", "code": "album_duplicate_merge_not_found"}
+        meta = tx.get("metadata") or {}
+        if meta.get("mutation_family") != "album_duplicate_merge_v1":
+            return {"ok": False, "error": "Transaction is not an album_duplicate_merge_v1 operation", "code": "album_duplicate_merge_family_mismatch"}
+        if tx.get("status") != "Completed":
+            return {"ok": False, "error": "Only a Completed merge can be rolled back", "code": "album_duplicate_merge_not_completed"}
+
+        lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB", "")
+        if not lib_db or not Path(lib_db).exists():
+            return {"ok": False, "error": "Beets library database not found", "code": "album_duplicate_merge_db_not_found"}
+
+        target_id = int(meta.get("target_album_id") or 0)
+        source_id = int(meta.get("source_album_id") or 0)
+        source_item_ids = sorted(int(i) for i in (meta.get("source_item_ids") or []))
+        inherit_fields = meta.get("inherit_fields") or {}
+        target_before = meta.get("target_before") or {}
+        source_before = meta.get("source_before") or {}
+
+        with _lock_resources(meta.get("resource_keys") or [f"album:{target_id}", f"album:{source_id}"]):
+            con = sqlite3.connect(lib_db, timeout=10)
+            con.row_factory = sqlite3.Row
+            db_restored = 0
+            db_failed = 0
+            try:
+                if source_before and not con.execute("SELECT 1 FROM albums WHERE id=?", (source_id,)).fetchone():
+                    cols = list(source_before.keys())
+                    placeholders = ",".join("?" * len(cols))
+                    cur = con.execute(
+                        f"INSERT INTO albums ({','.join(cols)}) VALUES ({placeholders})",
+                        [source_before[c] for c in cols],
+                    )
+                    if cur.rowcount == 1:
+                        db_restored += 1
+                    else:
+                        db_failed += 1
+
+                if source_item_ids:
+                    q_marks = ",".join("?" for _ in source_item_ids)
+                    cur = con.execute(
+                        f"UPDATE items SET album_id=? WHERE album_id=? AND id IN ({q_marks})",
+                        [source_id, target_id] + source_item_ids,
+                    )
+                    db_restored += cur.rowcount
+                    if cur.rowcount != len(source_item_ids):
+                        db_failed += (len(source_item_ids) - cur.rowcount)
+
+                if inherit_fields and target_before:
+                    cols = [f"{k}=?" for k in inherit_fields]
+                    vals = [target_before.get(k) for k in inherit_fields] + [target_id]
+                    cur = con.execute(f"UPDATE albums SET {', '.join(cols)} WHERE id=?", vals)
+                    if cur.rowcount == 1:
+                        db_restored += 1
+                    else:
+                        db_failed += 1
+                con.commit()
+            finally:
+                con.close()
+
+            final_status = "Rolled Back" if db_failed == 0 else ("Partially Rolled Back" if db_restored else "Failed")
+            store.update(operation_id, status=final_status, metadata={
+                **meta,
+                "rollback_available": False,
+                "db_restored_count": db_restored,
+                "db_failed_count": db_failed,
+                "rolled_back_at": _now(),
+            })
+            return {
+                "ok": db_failed == 0,
+                "operation_id": operation_id,
+                "status": final_status,
+                "db_restored": db_restored,
+                "db_failed": db_failed,
+                "partial_mutation": final_status == "Partially Rolled Back",
+            }
+
+
 # ── album_artwork_v1 ──────────────────────────────────────────────────────────
 
 _ALBUM_ARTWORK_MODES = frozenset({"quarantine", "move", "replace"})
