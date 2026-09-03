@@ -48,7 +48,6 @@ class TestBeetsClientExpansion(unittest.TestCase):
                 existing_album_id=10,
                 imported_album_id=20,
                 move_item_ids=[1, 2, 3],
-                allow_different_releasegroup=True,
                 retire_imported_album=True,
             )
             self.assertTrue(res["ok"])
@@ -59,9 +58,29 @@ class TestBeetsClientExpansion(unittest.TestCase):
                     "existing_album_id": 10,
                     "imported_album_id": 20,
                     "move_item_ids": [1, 2, 3],
-                    "allow_different_releasegroup": True,
                     "retire_imported_album": True,
                 },
+                timeout=30.0,
+            )
+
+    def test_plan_existing_album_reconcile_has_no_releasegroup_bypass_kwarg(self):
+        """No allow_different_releasegroup/force override exists on this method
+        or the engine-side identity gate it calls -- see docs/TECHNICAL_DEBT.md
+        ARCH-003 for why a cherry-picked version of this was reviewed and
+        removed. Even a caller that (mistakenly, or from stale code) still
+        passes these keys in a dict payload gets them stripped before the
+        request is sent."""
+        with patch.object(self.client, "_request", return_value={"ok": True, "operation_id": "op-456"}) as mock_req:
+            self.client.plan_existing_album_reconcile({
+                "existing_album_id": 10,
+                "imported_album_id": 20,
+                "allow_different_releasegroup": True,
+                "force": True,
+            })
+            mock_req.assert_called_once_with(
+                "POST",
+                "/albums/existing-reconcile/plan",
+                {"existing_album_id": 10, "imported_album_id": 20},
                 timeout=30.0,
             )
 

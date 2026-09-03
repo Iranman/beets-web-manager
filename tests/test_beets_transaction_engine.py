@@ -587,8 +587,14 @@ class TestBeetsTransactionEngineFamilies(unittest.TestCase):
             row = conn.execute("SELECT id FROM albums WHERE id=999").fetchone()
             self.assertIsNone(row)
 
-    def test_existing_album_reconcile_allow_different_releasegroup(self):
-        # Create 2 albums with different releasegroup IDs
+    def test_existing_album_reconcile_releasegroup_mismatch_has_no_bypass(self):
+        """The Release-Group-mismatch identity gate on existing_album_reconcile_v1
+        is unconditional -- an earlier cherry-picked allow_different_releasegroup/
+        force override was reviewed and removed (see docs/TECHNICAL_DEBT.md
+        ARCH-003) because none of the remaining unmigrated callers need it and
+        every one of this repo's real duplicate/RGID-merge routes already
+        enforces the same RG match requirement itself with no override path.
+        This proves the payload key cannot silently re-enable a bypass."""
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("INSERT INTO albums (id, album, albumartist, mb_releasegroupid) VALUES (101, 'Target Album', 'Artist A', '11111111-1111-1111-1111-111111111111')")
             conn.execute("INSERT INTO albums (id, album, albumartist, mb_releasegroupid) VALUES (102, 'Source Album', 'Artist A', '22222222-2222-2222-2222-222222222222')")
@@ -600,7 +606,6 @@ class TestBeetsTransactionEngineFamilies(unittest.TestCase):
                 (str(item_file).encode("utf-8"),),
             )
 
-        # Plan without allow_different_releasegroup should fail closed
         plan_rejected = transaction_engine.create_existing_album_reconcile_plan(
             self.store,
             {"existing_album_id": 101, "imported_album_id": 102, "move_item_ids": [501]},
@@ -610,28 +615,26 @@ class TestBeetsTransactionEngineFamilies(unittest.TestCase):
         self.assertFalse(plan_rejected.get("ok"))
         self.assertEqual(plan_rejected.get("code"), "reconcile_identity_mismatch")
 
-        # Plan with allow_different_releasegroup=True should succeed
-        plan_allowed = transaction_engine.create_existing_album_reconcile_plan(
+        # Same request, now also carrying the payload keys a bypass would have
+        # read -- still rejected. The gate does not consult these fields at all.
+        plan_still_rejected = transaction_engine.create_existing_album_reconcile_plan(
             self.store,
-            {"existing_album_id": 101, "imported_album_id": 102, "move_item_ids": [501], "allow_different_releasegroup": True, "retire_imported_album": True},
+            {
+                "existing_album_id": 101, "imported_album_id": 102, "move_item_ids": [501],
+                "allow_different_releasegroup": True, "force": True,
+            },
             music_allowed_roots=[str(self.music_dir)],
             db_path=str(self.db_path),
         )
-        self.assertTrue(plan_allowed.get("ok"), msg=plan_allowed.get("error"))
-        op_id = plan_allowed["operation_id"]
+        self.assertFalse(plan_still_rejected.get("ok"))
+        self.assertEqual(plan_still_rejected.get("code"), "reconcile_identity_mismatch")
 
-        apply_res = transaction_engine.execute_existing_album_reconcile_apply(
-            self.store, op_id, music_allowed_roots=[str(self.music_dir)], db_path=str(self.db_path)
-        )
-        self.assertTrue(apply_res.get("ok"), msg=apply_res.get("error"))
-
-        # Verify item moved to album 101 and album 102 retired
+        # Neither rejected plan mutated anything.
         with sqlite3.connect(self.db_path) as conn:
-            irow = conn.execute("SELECT album_id, album FROM items WHERE id=501").fetchone()
-            self.assertEqual(irow[0], 101)
-            self.assertEqual(irow[1], "Target Album")
+            irow = conn.execute("SELECT album_id FROM items WHERE id=501").fetchone()
+            self.assertEqual(irow[0], 102)
             arow = conn.execute("SELECT id FROM albums WHERE id=102").fetchone()
-            self.assertIsNone(arow)
+            self.assertIsNotNone(arow)
 
     @mock.patch("backend.transaction_engine._read_file_audio_tags")
     def test_album_mb_track_repair_direct_tracks(self, mock_read):

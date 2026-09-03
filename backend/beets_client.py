@@ -385,12 +385,19 @@ class BeetsClient:
         imported_album_id: Optional[int] = None,
         dup_item_ids: Optional[List[int]] = None,
         move_item_ids: Optional[List[int]] = None,
-        allow_different_releasegroup: bool = False,
         retire_imported_album: bool = False,
         timeout: float = 30.0,
         **kwargs,
     ) -> Dict[str, Any]:
-        """Engine-side existing-album duplicate & move reconciliation planning (SEC-002 Wave 20)."""
+        """Engine-side existing-album duplicate & move reconciliation planning (SEC-002 Wave 20).
+
+        No `allow_different_releasegroup`/`force` override exists here or on
+        the engine side -- the Release-Group-mismatch identity gate in
+        `create_existing_album_reconcile_plan`/`execute_existing_album_reconcile_apply`
+        is unconditional. See docs/TECHNICAL_DEBT.md ARCH-003 for why a
+        cherry-picked version of this bypass was reviewed and removed rather
+        than kept dormant.
+        """
         if isinstance(payload_or_target_id, dict):
             body = dict(payload_or_target_id)
         elif isinstance(payload_or_target_id, (int, str)) and str(payload_or_target_id).isdigit():
@@ -405,10 +412,10 @@ class BeetsClient:
             body["dup_item_ids"] = list(dup_item_ids)
         if move_item_ids is not None:
             body["move_item_ids"] = list(move_item_ids)
-        if allow_different_releasegroup:
-            body["allow_different_releasegroup"] = bool(allow_different_releasegroup)
         if retire_imported_album:
             body["retire_imported_album"] = bool(retire_imported_album)
+        body.pop("allow_different_releasegroup", None)
+        body.pop("force", None)
         body.update(kwargs)
         return self._request("POST", "/albums/existing-reconcile/plan", body, timeout=timeout)
 

@@ -4773,8 +4773,7 @@ def create_existing_album_reconcile_plan(
 
     existing_rg = str(existing_alb.get("mb_releasegroupid") or "").strip().lower()
     imported_rg = str(imported_alb.get("mb_releasegroupid") or "").strip().lower()
-    allow_diff_rg = bool(payload.get("allow_different_releasegroup") or payload.get("force"))
-    if not allow_diff_rg and existing_rg and imported_rg and existing_rg != imported_rg:
+    if existing_rg and imported_rg and existing_rg != imported_rg:
         con.close()
         return {"ok": False, "error": f"Cannot reconcile albums with different Release Group IDs ({imported_rg} vs {existing_rg})", "code": "reconcile_identity_mismatch"}
 
@@ -5087,7 +5086,6 @@ def create_existing_album_reconcile_plan(
         "imported_album_before": album_before_snapshot,
         "existing_album_rg_before": existing_rg,
         "imported_album_rg_before": imported_rg,
-        "allow_different_releasegroup": allow_diff_rg,
     }
 
     summary = (
@@ -5269,7 +5267,7 @@ def execute_existing_album_reconcile_apply(
                         expected_imp_rg = str(payload.get("imported_album_rg_before") or "")
                         if live_ex_rg != expected_ex_rg or live_imp_rg != expected_imp_rg:
                             return _fail("Album Release Group ID changed since plan", "reconcile_identity_mismatch")
-                        if not payload.get("allow_different_releasegroup") and live_ex_rg and live_imp_rg and live_ex_rg != live_imp_rg:
+                        if live_ex_rg and live_imp_rg and live_ex_rg != live_imp_rg:
                             return _fail("Album Release Group IDs are no longer compatible", "reconcile_identity_mismatch")
 
                         # Validate move_specs (full identity, not just path/stat)
