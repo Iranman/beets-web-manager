@@ -26787,6 +26787,7 @@ def _do_scan_job() -> str:
 
         lib_paths: set = set()
         item_by_path: Dict[str, int] = {}
+        item_album_by_id: Dict[int, int] = {}
         album_ids: set = set()
         for idx, row in enumerate(rows, start=1):
             if idx % 5000 == 0:
@@ -26797,9 +26798,12 @@ def _do_scan_job() -> str:
             if p and not p.startswith("/"):
                 p = _mroot_str + "/" + p
             lib_paths.add(p)
-            item_by_path[p] = int(row["id"] or 0)
+            item_id_val = int(row["id"] or 0)
+            item_by_path[p] = item_id_val
             if row["album_id"] is not None:
-                album_ids.add(int(row["album_id"] or 0))
+                aid_val = int(row["album_id"] or 0)
+                album_ids.add(aid_val)
+                item_album_by_id[item_id_val] = aid_val
         album_count = len(album_ids)
 
         disk_files: set = set()
@@ -26826,27 +26830,76 @@ def _do_scan_job() -> str:
         new_count = len(disk_files - lib_paths)
 
         # ── Auto-clean stale DB entries for deleted files ──────────────────────
+        # Deletion goes through album_maintenance_v1 per album (ARCH-003
+        # Wave 31), the same pattern as library_sync_deleted(): stale item
+        # ids are grouped by album and one Plan/Apply call per album
+        # removes them, which already deletes an album row that becomes
+        # fully empty as a result. A second, separate pass then reproduces
+        # the original global "any album left with zero items" sweep
+        # (which could catch pre-existing empty rows unrelated to this
+        # scan's own findings) by reusing beets_client.delete_album() --
+        # the same primitive _clean_remove_empty_albums() already uses --
+        # on a fresh, read-only query for currently-empty albums.
         removed_count = 0
         if missing and root_accessible and disk_files:
             # Safety: skip cleanup if >50 % of library appears missing
             # (guards against mount failure wiping the whole DB)
             pct_missing = len(missing) / max(len(lib_paths), 1)
             if pct_missing < 0.5:
+                stale_ids = [item_by_path[p] for p in missing if item_by_path.get(p)]
+                stale_by_album: Dict[int, List[int]] = {}
+                orphan_stale_ids: List[int] = []
+                for iid in stale_ids:
+                    aid = item_album_by_id.get(iid, 0)
+                    if aid > 0:
+                        stale_by_album.setdefault(aid, []).append(iid)
+                    else:
+                        orphan_stale_ids.append(iid)
+
+                for aid, aid_item_ids in sorted(stale_by_album.items()):
+                    try:
+                        plan_res = beets_client.plan_album_maintenance({
+                            "mode": "remove_tracks",
+                            "album_id": aid,
+                            "item_ids": aid_item_ids,
+                            "delete_files": False,
+                            "clean_empty_folders": False,
+                        })
+                        if not plan_res.get("ok"):
+                            log.append(f"warn:DB cleanup plan rejected for album_id {aid}: {plan_res.get('error')}")
+                            continue
+                        op_id = plan_res.get("operation_id")
+                        if not op_id:
+                            continue
+                        apply_res = beets_client.apply_album_maintenance(op_id)
+                        if not apply_res.get("ok"):
+                            log.append(f"warn:DB cleanup apply rejected for album_id {aid}: {apply_res.get('error')}")
+                            continue
+                        removed_count += int(apply_res.get("deleted_items") or 0)
+                    except (BeetsUnavailableError, BeetsError) as ex:
+                        log.append(f"warn:DB cleanup engine unavailable for album_id {aid}: {ex}")
+
+                if orphan_stale_ids:
+                    log.append(
+                        f"warn:{len(orphan_stale_ids)} stale item(s) have no album_id and "
+                        "cannot be removed through the engine's album_maintenance_v1 boundary; skipped"
+                    )
+
                 try:
-                    stale_ids = [item_by_path[p] for p in missing if item_by_path.get(p)]
-                    if stale_ids:
-                        with _db() as con:
-                            placeholders = ",".join("?" * len(stale_ids))
-                            con.execute(f"DELETE FROM items WHERE id IN ({placeholders})", stale_ids)
-                            con.execute(
-                                "DELETE FROM albums WHERE id NOT IN "
-                                "(SELECT DISTINCT album_id FROM items WHERE album_id IS NOT NULL)"
-                            )
-                            con.commit()
-                        removed_count = len(stale_ids)
-                        log.append(f"cleaned:{removed_count} stale DB entr{'y' if removed_count==1 else 'ies'} removed")
+                    with _db(row_factory=sqlite3.Row) as con:
+                        empty_album_rows = con.execute(
+                            "SELECT a.id FROM albums a LEFT JOIN items i ON i.album_id = a.id "
+                            "GROUP BY a.id HAVING COUNT(i.id) = 0"
+                        ).fetchall()
+                    for row in empty_album_rows:
+                        try:
+                            beets_client.delete_album(int(row["id"]), delete_files=False)
+                        except (BeetsUnavailableError, BeetsError) as ex:
+                            log.append(f"warn:empty-album cleanup engine unavailable for album_id {row['id']}: {ex}")
                 except Exception as ex:
-                    log.append(f"warn:DB cleanup error: {ex}")
+                    log.append(f"warn:empty-album sweep read failed: {ex}")
+
+                log.append(f"cleaned:{removed_count} stale DB entr{'y' if removed_count==1 else 'ies'} removed")
             else:
                 log.append(f"warn:skipping DB cleanup — {len(missing)}/{len(lib_paths)} entries missing (mount issue?)")
 
