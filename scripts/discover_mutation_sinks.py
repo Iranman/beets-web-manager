@@ -119,6 +119,11 @@ def _attr_chain(node: ast.AST) -> Optional[str]:
 def _extract_string_const(node: ast.AST) -> Optional[str]:
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _extract_string_const(node.left)
+        right = _extract_string_const(node.right)
+        if left is not None or right is not None:
+            return (left or "") + (right or "")
     if isinstance(node, ast.JoinedStr):
         return "".join(
             v.value for v in node.values
