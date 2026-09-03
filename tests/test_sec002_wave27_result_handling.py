@@ -346,6 +346,17 @@ class BeetsClientRequiredWrapperTests(unittest.TestCase):
         self.assertFalse(res["ok"])
         self.assertEqual(res.get("code"), "apply")
 
+    def test_update_item_metadata_forwards_write_tags_false_to_plan(self):
+        with mock.patch.object(self.client, "plan_item_metadata", return_value={"ok": True, "operation_id": None}) as plan,              mock.patch.object(self.client, "apply_item_metadata") as apply:
+            res = self.client.update_item_metadata(99, {"title": "x"}, force_write_tags=False, write_tags=False)
+        self.assertTrue(res["ok"])
+        apply.assert_not_called()
+        payload = plan.call_args.args[0]
+        self.assertEqual(payload["item_id"], 99)
+        self.assertEqual(payload["updates"], {"title": "x"})
+        self.assertIs(payload.get("write_tags"), False)
+        self.assertIs(payload.get("force_write_tags"), False)
+
     def test_genre_repair_plan_and_apply_failures(self):
         with mock.patch.object(self.client, "plan_album_genre_repair", return_value={"ok": False, "error": "bad genre plan", "code": "plan"}), \
              mock.patch.object(self.client, "apply_album_genre_repair") as apply:

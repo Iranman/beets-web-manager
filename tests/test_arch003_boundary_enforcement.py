@@ -81,6 +81,25 @@ class TestArch003BoundaryEnforcement(unittest.TestCase):
         self.assertIn("beets_client.plan_folder_cleanup(", self.app_source)
         self.assertIn("beets_client.apply_folder_cleanup(", self.app_source)
 
+    def test_folder_placeholder_apply_has_no_direct_mutation_calls(self):
+        src = self._function_source("apply_folder_placeholder_action_api")
+        tree = ast.parse(src)
+        found = []
+        banned_calls = {
+            "mkdir", "makedirs", "unlink", "remove", "rename", "replace",
+            "move", "rmdir", "removedirs", "rmtree", "copy", "copy2",
+            "copyfile", "copytree", "write_text", "write_bytes", "touch",
+        }
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                name = node.func.attr if isinstance(node.func, ast.Attribute) else (
+                    node.func.id if isinstance(node.func, ast.Name) else None)
+                if name in banned_calls:
+                    found.append(f"call:{name}@{node.lineno}")
+        self.assertEqual(found, [], f"found prohibited local-mutation call node(s) in folder placeholder apply: {found}")
+        self.assertIn("beets_client.plan_folder_cleanup(", src)
+        self.assertIn("beets_client.apply_folder_cleanup(", src)
+
     def test_app_delegates_playlist_media_cleanup_to_beets_client(self):
         self.assertIn("beets_client.plan_playlist_media_cleanup(", self.app_source)
         self.assertIn("beets_client.apply_playlist_media_cleanup(", self.app_source)

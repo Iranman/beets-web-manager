@@ -12807,58 +12807,6 @@ def _library_no_mb_album_matches_folder(album_id: int, folder_path: str) -> bool
     return matched > 0
 
 
-def _delete_library_db_rows_under_folder(folder_path: str, log: list) -> int:
-    """Remove Beets DB rows for files under a deleted library folder."""
-    folder = Path(folder_path).resolve(strict=False)
-    delete_ids: List[int] = []
-    album_ids: set = set()
-    try:
-        with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:
-            rows = con.execute(
-                "SELECT id, album_id, path FROM items WHERE path IS NOT NULL"
-            ).fetchall()
-    except Exception as ex:
-        log.append(f"  Library DB cleanup warning: {ex}")
-        return 0
-
-    for row in rows:
-        raw_path = _s(row["path"])
-        if not raw_path:
-            continue
-        abs_path = Path(raw_path)
-        if not abs_path.is_absolute():
-            abs_path = MUSIC_ROOT / raw_path
-        try:
-            abs_path.resolve(strict=False).relative_to(folder)
-        except Exception:
-            continue
-        delete_ids.append(int(row["id"]))
-        if row["album_id"]:
-            album_ids.add(int(row["album_id"]))
-
-    if not delete_ids:
-        return 0
-    try:
-        with _db() as con:
-            con.execute(
-                f"DELETE FROM items WHERE id IN ({','.join('?' * len(delete_ids))})",
-                delete_ids,
-            )
-            if album_ids:
-                ids = sorted(album_ids)
-                con.execute(
-                    f"DELETE FROM albums WHERE id IN ({','.join('?' * len(ids))}) "
-                    "AND NOT EXISTS (SELECT 1 FROM items WHERE items.album_id = albums.id)",
-                    ids,
-                )
-            con.commit()
-        log.append(f"  Removed {len(delete_ids)} Beets DB row(s) for deleted library folder.")
-        return len(delete_ids)
-    except Exception as ex:
-        log.append(f"  Library DB cleanup warning: {ex}")
-        return 0
-
-
 def _delete_review_source_folder(src_path: str, log: list,
                                  confirmed_wrong_library_folder: bool = False,
                                  album_id: int = 0) -> Dict[str, Any]:
@@ -13203,125 +13151,40 @@ def _classify_album_cleanup_apply_failure(res: Dict[str, Any]) -> Tuple[str, str
 
 def _delete_album_ids_from_db(album_ids: list, log: list, *,
                               delete_files: bool = False) -> int:
-    """Remove imported DB rows for failed validation.
-
-    When delete_files is true, also delete the matching audio files from the
-    music library. Use this only for albums that were just imported and failed
-    validation, not for pre-existing library albums.
-    """
+    """Remove failed imported album rows through the engine transaction boundary."""
     ids = [int(aid) for aid in album_ids if str(aid).isdigit()]
     if not ids:
         return 0
-    deleted_files = 0
-    parent_dirs: List[Path] = []
-    try:
-        with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:
-            if delete_files:
-                rows = con.execute(
-                    f"SELECT path FROM items WHERE album_id IN ({','.join('?' * len(ids))})",
-                    ids,
-                ).fetchall()
-                music_root_res = MUSIC_ROOT.resolve(strict=False)
-                for row in rows:
-                    raw_path = _s(row["path"])
-                    if not raw_path:
-                        continue
-                    fpath = Path(raw_path)
-                    if not fpath.is_absolute():
-                        fpath = MUSIC_ROOT / raw_path
-                    try:
-                        resolved = fpath.resolve(strict=False)
-                        resolved.relative_to(music_root_res)
-                        if resolved.suffix.lower() in AUDIO_EXT:
-                            parent_dirs.append(resolved.parent)
-                            resolved.unlink(missing_ok=True)
-                            deleted_files += 1
-                            log.append(f"  Removed failed import file: {resolved.name}")
-                    except Exception as ex:
-                        log.append(f"  WARN failed import file cleanup skipped for {fpath}: {ex}")
-            con.execute(
-                f"DELETE FROM items WHERE album_id IN ({','.join('?' * len(ids))})",
-                ids,
-            )
-            con.execute(
-                f"DELETE FROM albums WHERE id IN ({','.join('?' * len(ids))})",
-                ids,
-            )
-            con.commit()
-        if delete_files:
-            music_root_res = MUSIC_ROOT.resolve(strict=False)
-            for folder in sorted(set(parent_dirs), key=lambda p: len(p.parts), reverse=True):
-                for _ in range(6):
-                    try:
-                        resolved_folder = folder.resolve(strict=False)
-                        resolved_folder.relative_to(music_root_res)
-                        if resolved_folder == music_root_res:
-                            break
-                        if any(resolved_folder.iterdir()):
-                            break
-                        resolved_folder.rmdir()
-                        log.append(f"  Removed empty failed-import folder: {resolved_folder}")
-                        folder = resolved_folder.parent
-                    except Exception:
-                        break
-        log.append(
-            f"  Removed failed import DB rows for album_id(s): {ids}"
-            + (f" and {deleted_files} file(s)" if delete_files else "")
-        )
-        return deleted_files
-    except Exception as ex:
-        log.append(f"  DB cleanup warning after failed validation: {ex}")
-    return deleted_files
-
-
-def _delete_unmatched_items_in_folder(album_id: int, folder_path: str, log: list) -> int:
-    """Delete track=0 extras from one imported folder, including files."""
-    folder = Path(folder_path).resolve(strict=False)
-    try:
-        with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:
-            rows = con.execute(
-                "SELECT id, title, path FROM items "
-                "WHERE album_id=? AND (track IS NULL OR track=0)",
-                (album_id,),
-            ).fetchall()
-    except Exception as ex:
-        log.append(f"  Extra cleanup warning: {ex}")
-        return 0
-
-    delete_ids: list = []
-    for row in rows:
-        raw_path = _s(row["path"])
-        if not raw_path:
-            continue
-        abs_path = Path(raw_path)
-        if not abs_path.is_absolute():
-            abs_path = MUSIC_ROOT / raw_path
+    removed_files = 0
+    removed_albums = 0
+    for aid in ids:
         try:
-            abs_resolved = abs_path.resolve(strict=False)
-            abs_resolved.relative_to(folder)
-        except Exception:
+            res = beets_client.delete_album(aid, delete_files=delete_files)
+        except BeetsUnavailableError as ex:
+            log.append(f"  Engine unavailable during failed-import cleanup for album_id {aid}: {ex}")
             continue
-        delete_ids.append(int(row["id"]))
-        try:
-            abs_resolved.unlink(missing_ok=True)
-            log.append(f"  Removed unmatched extra: {abs_resolved.name}")
+        except BeetsError as ex:
+            log.append(f"  Engine cleanup rejected album_id {aid}: {ex}")
+            continue
         except Exception as ex:
-            log.append(f"  WARN deleting unmatched extra {abs_resolved.name}: {ex}")
-
-    if not delete_ids:
-        return 0
-    try:
-        with _db() as con:
-            con.execute(
-                f"DELETE FROM items WHERE id IN ({','.join('?' * len(delete_ids))})",
-                delete_ids,
-            )
-            con.commit()
-    except Exception as ex:
-        log.append(f"  Extra DB cleanup warning: {ex}")
-        return 0
-    log.append(f"  Removed {len(delete_ids)} unmatched extra DB item(s)")
-    return len(delete_ids)
+            app.logger.warning("Failed-import cleanup failed for album_id=%s: %s", aid, type(ex).__name__)
+            log.append(f"  Engine cleanup failed for album_id {aid}")
+            continue
+        if not res.get("ok") and not res.get("success"):
+            log.append(f"  Engine cleanup rejected album_id {aid}: {res.get('error') or 'unknown error'}")
+            continue
+        removed_albums += 1
+        removed_files += int(res.get("files_deleted") or 0)
+        log.append(
+            f"  Removed failed import album_id {aid} through engine transaction"
+            + (f" ({int(res.get('files_deleted') or 0)} file(s))" if delete_files else "")
+        )
+    if removed_albums:
+        log.append(
+            f"  Removed failed import DB rows for {removed_albums} album(s)"
+            + (f" and {removed_files} file(s)" if delete_files else "")
+        )
+    return removed_files
 
 
 def _delete_album_items_under_folder(album_id: int, folder_path: str, log: list) -> int:
@@ -22320,39 +22183,54 @@ def import_folder_with_id():
                         "SELECT id, path FROM items WHERE album_id=?",
                         (album_db_id,),
                     ).fetchall()
-                    for item_row in item_rows:
-                        item_name = Path(_s(item_row["path"])).name.casefold()
-                        mapping = mapped_by_name.get(item_name)
-                        if not mapping:
-                            continue
-                        track_num = int(mapping.get("num") or mapping.get("track") or 0)
-                        disc_num = int(mapping.get("disc") or 1)
-                        mb_trackid = _s(mapping.get("mb_trackid") or mapping.get("recording_id")).strip().lower()
-                        title = _s(mapping.get("mb_title") or mapping.get("title") or mapping.get("local_title")).strip()
-                        updates: Dict[str, Any] = {}
-                        if track_num > 0:
-                            updates["track"] = track_num
-                        if disc_num > 0:
-                            updates["disc"] = disc_num
-                        if mb_trackid:
-                            updates["mb_trackid"] = mb_trackid
-                        if title:
-                            updates["title"] = title
-                        if not updates:
-                            continue
-                        cols = _sqlite_columns(con, "items")
-                        clean = {k: v for k, v in updates.items() if k in cols}
-                        if not clean:
-                            continue
-                        con.execute(
-                            "UPDATE items SET " + ", ".join(f"{k}=?" for k in clean) + " WHERE id=?",
-                            list(clean.values()) + [int(item_row["id"])],
-                        )
-                        updated += 1
-                    con.commit()
             except Exception as ex:
                 log.append(f"  Verified review mapping warning: {ex}")
                 return 0
+            for item_row in item_rows:
+                try:
+                    item_name = Path(_s(item_row["path"])).name.casefold()
+                    mapping = mapped_by_name.get(item_name)
+                    if not mapping:
+                        continue
+                    track_num = int(mapping.get("num") or mapping.get("track") or 0)
+                    disc_num = int(mapping.get("disc") or 1)
+                    mb_trackid = _s(mapping.get("mb_trackid") or mapping.get("recording_id")).strip().lower()
+                    title = _s(mapping.get("mb_title") or mapping.get("title") or mapping.get("local_title")).strip()
+                    updates: Dict[str, Any] = {}
+                    if track_num > 0:
+                        updates["track"] = track_num
+                    if disc_num > 0:
+                        updates["disc"] = disc_num
+                    if mb_trackid:
+                        updates["mb_trackid"] = mb_trackid
+                    if title:
+                        updates["title"] = title
+                    clean = {k: v for k, v in updates.items() if k in {"track", "disc", "mb_trackid", "title"}}
+                    if not clean:
+                        continue
+                    try:
+                        res = beets_client.update_item_metadata(
+                            int(item_row["id"]),
+                            clean,
+                            force_write_tags=False,
+                            write_tags=False,
+                        )
+                    except (BeetsUnavailableError, BeetsError) as ex:
+                        log.append(f"  Verified review mapping engine warning: {ex}")
+                        return updated
+                    if not res.get("ok"):
+                        log.append(f"  Verified review mapping engine warning: {res.get('error') or 'item metadata update rejected'}")
+                        return updated
+                    updated += int(res.get("item_fields_changed") or 0) or 1
+                except Exception as ex:
+                    # Regression guard: this loop used to run inside one
+                    # broad try/except (raw SQL UPDATE path). Migrating to
+                    # per-item engine calls must not let one malformed
+                    # mapping row (bad int(), missing key, etc.) raise
+                    # uncaught out of this helper and abort the whole
+                    # import job -- skip the row and keep going.
+                    log.append(f"  Verified review mapping warning for item {item_row['id']}: {ex}")
+                    continue
             if updated:
                 log.append(f"  Applied verified Import Review track mapping to {updated} item(s).")
             return updated
@@ -22617,174 +22495,6 @@ def _match_tracks_from_mb(mb_albumid: str, album_db_id, log: list,
         zero_unmatched,
         target_tracks=target_tracks,
     )
-
-    from difflib import SequenceMatcher
-
-    # ── Fetch release from MusicBrainz ────────────────────────────────────────
-    try:
-        mb_url = (f"https://musicbrainz.org/ws/2/release/{mb_albumid}"
-                  "?inc=recordings+release-groups&fmt=json")
-        req = _ur.Request(mb_url,
-                          headers={"User-Agent": "BeetsWebControl/1.0 (beets-webcntrl)"})
-        with _ur.urlopen(req, timeout=30) as resp:
-            mb_data = json.loads(resp.read())
-    except Exception as ex:
-        log.append(f"  MB fetch warning: {ex}")
-        return 0
-
-    # ── Flatten tracklist across all discs ────────────────────────────────────
-    mb_tracks: list = []
-    for medium in mb_data.get("media", []):
-        disc_num = int(medium.get("position") or 1)
-        for trk in medium.get("tracks", []):
-            mb_tracks.append({
-                "track":      int(trk.get("position") or 0),
-                "disc":       disc_num,
-                "title":      (trk.get("title") or "").strip(),
-                "mb_trackid": (trk.get("recording") or {}).get("id", ""),
-                "duration_ms": int(trk.get("length") or 0),
-            })
-
-    if not mb_tracks:
-        log.append("  MB release has no tracks — cannot match")
-        return 0
-
-    log.append(f"  MB release has {len(mb_tracks)} track(s) across "
-               f"{len(mb_data.get('media', []))} disc(s)")
-
-    # ── Get album items from DB ───────────────────────────────────────────────
-    try:
-        with _db(row_factory=sqlite3.Row) as con:
-            items = con.execute(
-                "SELECT id, title, track, length FROM items WHERE album_id = ?",
-                (album_db_id,)).fetchall()
-    except Exception as ex:
-        log.append(f"  DB read warning: {ex}")
-        return 0
-
-    if not items:
-        log.append("  No items found in DB for this album_id")
-        return 0
-
-    # ── Helpers to extract clean title from beets-stored value ──────────────────
-    # Patterns to strip from filenames used as titles:
-    #   "Artist - Album - NN - Title"  →  "Title"
-    #   "Artist - Album - %02i{$track} - Title"  →  "Title"
-    #   "NN - Title"  →  "Title"
-    #   "NN. Title"   →  "Title"
-    _PREFIX_RE = re.compile(
-        r'^(?:.*?\s+-\s+)?'           # optional "Artist - Album -" prefix
-        r'(?:\d+|%\w+\{[^}]+\})'     # track number OR template like %02i{$track}
-        r'\s*[-\.]\s*',               # separator
-        re.IGNORECASE
-    )
-
-    def _clean_title(raw: str) -> str:
-        """Strip filename-style prefixes (Artist - Album - NN -) to get bare track title."""
-        t = raw.strip()
-        # Apply up to 3 times to handle multi-segment prefixes
-        for _ in range(3):
-            stripped = _PREFIX_RE.sub('', t).strip()
-            if stripped == t:
-                break
-            t = stripped
-        return t.lower()
-
-    # Regex to strip bracketed annotations like "(ft. Jaden)", "[slowed + reverb]",
-    # "(remaster)", "(radio edit)", etc. from item titles before matching.
-    _ANNOT_RE = re.compile(
-        r'\s*[\(\[]\s*(?:ft\.|feat\.|with\b|slowed|reverb|remix|edit|remaster'
-        r'|radio|live|acoustic|version|bonus|instrumental|deluxe).*?[\)\]]\s*',
-        re.IGNORECASE
-    )
-    # Strip unclosed bracket/paren to end-of-string (e.g., "[slowed + reverb" with no closing "]")
-    _UNCLOSED_RE = re.compile(r'\s*[\(\[](?!.*[\)\]]).*$')
-
-    # ── Match items to MB tracks by title + duration ──────────────────────────
-    used_mb_indices: set = set()
-    updates: list = []
-    unmatched_ids: list = []
-    for item in items:
-        raw_title   = (item["title"] or "").strip()
-        item_title  = raw_title.lower()
-        clean_title = _clean_title(raw_title)   # stripped of Artist/Album/NN prefix
-        # "Bare" title = annotations like "(ft. X)" / "[slowed+reverb]" removed,
-        # including unclosed brackets (e.g. "[slowed + reverb" without closing "]")
-        bare_title  = _UNCLOSED_RE.sub('', _ANNOT_RE.sub('', item_title)).strip()
-        bare_clean  = _UNCLOSED_RE.sub('', _ANNOT_RE.sub('', clean_title)).strip()
-        item_dur_ms = int((item["length"] or 0) * 1000)
-
-        best_idx   = -1
-        best_score = -1.0
-        for mi, mb_trk in enumerate(mb_tracks):
-            if mi in used_mb_indices:
-                continue
-            mb_title_lc = mb_trk["title"].lower()
-            # Score using raw, cleaned, and annotation-stripped titles; take best
-            sim_raw   = SequenceMatcher(None, item_title,  mb_title_lc).ratio()
-            sim_clean = SequenceMatcher(None, clean_title, mb_title_lc).ratio()
-            sim_bare  = max(
-                SequenceMatcher(None, bare_title, mb_title_lc).ratio(),
-                SequenceMatcher(None, bare_clean, mb_title_lc).ratio(),
-            )
-            title_sim = max(sim_raw, sim_clean, sim_bare)
-            # Duration bonus
-            dur_sim = 0.0
-            if item_dur_ms and mb_trk["duration_ms"]:
-                diff_s = abs(item_dur_ms - mb_trk["duration_ms"]) / 1000.0
-                dur_sim = 0.06 if diff_s <= 3 else (0.03 if diff_s <= 8 else 0.0)
-            score = title_sim + dur_sim
-            if score > best_score:
-                best_score = score
-                best_idx   = mi
-
-        if best_idx >= 0 and best_score >= _MB_TRACK_REPAIR_MATCH_THRESHOLD:
-            mb_trk = mb_tracks[best_idx]
-            used_mb_indices.add(best_idx)
-            updates.append((mb_trk["mb_trackid"], mb_trk["track"], mb_trk["disc"],
-                            mb_trk["title"], item["id"]))
-            log.append(f"  #{mb_trk['track']:02d} '{mb_trk['title']}'"
-                       f"  ← '{raw_title}' ({best_score:.0%})")
-        else:
-            log.append(f"  No match for '{raw_title}' (best {best_score:.0%})")
-            unmatched_ids.append(item["id"])
-
-    # ── Write matches back to DB ──────────────────────────────────────────────
-    if updates or (zero_unmatched and unmatched_ids):
-        try:
-            with _db() as con:
-                con.executemany(
-                    "UPDATE items SET mb_trackid=?, track=?, disc=?, title=? WHERE id=?",
-                    updates)
-            # Also stamp album-level fields from MB
-            rg    = mb_data.get("release-group") or {}
-            year  = (mb_data.get("date") or "")[:4]
-            label_info = (mb_data.get("label-info") or [{}])[0]
-            label = ((label_info.get("label") or {}).get("name") or "")
-            country = mb_data.get("country") or ""
-            if year and year.isdigit():
-                con.execute("UPDATE albums SET year=? WHERE id=?", (int(year), album_db_id))
-            if label:
-                con.execute("UPDATE albums SET label=? WHERE id=?", (label, album_db_id))
-            if country:
-                con.execute("UPDATE albums SET country=? WHERE id=?", (country, album_db_id))
-            rg_id = rg.get("id", "")
-            if rg_id:
-                con.execute("UPDATE albums SET mb_releasegroupid=? WHERE id=?",
-                            (rg_id, album_db_id))
-            if zero_unmatched and unmatched_ids:
-                con.executemany(
-                    "UPDATE items SET track=0 WHERE id=?",
-                    [(iid,) for iid in unmatched_ids])
-                log.append(f"  Zeroed track# for {len(unmatched_ids)} unmatched item(s) (will be removed by dedup)")
-            con.commit()
-            con.close()
-            log.append(f"  Updated {len(updates)} item(s) in DB with MB track data.")
-        except Exception as ex:
-            log.append(f"  DB write warning: {ex}")
-
-    return len(updates)
-
 
 def _match_tracks_from_mb_shared(mb_albumid: str, album_db_id, log: list,
                                  zero_unmatched: bool = False,
@@ -37594,23 +37304,113 @@ def apply_folder_placeholder_action_api():
     if action != "mark_reviewed" and action != "skip" and _folder_cleanup_is_approved_root(source):
         return jsonify({"ok": False, "error": "Refusing to modify the music library root itself"}), 400
 
+    class _PlanApplyOk:
+        __slots__ = ("plan_res", "apply_res", "op_id")
+
+        def __init__(self, plan_res, apply_res, op_id):
+            self.plan_res = plan_res
+            self.apply_res = apply_res
+            self.op_id = op_id
+
+    def _engine_reject(result: Dict[str, Any], *, default_error: str, target: Optional[Path] = None,
+                       status: int = 400, blocking_reasons: Optional[List[str]] = None):
+        code = _s(result.get("code") or result.get("error_code")).strip()
+        refs = result.get("references") if isinstance(result, dict) else None
+        ref_count = len(refs) if isinstance(refs, list) else 0
+        message = default_error
+        if code == "folder_cleanup_db_references":
+            if action in {"remove_empty_source", "remove_empty"}:
+                message = f"{ref_count} DB item(s) tracked under source; cannot remove"
+            elif action in {"safe_rename", "rename_folder"}:
+                message = f"{ref_count} DB item(s) tracked under source - use beet move instead of plain rename"
+            else:
+                message = "Merge is not safe to apply"
+        elif code == "folder_cleanup_not_empty":
+            message = "Folder is not empty; cannot remove"
+        elif code in {"folder_cleanup_not_directory", "folder_cleanup_target_missing"}:
+            message = "Source folder does not exist" if "source" in default_error.lower() else "Target folder does not exist"
+        elif code == "folder_cleanup_target_parent_missing":
+            message = "Target subfolder does not exist; cleanup apply will not create folders"
+        elif code == "folder_cleanup_target_exists":
+            message = f"Target folder already exists: {target.name}" if target is not None else "Target folder already exists"
+            status = 409
+        elif code in {"folder_cleanup_toctou_mismatch", "folder_cleanup_noop"}:
+            status = 409
+            if code == "folder_cleanup_noop":
+                message = "No source-only files are available to merge"
+            else:
+                message = "Stale preview; rerun preview before applying"
+        elif code in {"folder_cleanup_path_out_of_root", "folder_cleanup_symlink_rejected", "folder_cleanup_root_refused"}:
+            message = "Access denied for folder cleanup path"
+            status = 403 if code != "folder_cleanup_root_refused" else 400
+        body: Dict[str, Any] = {"ok": False, "error": message, "code": code or "folder_cleanup_rejected"}
+        if blocking_reasons:
+            body["blocking_reasons"] = blocking_reasons
+        return jsonify(body), status
+
+    def _engine_exception(exc: Exception, *, phase: str, operation_id: str = ""):
+        if isinstance(exc, BeetsUnavailableError):
+            app.logger.warning("Folder cleanup %s failed because engine is unavailable: %s", phase, type(exc).__name__)
+            return jsonify({
+                "ok": False,
+                "error": "Beets engine is unavailable; folder cleanup was not performed.",
+                "error_code": "ENGINE_OFFLINE",
+                "code": getattr(exc, "error_code", "") or "ENGINE_OFFLINE",
+                "operation_id": operation_id,
+            }), 503
+        app.logger.warning("Folder cleanup %s rejected by engine: %s", phase, getattr(exc, "error_code", "") or type(exc).__name__)
+        return jsonify({
+            "ok": False,
+            "error": "Beets engine rejected folder cleanup.",
+            "code": getattr(exc, "error_code", "") or "beets_error",
+            "operation_id": operation_id,
+        }), getattr(exc, "status_code", 409) or 409
+
+    def _plan_and_apply(engine_payload: Dict[str, Any], *, target: Optional[Path] = None,
+                        default_error: str = "Folder cleanup was rejected"):
+        # Bug fix: error responses from _engine_reject()/_engine_exception()
+        # are themselves plain (Response, status_code) tuples, which is
+        # indistinguishable from a bare `isinstance(result, tuple)` check
+        # against the 3-item success tuple below -- every rejected/failed
+        # plan or apply used to unpack a 2-tuple into 3 names and raise an
+        # uncaught ValueError instead of returning the intended structured
+        # error JSON. Wrap the success case in a distinct, unambiguous type
+        # so callers can tell success from a Flask error response reliably.
+        try:
+            plan_res = beets_client.plan_folder_cleanup(engine_payload)
+        except (BeetsUnavailableError, BeetsError) as exc:
+            return _engine_exception(exc, phase="plan")
+        if not plan_res.get("ok"):
+            return _engine_reject(plan_res, default_error=default_error, target=target)
+        op_id = _s(plan_res.get("operation_id")).strip()
+        if not op_id:
+            return jsonify({"ok": True, "action": engine_payload.get("action"), "changed_count": 0})
+        try:
+            apply_res = beets_client.apply_folder_cleanup(op_id)
+        except (BeetsUnavailableError, BeetsError) as exc:
+            return _engine_exception(exc, phase="apply", operation_id=op_id)
+        if not apply_res.get("ok"):
+            return _engine_reject(apply_res, default_error="Folder cleanup apply failed", target=target,
+                                  status=409 if apply_res.get("mutated") else 400)
+        return _PlanApplyOk(plan_res, apply_res, op_id)
+
     if action in {"remove_empty_source", "remove_empty"}:
         preview_token = _s(payload.get("preview_token")).strip()
         if not preview_token:
             return jsonify({"ok": False, "error": "Preview token is required; rerun preview before applying"}), 400
-        if not source.exists() or not source.is_dir():
-            return jsonify({"ok": False, "error": "Source folder does not exist"}), 400
-        db_items = _folder_cleanup_db_items(source)
-        if db_items:
-            return jsonify({"ok": False, "error": f"{len(db_items)} DB item(s) tracked under source; cannot remove"}), 400
-        if not _folder_cleanup_is_empty(source):
-            return jsonify({"ok": False, "error": "Folder is not empty; cannot remove"}), 400
-        try:
-            source.rmdir()
-        except Exception as exc:
-            app.logger.warning("Could not remove empty folder %r: %s", str(source), type(exc).__name__)
-            return jsonify({"ok": False, "error": "Failed to remove empty folder."}), 500
-        return jsonify({"ok": True, "action": "remove_empty_source", "removed": str(source), "changed_count": 1})
+        result = _plan_and_apply({"action": "remove_empty", "source": str(source)}, default_error="Source folder does not exist")
+        if not isinstance(result, _PlanApplyOk):
+            return result
+        _plan_res, apply_res, op_id = result.plan_res, result.apply_res, result.op_id
+        removed_folders = [_s(p) for p in apply_res.get("removed_dirs") or ([] if not apply_res.get("mutated") else [str(source)]) if _s(p)]
+        return jsonify({
+            "ok": True,
+            "action": "remove_empty_source",
+            "removed": removed_folders[0] if removed_folders else str(source),
+            "removed_folders": removed_folders,
+            "changed_count": len(removed_folders),
+            "operation_id": op_id,
+        })
 
     if action in {"safe_rename", "rename_folder"}:
         target_raw = _s(payload.get("target_path") or payload.get("proposed_path")).strip()
@@ -37619,21 +37419,24 @@ def apply_folder_placeholder_action_api():
         target, target_error = _folder_cleanup_path(target_raw)
         if target_error or target is None:
             return jsonify({"ok": False, "error": target_error or "Invalid target path"}), 400
-        if not source.exists() or not source.is_dir():
-            return jsonify({"ok": False, "error": "Source folder does not exist"}), 400
-        if target.exists():
-            return jsonify({"ok": False, "error": f"Target folder already exists: {target.name}"}), 409
-        db_items = _folder_cleanup_db_items(source)
-        if db_items:
-            return jsonify({"ok": False, "error": f"{len(db_items)} DB item(s) tracked under source — use beet move instead of plain rename"}), 400
-        if not _path_under(target.resolve(strict=False), MUSIC_ROOT):
-            return jsonify({"ok": False, "error": "Target path is outside the configured music library"}), 400
-        try:
-            source.rename(target)
-        except OSError as exc:
-            app.logger.warning("Rename failed (%r -> %r): %s", str(source), str(target), type(exc).__name__)
-            return jsonify({"ok": False, "error": "Rename failed."}), 500
-        return jsonify({"ok": True, "action": "safe_rename", "renamed_from": str(source), "renamed_to": str(target), "changed_count": 1})
+        result = _plan_and_apply(
+            {"action": "safe_rename", "source": str(source), "target": str(target)},
+            target=target,
+            default_error="Source folder does not exist",
+        )
+        if not isinstance(result, _PlanApplyOk):
+            return result
+        _plan_res, apply_res, op_id = result.plan_res, result.apply_res, result.op_id
+        moved = apply_res.get("moved_records") or [{"source": str(source), "target": str(target)}]
+        return jsonify({
+            "ok": True,
+            "action": "safe_rename",
+            "renamed_from": str(source),
+            "renamed_to": str(target),
+            "moved": moved,
+            "changed_count": len(moved),
+            "operation_id": op_id,
+        })
 
     if action in {"merge_source_files", "merge"}:
         preview_token = _s(payload.get("preview_token")).strip()
@@ -37646,49 +37449,33 @@ def apply_folder_placeholder_action_api():
         if preview_token != preview.get("preview_token"):
             return jsonify({"ok": False, "error": "Stale preview; rerun preview before applying"}), 409
         if not preview.get("safe"):
-            return jsonify({"ok": False, "error": "Merge is not safe to apply", "blocking_reasons": preview.get("blocking_reasons", [])}), 400
-        moved: List[Dict[str, str]] = []
-        try:
-            for move in preview.get("moves", []):
-                src = Path(_s(move.get("source")))
-                dst = Path(_s(move.get("target")))
-                src_resolved = src.resolve(strict=False)
-                dst_resolved = dst.resolve(strict=False)
-                if not _path_under(src_resolved, source) or not _path_under(dst_resolved, target):
-                    raise RuntimeError("Move path is outside the approved source/target folders")
-                if not src.exists() or not src.is_file():
-                    raise RuntimeError(f"Source file is missing: {src}")
-                if dst.exists():
-                    raise RuntimeError(f"Target file already exists: {dst}")
-                if not dst.parent.exists():
-                    raise RuntimeError(f"Target folder does not exist: {dst.parent}")
-                shutil.move(str(src), str(dst))
-                moved.append({"source": str(src), "target": str(dst)})
-            removed_folders: List[str] = []
-            for child in sorted(source.rglob("*"), key=lambda p: len(p.parts), reverse=True):
-                if child.is_dir() and _folder_cleanup_is_empty(child):
-                    child.rmdir()
-                    removed_folders.append(str(child))
-            if source.exists() and _folder_cleanup_is_empty(source):
-                source.rmdir()
-                removed_folders.append(str(source))
-        except Exception as exc:
-            app.logger.warning("Failed to apply folder merge: %s", type(exc).__name__)
-            return jsonify({"ok": False, "error": "Failed to apply merge.", "moved": moved}), 500
-        return jsonify(
-            {
-                "ok": True,
-                "action": "merge_source_files",
-                "moved": moved,
-                "removed_folders": removed_folders,
-                "changed_count": len(moved) + len(removed_folders),
-            }
+            return jsonify({
+                "ok": False,
+                "error": "Merge is not safe to apply",
+                "blocking_reasons": preview.get("blocking_reasons", []),
+            }), 400
+        result = _plan_and_apply(
+            {"action": "merge_source_files", "source": str(source), "target": str(target)},
+            target=target,
+            default_error="Merge is not safe to apply",
         )
+        if not isinstance(result, _PlanApplyOk):
+            return result
+        _plan_res, apply_res, op_id = result.plan_res, result.apply_res, result.op_id
+        moved = apply_res.get("moved_records") or []
+        removed_folders = [_s(p) for p in apply_res.get("removed_dirs") or [] if _s(p)]
+        return jsonify({
+            "ok": True,
+            "action": "merge_source_files",
+            "moved": moved,
+            "removed_folders": removed_folders,
+            "changed_count": len(moved) + len(removed_folders),
+            "operation_id": op_id,
+        })
 
     if action in {"mark_reviewed", "skip"}:
         return jsonify({"ok": True, "action": action, "changed_count": 0})
     return jsonify({"ok": False, "error": f"Unsupported cleanup action: {action}"}), 400
-
 
 @app.post("/api/clean/folder-placeholder/apply-safe-renames")
 def apply_safe_folder_placeholder_renames_job():
