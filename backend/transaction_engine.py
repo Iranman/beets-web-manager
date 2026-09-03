@@ -7720,28 +7720,70 @@ def create_album_maintenance_plan(
                         continue
                     old_path_str = str(fu.get("old_path") or "")
                     new_path_str = str(fu.get("new_path") or "")
+                    if not old_path_str or not new_path_str:
+                        continue
+                    # old_path/new_path are stored in db_item_updates and
+                    # bound verbatim into `UPDATE items SET path=? WHERE
+                    # id=? AND path=?` at Apply -- they must stay exactly
+                    # the caller's literal strings (a real Beets library
+                    # commonly stores items.path RELATIVE to the music
+                    # dir, see _resolve_db_path()'s docstring, so this can
+                    # legitimately be relative). Filesystem
+                    # containment/symlink/existence checks below resolve
+                    # a relative value against allowed_roots first --
+                    # resolving an already-absolute value is a no-op, so
+                    # this does not change behavior for the existing
+                    # "candidates" callers, which have always passed
+                    # absolute paths.
+                    src_p = _resolve_db_path(old_path_str, allowed_roots)
+                    dst_p = _resolve_db_path(new_path_str, allowed_roots)
                     entry = {
                         "item_id": iid,
                         "type": "move_file" if fu.get("rename") else "repoint_db",
-                        "source": old_path_str,
-                        "destination": new_path_str,
+                        "source": str(src_p),
+                        "destination": str(dst_p),
                     }
+                    # SEC-002 Wave 22 final review, CodeQL triage: this
+                    # caller-supplied old_path/new_path pair reached a
+                    # filesystem stat() with no root/symlink validation at
+                    # all -- unlike the filename_cleanup mode added this
+                    # same review just below, which does validate. Close
+                    # the same gap here.
+                    #
+                    # ARCH-003 Wave 31 review: that fix only covered the
+                    # rename=True ("move_file") branch. The rename=False
+                    # ("repoint_db") branch -- which changes an item's
+                    # authoritative on-disk path in the DB with no actual
+                    # file move -- had ZERO path validation at all, and
+                    # execute_album_maintenance_apply()'s TOCTOU/root/
+                    # symlink revalidation loop explicitly filters to only
+                    # `type == "move_file"` entries, so repoint_db never
+                    # got revalidated there either. A caller reaching this
+                    # payload shape (none currently do; found unused, not
+                    # exploited) could point an item's official path at
+                    # any unvalidated string. Every fix_updates entry now
+                    # gets the same root/symlink checks regardless of
+                    # rename, and repoint_db additionally requires the new
+                    # path to already exist as a real file (that is its
+                    # whole premise -- repointing the DB at a file that is
+                    # already really there) and the old path to NOT exist
+                    # (refusing to silently orphan a real file still
+                    # sitting at the path being abandoned).
+                    if not _path_under(src_p, Path(allowed_roots[0])) or not _path_under(dst_p, Path(allowed_roots[0])):
+                        return {"ok": False, "error": f"Path outside allowed roots: {dst_p}", "code": "album_maintenance_path_out_of_root"}
+                    if _path_has_symlink_under(src_p, Path(allowed_roots[0])) or _path_has_symlink_under(dst_p, Path(allowed_roots[0])):
+                        return {"ok": False, "error": f"Symlink rejected: {dst_p}", "code": "album_maintenance_symlink_rejected"}
                     if fu.get("rename"):
-                        # SEC-002 Wave 22 final review, CodeQL triage: this
-                        # caller-supplied old_path/new_path pair reached a
-                        # filesystem stat() with no root/symlink validation
-                        # at all -- unlike the filename_cleanup mode added
-                        # this same review just below, which does validate.
-                        # Close the same gap here.
-                        src_p = Path(old_path_str)
-                        dst_p = Path(new_path_str)
-                        if not _path_under(src_p, Path(allowed_roots[0])) or not _path_under(dst_p, Path(allowed_roots[0])):
-                            return {"ok": False, "error": f"Path outside allowed roots: {src_p}", "code": "album_maintenance_path_out_of_root"}
-                        if _path_has_symlink_under(src_p, Path(allowed_roots[0])) or _path_has_symlink_under(dst_p, Path(allowed_roots[0])):
-                            return {"ok": False, "error": f"Symlink rejected: {src_p}", "code": "album_maintenance_symlink_rejected"}
                         if src_p.exists() and src_p.is_file():
                             st = src_p.stat()
                             entry["stat"] = {"dev": st.st_dev, "ino": st.st_ino, "size": st.st_size, "mtime_ns": st.st_mtime_ns}
+                    else:
+                        if not dst_p.exists() or not dst_p.is_file():
+                            return {"ok": False, "error": f"Repoint target does not exist: {dst_p}", "code": "album_maintenance_item_missing"}
+                        if src_p.exists():
+                            return {"ok": False, "error": f"Refusing DB repoint: a file already exists at the old path: {src_p}", "code": "album_maintenance_target_exists"}
+                        st = dst_p.stat()
+                        entry["stat"] = {"dev": st.st_dev, "ino": st.st_ino, "size": st.st_size, "mtime_ns": st.st_mtime_ns}
                     resource_keys.add(f"item:{iid}")
                     moves_plan.append(entry)
                     db_item_updates.append({"id": iid, "old_path": old_path_str, "new_path": new_path_str})
@@ -7926,6 +7968,30 @@ def execute_album_maintenance_apply(
                     return _fail(f"Destination outside allowed roots: {dst_p}", "album_maintenance_path_out_of_root")
                 if dst_p.parent.exists() and _path_has_symlink_under(dst_p.parent, Path(allowed_roots[0])):
                     return _fail(f"Symlink detected on destination: {dst_p}", "album_maintenance_symlink_rejected")
+
+            # repoint_db entries change an item's authoritative on-disk
+            # path with no physical move -- excluded from real_moves
+            # above (nothing to rename), but the destination they point
+            # the DB at still needs the same TOCTOU/root/symlink proof
+            # immediately before mutation, or a file that vanished or
+            # changed between Plan and now would get silently pointed to.
+            repoint_updates = [m for m in moves_plan if m.get("type") == "repoint_db"]
+            for m in repoint_updates:
+                src_p = Path(str(m.get("source") or ""))
+                dst_p = Path(str(m.get("destination") or ""))
+                if not _path_under(src_p, Path(allowed_roots[0])) or not _path_under(dst_p, Path(allowed_roots[0])):
+                    return _fail(f"Repoint path outside allowed roots: {dst_p}", "album_maintenance_path_out_of_root")
+                if _path_has_symlink_under(src_p, Path(allowed_roots[0])) or _path_has_symlink_under(dst_p, Path(allowed_roots[0])):
+                    return _fail(f"Symlink detected on repoint path: {dst_p}", "album_maintenance_symlink_rejected")
+                if src_p.exists():
+                    return _fail(f"Repoint source now exists (no longer safe to abandon): {src_p}", "album_maintenance_toctou_mismatch")
+                if not dst_p.exists() or not dst_p.is_file():
+                    return _fail(f"Repoint target missing since plan: {dst_p}", "album_maintenance_toctou_mismatch")
+                exp_st = m.get("stat") or {}
+                st = dst_p.stat()
+                if (st.st_dev != exp_st.get("dev") or st.st_ino != exp_st.get("ino")
+                        or st.st_size != exp_st.get("size") or st.st_mtime_ns != exp_st.get("mtime_ns")):
+                    return _fail(f"Repoint target changed since plan: {dst_p}", "album_maintenance_toctou_mismatch")
 
             store.update(operation_id, status="Running", metadata={**meta, "mutation_started": True})
 

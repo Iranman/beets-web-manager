@@ -35150,21 +35150,29 @@ def fix_leaked_db_paths():
                 )
                 fixed += 1
             else:
-                try:
-                    with _db() as con:
-                        cur = con.execute("UPDATE items SET path=? WHERE id=?", (db_val, item_id))
-                        con.commit()
-                    if int(cur.rowcount or 0) > 0:
-                        fixed += 1
-                        log.append(
-                            f"  Fixed item {item_id}: {Path(old_path).name!r} -> {Path(new_path_str).name!r}"
-                        )
-                    else:
-                        errors += 1
-                        log.append(f"  WARN: no row updated for item {item_id}")
-                except Exception as ex:
+                album_id = int(r.get("album_id") or 0)
+                if album_id <= 0:
                     errors += 1
-                    log.append(f"  ERROR item {item_id}: {ex}")
+                    log.append(f"  ERROR item {item_id}: has no album_id; cannot repair through album_maintenance_v1")
+                    continue
+                try:
+                    res = beets_client.repoint_item_db_path(item_id, album_id, old_path, db_val)
+                except (BeetsUnavailableError, BeetsError) as ex:
+                    errors += 1
+                    log.append(f"  ERROR item {item_id}: engine unavailable: {ex}")
+                    continue
+                if res.get("ok") and res.get("repointed"):
+                    fixed += 1
+                    log.append(
+                        f"  Fixed item {item_id}: {Path(old_path).name!r} -> {Path(new_path_str).name!r}"
+                    )
+                elif res.get("ok"):
+                    # Plan found nothing to change (e.g. row already
+                    # matched -- a legitimate no-op, not a failure).
+                    log.append(f"  No change needed for item {item_id}")
+                else:
+                    errors += 1
+                    log.append(f"  ERROR item {item_id}: {res.get('error') or 'engine rejected repair'}")
             if update_state:
                 update_state({
                     "category": "Cleanup",

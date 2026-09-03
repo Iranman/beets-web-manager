@@ -766,6 +766,110 @@ class TestBeetsTransactionEngineFamilies(unittest.TestCase):
         self.assertFalse(missing.get("ok"))
         self.assertEqual(missing.get("code"), "album_duplicate_merge_album_missing")
 
+    # ── album_maintenance_v1 filename_cleanup fix_updates / repoint_db
+    # (ARCH-003 Wave 31: this payload shape had zero path validation
+    # before this wave, found unused by any real caller) ─────────────────
+
+    def test_repoint_db_accepts_relative_stored_path_and_updates_exact_row(self):
+        # Real Beets libraries commonly store items.path RELATIVE to the
+        # music dir; the leaked-db-paths use case this exists for scans
+        # exactly that kind of row.
+        real_dir = self.music_dir / "Artist" / "Album"
+        real_dir.mkdir(parents=True)
+        (real_dir / "01 Track.mp3").write_bytes(b"audio")
+        old_rel = "Artist/Album/%the{}/01 Track.mp3"
+        new_rel = "Artist/Album/01 Track.mp3"
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO albums (id, album) VALUES (50, 'Album')")
+            conn.execute("INSERT INTO items (id, path, album_id) VALUES (500, ?, 50)", (old_rel.encode("utf-8"),))
+
+        plan = transaction_engine.create_album_maintenance_plan(
+            self.store,
+            {"mode": "deduplicate", "album_id": 50, "fix_updates": [{"id": 500, "old_path": old_rel, "new_path": new_rel, "rename": False}]},
+            music_allowed_roots=[str(self.music_dir)],
+            db_path=str(self.db_path),
+        )
+        self.assertTrue(plan.get("ok"), msg=plan.get("error"))
+        op_id = plan["operation_id"]
+
+        apply_res = transaction_engine.execute_album_maintenance_apply(
+            self.store, op_id, music_allowed_roots=[str(self.music_dir)], db_path=str(self.db_path),
+        )
+        self.assertTrue(apply_res.get("ok"), msg=apply_res.get("error"))
+        # No physical move for a repoint -- the real file stays put.
+        self.assertTrue((real_dir / "01 Track.mp3").exists())
+
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute("SELECT path FROM items WHERE id=500").fetchone()
+        self.assertEqual(row[0].decode("utf-8") if isinstance(row[0], bytes) else row[0], new_rel)
+
+    def test_repoint_db_rejects_target_outside_allowed_root(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "escaped.mp3").write_bytes(b"audio")
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO albums (id, album) VALUES (51, 'Album')")
+            conn.execute("INSERT INTO items (id, path, album_id) VALUES (501, ?, 51)", (b"Artist/broken.mp3",))
+
+        plan = transaction_engine.create_album_maintenance_plan(
+            self.store,
+            {"mode": "deduplicate", "album_id": 51, "fix_updates": [{
+                "id": 501, "old_path": "Artist/broken.mp3", "new_path": str(outside / "escaped.mp3"), "rename": False,
+            }]},
+            music_allowed_roots=[str(self.music_dir)],
+            db_path=str(self.db_path),
+        )
+        self.assertFalse(plan.get("ok"))
+        self.assertEqual(plan.get("code"), "album_maintenance_path_out_of_root")
+
+    def test_repoint_db_rejects_when_target_does_not_exist(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO albums (id, album) VALUES (52, 'Album')")
+            conn.execute("INSERT INTO items (id, path, album_id) VALUES (502, ?, 52)", (b"Artist/broken.mp3",))
+
+        plan = transaction_engine.create_album_maintenance_plan(
+            self.store,
+            {"mode": "deduplicate", "album_id": 52, "fix_updates": [{
+                "id": 502, "old_path": "Artist/broken.mp3", "new_path": "Artist/does-not-exist.mp3", "rename": False,
+            }]},
+            music_allowed_roots=[str(self.music_dir)],
+            db_path=str(self.db_path),
+        )
+        self.assertFalse(plan.get("ok"))
+        self.assertEqual(plan.get("code"), "album_maintenance_item_missing")
+
+    def test_repoint_db_apply_toctou_rejects_when_target_changed_since_plan(self):
+        real_dir = self.music_dir / "Artist"
+        real_dir.mkdir()
+        target_file = real_dir / "01 Track.mp3"
+        target_file.write_bytes(b"audio-v1")
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO albums (id, album) VALUES (53, 'Album')")
+            conn.execute("INSERT INTO items (id, path, album_id) VALUES (503, ?, 53)", (b"Artist/%the{}/01 Track.mp3",))
+
+        plan = transaction_engine.create_album_maintenance_plan(
+            self.store,
+            {"mode": "deduplicate", "album_id": 53, "fix_updates": [{
+                "id": 503, "old_path": "Artist/%the{}/01 Track.mp3", "new_path": "Artist/01 Track.mp3", "rename": False,
+            }]},
+            music_allowed_roots=[str(self.music_dir)],
+            db_path=str(self.db_path),
+        )
+        self.assertTrue(plan.get("ok"), msg=plan.get("error"))
+        op_id = plan["operation_id"]
+
+        # Target file content/size changes between Plan and Apply.
+        target_file.write_bytes(b"audio-v2-different-size!!")
+
+        apply_res = transaction_engine.execute_album_maintenance_apply(
+            self.store, op_id, music_allowed_roots=[str(self.music_dir)], db_path=str(self.db_path),
+        )
+        self.assertFalse(apply_res.get("ok"))
+        self.assertEqual(apply_res.get("code"), "album_maintenance_toctou_mismatch")
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute("SELECT path FROM items WHERE id=503").fetchone()
+        self.assertEqual(row[0], b"Artist/%the{}/01 Track.mp3")
+
 
 if __name__ == "__main__":
     unittest.main()

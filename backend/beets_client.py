@@ -1180,6 +1180,29 @@ class BeetsClient:
             "files_deleted": len(item_ids) if delete_files else 0,
         }
 
+    def repoint_item_db_path(self, item_id: int, album_id: int, old_path: str, new_path: str) -> Dict[str, Any]:
+        """Correct one item's items.path DB value to an already-existing
+        file through album_maintenance_v1's deduplicate-mode fix_updates/
+        repoint_db path (ARCH-003 Wave 31). No file is moved -- the target
+        must already exist there; the engine validates root containment,
+        rejects symlinks, and TOCTOU-revalidates the target is unchanged
+        immediately before writing.
+        """
+        plan_res = self.plan_album_maintenance({
+            "mode": "deduplicate",
+            "album_id": album_id,
+            "fix_updates": [{"id": item_id, "old_path": old_path, "new_path": new_path, "rename": False}],
+        })
+        if not plan_res.get("ok"):
+            return {"ok": False, "error": plan_res.get("error") or "Path repair plan rejected", "code": plan_res.get("code")}
+        op_id = plan_res.get("operation_id")
+        if not op_id:
+            return {"ok": True, "repointed": False}
+        apply_res = self.apply_album_maintenance(op_id)
+        if not apply_res.get("ok"):
+            return {"ok": False, "error": apply_res.get("error") or "Path repair apply failed", "code": apply_res.get("code")}
+        return {"ok": True, "repointed": True, "operation_id": op_id}
+
     # ── album_relocation_v1 Pure HTTP Client Methods ────────────────────────────
 
     def plan_album_relocation(self, payload: Dict[str, Any]) -> Dict[str, Any]:
