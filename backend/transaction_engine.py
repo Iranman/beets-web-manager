@@ -10449,6 +10449,23 @@ def _cleanup_stat_record(path: Path, root: Path) -> Dict[str, Any]:
     return stat_record
 
 
+def _cleanup_dir_stat_record(path: Path, root: Path) -> Dict[str, Any]:
+    if not _path_under(path, root) or _path_has_symlink_under(path, root):
+        raise ValueError("cleanup directory outside validated root")
+    st = path.stat()
+    return {"dev": st.st_dev, "ino": st.st_ino, "mtime_ns": st.st_mtime_ns, "type": "directory"}
+
+
+def _cleanup_dir_stat_matches(path: Path, expected: Dict[str, Any], root: Path) -> bool:
+    if not expected:
+        return False
+    try:
+        st = path.stat()
+    except OSError:
+        return False
+    return st.st_dev == expected.get("dev") and st.st_ino == expected.get("ino")
+
+
 def _cleanup_stat_matches(path: Path, expected: Dict[str, Any], root: Path) -> bool:
     if not expected:
         return False
@@ -11147,6 +11164,11 @@ def create_folder_cleanup_plan(
     if root is None:
         return {"ok": False, "error": f"Folder outside allowed root: {src_display}", "code": "folder_cleanup_path_out_of_root"}
 
+    src_path_text = os.path.abspath(os.path.normpath(str(src_p)))
+    root_text = os.path.abspath(os.path.normpath(str(root)))
+    if src_path_text == root_text:
+        return {"ok": False, "error": "Refusing to modify allowed root directory itself", "code": "folder_cleanup_root_refused"}
+
     file_moves: List[Dict[str, Any]] = []
     dir_removals: List[Any] = []
     dir_renames: List[Dict[str, Any]] = []
@@ -11171,30 +11193,86 @@ def create_folder_cleanup_plan(
             refs = _library_cleanup_db_refs_beneath_folder(db_path or "", src_p, allowed_roots)
             if refs:
                 return {"ok": False, "error": "Directory still has Beets DB references", "code": "folder_cleanup_db_references", "references": refs[:20]}
-            dir_removals.append({"path": str(src_p), "expected_empty": True})
-    elif action in ("safe_rename", "rename_folder") and target_folder:
+            dir_removals.append({"path": str(src_p), "expected_empty": True, "stat": _cleanup_dir_stat_record(src_p, root)})
+    elif action in ("safe_rename", "rename_folder"):
+        if not target_folder:
+            return {"ok": False, "error": "target folder required", "code": "folder_cleanup_invalid_payload"}
         tgt_p = _cleanup_resolve_path(Path(target_folder))
+        tgt_display = str(tgt_p)
+        if not _normpath_within_roots(str(tgt_p), allowed_roots):
+            return {"ok": False, "error": f"Target outside allowed root: {tgt_display}", "code": "folder_cleanup_path_out_of_root"}
         tgt_root = _cleanup_root_for_path(tgt_p, allowed_roots)
-        if tgt_root is not None:
-            dir_renames.append({"source": str(src_p), "target": str(tgt_p)})
-    elif action in ("merge_source_files", "merge") and target_folder:
+        if tgt_root is None:
+            return {"ok": False, "error": f"Target outside allowed root: {tgt_display}", "code": "folder_cleanup_path_out_of_root"}
+        if not src_p.exists() or not src_p.is_dir():
+            return {"ok": False, "error": f"Source is not a directory: {src_display}", "code": "folder_cleanup_not_directory"}
+        if not tgt_p.parent.exists() or not tgt_p.parent.is_dir():
+            return {"ok": False, "error": "Target parent directory does not exist", "code": "folder_cleanup_target_parent_missing"}
+        if _path_has_symlink_under(tgt_p.parent, tgt_root):
+            return {"ok": False, "error": f"Symlink rejected: {tgt_display}", "code": "folder_cleanup_symlink_rejected"}
+        if tgt_p.exists() or tgt_p.is_symlink():
+            return {"ok": False, "error": "Target folder already exists", "code": "folder_cleanup_target_exists"}
+        refs = _library_cleanup_db_refs_beneath_folder(db_path or "", src_p, allowed_roots)
+        if refs:
+            return {"ok": False, "error": "Source folder still has Beets DB references", "code": "folder_cleanup_db_references", "references": refs[:20]}
+        dir_renames.append({"source": str(src_p), "target": str(tgt_p), "stat": _cleanup_dir_stat_record(src_p, root)})
+    elif action in ("merge_source_files", "merge"):
+        if not target_folder:
+            return {"ok": False, "error": "target folder required", "code": "folder_cleanup_invalid_payload"}
         tgt_p = _cleanup_resolve_path(Path(target_folder))
+        tgt_display = str(tgt_p)
+        if not _normpath_within_roots(str(tgt_p), allowed_roots):
+            return {"ok": False, "error": f"Target outside allowed root: {tgt_display}", "code": "folder_cleanup_path_out_of_root"}
         tgt_root = _cleanup_root_for_path(tgt_p, allowed_roots)
-        if tgt_root is not None:
-            if src_p.exists() and src_p.is_dir():
-                for f in src_p.rglob("*"):
-                    if f.is_file():
-                        rel = f.relative_to(src_p)
-                        dest_f = tgt_p / rel
-                        st = f.stat()
-                        file_moves.append({
-                            "source": str(f),
-                            "target": str(dest_f),
-                            "stat": {"dev": st.st_dev, "ino": st.st_ino, "size": st.st_size, "mtime_ns": st.st_mtime_ns},
-                        })
-                dir_removals.append(str(src_p))
+        if tgt_root is None:
+            return {"ok": False, "error": f"Target outside allowed root: {tgt_display}", "code": "folder_cleanup_path_out_of_root"}
+        if not src_p.exists() or not src_p.is_dir():
+            return {"ok": False, "error": f"Source is not a directory: {src_display}", "code": "folder_cleanup_not_directory"}
+        if not tgt_p.exists() or not tgt_p.is_dir():
+            return {"ok": False, "error": "Target folder does not exist", "code": "folder_cleanup_target_missing"}
+        if src_p.resolve(strict=False) == tgt_p.resolve(strict=False):
+            return {"ok": False, "error": "Source and target folders must differ", "code": "folder_cleanup_invalid_payload"}
+        if _path_has_symlink_under(tgt_p, tgt_root):
+            return {"ok": False, "error": f"Symlink rejected: {tgt_display}", "code": "folder_cleanup_symlink_rejected"}
+        refs = _library_cleanup_db_refs_beneath_folder(db_path or "", src_p, allowed_roots)
+        if refs:
+            return {"ok": False, "error": "Source folder still has Beets DB references", "code": "folder_cleanup_db_references", "references": refs[:20]}
+        source_dirs: List[Path] = []
+        for f in src_p.rglob("*"):
+            if f.is_dir():
+                source_dirs.append(f)
+                continue
+            if not f.is_file():
+                continue
+            if _path_has_symlink_under(f, root):
+                return {"ok": False, "error": f"Symlink rejected: {f}", "code": "folder_cleanup_symlink_rejected"}
+            rel = f.relative_to(src_p)
+            dest_f = tgt_p / rel
+            if not _path_under(dest_f, tgt_p):
+                return {"ok": False, "error": f"Target outside merge folder: {dest_f}", "code": "folder_cleanup_path_out_of_root"}
+            if not dest_f.parent.exists() or not dest_f.parent.is_dir():
+                return {"ok": False, "error": "Target subfolder does not exist; cleanup apply will not create folders", "code": "folder_cleanup_target_parent_missing"}
+            if _path_has_symlink_under(dest_f.parent, tgt_root):
+                return {"ok": False, "error": f"Symlink rejected: {dest_f}", "code": "folder_cleanup_symlink_rejected"}
+            if dest_f.exists() or dest_f.is_symlink():
+                return {"ok": False, "error": "Target file already exists", "code": "folder_cleanup_target_exists"}
+            st = f.stat()
+            file_moves.append({
+                "source": str(f),
+                "target": str(dest_f),
+                "stat": {"dev": st.st_dev, "ino": st.st_ino, "size": st.st_size, "mtime_ns": st.st_mtime_ns},
+            })
+        if not file_moves:
+            return {"ok": False, "error": "No source-only files are available to merge", "code": "folder_cleanup_noop"}
+        for d in sorted(source_dirs, key=lambda p: len(p.parts), reverse=True):
+            dir_removals.append({"path": str(d), "expected_empty": True, "stat": _cleanup_dir_stat_record(d, root)})
+        dir_removals.append({"path": str(src_p), "expected_empty": True, "stat": _cleanup_dir_stat_record(src_p, root)})
+    else:
+        return {"ok": False, "error": f"Unsupported folder cleanup action: {action}", "code": "folder_cleanup_invalid_payload"}
 
     resource_keys = [f"folder:{hashlib.sha256(str(src_p).encode('utf-8', 'surrogateescape')).hexdigest()}"]
+    if target_folder:
+        resource_keys.append(f"folder:{hashlib.sha256(str(_cleanup_resolve_path(Path(target_folder))).encode('utf-8', 'surrogateescape')).hexdigest()}")
 
     tx = store.create(
         operation_type="Folder Cleanup",
@@ -11267,9 +11345,20 @@ def execute_folder_cleanup_apply(
                     return _fail(f"Source outside allowed roots: {sp}", "folder_cleanup_path_out_of_root")
                 if _path_has_symlink_under(sp, root):
                     return _fail(f"Symlink detected on source: {sp}", "folder_cleanup_symlink_rejected")
-                if sp.exists() and "stat" in fm:
-                    if not _cleanup_stat_matches(sp, fm["stat"], root):
-                        return _fail(f"Source file stat changed: {sp}", "folder_cleanup_toctou_mismatch")
+                if not sp.exists() or not sp.is_file():
+                    return _fail(f"Source file missing: {sp}", "folder_cleanup_toctou_mismatch")
+                if "stat" in fm and not _cleanup_stat_matches(sp, fm["stat"], root):
+                    return _fail(f"Source file stat changed: {sp}", "folder_cleanup_toctou_mismatch")
+                tp = Path(fm["target"])
+                tp_root = _cleanup_root_for_path(tp, allowed_roots)
+                if tp_root is None:
+                    return _fail(f"Target outside allowed roots: {tp}", "folder_cleanup_path_out_of_root")
+                if not tp.parent.exists() or not tp.parent.is_dir():
+                    return _fail(f"Target parent directory missing: {tp.parent}", "folder_cleanup_target_parent_missing")
+                if _path_has_symlink_under(tp.parent, tp_root):
+                    return _fail(f"Symlink detected on target: {tp}", "folder_cleanup_symlink_rejected")
+                if tp.exists() or tp.is_symlink():
+                    return _fail(f"Target already exists: {tp}", "folder_cleanup_target_exists")
 
             store.update(operation_id, status="Running", metadata={**meta, "mutation_started": True})
 
@@ -11277,31 +11366,46 @@ def execute_folder_cleanup_apply(
             for fm in file_moves:
                 sp = Path(fm["source"])
                 tp = Path(fm["target"])
-                if sp.exists():
-                    tp_root = _cleanup_root_for_path(tp, allowed_roots)
-                    if tp_root is None:
-                        return _fail(f"Target outside allowed roots: {tp}", "folder_cleanup_path_out_of_root")
-                    tp.parent.mkdir(parents=True, exist_ok=True)
-                    try:
-                        _safe_rename(sp, tp)
-                        moved_records.append({"source": str(sp), "target": str(tp)})
-                    except Exception as e:
-                        return _fail(f"Move failed {sp} -> {tp}: {e}", "folder_cleanup_move_failed")
+                if not sp.exists() or not sp.is_file():
+                    return _fail(f"Source file missing: {sp}", "folder_cleanup_toctou_mismatch")
+                tp_root = _cleanup_root_for_path(tp, allowed_roots)
+                if tp_root is None:
+                    return _fail(f"Target outside allowed roots: {tp}", "folder_cleanup_path_out_of_root")
+                if not tp.parent.exists() or not tp.parent.is_dir():
+                    return _fail(f"Target parent directory missing: {tp.parent}", "folder_cleanup_target_parent_missing")
+                if _path_has_symlink_under(tp.parent, tp_root):
+                    return _fail(f"Symlink detected on target: {tp}", "folder_cleanup_symlink_rejected")
+                if tp.exists() or tp.is_symlink():
+                    return _fail(f"Target already exists: {tp}", "folder_cleanup_target_exists")
+                try:
+                    _safe_rename(sp, tp)
+                    moved_records.append({"source": str(sp), "target": str(tp)})
+                except Exception as e:
+                    return _fail(f"Move failed {sp} -> {tp}: {e}", "folder_cleanup_move_failed")
 
             dir_renames = meta.get("dir_renames") or []
             for dr in dir_renames:
                 sp = Path(dr["source"])
                 tp = Path(dr["target"])
-                if sp.exists():
-                    tp_root = _cleanup_root_for_path(tp, allowed_roots)
-                    if tp_root is None:
-                        return _fail(f"Target outside allowed roots: {tp}", "folder_cleanup_path_out_of_root")
-                    tp.parent.mkdir(parents=True, exist_ok=True)
-                    try:
-                        _safe_rename(sp, tp)
-                        moved_records.append({"source": str(sp), "target": str(tp)})
-                    except Exception as e:
-                        return _fail(f"Folder rename failed {sp} -> {tp}: {e}", "folder_cleanup_rename_failed")
+                root = _cleanup_root_for_path(sp, allowed_roots)
+                tp_root = _cleanup_root_for_path(tp, allowed_roots)
+                if root is None or tp_root is None:
+                    return _fail(f"Folder rename outside allowed roots: {sp} -> {tp}", "folder_cleanup_path_out_of_root")
+                if _path_has_symlink_under(sp, root) or _path_has_symlink_under(tp.parent, tp_root):
+                    return _fail(f"Symlink detected on folder rename path: {sp} -> {tp}", "folder_cleanup_symlink_rejected")
+                if not sp.exists() or not sp.is_dir():
+                    return _fail(f"Rename source missing: {sp}", "folder_cleanup_toctou_mismatch")
+                if dr.get("stat") and not _cleanup_dir_stat_matches(sp, dr["stat"], root):
+                    return _fail(f"Rename source changed since plan: {sp}", "folder_cleanup_toctou_mismatch")
+                if not tp.parent.exists() or not tp.parent.is_dir():
+                    return _fail(f"Target parent directory missing: {tp.parent}", "folder_cleanup_target_parent_missing")
+                if tp.exists() or tp.is_symlink():
+                    return _fail(f"Rename target already exists: {tp}", "folder_cleanup_target_exists")
+                try:
+                    _safe_rename(sp, tp)
+                    moved_records.append({"source": str(sp), "target": str(tp)})
+                except Exception as e:
+                    return _fail(f"Folder rename failed {sp} -> {tp}: {e}", "folder_cleanup_rename_failed")
 
             dir_removals = meta.get("dir_removals") or []
             removed_dirs = []
@@ -11329,7 +11433,7 @@ def execute_folder_cleanup_apply(
                 expected = spec.get("stat") if isinstance(spec, dict) else None
                 if expected:
                     try:
-                        current = _cleanup_stat_record(dp, root)
+                        current = _cleanup_dir_stat_record(dp, root)
                     except Exception:
                         return _fail(f"Directory disappeared before removal: {dp}", "folder_cleanup_toctou_mismatch")
                     if current.get("dev") != expected.get("dev") or current.get("ino") != expected.get("ino"):
@@ -11349,7 +11453,7 @@ def execute_folder_cleanup_apply(
                 "completed_at": _now(),
             })
 
-            return {"ok": True, "operation_id": operation_id, "status": "Completed", "mutated": mutated, "removed_dirs": removed_dirs}
+            return {"ok": True, "operation_id": operation_id, "status": "Completed", "mutated": mutated, "moved_records": moved_records, "removed_dirs": removed_dirs}
 
 def rollback_folder_cleanup(
     store: TransactionStore,
@@ -12940,6 +13044,9 @@ def create_item_metadata_plan(
     if item_id <= 0:
         return {"ok": False, "error": "item_id required", "code": "item_metadata_invalid_payload"}
     force_write_tags = bool(payload.get("force_write_tags"))
+    write_tags = payload.get("write_tags", True) is not False
+    if force_write_tags:
+        write_tags = True
     updates, rejected = _normalize_metadata_fields(payload.get("updates") or {}, ITEM_METADATA_FIELDS)
     if rejected:
         return {"ok": False, "error": f"Unknown/disallowed item metadata field(s): {sorted(rejected)}", "code": "item_metadata_field_not_allowed"}
@@ -12975,9 +13082,9 @@ def create_item_metadata_plan(
 
     if not diff and not force_write_tags:
         return {"ok": True, "operation_id": None, "item_fields_changed": 0}
-    capture_fields = set(diff.keys()) | (ITEM_METADATA_FIELDS if force_write_tags else set())
-    before_state = _capture_media_tag_state(item_path, capture_fields)
-    if force_write_tags and not before_state.get("exists"):
+    capture_fields = (set(diff.keys()) | (ITEM_METADATA_FIELDS if force_write_tags else set())) if write_tags else set()
+    before_state = _capture_media_tag_state(item_path, capture_fields) if capture_fields else {"stat": None, "tags": {}}
+    if write_tags and force_write_tags and not before_state.get("exists"):
         return {"ok": False, "error": f"Media file missing for item {item_id}", "code": "item_metadata_media_missing"}
     tx = store.create(
         operation_type="Metadata Update",
@@ -12991,6 +13098,7 @@ def create_item_metadata_plan(
             "item_diff": diff,
             "item_path": str(item_path),
             "force_write_tags": force_write_tags,
+            "write_tags": write_tags,
             "file_before_stat": before_state.get("stat"),
             "before_tags": before_state.get("tags") or {},
             "allowed_roots": allowed_roots,
@@ -13028,6 +13136,7 @@ def execute_item_metadata_apply(
         item_path = Path(meta.get("item_path") or "")
         allowed_roots = music_allowed_roots or meta.get("allowed_roots") or [str(os.environ.get("MUSIC_ROOT", "/music"))]
         music_root = allowed_roots[0]
+        write_tags = meta.get("write_tags", True) is not False
 
         def _fail(msg: str, code: str, *, recover: bool = False) -> Dict[str, Any]:
             if recover:
@@ -13068,7 +13177,7 @@ def execute_item_metadata_apply(
                     con.close()
             store.update(operation_id, metadata={**store.get(operation_id).get("metadata", {}), "db_mutated": db_mutated})
             tags_written = False
-            if diff or meta.get("force_write_tags"):
+            if write_tags and (diff or meta.get("force_write_tags")):
                 result = native_beets_write_item_tags(lib_db, music_root, item_id)
                 if not result.get("ok"):
                     fields = {key: value["after"] for key, value in diff.items()}

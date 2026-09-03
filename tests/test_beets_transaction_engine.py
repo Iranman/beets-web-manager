@@ -13,6 +13,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from backend import transaction_engine
 
@@ -126,6 +127,109 @@ class TestBeetsTransactionEngineFamilies(unittest.TestCase):
         self.assertTrue(rollback.get("ok"))
         self.assertTrue(src.exists())
         self.assertFalse(dst.exists())
+
+    def test_folder_cleanup_refuses_allowed_root_itself(self):
+        plan = transaction_engine.create_folder_cleanup_plan(
+            self.store,
+            {"action": "remove_empty", "source": str(self.music_dir)},
+            music_allowed_roots=[str(self.music_dir)],
+            db_path=str(self.db_path),
+        )
+        self.assertFalse(plan.get("ok"))
+        self.assertEqual(plan.get("code"), "folder_cleanup_root_refused")
+
+    def test_folder_cleanup_safe_rename_refuses_db_tracked_source(self):
+        src = self.music_dir / "old_album"
+        dst = self.music_dir / "new_album"
+        src.mkdir()
+        track = src / "track1.mp3"
+        track.write_bytes(b"audio content")
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO items (id, path, album_id, title) VALUES (900, ?, 1, 'Track')", (str(track).encode("utf-8"),))
+
+        plan = transaction_engine.create_folder_cleanup_plan(
+            self.store,
+            {"action": "safe_rename", "source": str(src), "target": str(dst)},
+            music_allowed_roots=[str(self.music_dir)],
+            db_path=str(self.db_path),
+        )
+        self.assertFalse(plan.get("ok"))
+        self.assertEqual(plan.get("code"), "folder_cleanup_db_references")
+        self.assertTrue(src.exists())
+        self.assertFalse(dst.exists())
+
+    def test_folder_cleanup_merge_refuses_missing_target_parent(self):
+        src = self.music_dir / "old_album"
+        dst = self.music_dir / "canonical_album"
+        src.mkdir()
+        dst.mkdir()
+        (src / "Disc 2").mkdir()
+        (src / "Disc 2" / "track2.mp3").write_bytes(b"audio content")
+
+        plan = transaction_engine.create_folder_cleanup_plan(
+            self.store,
+            {"action": "merge_source_files", "source": str(src), "target": str(dst)},
+            music_allowed_roots=[str(self.music_dir)],
+            db_path=str(self.db_path),
+        )
+        self.assertFalse(plan.get("ok"))
+        self.assertEqual(plan.get("code"), "folder_cleanup_target_parent_missing")
+        self.assertFalse((dst / "Disc 2").exists())
+
+    def test_folder_cleanup_apply_fails_when_planned_file_disappears(self):
+        src = self.music_dir / "old_album"
+        dst = self.music_dir / "canonical_album"
+        src.mkdir()
+        dst.mkdir()
+        track = src / "track1.mp3"
+        track.write_bytes(b"audio content")
+        plan = transaction_engine.create_folder_cleanup_plan(
+            self.store,
+            {"action": "merge_source_files", "source": str(src), "target": str(dst)},
+            music_allowed_roots=[str(self.music_dir)],
+            db_path=str(self.db_path),
+        )
+        self.assertTrue(plan.get("ok"), msg=plan.get("error"))
+        track.unlink()
+
+        apply = transaction_engine.execute_folder_cleanup_apply(
+            self.store,
+            plan["operation_id"],
+            music_allowed_roots=[str(self.music_dir)],
+            db_path=str(self.db_path),
+        )
+        self.assertFalse(apply.get("ok"))
+        self.assertEqual(apply.get("code"), "folder_cleanup_toctou_mismatch")
+        self.assertFalse((dst / "track1.mp3").exists())
+
+    def test_item_metadata_write_tags_false_updates_db_only(self):
+        track = self.music_dir / "db_only.mp3"
+        track.write_bytes(b"not a real media file")
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO items (id, path, album_id, title, artist, album) VALUES (901, ?, 1, 'Old', 'Artist', 'Album')",
+                (str(track).encode("utf-8"),),
+            )
+
+        plan = transaction_engine.create_item_metadata_plan(
+            self.store,
+            {"item_id": 901, "updates": {"title": "Mapped Title"}, "write_tags": False},
+            music_allowed_roots=[str(self.music_dir)],
+            db_path=str(self.db_path),
+        )
+        self.assertTrue(plan.get("ok"), msg=plan.get("error"))
+        with mock.patch.object(transaction_engine, "native_beets_write_item_tags", side_effect=AssertionError("tag writer called")),              mock.patch.object(transaction_engine, "_write_media_tag_fields", side_effect=AssertionError("fallback tag writer called")):
+            apply = transaction_engine.execute_item_metadata_apply(
+                self.store,
+                plan["operation_id"],
+                music_allowed_roots=[str(self.music_dir)],
+                db_path=str(self.db_path),
+            )
+        self.assertTrue(apply.get("ok"), msg=apply.get("error"))
+        self.assertEqual(apply.get("tags_written_count"), 0)
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute("SELECT title FROM items WHERE id=901").fetchone()
+        self.assertEqual(row[0], "Mapped Title")
 
     # ── 2. playlist_media_cleanup_v1 ──────────────────────────────────────────
 
