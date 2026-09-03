@@ -3670,7 +3670,9 @@ def create_album_mb_track_repair_plan(
     if not target_mb_albumid:
         return {"ok": False, "error": "Album does not have a MusicBrainz release ID"}
 
-    if fetch_tracklist_fn is not None:
+    if payload.get("mb_tracks") or payload.get("track_matches"):
+        mb = {"ok": True, "tracks": payload.get("mb_tracks") or payload.get("track_matches"), "release_group": payload.get("release_group", album_rg)}
+    elif fetch_tracklist_fn is not None:
         mb = fetch_tracklist_fn(target_mb_albumid)
     else:
         try:
@@ -4771,7 +4773,8 @@ def create_existing_album_reconcile_plan(
 
     existing_rg = str(existing_alb.get("mb_releasegroupid") or "").strip().lower()
     imported_rg = str(imported_alb.get("mb_releasegroupid") or "").strip().lower()
-    if existing_rg and imported_rg and existing_rg != imported_rg:
+    allow_diff_rg = bool(payload.get("allow_different_releasegroup") or payload.get("force"))
+    if not allow_diff_rg and existing_rg and imported_rg and existing_rg != imported_rg:
         con.close()
         return {"ok": False, "error": f"Cannot reconcile albums with different Release Group IDs ({imported_rg} vs {existing_rg})", "code": "reconcile_identity_mismatch"}
 
@@ -5084,6 +5087,7 @@ def create_existing_album_reconcile_plan(
         "imported_album_before": album_before_snapshot,
         "existing_album_rg_before": existing_rg,
         "imported_album_rg_before": imported_rg,
+        "allow_different_releasegroup": allow_diff_rg,
     }
 
     summary = (
@@ -5265,7 +5269,7 @@ def execute_existing_album_reconcile_apply(
                         expected_imp_rg = str(payload.get("imported_album_rg_before") or "")
                         if live_ex_rg != expected_ex_rg or live_imp_rg != expected_imp_rg:
                             return _fail("Album Release Group ID changed since plan", "reconcile_identity_mismatch")
-                        if live_ex_rg and live_imp_rg and live_ex_rg != live_imp_rg:
+                        if not payload.get("allow_different_releasegroup") and live_ex_rg and live_imp_rg and live_ex_rg != live_imp_rg:
                             return _fail("Album Release Group IDs are no longer compatible", "reconcile_identity_mismatch")
 
                         # Validate move_specs (full identity, not just path/stat)
@@ -7532,7 +7536,7 @@ def create_album_maintenance_plan(
     issue resolution, and filename normalization under an engine-owned boundary.
     """
     mode = str(payload.get("mode") or "deduplicate").strip()
-    _ALBUM_MAINTENANCE_MODES = frozenset({"remove_tracks", "deduplicate", "filename_cleanup"})
+    _ALBUM_MAINTENANCE_MODES = frozenset({"remove_tracks", "remove_album", "deduplicate", "filename_cleanup"})
     if mode not in _ALBUM_MAINTENANCE_MODES:
         # SEC-002 Wave 22 final review, finding #14/#15: "cleanup_issue" and
         # any other unimplemented mode must never silently fall through to
@@ -7555,7 +7559,7 @@ def create_album_maintenance_plan(
     captured_album_rows: List[Dict[str, Any]] = []
     skipped_unsafe_files_count = 0
 
-    if mode == "remove_tracks":
+    if mode in ("remove_tracks", "remove_album"):
         try:
             aid = int(payload.get("album_id") or 0)
         except Exception:
@@ -7564,7 +7568,7 @@ def create_album_maintenance_plan(
         delete_files = bool(payload.get("delete_files", True))
         clean_empty_folders = bool(payload.get("clean_empty_folders", False))
 
-        if aid <= 0 or not raw_item_ids:
+        if aid <= 0 or (mode == "remove_tracks" and not raw_item_ids):
             return {"ok": False, "error": "album_id and item_ids required", "code": "album_maintenance_invalid_payload"}
 
         item_ids = []
@@ -7575,53 +7579,57 @@ def create_album_maintenance_plan(
                     item_ids.append(val)
             except Exception:
                 continue
-        if not item_ids:
-            return {"ok": False, "error": "No valid item_ids provided", "code": "album_maintenance_invalid_payload"}
 
         resource_keys.add(f"album:{aid}")
-        for iid in item_ids:
-            resource_keys.add(f"item:{iid}")
 
         if lib_db and Path(lib_db).exists():
             con = sqlite3.connect(lib_db, timeout=10)
             con.row_factory = sqlite3.Row
             try:
-                q_marks = ",".join("?" for _ in item_ids)
-                rows = con.execute(
-                    f"SELECT * FROM items WHERE album_id=? AND id IN ({q_marks})",
-                    [aid] + item_ids,
-                ).fetchall()
-                for r in rows:
-                    r_dict = dict(r)
-                    captured_item_rows.append(r_dict)
-                    raw_p = r["path"]
-                    p_str = raw_p.decode("utf-8", "replace") if isinstance(raw_p, bytes) else str(raw_p or "")
-                    if not p_str:
-                        continue
-                    p_path = Path(p_str)
-                    if not p_path.is_absolute():
-                        p_path = Path(allowed_roots[0]) / p_str
+                if mode == "remove_album" and not item_ids:
+                    all_rows = con.execute("SELECT id FROM items WHERE album_id=?", (aid,)).fetchall()
+                    item_ids = [int(r["id"]) for r in all_rows]
 
-                    is_safe_file = any(_path_under(p_path, Path(r)) for r in allowed_roots) and not any(_path_has_symlink_under(p_path, Path(r)) for r in allowed_roots)
-                    if is_safe_file and delete_files and p_path.exists() and p_path.is_file():
-                        st = p_path.stat()
-                        dup_quarantines.append({
-                            "item_id": int(r["id"]),
-                            "source": str(p_path),
-                            "stat": {"dev": st.st_dev, "ino": st.st_ino, "size": st.st_size, "mtime_ns": st.st_mtime_ns},
+                for iid in item_ids:
+                    resource_keys.add(f"item:{iid}")
+
+                if item_ids:
+                    q_marks = ",".join("?" for _ in item_ids)
+                    rows = con.execute(
+                        f"SELECT * FROM items WHERE album_id=? AND id IN ({q_marks})",
+                        [aid] + item_ids,
+                    ).fetchall()
+                    for r in rows:
+                        r_dict = dict(r)
+                        captured_item_rows.append(r_dict)
+                        raw_p = r["path"]
+                        p_str = raw_p.decode("utf-8", "replace") if isinstance(raw_p, bytes) else str(raw_p or "")
+                        if not p_str:
+                            continue
+                        p_path = Path(p_str)
+                        if not p_path.is_absolute():
+                            p_path = Path(allowed_roots[0]) / p_str
+
+                        is_safe_file = any(_path_under(p_path, Path(r)) for r in allowed_roots) and not any(_path_has_symlink_under(p_path, Path(r)) for r in allowed_roots)
+                        if is_safe_file and delete_files and p_path.exists() and p_path.is_file():
+                            st = p_path.stat()
+                            dup_quarantines.append({
+                                "item_id": int(r["id"]),
+                                "source": str(p_path),
+                                "stat": {"dev": st.st_dev, "ino": st.st_ino, "size": st.st_size, "mtime_ns": st.st_mtime_ns},
+                            })
+                        elif not is_safe_file and delete_files and p_path.exists():
+                            skipped_unsafe_files_count += 1
+
+                        db_item_deletes.append({
+                            "id": int(r["id"]),
+                            "album_id": aid,
+                            "old_path": str(p_path),
                         })
-                    elif not is_safe_file and delete_files and p_path.exists():
-                        skipped_unsafe_files_count += 1
-
-                    db_item_deletes.append({
-                        "id": int(r["id"]),
-                        "album_id": aid,
-                        "old_path": str(p_path),
-                    })
 
                 tot_row = con.execute("SELECT COUNT(*) FROM items WHERE album_id=?", (aid,)).fetchone()
                 total_items_in_album = int(tot_row[0]) if tot_row else 0
-                if total_items_in_album > 0 and len(db_item_deletes) == total_items_in_album:
+                if total_items_in_album == 0 or len(db_item_deletes) == total_items_in_album:
                     arow = con.execute("SELECT * FROM albums WHERE id=?", (aid,)).fetchone()
                     if arow:
                         captured_album_rows.append(dict(arow))
@@ -11147,8 +11155,8 @@ def create_folder_cleanup_plan(
 ) -> Dict[str, Any]:
     """Create a non-mutating preview plan for folder/placeholder cleanup actions."""
     action = str(payload.get("action") or payload.get("mode") or "remove_empty").strip()
-    src_folder = str(payload.get("source") or payload.get("source_folder") or "").strip()
-    target_folder = str(payload.get("target") or payload.get("target_folder") or "").strip()
+    src_folder = str(payload.get("source") or payload.get("source_folder") or payload.get("source_path") or "").strip()
+    target_folder = str(payload.get("target") or payload.get("target_folder") or payload.get("target_path") or payload.get("proposed_path") or "").strip()
 
     if not src_folder:
         return {"ok": False, "error": "source folder required", "code": "folder_cleanup_invalid_payload"}
@@ -11453,7 +11461,15 @@ def execute_folder_cleanup_apply(
                 "completed_at": _now(),
             })
 
-            return {"ok": True, "operation_id": operation_id, "status": "Completed", "mutated": mutated, "moved_records": moved_records, "removed_dirs": removed_dirs}
+            return {
+                "ok": True,
+                "operation_id": operation_id,
+                "status": "Completed",
+                "mutated": mutated,
+                "moved_records": moved_records,
+                "removed_dirs": removed_dirs,
+                "changed_count": len(moved_records) + len(removed_dirs),
+            }
 
 def rollback_folder_cleanup(
     store: TransactionStore,

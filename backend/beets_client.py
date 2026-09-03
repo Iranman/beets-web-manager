@@ -331,9 +331,34 @@ class BeetsClient:
         """Engine-side bulk import replacement rollback (SEC-002 Wave 18)."""
         return self._request("POST", "/imports/bulk-replacement/rollback", {"operation_id": operation_id}, timeout=timeout)
 
-    def plan_album_mb_track_repair(self, payload: Dict[str, Any], *, timeout: float = 30.0) -> Dict[str, Any]:
+    def plan_album_mb_track_repair(
+        self,
+        payload_or_album_id: Any = None,
+        *,
+        album_id: Optional[int] = None,
+        track_matches: Optional[List[Dict[str, Any]]] = None,
+        album_metadata: Optional[Dict[str, Any]] = None,
+        zero_unmatched: bool = False,
+        timeout: float = 30.0,
+        **kwargs,
+    ) -> Dict[str, Any]:
         """Engine-side album MB track repair planning (SEC-002 Wave 19)."""
-        return self._request("POST", "/albums/mb-track-repair/plan", payload, timeout=timeout)
+        if isinstance(payload_or_album_id, dict):
+            body = dict(payload_or_album_id)
+        elif isinstance(payload_or_album_id, (int, str)) and str(payload_or_album_id).isdigit():
+            body = {"album_id": int(payload_or_album_id)}
+        else:
+            body = {}
+        if album_id is not None:
+            body["album_id"] = int(album_id)
+        if track_matches is not None:
+            body["track_matches"] = track_matches
+        if album_metadata is not None:
+            body["album_metadata"] = album_metadata
+        if zero_unmatched:
+            body["zero_unmatched"] = bool(zero_unmatched)
+        body.update(kwargs)
+        return self._request("POST", "/albums/mb-track-repair/plan", body, timeout=timeout)
 
     def apply_album_mb_track_repair(self, operation_id: str, *, write_tags: bool = True, timeout: float = 60.0) -> Dict[str, Any]:
         """Engine-side album MB track repair application (SEC-002 Wave 19).
@@ -352,9 +377,40 @@ class BeetsClient:
         """Engine-side album MB track repair rollback (SEC-002 Wave 19)."""
         return self._request("POST", "/albums/mb-track-repair/rollback", {"operation_id": operation_id}, timeout=timeout)
 
-    def plan_existing_album_reconcile(self, payload: Dict[str, Any], *, timeout: float = 30.0) -> Dict[str, Any]:
+    def plan_existing_album_reconcile(
+        self,
+        payload_or_target_id: Any = None,
+        *,
+        existing_album_id: Optional[int] = None,
+        imported_album_id: Optional[int] = None,
+        dup_item_ids: Optional[List[int]] = None,
+        move_item_ids: Optional[List[int]] = None,
+        allow_different_releasegroup: bool = False,
+        retire_imported_album: bool = False,
+        timeout: float = 30.0,
+        **kwargs,
+    ) -> Dict[str, Any]:
         """Engine-side existing-album duplicate & move reconciliation planning (SEC-002 Wave 20)."""
-        return self._request("POST", "/albums/existing-reconcile/plan", payload, timeout=timeout)
+        if isinstance(payload_or_target_id, dict):
+            body = dict(payload_or_target_id)
+        elif isinstance(payload_or_target_id, (int, str)) and str(payload_or_target_id).isdigit():
+            body = {"existing_album_id": int(payload_or_target_id)}
+        else:
+            body = {}
+        if existing_album_id is not None:
+            body["existing_album_id"] = int(existing_album_id)
+        if imported_album_id is not None:
+            body["imported_album_id"] = int(imported_album_id)
+        if dup_item_ids is not None:
+            body["dup_item_ids"] = list(dup_item_ids)
+        if move_item_ids is not None:
+            body["move_item_ids"] = list(move_item_ids)
+        if allow_different_releasegroup:
+            body["allow_different_releasegroup"] = bool(allow_different_releasegroup)
+        if retire_imported_album:
+            body["retire_imported_album"] = bool(retire_imported_album)
+        body.update(kwargs)
+        return self._request("POST", "/albums/existing-reconcile/plan", body, timeout=timeout)
 
     def apply_existing_album_reconcile(self, operation_id: str, *, timeout: float = 60.0) -> Dict[str, Any]:
         """Engine-side existing-album duplicate & move reconciliation application (SEC-002 Wave 20)."""
@@ -364,9 +420,34 @@ class BeetsClient:
         """Engine-side existing-album duplicate & move reconciliation rollback (SEC-002 Wave 20)."""
         return self._request("POST", "/albums/existing-reconcile/rollback", {"operation_id": operation_id}, timeout=timeout)
 
-    def plan_artist_folder_reconcile(self, payload: Dict[str, Any], *, timeout: float = 30.0) -> Dict[str, Any]:
+    def plan_artist_folder_reconcile(
+        self,
+        payload_or_root: Any = None,
+        *,
+        root: Optional[str] = None,
+        mode: Optional[str] = None,
+        selected_keys: Optional[List[str]] = None,
+        candidates: Optional[List[Dict[str, Any]]] = None,
+        timeout: float = 30.0,
+        **kwargs,
+    ) -> Dict[str, Any]:
         """Engine-side artist-folder merge & MBID stamping planning (SEC-002 Wave 21)."""
-        return self._request("POST", "/artists/reconcile/plan", payload, timeout=timeout)
+        if isinstance(payload_or_root, dict):
+            body = dict(payload_or_root)
+        elif isinstance(payload_or_root, str):
+            body = {"root": payload_or_root}
+        else:
+            body = {}
+        if root is not None:
+            body["root"] = root
+        if mode is not None:
+            body["mode"] = mode
+        if selected_keys is not None:
+            body["selected_keys"] = list(selected_keys)
+        if candidates is not None:
+            body["candidates"] = list(candidates)
+        body.update(kwargs)
+        return self._request("POST", "/artists/reconcile/plan", body, timeout=timeout)
 
     def apply_artist_folder_reconcile(self, operation_id: str, *, timeout: float = 60.0) -> Dict[str, Any]:
         """Engine-side artist-folder merge & MBID stamping application (SEC-002 Wave 21)."""
@@ -491,21 +572,69 @@ class BeetsClient:
         """Engine-side import folder rollback (SEC-002 Wave 22 Closure)."""
         return self._request("POST", "/import/rollback", {"operation_id": operation_id}, timeout=timeout)
 
-    def plan_folder_cleanup(self, payload: Dict[str, Any], *, timeout: float = 30.0) -> Dict[str, Any]:
+    def plan_folder_cleanup(
+        self,
+        payload_or_action: Any = None,
+        *,
+        action: Optional[str] = None,
+        source_path: Optional[str] = None,
+        target_path: Optional[str] = None,
+        preview_token: Optional[str] = None,
+        timeout: float = 30.0,
+        **kwargs,
+    ) -> Dict[str, Any]:
         """Engine-side folder cleanup planning (SEC-002 Wave 22 Closure)."""
-        return self._request("POST", "/folders/cleanup/plan", payload, timeout=timeout)
+        if isinstance(payload_or_action, dict):
+            body = dict(payload_or_action)
+        elif isinstance(payload_or_action, str):
+            body = {"action": payload_or_action}
+        else:
+            body = {}
+        if action is not None:
+            body["action"] = action
+        if source_path is not None:
+            body["source_path"] = source_path
+        if target_path is not None:
+            body["target_path"] = target_path
+        if preview_token is not None:
+            body["preview_token"] = preview_token
+        body.update(kwargs)
+        return self._request("POST", "/folders/cleanup/plan", body, timeout=timeout)
 
-    def apply_folder_cleanup(self, operation_id: str, *, timeout: float = 60.0) -> Dict[str, Any]:
+    def apply_folder_cleanup(self, operation_id: str, *, confirmed: bool = True, timeout: float = 60.0, **kwargs) -> Dict[str, Any]:
         """Engine-side folder cleanup application (SEC-002 Wave 22 Closure)."""
-        return self._request("POST", "/folders/cleanup/apply", {"operation_id": operation_id}, timeout=timeout)
+        body = {"operation_id": operation_id, "confirmed": bool(confirmed), **kwargs}
+        return self._request("POST", "/folders/cleanup/apply", body, timeout=timeout)
 
     def rollback_folder_cleanup(self, operation_id: str, *, timeout: float = 60.0) -> Dict[str, Any]:
         """Engine-side folder cleanup rollback (SEC-002 Wave 22 Closure)."""
         return self._request("POST", "/folders/cleanup/rollback", {"operation_id": operation_id}, timeout=timeout)
 
-    def plan_library_cleanup(self, payload: Dict[str, Any], *, timeout: float = 30.0) -> Dict[str, Any]:
+    def plan_library_cleanup(
+        self,
+        payload_or_action: Any = None,
+        *,
+        action: Optional[str] = None,
+        paths: Optional[List[str]] = None,
+        files: Optional[List[str]] = None,
+        timeout: float = 30.0,
+        **kwargs,
+    ) -> Dict[str, Any]:
         """Engine-side library cleanup planning (SEC-002 / ARCH-003 library_cleanup_v1)."""
-        return self._request("POST", "/library/cleanup/plan", payload, timeout=timeout)
+        if isinstance(payload_or_action, dict):
+            body = dict(payload_or_action)
+        elif isinstance(payload_or_action, str):
+            body = {"action": payload_or_action}
+        else:
+            body = {}
+        if action is not None:
+            body["action"] = action
+        if paths is not None:
+            body["paths"] = list(paths)
+        if files is not None:
+            body["files"] = list(files)
+        body.update(kwargs)
+        return self._request("POST", "/library/cleanup/plan", body, timeout=timeout)
 
     def apply_library_cleanup(self, operation_id: str, *, timeout: float = 60.0) -> Dict[str, Any]:
         """Engine-side library cleanup application (SEC-002 / ARCH-003 library_cleanup_v1)."""
@@ -985,11 +1114,9 @@ class BeetsClient:
         album_data = self.get_album(album_id) or {}
         items = album_data.get("items") or []
         item_ids = [int(it.get("id") or 0) for it in items if int(it.get("id") or 0) > 0]
-        if not item_ids:
-            return {"ok": False, "error": f"Album {album_id} has no track items"}
 
         plan_res = self.plan_album_maintenance({
-            "mode": "remove_tracks",
+            "mode": "remove_album" if not item_ids else "remove_tracks",
             "album_id": album_id,
             "item_ids": item_ids,
             "delete_files": delete_files,

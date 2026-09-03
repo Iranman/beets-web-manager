@@ -31,8 +31,8 @@ class TestBeetsTransactionEngineFamilies(unittest.TestCase):
 
         self.db_path = self.root / "beets.db"
         with sqlite3.connect(self.db_path) as conn:
-            conn.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, path BLOB, album_id INT, title TEXT, artist TEXT, album TEXT)")
-            conn.execute("CREATE TABLE albums (id INTEGER PRIMARY KEY, album TEXT, albumartist TEXT, mb_albumid TEXT, mb_releasegroupid TEXT, artpath BLOB)")
+            conn.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, path BLOB, album_id INT, title TEXT, artist TEXT, album TEXT, albumartist TEXT, mb_trackid TEXT, mb_albumid TEXT, mb_releasegroupid TEXT, disc INT, track INT, length REAL)")
+            conn.execute("CREATE TABLE albums (id INTEGER PRIMARY KEY, album TEXT, albumartist TEXT, mb_albumid TEXT, mb_releasegroupid TEXT, artpath BLOB, year INT, country TEXT, label TEXT)")
             conn.execute("CREATE TABLE item_attributes (id INTEGER PRIMARY KEY, entity_id INT, key TEXT, value TEXT)")
 
         self.store_path = self.root / "transactions.db"
@@ -535,6 +535,140 @@ class TestBeetsTransactionEngineFamilies(unittest.TestCase):
         )
         self.assertFalse(rollback.get("ok"))
         self.assertEqual(rollback.get("status"), "Recovery Required")
+
+    # ── Wave 29 Engine & BeetsClient Expansion Tests (cherry-picked from
+    # feat/sec002-arch003-wave29-direct-mutations, reconciled against this
+    # branch's folder_cleanup_v1 hardening) ─────────────────────────────────
+
+    def test_folder_cleanup_source_and_target_path_keys(self):
+        src = self.music_dir / "old_src_path"
+        dst = self.music_dir / "new_dst_path"
+        src.mkdir()
+        (src / "track1.mp3").write_bytes(b"audio content")
+
+        plan = transaction_engine.create_folder_cleanup_plan(
+            self.store,
+            {"action": "safe_rename", "source_path": str(src), "target_path": str(dst)},
+            music_allowed_roots=[str(self.music_dir)],
+            db_path=str(self.db_path),
+        )
+        self.assertTrue(plan.get("ok"), msg=plan.get("error"))
+        op_id = plan["operation_id"]
+        apply_res = transaction_engine.execute_folder_cleanup_apply(
+            self.store, op_id, music_allowed_roots=[str(self.music_dir)], db_path=str(self.db_path)
+        )
+        self.assertTrue(apply_res.get("ok"), msg=apply_res.get("error"))
+        self.assertTrue(dst.exists())
+        self.assertFalse(src.exists())
+        self.assertEqual(len(apply_res.get("moved_records", [])), 1)
+        self.assertEqual(apply_res.get("changed_count"), 1)
+
+    def test_album_maintenance_remove_album_empty_album(self):
+        # Insert an orphaned album row with no items
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO albums (id, album, albumartist) VALUES (999, 'Empty Album', 'Ghost Artist')")
+
+        plan = transaction_engine.create_album_maintenance_plan(
+            self.store,
+            {"mode": "remove_album", "album_id": 999},
+            music_allowed_roots=[str(self.music_dir)],
+            db_path=str(self.db_path),
+        )
+        self.assertTrue(plan.get("ok"), msg=plan.get("error"))
+        op_id = plan["operation_id"]
+
+        apply_res = transaction_engine.execute_album_maintenance_apply(
+            self.store, op_id, music_allowed_roots=[str(self.music_dir)], db_path=str(self.db_path)
+        )
+        self.assertTrue(apply_res.get("ok"), msg=apply_res.get("error"))
+
+        # Verify album row deleted from SQLite
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute("SELECT id FROM albums WHERE id=999").fetchone()
+            self.assertIsNone(row)
+
+    def test_existing_album_reconcile_allow_different_releasegroup(self):
+        # Create 2 albums with different releasegroup IDs
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO albums (id, album, albumartist, mb_releasegroupid) VALUES (101, 'Target Album', 'Artist A', '11111111-1111-1111-1111-111111111111')")
+            conn.execute("INSERT INTO albums (id, album, albumartist, mb_releasegroupid) VALUES (102, 'Source Album', 'Artist A', '22222222-2222-2222-2222-222222222222')")
+            item_file = self.music_dir / "item1.mp3"
+            item_file.write_bytes(b"audio track 1")
+            conn.execute(
+                "INSERT INTO items (id, path, album_id, title, artist, album, mb_trackid, mb_albumid, mb_releasegroupid, disc, track) "
+                "VALUES (501, ?, 102, 'Track 1', 'Artist A', 'Source Album', '33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444444', '22222222-2222-2222-2222-222222222222', 1, 1)",
+                (str(item_file).encode("utf-8"),),
+            )
+
+        # Plan without allow_different_releasegroup should fail closed
+        plan_rejected = transaction_engine.create_existing_album_reconcile_plan(
+            self.store,
+            {"existing_album_id": 101, "imported_album_id": 102, "move_item_ids": [501]},
+            music_allowed_roots=[str(self.music_dir)],
+            db_path=str(self.db_path),
+        )
+        self.assertFalse(plan_rejected.get("ok"))
+        self.assertEqual(plan_rejected.get("code"), "reconcile_identity_mismatch")
+
+        # Plan with allow_different_releasegroup=True should succeed
+        plan_allowed = transaction_engine.create_existing_album_reconcile_plan(
+            self.store,
+            {"existing_album_id": 101, "imported_album_id": 102, "move_item_ids": [501], "allow_different_releasegroup": True, "retire_imported_album": True},
+            music_allowed_roots=[str(self.music_dir)],
+            db_path=str(self.db_path),
+        )
+        self.assertTrue(plan_allowed.get("ok"), msg=plan_allowed.get("error"))
+        op_id = plan_allowed["operation_id"]
+
+        apply_res = transaction_engine.execute_existing_album_reconcile_apply(
+            self.store, op_id, music_allowed_roots=[str(self.music_dir)], db_path=str(self.db_path)
+        )
+        self.assertTrue(apply_res.get("ok"), msg=apply_res.get("error"))
+
+        # Verify item moved to album 101 and album 102 retired
+        with sqlite3.connect(self.db_path) as conn:
+            irow = conn.execute("SELECT album_id, album FROM items WHERE id=501").fetchone()
+            self.assertEqual(irow[0], 101)
+            self.assertEqual(irow[1], "Target Album")
+            arow = conn.execute("SELECT id FROM albums WHERE id=102").fetchone()
+            self.assertIsNone(arow)
+
+    @mock.patch("backend.transaction_engine._read_file_audio_tags")
+    def test_album_mb_track_repair_direct_tracks(self, mock_read):
+        mock_read.return_value = {"ok": True, "tags": {"title": "Song 1", "artist": "Artist B"}}
+        # Create album and items
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO albums (id, album, albumartist, year, mb_albumid, mb_releasegroupid) VALUES (201, 'Album MB', 'Artist B', 2000, '55555555-5555-5555-5555-555555555555', '66666666-6666-6666-6666-666666666666')")
+            f1 = self.music_dir / "mb_track1.mp3"
+            f1.write_bytes(b"audio track 1")
+            conn.execute("INSERT INTO items (id, path, album_id, title, artist, album, mb_trackid, mb_albumid, disc, track) VALUES (601, ?, 201, 'Song 1', 'Artist B', 'Album MB', '', '55555555-5555-5555-5555-555555555555', 1, 1)", (str(f1).encode("utf-8"),))
+
+        mb_tracks = [
+            {"track": 1, "disc": 1, "title": "Song 1", "mb_trackid": "77777777-7777-7777-7777-777777777777"}
+        ]
+
+        plan = transaction_engine.create_album_mb_track_repair_plan(
+            self.store,
+            {
+                "album_id": 201,
+                "mb_tracks": mb_tracks,
+            },
+            music_allowed_roots=[str(self.music_dir)],
+            db_path=str(self.db_path),
+        )
+        self.assertTrue(plan.get("ok"), msg=plan.get("error"))
+        op_id = plan["operation_id"]
+
+        apply_res = transaction_engine.execute_album_mb_track_repair_apply(
+            self.store, op_id, music_allowed_roots=[str(self.music_dir)], db_path=str(self.db_path), write_tags=False,
+        )
+        self.assertTrue(apply_res.get("ok"), msg=apply_res.get("error"))
+
+        with sqlite3.connect(self.db_path) as conn:
+            # Check repaired track
+            r1 = conn.execute("SELECT mb_trackid, track FROM items WHERE id=601").fetchone()
+            self.assertEqual(r1[0], "77777777-7777-7777-7777-777777777777")
+            self.assertEqual(r1[1], 1)
 
 
 if __name__ == "__main__":
