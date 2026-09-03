@@ -8346,13 +8346,50 @@ def rollback_album_maintenance(
 _ALBUM_DUPLICATE_MERGE_INHERIT_FIELDS = ("mb_albumid", "mb_releasegroupid", "year", "label")
 
 
+_ALBUM_DUPLICATE_MERGE_ADOPT_FIELDS = (
+    "album", "albumartist", "albumartist_sort", "albumartist_credit",
+    "albumartists", "albumartists_sort", "albumartists_credit",
+    "mb_albumid", "mb_albumartistid", "mb_albumartistids",
+    "mb_releasegroupid", "albumtype", "albumtypes", "albumstatus",
+    "country", "label", "catalognum", "albumdisambig",
+    "year", "month", "day", "original_year", "original_month",
+    "original_day", "disctotal",
+)
+
+
 def create_album_duplicate_merge_plan(
     store: TransactionStore,
     payload: Dict[str, Any],
     *,
     db_path: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Create a non-mutating preview plan for merging two duplicate album rows."""
+    """Create a non-mutating preview plan for merging two duplicate album rows.
+
+    Default shape (item_ids omitted): move every item from source into
+    target, target inherits any of _ALBUM_DUPLICATE_MERGE_INHERIT_FIELDS
+    it's missing but source has, retire the now-empty source row.
+
+    ARCH-003 Wave 31: item_ids (optional) restricts the move to a caller-
+    selected subset of source's items instead of all of them -- the
+    "split album" shape, where files already sitting together on disk
+    got split across two album rows by inconsistent tags, and only some
+    of source's items actually belong with target. adopt_target_fields
+    (optional, only meaningful with item_ids) reverses the field-copy
+    direction for the moved items specifically: instead of target
+    inheriting blank fields from source, the moved items adopt target's
+    values for the broader _ALBUM_DUPLICATE_MERGE_ADOPT_FIELDS set
+    (matching what a real split-album merge needs -- the moved rows
+    must end up describing target's album, not keep source's stale
+    values), while target's own album row is left untouched.
+
+    Either shape now requires a real Release-Group identity check that
+    did not exist here before this wave for the split case: an item
+    actually being moved that carries its own non-blank
+    mb_releasegroupid conflicting with target's non-blank
+    mb_releasegroupid is refused outright, not silently overwritten --
+    a "split album" claim is not evidence strong enough to discard a
+    real, established MusicBrainz identity mismatch.
+    """
     try:
         target_id = int(payload.get("target_album_id") or 0)
     except Exception:
@@ -8363,6 +8400,14 @@ def create_album_duplicate_merge_plan(
         source_id = 0
     if target_id <= 0 or source_id <= 0 or target_id == source_id:
         return {"ok": False, "error": "target_album_id and source_album_id are required and must differ", "code": "album_duplicate_merge_invalid_payload"}
+
+    requested_item_ids: Optional[List[int]] = None
+    if payload.get("item_ids") is not None:
+        requested_item_ids = sorted({int(v) for v in (payload.get("item_ids") or []) if int(v or 0) > 0})
+        if not requested_item_ids:
+            return {"ok": False, "error": "item_ids, if provided, must be a non-empty list of positive item ids", "code": "album_duplicate_merge_invalid_payload"}
+
+    adopt_target_fields = bool(payload.get("adopt_target_fields"))
 
     lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB", "")
     if not lib_db or not Path(lib_db).exists():
@@ -8380,33 +8425,84 @@ def create_album_duplicate_merge_plan(
         target_before = _row_to_dict(target_row)
         source_before = _row_to_dict(source_row)
 
-        source_item_rows = con.execute("SELECT id FROM items WHERE album_id=?", (source_id,)).fetchall()
+        source_item_rows = con.execute(
+            "SELECT id, COALESCE(mb_releasegroupid, '') AS mb_releasegroupid FROM items WHERE album_id=?",
+            (source_id,),
+        ).fetchall()
         source_item_ids = sorted(int(r["id"]) for r in source_item_rows)
+        source_item_rg = {int(r["id"]): _s(r["mb_releasegroupid"]).strip().lower() for r in source_item_rows}
     finally:
         con.close()
 
+    if requested_item_ids is not None:
+        missing = [iid for iid in requested_item_ids if iid not in source_item_rg]
+        if missing:
+            return {"ok": False, "error": f"item(s) {missing} do not belong to source album {source_id}", "code": "album_duplicate_merge_identity_mismatch"}
+        move_item_ids = requested_item_ids
+    else:
+        move_item_ids = source_item_ids
+
+    # Real Release-Group identity check (ARCH-003 Wave 31 -- previously
+    # absent for the split-album caller entirely). Caller-supplied item
+    # selection is never treated as identity evidence on its own.
+    target_rg = _s(target_before.get("mb_releasegroupid")).strip().lower()
+    if target_rg:
+        conflicting = [iid for iid in move_item_ids if source_item_rg.get(iid) and source_item_rg[iid] != target_rg]
+        if conflicting:
+            return {
+                "ok": False,
+                "error": f"item(s) {conflicting} carry a MusicBrainz release-group id that conflicts with target album {target_id}'s established identity; refusing merge",
+                "code": "album_duplicate_merge_identity_mismatch",
+            }
+
     inherit_fields: Dict[str, Any] = {}
-    for col in _ALBUM_DUPLICATE_MERGE_INHERIT_FIELDS:
-        t_val = _s(target_before.get(col)).strip()
-        s_val = _s(source_before.get(col)).strip()
-        if not t_val and s_val:
-            inherit_fields[col] = source_before.get(col)
+    adopt_fields: Dict[str, Any] = {}
+    moved_items_before: Dict[str, Dict[str, Any]] = {}
+    if adopt_target_fields:
+        for col in _ALBUM_DUPLICATE_MERGE_ADOPT_FIELDS:
+            if col in target_before and target_before.get(col) is not None:
+                adopt_fields[col] = target_before[col]
+        if adopt_fields:
+            # Capture each moved item's own pre-adopt values for the exact
+            # fields about to be overwritten, so rollback can restore them
+            # (not just re-parent the item back to source -- its adopted
+            # fields must revert too).
+            con = sqlite3.connect(lib_db, timeout=10)
+            con.row_factory = sqlite3.Row
+            try:
+                for iid in move_item_ids:
+                    row = con.execute("SELECT * FROM items WHERE id=?", (iid,)).fetchone()
+                    if row:
+                        row_dict = _row_to_dict(row)
+                        moved_items_before[str(iid)] = {k: row_dict.get(k) for k in adopt_fields}
+            finally:
+                con.close()
+    else:
+        for col in _ALBUM_DUPLICATE_MERGE_INHERIT_FIELDS:
+            t_val = _s(target_before.get(col)).strip()
+            s_val = _s(source_before.get(col)).strip()
+            if not t_val and s_val:
+                inherit_fields[col] = source_before.get(col)
 
     resource_keys = {f"album:{target_id}", f"album:{source_id}"}
-    for iid in source_item_ids:
+    for iid in move_item_ids:
         resource_keys.add(f"item:{iid}")
 
     tx = store.create(
         operation_type="Merge Album",
         status="Pending",
-        summary=f"Merge duplicate album {source_id} into {target_id} ({len(source_item_ids)} item(s))",
+        summary=f"Merge {'selected item(s) of' if requested_item_ids is not None else 'duplicate album'} {source_id} into {target_id} ({len(move_item_ids)} item(s))",
         rollback_available=True,
         metadata={
             "mutation_family": "album_duplicate_merge_v1",
             "target_album_id": target_id,
             "source_album_id": source_id,
             "source_item_ids": source_item_ids,
+            "move_item_ids": move_item_ids,
+            "partial_move": requested_item_ids is not None,
             "inherit_fields": inherit_fields,
+            "adopt_fields": adopt_fields,
+            "moved_items_before": moved_items_before,
             "target_before": target_before,
             "source_before": source_before,
             "resource_keys": sorted(resource_keys),
@@ -8417,8 +8513,9 @@ def create_album_duplicate_merge_plan(
         "operation_id": tx["id"],
         "target_album_id": target_id,
         "source_album_id": source_id,
-        "moved_item_count": len(source_item_ids),
+        "moved_item_count": len(move_item_ids),
         "inherit_fields": inherit_fields,
+        "adopt_fields": adopt_fields,
     }
 
 
@@ -8448,7 +8545,10 @@ def execute_album_duplicate_merge_apply(
         target_id = int(meta.get("target_album_id") or 0)
         source_id = int(meta.get("source_album_id") or 0)
         source_item_ids = sorted(int(i) for i in (meta.get("source_item_ids") or []))
+        move_item_ids = sorted(int(i) for i in (meta.get("move_item_ids") or source_item_ids))
+        partial_move = bool(meta.get("partial_move"))
         inherit_fields = meta.get("inherit_fields") or {}
+        adopt_fields = meta.get("adopt_fields") or {}
 
         def _fail(msg: str, code: str) -> Dict[str, Any]:
             store.update(operation_id, status="Failed", logs=[f"Apply failed: {msg}"])
@@ -8481,19 +8581,32 @@ def execute_album_duplicate_merge_apply(
                 store.update(operation_id, status="Running", metadata={**meta, "mutation_started": True})
 
                 moved = 0
-                if source_item_ids:
-                    q_marks = ",".join("?" for _ in source_item_ids)
+                if move_item_ids:
+                    q_marks = ",".join("?" for _ in move_item_ids)
                     cur = con.execute(
                         f"UPDATE items SET album_id=? WHERE album_id=? AND id IN ({q_marks})",
-                        [target_id, source_id] + source_item_ids,
+                        [target_id, source_id] + move_item_ids,
                     )
                     moved = cur.rowcount
-                    if moved != len(source_item_ids):
+                    if moved != len(move_item_ids):
                         con.rollback()
                         return _fail(
-                            f"Expected to move {len(source_item_ids)} item(s), moved {moved}",
+                            f"Expected to move {len(move_item_ids)} item(s), moved {moved}",
                             "album_duplicate_merge_rowcount_mismatch",
                         )
+
+                if adopt_fields and move_item_ids:
+                    # Split-album direction: the moved items adopt target's
+                    # values (they now belong to target's album, not
+                    # source's stale one) rather than target inheriting
+                    # from source.
+                    cols = [f"{k}=?" for k in adopt_fields]
+                    q_marks = ",".join("?" for _ in move_item_ids)
+                    vals = list(adopt_fields.values()) + move_item_ids
+                    cur = con.execute(f"UPDATE items SET {', '.join(cols)} WHERE id IN ({q_marks})", vals)
+                    if cur.rowcount != len(move_item_ids):
+                        con.rollback()
+                        return _fail(f"Expected to update {len(move_item_ids)} moved item row(s) with target fields, affected {cur.rowcount}", "album_duplicate_merge_rowcount_mismatch")
 
                 if inherit_fields:
                     cols = [f"{k}=?" for k in inherit_fields]
@@ -8504,13 +8617,22 @@ def execute_album_duplicate_merge_apply(
                         return _fail(f"Expected to update exactly 1 target album row, affected {cur.rowcount}", "album_duplicate_merge_rowcount_mismatch")
 
                 remaining = con.execute("SELECT COUNT(*) FROM items WHERE album_id=?", (source_id,)).fetchone()[0]
-                if int(remaining or 0) != 0:
+                source_deleted = False
+                if int(remaining or 0) == 0:
+                    cur = con.execute("DELETE FROM albums WHERE id=?", (source_id,))
+                    if cur.rowcount != 1:
+                        con.rollback()
+                        return _fail(f"Expected to delete exactly 1 source album row, affected {cur.rowcount}", "album_duplicate_merge_rowcount_mismatch")
+                    source_deleted = True
+                elif not partial_move:
+                    # Whole-album merge (the original, still-tested shape)
+                    # planned every one of source's items for the move --
+                    # anything left over means a concurrent write slipped
+                    # in since the TOCTOU check above, or the move itself
+                    # did not fully succeed. Refuse rather than leave a
+                    # part-merged, part-orphaned source row.
                     con.rollback()
                     return _fail(f"Source album_id {source_id} still has items after move; refusing to delete its row", "album_duplicate_merge_rowcount_mismatch")
-                cur = con.execute("DELETE FROM albums WHERE id=?", (source_id,))
-                if cur.rowcount != 1:
-                    con.rollback()
-                    return _fail(f"Expected to delete exactly 1 source album row, affected {cur.rowcount}", "album_duplicate_merge_rowcount_mismatch")
                 con.commit()
             finally:
                 con.close()
@@ -8519,6 +8641,7 @@ def execute_album_duplicate_merge_apply(
                 **store.get(operation_id).get("metadata", {}),
                 "db_mutated": True,
                 "moved_count": moved,
+                "source_deleted": source_deleted,
                 "completed_at": _now(),
             })
             return {
@@ -8527,6 +8650,7 @@ def execute_album_duplicate_merge_apply(
                 "status": "Completed",
                 "mutated": True,
                 "moved": moved,
+                "source_album_deleted": source_deleted,
                 "target_album_id": target_id,
                 "source_album_id": source_id,
             }
@@ -8558,7 +8682,10 @@ def rollback_album_duplicate_merge(
         target_id = int(meta.get("target_album_id") or 0)
         source_id = int(meta.get("source_album_id") or 0)
         source_item_ids = sorted(int(i) for i in (meta.get("source_item_ids") or []))
+        move_item_ids = sorted(int(i) for i in (meta.get("move_item_ids") or source_item_ids))
         inherit_fields = meta.get("inherit_fields") or {}
+        adopt_fields = meta.get("adopt_fields") or {}
+        moved_items_before = meta.get("moved_items_before") or {}
         target_before = meta.get("target_before") or {}
         source_before = meta.get("source_before") or {}
 
@@ -8580,15 +8707,28 @@ def rollback_album_duplicate_merge(
                     else:
                         db_failed += 1
 
-                if source_item_ids:
-                    q_marks = ",".join("?" for _ in source_item_ids)
+                if move_item_ids:
+                    q_marks = ",".join("?" for _ in move_item_ids)
                     cur = con.execute(
                         f"UPDATE items SET album_id=? WHERE album_id=? AND id IN ({q_marks})",
-                        [source_id, target_id] + source_item_ids,
+                        [source_id, target_id] + move_item_ids,
                     )
                     db_restored += cur.rowcount
-                    if cur.rowcount != len(source_item_ids):
-                        db_failed += (len(source_item_ids) - cur.rowcount)
+                    if cur.rowcount != len(move_item_ids):
+                        db_failed += (len(move_item_ids) - cur.rowcount)
+
+                if adopt_fields and moved_items_before:
+                    for iid in move_item_ids:
+                        before = moved_items_before.get(str(iid))
+                        if not before:
+                            continue
+                        cols = [f"{k}=?" for k in before]
+                        vals = list(before.values()) + [iid]
+                        cur = con.execute(f"UPDATE items SET {', '.join(cols)} WHERE id=?", vals)
+                        if cur.rowcount == 1:
+                            db_restored += 1
+                        else:
+                            db_failed += 1
 
                 if inherit_fields and target_before:
                     cols = [f"{k}=?" for k in inherit_fields]

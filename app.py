@@ -15937,52 +15937,23 @@ def album_merge_split_album(target_aid):
                     "target_album_id": target_id,
                     "item_count": len(move_ids),
                     "source_album_deleted": False,
-                    "backup": "",
                 }
 
-            backup = f"{LIB_PATH}.bak-{int(time.time())}-split-album-merge"
-            try:
-                shutil.copy2(LIB_PATH, backup)
-                log.append(f"DB backup: {backup}")
-            except Exception as ex:
-                raise RuntimeError(f"Could not create DB backup before split-album merge: {ex}")
-
-            item_cols = _sqlite_columns(con, "items")
-            updates: Dict[str, Any] = {"album_id": target_id}
-            album_level_cols = (
-                "album", "albumartist", "albumartist_sort", "albumartist_credit",
-                "albumartists", "albumartists_sort", "albumartists_credit",
-                "mb_albumid", "mb_albumartistid", "mb_albumartistids",
-                "mb_releasegroupid", "albumtype", "albumtypes", "albumstatus",
-                "country", "label", "catalognum", "albumdisambig",
-                "year", "month", "day", "original_year", "original_month",
-                "original_day", "disctotal",
-            )
-            numeric_album_cols = {
-                "year", "month", "day", "original_year", "original_month",
-                "original_day", "disctotal",
-            }
-            target_keys = set(target.keys())
-            for col in album_level_cols:
-                if col in item_cols and col in target_keys:
-                    value = target[col]
-                    if value is not None:
-                        updates[col] = value if col in numeric_album_cols else _s(value)
-            set_clause = ", ".join(f"{col}=?" for col in updates)
-            con.execute(
-                f"UPDATE items SET {set_clause} WHERE id IN ("
-                + ",".join("?" for _ in move_ids) + ")",
-                list(updates.values()) + move_ids,
-            )
-            remaining = con.execute(
-                "SELECT COUNT(*) FROM items WHERE album_id=?",
-                (source_id,),
-            ).fetchone()[0]
-            source_album_deleted = False
-            if int(remaining or 0) == 0:
-                con.execute("DELETE FROM albums WHERE id=?", (source_id,))
-                source_album_deleted = True
-            con.commit()
+        # The actual reassignment (item_ids -> target's album_id, moved
+        # items adopt target's album-level fields, source retired only if
+        # the move empties it) and the Release-Group identity check this
+        # migration adds go through album_duplicate_merge_v1's partial/
+        # adopt mode -- see BeetsClient.merge_split_album_items(). The
+        # previous local `shutil.copy2(LIB_PATH, ...)` DB backup is
+        # superseded by that engine transaction's own Plan-captured
+        # rollback data (rollback_album_duplicate_merge); LIB_PATH is not
+        # actually reachable from the web-manager container in the
+        # supported two-service deployment, so that backup step never
+        # really worked there anyway.
+        merge_res = beets_client.merge_split_album_items(target_id, source_id, move_ids)
+        if not merge_res.get("ok"):
+            raise RuntimeError(merge_res.get("error") or "Engine rejected split-album merge")
+        source_album_deleted = bool(merge_res.get("source_album_deleted"))
 
         _invalidate_lib_cache()
         log.append(
@@ -15995,7 +15966,6 @@ def album_merge_split_album(target_aid):
             "target_album_id": target_id,
             "item_count": len(move_ids),
             "source_album_deleted": source_album_deleted,
-            "backup": backup,
         }
 
     job = jobs.start_python(

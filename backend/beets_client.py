@@ -511,6 +511,35 @@ class BeetsClient:
             "inherit_fields": plan_res.get("inherit_fields") or {},
         }
 
+    def merge_split_album_items(self, target_album_id: int, source_album_id: int, item_ids: List[int]) -> Dict[str, Any]:
+        """Move a selected item subset from source into target through
+        album_duplicate_merge_v1's partial/adopt mode (ARCH-003 Wave 31):
+        moved items adopt target's album-level fields, source is retired
+        only if the move empties it, and the engine enforces a real
+        Release-Group identity check on the selected items."""
+        plan_res = self.plan_album_duplicate_merge({
+            "target_album_id": target_album_id,
+            "source_album_id": source_album_id,
+            "item_ids": item_ids,
+            "adopt_target_fields": True,
+        })
+        if not plan_res.get("ok"):
+            return {"ok": False, "error": plan_res.get("error") or "Split-album merge plan rejected", "code": plan_res.get("code")}
+        op_id = plan_res.get("operation_id")
+        if not op_id:
+            return {"ok": True, "moved": 0, "source_album_deleted": False}
+        apply_res = self.apply_album_duplicate_merge(op_id)
+        if not apply_res.get("ok"):
+            return {"ok": False, "error": apply_res.get("error") or "Split-album merge apply failed", "code": apply_res.get("code")}
+        return {
+            "ok": True,
+            "moved": apply_res.get("moved", 0),
+            "source_album_deleted": bool(apply_res.get("source_album_deleted")),
+            "target_album_id": target_album_id,
+            "source_album_id": source_album_id,
+            "operation_id": op_id,
+        }
+
     def plan_album_artwork(self, payload: Dict[str, Any], *, timeout: float = 30.0) -> Dict[str, Any]:
         """Engine-side album artwork planning (SEC-002 Wave 22)."""
         return self._request("POST", "/albums/artwork/plan", payload, timeout=timeout)

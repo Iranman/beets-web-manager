@@ -870,6 +870,112 @@ class TestBeetsTransactionEngineFamilies(unittest.TestCase):
             row = conn.execute("SELECT path FROM items WHERE id=503").fetchone()
         self.assertEqual(row[0], b"Artist/%the{}/01 Track.mp3")
 
+    # ── album_duplicate_merge_v1 partial/adopt mode (ARCH-003 Wave 31:
+    # generalized for album_merge_split_album's "split album" shape --
+    # move only a caller-selected item subset, moved items adopt
+    # target's fields instead of target inheriting from source, source
+    # is retired only if it actually ends up empty) ───────────────────────
+
+    def test_partial_move_adopts_target_fields_and_keeps_nonempty_source(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO albums (id, album, albumartist, mb_releasegroupid) VALUES (601, 'Real Album', 'Real Artist', '11111111-1111-1111-1111-111111111111')")
+            conn.execute("INSERT INTO albums (id, album, albumartist, mb_releasegroupid) VALUES (602, 'Mistagged', 'Mistagged Artist', '')")
+            conn.execute("INSERT INTO items (id, album_id, title, album, albumartist, mb_releasegroupid) VALUES (701, 602, 'Track 1', 'Mistagged', 'Mistagged Artist', '')")
+            conn.execute("INSERT INTO items (id, album_id, title, album, albumartist, mb_releasegroupid) VALUES (702, 602, 'Track 2', 'Mistagged', 'Mistagged Artist', '')")
+
+        plan = transaction_engine.create_album_duplicate_merge_plan(
+            self.store,
+            {"target_album_id": 601, "source_album_id": 602, "item_ids": [701], "adopt_target_fields": True},
+            db_path=str(self.db_path),
+        )
+        self.assertTrue(plan.get("ok"), msg=plan.get("error"))
+        self.assertEqual(plan.get("moved_item_count"), 1)
+        self.assertEqual(plan["adopt_fields"].get("album"), "Real Album")
+        self.assertEqual(plan["adopt_fields"].get("albumartist"), "Real Artist")
+        op_id = plan["operation_id"]
+
+        apply_res = transaction_engine.execute_album_duplicate_merge_apply(self.store, op_id, db_path=str(self.db_path))
+        self.assertTrue(apply_res.get("ok"), msg=apply_res.get("error"))
+        self.assertEqual(apply_res.get("moved"), 1)
+        self.assertFalse(apply_res.get("source_album_deleted"))
+
+        with sqlite3.connect(self.db_path) as conn:
+            moved = conn.execute("SELECT album_id, album, albumartist FROM items WHERE id=701").fetchone()
+            self.assertEqual(moved, (601, "Real Album", "Real Artist"))
+            # Item 702 was not selected -- untouched, still in source.
+            unmoved = conn.execute("SELECT album_id, album FROM items WHERE id=702").fetchone()
+            self.assertEqual(unmoved, (602, "Mistagged"))
+            # Source has a remaining item -- its row survives.
+            source = conn.execute("SELECT id FROM albums WHERE id=602").fetchone()
+            self.assertIsNotNone(source)
+
+    def test_partial_move_retires_source_when_it_becomes_empty(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO albums (id, album, albumartist) VALUES (611, 'Real Album', 'Real Artist')")
+            conn.execute("INSERT INTO albums (id, album, albumartist) VALUES (612, 'Mistagged', 'Mistagged Artist')")
+            conn.execute("INSERT INTO items (id, album_id, title) VALUES (711, 612, 'Track 1')")
+
+        plan = transaction_engine.create_album_duplicate_merge_plan(
+            self.store,
+            {"target_album_id": 611, "source_album_id": 612, "item_ids": [711], "adopt_target_fields": True},
+            db_path=str(self.db_path),
+        )
+        self.assertTrue(plan.get("ok"), msg=plan.get("error"))
+        op_id = plan["operation_id"]
+
+        apply_res = transaction_engine.execute_album_duplicate_merge_apply(self.store, op_id, db_path=str(self.db_path))
+        self.assertTrue(apply_res.get("ok"), msg=apply_res.get("error"))
+        self.assertTrue(apply_res.get("source_album_deleted"))
+
+        with sqlite3.connect(self.db_path) as conn:
+            source = conn.execute("SELECT id FROM albums WHERE id=612").fetchone()
+            self.assertIsNone(source)
+
+    def test_partial_move_rejects_conflicting_releasegroup(self):
+        """The real Release-Group identity check this wave adds: a
+        selected item carrying its own established, conflicting
+        mb_releasegroupid is refused, never silently overwritten just
+        because the caller labeled this a 'split album' merge."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO albums (id, album, albumartist, mb_releasegroupid) VALUES (621, 'Real Album', 'Real Artist', '11111111-1111-1111-1111-111111111111')")
+            conn.execute("INSERT INTO albums (id, album, albumartist) VALUES (622, 'Mistagged', 'Mistagged Artist')")
+            conn.execute("INSERT INTO items (id, album_id, title, mb_releasegroupid) VALUES (721, 622, 'Track 1', '22222222-2222-2222-2222-222222222222')")
+
+        plan = transaction_engine.create_album_duplicate_merge_plan(
+            self.store,
+            {"target_album_id": 621, "source_album_id": 622, "item_ids": [721], "adopt_target_fields": True},
+            db_path=str(self.db_path),
+        )
+        self.assertFalse(plan.get("ok"))
+        self.assertEqual(plan.get("code"), "album_duplicate_merge_identity_mismatch")
+
+        with sqlite3.connect(self.db_path) as conn:
+            unchanged = conn.execute("SELECT album_id FROM items WHERE id=721").fetchone()
+            self.assertEqual(unchanged[0], 622)
+
+    def test_partial_move_rollback_restores_adopted_fields_and_membership(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO albums (id, album, albumartist) VALUES (631, 'Real Album', 'Real Artist')")
+            conn.execute("INSERT INTO albums (id, album, albumartist) VALUES (632, 'Mistagged', 'Mistagged Artist')")
+            conn.execute("INSERT INTO items (id, album_id, title, album, albumartist) VALUES (731, 632, 'Track 1', 'Mistagged', 'Mistagged Artist')")
+            conn.execute("INSERT INTO items (id, album_id, title) VALUES (732, 632, 'Track 2')")
+
+        plan = transaction_engine.create_album_duplicate_merge_plan(
+            self.store,
+            {"target_album_id": 631, "source_album_id": 632, "item_ids": [731], "adopt_target_fields": True},
+            db_path=str(self.db_path),
+        )
+        op_id = plan["operation_id"]
+        apply_res = transaction_engine.execute_album_duplicate_merge_apply(self.store, op_id, db_path=str(self.db_path))
+        self.assertTrue(apply_res.get("ok"), msg=apply_res.get("error"))
+
+        rollback_res = transaction_engine.rollback_album_duplicate_merge(self.store, op_id, db_path=str(self.db_path))
+        self.assertTrue(rollback_res.get("ok"), msg=rollback_res)
+
+        with sqlite3.connect(self.db_path) as conn:
+            restored = conn.execute("SELECT album_id, album, albumartist FROM items WHERE id=731").fetchone()
+            self.assertEqual(restored, (632, "Mistagged", "Mistagged Artist"))
+
 
 if __name__ == "__main__":
     unittest.main()
