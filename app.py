@@ -26893,9 +26893,12 @@ def _do_scan_job() -> str:
                         ).fetchall()
                     for row in empty_album_rows:
                         try:
-                            beets_client.delete_album(int(row["id"]), delete_files=False)
+                            empty_res = beets_client.delete_album(int(row["id"]), delete_files=False)
                         except (BeetsUnavailableError, BeetsError) as ex:
                             log.append(f"warn:empty-album cleanup engine unavailable for album_id {row['id']}: {ex}")
+                            continue
+                        if not empty_res.get("ok"):
+                            log.append(f"warn:empty-album cleanup rejected for album_id {row['id']}: {empty_res.get('error') or 'unknown error'}")
                 except Exception as ex:
                     log.append(f"warn:empty-album sweep read failed: {ex}")
 

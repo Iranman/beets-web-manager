@@ -159,6 +159,35 @@ class ScanJobAutoCleanTests(unittest.TestCase):
 
         mock_delete_album.assert_called_once_with(2, delete_files=False)
 
+    def test_global_sweep_rejection_is_logged_not_swallowed(self):
+        """Adversarial self-review catch: delete_album() returns {"ok":
+        False, ...} on rejection rather than raising -- the first version
+        of this migration discarded that return value entirely, silently
+        swallowing a real rejection with no log line at all."""
+        (self.music_root / "keep.mp3").write_bytes(b"audio")
+        (self.music_root / "keep2.mp3").write_bytes(b"audio")
+        (self.music_root / "keep3.mp3").write_bytes(b"audio")
+        self._insert_album(1)
+        self._insert_item(10, 1, "keep.mp3")
+        self._insert_item(12, 1, "keep2.mp3")
+        self._insert_item(13, 1, "keep3.mp3")
+        self._insert_item(11, 1, "missing.mp3")
+        self._insert_album(2)
+
+        with mock.patch.object(
+            app_module.beets_client, "plan_album_maintenance",
+            return_value={"ok": True, "operation_id": "op-1"},
+        ), mock.patch.object(
+            app_module.beets_client, "apply_album_maintenance",
+            return_value={"ok": True, "deleted_items": 1, "deleted_albums": 0},
+        ), mock.patch.object(
+            app_module.beets_client, "delete_album",
+            return_value={"ok": False, "error": "boom"},
+        ):
+            log = self._run_scan()
+
+        self.assertTrue(any("empty-album cleanup rejected for album_id 2: boom" in line for line in log))
+
     def test_item_with_no_album_id_is_skipped_not_crashed(self):
         (self.music_root / "keep1.mp3").write_bytes(b"audio")
         (self.music_root / "keep2.mp3").write_bytes(b"audio")
