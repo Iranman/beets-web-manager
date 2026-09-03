@@ -26970,40 +26970,48 @@ def library_merge_artist():
         return jsonify({"ok": False, "error": "from_artist and to_artist are the same"})
 
     def _do(log, cancel_event=None):
-        with _db() as con:
+        with _db(row_factory=sqlite3.Row) as con:
             album_rows = con.execute(
                 "SELECT id FROM albums WHERE albumartist = ?", (from_artist,)
             ).fetchall()
-            if not album_rows:
-                log.append(f"No albums found for artist '{from_artist}'")
-                return
-            album_ids = [r[0] for r in album_rows]
-            log.append(f"Renaming {len(album_ids)} album(s): {from_artist!r} → {to_artist!r}")
-            con.execute("UPDATE albums SET albumartist = ? WHERE albumartist = ?",
-                        (to_artist, from_artist))
-            con.execute("UPDATE items SET albumartist = ? WHERE albumartist = ?",
-                        (to_artist, from_artist))
-            con.commit()
-        log.append("DB updated.")
-        # Write tags and move files for each affected album
-        cfg = "/config/config.yaml"
-        for i, aid in enumerate(album_ids, 1):
-            log.append(f"[{i}/{len(album_ids)}] Writing tags for album_id={aid}…")
-            r = subprocess.run(
-                [BEET_BIN, "-c", cfg, "write", f"album_id:{aid}"],
-                capture_output=True, text=True, timeout=120
-            )
-            for line in (r.stdout + r.stderr).splitlines():
-                if line.strip(): log.append("  " + line)
-            log.append(f"[{i}/{len(album_ids)}] Moving files for album_id={aid}…")
-            r = subprocess.run(
-                [BEET_BIN, "-c", cfg, "move", f"album_id:{aid}"],
-                capture_output=True, text=True, timeout=120
-            )
-            for line in (r.stdout + r.stderr).splitlines():
-                if line.strip(): log.append("  " + line)
+        if not album_rows:
+            log.append(f"No albums found for artist '{from_artist}'")
+            return
+        album_ids = [int(r["id"]) for r in album_rows]
+        log.append(f"Renaming {len(album_ids)} album(s): {from_artist!r} → {to_artist!r}")
+
+        # Same album_metadata_repair_v1 migration already applied to
+        # library_normalize_artists()/_run_normalize_artists_if_needed()
+        # (ARCH-003 Wave 30/32): updates={"albumartist": to_artist}
+        # propagates to every item row of each album too, and
+        # force_write_tags=True performs the real on-disk tag write --
+        # no local subprocess execution needed for either the DB rename
+        # or the write step.
+        renamed_ids: List[int] = []
+        for aid in album_ids:
+            try:
+                res = beets_client.update_album_metadata(aid, {"albumartist": to_artist}, force_write_tags=True)
+            except (BeetsUnavailableError, BeetsError) as ex:
+                log.append(f"  Engine unavailable renaming album_id {aid}: {ex}")
+                continue
+            if not res.get("ok"):
+                log.append(f"  Engine rejected rename for album_id {aid}: {res.get('error') or 'unknown error'}")
+                continue
+            renamed_ids.append(aid)
+        log.append(f"DB updated: {len(renamed_ids)}/{len(album_ids)} album(s).")
+
+        for i, aid in enumerate(renamed_ids, 1):
+            log.append(f"[{i}/{len(renamed_ids)}] Moving files for album_id={aid}…")
+            try:
+                rel_res = beets_client.relocate_album(aid, mode="rename")
+                if rel_res.get("ok"):
+                    log.append(f"  ✓ Relocated album {aid} to: {rel_res.get('dest_dir')}")
+                else:
+                    log.append(f"  relocate warning: {rel_res.get('error')}")
+            except Exception as _ex:
+                log.append(f"  relocate warning: {_ex}")
         _invalidate_lib_cache()
-        log.append(f"Done — all albums now under '{to_artist}'.")
+        log.append(f"Done — {len(renamed_ids)} album(s) now under '{to_artist}'.")
 
     job = jobs.start_python(_do, label=f"Merge artist: {from_artist!r} → {to_artist!r}")
     return jsonify({"ok": True, "job_id": job.job_id})
@@ -27844,49 +27852,58 @@ def library_normalize_artists():
     """Normalize Unicode punctuation (fancy hyphens, smart quotes, etc.) in all
     albumartist and artist fields in the DB, then move files for affected albums."""
     def _do(log, cancel_event=None):
-        cfg = "/config/config.yaml"
-        with _db() as con:
+        with _db(row_factory=sqlite3.Row) as con:
             # Collect all distinct albumartist values
             aa_rows = con.execute("SELECT DISTINCT albumartist FROM albums WHERE albumartist != ''").fetchall()
-            changed_artists = {}  # old → new
-            for (aa,) in aa_rows:
-                clean = _normalize_albumartist(aa)
-                if clean != aa:
-                    changed_artists[aa] = clean
-                    log.append(f"  Renamed: {aa!r} → {clean!r}")
+        to_fix = []
+        for row in aa_rows:
+            aa = row["albumartist"]
+            clean = _normalize_albumartist(aa)
+            if clean != aa:
+                to_fix.append((aa, clean))
+                log.append(f"  Renamed: {aa!r} → {clean!r}")
 
-            if not changed_artists:
-                log.append("No artist names needed normalization.")
-                return
+        if not to_fix:
+            log.append("No artist names needed normalization.")
+            return
 
-            # Collect affected album IDs before updating
-            affected_ids = []
-            for old_aa in changed_artists:
+        # Selection (which album rows currently hold the un-normalized
+        # value) stays a local, non-mutating read; the rename itself is
+        # one album_metadata_repair_v1 call per affected album --
+        # updates={"albumartist": new_aa} already propagates to every
+        # item row of that album too (create_album_metadata_plan merges
+        # album-level identity fields into each item's diff when the
+        # item doesn't already set its own), so no separate
+        # UPDATE items SET albumartist=... step is needed. Same
+        # migration already applied to the sibling auto-triggered
+        # function _run_normalize_artists_if_needed() (ARCH-003 Wave 30).
+        affected_ids: List[int] = []
+        for old_aa, new_aa in to_fix:
+            with _db(row_factory=sqlite3.Row) as con:
                 rows = con.execute("SELECT id FROM albums WHERE albumartist = ?", (old_aa,)).fetchall()
-                affected_ids.extend(r[0] for r in rows)
+            for row in rows:
+                aid = int(row["id"])
+                try:
+                    res = beets_client.update_album_metadata(aid, {"albumartist": new_aa}, force_write_tags=True)
+                except (BeetsUnavailableError, BeetsError) as ex:
+                    log.append(f"  Engine unavailable normalizing album_id {aid}: {ex}")
+                    continue
+                if not res.get("ok"):
+                    log.append(f"  Engine rejected normalize for album_id {aid}: {res.get('error') or 'unknown error'}")
+                    continue
+                affected_ids.append(aid)
+        log.append(f"DB updated: {len(to_fix)} artist name(s) normalized across {len(affected_ids)} album(s).")
 
-            # Apply updates
-            for old_aa, new_aa in changed_artists.items():
-                con.execute("UPDATE albums SET albumartist = ? WHERE albumartist = ?", (new_aa, old_aa))
-                con.execute("UPDATE items  SET albumartist = ? WHERE albumartist = ?", (new_aa, old_aa))
-            con.commit()
-        log.append(f"DB updated: {len(changed_artists)} artist name(s) normalized.")
-
-        # Write tags + move files for each affected album
         for i, aid in enumerate(affected_ids, 1):
             log.append(f"[{i}/{len(affected_ids)}] Moving album_id={aid}…")
-            r = subprocess.run(
-                [BEET_BIN, "-c", cfg, "write", f"album_id:{aid}"],
-                capture_output=True, text=True, timeout=120
-            )
-            for line in (r.stdout + r.stderr).splitlines():
-                if line.strip(): log.append("  " + line)
-            r = subprocess.run(
-                [BEET_BIN, "-c", cfg, "move", f"album_id:{aid}"],
-                capture_output=True, text=True, timeout=120
-            )
-            for line in (r.stdout + r.stderr).splitlines():
-                if line.strip(): log.append("  " + line)
+            try:
+                rel_res = beets_client.relocate_album(aid, mode="rename")
+                if rel_res.get("ok"):
+                    log.append(f"  ✓ Relocated album {aid} to: {rel_res.get('dest_dir')}")
+                else:
+                    log.append(f"  relocate warning: {rel_res.get('error')}")
+            except Exception as _ex:
+                log.append(f"  relocate warning: {_ex}")
 
         _invalidate_lib_cache()
         log.append("Done.")
