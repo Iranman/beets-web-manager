@@ -1,4 +1,4 @@
-# Beets Web Manager
+# Beets Web Manager-BROKEN DO NOT DOWNLOAD!!
 
 Beets Web Manager is a self-hosted web application for managing a Beets music library, import review, playlist repair, acquisition queues, cleanup jobs, metadata verification, and media-server synchronization from one operator-focused interface.
 
