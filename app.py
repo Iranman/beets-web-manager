@@ -27436,6 +27436,44 @@ def library_move_all():
         _cfg = _write_job_beets_config(f"/tmp/beets-move-all-{uuid.uuid4().hex}.yaml")
         base = [BEET_BIN, "-c", _cfg]
 
+        # ARCH-003 Wave 33: the pre-move candidate-directory set is read
+        # here, BEFORE `beet move` runs -- every directory currently
+        # holding at least one track is a real candidate for going empty
+        # once its file(s) relocate to match the (possibly changed) path
+        # template. This is a read-only DB query (never a mutation), and
+        # is the only way this route can know which directories to even
+        # ask the engine to check: the web-manager container has no
+        # filesystem mount into MUSIC_ROOT in the supported deployment
+        # (docker-compose.full.yml/docker-compose.yml), so it cannot walk
+        # the real directory tree itself the way the old local
+        # os.walk(str(MUSIC_ROOT))-based cleanup below assumed it could --
+        # that step was silently a no-op (or worse, an unhandled
+        # exception swallowed by its own try/except) in the real
+        # deployment before this fix, not just an ARCH-003 sink.
+        candidate_dirs: set = set()
+        try:
+            with _db(text_factory=bytes) as con:
+                path_rows = con.execute("SELECT DISTINCT path FROM items").fetchall()
+            for row in path_rows:
+                raw_p = row[0]
+                p = raw_p.decode("utf-8", "replace") if isinstance(raw_p, bytes) else str(raw_p or "")
+                if not p:
+                    continue
+                abs_p = p if p.startswith("/") else f"{MUSIC_ROOT}/{p}"
+                # Every ancestor up to (not including) MUSIC_ROOT is also a
+                # real candidate -- e.g. an artist folder whose only album
+                # folder is the one that just went empty. folder_cleanup_v1
+                # safely no-ops on a directory that still has content, so
+                # over-including ancestors here costs nothing but a
+                # rejected (silently skipped) Plan call.
+                parent = Path(abs_p).parent
+                root = Path(str(MUSIC_ROOT))
+                while parent != root and root in parent.parents:
+                    candidate_dirs.add(str(parent))
+                    parent = parent.parent
+        except Exception as ex:
+            log.append(f"  [warn] Could not enumerate pre-move directories for empty-folder cleanup: {ex}")
+
         # Step 1: rescan disk to fix any stale DB paths before moving
         rc = _stream(base + ["update"], "Rescanning library (beet update)", time.time() + 1800)
         if rc == -9: return
@@ -27451,23 +27489,45 @@ def library_move_all():
         if rc not in (0, 1):
             raise RuntimeError(f"beet move exited with rc={rc}")
 
-        # Step 3: remove empty directories left behind by the move
+        # Step 3: ask the engine (which -- unlike this container -- has
+        # real filesystem access) to remove whichever pre-move candidate
+        # directories are now actually empty, through folder_cleanup_v1's
+        # existing remove_empty action (SEC-002 Wave 22): it independently
+        # re-verifies the directory is truly empty and has no lingering
+        # Beets DB references before removing anything, so a directory
+        # that is not actually empty (or moved outside the allowed root)
+        # is safely and expectedly skipped, not an error.
         removed_dirs = 0
-        try:
-            # Walk bottom-up so inner empty dirs are removed before their parents
-            for dirpath, dirnames, filenames in os.walk(str(MUSIC_ROOT), topdown=False):
-                dp = Path(dirpath)
-                if dp == MUSIC_ROOT:
-                    continue
-                try:
-                    if not any(dp.iterdir()):
-                        dp.rmdir()
-                        removed_dirs += 1
-                        log.append(f"  Removed empty folder: {dp.relative_to(MUSIC_ROOT)}")
-                except Exception:
-                    pass
-        except Exception as ex:
-            log.append(f"  [warn] Empty-folder cleanup failed (non-fatal): {ex}")
+        for cdir in sorted(candidate_dirs, key=len, reverse=True):
+            if cancel_event and cancel_event.is_set():
+                log.append("[cancelled]"); return
+            try:
+                plan_res = beets_client.plan_folder_cleanup({"source": cdir, "action": "remove_empty"})
+            except Exception as ex:
+                log.append(f"  [warn] Folder cleanup plan failed for {cdir}: {ex}")
+                continue
+            if not plan_res.get("ok"):
+                # Expected in the common case: most pre-move directories
+                # still have files, or files from a different album now
+                # sitting there -- not an empty-folder candidate. Only
+                # unexpected engine-side codes are worth a log line.
+                code = plan_res.get("code") or ""
+                if code not in ("folder_cleanup_not_empty", "folder_cleanup_db_references"):
+                    log.append(f"  [warn] Folder cleanup plan rejected for {cdir}: {plan_res.get('error')}")
+                continue
+            op_id = plan_res.get("operation_id")
+            if not op_id:
+                continue
+            try:
+                apply_res = beets_client.apply_folder_cleanup(op_id)
+            except Exception as ex:
+                log.append(f"  [warn] Folder cleanup apply failed for {cdir}: {ex}")
+                continue
+            if apply_res.get("ok"):
+                removed_dirs += 1
+                log.append(f"  Removed empty folder: {cdir}")
+            else:
+                log.append(f"  [warn] Folder cleanup apply rejected for {cdir}: {apply_res.get('error')}")
         if removed_dirs:
             log.append(f"Cleaned up {removed_dirs} empty folder(s).")
 
@@ -27484,19 +27544,41 @@ def library_mbsync_all():
     """Sync all library tracks against MusicBrainz metadata (beet mbsync)."""
     def _do(log, cancel_event=None):
         import subprocess as _sp
-        # Remove orphaned album records (albums with no tracks) — mbsync crashes on them
+        # Remove orphaned album records (albums with no tracks) — mbsync
+        # crashes on them. ARCH-003 Wave 33: previously a raw local
+        # `DELETE FROM albums WHERE id IN (...)` SQL sink -- migrated onto
+        # beets_client.delete_album() (album_maintenance_v1's
+        # mode="remove_album", the same controlled per-album removal path
+        # already used elsewhere for exactly this "album with zero items"
+        # shape). This also fixes a real, latent bug in the code it
+        # replaces: `log.append(f"Pruned {len(ids)} ...")` sat OUTSIDE the
+        # `if rows:` block that defined `ids`, so on the common case of
+        # zero orphaned albums this always raised NameError, silently
+        # swallowed by the surrounding except as a "non-fatal" warning.
         try:
             with _db() as con:
                 rows = con.execute(
                     "SELECT id FROM albums WHERE id NOT IN (SELECT DISTINCT album_id FROM items WHERE album_id IS NOT NULL)"
                 ).fetchall()
-                if rows:
-                    ids = [r[0] for r in rows]
-                    con.execute(f"DELETE FROM albums WHERE id IN ({','.join('?'*len(ids))})", ids)
-                log.append(f"Pruned {len(ids)} orphaned album record(s) with no tracks.")
-            con.close()
+            orphan_ids = [int(r[0]) for r in rows]
         except Exception as ex:
-            log.append(f"  [warn] Orphan prune failed (non-fatal): {ex}")
+            log.append(f"  [warn] Orphan lookup failed (non-fatal): {ex}")
+            orphan_ids = []
+
+        pruned = 0
+        for oid in orphan_ids:
+            if cancel_event and cancel_event.is_set():
+                log.append("[cancelled]"); return
+            try:
+                res = beets_client.delete_album(oid, delete_files=True)
+                if res.get("ok"):
+                    pruned += 1
+                else:
+                    log.append(f"  [warn] Could not prune orphaned album {oid}: {res.get('error')}")
+            except Exception as ex:
+                log.append(f"  [warn] Could not prune orphaned album {oid}: {ex}")
+        if orphan_ids:
+            log.append(f"Pruned {pruned}/{len(orphan_ids)} orphaned album record(s) with no tracks.")
 
         env = {**_beet_env(), "PYTHONUNBUFFERED": "1"}
         _cfg = _write_job_beets_config(f"/tmp/beets-mbsync-all-{uuid.uuid4().hex}.yaml")

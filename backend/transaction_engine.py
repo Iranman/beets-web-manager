@@ -27,6 +27,13 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import urllib.parse
 import unicodedata
 
+# Small, dependency-free (re/typing only), already used at module level by
+# app.py -- confirmed zero circular-import risk (Wave 32/33 root-cause
+# investigation into why _match_tracks_from_mb_shared() was thought to need
+# a normalization-pipeline port: it did not, this module can import it
+# directly). Used by album_mb_track_repair_v1's target_tracks subset filter.
+from backend.import_guard import release_track_matches_missing_target
+
 LOG = logging.getLogger("beets_web.transaction_engine")
 
 
@@ -3611,6 +3618,106 @@ def _write_file_audio_tags(file_path: Path, tags: Dict[str, Any]) -> Dict[str, A
     return {"ok": True, "reason": None}
 
 
+def _mb_track_repair_title_norm(text: Any) -> str:
+    """Title normalizer for album_mb_track_repair_v1's target_tracks
+    subset filter and AcoustID cross-check. Deliberately self-contained
+    (no import of backend.mb_alignment.album_track_norm, which is only
+    ever lazily imported inside create_album_mb_track_repair_plan itself,
+    behind a try/except, to keep a mb_alignment import failure from
+    breaking this whole module's import) -- same normalization shape
+    (casefold, strip bracketed content, strip punctuation, collapse
+    whitespace) as both app.py's _album_track_norm() and
+    backend.mb_alignment.album_track_norm()."""
+    t = str(text or "").lower()
+    t = re.sub(r"[\(\[\{].*?[\)\]\}]", "", t)
+    t = re.sub(r"[^\w\s]", "", t)
+    return " ".join(t.split())
+
+
+def _normalise_target_tracks(raw: Any) -> List[Dict[str, Any]]:
+    """Compact a caller-supplied target_tracks list (album_mb_track_repair_v1's
+    subset filter) down to the fields release_track_matches_missing_target()
+    needs. Mirrors app.py's _normalise_wanted_tracks() field names/aliases
+    without depending on any app.py-only helper."""
+    if not raw or not isinstance(raw, list):
+        return []
+    tracks: List[Dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            disc = int(item.get("disc") or item.get("medium") or 1)
+        except Exception:
+            disc = 1
+        try:
+            track = int(item.get("track") or item.get("position") or item.get("number") or 0)
+        except Exception:
+            track = 0
+        title = str(item.get("title") or item.get("name") or "").strip()
+        mb_trackid = str(item.get("mb_trackid") or item.get("recording_id") or "").strip().lower()
+        if not track and not title and not mb_trackid:
+            continue
+        tracks.append({
+            "disc": max(disc, 1),
+            "track": max(track, 0),
+            "title": title,
+            "mb_trackid": mb_trackid,
+        })
+    return tracks
+
+
+def _mb_track_repair_acoustid_check(
+    item_path: Path,
+    mb_tracks: List[Dict[str, Any]],
+    lookup_fn: Any,
+) -> Dict[str, Any]:
+    """Cross-check a fuzzy title/position/duration match against the file's
+    AcoustID fingerprint before trusting it enough to auto-repair
+    mb_trackid/track/disc/title (album_mb_track_repair_v1's
+    acoustid_verify option). Mirrors app.py's
+    _album_track_fingerprint_check() policy: fuzzy scoring alone can be
+    fooled by similarly-named tracks (intros, live/remix versions), so a
+    confirmed fingerprint mismatch against every track on the release means
+    this file isn't actually the fuzzy-matched track, regardless of how
+    good the text match looked. Only "mismatch" ever excludes a row from
+    repair -- "none"/"unavailable"/"unclear" all fall through to trusting
+    the fuzzy match as before, same as app.py's version."""
+    if not item_path.exists():
+        return {"status": "missing"}
+    try:
+        candidates = lookup_fn(item_path)
+    except Exception:
+        candidates = None
+    if candidates is None:
+        return {"status": "unavailable"}
+    if not candidates:
+        return {"status": "none"}
+
+    mb_ids = {str(t.get("mb_trackid") or "").strip().lower() for t in mb_tracks if t.get("mb_trackid")}
+    for cand in candidates:
+        cand_id = str(cand.get("mb_trackid") or "").strip().lower()
+        if cand_id and cand_id in mb_ids:
+            return {"status": "match", "candidate": cand}
+
+    from difflib import SequenceMatcher
+    best_cand = candidates[0]
+    cand_title = _mb_track_repair_title_norm(best_cand.get("title", ""))
+    best_title_score = max(
+        (
+            SequenceMatcher(None, cand_title, _mb_track_repair_title_norm(t.get("title", ""))).ratio()
+            for t in mb_tracks if cand_title and t.get("title")
+        ),
+        default=0.0,
+    )
+    try:
+        cand_score = int(best_cand.get("score") or 0)
+    except Exception:
+        cand_score = 0
+    if cand_score >= 70 and best_title_score < 0.72:
+        return {"status": "mismatch", "candidate": best_cand, "best_title_score": round(best_title_score, 3)}
+    return {"status": "unclear", "candidate": best_cand, "best_title_score": round(best_title_score, 3)}
+
+
 def create_album_mb_track_repair_plan(
     store: TransactionStore,
     payload: Dict[str, Any],
@@ -3618,8 +3725,43 @@ def create_album_mb_track_repair_plan(
     music_allowed_roots: Optional[List[str]] = None,
     db_path: Optional[str] = None,
     fetch_tracklist_fn: Optional[Any] = None,
+    acoustid_lookup_fn: Optional[Any] = None,
 ) -> Dict[str, Any]:
-    """Create transaction plan for repairing MusicBrainz track IDs for an album (SEC-002 Wave 19)."""
+    """Create transaction plan for repairing MusicBrainz track IDs for an album (SEC-002 Wave 19).
+
+    Wave 32/33 extensions (all opt-in via `payload`, default-off, and none
+    change behavior for a caller that does not set them -- every existing
+    caller and test for this family is unaffected):
+
+    - `payload["target_tracks"]`: restrict matching to a caller-supplied
+      subset of the release's tracklist (e.g. "only match these specific
+      missing tracks"), using the same shared, already-proven
+      `release_track_matches_missing_target()` guard app.py's own
+      `_match_tracks_from_mb_shared()` uses.
+    - `payload["acoustid_verify"]`: cross-check every fuzzy title/position/
+      duration match (i.e. every row with no pre-existing recording ID of
+      its own) against the file's AcoustID fingerprint before trusting it
+      enough to auto-repair -- mirrors app.py's
+      `_album_track_fingerprint_check()` policy. A confirmed fingerprint
+      mismatch against every track on the release excludes that row from
+      repair entirely rather than relabeling it on fuzzy evidence alone.
+    - `payload["zero_unmatched"]`: for items that align to no track on the
+      (possibly target_tracks-filtered) release at all, plan zeroing their
+      `track` column (a dedup/cleanup signal for a later pass, never a tag
+      write) -- mirrors app.py's `zero_unmatched` contract.
+    - `payload["allow_establish_release_group"]`: the family's default
+      behavior (`repair_rg_not_established`) refuses to let a recording-ID
+      repair silently stamp `mb_releasegroupid` for an album that has
+      never had one -- correct and load-bearing for this family's plain
+      repair callers, which must never establish identity as a side
+      effect. Some callers (e.g. a fresh, MB-confirmed reimport establishing
+      an album's identity for the very first time) are legitimately
+      performing that establishment on purpose; this flag lets exactly
+      those callers opt in, still failing closed at Apply if the album's
+      Release Group is no longer blank by Apply time. `repair_identity_mismatch`
+      (a REAL conflict, not merely "not yet set") is never bypassed by this
+      flag -- that check always fires regardless.
+    """
     payload = payload or {}
     try:
         album_id = int(payload.get("album_id") or payload.get("aid") or 0)
@@ -3702,6 +3844,9 @@ def create_album_mb_track_repair_plan(
     if not isinstance(mb, dict) or not mb.get("ok"):
         return {"ok": False, "error": (mb.get("error") if isinstance(mb, dict) else None) or "MusicBrainz release lookup failed"}
 
+    allow_establish_release_group = bool(payload.get("allow_establish_release_group"))
+    establish_release_group_id = ""
+
     candidate_rg = str(mb.get("release_group") or "").strip().lower()
     # Release Group ID remains the canonical album-family identity; Release
     # ID is edition/tracklist evidence. Refuse whenever the selected
@@ -3714,25 +3859,63 @@ def create_album_mb_track_repair_plan(
     # a blank album_rg went completely unchecked.
     if candidate_rg:
         if album_rg and candidate_rg != album_rg:
+            # A REAL conflict (an already-established identity disagreeing
+            # with the requested release) is never bypassable by
+            # allow_establish_release_group -- that flag only ever covers
+            # "not yet set", never "set to something else".
             return {
                 "ok": False,
                 "error": "Requested release belongs to a different Release Group than this album's established identity; refusing repair.",
                 "code": "repair_identity_mismatch",
             }
         if not album_rg:
-            return {
-                "ok": False,
-                "error": (
-                    "This album has no established MusicBrainz Release Group identity "
-                    "(mb_releasegroupid is blank); refusing recording-ID repair until a "
-                    "canonical Release Group is established for this album."
-                ),
-                "code": "repair_rg_not_established",
-            }
+            if not allow_establish_release_group:
+                return {
+                    "ok": False,
+                    "error": (
+                        "This album has no established MusicBrainz Release Group identity "
+                        "(mb_releasegroupid is blank); refusing recording-ID repair until a "
+                        "canonical Release Group is established for this album."
+                    ),
+                    "code": "repair_rg_not_established",
+                }
+            # Caller has explicitly opted in to establishing this album's
+            # Release Group identity as part of this repair (Wave 33) --
+            # e.g. a fresh, MB-confirmed reimport doing so for the first
+            # time. Apply re-validates the album's mb_releasegroupid is
+            # STILL blank immediately before writing (TOCTOU), so a
+            # concurrent edit establishing a different RG between Plan and
+            # Apply is never silently overwritten.
+            establish_release_group_id = candidate_rg
 
     mb_tracks = mb.get("tracks") or []
     if not mb_tracks:
         return {"ok": False, "error": "MusicBrainz release tracklist is empty"}
+
+    target_tracks_raw = payload.get("target_tracks")
+    if target_tracks_raw:
+        wanted_targets = _normalise_target_tracks(target_tracks_raw)
+        if wanted_targets:
+            release_title_counts: Dict[str, int] = {}
+            for mbt in mb_tracks:
+                title_norm = _mb_track_repair_title_norm(mbt.get("title", ""))
+                if title_norm:
+                    release_title_counts[title_norm] = release_title_counts.get(title_norm, 0) + 1
+            target_mb_tracks = [
+                t for t in mb_tracks
+                if release_track_matches_missing_target(
+                    t, wanted_targets,
+                    title_norm_fn=_mb_track_repair_title_norm,
+                    release_title_counts=release_title_counts,
+                )
+            ]
+            if not target_mb_tracks:
+                return {
+                    "ok": False,
+                    "error": "None of the requested target track(s) were found in the selected MusicBrainz release.",
+                    "code": "repair_target_tracks_not_found",
+                }
+            mb_tracks = target_mb_tracks
 
     items_list: List[Dict[str, Any]] = []
     item_stats: Dict[int, Dict[str, Any]] = {}
@@ -3794,6 +3977,8 @@ def create_album_mb_track_repair_plan(
             "length": float(row["length"] or 0),
         })
 
+    items_by_id: Dict[int, Dict[str, Any]] = {it["id"]: it for it in items_list}
+
     try:
         from backend.mb_alignment import summarize_mb_track_alignment, best_album_track_match
         alignment = summarize_mb_track_alignment(
@@ -3806,7 +3991,21 @@ def create_album_mb_track_repair_plan(
     except Exception as ex:
         return {"ok": False, "error": f"Track alignment failed: {ex}"}
 
+    acoustid_verify = bool(payload.get("acoustid_verify"))
+    _acoustid_lookup = acoustid_lookup_fn
+    if acoustid_verify and _acoustid_lookup is None:
+        try:
+            from backend.beets_control_agent import _engine_acoustid_lookup as _acoustid_lookup
+        except Exception:
+            # Engine-side fpcalc/AcoustID machinery unavailable (e.g. this
+            # module imported outside the beets_control_agent process) --
+            # fail the *verification*, not the whole repair: every row
+            # falls through to "unavailable" below and is trusted on fuzzy
+            # evidence alone, same as acoustid_verify=False.
+            _acoustid_lookup = lambda _path: None
+
     tracks_to_repair: List[Dict[str, Any]] = []
+    acoustid_rejected: List[Dict[str, Any]] = []
     conflicts_requiring_review: List[Dict[str, Any]] = []
     changes: List[Dict[str, Any]] = []
     unreadable_items: List[Dict[str, Any]] = []
@@ -3910,6 +4109,19 @@ def create_album_mb_track_repair_plan(
             )
             conflicts_requiring_review.append(repair_spec)
         else:
+            if acoustid_verify:
+                fp = _mb_track_repair_acoustid_check(item_path, mb_tracks, _acoustid_lookup)
+                change_row["acoustid"] = fp
+                if fp.get("status") == "mismatch":
+                    change_row["status"] = "rejected"
+                    change_row["review_reason"] = (
+                        "AcoustID fingerprint does not match any track on this "
+                        "release; fuzzy title/position/duration scoring alone is "
+                        "not sufficient evidence to relabel this item."
+                    )
+                    acoustid_rejected.append(repair_spec)
+                    changes.append(change_row)
+                    continue
             change_row["status"] = "planned"
             tracks_to_repair.append(repair_spec)
         changes.append(change_row)
@@ -3962,6 +4174,40 @@ def create_album_mb_track_repair_plan(
                 "status": "planned",
             })
 
+    # zero_unmatched (Wave 33): items that align to no track on the
+    # (possibly target_tracks-filtered) release at all -- plus any item
+    # this Plan's own AcoustID cross-check just rejected -- get their
+    # `track` column zeroed as a dedup/cleanup signal for a later pass,
+    # mirroring app.py's zero_unmatched contract exactly (including that
+    # an AcoustID-rejected row is treated the same as a never-matched row).
+    # This never writes an audio tag -- DB-only, like the rest of this
+    # option -- and is skipped entirely for a row already at track=0.
+    zero_unmatched = bool(payload.get("zero_unmatched"))
+    zero_unmatched_rows: List[Dict[str, Any]] = []
+    if zero_unmatched:
+        unmatched_ids = {int(it.get("id") or 0) for it in (alignment.get("extra_items") or [])}
+        unmatched_ids |= {t["item_id"] for t in acoustid_rejected}
+        for iid in sorted(unmatched_ids):
+            it = items_by_id.get(iid)
+            if not it:
+                continue
+            current_track = int(it.get("track") or 0)
+            if current_track == 0:
+                continue
+            zero_unmatched_rows.append({
+                "item_id": iid,
+                "before": {"track": current_track},
+                "after": {"track": 0},
+            })
+            changes.append({
+                "id": iid,
+                "track": f"zero-unmatched: {it.get('title') or ''}",
+                "before": {"track": current_track},
+                "after": {"track": 0},
+                "identity_evidence": {"source": "musicbrainz_no_alignment_match"},
+                "status": "planned",
+            })
+
     album_before = {
         "mb_albumid": str(album_row["mb_albumid"] or "").strip().lower(),
         "mb_releasegroupid": album_rg,
@@ -3969,15 +4215,39 @@ def create_album_mb_track_repair_plan(
     release_stamping_needed = bool(album_release_stamp_rows) or (
         bool(target_mb_albumid) and target_mb_albumid != album_before["mb_albumid"]
     )
+    release_group_establishment_needed = bool(establish_release_group_id)
 
-    if not tracks_to_repair and not conflicts_requiring_review and not release_stamping_needed:
+    if (
+        not tracks_to_repair
+        and not conflicts_requiring_review
+        and not acoustid_rejected
+        and not release_stamping_needed
+        and not zero_unmatched_rows
+        and not release_group_establishment_needed
+    ):
         return {
             "ok": True,
             "updated": 0,
             "conflicts": 0,
+            "acoustid_rejected": 0,
+            "zero_unmatched_rows": 0,
+            "establishing_release_group": False,
             "message": "No MusicBrainz recording IDs needed safe repair.",
             "unreadable_items": unreadable_items,
         }
+
+    if release_group_establishment_needed:
+        changes.append({
+            "id": album_id,
+            "track": "album Release Group identity",
+            "before": {"mb_releasegroupid": ""},
+            "after": {"mb_releasegroupid": establish_release_group_id},
+            "identity_evidence": {
+                "source": "musicbrainz_release_group_establishment",
+                "mb_releasegroupid": establish_release_group_id,
+            },
+            "status": "planned",
+        })
 
     summary = (
         f"Repair MB track IDs for album {album_id}: {len(tracks_to_repair)} track(s), "
@@ -3990,9 +4260,12 @@ def create_album_mb_track_repair_plan(
         "mb_releasegroupid": album_rg,
         "tracks_to_repair": tracks_to_repair,
         "conflicts_requiring_review": conflicts_requiring_review,
+        "acoustid_rejected": acoustid_rejected,
         "album_release_stamp_rows": album_release_stamp_rows,
+        "zero_unmatched_rows": zero_unmatched_rows,
         "album_before": album_before,
         "release_stamping_needed": release_stamping_needed,
+        "establish_release_group_id": establish_release_group_id,
         "unreadable_items": unreadable_items,
     }
     # Rollback is only ever advertised for rows we actually captured full
@@ -4022,8 +4295,11 @@ def create_album_mb_track_repair_plan(
         "transaction": tx_res,
         "updated": len(tracks_to_repair),
         "conflicts": len(conflicts_requiring_review),
+        "acoustid_rejected": len(acoustid_rejected),
         "release_stamping_needed": release_stamping_needed,
         "release_stamp_rows": len(album_release_stamp_rows),
+        "zero_unmatched_rows": len(zero_unmatched_rows),
+        "establishing_release_group": release_group_establishment_needed,
         "unreadable_items": unreadable_items,
     }
 
@@ -4059,7 +4335,9 @@ def execute_album_mb_track_repair_apply(
         payload = meta.get("payload") or meta or tx.get("payload") or {}
         tracks_to_repair: List[Dict[str, Any]] = payload.get("tracks_to_repair") or []
         album_release_stamp_rows: List[Dict[str, Any]] = payload.get("album_release_stamp_rows") or []
+        zero_unmatched_rows: List[Dict[str, Any]] = payload.get("zero_unmatched_rows") or []
         album_before: Dict[str, Any] = payload.get("album_before") or {}
+        establish_release_group_id = str(payload.get("establish_release_group_id") or "").strip().lower()
 
         if tx.get("status") == "Completed":
             return {
@@ -4074,7 +4352,11 @@ def execute_album_mb_track_repair_apply(
         album_id = int(payload.get("album_id") or 0)
         target_mb_albumid = str(payload.get("mb_albumid") or "").strip().lower()
 
-        item_ids = sorted({int(t["item_id"]) for t in tracks_to_repair} | {int(t["item_id"]) for t in album_release_stamp_rows})
+        item_ids = sorted(
+            {int(t["item_id"]) for t in tracks_to_repair}
+            | {int(t["item_id"]) for t in album_release_stamp_rows}
+            | {int(t["item_id"]) for t in zero_unmatched_rows}
+        )
 
         # Resource locking: album lock + every item lock this Apply can
         # touch, in deterministic order (album_mb_track_repair_v1's own
@@ -4196,6 +4478,31 @@ def execute_album_mb_track_repair_apply(
                     if live_album_mbid != expected_album_mbid:
                         return _fail("Album Release ID changed since plan.", "repair_toctou_mismatch")
 
+                    if establish_release_group_id and live_rg:
+                        # Someone else established (or changed) this
+                        # album's Release Group identity between Plan and
+                        # Apply -- refuse to silently overwrite it, whether
+                        # it now matches what this Plan would have set or
+                        # not (Wave 33: allow_establish_release_group's
+                        # TOCTOU revalidation).
+                        return _fail(
+                            "Album Release Group ID was established by another operation since plan.",
+                            "repair_toctou_mismatch",
+                        )
+
+                    for spec in zero_unmatched_rows:
+                        iid = int(spec["item_id"])
+                        cur.execute("SELECT id, album_id, track FROM items WHERE id=?", (iid,))
+                        irow2 = cur.fetchone()
+                        if not irow2:
+                            return _fail(f"Item {iid} no longer exists.", "repair_item_missing")
+                        if int(irow2["album_id"]) != album_id:
+                            return _fail(f"Item {iid} no longer belongs to this album.", "repair_album_membership_changed")
+                        live_track = int(irow2["track"] or 0)
+                        expected_track = int(spec["before"]["track"])
+                        if live_track != expected_track:
+                            return _fail(f"Item {iid} track number changed since plan.", "repair_toctou_mismatch")
+
                     for spec in tracks_to_repair:
                         iid = int(spec["item_id"])
                         before = spec["before"]
@@ -4268,11 +4575,26 @@ def execute_album_mb_track_repair_apply(
                             con.rollback()
                             return _fail(f"Expected to update exactly 1 row for item {spec['item_id']}, updated {cur.rowcount}.", "repair_rowcount_mismatch")
 
+                    for spec in zero_unmatched_rows:
+                        cur.execute("UPDATE items SET track=0 WHERE id=?", (spec["item_id"],))
+                        if cur.rowcount != 1:
+                            con.rollback()
+                            return _fail(f"Expected to update exactly 1 row for item {spec['item_id']}, updated {cur.rowcount}.", "repair_rowcount_mismatch")
+
                     if target_mb_albumid:
                         cur.execute("UPDATE albums SET mb_albumid=? WHERE id=?", (target_mb_albumid, album_id))
                         if cur.rowcount != 1:
                             con.rollback()
                             return _fail(f"Expected to update exactly 1 album row, updated {cur.rowcount}.", "repair_rowcount_mismatch")
+
+                    if establish_release_group_id:
+                        cur.execute(
+                            "UPDATE albums SET mb_releasegroupid=? WHERE id=? AND (mb_releasegroupid IS NULL OR mb_releasegroupid='')",
+                            (establish_release_group_id, album_id),
+                        )
+                        if cur.rowcount != 1:
+                            con.rollback()
+                            return _fail("Album Release Group ID was no longer blank at write time.", "repair_toctou_mismatch")
 
                     con.commit()
                 finally:
@@ -4382,6 +4704,19 @@ def execute_album_mb_track_repair_apply(
                         arow = cur.fetchone()
                         if not arow or str(arow["mb_albumid"] or "").strip().lower() != target_mb_albumid:
                             return _fail("Post-write verification failed for album row.", "repair_verification_failed", mutated=True)
+
+                    for spec in zero_unmatched_rows:
+                        iid = spec["item_id"]
+                        cur.execute("SELECT track FROM items WHERE id=?", (iid,))
+                        row = cur.fetchone()
+                        if not row or int(row["track"] or 0) != 0:
+                            return _fail(f"Post-write verification failed for item {iid}.", "repair_verification_failed", mutated=True)
+
+                    if establish_release_group_id:
+                        cur.execute("SELECT mb_releasegroupid FROM albums WHERE id=?", (album_id,))
+                        arow = cur.fetchone()
+                        if not arow or str(arow["mb_releasegroupid"] or "").strip().lower() != establish_release_group_id:
+                            return _fail("Post-write verification failed for album Release Group establishment.", "repair_verification_failed", mutated=True)
                 finally:
                     con.close()
                 _persist_step("result_verified", "Completed")
@@ -4396,6 +4731,8 @@ def execute_album_mb_track_repair_apply(
                 "operation_id": operation_id,
                 "updated": len(tracks_to_repair),
                 "release_stamp_rows": len(album_release_stamp_rows),
+                "zero_unmatched_rows": len(zero_unmatched_rows),
+                "established_release_group": bool(establish_release_group_id),
                 "tags_written": bool(write_tags),
             }
 
@@ -4431,10 +4768,16 @@ def rollback_album_mb_track_repair(
         album_id = int(payload.get("album_id") or 0)
         tracks_to_repair: List[Dict[str, Any]] = payload.get("tracks_to_repair") or []
         album_release_stamp_rows: List[Dict[str, Any]] = payload.get("album_release_stamp_rows") or []
+        zero_unmatched_rows: List[Dict[str, Any]] = payload.get("zero_unmatched_rows") or []
         album_before: Dict[str, Any] = payload.get("album_before") or {}
+        establish_release_group_id = str(payload.get("establish_release_group_id") or "").strip().lower()
         tags_mutated = bool(meta.get("tags_mutated"))
 
-        item_ids = sorted({int(t["item_id"]) for t in tracks_to_repair} | {int(t["item_id"]) for t in album_release_stamp_rows})
+        item_ids = sorted(
+            {int(t["item_id"]) for t in tracks_to_repair}
+            | {int(t["item_id"]) for t in album_release_stamp_rows}
+            | {int(t["item_id"]) for t in zero_unmatched_rows}
+        )
 
         # Same resource-locking discipline as Apply (album lock + every
         # item lock, deterministic order) -- SEC-002 Wave 19 final review:
@@ -4517,6 +4860,26 @@ def rollback_album_mb_track_repair(
                         if live_albumid != spec["after"]["mb_albumid"]:
                             store.update(operation_id, logs=[f"Rollback precondition failed: item {iid} was modified after this repair."])
                             return {"ok": False, "error": f"Item {iid} was modified after this repair; refusing to overwrite a later change.", "code": "repair_rollback_stale"}
+                    for spec in zero_unmatched_rows:
+                        iid = int(spec["item_id"])
+                        cur.execute("SELECT track FROM items WHERE id=?", (iid,))
+                        row = cur.fetchone()
+                        if not row:
+                            store.update(operation_id, logs=[f"Rollback precondition failed: item {iid} no longer exists."])
+                            return {"ok": False, "error": f"Item {iid} no longer exists.", "code": "repair_rollback_precondition_failed"}
+                        if int(row["track"] or 0) != 0:
+                            store.update(operation_id, logs=[f"Rollback precondition failed: item {iid} was modified after this repair."])
+                            return {"ok": False, "error": f"Item {iid} was modified after this repair; refusing to overwrite a later change.", "code": "repair_rollback_stale"}
+                    if establish_release_group_id:
+                        cur.execute("SELECT mb_releasegroupid FROM albums WHERE id=?", (album_id,))
+                        arow = cur.fetchone()
+                        if not arow:
+                            store.update(operation_id, logs=["Rollback precondition failed: album no longer exists."])
+                            return {"ok": False, "error": "Album no longer exists.", "code": "repair_rollback_precondition_failed"}
+                        live_established_rg = str(arow["mb_releasegroupid"] or "").strip().lower()
+                        if live_established_rg != establish_release_group_id:
+                            store.update(operation_id, logs=["Rollback precondition failed: album Release Group was modified after this repair."])
+                            return {"ok": False, "error": "Album Release Group ID was modified after this repair; refusing to overwrite a later change.", "code": "repair_rollback_stale"}
                 finally:
                     con.close()
             except sqlite3.Error as ex:
@@ -4550,12 +4913,33 @@ def rollback_album_mb_track_repair(
                         else:
                             db_failed_ids.append(iid)
 
+                    for spec in zero_unmatched_rows:
+                        iid = spec["item_id"]
+                        before = spec["before"]
+                        cur.execute("UPDATE items SET track=? WHERE id=?", (before["track"], iid))
+                        if cur.rowcount == 1:
+                            db_restored += 1
+                        else:
+                            db_failed_ids.append(iid)
+
                     # Restore the album's own original value -- captured
                     # explicitly at Plan time, not inferred from the first
                     # repaired track (which is not necessarily the same
                     # value the album row itself held before Apply).
                     if album_before.get("mb_albumid") is not None:
                         cur.execute("UPDATE albums SET mb_albumid=? WHERE id=?", (album_before["mb_albumid"], album_id))
+                    if establish_release_group_id:
+                        # Restore to blank -- this transaction is what
+                        # established it in the first place (the
+                        # precondition check above already confirmed the
+                        # live value still matches what this transaction
+                        # wrote, so this can only ever be undoing this
+                        # transaction's own establishment, never a later,
+                        # unrelated edit).
+                        cur.execute(
+                            "UPDATE albums SET mb_releasegroupid='' WHERE id=? AND mb_releasegroupid=?",
+                            (album_id, establish_release_group_id),
+                        )
                     con.commit()
                 finally:
                     con.close()
@@ -4588,7 +4972,7 @@ def rollback_album_mb_track_repair(
                     else:
                         tags_failed_ids.append(iid)
 
-            total_rows = len(tracks_to_repair) + len(album_release_stamp_rows)
+            total_rows = len(tracks_to_repair) + len(album_release_stamp_rows) + len(zero_unmatched_rows)
             full_success = (not db_failed_ids) and (not tags_failed_ids)
             any_restored = db_restored > 0 or tags_restored > 0
             final_status = "Rolled Back" if full_success else ("Partially Rolled Back" if any_restored else "Failed")
