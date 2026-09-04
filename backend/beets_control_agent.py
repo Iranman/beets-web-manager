@@ -127,6 +127,28 @@ def _resolved_downloads_root() -> str:
 
 def _resolved_staging_root() -> str:
     return str(Path(os.environ.get("STAGING_ROOT") or _resolved_downloads_root()).resolve(strict=False))
+
+
+# Same env var name, same comma-separated parsing, and the same default
+# literal as app.py's module-level TORRENT_SOURCE_ROOTS (see app.py's
+# DEFAULT_TORRENT_SOURCE_ROOTS) so one operator-set value governs both
+# containers, matching the MUSIC_ROOT/PLAYLIST_DIR convention above. Every
+# call site below previously read this with
+# os.environ.get("TORRENT_SOURCE_ROOTS", "/torrents") as a single list
+# entry: a comma-separated value (the only format app.py itself ever
+# produces or documents for this name) was treated as one literal path that
+# never resolves to a real directory, silently dropping every root past the
+# first from consideration, and the "/torrents" fallback did not match this
+# container's real mount point (/data/torrents, from DOWNLOAD_PATH) --
+# Wave 32 root-default audit.
+_DEFAULT_TORRENT_SOURCE_ROOTS = "/data/torrents/music,/data/torrents,/data/downloads"
+
+
+def _resolved_torrent_source_roots() -> list:
+    raw = os.environ.get("TORRENT_SOURCE_ROOTS", _DEFAULT_TORRENT_SOURCE_ROOTS)
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
 PLAYLIST_DIR = Path(os.environ.get("PLAYLIST_DIR", "/data/media/music/playlists"))
 PLAYLIST_DOWNLOAD_ROOT = Path(os.environ.get(
     "PLAYLIST_DOWNLOAD_ROOT",
@@ -4757,7 +4779,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             allowed_roots = [
                 _resolved_downloads_root(),
                 os.environ.get("PLAYLIST_DOWNLOAD_ROOT", "/data/torrents/music/Playlist Downloads"),
-                os.environ.get("TORRENT_SOURCE_ROOTS", "/torrents"),
+                *_resolved_torrent_source_roots(),
                 tempfile.gettempdir(),
                 os.environ.get("IMPORT_REVIEW_QUARANTINE_DIR", "/config/import_review_quarantine"),
                 music_root_env,
@@ -4826,7 +4848,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             candidate_allowed_roots = [
                 _resolved_downloads_root(),
                 os.environ.get("PLAYLIST_DOWNLOAD_ROOT", "/data/torrents/music/Playlist Downloads"),
-                os.environ.get("TORRENT_SOURCE_ROOTS", "/torrents"),
+                *_resolved_torrent_source_roots(),
                 tempfile.gettempdir(),
             ]
             res = transaction_engine.create_track_replacement_plan(
@@ -4850,7 +4872,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             candidate_allowed_roots = [
                 _resolved_downloads_root(),
                 os.environ.get("PLAYLIST_DOWNLOAD_ROOT", "/data/torrents/music/Playlist Downloads"),
-                os.environ.get("TORRENT_SOURCE_ROOTS", "/torrents"),
+                *_resolved_torrent_source_roots(),
                 tempfile.gettempdir(),
             ]
             res = transaction_engine.execute_track_replacement_apply(
@@ -5003,7 +5025,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             staging_allowed_roots = [
                 _resolved_downloads_root(),
                 os.environ.get("PLAYLIST_DOWNLOAD_ROOT", "/data/torrents/music/Playlist Downloads"),
-                os.environ.get("TORRENT_SOURCE_ROOTS", "/torrents"),
+                *_resolved_torrent_source_roots(),
                 tempfile.gettempdir(),
             ]
             res = transaction_engine.create_existing_album_reconcile_plan(
@@ -5027,7 +5049,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             staging_allowed_roots = [
                 _resolved_downloads_root(),
                 os.environ.get("PLAYLIST_DOWNLOAD_ROOT", "/data/torrents/music/Playlist Downloads"),
-                os.environ.get("TORRENT_SOURCE_ROOTS", "/torrents"),
+                *_resolved_torrent_source_roots(),
                 tempfile.gettempdir(),
             ]
             res = transaction_engine.execute_existing_album_reconcile_apply(

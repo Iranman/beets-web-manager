@@ -1482,15 +1482,33 @@ def create_album_cleanup_plan(
         return {"ok": False, "error": f"Album {album_id} has no track items in database."}
 
     album_dir = item_paths[0].parent.resolve(strict=False)
-    music_root = Path(os.environ.get("BEETS_MUSIC_DIR", os.environ.get("MUSIC_ROOT", "/music"))).resolve(strict=False)
+    # SEC-002 / ARCH-003 Wave 32 root-default audit: this previously
+    # unconditionally prepended an env-derived music_root to `roots`
+    # regardless of whether the caller supplied `allowed_roots` -- unlike
+    # every sibling function in this module, which only falls back to an
+    # env-derived root when the caller-supplied roots list is empty. The
+    # real production caller (beets_control_agent.py's
+    # /albums/cleanup/plan handler) always supplies allowed_roots via
+    # _resolved_music_root()/_resolved_downloads_root(), so this was inert
+    # in practice (the stale "/music" default below never matches this
+    # container's real mount, /data/media/music, so it only ever added a
+    # dead extra root) -- but it is fixed here for defense-in-depth
+    # consistency with the rest of the module and so a real default is
+    # used if this function is ever called (directly, or by a future
+    # caller) without allowed_roots.
+    music_root = Path(
+        os.environ.get("BEETS_MUSIC_DIR")
+        or os.environ.get("MUSIC_ROOT")
+        or os.environ.get("MUSIC_LIBRARY_PATH", "/data/media/music")
+    ).resolve(strict=False)
 
-    roots = [music_root] + [Path(r).resolve(strict=False) for r in (allowed_roots or [])]
+    roots = [Path(r).resolve(strict=False) for r in (allowed_roots or [])] or [music_root]
     is_under_root = any(album_dir == r or r in album_dir.parents for r in roots)
     if not is_under_root:
         return {"ok": False, "error": f"Album path {album_dir} is outside authorized music roots."}
 
-    if album_dir == music_root:
-        return {"ok": False, "error": f"Refusing to delete music root directory {music_root} itself."}
+    if any(album_dir == r for r in roots):
+        return {"ok": False, "error": f"Refusing to delete music root directory {album_dir} itself."}
 
     steps: List[Dict[str, Any]] = []
     step_idx = 1
