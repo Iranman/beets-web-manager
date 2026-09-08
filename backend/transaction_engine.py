@@ -32,7 +32,26 @@ import unicodedata
 # investigation into why _match_tracks_from_mb_shared() was thought to need
 # a normalization-pipeline port: it did not, this module can import it
 # directly). Used by album_mb_track_repair_v1's target_tracks subset filter.
-from backend.import_guard import release_track_matches_missing_target
+#
+# Wave 33 real-Docker-acceptance fix: this module is deployed two different
+# ways -- as a real `backend` package member (this repo, the web-manager
+# container, and this file's own test suite), and flattened into a single
+# directory with no package structure at all inside the `beets` engine
+# container (Dockerfile.beets COPYs backend/*.py to
+# /opt/beets-web-manager-agent/*.py directly, imported bare -- e.g.
+# `import transaction_engine`, not `from backend import transaction_engine`).
+# A bare `from backend.import_guard import ...` therefore crashed the
+# engine container at startup with `ModuleNotFoundError: No module named
+# 'backend'` -- found only by actually booting this exact image, not by
+# py_compile or the unit test suite, neither of which exercises the
+# engine's own flattened layout. track_align.py (imported later in this
+# same file, inside confirmed_import_v1) already solves this exact problem
+# with a flat-import-first, package-import-fallback try/except; mirrored
+# here.
+try:
+    from import_guard import release_track_matches_missing_target
+except ImportError:
+    from backend.import_guard import release_track_matches_missing_target
 
 LOG = logging.getLogger("beets_web.transaction_engine")
 
@@ -4009,7 +4028,10 @@ def create_album_mb_track_repair_plan(
         # merely bounding it. items_list is already read in the same
         # `ORDER BY disc, track, title, id` app.py's own DB query used, so
         # the greedy, order-dependent claim order is identical.
-        from backend.mb_alignment import greedy_album_track_alignment, album_track_score
+        try:
+            from mb_alignment import greedy_album_track_alignment, album_track_score
+        except ImportError:
+            from backend.mb_alignment import greedy_album_track_alignment, album_track_score
         alignment = greedy_album_track_alignment(
             items_list,
             mb_tracks,
@@ -4023,7 +4045,10 @@ def create_album_mb_track_repair_plan(
     _acoustid_lookup = acoustid_lookup_fn
     if acoustid_verify and _acoustid_lookup is None:
         try:
-            from backend.beets_control_agent import _engine_acoustid_lookup as _acoustid_lookup
+            try:
+                from beets_control_agent import _engine_acoustid_lookup as _acoustid_lookup
+            except ImportError:
+                from backend.beets_control_agent import _engine_acoustid_lookup as _acoustid_lookup
         except Exception:
             # Engine-side fpcalc/AcoustID machinery unavailable (e.g. this
             # module imported outside the beets_control_agent process) --

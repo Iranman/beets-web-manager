@@ -264,6 +264,56 @@ def seed_disposable_library(config_dir: Path, music_dir: Path) -> dict:
         length=1.0,
     )
     offline_item.add(lib)
+
+    # SEC-002 / ARCH-003 Wave 33 continuation: two albums under the same
+    # source albumartist, for library_merge_artist() (migrated off local
+    # BEET_BIN subprocess execution onto beets_client.update_album_metadata()/
+    # relocate_album() this wave) -- real DB/filesystem state is verified
+    # after, not just "no error returned".
+    merge_src_dir_a = music_dir / "Merge Source Artist" / "Merge Album A"
+    merge_src_dir_a.mkdir(parents=True, exist_ok=True)
+    merge_path_a = merge_src_dir_a / "01 - Merge Track A.wav"
+    merge_path_a.write_bytes(_real_wav_bytes(freq=440))
+    merge_album_a = bl.Album(lib, albumartist="Merge Source Artist", album="Merge Album A", year=2024)
+    merge_album_a.add(lib)
+    merge_item_a = bl.Item(
+        albumartist="Merge Source Artist", album="Merge Album A",
+        artist="Merge Source Artist", title="Merge Track A",
+        track=1, disc=1, year=2024, album_id=merge_album_a.id,
+        path=str(merge_path_a).encode("utf-8"), length=1.0,
+    )
+    merge_item_a.add(lib)
+
+    merge_src_dir_b = music_dir / "Merge Source Artist" / "Merge Album B"
+    merge_src_dir_b.mkdir(parents=True, exist_ok=True)
+    merge_path_b = merge_src_dir_b / "01 - Merge Track B.wav"
+    merge_path_b.write_bytes(_real_wav_bytes(freq=445))
+    merge_album_b = bl.Album(lib, albumartist="Merge Source Artist", album="Merge Album B", year=2024)
+    merge_album_b.add(lib)
+    merge_item_b = bl.Item(
+        albumartist="Merge Source Artist", album="Merge Album B",
+        artist="Merge Source Artist", title="Merge Track B",
+        track=1, disc=1, year=2024, album_id=merge_album_b.id,
+        path=str(merge_path_b).encode("utf-8"), length=1.0,
+    )
+    merge_item_b.add(lib)
+
+    # One album with a Unicode "fancy" hyphen (U+2010) in its albumartist,
+    # for library_normalize_artists() (same migration, same wave).
+    normalize_dir = music_dir / "Normalize‐Artist" / "Normalize Album"
+    normalize_dir.mkdir(parents=True, exist_ok=True)
+    normalize_path = normalize_dir / "01 - Normalize Track.wav"
+    normalize_path.write_bytes(_real_wav_bytes(freq=460))
+    normalize_album = bl.Album(lib, albumartist="Normalize‐Artist", album="Normalize Album", year=2024)
+    normalize_album.add(lib)
+    normalize_item = bl.Item(
+        albumartist="Normalize‐Artist", album="Normalize Album",
+        artist="Normalize‐Artist", title="Normalize Track",
+        track=1, disc=1, year=2024, album_id=normalize_album.id,
+        path=str(normalize_path).encode("utf-8"), length=1.0,
+    )
+    normalize_item.add(lib)
+
     lib._close()
 
     return {
@@ -277,6 +327,12 @@ def seed_disposable_library(config_dir: Path, music_dir: Path) -> dict:
         "offline_item_path": str(offline_path),
         "offline_container_path": "/data/media/music/" + offline_path.relative_to(music_dir).as_posix(),
         "db_path": str(db_path),
+        "merge_album_a_id": int(merge_album_a.id),
+        "merge_album_b_id": int(merge_album_b.id),
+        "merge_item_a_id": int(merge_item_a.id),
+        "merge_item_b_id": int(merge_item_b.id),
+        "normalize_album_id": int(normalize_album.id),
+        "normalize_item_id": int(normalize_item.id),
     }
 
 
@@ -2282,6 +2338,91 @@ sys.exit(0 if ok else 1)
     else:
         print("[PASS] attach-recording-dict-shaped-ipc-failure-stops-before-success")
 
+
+def run_wave33_scenarios(client: "HttpClient", db_path: str) -> None:
+    """SEC-002 / ARCH-003 Wave 33 continuation Docker acceptance: exercises
+    library_merge_artist()/library_normalize_artists() -- migrated off local
+    BEET_BIN subprocess execution onto beets_client.update_album_metadata()/
+    relocate_album() this wave -- through the real production HTTP route ->
+    real engine IPC -> real Beets DB write + real on-disk tag write/
+    relocate. Exact host-mounted DB state is verified after, not just "no
+    error returned"."""
+
+    def scenario_pass(name: str) -> None:
+        print(f"[PASS] {name}")
+
+    def scenario_fail(name: str, detail: str) -> None:
+        _fail(f"{name}: {detail}")
+
+    print("==> [Wave33] library_merge_artist(): merging 2 albums under 'Merge Source Artist'...")
+    status, body = client.request(
+        "POST", "/api/library/merge-artist",
+        json_body={"from_artist": "Merge Source Artist", "to_artist": "Merge Target Artist Wave33"},
+        timeout=15,
+    )
+    if status != 200 or not body.get("ok"):
+        scenario_fail("wave33-library-merge-artist", f"request rejected: {status} {body}")
+    else:
+        try:
+            result = client.wait_job(body["job_id"], timeout=60)
+        except TimeoutError as ex:
+            scenario_fail("wave33-library-merge-artist", f"job did not complete: {ex}")
+            result = None
+        if result is not None:
+            if result.get("status") != "success":
+                scenario_fail("wave33-library-merge-artist", f"job did not succeed: {result.get('status')} / {result.get('log')}")
+            else:
+                con = sqlite3.connect(db_path)
+                con.row_factory = sqlite3.Row
+                target_albums = con.execute(
+                    "SELECT id FROM albums WHERE albumartist='Merge Target Artist Wave33'"
+                ).fetchall()
+                remaining_src = con.execute(
+                    "SELECT COUNT(*) FROM albums WHERE albumartist='Merge Source Artist'"
+                ).fetchone()[0]
+                target_items = con.execute(
+                    "SELECT i.albumartist, i.artist FROM items i JOIN albums a ON a.id=i.album_id "
+                    "WHERE a.albumartist='Merge Target Artist Wave33'"
+                ).fetchall()
+                con.close()
+                if len(target_albums) != 2:
+                    scenario_fail("wave33-library-merge-artist", f"expected exactly 2 albums renamed to the target artist, found {len(target_albums)}")
+                elif remaining_src != 0:
+                    scenario_fail("wave33-library-merge-artist", f"expected 0 albums left under the source artist, found {remaining_src}")
+                elif len(target_items) != 2 or any(r["albumartist"] != "Merge Target Artist Wave33" for r in target_items):
+                    scenario_fail("wave33-library-merge-artist", f"item rows under the merged albums do not all show the new albumartist: {[dict(r) for r in target_items]}")
+                else:
+                    scenario_pass("wave33-library-merge-artist (both albums+items renamed via real engine IPC, no local BEET_BIN, host-mounted DB verified)")
+
+    print("==> [Wave33] library_normalize_artists(): normalizing Unicode punctuation in albumartist...")
+    status, body = client.request("POST", "/api/library/normalize-artists", json_body={}, timeout=15)
+    if status != 200 or not body.get("ok"):
+        scenario_fail("wave33-library-normalize-artists", f"request rejected: {status} {body}")
+    else:
+        try:
+            result = client.wait_job(body["job_id"], timeout=60)
+        except TimeoutError as ex:
+            scenario_fail("wave33-library-normalize-artists", f"job did not complete: {ex}")
+            result = None
+        if result is not None:
+            if result.get("status") != "success":
+                scenario_fail("wave33-library-normalize-artists", f"job did not succeed: {result.get('status')} / {result.get('log')}")
+            else:
+                con = sqlite3.connect(db_path)
+                con.row_factory = sqlite3.Row
+                row = con.execute("SELECT albumartist FROM albums WHERE album='Normalize Album'").fetchone()
+                con.close()
+                normalized = row["albumartist"] if row else None
+                if row is None:
+                    scenario_fail("wave33-library-normalize-artists", "normalize-scenario album row disappeared")
+                elif normalized == "Normalize‐Artist":
+                    scenario_fail("wave33-library-normalize-artists", "albumartist Unicode hyphen (U+2010) was not normalized")
+                elif "‐" in (normalized or ""):
+                    scenario_fail("wave33-library-normalize-artists", f"unexpected: normalized value still contains U+2010: {normalized!r}")
+                else:
+                    scenario_pass(f"wave33-library-normalize-artists (normalized to {normalized!r} via real engine IPC, host-mounted DB verified)")
+
+
 def main() -> int:
     print("==> Checking Docker daemon / compose availability...")
     require_docker()
@@ -2583,6 +2724,9 @@ def main() -> int:
 
         print("\n==> Wave 26 AI Batch Import scenarios ==>")
         run_wave26_ai_import_scenarios(client, web_container, engine_container, downloads_dir, db_path)
+
+        print("\n==> Wave 33 continuation scenarios ==>")
+        run_wave33_scenarios(client, db_path)
 
         if FAILURES:
             print(f"\n[SUMMARY] {len(FAILURES)} failure(s):")
