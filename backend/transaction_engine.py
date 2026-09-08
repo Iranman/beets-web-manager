@@ -4000,13 +4000,21 @@ def create_album_mb_track_repair_plan(
     items_by_id: Dict[int, Dict[str, Any]] = {it["id"]: it for it in items_list}
 
     try:
-        from backend.mb_alignment import summarize_mb_track_alignment, best_album_track_match
-        alignment = summarize_mb_track_alignment(
+        # SEC-002 / ARCH-003 Wave 33 continuation: this family's alignment
+        # procedure IS app.py's own _match_tracks_from_mb_shared() matching
+        # loop (greedy_album_track_alignment, ported verbatim), not an
+        # independently-written approximation of it -- eliminates the
+        # correctness risk of the two ever silently disagreeing on which
+        # specific track a file gets permanently relabeled as, rather than
+        # merely bounding it. items_list is already read in the same
+        # `ORDER BY disc, track, title, id` app.py's own DB query used, so
+        # the greedy, order-dependent claim order is identical.
+        from backend.mb_alignment import greedy_album_track_alignment, album_track_score
+        alignment = greedy_album_track_alignment(
             items_list,
             mb_tracks,
-            match_fn=best_album_track_match,
+            score_fn=album_track_score,
             threshold=0.72,
-            repair_threshold=0.65,
         )
     except Exception as ex:
         return {"ok": False, "error": f"Track alignment failed: {ex}"}
@@ -8848,6 +8856,17 @@ _ALBUM_DUPLICATE_MERGE_ADOPT_FIELDS = (
     "original_day", "disctotal",
 )
 
+# ARCH-003 Wave 33 continuation: deliberately separate, small, track-level
+# allowlist for item_field_overrides -- distinct from the album-level
+# _ALBUM_DUPLICATE_MERGE_ADOPT_FIELDS set above. Supports the
+# apply_album_duplicate_resolver() retag path (decomposed into N single-
+# source-album album_duplicate_merge_v1 calls at the app.py layer, see
+# docs/TECHNICAL_DEBT.md): each moved item is manually assigned to a
+# specific, caller-supplied missing-track slot on the target release --
+# per-item DIFFERENT values, never a single uniform value the way
+# adopt_target_fields' fields are.
+_ALBUM_DUPLICATE_MERGE_ITEM_OVERRIDE_FIELDS = ("mb_trackid", "disc", "track", "title")
+
 
 def create_album_duplicate_merge_plan(
     store: TransactionStore,
@@ -8873,6 +8892,23 @@ def create_album_duplicate_merge_plan(
     (matching what a real split-album merge needs -- the moved rows
     must end up describing target's album, not keep source's stale
     values), while target's own album row is left untouched.
+
+    ARCH-003 Wave 33 continuation: item_field_overrides (optional, also
+    only meaningful with item_ids) is the per-item counterpart to
+    adopt_target_fields -- {str(item_id): {field: value}}, restricted to
+    the small, deliberately separate track-level
+    _ALBUM_DUPLICATE_MERGE_ITEM_OVERRIDE_FIELDS allowlist (mb_trackid,
+    disc, track, title). Unlike adopt_target_fields' single uniform
+    value applied to every moved item, this lets each moved item receive
+    its own distinct values -- e.g. each duplicate item assigned to a
+    different, caller-supplied missing-track slot on the target release
+    (apply_album_duplicate_resolver()'s retag path, decomposed into N
+    single-source-album calls to this family at the app.py layer rather
+    than this family growing multi-source-album support -- see
+    docs/TECHNICAL_DEBT.md). Every override key must name an item
+    actually in item_ids; an id outside that set is refused, never
+    silently ignored or silently authorizing a write to an unrelated
+    item.
 
     Either shape now requires a real Release-Group identity check that
     did not exist here before this wave for the split case: an item
@@ -8900,6 +8936,34 @@ def create_album_duplicate_merge_plan(
             return {"ok": False, "error": "item_ids, if provided, must be a non-empty list of positive item ids", "code": "album_duplicate_merge_invalid_payload"}
 
     adopt_target_fields = bool(payload.get("adopt_target_fields"))
+
+    # item_field_overrides (Wave 33 continuation): {str(item_id): {field:
+    # value}}, restricted to _ALBUM_DUPLICATE_MERGE_ITEM_OVERRIDE_FIELDS.
+    # Every key must name an item actually being moved -- never an
+    # arbitrary, unvalidated item id the caller can reach through this
+    # payload alone.
+    raw_item_overrides = payload.get("item_field_overrides")
+    item_field_overrides: Dict[str, Dict[str, Any]] = {}
+    if raw_item_overrides:
+        if not isinstance(raw_item_overrides, dict):
+            return {"ok": False, "error": "item_field_overrides must be an object keyed by item id", "code": "album_duplicate_merge_invalid_payload"}
+        if requested_item_ids is None:
+            return {"ok": False, "error": "item_field_overrides requires item_ids to also be supplied", "code": "album_duplicate_merge_invalid_payload"}
+        allowed_override_ids = set(requested_item_ids)
+        for raw_iid, raw_fields in raw_item_overrides.items():
+            try:
+                iid = int(raw_iid)
+            except Exception:
+                return {"ok": False, "error": f"item_field_overrides key {raw_iid!r} is not a valid item id", "code": "album_duplicate_merge_invalid_payload"}
+            if iid not in allowed_override_ids:
+                return {"ok": False, "error": f"item_field_overrides item {iid} is not one of the requested item_ids", "code": "album_duplicate_merge_invalid_payload"}
+            if not isinstance(raw_fields, dict):
+                return {"ok": False, "error": f"item_field_overrides value for item {iid} must be an object", "code": "album_duplicate_merge_invalid_payload"}
+            unknown = set(raw_fields) - set(_ALBUM_DUPLICATE_MERGE_ITEM_OVERRIDE_FIELDS)
+            if unknown:
+                return {"ok": False, "error": f"item_field_overrides field(s) not allowed: {sorted(unknown)}", "code": "album_duplicate_merge_invalid_payload"}
+            if raw_fields:
+                item_field_overrides[str(iid)] = dict(raw_fields)
 
     lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB", "")
     if not lib_db or not Path(lib_db).exists():
@@ -8954,27 +9018,32 @@ def create_album_duplicate_merge_plan(
         for col in _ALBUM_DUPLICATE_MERGE_ADOPT_FIELDS:
             if col in target_before and target_before.get(col) is not None:
                 adopt_fields[col] = target_before[col]
-        if adopt_fields:
-            # Capture each moved item's own pre-adopt values for the exact
-            # fields about to be overwritten, so rollback can restore them
-            # (not just re-parent the item back to source -- its adopted
-            # fields must revert too).
-            con = sqlite3.connect(lib_db, timeout=10)
-            con.row_factory = sqlite3.Row
-            try:
-                for iid in move_item_ids:
-                    row = con.execute("SELECT * FROM items WHERE id=?", (iid,)).fetchone()
-                    if row:
-                        row_dict = _row_to_dict(row)
-                        moved_items_before[str(iid)] = {k: row_dict.get(k) for k in adopt_fields}
-            finally:
-                con.close()
     else:
         for col in _ALBUM_DUPLICATE_MERGE_INHERIT_FIELDS:
             t_val = _s(target_before.get(col)).strip()
             s_val = _s(source_before.get(col)).strip()
             if not t_val and s_val:
                 inherit_fields[col] = source_before.get(col)
+
+    if adopt_fields or item_field_overrides:
+        # Capture each moved item's own pre-overwrite values for the
+        # exact fields about to change (the uniform adopt_fields set,
+        # this item's own specific item_field_overrides, or both), so
+        # rollback can restore them -- not just re-parent the item back
+        # to source, its changed fields must revert too.
+        con = sqlite3.connect(lib_db, timeout=10)
+        con.row_factory = sqlite3.Row
+        try:
+            for iid in move_item_ids:
+                fields_for_item = set(adopt_fields) | set(item_field_overrides.get(str(iid)) or {})
+                if not fields_for_item:
+                    continue
+                row = con.execute("SELECT * FROM items WHERE id=?", (iid,)).fetchone()
+                if row:
+                    row_dict = _row_to_dict(row)
+                    moved_items_before[str(iid)] = {k: row_dict.get(k) for k in fields_for_item}
+        finally:
+            con.close()
 
     resource_keys = {f"album:{target_id}", f"album:{source_id}"}
     for iid in move_item_ids:
@@ -8994,6 +9063,7 @@ def create_album_duplicate_merge_plan(
             "partial_move": requested_item_ids is not None,
             "inherit_fields": inherit_fields,
             "adopt_fields": adopt_fields,
+            "item_field_overrides": item_field_overrides,
             "moved_items_before": moved_items_before,
             "target_before": target_before,
             "source_before": source_before,
@@ -9008,6 +9078,7 @@ def create_album_duplicate_merge_plan(
         "moved_item_count": len(move_item_ids),
         "inherit_fields": inherit_fields,
         "adopt_fields": adopt_fields,
+        "item_field_overrides": item_field_overrides,
     }
 
 
@@ -9041,6 +9112,7 @@ def execute_album_duplicate_merge_apply(
         partial_move = bool(meta.get("partial_move"))
         inherit_fields = meta.get("inherit_fields") or {}
         adopt_fields = meta.get("adopt_fields") or {}
+        item_field_overrides: Dict[str, Dict[str, Any]] = meta.get("item_field_overrides") or {}
 
         def _fail(msg: str, code: str) -> Dict[str, Any]:
             store.update(operation_id, status="Failed", logs=[f"Apply failed: {msg}"])
@@ -9099,6 +9171,23 @@ def execute_album_duplicate_merge_apply(
                     if cur.rowcount != len(move_item_ids):
                         con.rollback()
                         return _fail(f"Expected to update {len(move_item_ids)} moved item row(s) with target fields, affected {cur.rowcount}", "album_duplicate_merge_rowcount_mismatch")
+
+                if item_field_overrides:
+                    # Per-item, potentially different values -- unlike
+                    # adopt_fields above, this cannot be one shared query;
+                    # each moved item may receive entirely different
+                    # mb_trackid/disc/track/title values (its own specific
+                    # missing-track slot), never a uniform one.
+                    for iid in move_item_ids:
+                        fields = item_field_overrides.get(str(iid))
+                        if not fields:
+                            continue
+                        cols = [f"{k}=?" for k in fields]
+                        vals = list(fields.values()) + [iid]
+                        cur = con.execute(f"UPDATE items SET {', '.join(cols)} WHERE id=?", vals)
+                        if cur.rowcount != 1:
+                            con.rollback()
+                            return _fail(f"Expected to update exactly 1 item row for item {iid}'s field overrides, affected {cur.rowcount}", "album_duplicate_merge_rowcount_mismatch")
 
                 if inherit_fields:
                     cols = [f"{k}=?" for k in inherit_fields]
@@ -9209,7 +9298,17 @@ def rollback_album_duplicate_merge(
                     if cur.rowcount != len(move_item_ids):
                         db_failed += (len(move_item_ids) - cur.rowcount)
 
-                if adopt_fields and moved_items_before:
+                if moved_items_before:
+                    # Restores whatever fields were actually snapshotted
+                    # per item, whether from adopt_fields (a uniform value
+                    # every moved item shares) or item_field_overrides (a
+                    # value specific to that one item) -- moved_items_before
+                    # already only ever contains the exact keys that were
+                    # actually about to change for that item (Wave 33
+                    # continuation: previously gated on `adopt_fields`
+                    # alone, which is correct only because adopt_fields was
+                    # the sole populator of moved_items_before before this
+                    # wave; item_field_overrides is now a second one).
                     for iid in move_item_ids:
                         before = moved_items_before.get(str(iid))
                         if not before:

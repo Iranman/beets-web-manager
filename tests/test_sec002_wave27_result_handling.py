@@ -259,8 +259,20 @@ class DuplicateResolverIdentityTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_retag_uses_selected_album_id_not_item_id_or_album_zero(self):
-        with mock.patch.object(APP.beets_client, "update_album_metadata", return_value={"ok": True}) as update, \
-             mock.patch.object(APP.beets_client, "relocate_album", return_value={"ok": True}) as relocate:
+        # ARCH-003 Wave 33 continuation: the retag path now decomposes
+        # into one album_duplicate_merge_v1 Plan+Apply call per distinct
+        # source album (here, exactly one: album 7) instead of raw local
+        # SQL -- see docs/TECHNICAL_DEBT.md.
+        with mock.patch.object(
+            APP.beets_client, "plan_album_duplicate_merge",
+            return_value={"ok": True, "operation_id": "op-retag-1"},
+        ) as plan_merge, mock.patch.object(
+            APP.beets_client, "apply_album_duplicate_merge", return_value={"ok": True},
+        ) as apply_merge, mock.patch.object(
+            APP.beets_client, "update_album_metadata", return_value={"ok": True},
+        ) as update, mock.patch.object(
+            APP.beets_client, "relocate_album", return_value={"ok": True},
+        ) as relocate:
             response = self.client.post("/api/albums/123/duplicate-resolver/apply", json={
                 "mb_albumid": VALID_RELEASE_ID,
                 "write_tags": True,
@@ -269,10 +281,185 @@ class DuplicateResolverIdentityTests(unittest.TestCase):
             })
         self.assertEqual(response.status_code, 200)
         self.assertIsNone(self.inline.error)
-        update.assert_called_once_with(123, {}, force_write_tags=True)
+
+        plan_merge.assert_called_once()
+        merge_payload = plan_merge.call_args.args[0]
+        self.assertEqual(merge_payload["target_album_id"], 123)
+        self.assertEqual(merge_payload["source_album_id"], 7)
+        self.assertEqual(merge_payload["item_ids"], [999])
+        self.assertTrue(merge_payload["adopt_target_fields"])
+        self.assertEqual(
+            merge_payload["item_field_overrides"]["999"]["mb_trackid"],
+            VALID_TRACK_ID,
+        )
+        apply_merge.assert_called_once_with("op-retag-1")
+
+        # Target album's own mb_albumid is stamped separately (the
+        # merge family never touches the target's own row), plus the
+        # existing tag-write/relocate stage -- three total
+        # update_album_metadata-family calls: the mb_albumid stamp and
+        # the force_write_tags call.
+        update.assert_any_call(123, {"mb_albumid": VALID_RELEASE_ID})
+        update.assert_any_call(123, {}, force_write_tags=True)
         relocate.assert_called_once_with(123, mode="rename")
         self.assertNotEqual(relocate.call_args.args[0], 999)
         self.assertNotEqual(relocate.call_args.args[0], 0)
+
+
+@unittest.skipIf(APP is None, f"app.py could not be imported: {_APP_IMPORT_ERROR}")
+class DuplicateResolverMultiSourceRetagTests(unittest.TestCase):
+    """ARCH-003 Wave 33 continuation: apply_album_duplicate_resolver()'s
+    retag path decomposed into N single-source-album
+    album_duplicate_merge_v1 calls, one per distinct source album among
+    the selected retag items -- see docs/TECHNICAL_DEBT.md for the
+    accepted whole-batch-atomicity trade-off this makes (deliberate, not
+    an oversight): a later source's merge failing after an earlier one
+    already committed is now a real, reportable partial-completion
+    outcome, never silently folded into an overall "ok": true.
+    """
+
+    VALID_TRACK_ID_2 = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="wave33_multi_source_retag_")
+        self.db_path = Path(self.tmp.name) / "library.blb"
+        con = sqlite3.connect(self.db_path)
+        try:
+            con.executescript(
+                """
+                CREATE TABLE albums (id INTEGER PRIMARY KEY, album TEXT, albumartist TEXT, year INTEGER, mb_albumid TEXT);
+                CREATE TABLE items (id INTEGER PRIMARY KEY, album_id INTEGER, album TEXT, albumartist TEXT, artist TEXT, title TEXT, disc INTEGER, track INTEGER, year INTEGER, mb_albumid TEXT, mb_trackid TEXT, path BLOB);
+                INSERT INTO albums (id, album, albumartist, year, mb_albumid) VALUES (123, 'Target Album', 'Target Artist', 2020, 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
+                INSERT INTO albums (id, album, albumartist, year, mb_albumid) VALUES (7, 'Duplicate Album A', 'Wrong Artist A', 2019, 'old-release-a');
+                INSERT INTO albums (id, album, albumartist, year, mb_albumid) VALUES (8, 'Duplicate Album B', 'Wrong Artist B', 2018, 'old-release-b');
+                INSERT INTO items (id, album_id, album, albumartist, artist, title, disc, track, year, mb_albumid, mb_trackid, path) VALUES (999, 7, 'Duplicate Album A', 'Wrong Artist A', 'Wrong Artist A', 'Wrong title A', 1, 99, 2019, 'old-release-a', 'old-track-a', X'2f6d757369632f612e6d7033');
+                INSERT INTO items (id, album_id, album, albumartist, artist, title, disc, track, year, mb_albumid, mb_trackid, path) VALUES (888, 8, 'Duplicate Album B', 'Wrong Artist B', 'Wrong Artist B', 'Wrong title B', 1, 98, 2018, 'old-release-b', 'old-track-b', X'2f6d757369632f622e6d7033');
+                """
+            )
+            con.commit()
+        finally:
+            con.close()
+        self.inline = InlineJobs()
+        self.client = APP.app.test_client()
+        self.patches = [
+            mock.patch.object(APP.jobs, "start_python", side_effect=self.inline.start_python),
+            mock.patch.object(APP, "_db", side_effect=lambda *a, **k: sqlite_app_db(self.db_path, row_factory=k.get("row_factory"), text_factory=k.get("text_factory"))),
+            mock.patch.object(APP, "_album_duplicate_resolver_plan", return_value={
+                "ok": True,
+                "mb_albumid": VALID_RELEASE_ID,
+                "groups": [{"action_items": [
+                    {"id": 999, "album_id": 7, "filename": "a.mp3", "title": "Wrong title A"},
+                    {"id": 888, "album_id": 8, "filename": "b.mp3", "title": "Wrong title B"},
+                ]}],
+                "missing_tracks": [
+                    {"mb_trackid": VALID_TRACK_ID, "disc": 1, "track": 1, "title": "Correct title A"},
+                    {"mb_trackid": self.VALID_TRACK_ID_2, "disc": 1, "track": 2, "title": "Correct title B"},
+                ],
+            }),
+            mock.patch.object(APP, "_invalidate_lib_cache"),
+            mock.patch.object(APP, "_trigger_plex_refresh"),
+        ]
+        for patcher in self.patches:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _actions(self):
+        return [
+            {"item_id": 999, "action": "retag", "target_mb_trackid": VALID_TRACK_ID},
+            {"item_id": 888, "action": "retag", "target_mb_trackid": self.VALID_TRACK_ID_2},
+        ]
+
+    def test_two_distinct_source_albums_produce_two_separate_merge_calls(self):
+        with mock.patch.object(
+            APP.beets_client, "plan_album_duplicate_merge",
+            return_value={"ok": True, "operation_id": "op-x"},
+        ) as plan_merge, mock.patch.object(
+            APP.beets_client, "apply_album_duplicate_merge", return_value={"ok": True},
+        ) as apply_merge, mock.patch.object(
+            APP.beets_client, "update_album_metadata", return_value={"ok": True},
+        ), mock.patch.object(
+            APP.beets_client, "relocate_album", return_value={"ok": True},
+        ):
+            response = self.client.post("/api/albums/123/duplicate-resolver/apply", json={
+                "mb_albumid": VALID_RELEASE_ID, "write_tags": True, "delete_files": False,
+                "actions": self._actions(),
+            })
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(self.inline.error)
+        self.assertEqual(self.inline.result.get("retagged"), 2)
+        self.assertEqual(sorted(self.inline.result.get("retagged_ids")), [888, 999])
+        self.assertEqual(self.inline.result.get("retag_failures"), [])
+
+        self.assertEqual(plan_merge.call_count, 2)
+        source_ids = sorted(c.args[0]["source_album_id"] for c in plan_merge.call_args_list)
+        self.assertEqual(source_ids, [7, 8])
+        for call in plan_merge.call_args_list:
+            body = call.args[0]
+            self.assertEqual(body["target_album_id"], 123)
+            self.assertTrue(body["adopt_target_fields"])
+            if body["source_album_id"] == 7:
+                self.assertEqual(body["item_ids"], [999])
+                self.assertEqual(body["item_field_overrides"]["999"]["mb_trackid"], VALID_TRACK_ID)
+            else:
+                self.assertEqual(body["item_ids"], [888])
+                self.assertEqual(body["item_field_overrides"]["888"]["mb_trackid"], self.VALID_TRACK_ID_2)
+        self.assertEqual(apply_merge.call_count, 2)
+
+    def test_one_source_failing_does_not_block_the_other_and_is_reported_truthfully(self):
+        """The accepted atomicity trade-off, proven concretely: source
+        album 8's merge fails, source album 7's still succeeds, and the
+        job's own final result truthfully reports both outcomes rather
+        than claiming total success or aborting the whole operation."""
+        def fake_plan(body):
+            if body["source_album_id"] == 8:
+                return {"ok": False, "error": "simulated engine rejection", "code": "album_duplicate_merge_identity_mismatch"}
+            return {"ok": True, "operation_id": "op-ok"}
+
+        with mock.patch.object(
+            APP.beets_client, "plan_album_duplicate_merge", side_effect=fake_plan,
+        ), mock.patch.object(
+            APP.beets_client, "apply_album_duplicate_merge", return_value={"ok": True},
+        ) as apply_merge, mock.patch.object(
+            APP.beets_client, "update_album_metadata", return_value={"ok": True},
+        ), mock.patch.object(
+            APP.beets_client, "relocate_album", return_value={"ok": True},
+        ):
+            response = self.client.post("/api/albums/123/duplicate-resolver/apply", json={
+                "mb_albumid": VALID_RELEASE_ID, "write_tags": True, "delete_files": False,
+                "actions": self._actions(),
+            })
+        self.assertEqual(response.status_code, 200)
+        # The job itself must not crash/raise just because one of several
+        # source albums failed -- it completes, truthfully reporting the
+        # mixed outcome.
+        self.assertIsNone(self.inline.error)
+        result = self.inline.result
+        self.assertTrue(result.get("ok"))
+        self.assertEqual(result.get("retagged"), 1)
+        self.assertEqual(result.get("retagged_ids"), [999])
+        self.assertEqual(len(result.get("retag_failures")), 1)
+        self.assertEqual(result["retag_failures"][0]["source_album_id"], 8)
+        self.assertEqual(result["retag_failures"][0]["item_ids"], [888])
+        self.assertIn("simulated engine rejection", result["retag_failures"][0]["error"])
+        # Only the successful source's operation_id is ever applied.
+        apply_merge.assert_called_once_with("op-ok")
+
+    def test_dry_run_reports_both_without_calling_the_engine(self):
+        with mock.patch.object(APP.beets_client, "plan_album_duplicate_merge") as plan_merge, \
+             mock.patch.object(APP.beets_client, "apply_album_duplicate_merge") as apply_merge:
+            response = self.client.post("/api/albums/123/duplicate-resolver/apply", json={
+                "mb_albumid": VALID_RELEASE_ID, "dry_run": True,
+                "actions": self._actions(),
+            })
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(self.inline.error)
+        self.assertEqual(self.inline.result.get("retagged"), 2)
+        self.assertTrue(self.inline.result.get("dry_run"))
+        plan_merge.assert_not_called()
+        apply_merge.assert_not_called()
 
 
 @unittest.skipIf(APP is None, f"app.py could not be imported: {_APP_IMPORT_ERROR}")

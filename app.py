@@ -22469,157 +22469,94 @@ def _match_tracks_from_mb(mb_albumid: str, album_db_id, log: list,
 def _match_tracks_from_mb_shared(mb_albumid: str, album_db_id, log: list,
                                  zero_unmatched: bool = False,
                                  target_tracks: Optional[List[Dict[str, Any]]] = None) -> int:
-    """Shared MB track matcher used by import/repair after preflight."""
-    mb = _fetch_mb_release_tracklist(mb_albumid, log)
-    if not mb.get("ok"):
-        log.append(f"  MB fetch warning: {mb.get('error') or 'MusicBrainz release lookup failed'}")
-        return -1
-    mb_tracks = mb.get("tracks") or []
-    if not mb_tracks:
-        log.append("  MB release has no tracks — cannot match")
-        return 0
+    """Shared MB track matcher used by import/repair after preflight.
 
-    log.append(
-        f"  MB release has {len(mb_tracks)} track(s) across "
-        f"{len(set(int(t.get('disc') or 1) for t in mb_tracks))} disc(s)"
-    )
-    wanted_targets = _normalise_wanted_tracks(target_tracks)
-    if wanted_targets:
-        release_title_counts: Dict[str, int] = {}
-        for mbt in mb_tracks:
-            title_norm = _album_track_norm(mbt.get("title", ""))
-            if title_norm:
-                release_title_counts[title_norm] = release_title_counts.get(title_norm, 0) + 1
-        target_mb_tracks = [
-            t for t in mb_tracks
-            if _guard_release_track_matches_missing_target(
-                t,
-                wanted_targets,
-                title_norm_fn=_album_track_norm,
-                release_title_counts=release_title_counts,
-            )
-        ]
-        if target_mb_tracks:
-            mb_tracks = target_mb_tracks
-            log.append(
-                "  Restricting MB match to requested track(s): "
-                + ", ".join(_wanted_track_label(t) for t in wanted_targets[:8])
-            )
-        else:
-            log.append(
-                "  WARN: requested missing track(s) were not found in the selected "
-                "MusicBrainz release; no imported items will be matched."
-            )
-            mb_tracks = []
+    ARCH-003 Wave 33 continuation: migrated from raw local
+    UPDATE items/UPDATE albums SQL onto album_mb_track_repair_v1 (through
+    beets_client), using the target_tracks/acoustid_verify/zero_unmatched/
+    allow_establish_release_group/stamp_release_metadata options built
+    this same wave specifically to close this migration, and the family's
+    alignment procedure (backend/mb_alignment.greedy_album_track_alignment),
+    ported verbatim from this function's own former matching loop so the
+    engine and this call site can never again risk disagreeing on which
+    specific track a file gets permanently relabeled as.
+
+    acoustid_verify/allow_establish_release_group/stamp_release_metadata
+    are always requested here (not opt-in like they are for other
+    callers of the family): this function's own pre-migration behavior
+    always ran the AcoustID cross-check unconditionally, always stamped
+    mb_releasegroupid whenever the release had one (with no conflict
+    check at all -- the engine's repair_identity_mismatch guard is a
+    strict, real improvement over that), and always stamped year/country.
+
+    Return-value contract preserved for this function's 6 real callers,
+    3 of which check `matched < 0` and raise/abort on it: -1 means the
+    MusicBrainz lookup itself genuinely failed (network/API error, no
+    engine "code" at all -- the same signal this function's own MB fetch
+    failure used to produce); 0-or-more means the engine ran the request
+    to completion, whatever it decided (matched some tracks, decided
+    there was nothing to do, or refused for a specific, named reason --
+    e.g. target_tracks entirely absent from the release, a real identity
+    conflict). None of app.py's other 3 callers key off any value beyond
+    `< 0`, only log it.
+    """
+    payload: Dict[str, Any] = {
+        "album_id": int(album_db_id or 0),
+        "mb_albumid": mb_albumid,
+        "acoustid_verify": True,
+        "allow_establish_release_group": True,
+        "stamp_release_metadata": True,
+    }
+    if target_tracks:
+        payload["target_tracks"] = target_tracks
+    if zero_unmatched:
+        payload["zero_unmatched"] = True
 
     try:
-        with _db(row_factory=sqlite3.Row) as con:
-            items = con.execute(
-                "SELECT id, title, track, disc, path, mb_trackid, length "
-                "FROM items WHERE album_id=? ORDER BY disc, track, title, id",
-                (album_db_id,),
-            ).fetchall()
+        plan_res = beets_client.plan_album_mb_track_repair(payload)
     except Exception as ex:
-        log.append(f"  DB read warning: {ex}")
+        log.append(f"  MB fetch warning: {ex}")
+        return -1
+
+    if not plan_res.get("ok"):
+        code = plan_res.get("code") or ""
+        error_text = str(plan_res.get("error") or "")
+        if not code:
+            # The engine's MB-lookup-failure path returns {"ok": False,
+            # "error": ...} with no "code" at all -- the one case that
+            # must still map to -1 (refuse to proceed), matching every
+            # real caller's own `matched < 0` check.
+            log.append(f"  MB fetch warning: {error_text or 'MusicBrainz release lookup failed'}")
+            return -1
+        log.append(f"  {error_text or 'MB track repair planning failed'}")
         return 0
 
-    if not items:
-        log.append("  No items found in DB for this album_id")
+    op_id = plan_res.get("operation_id")
+    if not op_id:
+        log.append("  " + str(plan_res.get("message") or "No MusicBrainz recording IDs needed safe repair."))
         return 0
 
-    used_mb_indices: set = set()
-    updates: list = []
-    unmatched_ids: list = []
-    for item in items:
-        raw_title = _s(item["title"]).strip()
-        item_obj = {
-            "title": raw_title,
-            "track": int(item["track"] or 0),
-            "disc": int(item["disc"] or 1),
-            "path": _s(item["path"]),
-            "mb_trackid": _s(item["mb_trackid"]).strip().lower(),
-            "length": float(item["length"] or 0),
-        }
+    updated = int(plan_res.get("updated") or 0)
+    conflicts = int(plan_res.get("conflicts") or 0)
+    acoustid_rejected = int(plan_res.get("acoustid_rejected") or 0)
+    zero_planned = int(plan_res.get("zero_unmatched_rows") or 0)
+    log.append(
+        f"  MB release match: {updated} track(s) to repair, {conflicts} conflict(s) "
+        f"requiring review, {acoustid_rejected} AcoustID-rejected fuzzy match(es)"
+        + (f", {zero_planned} unmatched item(s) to zero" if zero_unmatched else "")
+    )
 
-        best_idx = -1
-        best_score = -1.0
-        best_track: Dict[str, Any] = {}
-        for idx, mb_trk in enumerate(mb_tracks):
-            if idx in used_mb_indices:
-                continue
-            score = _album_track_score(item_obj, mb_trk)
-            if score > best_score:
-                best_score = score
-                best_idx = idx
-                best_track = mb_trk
+    try:
+        apply_res = beets_client.apply_album_mb_track_repair(op_id, write_tags=True)
+    except Exception as ex:
+        log.append(f"  DB write warning: {ex}")
+        return 0
+    if not apply_res.get("ok"):
+        log.append(f"  DB write warning: {apply_res.get('error') or 'apply failed'}")
+        return 0
 
-        if best_idx >= 0 and best_score >= _MB_TRACK_REPAIR_MATCH_THRESHOLD:
-            # Fuzzy title/duration scoring can be fooled by similarly-named
-            # tracks (intros, live/remix versions, etc). Cross-check with the
-            # file's AcoustID fingerprint before permanently relabeling
-            # mb_trackid/track/disc/title in the DB — a confirmed fingerprint
-            # mismatch against every track on the release means this file
-            # isn't actually part of this release, whichever track fuzzy
-            # scoring picked.
-            fp = _album_track_fingerprint_check(item_obj, mb_tracks)
-            if fp.get("status") == "mismatch":
-                log.append(
-                    f"  ✗ REJECTED '{raw_title}' → '{best_track.get('title', '')}' "
-                    f"({best_score:.0%} text match) — AcoustID fingerprint doesn't match any track on this release"
-                )
-                unmatched_ids.append(int(item["id"]))
-                continue
-            used_mb_indices.add(best_idx)
-            updates.append((
-                best_track.get("mb_trackid", ""),
-                int(best_track.get("track") or 0),
-                int(best_track.get("disc") or 1),
-                _s(best_track.get("title", "")),
-                int(item["id"]),
-            ))
-            log.append(
-                f"  #{int(best_track.get('track') or 0):02d} "
-                f"'{best_track.get('title', '')}'  ← '{raw_title}' ({best_score:.0%})"
-            )
-        else:
-            log.append(f"  No match for '{raw_title}' (best {best_score:.0%})")
-            unmatched_ids.append(int(item["id"]))
-
-    if updates or (zero_unmatched and unmatched_ids):
-        try:
-            with _db() as con:
-                con.executemany(
-                    "UPDATE items SET mb_trackid=?, track=?, disc=?, title=? WHERE id=?",
-                    updates,
-                )
-                year = (mb.get("date") or "")[:4]
-                if year and year.isdigit():
-                    con.execute("UPDATE albums SET year=? WHERE id=?",
-                                (int(year), album_db_id))
-                country = mb.get("country") or ""
-                if country:
-                    con.execute("UPDATE albums SET country=? WHERE id=?",
-                                (country, album_db_id))
-                rg_id = mb.get("release_group", "")
-                if rg_id:
-                    con.execute("UPDATE albums SET mb_releasegroupid=? WHERE id=?",
-                                (rg_id, album_db_id))
-                if zero_unmatched and unmatched_ids:
-                    con.executemany(
-                        "UPDATE items SET track=0 WHERE id=?",
-                        [(iid,) for iid in unmatched_ids],
-                    )
-                    log.append(
-                        f"  Zeroed track# for {len(unmatched_ids)} unmatched item(s) "
-                        "(will be removed by dedup)"
-                    )
-                con.commit()
-            log.append(f"  Updated {len(updates)} item(s) in DB with MB track data.")
-        except Exception as ex:
-            log.append(f"  DB write warning: {ex}")
-
-    _stamp_album_release_id(int(album_db_id or 0), mb_albumid, log)
-    return len(updates)
+    log.append(f"  Updated {updated} item(s) in DB with MB track data.")
+    return updated
 
 
 @app.post("/api/albums/reimport-disk")
@@ -32759,18 +32696,8 @@ def apply_album_duplicate_resolver(aid):
 
         retagged = 0
         retagged_ids: List[int] = []
+        retag_failures: List[Dict[str, Any]] = []
         if retags:
-            try:
-                with _db(row_factory=sqlite3.Row) as con:
-                    album_row = con.execute(
-                        "SELECT album, albumartist, year FROM albums WHERE id=?",
-                        (int(aid),),
-                    ).fetchone()
-            except Exception as ex:
-                raise RuntimeError(f"Could not read selected album row: {ex}") from ex
-            if not album_row:
-                raise RuntimeError(f"Selected album_id {aid} no longer exists")
-
             if dry_run:
                 for entry in retags:
                     item = entry["item"]
@@ -32786,72 +32713,147 @@ def apply_album_duplicate_resolver(aid):
                     )
                 retagged = len(retags)
             else:
-                updates = []
-                old_album_ids: set[int] = set()
+                # ARCH-003 Wave 33 continuation: decomposed into N single-
+                # source-album album_duplicate_merge_v1 calls (one per
+                # distinct source album among the selected retag items)
+                # rather than extending that shared family's Plan/Apply/
+                # Rollback control flow to support multiple source albums
+                # in one call -- the family has other real callers, and
+                # touching its core flow for this one edge case risked
+                # regressing them. adopt_target_fields=True makes each
+                # moved item inherit the target album's own current
+                # album/albumartist/year/mb_albumid; item_field_overrides
+                # gives each moved item its own specific
+                # mb_trackid/disc/track/title (the actual retag: each
+                # duplicate item assigned to a different missing-track
+                # slot). album_duplicate_merge_v1's own Apply already
+                # retires a source album row that becomes empty -- no
+                # separate cleanup step is needed here the way the old
+                # raw-SQL code needed one.
+                #
+                # DELIBERATE, ACCEPTED TRADE-OFF (see docs/TECHNICAL_DEBT.md):
+                # this sacrifices the old code's whole-batch atomicity
+                # (one SQL transaction covering every retagged item
+                # across every source album at once) for N independent
+                # atomic operations, one per source album. A later
+                # source's merge failing after an earlier one already
+                # committed is a real, possible partial-completion
+                # outcome now -- reported truthfully below (per-source
+                # success/failure in retag_failures, never silently
+                # folded into an overall "ok": true), and each
+                # succeeded source's merge remains individually
+                # rollback-able through the family's own existing
+                # rollback endpoint exactly as any other
+                # album_duplicate_merge_v1 operation would be.
+                by_source: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
                 for entry in retags:
-                    item = entry["item"]
-                    target = entry["target"]
-                    item_id = int(item.get("id") or 0)
-                    old_album_ids.add(int(item.get("album_id") or 0))
-                    updates.append((
-                        int(aid),
-                        _s(album_row["album"]),
-                        _s(album_row["albumartist"]),
-                        int(album_row["year"] or 0),
-                        plan.get("mb_albumid", ""),
-                        _s(target.get("mb_trackid") or ""),
-                        int(target.get("disc") or 1),
-                        int(target.get("track") or 0),
-                        _s(target.get("title") or ""),
-                        item_id,
-                    ))
-                    retagged_ids.append(item_id)
-                with _db() as con:
-                    con.executemany(
-                        "UPDATE items SET album_id=?, album=?, albumartist=?, year=?, "
-                        "mb_albumid=?, mb_trackid=?, disc=?, track=?, title=? WHERE id=?",
-                        updates,
-                    )
-                    con.execute(
-                        "UPDATE albums SET mb_albumid=? WHERE id=?",
-                        (_s(plan.get("mb_albumid") or ""), int(aid)),
-                    )
-                    for old_aid in old_album_ids:
-                        if old_aid <= 0 or old_aid == int(aid):
-                            continue
-                        remaining = con.execute(
-                            "SELECT COUNT(*) FROM items WHERE album_id=?",
-                            (old_aid,),
-                        ).fetchone()[0]
-                        if int(remaining or 0) == 0:
-                            con.execute("DELETE FROM albums WHERE id=?", (old_aid,))
-                            log.append(f"  Removed empty duplicate album row {old_aid}")
-                    con.commit()
-                retagged = len(updates)
+                    by_source[int(entry["item"].get("album_id") or 0)].append(entry)
 
-                if write_tags:
+                for src_aid, entries in sorted(by_source.items()):
+                    item_ids = [int(e["item"].get("id") or 0) for e in entries]
+                    if src_aid <= 0:
+                        retag_failures.append({
+                            "source_album_id": src_aid, "item_ids": item_ids,
+                            "error": "Retag item does not have a valid source album_id",
+                        })
+                        continue
                     if cancel_event is not None and cancel_event.is_set():
                         raise RuntimeError("cancelled")
-                    for entry in retags:
-                        item = entry["item"]
-                        target = entry["target"]
+
+                    item_field_overrides = {
+                        str(int(e["item"].get("id") or 0)): {
+                            "mb_trackid": _s(e["target"].get("mb_trackid") or ""),
+                            "disc": int(e["target"].get("disc") or 1),
+                            "track": int(e["target"].get("track") or 0),
+                            "title": _s(e["target"].get("title") or ""),
+                        }
+                        for e in entries
+                    }
+                    merge_payload = {
+                        "target_album_id": int(aid),
+                        "source_album_id": src_aid,
+                        "item_ids": item_ids,
+                        "adopt_target_fields": True,
+                        "item_field_overrides": item_field_overrides,
+                    }
+                    try:
+                        plan_res = beets_client.plan_album_duplicate_merge(merge_payload)
+                    except Exception as ex:
+                        retag_failures.append({"source_album_id": src_aid, "item_ids": item_ids, "error": str(ex)})
+                        log.append(f"  Retag from album {src_aid} failed (plan): {ex}")
+                        continue
+                    if not plan_res.get("ok") or not plan_res.get("operation_id"):
+                        err = plan_res.get("error") or "plan rejected"
+                        retag_failures.append({"source_album_id": src_aid, "item_ids": item_ids, "error": err})
+                        log.append(f"  Retag from album {src_aid} failed (plan): {err}")
+                        continue
+                    try:
+                        apply_res = beets_client.apply_album_duplicate_merge(plan_res["operation_id"])
+                    except Exception as ex:
+                        retag_failures.append({"source_album_id": src_aid, "item_ids": item_ids, "error": str(ex)})
+                        log.append(f"  Retag from album {src_aid} failed (apply): {ex}")
+                        continue
+                    if not apply_res.get("ok"):
+                        err = apply_res.get("error") or "apply failed"
+                        retag_failures.append({"source_album_id": src_aid, "item_ids": item_ids, "error": err})
+                        log.append(f"  Retag from album {src_aid} failed (apply): {err}")
+                        continue
+
+                    retagged += len(item_ids)
+                    retagged_ids.extend(item_ids)
+                    for e in entries:
+                        item = e["item"]
+                        target = e["target"]
                         item_id = int(item.get("id") or 0)
                         label = f"{int(target.get('disc') or 1)}.{int(target.get('track') or 0):02d} {_s(target.get('title') or '')}"
                         log.append(f"  Retagged item {item_id}: {label}")
-                    tag_result = beets_client.update_album_metadata(int(aid), {}, force_write_tags=True)
-                    _require_attach_stage_success(tag_result, "duplicate resolver tag write")
-                    relocate_result = beets_client.relocate_album(int(aid), mode="rename")
-                    _require_attach_stage_success(relocate_result, "duplicate resolver relocation")
+
+                if retag_failures:
+                    log.append(
+                        f"  {len(retag_failures)} source album(s) failed to retag "
+                        f"(see above); {retagged} item(s) succeeded across the rest."
+                    )
+
+                if retagged:
+                    # album_duplicate_merge_v1 never touches the target
+                    # album's own row -- adopt_target_fields only ever
+                    # copies FROM it into moved items. Stamp the target's
+                    # own mb_albumid to the selected release separately,
+                    # through the same controlled per-album metadata
+                    # update every other album-level field write in this
+                    # route already uses.
+                    stamp_mbid = _s(plan.get("mb_albumid") or "")
+                    if stamp_mbid:
+                        stamp_res = beets_client.update_album_metadata(int(aid), {"mb_albumid": stamp_mbid})
+                        if not stamp_res.get("ok"):
+                            log.append(f"  WARN: could not stamp target album mb_albumid: {stamp_res.get('error')}")
+
+                    if write_tags:
+                        if cancel_event is not None and cancel_event.is_set():
+                            raise RuntimeError("cancelled")
+                        tag_result = beets_client.update_album_metadata(int(aid), {}, force_write_tags=True)
+                        _require_attach_stage_success(tag_result, "duplicate resolver tag write")
+                        relocate_result = beets_client.relocate_album(int(aid), mode="rename")
+                        _require_attach_stage_success(relocate_result, "duplicate resolver relocation")
 
         if not dry_run and retagged:
             _invalidate_lib_cache()
             _trigger_plex_refresh(log)
-        log.append(f"Done - deleted {deleted} row(s), retagged {retagged} row(s).")
+        log.append(
+            f"Done - deleted {deleted} row(s), retagged {retagged} row(s)"
+            + (f", {len(retag_failures)} source album(s) failed" if retag_failures else "")
+            + "."
+        )
         return {
+            # Truthful even when some (not all) source albums failed to
+            # retag: the job itself ran to completion and did not crash,
+            # but a caller must inspect retag_failures -- never assume
+            # every requested retag succeeded just because "ok" is true.
             "ok": True,
             "deleted": deleted,
             "retagged": retagged,
             "retagged_ids": retagged_ids,
+            "retag_failures": retag_failures,
             "delete_summaries": delete_summaries,
             "dry_run": dry_run,
         }

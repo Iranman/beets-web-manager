@@ -976,6 +976,165 @@ class TestBeetsTransactionEngineFamilies(unittest.TestCase):
             restored = conn.execute("SELECT album_id, album, albumartist FROM items WHERE id=731").fetchone()
             self.assertEqual(restored, (632, "Mistagged", "Mistagged Artist"))
 
+    # ── item_field_overrides (ARCH-003 Wave 33 continuation) ─────────────────
+    # Supports apply_album_duplicate_resolver()'s retag path, decomposed
+    # into N single-source-album calls to this family (see
+    # docs/TECHNICAL_DEBT.md) -- each moved item receives its own,
+    # caller-specific mb_trackid/disc/track/title values (a different
+    # missing-track slot per item), never one uniform value the way
+    # adopt_target_fields' fields are.
+
+    def test_item_field_overrides_applies_per_item_distinct_values(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO albums (id, album, albumartist) VALUES (801, 'Target Album', 'Target Artist')")
+            conn.execute("INSERT INTO albums (id, album, albumartist) VALUES (802, 'Dupes', 'Dupes Artist')")
+            conn.execute("INSERT INTO items (id, album_id, title, mb_trackid, disc, track) VALUES (901, 802, 'Old Title A', '', 1, 0)")
+            conn.execute("INSERT INTO items (id, album_id, title, mb_trackid, disc, track) VALUES (902, 802, 'Old Title B', '', 1, 0)")
+
+        plan = transaction_engine.create_album_duplicate_merge_plan(
+            self.store,
+            {
+                "target_album_id": 801, "source_album_id": 802,
+                "item_ids": [901, 902],
+                "item_field_overrides": {
+                    "901": {"mb_trackid": "aaaaaaaa-0000-0000-0000-000000000001", "disc": 1, "track": 1, "title": "New Title A"},
+                    "902": {"mb_trackid": "bbbbbbbb-0000-0000-0000-000000000002", "disc": 1, "track": 2, "title": "New Title B"},
+                },
+            },
+            db_path=str(self.db_path),
+        )
+        self.assertTrue(plan.get("ok"), msg=plan.get("error"))
+        op_id = plan["operation_id"]
+
+        apply_res = transaction_engine.execute_album_duplicate_merge_apply(self.store, op_id, db_path=str(self.db_path))
+        self.assertTrue(apply_res.get("ok"), msg=apply_res.get("error"))
+
+        with sqlite3.connect(self.db_path) as conn:
+            row_a = conn.execute("SELECT album_id, mb_trackid, track, title FROM items WHERE id=901").fetchone()
+            row_b = conn.execute("SELECT album_id, mb_trackid, track, title FROM items WHERE id=902").fetchone()
+            self.assertEqual(row_a, (801, "aaaaaaaa-0000-0000-0000-000000000001", 1, "New Title A"))
+            self.assertEqual(row_b, (801, "bbbbbbbb-0000-0000-0000-000000000002", 2, "New Title B"))
+
+    def test_item_field_overrides_rejects_unknown_field(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO albums (id, album, albumartist) VALUES (811, 'Target Album', 'Target Artist')")
+            conn.execute("INSERT INTO albums (id, album, albumartist) VALUES (812, 'Dupes', 'Dupes Artist')")
+            conn.execute("INSERT INTO items (id, album_id, title) VALUES (911, 812, 'Old Title')")
+
+        plan = transaction_engine.create_album_duplicate_merge_plan(
+            self.store,
+            {
+                "target_album_id": 811, "source_album_id": 812,
+                "item_ids": [911],
+                "item_field_overrides": {"911": {"albumartist": "Sneaky Album-Level Field"}},
+            },
+            db_path=str(self.db_path),
+        )
+        self.assertFalse(plan.get("ok"))
+        self.assertEqual(plan.get("code"), "album_duplicate_merge_invalid_payload")
+        with sqlite3.connect(self.db_path) as conn:
+            unchanged = conn.execute("SELECT album_id FROM items WHERE id=911").fetchone()
+            self.assertEqual(unchanged[0], 812)
+
+    def test_item_field_overrides_rejects_item_outside_item_ids(self):
+        """An override key naming an item NOT in item_ids must never be
+        silently ignored or silently authorize a write to an unrelated
+        item -- refused outright."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO albums (id, album, albumartist) VALUES (821, 'Target Album', 'Target Artist')")
+            conn.execute("INSERT INTO albums (id, album, albumartist) VALUES (822, 'Dupes', 'Dupes Artist')")
+            conn.execute("INSERT INTO items (id, album_id, title) VALUES (921, 822, 'Selected')")
+            conn.execute("INSERT INTO items (id, album_id, title) VALUES (922, 822, 'Not Selected')")
+
+        plan = transaction_engine.create_album_duplicate_merge_plan(
+            self.store,
+            {
+                "target_album_id": 821, "source_album_id": 822,
+                "item_ids": [921],
+                "item_field_overrides": {"922": {"title": "Should never apply"}},
+            },
+            db_path=str(self.db_path),
+        )
+        self.assertFalse(plan.get("ok"))
+        self.assertEqual(plan.get("code"), "album_duplicate_merge_invalid_payload")
+
+    def test_item_field_overrides_requires_item_ids(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO albums (id, album, albumartist) VALUES (831, 'Target Album', 'Target Artist')")
+            conn.execute("INSERT INTO albums (id, album, albumartist) VALUES (832, 'Dupes', 'Dupes Artist')")
+            conn.execute("INSERT INTO items (id, album_id, title) VALUES (931, 832, 'Track')")
+
+        plan = transaction_engine.create_album_duplicate_merge_plan(
+            self.store,
+            {
+                "target_album_id": 831, "source_album_id": 832,
+                "item_field_overrides": {"931": {"title": "New Title"}},
+            },
+            db_path=str(self.db_path),
+        )
+        self.assertFalse(plan.get("ok"))
+        self.assertEqual(plan.get("code"), "album_duplicate_merge_invalid_payload")
+
+    def test_item_field_overrides_rollback_restores_original_track_fields(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO albums (id, album, albumartist) VALUES (841, 'Target Album', 'Target Artist')")
+            conn.execute("INSERT INTO albums (id, album, albumartist) VALUES (842, 'Dupes', 'Dupes Artist')")
+            conn.execute("INSERT INTO items (id, album_id, title, mb_trackid, disc, track) VALUES (941, 842, 'Old Title', 'oldid', 1, 9)")
+
+        plan = transaction_engine.create_album_duplicate_merge_plan(
+            self.store,
+            {
+                "target_album_id": 841, "source_album_id": 842,
+                "item_ids": [941],
+                "item_field_overrides": {"941": {"mb_trackid": "newid", "disc": 1, "track": 1, "title": "New Title"}},
+            },
+            db_path=str(self.db_path),
+        )
+        op_id = plan["operation_id"]
+        apply_res = transaction_engine.execute_album_duplicate_merge_apply(self.store, op_id, db_path=str(self.db_path))
+        self.assertTrue(apply_res.get("ok"), msg=apply_res.get("error"))
+
+        rollback_res = transaction_engine.rollback_album_duplicate_merge(self.store, op_id, db_path=str(self.db_path))
+        self.assertTrue(rollback_res.get("ok"), msg=rollback_res)
+
+        with sqlite3.connect(self.db_path) as conn:
+            restored = conn.execute("SELECT album_id, mb_trackid, track, title FROM items WHERE id=941").fetchone()
+            self.assertEqual(restored, (842, "oldid", 9, "Old Title"))
+
+    def test_item_field_overrides_composes_with_adopt_target_fields(self):
+        """Both capabilities together: the moved item adopts the target
+        album's uniform albumartist/album AND receives its own specific
+        track fields -- exactly what the real retag decomposition needs
+        (see docs/TECHNICAL_DEBT.md)."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO albums (id, album, albumartist) VALUES (851, 'Real Album', 'Real Artist')")
+            conn.execute("INSERT INTO albums (id, album, albumartist) VALUES (852, 'Mistagged', 'Mistagged Artist')")
+            conn.execute("INSERT INTO items (id, album_id, title, album, albumartist, mb_trackid, disc, track) VALUES (951, 852, 'Old Title', 'Mistagged', 'Mistagged Artist', '', 1, 0)")
+
+        plan = transaction_engine.create_album_duplicate_merge_plan(
+            self.store,
+            {
+                "target_album_id": 851, "source_album_id": 852,
+                "item_ids": [951], "adopt_target_fields": True,
+                "item_field_overrides": {"951": {"mb_trackid": "newid", "disc": 1, "track": 3, "title": "New Title"}},
+            },
+            db_path=str(self.db_path),
+        )
+        self.assertTrue(plan.get("ok"), msg=plan.get("error"))
+        op_id = plan["operation_id"]
+        apply_res = transaction_engine.execute_album_duplicate_merge_apply(self.store, op_id, db_path=str(self.db_path))
+        self.assertTrue(apply_res.get("ok"), msg=apply_res.get("error"))
+
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute("SELECT album_id, album, albumartist, mb_trackid, track, title FROM items WHERE id=951").fetchone()
+            self.assertEqual(row, (851, "Real Album", "Real Artist", "newid", 3, "New Title"))
+
+        rollback_res = transaction_engine.rollback_album_duplicate_merge(self.store, op_id, db_path=str(self.db_path))
+        self.assertTrue(rollback_res.get("ok"), msg=rollback_res)
+        with sqlite3.connect(self.db_path) as conn:
+            restored = conn.execute("SELECT album_id, album, albumartist, mb_trackid, track, title FROM items WHERE id=951").fetchone()
+            self.assertEqual(restored, (852, "Mistagged", "Mistagged Artist", "", 0, "Old Title"))
+
 
 if __name__ == "__main__":
     unittest.main()

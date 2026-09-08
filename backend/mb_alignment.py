@@ -315,3 +315,136 @@ def summarize_mb_track_alignment(
         "duplicate_recording_groups": duplicate_recording_groups,
     }
 
+
+ScoreFn = Callable[[Dict[str, Any], Dict[str, Any]], float]
+
+
+def greedy_album_track_alignment(
+    items: List[Dict[str, Any]],
+    mb_tracks: List[Dict[str, Any]],
+    *,
+    score_fn: ScoreFn = album_track_score,
+    file_exists_fn: "ExistsFn | None" = None,
+    threshold: float = 0.72,
+) -> Dict[str, Any]:
+    """Greedy, item-order-driven track alignment.
+
+    SEC-002 / ARCH-003 Wave 33 continuation: this is app.py's own
+    _match_tracks_from_mb_shared() matching loop, ported here VERBATIM (not
+    approximated) rather than reusing summarize_mb_track_alignment's
+    different rank-based-displacement conflict resolution, so the engine
+    and app.py can never again risk silently disagreeing on which specific
+    track a file gets permanently relabeled as in an ambiguous case
+    (duplicate/near-duplicate titles, multiple candidate files competing
+    for one track). album_track_score() (the per-pair scoring function)
+    was already shared/identical between the two call sites before this
+    change -- only the overall alignment/conflict-resolution shape
+    differed, and that is what this replaces.
+
+    For each local item, in the exact order the caller supplies `items`
+    (app.py's caller sorts its DB read `ORDER BY disc, track, title, id`;
+    callers here must supply that same order to be behaviorally
+    identical), claim the single highest-scoring MB track not already
+    claimed by an earlier item in this same call. Once a track is
+    claimed, no later item can ever take it away, even if the later item
+    would have scored higher against it -- this is deliberately NOT
+    summarize_mb_track_alignment's rank-based displacement. A tie
+    (`score` exactly equal between two mb_tracks against the same item)
+    keeps the FIRST mb_track encountered in `mb_tracks` order, matching
+    app.py's own `if score > best_score` (strict greater-than) loop
+    exactly.
+
+    Deliberately does not special-case an item's own existing
+    mb_trackid (no "exact_mbid" score boost) -- app.py's own loop never
+    did either; `score_fn` (album_track_score) only ever looks at title/
+    position/duration. An item's pre-existing recording ID is still
+    honored downstream, by the (unchanged, and deliberately NOT ported --
+    a real engine safety improvement over app.py's older code, not a
+    behavioral approximation of it) caller-side check that keeps a
+    conflicting non-blank existing recording ID out of automatic repair
+    and routes it to manual review instead.
+    """
+    exists = file_exists_fn or (lambda _item: True)
+    used_indices: set[int] = set()
+    matched_by_idx: Dict[int, Dict[str, Any]] = {}
+    matched_item_ids: set[int] = set()
+    extra_items: List[Dict[str, Any]] = []
+
+    for item in items:
+        if not exists(item):
+            extra_items.append(item)
+            continue
+
+        best_idx = -1
+        best_score = -1.0
+        for idx, mb_trk in enumerate(mb_tracks):
+            if idx in used_indices:
+                continue
+            score = score_fn(item, mb_trk)
+            if score > best_score:
+                best_score = score
+                best_idx = idx
+
+        if best_idx >= 0 and best_score >= threshold:
+            used_indices.add(best_idx)
+            matched_by_idx[best_idx] = {**item, "score": round(best_score, 3)}
+            matched_item_ids.add(int(item.get("id") or 0))
+        else:
+            extra_items.append(item)
+
+    expected: List[Dict[str, Any]] = []
+    missing: List[Dict[str, Any]] = []
+    in_library = 0
+    repairable_count = 0
+    missing_recording_id_count = 0
+    mismatched_recording_id_count = 0
+
+    for idx, trk in enumerate(mb_tracks):
+        matched_item = matched_by_idx.get(idx)
+        rec = {
+            "disc": int(trk.get("disc") or 1),
+            "track": int(trk.get("track") or 0),
+            "title": trk.get("title", ""),
+            "mb_trackid": trk.get("mb_trackid", ""),
+            "duration_ms": int(trk.get("duration_ms") or 0),
+            "ok": bool(matched_item),
+            "missing": not bool(matched_item),
+            "item": matched_item or {},
+        }
+        if matched_item:
+            in_library += 1
+            current_mbid = _s(matched_item.get("mb_trackid") or "").strip().lower()
+            target_mbid = _s(trk.get("mb_trackid") or "").strip().lower()
+            if target_mbid and current_mbid != target_mbid:
+                repairable_count += 1
+                if current_mbid:
+                    mismatched_recording_id_count += 1
+                else:
+                    missing_recording_id_count += 1
+        else:
+            missing.append(rec)
+        expected.append(rec)
+
+    duplicate_recording_groups = _duplicate_recording_groups(items, mb_tracks, exists)
+    duplicate_recording_count = sum(
+        int(group.get("duplicate_count") or 0)
+        for group in duplicate_recording_groups
+    )
+
+    return {
+        "actual_count": len(items),
+        "expected_count": len(expected),
+        "extra_count": len(extra_items),
+        "extra_items": extra_items,
+        "in_library": in_library,
+        "missing_count": len(missing),
+        "missing": missing,
+        "percent": int(round((in_library / len(expected)) * 100)) if expected else 0,
+        "tracks": expected,
+        "mb_repairable_count": repairable_count,
+        "mb_trackid_missing_count": missing_recording_id_count,
+        "mb_trackid_mismatch_count": mismatched_recording_id_count,
+        "mb_duplicate_recording_id_count": duplicate_recording_count,
+        "duplicate_recording_groups": duplicate_recording_groups,
+    }
+
