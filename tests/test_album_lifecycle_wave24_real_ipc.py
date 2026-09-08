@@ -144,7 +144,8 @@ class TestWave24RealHTTPIPC(unittest.TestCase):
                 artpath TEXT,
                 mb_albumid TEXT,
                 mb_releasegroupid TEXT,
-                mb_artistid TEXT
+                mb_artistid TEXT,
+                country TEXT
             )
         """)
         con.execute("""
@@ -899,7 +900,7 @@ class TestWave24RelativeDbPathNormalization(unittest.TestCase):
             CREATE TABLE albums (
                 id INTEGER PRIMARY KEY, album TEXT, artist TEXT, albumartist TEXT,
                 year INTEGER, genre TEXT, artpath TEXT, mb_albumid TEXT,
-                mb_releasegroupid TEXT, mb_artistid TEXT
+                mb_releasegroupid TEXT, mb_artistid TEXT, country TEXT
             )
         """)
         con.execute("""

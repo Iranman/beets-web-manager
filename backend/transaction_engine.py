@@ -3791,7 +3791,7 @@ def create_album_mb_track_repair_plan(
         con.row_factory = sqlite3.Row
         cur = con.cursor()
         cur.execute(
-            "SELECT id, album, albumartist, year, mb_albumid, mb_releasegroupid "
+            "SELECT id, album, albumartist, year, country, mb_albumid, mb_releasegroupid "
             "FROM albums WHERE id=?",
             (album_id,),
         )
@@ -3816,6 +3816,7 @@ def create_album_mb_track_repair_plan(
     album_artist = str(album_row["albumartist"] or "").strip()
     album_title = str(album_row["album"] or "").strip()
     album_year = str(album_row["year"] or "").strip()
+    album_country = str(album_row["country"] or "").strip()
     album_rg = str(album_row["mb_releasegroupid"] or "").strip().lower()
     caller_override = str(payload.get("mb_albumid") or "").strip().lower()
     target_mb_albumid = caller_override or str(album_row["mb_albumid"] or "").strip().lower()
@@ -3843,6 +3844,25 @@ def create_album_mb_track_repair_plan(
 
     if not isinstance(mb, dict) or not mb.get("ok"):
         return {"ok": False, "error": (mb.get("error") if isinstance(mb, dict) else None) or "MusicBrainz release lookup failed"}
+
+    # stamp_release_metadata (Wave 33): the album-level year/country fields
+    # app.py's own _match_tracks_from_mb_shared() has always stamped from
+    # the same MB release lookup this function already performs --
+    # opt-in, default-off, and independent of every other option here.
+    # Only a genuine value difference plans a change; an already-matching
+    # value is left alone rather than rewritten as a no-op "change".
+    release_metadata_changes: Dict[str, Dict[str, Any]] = {}
+    if payload.get("stamp_release_metadata"):
+        mb_date = str(mb.get("date") or "").strip()
+        mb_year_str = mb_date[:4]
+        if mb_year_str.isdigit():
+            mb_year = int(mb_year_str)
+            current_year = int(album_year) if album_year.isdigit() else None
+            if mb_year != current_year:
+                release_metadata_changes["year"] = {"before": current_year, "after": mb_year}
+        mb_country = str(mb.get("country") or "").strip()
+        if mb_country and mb_country != album_country:
+            release_metadata_changes["country"] = {"before": album_country, "after": mb_country}
 
     allow_establish_release_group = bool(payload.get("allow_establish_release_group"))
     establish_release_group_id = ""
@@ -4224,6 +4244,7 @@ def create_album_mb_track_repair_plan(
         and not release_stamping_needed
         and not zero_unmatched_rows
         and not release_group_establishment_needed
+        and not release_metadata_changes
     ):
         return {
             "ok": True,
@@ -4232,6 +4253,7 @@ def create_album_mb_track_repair_plan(
             "acoustid_rejected": 0,
             "zero_unmatched_rows": 0,
             "establishing_release_group": False,
+            "release_metadata_changes": {},
             "message": "No MusicBrainz recording IDs needed safe repair.",
             "unreadable_items": unreadable_items,
         }
@@ -4245,6 +4267,19 @@ def create_album_mb_track_repair_plan(
             "identity_evidence": {
                 "source": "musicbrainz_release_group_establishment",
                 "mb_releasegroupid": establish_release_group_id,
+            },
+            "status": "planned",
+        })
+
+    if release_metadata_changes:
+        changes.append({
+            "id": album_id,
+            "track": "album year/country metadata",
+            "before": {k: v["before"] for k, v in release_metadata_changes.items()},
+            "after": {k: v["after"] for k, v in release_metadata_changes.items()},
+            "identity_evidence": {
+                "source": "musicbrainz_release_metadata",
+                "mb_albumid": target_mb_albumid,
             },
             "status": "planned",
         })
@@ -4266,6 +4301,7 @@ def create_album_mb_track_repair_plan(
         "album_before": album_before,
         "release_stamping_needed": release_stamping_needed,
         "establish_release_group_id": establish_release_group_id,
+        "release_metadata_changes": release_metadata_changes,
         "unreadable_items": unreadable_items,
     }
     # Rollback is only ever advertised for rows we actually captured full
@@ -4300,6 +4336,7 @@ def create_album_mb_track_repair_plan(
         "release_stamp_rows": len(album_release_stamp_rows),
         "zero_unmatched_rows": len(zero_unmatched_rows),
         "establishing_release_group": release_group_establishment_needed,
+        "release_metadata_changes": release_metadata_changes,
         "unreadable_items": unreadable_items,
     }
 
@@ -4338,6 +4375,7 @@ def execute_album_mb_track_repair_apply(
         zero_unmatched_rows: List[Dict[str, Any]] = payload.get("zero_unmatched_rows") or []
         album_before: Dict[str, Any] = payload.get("album_before") or {}
         establish_release_group_id = str(payload.get("establish_release_group_id") or "").strip().lower()
+        release_metadata_changes: Dict[str, Dict[str, Any]] = payload.get("release_metadata_changes") or {}
 
         if tx.get("status") == "Completed":
             return {
@@ -4463,10 +4501,21 @@ def execute_album_mb_track_repair_apply(
                 con.row_factory = sqlite3.Row
                 try:
                     cur = con.cursor()
-                    cur.execute("SELECT id, mb_albumid, mb_releasegroupid FROM albums WHERE id=?", (album_id,))
+                    cur.execute("SELECT id, mb_albumid, mb_releasegroupid, year, country FROM albums WHERE id=?", (album_id,))
                     alb_row = cur.fetchone()
                     if not alb_row:
                         return _fail(f"Album {album_id} no longer exists.", "repair_album_missing")
+
+                    if release_metadata_changes:
+                        if "year" in release_metadata_changes:
+                            live_year_str = str(alb_row["year"] or "").strip()
+                            live_year = int(live_year_str) if live_year_str.isdigit() else None
+                            if live_year != release_metadata_changes["year"].get("before"):
+                                return _fail("Album year changed since plan.", "repair_toctou_mismatch")
+                        if "country" in release_metadata_changes:
+                            live_country = str(alb_row["country"] or "").strip()
+                            if live_country != release_metadata_changes["country"].get("before"):
+                                return _fail("Album country changed since plan.", "repair_toctou_mismatch")
 
                     expected_rg = str(payload.get("mb_releasegroupid") or "").strip().lower()
                     live_rg = str(alb_row["mb_releasegroupid"] or "").strip().lower()
@@ -4596,6 +4645,14 @@ def execute_album_mb_track_repair_apply(
                             con.rollback()
                             return _fail("Album Release Group ID was no longer blank at write time.", "repair_toctou_mismatch")
 
+                    if release_metadata_changes:
+                        cols = [f"{field}=?" for field in release_metadata_changes]
+                        vals = [change["after"] for change in release_metadata_changes.values()] + [album_id]
+                        cur.execute(f"UPDATE albums SET {', '.join(cols)} WHERE id=?", vals)
+                        if cur.rowcount != 1:
+                            con.rollback()
+                            return _fail(f"Expected to update exactly 1 album row for release metadata, updated {cur.rowcount}.", "repair_rowcount_mismatch")
+
                     con.commit()
                 finally:
                     con.close()
@@ -4717,6 +4774,16 @@ def execute_album_mb_track_repair_apply(
                         arow = cur.fetchone()
                         if not arow or str(arow["mb_releasegroupid"] or "").strip().lower() != establish_release_group_id:
                             return _fail("Post-write verification failed for album Release Group establishment.", "repair_verification_failed", mutated=True)
+
+                    if release_metadata_changes:
+                        cur.execute("SELECT year, country FROM albums WHERE id=?", (album_id,))
+                        arow = cur.fetchone()
+                        if not arow:
+                            return _fail("Post-write verification failed for album release metadata.", "repair_verification_failed", mutated=True)
+                        if "year" in release_metadata_changes and int(arow["year"] or 0) != release_metadata_changes["year"]["after"]:
+                            return _fail("Post-write verification failed for album year.", "repair_verification_failed", mutated=True)
+                        if "country" in release_metadata_changes and str(arow["country"] or "").strip() != release_metadata_changes["country"]["after"]:
+                            return _fail("Post-write verification failed for album country.", "repair_verification_failed", mutated=True)
                 finally:
                     con.close()
                 _persist_step("result_verified", "Completed")
@@ -4733,6 +4800,7 @@ def execute_album_mb_track_repair_apply(
                 "release_stamp_rows": len(album_release_stamp_rows),
                 "zero_unmatched_rows": len(zero_unmatched_rows),
                 "established_release_group": bool(establish_release_group_id),
+                "release_metadata_changes": sorted(release_metadata_changes.keys()),
                 "tags_written": bool(write_tags),
             }
 
@@ -4771,6 +4839,7 @@ def rollback_album_mb_track_repair(
         zero_unmatched_rows: List[Dict[str, Any]] = payload.get("zero_unmatched_rows") or []
         album_before: Dict[str, Any] = payload.get("album_before") or {}
         establish_release_group_id = str(payload.get("establish_release_group_id") or "").strip().lower()
+        release_metadata_changes: Dict[str, Dict[str, Any]] = payload.get("release_metadata_changes") or {}
         tags_mutated = bool(meta.get("tags_mutated"))
 
         item_ids = sorted(
@@ -4880,6 +4949,18 @@ def rollback_album_mb_track_repair(
                         if live_established_rg != establish_release_group_id:
                             store.update(operation_id, logs=["Rollback precondition failed: album Release Group was modified after this repair."])
                             return {"ok": False, "error": "Album Release Group ID was modified after this repair; refusing to overwrite a later change.", "code": "repair_rollback_stale"}
+                    if release_metadata_changes:
+                        cur.execute("SELECT year, country FROM albums WHERE id=?", (album_id,))
+                        arow = cur.fetchone()
+                        if not arow:
+                            store.update(operation_id, logs=["Rollback precondition failed: album no longer exists."])
+                            return {"ok": False, "error": "Album no longer exists.", "code": "repair_rollback_precondition_failed"}
+                        if "year" in release_metadata_changes and int(arow["year"] or 0) != release_metadata_changes["year"]["after"]:
+                            store.update(operation_id, logs=["Rollback precondition failed: album year was modified after this repair."])
+                            return {"ok": False, "error": "Album year was modified after this repair; refusing to overwrite a later change.", "code": "repair_rollback_stale"}
+                        if "country" in release_metadata_changes and str(arow["country"] or "").strip() != release_metadata_changes["country"]["after"]:
+                            store.update(operation_id, logs=["Rollback precondition failed: album country was modified after this repair."])
+                            return {"ok": False, "error": "Album country was modified after this repair; refusing to overwrite a later change.", "code": "repair_rollback_stale"}
                 finally:
                     con.close()
             except sqlite3.Error as ex:
@@ -4940,6 +5021,15 @@ def rollback_album_mb_track_repair(
                             "UPDATE albums SET mb_releasegroupid='' WHERE id=? AND mb_releasegroupid=?",
                             (album_id, establish_release_group_id),
                         )
+                    if release_metadata_changes:
+                        # Same "this transaction's own precondition-checked
+                        # write" reasoning as the Release Group restore
+                        # above -- the precondition check already confirmed
+                        # the live value(s) still match what this
+                        # transaction wrote before restoring.
+                        cols = [f"{field}=?" for field in release_metadata_changes]
+                        vals = [change["before"] for change in release_metadata_changes.values()] + [album_id]
+                        cur.execute(f"UPDATE albums SET {', '.join(cols)} WHERE id=?", vals)
                     con.commit()
                 finally:
                     con.close()

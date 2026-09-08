@@ -389,5 +389,132 @@ class EstablishReleaseGroupTests(Wave19FixtureBase):
         self.assertEqual(row["mb_releasegroupid"], "cccccccc-0000-0000-0000-000000000000")
 
 
+class StampReleaseMetadataTests(Wave19FixtureBase):
+    """album_mb_track_repair_v1's stamp_release_metadata option (Wave 33
+    part 2): the year/country album-field stamping
+    _match_tracks_from_mb_shared() needs to migrate for real, closing the
+    year/month/day/country gap found while tracing its exact SQL."""
+
+    def _tracklist_with_metadata(self, date="2020-05-15", country="US"):
+        return {**_fake_tracklist_a(), "date": date, "country": country}
+
+    def test_stamps_year_and_country_when_they_differ(self):
+        self._create_album_and_items(album_id=1)  # year=2024 by fixture default
+        res = create_album_mb_track_repair_plan(
+            self.store,
+            {"album_id": 1, "stamp_release_metadata": True},
+            music_allowed_roots=[str(self.music_root)],
+            db_path=str(self.db_path),
+            fetch_tracklist_fn=lambda _: self._tracklist_with_metadata(),
+        )
+        self.assertTrue(res.get("ok"), res)
+        self.assertEqual(sorted(res["release_metadata_changes"].keys()), ["country", "year"])
+        op_id = res["operation_id"]
+
+        apply_res = execute_album_mb_track_repair_apply(
+            self.store, op_id, db_path=str(self.db_path),
+            music_allowed_roots=[str(self.music_root)], write_tags=False,
+        )
+        self.assertTrue(apply_res.get("ok"), apply_res)
+        self.assertEqual(sorted(apply_res["release_metadata_changes"]), ["country", "year"])
+
+        con = sqlite3.connect(self.db_path)
+        con.row_factory = sqlite3.Row
+        row = con.execute("SELECT year, country FROM albums WHERE id=1").fetchone()
+        con.close()
+        self.assertEqual(row["year"], 2020)
+        self.assertEqual(row["country"], "US")
+
+    def test_no_op_when_values_already_match(self):
+        self._create_album_and_items(album_id=1)
+        con = sqlite3.connect(self.db_path)
+        con.execute("UPDATE albums SET year=2020, country='US' WHERE id=1")
+        con.commit()
+        con.close()
+        res = create_album_mb_track_repair_plan(
+            self.store,
+            {"album_id": 1, "stamp_release_metadata": True},
+            music_allowed_roots=[str(self.music_root)],
+            db_path=str(self.db_path),
+            fetch_tracklist_fn=lambda _: self._tracklist_with_metadata(),
+        )
+        self.assertTrue(res.get("ok"), res)
+        self.assertEqual(res["release_metadata_changes"], {})
+
+    def test_omitted_flag_never_stamps_metadata(self):
+        """Regression: default-off must behave exactly as before."""
+        self._create_album_and_items(album_id=1)
+        res = create_album_mb_track_repair_plan(
+            self.store,
+            {"album_id": 1},
+            music_allowed_roots=[str(self.music_root)],
+            db_path=str(self.db_path),
+            fetch_tracklist_fn=lambda _: self._tracklist_with_metadata(),
+        )
+        self.assertTrue(res.get("ok"), res)
+        self.assertEqual(res.get("release_metadata_changes", {}), {})
+        con = sqlite3.connect(self.db_path)
+        con.row_factory = sqlite3.Row
+        row = con.execute("SELECT year, country FROM albums WHERE id=1").fetchone()
+        con.close()
+        self.assertEqual(row["year"], 2024)
+        self.assertIsNone(row["country"])
+
+    def test_rollback_restores_original_year_and_country(self):
+        self._create_album_and_items(album_id=1)
+        res = create_album_mb_track_repair_plan(
+            self.store,
+            {"album_id": 1, "stamp_release_metadata": True},
+            music_allowed_roots=[str(self.music_root)],
+            db_path=str(self.db_path),
+            fetch_tracklist_fn=lambda _: self._tracklist_with_metadata(),
+        )
+        op_id = res["operation_id"]
+        execute_album_mb_track_repair_apply(
+            self.store, op_id, db_path=str(self.db_path),
+            music_allowed_roots=[str(self.music_root)], write_tags=False,
+        )
+        rb_res = rollback_album_mb_track_repair(
+            self.store, op_id, db_path=str(self.db_path),
+            music_allowed_roots=[str(self.music_root)],
+        )
+        self.assertTrue(rb_res.get("ok"), rb_res)
+        con = sqlite3.connect(self.db_path)
+        con.row_factory = sqlite3.Row
+        row = con.execute("SELECT year, country FROM albums WHERE id=1").fetchone()
+        con.close()
+        self.assertEqual(row["year"], 2024)
+        self.assertIn(row["country"], (None, ""))
+
+    def test_apply_fails_closed_if_year_changed_by_someone_else_since_plan(self):
+        self._create_album_and_items(album_id=1)
+        res = create_album_mb_track_repair_plan(
+            self.store,
+            {"album_id": 1, "stamp_release_metadata": True},
+            music_allowed_roots=[str(self.music_root)],
+            db_path=str(self.db_path),
+            fetch_tracklist_fn=lambda _: self._tracklist_with_metadata(),
+        )
+        op_id = res["operation_id"]
+
+        con = sqlite3.connect(self.db_path)
+        con.execute("UPDATE albums SET year=1999 WHERE id=1")
+        con.commit()
+        con.close()
+
+        apply_res = execute_album_mb_track_repair_apply(
+            self.store, op_id, db_path=str(self.db_path),
+            music_allowed_roots=[str(self.music_root)], write_tags=False,
+        )
+        self.assertFalse(apply_res.get("ok"))
+        self.assertEqual(apply_res.get("code"), "repair_toctou_mismatch")
+
+        con = sqlite3.connect(self.db_path)
+        con.row_factory = sqlite3.Row
+        row = con.execute("SELECT year FROM albums WHERE id=1").fetchone()
+        con.close()
+        self.assertEqual(row["year"], 1999)
+
+
 if __name__ == "__main__":
     unittest.main()

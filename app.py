@@ -22626,7 +22626,27 @@ def _match_tracks_from_mb_shared(mb_albumid: str, album_db_id, log: list,
 def reimport_disk():
     """Tag & import audio files that are already in the music folder but not in the beets DB.
     Body: {aldir, mb_albumid}
-    Uses a temp config with copy/move disabled + zero threshold so beets matches in-place."""
+    Uses a temp config with copy/move disabled + zero threshold so beets matches in-place.
+
+    ARCH-003 Wave 33 bugfix: every plan_album_mb_track_repair() call in this
+    function passes allow_establish_release_group=True. Without it, this
+    function is a real, confirmed-live case of album_mb_track_repair_v1's
+    repair_rg_not_established guard: a fresh reimport genuinely can be the
+    FIRST time this specific album row's mb_releasegroupid gets set (a
+    brand-new album, or an existing album row that predates this project's
+    RG tracking), and the engine's default (correct for a plain repair
+    caller) refuses to silently establish that identity as a side effect.
+    Before this fix, that refusal was surfaced here as a raised
+    RuntimeError, silently failing the entire reimport rather than
+    completing it -- this function's whole premise is that mb_albumid was
+    already independently confirmed (a real beets import against a chosen
+    MB release, or explicit user/caller selection), so establishing the
+    corresponding Release Group here is the correct, evidence-backed
+    behavior, not a silent side effect. A real identity CONFLICT
+    (repair_identity_mismatch -- the album already has a DIFFERENT
+    established Release Group) is never bypassed by this flag and still
+    fails the reimport exactly as before.
+    """
     payload    = request.get_json(silent=True) or {}
     aldir      = payload.get("aldir", "").strip()
     mb_albumid = payload.get("mb_albumid", "").strip()
@@ -22815,7 +22835,7 @@ def reimport_disk():
                         f"Existing album repair did not match enough tracks: "
                         f"{matched}/{expected_tracks}"
                     )
-            p_res = beets_client.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mb_albumid})
+            p_res = beets_client.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mb_albumid, "allow_establish_release_group": True})
             if not p_res.get("ok") or not p_res.get("operation_id"):
                 raise RuntimeError(f"Engine plan_album_mb_track_repair failed for album {aid}")
             app_res = beets_client.apply_album_mb_track_repair(p_res["operation_id"], write_tags=True)
@@ -23590,7 +23610,7 @@ def reimport_disk():
                         f"{labels or len(still_missing_before_retag)}"
                     )
 
-            p_res = beets_client.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mb_albumid})
+            p_res = beets_client.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mb_albumid, "allow_establish_release_group": True})
             if not p_res.get("ok") or not p_res.get("operation_id"):
                 raise RuntimeError(f"Engine plan_album_mb_track_repair failed for album {aid}")
             app_res = beets_client.apply_album_mb_track_repair(p_res["operation_id"], write_tags=True)
@@ -23642,7 +23662,7 @@ def reimport_disk():
                     replace_existing_item_ids=replace_existing_item_ids)
                 if merged_aid != aid:
                     aid = merged_aid
-                    p_res = beets_client.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mb_albumid})
+                    p_res = beets_client.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mb_albumid, "allow_establish_release_group": True})
                     if not p_res.get("ok") or not p_res.get("operation_id"):
                         raise RuntimeError(f"Engine plan_album_mb_track_repair failed for album {aid} after merge")
                     app_res = beets_client.apply_album_mb_track_repair(p_res["operation_id"], write_tags=True)
@@ -23761,7 +23781,7 @@ def reimport_disk():
                 except Exception:
                     pass
 
-            p_res = beets_client.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mb_albumid})
+            p_res = beets_client.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mb_albumid, "allow_establish_release_group": True})
             if not p_res.get("ok") or not p_res.get("operation_id"):
                 raise RuntimeError(f"Engine plan_album_mb_track_repair failed for album {aid}")
             app_res = beets_client.apply_album_mb_track_repair(p_res["operation_id"], write_tags=True)
@@ -23863,7 +23883,7 @@ def reimport_disk():
 
             _strip_year_from_album_name(_real_aid, log)
 
-            p_res = beets_client.plan_album_mb_track_repair({"album_id": _real_aid, "mb_albumid": mb_albumid})
+            p_res = beets_client.plan_album_mb_track_repair({"album_id": _real_aid, "mb_albumid": mb_albumid, "allow_establish_release_group": True})
             if not p_res.get("ok") or not p_res.get("operation_id"):
                 raise RuntimeError(f"Engine plan_album_mb_track_repair failed for album {_real_aid}")
             app_res = beets_client.apply_album_mb_track_repair(p_res["operation_id"], write_tags=True)

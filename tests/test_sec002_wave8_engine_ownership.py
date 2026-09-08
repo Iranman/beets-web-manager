@@ -26,6 +26,7 @@ This module guards both fixes:
    containment/collision/secret-redaction tests.
 """
 import os
+import re
 import shutil
 import tempfile
 import unittest
@@ -80,6 +81,125 @@ class ReimportDiskNoLocalSubprocessTests(unittest.TestCase):
         code_only = source.split('"""', 2)[-1]
         self.assertNotIn("MUSIC_ROOT", code_only)
         self.assertIn("UNMATCHED_DRAFT_ROOT", code_only)
+
+
+class ReimportDiskEstablishesReleaseGroupTests(unittest.TestCase):
+    """ARCH-003 Wave 33 bugfix regression.
+
+    Before this fix, every plan_album_mb_track_repair() call in
+    reimport_disk() omitted allow_establish_release_group -- so a fresh
+    reimport establishing an album's mb_releasegroupid for the first time
+    (routine: a brand-new album, or an existing album row that predates
+    this project's RG tracking) hit album_mb_track_repair_v1's
+    repair_rg_not_established guard and reimport_disk() unconditionally
+    raised RuntimeError on that rejection, silently failing the entire
+    reimport. This was previously undocumented and untested: no existing
+    test exercised this call with a blank-RG fixture.
+    """
+
+    def test_every_plan_album_mb_track_repair_call_passes_allow_establish_release_group(self):
+        source = function_source("reimport_disk")
+        calls = re.findall(r'plan_album_mb_track_repair\(\{[^}]*\}\)', source)
+        self.assertGreaterEqual(len(calls), 5, "expected at least 5 plan_album_mb_track_repair() calls in reimport_disk()")
+        offending = [c for c in calls if '"allow_establish_release_group": True' not in c]
+        self.assertEqual(offending, [], f"call(s) missing allow_establish_release_group=True: {offending}")
+
+    def test_reimport_disk_payload_shape_establishes_rg_end_to_end_on_a_blank_rg_album(self):
+        """Real engine test (not a mock) using the EXACT payload shape
+        reimport_disk() sends: {"album_id", "mb_albumid",
+        "allow_establish_release_group": True}. Proves the specific
+        mechanism the bug lived in now succeeds where it previously would
+        have raised."""
+        from tests.test_sec002_wave19_mb_track_repair import (
+            RG_A, REL_A, Wave19FixtureBase, _fake_tracklist_a, _write_test_audio,
+        )
+        import sqlite3
+
+        class _Harness(Wave19FixtureBase):
+            def runTest(self):
+                pass
+
+        h = _Harness()
+        h.setUp()
+        try:
+            con = sqlite3.connect(h.db_path)
+            con.execute(
+                "INSERT INTO albums (id, album, albumartist, mb_albumid, mb_releasegroupid, year) VALUES (?, ?, ?, ?, ?, ?)",
+                (1, "Test Album Title", "Test Artist", REL_A, "", 2024),
+            )
+            album_dir = h.music_root / "album_1"
+            album_dir.mkdir(parents=True, exist_ok=True)
+            for i in (1, 2):
+                p = album_dir / f"track{i}.wav"
+                _write_test_audio(p, freq=220.0 * i, mb_albumid=REL_A, title=f"Track {i} Old Title", track=i, disc=1)
+                con.execute(
+                    "INSERT INTO items (id, album_id, title, artist, album, albumartist, disc, track, path, mb_trackid, mb_albumid, mb_releasegroupid, length) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (i, 1, f"Track {i} Old Title", "Test Artist", "Test Album Title", "Test Artist", 1, i, str(p), "", REL_A, "", 180.0),
+                )
+            con.commit()
+            con.close()
+
+            from backend.transaction_engine import (
+                create_album_mb_track_repair_plan,
+                execute_album_mb_track_repair_apply,
+            )
+
+            # The literal payload shape reimport_disk() now constructs.
+            payload = {"album_id": 1, "mb_albumid": REL_A, "allow_establish_release_group": True}
+            plan_res = create_album_mb_track_repair_plan(
+                h.store, payload,
+                music_allowed_roots=[str(h.music_root)],
+                db_path=str(h.db_path),
+                fetch_tracklist_fn=lambda _: _fake_tracklist_a(),
+            )
+            self.assertTrue(plan_res.get("ok"), plan_res)
+            apply_res = execute_album_mb_track_repair_apply(
+                h.store, plan_res["operation_id"], db_path=str(h.db_path),
+                music_allowed_roots=[str(h.music_root)], write_tags=False,
+            )
+            self.assertTrue(apply_res.get("ok"), apply_res)
+
+            con = sqlite3.connect(h.db_path)
+            con.row_factory = sqlite3.Row
+            row = con.execute("SELECT mb_releasegroupid FROM albums WHERE id=1").fetchone()
+            con.close()
+            self.assertEqual(row["mb_releasegroupid"], RG_A)
+        finally:
+            h.doCleanups()
+
+    def test_reimport_disk_payload_shape_still_rejects_a_real_rg_conflict(self):
+        """Same payload shape, but the album already has a DIFFERENT,
+        established Release Group -- allow_establish_release_group must
+        never bypass a real conflict. Behavior must be identical to
+        before this fix (repair_identity_mismatch)."""
+        from tests.test_sec002_wave19_mb_track_repair import Wave19FixtureBase, _fake_tracklist_a
+
+        class _Harness(Wave19FixtureBase):
+            def runTest(self):
+                pass
+
+        h = _Harness()
+        h.setUp()
+        try:
+            RG_A = "aaaaaaaa-0000-0000-0000-000000000000"
+            RG_B = "bbbbbbbb-0000-0000-0000-000000000000"
+            REL_B = "22222222-2222-2222-2222-222222222222"
+            h._create_album_and_items(album_id=1, rg_id=RG_A)
+
+            from backend.transaction_engine import create_album_mb_track_repair_plan
+
+            payload = {"album_id": 1, "mb_albumid": REL_B, "allow_establish_release_group": True}
+            plan_res = create_album_mb_track_repair_plan(
+                h.store, payload,
+                music_allowed_roots=[str(h.music_root)],
+                db_path=str(h.db_path),
+                fetch_tracklist_fn=lambda _: _fake_tracklist_a(rel_id=REL_B, rg_id=RG_B),
+            )
+            self.assertFalse(plan_res.get("ok"))
+            self.assertEqual(plan_res.get("code"), "repair_identity_mismatch")
+        finally:
+            h.doCleanups()
 
 
 class BeetRunConfigOverrideTests(unittest.TestCase):
