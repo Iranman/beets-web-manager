@@ -26927,10 +26927,15 @@ def library_merge_artist():
         return jsonify({"ok": False, "error": "from_artist and to_artist are the same"})
 
     def _do(log, cancel_event=None):
-        with _db(row_factory=sqlite3.Row) as con:
-            album_rows = con.execute(
-                "SELECT id FROM albums WHERE albumartist = ?", (from_artist,)
-            ).fetchall()
+        # ARCH-007 (Wave 34): structured engine read, not raw _db() SQL --
+        # see backend.beets_client.find_all_albums_by_albumartist()'s own
+        # docstring for why this is an exact-match query, not a substring
+        # LIKE match.
+        try:
+            album_rows = beets_client.find_all_albums_by_albumartist(from_artist)
+        except (BeetsUnavailableError, BeetsError) as ex:
+            log.append(f"ERROR: Engine unavailable looking up artist '{from_artist}': {ex}")
+            return
         if not album_rows:
             log.append(f"No albums found for artist '{from_artist}'")
             return
@@ -27407,13 +27412,15 @@ def library_move_all():
         # that step was silently a no-op (or worse, an unhandled
         # exception swallowed by its own try/except) in the real
         # deployment before this fix, not just an ARCH-003 sink.
+        # ARCH-007 (Wave 34): structured engine read, not raw _db() SQL --
+        # beets_client.list_distinct_item_paths() -> GET /library/item-paths
+        # already returns plain str (the engine decodes bytes path columns
+        # itself), so no local bytes/text_factory handling is needed here
+        # any more.
         candidate_dirs: set = set()
         try:
-            with _db(text_factory=bytes) as con:
-                path_rows = con.execute("SELECT DISTINCT path FROM items").fetchall()
-            for row in path_rows:
-                raw_p = row[0]
-                p = raw_p.decode("utf-8", "replace") if isinstance(raw_p, bytes) else str(raw_p or "")
+            path_values = beets_client.list_distinct_item_paths()
+            for p in path_values:
                 if not p:
                     continue
                 abs_p = p if p.startswith("/") else f"{MUSIC_ROOT}/{p}"
@@ -27428,6 +27435,20 @@ def library_move_all():
                 while parent != root and root in parent.parents:
                     candidate_dirs.add(str(parent))
                     parent = parent.parent
+            # ARCH-007 (Wave 34): a positive success log line for the
+            # engine read step, mirroring library_mbsync_all()'s "Pruned
+            # X/Y ..." line. Before this, a successful scan produced no
+            # log output at all (only the [warn] line on the except
+            # branch below existed), so real Docker acceptance testing
+            # had no job-log-based way to distinguish "the read succeeded"
+            # from "the read was never attempted" -- it could only infer
+            # success from the ABSENCE of the warning, which is weaker
+            # evidence than the explicit positive markers every other
+            # migrated read in this wave already logs.
+            log.append(
+                f"Pre-move scan: {len(path_values)} distinct item path(s) read via engine IPC, "
+                f"{len(candidate_dirs)} candidate empty-folder director{'y' if len(candidate_dirs) == 1 else 'ies'}."
+            )
         except Exception as ex:
             log.append(f"  [warn] Could not enumerate pre-move directories for empty-folder cleanup: {ex}")
 
@@ -27512,12 +27533,13 @@ def library_mbsync_all():
         # `if rows:` block that defined `ids`, so on the common case of
         # zero orphaned albums this always raised NameError, silently
         # swallowed by the surrounding except as a "non-fatal" warning.
+        # ARCH-007 (Wave 34): structured engine read, not raw _db() SQL --
+        # beets_client.find_all_orphan_albums() -> GET /albums?orphan=true
+        # (an `id NOT IN (...)`-equivalent WHERE NOT EXISTS on the engine
+        # side, same semantics as the raw SQL it replaces).
         try:
-            with _db() as con:
-                rows = con.execute(
-                    "SELECT id FROM albums WHERE id NOT IN (SELECT DISTINCT album_id FROM items WHERE album_id IS NOT NULL)"
-                ).fetchall()
-            orphan_ids = [int(r[0]) for r in rows]
+            orphan_rows = beets_client.find_all_orphan_albums()
+            orphan_ids = [int(r["id"]) for r in orphan_rows]
         except Exception as ex:
             log.append(f"  [warn] Orphan lookup failed (non-fatal): {ex}")
             orphan_ids = []
@@ -27891,12 +27913,14 @@ def library_normalize_artists():
     """Normalize Unicode punctuation (fancy hyphens, smart quotes, etc.) in all
     albumartist and artist fields in the DB, then move files for affected albums."""
     def _do(log, cancel_event=None):
-        with _db(row_factory=sqlite3.Row) as con:
-            # Collect all distinct albumartist values
-            aa_rows = con.execute("SELECT DISTINCT albumartist FROM albums WHERE albumartist != ''").fetchall()
+        # ARCH-007 (Wave 34): structured engine read, not raw _db() SQL.
+        try:
+            aa_values = beets_client.list_distinct_albumartists()
+        except (BeetsUnavailableError, BeetsError) as ex:
+            log.append(f"ERROR: Engine unavailable listing artist names: {ex}")
+            return
         to_fix = []
-        for row in aa_rows:
-            aa = row["albumartist"]
+        for aa in aa_values:
             clean = _normalize_albumartist(aa)
             if clean != aa:
                 to_fix.append((aa, clean))
@@ -27907,7 +27931,7 @@ def library_normalize_artists():
             return
 
         # Selection (which album rows currently hold the un-normalized
-        # value) stays a local, non-mutating read; the rename itself is
+        # value) stays a non-mutating structured read; the rename itself is
         # one album_metadata_repair_v1 call per affected album --
         # updates={"albumartist": new_aa} already propagates to every
         # item row of that album too (create_album_metadata_plan merges
@@ -27915,11 +27939,14 @@ def library_normalize_artists():
         # item doesn't already set its own), so no separate
         # UPDATE items SET albumartist=... step is needed. Same
         # migration already applied to the sibling auto-triggered
-        # function _run_normalize_artists_if_needed() (ARCH-003 Wave 30).
+        # function _run_normalize_artists_if_needed() (ARCH-003 Wave 30/34).
         affected_ids: List[int] = []
         for old_aa, new_aa in to_fix:
-            with _db(row_factory=sqlite3.Row) as con:
-                rows = con.execute("SELECT id FROM albums WHERE albumartist = ?", (old_aa,)).fetchall()
+            try:
+                rows = beets_client.find_all_albums_by_albumartist(old_aa)
+            except (BeetsUnavailableError, BeetsError) as ex:
+                log.append(f"  Engine unavailable looking up albums for {old_aa!r}: {ex}")
+                continue
             for row in rows:
                 aid = int(row["id"])
                 try:
@@ -28365,21 +28392,24 @@ def _run_normalize_artists_if_needed():
     Runs silently as a background job when anything needs fixing.
     """
     try:
-        with _db() as con:
-            aa_rows = con.execute(
-                "SELECT DISTINCT albumartist FROM albums WHERE albumartist != ''"
-            ).fetchall()
+        # ARCH-007 (Wave 34): structured engine read, not raw _db() SQL --
+        # this background function silently no-op'd via the outer
+        # `except Exception: pass` on every run in the real two-service
+        # topology before this fix (found tracing this function as the
+        # "sibling" of library_normalize_artists(), per its own comment
+        # above, while fixing that function's identical defect).
+        aa_values = beets_client.list_distinct_albumartists()
         to_fix = [
             (aa, _normalize_albumartist(aa))
-            for (aa,) in aa_rows
+            for aa in aa_values
             if _normalize_albumartist(aa) != aa
         ]
         if not to_fix:
             return
         def _do(log, cancel_event=None):
             # Selection (which album rows currently hold the un-normalized
-            # value) is a local, non-mutating read; the actual rename is one
-            # album_metadata_repair_v1 call per affected album --
+            # value) is a non-mutating structured read; the actual rename is
+            # one album_metadata_repair_v1 call per affected album --
             # updates={"albumartist": new_aa} already propagates to every
             # item row of that album too (create_album_metadata_plan merges
             # album-level identity fields into each item's diff when the
@@ -28387,8 +28417,11 @@ def _run_normalize_artists_if_needed():
             # UPDATE items SET albumartist=... step is needed.
             affected_ids: List[int] = []
             for old_aa, new_aa in to_fix:
-                with _db(row_factory=sqlite3.Row) as con:
-                    rows = con.execute("SELECT id FROM albums WHERE albumartist = ?", (old_aa,)).fetchall()
+                try:
+                    rows = beets_client.find_all_albums_by_albumartist(old_aa)
+                except (BeetsUnavailableError, BeetsError) as ex:
+                    log.append(f"  Engine unavailable looking up albums for {old_aa!r}: {ex}")
+                    continue
                 log.append(f"  Renamed: {old_aa!r} → {new_aa!r}")
                 for row in rows:
                     aid = int(row["id"])

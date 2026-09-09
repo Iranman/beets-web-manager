@@ -21,15 +21,25 @@ subprocess invocations -- see docs/TECHNICAL_DEBT.md for why (no per-
 album engine analog exists for `beet mbsync`'s own MB-matching logic or
 `beet update`'s DB-vs-disk resync logic); this wave closes the two raw
 mutation *sinks* each route also had, not the whole BEET_BIN dependency.
+
+ARCH-007 (Wave 34): both routes' remaining *read* steps -- the orphan-
+album lookup and the pre-move distinct-item-path scan -- were themselves
+still raw `_db()` SELECTs, which real Docker acceptance testing proved
+unconditionally raise in the actual two-service deployment (this was
+found and confirmed by the same acceptance run that found the two
+sibling library_merge_artist()/library_normalize_artists() failures).
+Migrated onto beets_client.find_all_orphan_albums() (GET
+/albums?orphan=true) and beets_client.list_distinct_item_paths() (GET
+/library/item-paths) respectively -- both real, structured, engine-side
+queries. The fixtures below mock those client methods directly instead of
+backing a local sqlite file through a patched `_db()`.
 """
 
 import ast
-import sqlite3
-import tempfile
 import unittest
-from contextlib import contextmanager
-from pathlib import Path
 from unittest import mock
+
+from backend.beets_client import BeetsUnavailableError
 
 import app as app_module
 
@@ -45,26 +55,6 @@ def _fake_popen(returncode=0, stdout_lines=None):
 
 class LibraryTablesFixture(unittest.TestCase):
     def setUp(self):
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.tmp_path = Path(self.tmpdir.name).resolve()
-        self.db_path = self.tmp_path / "musiclibrary.db"
-        with sqlite3.connect(self.db_path) as con:
-            con.execute("CREATE TABLE albums (id INTEGER PRIMARY KEY, albumartist TEXT)")
-            con.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, album_id INTEGER, path TEXT)")
-            con.commit()
-
-        @contextmanager
-        def _mock_db_cm(*args, **kwargs):
-            con = sqlite3.connect(self.db_path)
-            if kwargs.get("row_factory") is not None:
-                con.row_factory = kwargs["row_factory"]
-            try:
-                yield con
-            finally:
-                con.close()
-
-        self._db_patch = mock.patch.object(app_module, "_db", side_effect=_mock_db_cm)
-        self._db_patch.start()
         self._invalidate_patch = mock.patch.object(app_module, "_invalidate_lib_cache")
         self._invalidate_patch.start()
         self._plex_patch = mock.patch.object(app_module, "_trigger_plex_refresh")
@@ -73,21 +63,6 @@ class LibraryTablesFixture(unittest.TestCase):
     def tearDown(self):
         self._plex_patch.stop()
         self._invalidate_patch.stop()
-        self._db_patch.stop()
-        try:
-            self.tmpdir.cleanup()
-        except Exception:
-            pass
-
-    def _insert_album(self, album_id):
-        with sqlite3.connect(self.db_path) as con:
-            con.execute("INSERT INTO albums (id, albumartist) VALUES (?, ?)", (album_id, "Some Artist"))
-            con.commit()
-
-    def _insert_item(self, item_id, album_id, path):
-        with sqlite3.connect(self.db_path) as con:
-            con.execute("INSERT INTO items (id, album_id, path) VALUES (?, ?, ?)", (item_id, album_id, path))
-            con.commit()
 
     def _run(self, fn, route):
         captured = {}
@@ -106,10 +81,9 @@ class LibraryTablesFixture(unittest.TestCase):
 
 class LibraryMbsyncAllTests(LibraryTablesFixture):
     def test_no_orphans_is_a_clean_no_op(self):
-        self._insert_album(1)
-        self._insert_item(1, 1, "artist/album/track1.mp3")
         with mock.patch.object(app_module, "beets_client") as mock_client, \
              mock.patch("subprocess.Popen", return_value=_fake_popen()):
+            mock_client.find_all_orphan_albums.return_value = []
             log = self._run(app_module.library_mbsync_all, "/api/library/mbsync-all")
         mock_client.delete_album.assert_not_called()
         # The original code's NameError-on-empty-orphans bug must not
@@ -118,26 +92,27 @@ class LibraryMbsyncAllTests(LibraryTablesFixture):
         self.assertFalse(any("Pruned" in line for line in log))
 
     def test_prunes_orphaned_album_via_engine_not_raw_sql(self):
-        self._insert_album(1)
-        self._insert_item(1, 1, "artist/album/track1.mp3")
-        self._insert_album(2)  # orphaned: no items reference album_id=2
         with mock.patch.object(
+            app_module.beets_client, "find_all_orphan_albums",
+            return_value=[{"id": 2, "albumartist": "Some Artist"}],
+        ) as mock_find, mock.patch.object(
             app_module.beets_client, "delete_album", return_value={"ok": True},
         ) as mock_delete, mock.patch("subprocess.Popen", return_value=_fake_popen()):
             log = self._run(app_module.library_mbsync_all, "/api/library/mbsync-all")
+        mock_find.assert_called_once_with()
         mock_delete.assert_called_once_with(2, delete_files=True)
         self.assertTrue(any("Pruned 1/1" in line for line in log))
 
     def test_engine_rejection_for_one_orphan_does_not_block_the_other(self):
-        self._insert_album(2)
-        self._insert_album(3)
-
         def fake_delete(album_id, delete_files=True):
             if album_id == 2:
                 return {"ok": False, "error": "boom"}
             return {"ok": True}
 
         with mock.patch.object(
+            app_module.beets_client, "find_all_orphan_albums",
+            return_value=[{"id": 2, "albumartist": "A"}, {"id": 3, "albumartist": "B"}],
+        ), mock.patch.object(
             app_module.beets_client, "delete_album", side_effect=fake_delete,
         ) as mock_delete, mock.patch("subprocess.Popen", return_value=_fake_popen()):
             log = self._run(app_module.library_mbsync_all, "/api/library/mbsync-all")
@@ -145,14 +120,30 @@ class LibraryMbsyncAllTests(LibraryTablesFixture):
         self.assertTrue(any("Could not prune orphaned album 2" in line for line in log))
         self.assertTrue(any("Pruned 1/2" in line for line in log))
 
+    def test_orphan_lookup_engine_unavailable_is_non_fatal_mbsync_still_runs(self):
+        """ARCH-007 (Wave 34): the NEW failure mode this migration
+        introduces a real recovery path for -- find_all_orphan_albums()
+        can now fail with a real engine-offline error instead of the old
+        unconditional raw-SQL raise. Must stay non-fatal (matches this
+        route's pre-existing 'orphan prune is best-effort' contract): no
+        orphans get pruned, but `beet mbsync` itself still runs."""
+        with mock.patch.object(
+            app_module.beets_client, "find_all_orphan_albums",
+            side_effect=BeetsUnavailableError("engine offline"),
+        ), mock.patch.object(app_module.beets_client, "delete_album") as mock_delete, \
+             mock.patch("subprocess.Popen", return_value=_fake_popen()) as mock_popen:
+            log = self._run(app_module.library_mbsync_all, "/api/library/mbsync-all")
+        mock_delete.assert_not_called()
+        mock_popen.assert_called_once()
+        self.assertTrue(any("Orphan lookup failed (non-fatal)" in line for line in log))
+
 
 class LibraryMoveAllTests(LibraryTablesFixture):
-    def test_candidate_dirs_derived_from_db_then_cleaned_via_engine(self):
-        self._insert_album(1)
-        self._insert_item(1, 1, "ArtistA/AlbumA/track1.mp3")
-        self._insert_item(2, 1, "ArtistA/AlbumA/track2.mp3")
-
+    def test_candidate_dirs_derived_from_engine_then_cleaned_via_engine(self):
         with mock.patch.object(
+            app_module.beets_client, "list_distinct_item_paths",
+            return_value=["ArtistA/AlbumA/track1.mp3", "ArtistA/AlbumA/track2.mp3"],
+        ) as mock_paths, mock.patch.object(
             app_module.beets_client, "plan_folder_cleanup",
             return_value={"ok": True, "operation_id": "op-1"},
         ) as mock_plan, mock.patch.object(
@@ -161,6 +152,7 @@ class LibraryMoveAllTests(LibraryTablesFixture):
         ) as mock_apply, mock.patch("subprocess.Popen", return_value=_fake_popen()):
             log = self._run(app_module.library_move_all, "/api/library/move-all")
 
+        mock_paths.assert_called_once_with()
         # Both the album dir and its ancestor (ArtistA) must have been
         # considered as candidates.
         planned_bodies = [c.args[0] if c.args else c.kwargs for c in mock_plan.call_args_list]
@@ -169,11 +161,27 @@ class LibraryMoveAllTests(LibraryTablesFixture):
         self.assertIn(str(app_module.MUSIC_ROOT / "ArtistA"), planned_sources_from_bodies)
         self.assertTrue(mock_apply.called)
         self.assertTrue(any("Removed empty folder" in line for line in log))
+        # ARCH-007 (Wave 34): a successful engine-IPC read step must leave
+        # positive evidence in the job log, not just an absent warning --
+        # real Docker acceptance testing found the original silent-success
+        # shape gave the acceptance script's own verification nothing
+        # reliable to check (it fell back to grepping the engine
+        # container's HTTP access log, which never contains per-request
+        # lines because ControlAgentHandler.log_message() is a no-op by
+        # design -- a broken check, not a broken fix). This asserts the
+        # fix for that: an explicit "Pre-move scan: ... via engine IPC"
+        # log line naming both the raw path count and the derived
+        # candidate-directory count.
+        self.assertTrue(
+            any("Pre-move scan: 2 distinct item path(s) read via engine IPC" in line for line in log),
+            f"expected a positive pre-move-scan log line, got: {log}",
+        )
 
     def test_expected_rejection_codes_are_silently_skipped(self):
-        self._insert_album(1)
-        self._insert_item(1, 1, "ArtistA/AlbumA/track1.mp3")
         with mock.patch.object(
+            app_module.beets_client, "list_distinct_item_paths",
+            return_value=["ArtistA/AlbumA/track1.mp3"],
+        ), mock.patch.object(
             app_module.beets_client, "plan_folder_cleanup",
             return_value={"ok": False, "code": "folder_cleanup_not_empty", "error": "Directory is not empty"},
         ), mock.patch.object(
@@ -185,14 +193,33 @@ class LibraryMoveAllTests(LibraryTablesFixture):
         self.assertFalse(any("Removed empty folder" in line for line in log))
 
     def test_unexpected_rejection_code_is_logged(self):
-        self._insert_album(1)
-        self._insert_item(1, 1, "ArtistA/AlbumA/track1.mp3")
         with mock.patch.object(
+            app_module.beets_client, "list_distinct_item_paths",
+            return_value=["ArtistA/AlbumA/track1.mp3"],
+        ), mock.patch.object(
             app_module.beets_client, "plan_folder_cleanup",
             return_value={"ok": False, "code": "folder_cleanup_symlink_rejected", "error": "Symlink rejected"},
         ), mock.patch("subprocess.Popen", return_value=_fake_popen()):
             log = self._run(app_module.library_move_all, "/api/library/move-all")
         self.assertTrue(any("Folder cleanup plan rejected" in line for line in log))
+
+    def test_path_scan_engine_unavailable_is_non_fatal_move_still_runs(self):
+        """ARCH-007 (Wave 34): the NEW failure mode this migration
+        introduces a real recovery path for -- list_distinct_item_paths()
+        can now fail with a real engine-offline error instead of the old
+        unconditional raw-SQL raise. Must stay non-fatal (matches this
+        route's pre-existing broad try/except around the candidate-dir
+        scan): no folders get cleaned up, but `beet update`/`beet move`
+        themselves still run."""
+        with mock.patch.object(
+            app_module.beets_client, "list_distinct_item_paths",
+            side_effect=BeetsUnavailableError("engine offline"),
+        ), mock.patch.object(app_module.beets_client, "plan_folder_cleanup") as mock_plan, \
+             mock.patch("subprocess.Popen", return_value=_fake_popen()) as mock_popen:
+            log = self._run(app_module.library_move_all, "/api/library/move-all")
+        mock_plan.assert_not_called()
+        self.assertTrue(mock_popen.called)
+        self.assertTrue(any("Could not enumerate pre-move directories" in line for line in log))
 
     def test_no_local_filesystem_walk_or_rmdir_remains(self):
         """Structural regression (AST-based, not a text/comment match): the

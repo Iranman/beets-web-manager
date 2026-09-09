@@ -1096,6 +1096,67 @@ class BeetsClient:
         """Fetch all items by paginating through all available pages up to safety ceiling."""
         return self._fetch_all_paginated("/items", "items", page_size=page_size, safety_ceiling=safety_ceiling)
 
+    # ARCH-007 (Wave 34): structured, workflow-specific read methods that
+    # replace app.py's own raw `_db()`-based SELECTs in
+    # library_merge_artist(), library_normalize_artists(),
+    # library_mbsync_all(), and library_move_all() -- all four previously
+    # routed their read/detection step through `_db()` ->
+    # RemoteSQLiteConnection -> raw_sqlite_query(), which unconditionally
+    # raises in the real two-service topology (confirmed by real Docker
+    # acceptance testing, not theoretical). Each method below is a narrow,
+    # fixed-shape query engineered for exactly the one caller need it
+    # serves -- server-owned WHERE clauses with bound parameters, never
+    # caller-supplied SQL -- not a reopening of the raw-SQL boundary
+    # raw_sqlite_query() deliberately closed.
+
+    def find_all_albums_by_albumartist(self, albumartist: str) -> List[Dict[str, Any]]:
+        """Every album row whose albumartist is EXACTLY the given string
+        (an equality match, not the substring `query=artist:...` LIKE
+        filter /albums also supports -- a LIKE match here could silently
+        pull in an unrelated album, e.g. "Bob" also matching "Bobby").
+        Structured replacement for library_merge_artist()'s and
+        library_normalize_artists()'s per-name album lookup."""
+        if not albumartist or not albumartist.strip():
+            raise BeetsError("albumartist cannot be empty")
+        return self._fetch_all_paginated(
+            f"/albums?albumartist={urllib.parse.quote(albumartist)}", "albums", safety_ceiling=20000
+        )
+
+    def list_distinct_albumartists(self) -> List[str]:
+        """Every distinct, non-empty albumartist value library-wide.
+        Structured replacement for library_normalize_artists()'s
+        scan-every-albumartist step."""
+        res = self._request("GET", "/library/albumartists")
+        values = res.get("albumartists", [])
+        if not isinstance(values, list):
+            raise BeetsError(
+                f"Malformed /library/albumartists response: 'albumartists' is not a list ({type(values).__name__})"
+            )
+        return [str(v) for v in values]
+
+    def find_all_orphan_albums(self) -> List[Dict[str, Any]]:
+        """Every album row with zero item rows. Structured replacement for
+        library_mbsync_all()'s pre-mbsync orphan-album prune step (`beet
+        mbsync` crashes on these rows if they are not pruned first)."""
+        return self._fetch_all_paginated("/albums?orphan=true", "albums", safety_ceiling=20000)
+
+    def list_distinct_item_paths(self) -> List[str]:
+        """Every distinct item path library-wide. Structured replacement for
+        library_move_all()'s pre-move empty-folder-cleanup candidate scan
+        (the web manager has no filesystem mount into MUSIC_ROOT in the
+        supported deployment, so it cannot walk the real directory tree
+        itself and must derive candidate directories from item paths
+        instead). Raises BeetsError if the engine's own response-size
+        safety cap is exceeded (HTTP 413) rather than silently returning a
+        partial list."""
+        res = self._request("GET", "/library/item-paths")
+        values = res.get("paths", [])
+        if not isinstance(values, list):
+            raise BeetsError(
+                f"Malformed /library/item-paths response: 'paths' is not a list ({type(values).__name__})"
+            )
+        return [str(v) for v in values]
+
     def update_item_fields(self, item_id: int, fields: Dict[str, Any]) -> Dict[str, Any]:
         """Update fields on item row in SQLite under lock."""
         return self._request("PATCH", f"/items/{item_id}", {"fields": fields})

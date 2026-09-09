@@ -362,6 +362,13 @@ _AGENT_CONFIG_CONTENT_MAX_BYTES = _env_int_clamped(
 _AGENT_CONFIG_REQUEST_MAX_BYTES = _AGENT_CONFIG_CONTENT_MAX_BYTES + 4096
 _AGENT_CONFIG_LOCK = threading.Lock()
 
+# ARCH-007 (Wave 34): safety cap for GET /library/item-paths -- a single
+# unbounded response covering every distinct item path in the library. A
+# real library this size is implausible, but refusing outright with a
+# clear error is safer than either an unbounded response or a silent
+# truncation a caller could mistake for the complete set.
+MAX_ITEM_PATHS_RESPONSE = 500_000
+
 
 def _agent_config_raw_root() -> Path:
     root = Path(BEETSDIR).expanduser()
@@ -4373,6 +4380,16 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             query = params.get("query", [None])[0]
             mb_albumid = params.get("mb_albumid", [None])[0]
             mb_releasegroupid = params.get("mb_releasegroupid", [None])[0]
+            # ARCH-007 (Wave 34): exact-match albumartist filter, distinct
+            # from the substring `query=artist:...` LIKE match above --
+            # library_merge_artist()/library_normalize_artists() need every
+            # album whose albumartist is EXACTLY a given string (a LIKE
+            # match could silently pull in an unrelated album, e.g.
+            # "Bob" also matching "Bobby"). "orphan" is a boolean filter
+            # for albums with zero item rows (library_mbsync_all()'s
+            # pre-mbsync prune step -- mbsync crashes on these).
+            albumartist_exact = params.get("albumartist", [None])[0]
+            orphan_raw = params.get("orphan", [None])[0]
             offset = max(int(params.get("offset", [0])[0]), 0)
             limit = min(max(int(params.get("limit", [500])[0]), 1), 2000)
 
@@ -4394,6 +4411,19 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 elif mb_releasegroupid:
                     where_clause = "WHERE mb_releasegroupid = ?"
                     sql_params.append(mb_releasegroupid)
+                elif albumartist_exact is not None:
+                    where_clause = "WHERE albumartist = ?"
+                    sql_params.append(albumartist_exact)
+                elif orphan_raw is not None:
+                    if str(orphan_raw).strip().lower() not in {"true", "false", "1", "0"}:
+                        self._send_json(400, {"error": f"Invalid orphan parameter value: {orphan_raw!r}"})
+                        con.close()
+                        return
+                    orphan_bool = str(orphan_raw).strip().lower() in {"true", "1"}
+                    if orphan_bool:
+                        where_clause = "WHERE NOT EXISTS (SELECT 1 FROM items WHERE items.album_id = albums.id)"
+                    else:
+                        where_clause = "WHERE EXISTS (SELECT 1 FROM items WHERE items.album_id = albums.id)"
                 elif query is not None:
                     q_str = str(query).strip()
                     if not q_str:
@@ -4432,6 +4462,72 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                     "has_more": has_more,
                     "next_offset": next_offset
                 })
+            except Exception as exc:
+                self._send_json(500, {"error": f"Database error: {exc}"})
+            finally:
+                release_os_lock(lock)
+            return
+
+        if path == "/library/albumartists":
+            # ARCH-007 (Wave 34): structured, workflow-specific replacement
+            # for library_normalize_artists()'s scan step -- distinct,
+            # non-empty albumartist values across the whole library. Not a
+            # general query surface: no caller-supplied SQL, no filter
+            # params, one fixed shape.
+            if not os.path.exists(LIB_PATH):
+                self._send_json(404, {"error": "Database file musiclibrary.blb not found"})
+                return
+            lock = acquire_os_lock(read_only=True)
+            try:
+                con = sqlite3.connect(LIB_PATH, timeout=10)
+                cur = con.cursor()
+                cur.execute("SELECT DISTINCT albumartist FROM albums WHERE albumartist != ''")
+                values = [r[0] for r in cur.fetchall()]
+                con.close()
+                self._send_json(200, {"albumartists": values, "count": len(values)})
+            except Exception as exc:
+                self._send_json(500, {"error": f"Database error: {exc}"})
+            finally:
+                release_os_lock(lock)
+            return
+
+        if path == "/library/item-paths":
+            # ARCH-007 (Wave 34): structured, workflow-specific replacement
+            # for library_move_all()'s pre-move candidate-directory scan --
+            # every distinct item path in the library, so the web-manager
+            # (which has no filesystem mount into MUSIC_ROOT) can compute
+            # which ancestor directories are real empty-folder-cleanup
+            # candidates once `beet move` finishes. Same fixed shape as
+            # /library/albumartists: no caller-supplied SQL, no filters.
+            # Capped at MAX_ITEM_PATHS_RESPONSE rows (a real, if very large,
+            # library could exceed a safe single-response size) -- refused
+            # outright with a clear error rather than silently truncated,
+            # so a caller never mistakes a partial list for the complete
+            # set.
+            if not os.path.exists(LIB_PATH):
+                self._send_json(404, {"error": "Database file musiclibrary.blb not found"})
+                return
+            lock = acquire_os_lock(read_only=True)
+            try:
+                con = sqlite3.connect(LIB_PATH, timeout=10)
+                cur = con.cursor()
+                cur.execute("SELECT COUNT(*) FROM (SELECT DISTINCT path FROM items)")
+                distinct_count = cur.fetchone()[0]
+                if distinct_count > MAX_ITEM_PATHS_RESPONSE:
+                    con.close()
+                    self._send_json(413, {
+                        "error": f"{distinct_count} distinct item paths exceeds the "
+                                 f"{MAX_ITEM_PATHS_RESPONSE}-row response cap for this endpoint",
+                    })
+                    return
+                cur.execute("SELECT DISTINCT path FROM items")
+                raw_values = [r[0] for r in cur.fetchall()]
+                con.close()
+                values = [
+                    (v.decode("utf-8", "replace") if isinstance(v, (bytes, bytearray)) else str(v or ""))
+                    for v in raw_values
+                ]
+                self._send_json(200, {"paths": values, "count": len(values)})
             except Exception as exc:
                 self._send_json(500, {"error": f"Database error: {exc}"})
             finally:

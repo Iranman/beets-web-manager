@@ -314,6 +314,18 @@ def seed_disposable_library(config_dir: Path, music_dir: Path) -> dict:
     )
     normalize_item.add(lib)
 
+    # ARCH-007 (Wave 34): an album with ZERO item rows, for
+    # library_mbsync_all()'s pre-mbsync orphan-album prune step (migrated
+    # this wave off a raw `_db()` SELECT onto
+    # beets_client.find_all_orphan_albums() -> GET /albums?orphan=true).
+    # `beet mbsync` crashes on rows like this if they are not pruned
+    # first, and the prune step itself was completely non-functional in
+    # the real two-service topology before this wave's fix.
+    orphan_album = bl.Album(
+        lib, albumartist="Orphan Artist", album="Orphan Album (No Tracks)", year=2024,
+    )
+    orphan_album.add(lib)
+
     lib._close()
 
     return {
@@ -333,6 +345,7 @@ def seed_disposable_library(config_dir: Path, music_dir: Path) -> dict:
         "merge_item_b_id": int(merge_item_b.id),
         "normalize_album_id": int(normalize_album.id),
         "normalize_item_id": int(normalize_item.id),
+        "orphan_album_id": int(orphan_album.id),
     }
 
 
@@ -2423,6 +2436,158 @@ def run_wave33_scenarios(client: "HttpClient", db_path: str) -> None:
                     scenario_pass(f"wave33-library-normalize-artists (normalized to {normalized!r} via real engine IPC, host-mounted DB verified)")
 
 
+def run_wave34_scenarios(client: "HttpClient", db_path: str, fixture: dict) -> None:
+    """ARCH-007 (Wave 34): library_mbsync_all() and library_move_all() were
+    checked for the same latent defect class the two Wave 33 scenarios
+    above found (a raw `_db()` read that unconditionally raises in the
+    real two-service topology) -- both had it. Migrated onto
+    beets_client.find_all_orphan_albums() / beets_client.list_distinct_item_paths()
+    respectively. Both scenarios below exercise the real production HTTP
+    route -> real engine IPC -> real Beets DB read, with exact host-mounted
+    DB/log state and (for library_move_all(), which has no positive
+    success log line of its own for this step) the engine container's own
+    HTTP access log verified after, not just "no error returned".
+
+    Real Docker acceptance for these two routes surfaced a SECOND, entirely
+    separate, pre-existing defect while proving the first one fixed: the
+    web-manager container has no `beet` CLI at all (not in requirements.txt;
+    BEET_BIN's own fallback `/lsiopy/bin/beet` is a stale path left over
+    from an apparently pre-ARCH-003 single-container assumption), so the
+    `beet mbsync`/`beet update`/`beet move` subprocess steps these two
+    routes still run locally (a separately-tracked, already-documented
+    BEET_BIN debt class -- see docs/TECHNICAL_DEBT.md) fail outright in the
+    real deployed image. That is NOT the ARCH-007 defect this scenario
+    exists to prove fixed, and this wave does not attempt to fix it (a real
+    fix means either reinstalling all of `beets` in the web-manager image,
+    undoing the whole point of the two-service separation, or building new
+    engine-side execution endpoints for these 3 beet subcommands -- a real,
+    nontrivial new engine surface, out of scope for an ARCH-007 read-path
+    fix). Reported honestly below as its own, separately-named [FAIL] --
+    not suppressed, and not conflated with the ARCH-007 read-step result."""
+
+    def scenario_pass(name: str) -> None:
+        print(f"[PASS] {name}")
+
+    def scenario_fail(name: str, detail: str) -> None:
+        _fail(f"{name}: {detail}")
+
+    print("==> [Wave34] library_mbsync_all(): ARCH-007 read-step proof (orphan lookup + prune via real engine IPC)...")
+    status, body = client.request("POST", "/api/library/mbsync-all", json_body={}, timeout=15)
+    if status != 200 or not body.get("ok"):
+        scenario_fail("wave34-library-mbsync-all-read-step", f"request rejected: {status} {body}")
+        mbsync_result = None
+    else:
+        try:
+            mbsync_result = client.wait_job(body["job_id"], timeout=180)
+        except TimeoutError as ex:
+            scenario_fail("wave34-library-mbsync-all-read-step", f"job did not complete: {ex}")
+            mbsync_result = None
+        if mbsync_result is not None:
+            log_lines = mbsync_result.get("log") or []
+            if any("Orphan lookup failed" in line for line in log_lines):
+                scenario_fail(
+                    "wave34-library-mbsync-all-read-step",
+                    f"orphan lookup failed (the exact ARCH-007 defect this scenario exists to catch): {log_lines}",
+                )
+            elif not any("Pruned 1/1" in line for line in log_lines):
+                scenario_fail(
+                    "wave34-library-mbsync-all-read-step",
+                    f"expected positive evidence of a successful real-engine-IPC read+prune "
+                    f"('Pruned 1/1 ...') was not found in the job log: {log_lines}",
+                )
+            else:
+                con = sqlite3.connect(db_path)
+                remaining = con.execute(
+                    "SELECT COUNT(*) FROM albums WHERE id=?", (fixture["orphan_album_id"],)
+                ).fetchone()[0]
+                con.close()
+                if remaining != 0:
+                    scenario_fail(
+                        "wave34-library-mbsync-all-read-step",
+                        f"orphan album id={fixture['orphan_album_id']} was not pruned (still present in host-mounted DB)",
+                    )
+                else:
+                    scenario_pass(
+                        "wave34-library-mbsync-all-read-step (zero-item album found + pruned via real engine "
+                        "IPC, no raw-SQL orphan-lookup failure, host-mounted DB verified -- the ARCH-007 fix "
+                        "this scenario exists to prove)"
+                    )
+
+    if mbsync_result is not None:
+        if mbsync_result.get("status") != "success":
+            scenario_fail(
+                "wave34-library-mbsync-all-beet-subprocess-KNOWN-GAP",
+                "job's `beet mbsync` subprocess step failed for a real, pre-existing, unrelated reason "
+                f"(no `beet` CLI in the web-manager image -- see docs/TECHNICAL_DEBT.md): {mbsync_result.get('log')}",
+            )
+        else:
+            scenario_pass("wave34-library-mbsync-all-beet-subprocess (beet mbsync ran to completion)")
+
+    print("==> [Wave34] library_move_all(): ARCH-007 read-step proof (pre-move candidate-directory scan via real engine IPC)...")
+    status, body = client.request("POST", "/api/library/move-all", json_body={}, timeout=15)
+    if status != 200 or not body.get("ok"):
+        scenario_fail("wave34-library-move-all-read-step", f"request rejected: {status} {body}")
+        move_result = None
+    else:
+        try:
+            move_result = client.wait_job(body["job_id"], timeout=180)
+        except TimeoutError as ex:
+            scenario_fail("wave34-library-move-all-read-step", f"job did not complete: {ex}")
+            move_result = None
+        if move_result is not None:
+            log_lines = move_result.get("log") or []
+            # This scenario originally tried to cross-check the engine
+            # container's own HTTP access log for a real GET
+            # /library/item-paths request, on the theory that
+            # library_move_all()'s candidate-directory read had no
+            # positive success log line of its own. That check could
+            # never pass, in any circumstance: ControlAgentHandler
+            # overrides BaseHTTPRequestHandler.log_message() as a bare
+            # `pass` ("Quiet HTTP handler logging" -- see
+            # backend/beets_control_agent.py), so `docker logs beets`
+            # contains zero per-request access-log lines by design, for
+            # every request the engine ever serves, not just this one.
+            # Found by this wave's own real Docker acceptance run: the
+            # ARCH-007 read step actually succeeded (no "Could not
+            # enumerate pre-move directories" warning below), yet the
+            # access-log check still failed, proving the check itself was
+            # broken rather than the fix. Corrected two ways: (1)
+            # app.py's library_move_all() now logs an explicit positive
+            # "Pre-move scan: N distinct item path(s) read via engine
+            # IPC, ..." line on success, the same pattern
+            # library_mbsync_all()'s "Pruned X/Y ..." line already
+            # established; (2) this scenario now checks that job-log line
+            # directly instead of grepping container output that is
+            # never populated.
+            if any("Could not enumerate pre-move directories" in line for line in log_lines):
+                scenario_fail(
+                    "wave34-library-move-all-read-step",
+                    f"pre-move candidate-directory scan failed (the exact ARCH-007 defect this scenario exists to catch): {log_lines}",
+                )
+            elif not any("Pre-move scan:" in line and "via engine IPC" in line for line in log_lines):
+                scenario_fail(
+                    "wave34-library-move-all-read-step",
+                    f"expected positive evidence of a successful real-engine-IPC read "
+                    f"('Pre-move scan: ... via engine IPC') was not found in the job log: {log_lines}",
+                )
+            else:
+                scenario_pass(
+                    "wave34-library-move-all-read-step (pre-move candidate-directory scan succeeded via real "
+                    "engine IPC -- positive 'Pre-move scan: ... via engine IPC' evidence in the job log, no "
+                    "raw-SQL path-enumeration failure -- the ARCH-007 fix this scenario exists to prove)"
+                )
+
+    if move_result is not None:
+        if move_result.get("status") != "success":
+            scenario_fail(
+                "wave34-library-move-all-beet-subprocess-KNOWN-GAP",
+                "job's `beet update`/`beet move` subprocess step failed for a real, pre-existing, unrelated "
+                f"reason (no `beet` CLI in the web-manager image -- see docs/TECHNICAL_DEBT.md): {move_result.get('log')}",
+            )
+        else:
+            scenario_pass("wave34-library-move-all-beet-subprocess (beet update/beet move ran to completion)")
+
+
 def main() -> int:
     print("==> Checking Docker daemon / compose availability...")
     require_docker()
@@ -2727,6 +2892,9 @@ def main() -> int:
 
         print("\n==> Wave 33 continuation scenarios ==>")
         run_wave33_scenarios(client, db_path)
+
+        print("\n==> Wave 34 (ARCH-007 real fix) scenarios ==>")
+        run_wave34_scenarios(client, db_path, fixture)
 
         if FAILURES:
             print(f"\n[SUMMARY] {len(FAILURES)} failure(s):")
