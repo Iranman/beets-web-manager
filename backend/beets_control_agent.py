@@ -96,7 +96,7 @@ _PLACEHOLDER_API_TOKENS = {
     "changeme_required_strong_token", "replace_with_a_generated_strong_token",
     "your-token-here", "your_token_here",
 }
-BEETSDIR = os.environ.get("BEETSDIR", "/config")
+BEETSDIR = os.environ.get("BEETSDIR", "/config" if os.path.exists("/config") or os.name == "nt" else tempfile.gettempdir())
 MUSIC_LIBRARY_PATH = os.environ.get("MUSIC_LIBRARY_PATH", "/data/media/music")
 DOWNLOAD_PATH = os.environ.get("DOWNLOAD_PATH", "/data/torrents")
 # Path objects for the playlist-specific engine endpoints below
@@ -3289,12 +3289,8 @@ def _run_beet_subcommand_locked(
 
 def acquire_os_lock(read_only: bool = False):
     """Acquire an OS file lock on LOCK_PATH for Beets concurrency protection."""
-    try:
-        os.makedirs(os.path.dirname(LOCK_PATH), exist_ok=True)
-        lock_file = open(LOCK_PATH, "a+")
-    except OSError:
-        fallback_lock = os.path.join(tempfile.gettempdir(), ".beet_db.lock")
-        lock_file = open(fallback_lock, "a+")
+    os.makedirs(os.path.dirname(LOCK_PATH), exist_ok=True)
+    lock_file = open(LOCK_PATH, "a+")
     if fcntl is not None:
         mode = fcntl.LOCK_SH if read_only else fcntl.LOCK_EX
         fcntl.flock(lock_file.fileno(), mode)
