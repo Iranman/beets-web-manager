@@ -6172,7 +6172,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                     update_cmd.append(safe_query)
                 cmd_sequence.append(update_cmd)
 
-            move_cmd = ["move", "-q"]
+            move_cmd = ["move"]
             if pretend:
                 move_cmd.append("-p")
             if safe_query:

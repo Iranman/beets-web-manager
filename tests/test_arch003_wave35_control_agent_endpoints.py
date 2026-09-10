@@ -252,7 +252,7 @@ class ControlAgentEndpointLiveTests(unittest.TestCase):
             self.assertTrue(data.get("moved"))
             self.assertEqual(len(calls), 2)
             self.assertEqual(calls[0], [agent.BEET_BIN, "update"])
-            self.assertEqual(calls[1], [agent.BEET_BIN, "move", "-q"])
+            self.assertEqual(calls[1], [agent.BEET_BIN, "move"])
 
     def test_move_without_rescan(self):
         calls = []
@@ -268,7 +268,7 @@ class ControlAgentEndpointLiveTests(unittest.TestCase):
             self.assertFalse(data.get("updated"))
             self.assertTrue(data.get("moved"))
             self.assertEqual(len(calls), 1)
-            self.assertEqual(calls[0], [agent.BEET_BIN, "move", "-q"])
+            self.assertEqual(calls[0], [agent.BEET_BIN, "move"])
 
     def test_move_with_query_and_pretend(self):
         calls = []
@@ -282,7 +282,7 @@ class ControlAgentEndpointLiveTests(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertEqual(len(calls), 2)
             self.assertEqual(calls[0], [agent.BEET_BIN, "update", "-p", "album:OK Computer"])
-            self.assertEqual(calls[1], [agent.BEET_BIN, "move", "-q", "-p", "album:OK Computer"])
+            self.assertEqual(calls[1], [agent.BEET_BIN, "move", "-p", "album:OK Computer"])
 
     def test_move_rescan_failure_halts_and_aborts_move(self):
         calls = []
