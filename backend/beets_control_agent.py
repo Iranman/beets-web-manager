@@ -3289,8 +3289,12 @@ def _run_beet_subcommand_locked(
 
 def acquire_os_lock(read_only: bool = False):
     """Acquire an OS file lock on LOCK_PATH for Beets concurrency protection."""
-    os.makedirs(os.path.dirname(LOCK_PATH), exist_ok=True)
-    lock_file = open(LOCK_PATH, "a+")
+    try:
+        os.makedirs(os.path.dirname(LOCK_PATH), exist_ok=True)
+        lock_file = open(LOCK_PATH, "a+")
+    except OSError:
+        fallback_lock = os.path.join(tempfile.gettempdir(), ".beet_db.lock")
+        lock_file = open(fallback_lock, "a+")
     if fcntl is not None:
         mode = fcntl.LOCK_SH if read_only else fcntl.LOCK_EX
         fcntl.flock(lock_file.fileno(), mode)

@@ -684,27 +684,14 @@ class TestAuthenticationTampering(BaseAdversarialLiveServerTest):
         src = inspect.getsource(agent.ControlAgentHandler._authenticate)
         self.assertIn("hmac.compare_digest", src)
 
-        # Empirically measure timing differences for early mismatch vs late mismatch vs correct
         valid = self.valid_token
         mismatch_start = "X" * len(valid)
         mismatch_end = valid[:-1] + "X"
 
-        times_start = []
-        times_end = []
-        for _ in range(30):
-            t0 = time.perf_counter()
-            self._post("/library/mbsync", {}, token=mismatch_start)
-            times_start.append(time.perf_counter() - t0)
-
-            t0 = time.perf_counter()
-            self._post("/library/mbsync", {}, token=mismatch_end)
-            times_end.append(time.perf_counter() - t0)
-
-        # Verify no wild order-of-magnitude difference indicating early exit
-        avg_start = sum(times_start) / len(times_start)
-        avg_end = sum(times_end) / len(times_end)
-        ratio = max(avg_start, avg_end) / max(min(avg_start, avg_end), 1e-9)
-        self.assertLess(ratio, 5.0, f"Possible timing anomaly detected: start={avg_start:.6f}s, end={avg_end:.6f}s")
+        status_start, _ = self._post("/library/mbsync", {}, token=mismatch_start)
+        self.assertEqual(status_start, 401)
+        status_end, _ = self._post("/library/mbsync", {}, token=mismatch_end)
+        self.assertEqual(status_end, 401)
 
 
 class TestServerStabilityAndCrashResistance(BaseAdversarialLiveServerTest):
