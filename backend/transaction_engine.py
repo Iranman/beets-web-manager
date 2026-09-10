@@ -13708,6 +13708,7 @@ ITEM_METADATA_FIELDS = frozenset({
     "disctotal", "genres", "label", "language",
     "mb_albumartistid", "mb_albumartistids", "mb_albumid",
     "mb_artistid", "mb_artistids", "mb_releasegroupid",
+    "mb_trackid",
     "month", "original_day", "original_month", "original_year",
     "release_group_title", "releasegroupdisambig", "script", "style", "year",
     "comments", "lyrics", "bpm", "initial_key", "isrc", "media", "grouping", "title",
@@ -13766,8 +13767,8 @@ def create_album_metadata_plan(
         return {"ok": False, "error": "album_id required", "code": "album_metadata_invalid_payload"}
 
     force_write_tags = bool(payload.get("force_write_tags"))
-    raw_updates = payload.get("updates") or {}
-    raw_item_updates = payload.get("item_updates") or {}
+    raw_updates = payload.get("updates") or payload.get("album_fields") or {}
+    raw_item_updates = payload.get("item_updates") or payload.get("track_fields") or {}
 
     updates, rejected = _normalize_metadata_fields(raw_updates, ALBUM_METADATA_FIELDS)
     if rejected:

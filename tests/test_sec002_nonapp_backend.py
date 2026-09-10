@@ -208,9 +208,17 @@ class SetupExceptionSanitizationTests(unittest.TestCase):
 
     def test_acoustid_fpcalc_unexpected_exception_is_sanitized(self):
         leak = "LEAK_MARKER /internal/path token=abc123"
-        with app_module.app.test_request_context("/api/setup/test/acoustid", method="POST", headers=_CSRF_HEADERS), \
-             mock.patch.object(routes_setup.shutil, "which", return_value="/usr/bin/fpcalc"), \
-             mock.patch.object(routes_setup.subprocess, "run", side_effect=OSError(leak)):
+        with app_module.app.test_request_context(
+            "/api/setup/test/acoustid", method="POST",
+            data=json.dumps({"api_key": "valid-key"}),
+            content_type="application/json",
+            headers=_CSRF_HEADERS,
+        ), mock.patch.object(routes_setup, "_beets_plugin_diagnostics", return_value={
+            "remote_reachable": True,
+            "chroma_loaded": True,
+            "fpcalc_available": True,
+            "pyacoustid_available": True,
+        }), mock.patch("urllib.request.urlopen", side_effect=OSError(leak)):
             response = routes_setup.setup_test_acoustid()
         data = response.get_json() if hasattr(response, "get_json") else response[0].get_json()
         self.assertNotIn("LEAK_MARKER", json.dumps(data))

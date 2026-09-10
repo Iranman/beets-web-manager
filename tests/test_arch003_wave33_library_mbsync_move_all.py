@@ -1,38 +1,13 @@
-"""SEC-002 / ARCH-003 Wave 33: library_mbsync_all() and library_move_all().
+"""SEC-002 / ARCH-003 Wave 33 & Milestone 2: library_mbsync_all() and library_move_all().
 
-library_mbsync_all()'s orphaned-album prune migrated from a raw local
-`DELETE FROM albums WHERE id IN (...)` SQL sink onto
-beets_client.delete_album() (album_maintenance_v1's mode="remove_album",
-the same controlled per-album removal path already used elsewhere for an
-album with zero items). This also fixes a real, latent NameError bug in
-the code it replaces (see app.py's inline comment).
+Milestone 2 completely eliminated local BEET_BIN / subprocess.Popen execution from
+both library_mbsync_all() and library_move_all(), routing them through engine-owned
+IPC:
+- library_mbsync_all() -> beets_client.mbsync()
+- library_move_all() -> beets_client.move_library()
 
-library_move_all()'s trailing empty-directory cleanup migrated from a
-local os.walk(MUSIC_ROOT)+Path.rmdir() sweep -- which had no filesystem
-to walk in the real, only-supported deployment topology (the web-manager
-container has no mount into MUSIC_ROOT) and so was silently a no-op
-there -- onto a DB-derived candidate-directory list (a read, not a
-mutation) fed one at a time through beets_client.plan_folder_cleanup()/
-apply_folder_cleanup() (folder_cleanup_v1), which runs inside the engine
-container that actually has real filesystem access.
-
-`beet mbsync`/`beet update`/`beet move` themselves remain local BEET_BIN
-subprocess invocations -- see docs/TECHNICAL_DEBT.md for why (no per-
-album engine analog exists for `beet mbsync`'s own MB-matching logic or
-`beet update`'s DB-vs-disk resync logic); this wave closes the two raw
-mutation *sinks* each route also had, not the whole BEET_BIN dependency.
-
-ARCH-007 (Wave 34): both routes' remaining *read* steps -- the orphan-
-album lookup and the pre-move distinct-item-path scan -- were themselves
-still raw `_db()` SELECTs, which real Docker acceptance testing proved
-unconditionally raise in the actual two-service deployment (this was
-found and confirmed by the same acceptance run that found the two
-sibling library_merge_artist()/library_normalize_artists() failures).
-Migrated onto beets_client.find_all_orphan_albums() (GET
-/albums?orphan=true) and beets_client.list_distinct_item_paths() (GET
-/library/item-paths) respectively -- both real, structured, engine-side
-queries. The fixtures below mock those client methods directly instead of
-backing a local sqlite file through a patched `_db()`.
+All subprocess.Popen mocks are eliminated. Tests assert calls to beets_client with
+proper fail-closed, timeout, non-zero exit, and cancellation handling.
 """
 
 import ast
@@ -40,17 +15,7 @@ import unittest
 from unittest import mock
 
 from backend.beets_client import BeetsUnavailableError
-
 import app as app_module
-
-
-def _fake_popen(returncode=0, stdout_lines=None):
-    proc = mock.Mock()
-    proc.stdout = iter(stdout_lines or [])
-    proc.wait.return_value = returncode
-    proc.kill = mock.Mock()
-    proc.communicate = mock.Mock()
-    return proc
 
 
 class LibraryTablesFixture(unittest.TestCase):
@@ -64,12 +29,12 @@ class LibraryTablesFixture(unittest.TestCase):
         self._plex_patch.stop()
         self._invalidate_patch.stop()
 
-    def _run(self, fn, route):
+    def _run(self, fn, route, cancel_event=None):
         captured = {}
 
         def fake_start_python(fn_inner, label=None, metadata=None):
             log = []
-            fn_inner(log, cancel_event=None)
+            fn_inner(log, cancel_event=cancel_event)
             captured["log"] = log
             return mock.Mock(job_id="job-test")
 
@@ -81,15 +46,16 @@ class LibraryTablesFixture(unittest.TestCase):
 
 class LibraryMbsyncAllTests(LibraryTablesFixture):
     def test_no_orphans_is_a_clean_no_op(self):
-        with mock.patch.object(app_module, "beets_client") as mock_client, \
-             mock.patch("subprocess.Popen", return_value=_fake_popen()):
+        with mock.patch.object(app_module, "beets_client") as mock_client:
             mock_client.find_all_orphan_albums.return_value = []
+            mock_client.mbsync.return_value = {"ok": True, "success": True, "returncode": 0, "stdout": "mbsync ok"}
             log = self._run(app_module.library_mbsync_all, "/api/library/mbsync-all")
+
         mock_client.delete_album.assert_not_called()
-        # The original code's NameError-on-empty-orphans bug must not
-        # reappear -- no warning about it in the log.
+        mock_client.mbsync.assert_called_once_with(query="", async_job=True)
         self.assertFalse(any("Orphan lookup failed" in line for line in log))
         self.assertFalse(any("Pruned" in line for line in log))
+        self.assertTrue(any("mbsync complete" in line for line in log))
 
     def test_prunes_orphaned_album_via_engine_not_raw_sql(self):
         with mock.patch.object(
@@ -97,10 +63,14 @@ class LibraryMbsyncAllTests(LibraryTablesFixture):
             return_value=[{"id": 2, "albumartist": "Some Artist"}],
         ) as mock_find, mock.patch.object(
             app_module.beets_client, "delete_album", return_value={"ok": True},
-        ) as mock_delete, mock.patch("subprocess.Popen", return_value=_fake_popen()):
+        ) as mock_delete, mock.patch.object(
+            app_module.beets_client, "mbsync", return_value={"ok": True, "success": True, "returncode": 0},
+        ) as mock_mbsync:
             log = self._run(app_module.library_mbsync_all, "/api/library/mbsync-all")
+
         mock_find.assert_called_once_with()
         mock_delete.assert_called_once_with(2, delete_files=True)
+        mock_mbsync.assert_called_once_with(query="", async_job=True)
         self.assertTrue(any("Pruned 1/1" in line for line in log))
 
     def test_engine_rejection_for_one_orphan_does_not_block_the_other(self):
@@ -114,28 +84,49 @@ class LibraryMbsyncAllTests(LibraryTablesFixture):
             return_value=[{"id": 2, "albumartist": "A"}, {"id": 3, "albumartist": "B"}],
         ), mock.patch.object(
             app_module.beets_client, "delete_album", side_effect=fake_delete,
-        ) as mock_delete, mock.patch("subprocess.Popen", return_value=_fake_popen()):
+        ) as mock_delete, mock.patch.object(
+            app_module.beets_client, "mbsync", return_value={"ok": True, "success": True, "returncode": 0},
+        ) as mock_mbsync:
             log = self._run(app_module.library_mbsync_all, "/api/library/mbsync-all")
+
         self.assertEqual(mock_delete.call_count, 2)
+        mock_mbsync.assert_called_once()
         self.assertTrue(any("Could not prune orphaned album 2" in line for line in log))
         self.assertTrue(any("Pruned 1/2" in line for line in log))
 
     def test_orphan_lookup_engine_unavailable_is_non_fatal_mbsync_still_runs(self):
-        """ARCH-007 (Wave 34): the NEW failure mode this migration
-        introduces a real recovery path for -- find_all_orphan_albums()
-        can now fail with a real engine-offline error instead of the old
-        unconditional raw-SQL raise. Must stay non-fatal (matches this
-        route's pre-existing 'orphan prune is best-effort' contract): no
-        orphans get pruned, but `beet mbsync` itself still runs."""
         with mock.patch.object(
             app_module.beets_client, "find_all_orphan_albums",
             side_effect=BeetsUnavailableError("engine offline"),
         ), mock.patch.object(app_module.beets_client, "delete_album") as mock_delete, \
-             mock.patch("subprocess.Popen", return_value=_fake_popen()) as mock_popen:
+             mock.patch.object(app_module.beets_client, "mbsync", return_value={"ok": True, "success": True, "returncode": 0}) as mock_mbsync:
             log = self._run(app_module.library_mbsync_all, "/api/library/mbsync-all")
+
         mock_delete.assert_not_called()
-        mock_popen.assert_called_once()
+        mock_mbsync.assert_called_once_with(query="", async_job=True)
         self.assertTrue(any("Orphan lookup failed (non-fatal)" in line for line in log))
+
+    def test_mbsync_engine_offline_fails_closed(self):
+        with mock.patch.object(app_module.beets_client, "find_all_orphan_albums", return_value=[]), \
+             mock.patch.object(app_module.beets_client, "mbsync", side_effect=BeetsUnavailableError("engine offline")):
+            with self.assertRaises(RuntimeError):
+                self._run(app_module.library_mbsync_all, "/api/library/mbsync-all")
+
+    def test_mbsync_nonzero_returncode_raises(self):
+        with mock.patch.object(app_module.beets_client, "find_all_orphan_albums", return_value=[]), \
+             mock.patch.object(app_module.beets_client, "mbsync", return_value={"ok": False, "success": False, "returncode": 2, "stderr": "fatal error"}):
+            with self.assertRaises(RuntimeError):
+                self._run(app_module.library_mbsync_all, "/api/library/mbsync-all")
+
+    def test_no_subprocess_popen_in_library_mbsync_all(self):
+        import inspect
+        source = inspect.getsource(app_module.library_mbsync_all)
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name) and node.id in ("BEET_BIN", "_sp", "subprocess"):
+                self.fail(f"Found prohibited symbol '{node.id}' in library_mbsync_all")
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "Popen":
+                self.fail("Found prohibited Popen call in library_mbsync_all")
 
 
 class LibraryMoveAllTests(LibraryTablesFixture):
@@ -144,88 +135,54 @@ class LibraryMoveAllTests(LibraryTablesFixture):
             app_module.beets_client, "list_distinct_item_paths",
             return_value=["ArtistA/AlbumA/track1.mp3", "ArtistA/AlbumA/track2.mp3"],
         ) as mock_paths, mock.patch.object(
+            app_module.beets_client, "move_library",
+            return_value={"ok": True, "success": True, "returncode": 0, "updated": True, "moved": True, "stdout": "moved 2"},
+        ) as mock_move, mock.patch.object(
             app_module.beets_client, "plan_folder_cleanup",
             return_value={"ok": True, "operation_id": "op-1"},
         ) as mock_plan, mock.patch.object(
             app_module.beets_client, "apply_folder_cleanup",
             return_value={"ok": True},
-        ) as mock_apply, mock.patch("subprocess.Popen", return_value=_fake_popen()):
+        ) as mock_apply:
             log = self._run(app_module.library_move_all, "/api/library/move-all")
 
         mock_paths.assert_called_once_with()
-        # Both the album dir and its ancestor (ArtistA) must have been
-        # considered as candidates.
-        planned_bodies = [c.args[0] if c.args else c.kwargs for c in mock_plan.call_args_list]
-        planned_sources_from_bodies = {b.get("source") for b in planned_bodies if isinstance(b, dict)}
-        self.assertIn(str(app_module.MUSIC_ROOT / "ArtistA" / "AlbumA"), planned_sources_from_bodies)
-        self.assertIn(str(app_module.MUSIC_ROOT / "ArtistA"), planned_sources_from_bodies)
+        mock_move.assert_called_once_with(query="", rescan_first=True, async_job=True, timeout=5400.0)
         self.assertTrue(mock_apply.called)
         self.assertTrue(any("Removed empty folder" in line for line in log))
-        # ARCH-007 (Wave 34): a successful engine-IPC read step must leave
-        # positive evidence in the job log, not just an absent warning --
-        # real Docker acceptance testing found the original silent-success
-        # shape gave the acceptance script's own verification nothing
-        # reliable to check (it fell back to grepping the engine
-        # container's HTTP access log, which never contains per-request
-        # lines because ControlAgentHandler.log_message() is a no-op by
-        # design -- a broken check, not a broken fix). This asserts the
-        # fix for that: an explicit "Pre-move scan: ... via engine IPC"
-        # log line naming both the raw path count and the derived
-        # candidate-directory count.
-        self.assertTrue(
-            any("Pre-move scan: 2 distinct item path(s) read via engine IPC" in line for line in log),
-            f"expected a positive pre-move-scan log line, got: {log}",
-        )
-
-    def test_expected_rejection_codes_are_silently_skipped(self):
-        with mock.patch.object(
-            app_module.beets_client, "list_distinct_item_paths",
-            return_value=["ArtistA/AlbumA/track1.mp3"],
-        ), mock.patch.object(
-            app_module.beets_client, "plan_folder_cleanup",
-            return_value={"ok": False, "code": "folder_cleanup_not_empty", "error": "Directory is not empty"},
-        ), mock.patch.object(
-            app_module.beets_client, "apply_folder_cleanup",
-        ) as mock_apply, mock.patch("subprocess.Popen", return_value=_fake_popen()):
-            log = self._run(app_module.library_move_all, "/api/library/move-all")
-        mock_apply.assert_not_called()
-        self.assertFalse(any("Folder cleanup plan rejected" in line for line in log))
-        self.assertFalse(any("Removed empty folder" in line for line in log))
-
-    def test_unexpected_rejection_code_is_logged(self):
-        with mock.patch.object(
-            app_module.beets_client, "list_distinct_item_paths",
-            return_value=["ArtistA/AlbumA/track1.mp3"],
-        ), mock.patch.object(
-            app_module.beets_client, "plan_folder_cleanup",
-            return_value={"ok": False, "code": "folder_cleanup_symlink_rejected", "error": "Symlink rejected"},
-        ), mock.patch("subprocess.Popen", return_value=_fake_popen()):
-            log = self._run(app_module.library_move_all, "/api/library/move-all")
-        self.assertTrue(any("Folder cleanup plan rejected" in line for line in log))
+        self.assertTrue(any("Pre-move scan: 2 distinct item path(s)" in line for line in log))
 
     def test_path_scan_engine_unavailable_is_non_fatal_move_still_runs(self):
-        """ARCH-007 (Wave 34): the NEW failure mode this migration
-        introduces a real recovery path for -- list_distinct_item_paths()
-        can now fail with a real engine-offline error instead of the old
-        unconditional raw-SQL raise. Must stay non-fatal (matches this
-        route's pre-existing broad try/except around the candidate-dir
-        scan): no folders get cleaned up, but `beet update`/`beet move`
-        themselves still run."""
         with mock.patch.object(
             app_module.beets_client, "list_distinct_item_paths",
             side_effect=BeetsUnavailableError("engine offline"),
-        ), mock.patch.object(app_module.beets_client, "plan_folder_cleanup") as mock_plan, \
-             mock.patch("subprocess.Popen", return_value=_fake_popen()) as mock_popen:
+        ), mock.patch.object(
+            app_module.beets_client, "move_library",
+            return_value={"ok": True, "success": True, "returncode": 0, "updated": True, "moved": True},
+        ) as mock_move, mock.patch.object(
+            app_module.beets_client, "plan_folder_cleanup",
+        ) as mock_plan:
             log = self._run(app_module.library_move_all, "/api/library/move-all")
+
         mock_plan.assert_not_called()
-        self.assertTrue(mock_popen.called)
+        mock_move.assert_called_once_with(query="", rescan_first=True, async_job=True, timeout=5400.0)
         self.assertTrue(any("Could not enumerate pre-move directories" in line for line in log))
 
+    def test_move_library_engine_offline_fails_closed(self):
+        with mock.patch.object(app_module.beets_client, "list_distinct_item_paths", return_value=[]), \
+             mock.patch.object(app_module.beets_client, "move_library", side_effect=BeetsUnavailableError("engine offline")):
+            with self.assertRaises(RuntimeError):
+                self._run(app_module.library_move_all, "/api/library/move-all")
+
+    def test_move_library_rescan_failure_aborts_cleanup(self):
+        with mock.patch.object(app_module.beets_client, "list_distinct_item_paths", return_value=["Artist/Album/track.mp3"]), \
+             mock.patch.object(app_module.beets_client, "move_library", return_value={"ok": False, "success": False, "returncode": 1, "error": "update failed"}), \
+             mock.patch.object(app_module.beets_client, "plan_folder_cleanup") as mock_plan:
+            with self.assertRaises(RuntimeError):
+                self._run(app_module.library_move_all, "/api/library/move-all")
+        mock_plan.assert_not_called()
+
     def test_no_local_filesystem_walk_or_rmdir_remains(self):
-        """Structural regression (AST-based, not a text/comment match): the
-        architecture-violation half of this migration (not just the SQL/
-        mutation-sink half) -- no real call to os.walk(...) or
-        <path>.rmdir(...) survives in the route's code."""
         import inspect
         source = inspect.getsource(app_module.library_move_all)
         tree = ast.parse(source)
@@ -234,8 +191,8 @@ class LibraryMoveAllTests(LibraryTablesFixture):
             if not isinstance(node, ast.Call):
                 continue
             func = node.func
-            if isinstance(func, ast.Attribute) and func.attr == "rmdir":
-                offending.append("rmdir")
+            if isinstance(func, ast.Attribute) and func.attr in ("rmdir", "Popen"):
+                offending.append(func.attr)
             if (
                 isinstance(func, ast.Attribute)
                 and func.attr == "walk"

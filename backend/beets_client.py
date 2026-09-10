@@ -6,6 +6,7 @@ Replaces local subprocess execution and direct SQLite access with authenticated 
 import base64
 import json
 import os
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -55,6 +56,9 @@ class BeetsCommandError(BeetsError):
         self.returncode = returncode
         self.stdout = stdout
         self.stderr = stderr
+
+
+BeetsClientError = BeetsError
 
 
 class ParsedQuery:
@@ -1327,13 +1331,49 @@ class BeetsClient:
 
     # ── album_metadata_repair_v1 Pure HTTP Client Methods ──────────────────────
 
-    def plan_album_metadata(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def plan_album_metadata(
+        self,
+        payload: Optional[Dict[str, Any]] = None,
+        *,
+        album_id: Optional[int] = None,
+        album_fields: Optional[Dict[str, Any]] = None,
+        track_fields: Optional[Dict[Any, Dict[str, Any]]] = None,
+        updates: Optional[Dict[str, Any]] = None,
+        item_updates: Optional[Dict[Any, Dict[str, Any]]] = None,
+        force_write_tags: bool = False,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
         """Request preview plan for album metadata update via HTTP."""
-        return self._request("POST", "/albums/metadata/plan", payload)
+        if payload is None:
+            payload = {
+                "album_id": album_id,
+                "updates": album_fields if album_fields is not None else (updates or {}),
+                "item_updates": track_fields if track_fields is not None else (item_updates or {}),
+                "force_write_tags": force_write_tags,
+                **kwargs,
+            }
+        res = self._request("POST", "/albums/metadata/plan", payload)
+        if isinstance(res, dict) and "operation_id" in res and "token" not in res:
+            res["token"] = res["operation_id"]
+        return res
 
-    def apply_album_metadata(self, operation_id: str) -> Dict[str, Any]:
+    def apply_album_metadata(
+        self,
+        operation_id: Optional[str] = None,
+        *,
+        plan_token: Optional[str] = None,
+        force_write_tags: bool = False,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
         """Execute album metadata apply via HTTP."""
-        return self._request("POST", "/albums/metadata/apply", {"operation_id": operation_id})
+        op_id = operation_id or plan_token
+        if not op_id:
+            raise BeetsError("operation_id or plan_token is required", error_code="INVALID_PARAMETER")
+        payload = {"operation_id": op_id}
+        if force_write_tags:
+            payload["force_write_tags"] = True
+        payload.update(kwargs)
+        return self._request("POST", "/albums/metadata/apply", payload)
 
     def rollback_album_metadata(self, operation_id: str) -> Dict[str, Any]:
         """Roll back album metadata update via HTTP."""
@@ -1418,6 +1458,105 @@ class BeetsClient:
         if not apply_res.get("ok"):
             return {"ok": False, "error": apply_res.get("error") or "Genre repair apply failed", "code": apply_res.get("code")}
         return {"ok": True, "output": apply_res.get("output") or "", "genre_after": apply_res.get("genre_after")}
+
+    # ── Library Maintenance & Submissions (ARCH-003 / Milestone 1) ─────────────
+
+    def mbsync(
+        self,
+        query: str = "",
+        pretend: bool = False,
+        async_job: bool = False,
+        timeout: Optional[float] = None,
+        async_: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        """Execute beet mbsync inside the Beets engine container under engine OS lock.
+
+        Replaces local Web Manager subprocess execution in library_mbsync_all().
+        Fails closed: raises BeetsUnavailableError if engine is unreachable,
+        BeetsAuthError on 401, or BeetsError on non-zero exit / timeout.
+        Never falls back to local subprocess.
+        """
+        if query is not None and not isinstance(query, str):
+            raise BeetsError("query must be a string", error_code="INVALID_PARAMETER")
+        q_str = (query or "").strip()
+        if any(c in q_str for c in ("\x00", "\n", "\r", ";", "&&", "||", "|", ">", "<", "$", "`")):
+            raise BeetsError("query contains forbidden control or shell characters", error_code="INVALID_PARAMETER")
+        if len(q_str) > 256:
+            raise BeetsError("query exceeds maximum length of 256 characters", error_code="INVALID_PARAMETER")
+
+        is_async = bool(async_) if async_ is not None else bool(async_job)
+        payload: Dict[str, Any] = {
+            "query": q_str,
+            "pretend": bool(pretend),
+            "async": is_async,
+        }
+        req_timeout = float(timeout) if timeout is not None else (15.0 if is_async else 7200.0)
+        return self._request("POST", "/library/mbsync", payload, timeout=req_timeout)
+
+    def move_library(
+        self,
+        query: str = "",
+        rescan_first: bool = True,
+        pretend: bool = False,
+        timeout: Optional[float] = None,
+        async_job: bool = False,
+        async_: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        """Execute beet update + beet move inside the Beets engine container under exclusive OS lock.
+
+        Replaces local Web Manager subprocess execution in library_move_all().
+        Fails closed: raises BeetsUnavailableError if engine is unreachable.
+        Never falls back to local subprocess.
+        """
+        if query is not None and not isinstance(query, str):
+            raise BeetsError("query must be a string", error_code="INVALID_PARAMETER")
+        q_str = (query or "").strip()
+        if any(c in q_str for c in ("\x00", "\n", "\r", ";", "&&", "||", "|", ">", "<", "$", "`")):
+            raise BeetsError("query contains forbidden control or shell characters", error_code="INVALID_PARAMETER")
+        if len(q_str) > 256:
+            raise BeetsError("query exceeds maximum length of 256 characters", error_code="INVALID_PARAMETER")
+
+        is_async = bool(async_) if async_ is not None else bool(async_job)
+        payload: Dict[str, Any] = {
+            "query": q_str,
+            "rescan_first": bool(rescan_first),
+            "pretend": bool(pretend),
+        }
+        if is_async:
+            payload["async"] = True
+        req_timeout = float(timeout) if timeout is not None else (15.0 if is_async else 3600.0)
+        return self._request("POST", "/library/move", payload, timeout=req_timeout)
+
+    def acoustid_submit(
+        self,
+        query: str,
+        api_key: Optional[str] = None,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Submit audio fingerprints to AcoustID via engine-owned beet submit.
+
+        Replaces local Web Manager subprocess execution in routes_submissions.py.
+        Fails closed: raises BeetsUnavailableError if engine is unreachable.
+        Never falls back to local subprocess.
+        """
+        if not query or not isinstance(query, str) or not query.strip():
+            raise BeetsError("Query string is required for acoustid_submit", error_code="INVALID_PARAMETER")
+        q_str = query.strip()
+        if any(c in q_str for c in ("\x00", "\n", "\r", ";", "&&", "||", "|", ">", "<", "$", "`")):
+            raise BeetsError("query contains forbidden control or shell characters", error_code="INVALID_PARAMETER")
+
+        payload: Dict[str, Any] = {"query": q_str}
+        if api_key:
+            if not isinstance(api_key, str):
+                raise BeetsError("api_key must be a string", error_code="INVALID_PARAMETER")
+            key_str = api_key.strip()
+            if not re.match(r"^[a-zA-Z0-9_-]{1,64}$", key_str):
+                raise BeetsError("api_key must be alphanumeric and <= 64 characters", error_code="INVALID_PARAMETER")
+            payload["api_key"] = key_str
+
+        req_timeout = float(timeout) if timeout is not None else 300.0
+        return self._request("POST", "/submissions/submit", payload, timeout=req_timeout)
+
 
 
 class RemoteSQLiteCursor:

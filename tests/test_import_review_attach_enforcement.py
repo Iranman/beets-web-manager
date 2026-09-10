@@ -237,7 +237,6 @@ class AttachRecordingEnforcementTests(unittest.TestCase):
         self._patch(mock.patch.object(APP, "_mb_recording_search", return_value=[]))
         self._patch(mock.patch.object(APP, "_fetch_mb_recording_details",
                                        side_effect=lambda *a, **k: self._mb_details_payload))
-        self._patch(mock.patch.object(APP, "_beet_run", side_effect=fake_beet_run))
         self._patch(mock.patch.object(APP.beets_client, "plan_album_mb_track_repair", side_effect=fake_plan_track_repair))
         self._patch(mock.patch.object(APP.beets_client, "apply_album_mb_track_repair", side_effect=fake_apply_track_repair))
         self._patch(mock.patch.object(APP.beets_client, "update_item_metadata", side_effect=fake_update_item_metadata))
@@ -589,7 +588,6 @@ class ManualIdAttachIntegrationTests(unittest.TestCase):
         self._patch(mock.patch.object(APP, "_mb_recording_search", return_value=[]))
         self._patch(mock.patch.object(APP, "_fetch_mb_recording_details",
                                        side_effect=lambda *a, **k: self._mb_details_payload))
-        self._patch(mock.patch.object(APP, "_beet_run", side_effect=fake_beet_run))
         self._patch(mock.patch.object(APP.beets_client, "plan_album_mb_track_repair", side_effect=fake_plan_track_repair))
         self._patch(mock.patch.object(APP.beets_client, "apply_album_mb_track_repair", side_effect=fake_apply_track_repair))
         self._patch(mock.patch.object(APP.beets_client, "update_item_metadata", side_effect=fake_update_item_metadata))

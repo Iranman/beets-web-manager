@@ -195,7 +195,7 @@ class AiImportFolderSequenceTests(unittest.TestCase):
             return SimpleNamespace(returncode=0, stdout="", stderr="")
 
         self.fake_beet_run = fake_beet_run
-        self._patch(mock.patch.object(APP, "_beet_run", side_effect=fake_beet_run))
+        self._patch(mock.patch.object(APP, "_beet_run", side_effect=fake_beet_run, create=True))
 
         def fake_fetch_tracklist(mb_albumid, log=None):
             return {

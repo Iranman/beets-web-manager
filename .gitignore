@@ -121,3 +121,7 @@ docs/incidents/*
 docs/security/*
 !docs/security/*.md
 .playwright-mcp/
+.agents/
+ORIGINAL_REQUEST.md
+PROJECT.md
+TEST_INFRA.md

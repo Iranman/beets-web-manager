@@ -3191,7 +3191,48 @@ def _sanitize_command_path_args(args: Any, allowed_types: list) -> list:
     return sanitized
 
 
-def _run_beet_subcommand_locked(cmd_list: list, *, config_override: str = "", timeout: float = 120.0) -> dict[str, Any]:
+_FORBIDDEN_QUERY_CHARS = frozenset(";&|><$`\\\x00\n\r")
+
+
+def _validate_safe_beet_query(query: Any, *, max_length: int = 512, required: bool = False) -> str:
+    r"""Validate and sanitize a Beets CLI query argument.
+
+    Rejects:
+    - Non-string types (unless None/empty and not required)
+    - Empty string if required
+    - Lengths exceeding max_length
+    - Leading '-' or '--' (flag injection prevention)
+    - Dangerous control characters and shell metacharacters (; & | > < $ ` \ null newline)
+    """
+    if query is None or query == "":
+        if required:
+            raise ValueError("query is required and must be non-empty")
+        return ""
+    if not isinstance(query, str):
+        raise ValueError("query must be a string")
+    trimmed = query.strip()
+    if not trimmed:
+        if required:
+            raise ValueError("query is required and must be non-empty")
+        return ""
+    if len(trimmed) > max_length:
+        raise ValueError(f"query exceeds maximum length of {max_length} characters")
+    if trimmed.startswith("-"):
+        raise ValueError("query cannot start with '-' (flag injection prevented)")
+    found = _FORBIDDEN_QUERY_CHARS.intersection(trimmed)
+    if found:
+        raise ValueError("Invalid query: dangerous characters detected")
+    return trimmed
+
+
+def _run_beet_subcommand_locked(
+    cmd_list: list,
+    *,
+    config_override: str = "",
+    timeout: float = 120.0,
+    read_only: Optional[bool] = None,
+    lock_file: Any = None,
+) -> dict[str, Any]:
     """Run a `beet` subcommand under the OS concurrency lock and return a
     plain result dict -- the shared implementation behind /commands/execute
     and any in-process caller (e.g. album_artwork_fetch_v1's Apply, which
@@ -3205,7 +3246,12 @@ def _run_beet_subcommand_locked(cmd_list: list, *, config_override: str = "", ti
         "import", "update", "write", "move", "modify", "mbsync",
         "fetchart", "embedart", "lastgenre", "alt", "remove", "rm"
     }
-    lock_file = acquire_os_lock(read_only=not mutating)
+    own_lock = False
+    if lock_file is None:
+        actual_read_only = (not mutating) if read_only is None else bool(read_only)
+        lock_file = acquire_os_lock(read_only=actual_read_only)
+        own_lock = True
+
     tmp_cfg_path = None
     try:
         full_cmd = [BEET_BIN]
@@ -3237,7 +3283,8 @@ def _run_beet_subcommand_locked(cmd_list: list, *, config_override: str = "", ti
                 os.unlink(tmp_cfg_path)
             except Exception:
                 pass
-        release_os_lock(lock_file)
+        if own_lock:
+            release_os_lock(lock_file)
 
 
 def acquire_os_lock(read_only: bool = False):
@@ -3262,11 +3309,29 @@ def release_os_lock(lock_file):
 
 
 class AgentJob:
-    def __init__(self, job_id: str, command: list, label: str = "", config_override: str = ""):
+    def __init__(
+        self,
+        job_id: str,
+        command: list,
+        label: str = "",
+        config_override: str = "",
+        timeout: float = 600.0,
+        read_only: Optional[bool] = None,
+    ):
         self.job_id = job_id
         self.command = command
-        self.label = label or " ".join(command)
+        if label:
+            self.label = label
+        elif isinstance(command, list) and command:
+            if isinstance(command[0], list):
+                self.label = " && ".join(" ".join(str(x) for x in c) for c in command)
+            else:
+                self.label = " ".join(str(x) for x in command)
+        else:
+            self.label = ""
         self.config_override = config_override
+        self.timeout = float(timeout)
+        self.read_only = read_only
         self.created_at = time.time()
         self.started_at = None
         self.finished_at = None
@@ -3294,42 +3359,56 @@ class AgentJob:
         lock_file = None
         tmp_cfg_path = None
         try:
-            mutating = self.command and self.command[0] in {
-                "import", "update", "write", "move", "modify", "mbsync",
-                "fetchart", "embedart", "lastgenre", "alt", "remove", "rm"
-            }
-            lock_file = acquire_os_lock(read_only=not mutating)
+            is_seq = bool(self.command and isinstance(self.command[0], list))
+            cmd_sequence = self.command if is_seq else [self.command]
 
-            full_cmd = [BEET_BIN]
+            mutating = any(
+                cmd and cmd[0] in {
+                    "import", "update", "write", "move", "modify", "mbsync",
+                    "fetchart", "embedart", "lastgenre", "alt", "remove", "rm"
+                }
+                for cmd in cmd_sequence
+            )
+            actual_read_only = (not mutating) if self.read_only is None else bool(self.read_only)
+            lock_file = acquire_os_lock(read_only=actual_read_only)
+
             if self.config_override:
                 tmp_cfg_path = f"/tmp/beets_job_cfg_{self.job_id}.yaml"
                 with open(tmp_cfg_path, "w", encoding="utf-8") as f:
                     f.write(self.config_override)
                 os.chmod(tmp_cfg_path, 0o600)
-                full_cmd.extend(["-c", tmp_cfg_path])
 
-            full_cmd.extend(self.command)
             env = os.environ.copy()
             env["BEETSDIR"] = BEETSDIR
 
-            self.proc = subprocess.Popen(
-                full_cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                env=env
-            )
-            out, err = self.proc.communicate(timeout=600)
-            self.returncode = self.proc.returncode
-            if out:
-                self.stdout = out.splitlines()[-5000:]
-            if err:
-                self.stderr = err.splitlines()[-5000:]
+            for single_cmd in cmd_sequence:
+                if self._cancel.is_set():
+                    break
+                full_cmd = [BEET_BIN]
+                if tmp_cfg_path:
+                    full_cmd.extend(["-c", tmp_cfg_path])
+                full_cmd.extend(single_cmd)
+
+                self.proc = subprocess.Popen(
+                    full_cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    env=env
+                )
+                out, err = self.proc.communicate(timeout=self.timeout)
+                self.returncode = self.proc.returncode
+                if out:
+                    self.stdout.extend(out.splitlines()[-5000:])
+                if err:
+                    self.stderr.extend(err.splitlines()[-5000:])
+                if self.returncode != 0:
+                    break
         except subprocess.TimeoutExpired:
             if self.proc:
                 self.proc.kill()
             self.returncode = 124
-            self.stderr.append("Command timed out after 600 seconds")
+            self.stderr.append(f"Command timed out after {self.timeout} seconds")
         except Exception as exc:
             self.returncode = 1
             self.stderr.append(f"Execution error: {exc}")
@@ -4115,6 +4194,12 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 header_token = auth_header[7:]
 
         if not hmac.compare_digest(header_token.strip(), BEETS_API_TOKEN.strip()):
+            try:
+                cl = int(self.headers.get("Content-Length", 0))
+                if 0 < cl < 65536:
+                    self.rfile.read(cl)
+            except Exception:
+                pass
             self._send_json(401, {"error": "Unauthorized: invalid API token"})
             return False
         return True
@@ -5957,6 +6042,307 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 self._send_json(status, {"ok": False, "error": result.get("error_code", "reimport_failed"), "message": result.get("message", "")})
                 return
             self._send_json(200, result)
+            return
+
+        if path == "/library/mbsync":
+            if not isinstance(body, dict):
+                self._send_json(400, {"error": "Request body must be a JSON object"})
+                return
+
+            raw_query = body.get("query", "")
+            try:
+                safe_query = _validate_safe_beet_query(raw_query)
+            except ValueError as val_err:
+                self._send_json(400, {"error": str(val_err)})
+                return
+
+            if "pretend" in body and not isinstance(body["pretend"], bool):
+                self._send_json(400, {"error": "pretend must be a boolean"})
+                return
+            pretend = bool(body.get("pretend", False))
+
+            async_val = body.get("async", body.get("async_mode", False))
+            if ("async" in body or "async_mode" in body) and not isinstance(async_val, bool):
+                self._send_json(400, {"error": "async must be a boolean"})
+                return
+            async_mode = bool(async_val)
+
+            timeout = body.get("timeout", 7200.0)
+            try:
+                timeout = float(timeout)
+                if timeout <= 0:
+                    raise ValueError()
+                timeout = max(5.0, min(timeout, 14400.0))
+            except (ValueError, TypeError):
+                self._send_json(400, {"error": "Invalid timeout parameter"})
+                return
+
+            cmd_list = ["mbsync"]
+            if pretend:
+                cmd_list.append("-p")
+            if safe_query:
+                cmd_list.append(safe_query)
+
+            read_only_lock = bool(pretend)
+
+            if async_mode:
+                job_id = f"mbsync-{uuid.uuid4().hex[:12]}"
+                label = "beet mbsync" + (" -p" if pretend else "") + (f" {safe_query}" if safe_query else "")
+                job = AgentJob(job_id, cmd_list, label=label, timeout=timeout, read_only=read_only_lock)
+                with JOBS_LOCK:
+                    JOBS[job_id] = job
+                self._send_json(200, {
+                    "ok": True,
+                    "success": True,
+                    "job_id": job_id,
+                    "status": "started",
+                    "endpoint": f"/jobs/{job_id}",
+                    "label": label,
+                })
+                return
+
+            try:
+                lock_file = acquire_os_lock(read_only=read_only_lock)
+            except (BlockingIOError, TimeoutError, OSError, RuntimeError) as lock_err:
+                self._send_json(503, {"error": "Failed to acquire engine OS lock", "detail": str(lock_err)})
+                return
+
+            try:
+                res = _run_beet_subcommand_locked(cmd_list, timeout=timeout, read_only=read_only_lock, lock_file=lock_file)
+                if res.get("timed_out"):
+                    self._send_json(408, {"error": f"Command 'mbsync' timed out after {timeout}s", "returncode": 124})
+                elif res.get("internal_error"):
+                    self._send_json(500, {"error": "mbsync execution error", "detail": res.get("stderr")})
+                else:
+                    self._send_json(200, {
+                        "ok": res["returncode"] == 0,
+                        "success": res["returncode"] == 0,
+                        "returncode": res["returncode"],
+                        "stdout": res["stdout"],
+                        "stderr": res["stderr"],
+                    })
+            finally:
+                release_os_lock(lock_file)
+            return
+
+        if path == "/library/move":
+            if not isinstance(body, dict):
+                self._send_json(400, {"error": "Request body must be a JSON object"})
+                return
+
+            raw_query = body.get("query", "")
+            try:
+                safe_query = _validate_safe_beet_query(raw_query)
+            except ValueError as val_err:
+                self._send_json(400, {"error": str(val_err)})
+                return
+
+            if "rescan_first" in body and not isinstance(body["rescan_first"], bool):
+                self._send_json(400, {"error": "rescan_first must be a boolean"})
+                return
+            rescan_first = bool(body.get("rescan_first", True))
+
+            if "pretend" in body and not isinstance(body["pretend"], bool):
+                self._send_json(400, {"error": "pretend must be a boolean"})
+                return
+            pretend = bool(body.get("pretend", False))
+
+            async_val = body.get("async", body.get("async_mode", False))
+            if ("async" in body or "async_mode" in body) and not isinstance(async_val, bool):
+                self._send_json(400, {"error": "async must be a boolean"})
+                return
+            async_mode = bool(async_val)
+
+            timeout = body.get("timeout", 3600.0)
+            try:
+                timeout = float(timeout)
+                if timeout <= 0:
+                    raise ValueError()
+                timeout = max(5.0, min(timeout, 7200.0))
+            except (ValueError, TypeError):
+                self._send_json(400, {"error": "Invalid timeout parameter"})
+                return
+
+            cmd_sequence = []
+            if rescan_first:
+                update_cmd = ["update"]
+                if pretend:
+                    update_cmd.append("-p")
+                if safe_query:
+                    update_cmd.append(safe_query)
+                cmd_sequence.append(update_cmd)
+
+            move_cmd = ["move", "-q"]
+            if pretend:
+                move_cmd.append("-p")
+            if safe_query:
+                move_cmd.append(safe_query)
+            cmd_sequence.append(move_cmd)
+
+            read_only_lock = bool(pretend)
+
+            if async_mode:
+                job_id = f"move-{uuid.uuid4().hex[:12]}"
+                label = "beet move" + (" (with update)" if rescan_first else "") + (" -p" if pretend else "") + (f" {safe_query}" if safe_query else "")
+                job = AgentJob(job_id, cmd_sequence, label=label, timeout=timeout, read_only=read_only_lock)
+                with JOBS_LOCK:
+                    JOBS[job_id] = job
+                self._send_json(200, {
+                    "ok": True,
+                    "success": True,
+                    "job_id": job_id,
+                    "status": "started",
+                    "endpoint": f"/jobs/{job_id}",
+                    "label": label,
+                })
+                return
+
+            try:
+                lock_file = acquire_os_lock(read_only=read_only_lock)
+            except (BlockingIOError, TimeoutError, OSError, RuntimeError) as lock_err:
+                self._send_json(503, {"error": "Failed to acquire engine OS lock", "detail": str(lock_err)})
+                return
+
+            try:
+                steps_summary = []
+                combined_stdout = []
+                combined_stderr = []
+                last_rc = 0
+                update_failed = False
+
+                env = os.environ.copy()
+                env["BEETSDIR"] = BEETSDIR
+
+                for single_cmd in cmd_sequence:
+                    step_name = single_cmd[0]
+                    full_cmd = [BEET_BIN] + single_cmd
+                    try:
+                        sub_res = subprocess.run(
+                            full_cmd,
+                            capture_output=True,
+                            text=True,
+                            timeout=timeout,
+                            env=env,
+                        )
+                        last_rc = sub_res.returncode
+                        steps_summary.append({"step": step_name, "returncode": last_rc})
+                        if sub_res.stdout:
+                            combined_stdout.append(sub_res.stdout)
+                        if sub_res.stderr:
+                            combined_stderr.append(sub_res.stderr)
+                        if last_rc != 0:
+                            if step_name == "update":
+                                update_failed = True
+                            break
+                    except subprocess.TimeoutExpired:
+                        self._send_json(408, {"error": f"Command '{step_name}' timed out after {timeout}s", "returncode": 124})
+                        return
+                    except Exception as exc:
+                        self._send_json(500, {"error": f"Command '{step_name}' execution error", "detail": str(exc)})
+                        return
+
+                if update_failed:
+                    self._send_json(200, {
+                        "ok": False,
+                        "success": False,
+                        "updated": False,
+                        "moved": False,
+                        "returncode": last_rc,
+                        "stdout": "\n".join(combined_stdout),
+                        "stderr": "\n".join(combined_stderr),
+                        "error": "Rescan (beet update) failed; move aborted",
+                        "steps": steps_summary,
+                    })
+                    return
+
+                all_ok = (last_rc == 0)
+                self._send_json(200, {
+                    "ok": all_ok,
+                    "success": all_ok,
+                    "updated": rescan_first,
+                    "moved": all_ok,
+                    "returncode": last_rc,
+                    "stdout": "\n".join(combined_stdout),
+                    "stderr": "\n".join(combined_stderr),
+                    "steps": steps_summary,
+                })
+            finally:
+                release_os_lock(lock_file)
+            return
+
+        if path == "/submissions/submit":
+            if not isinstance(body, dict):
+                self._send_json(400, {"error": "Request body must be a JSON object"})
+                return
+
+            capability_error = require_command_capability("submit")
+            if capability_error is not None:
+                self._send_json(409, capability_error)
+                return
+
+            raw_query = body.get("query", "")
+            try:
+                safe_query = _validate_safe_beet_query(raw_query, required=True, max_length=256)
+            except ValueError as val_err:
+                self._send_json(400, {"error": str(val_err)})
+                return
+
+            api_key = body.get("api_key")
+            if api_key is not None:
+                if not isinstance(api_key, str):
+                    self._send_json(400, {"error": "api_key must be a string"})
+                    return
+                api_key = api_key.strip()
+                if api_key and not re.match(r"^[a-zA-Z0-9_-]{1,64}$", api_key):
+                    self._send_json(400, {"error": "Invalid api_key format"})
+                    return
+            else:
+                api_key = os.environ.get("ACOUSTID_API_KEY", "").strip() or os.environ.get("ACOUSTID_KEY", "").strip()
+
+            timeout = body.get("timeout", 300.0)
+            try:
+                timeout = float(timeout)
+                if timeout <= 0:
+                    raise ValueError()
+                timeout = max(5.0, min(timeout, 600.0))
+            except (ValueError, TypeError):
+                self._send_json(400, {"error": "Invalid timeout parameter"})
+                return
+
+            config_override = ""
+            if api_key:
+                safe_k = api_key.replace("\\", "\\\\").replace('"', '\\"')
+                config_override = f'chroma:\n  auto: no\n  apikey: "{safe_k}"\nacoustid:\n  apikey: "{safe_k}"\n'
+
+            try:
+                lock_file = acquire_os_lock(read_only=True)
+            except (BlockingIOError, TimeoutError, OSError, RuntimeError) as lock_err:
+                self._send_json(503, {"error": "Failed to acquire engine OS lock", "detail": str(lock_err)})
+                return
+
+            try:
+                cmd_list = ["submit", safe_query]
+                res = _run_beet_subcommand_locked(
+                    cmd_list,
+                    config_override=config_override,
+                    timeout=timeout,
+                    read_only=True,
+                    lock_file=lock_file,
+                )
+                if res.get("timed_out"):
+                    self._send_json(408, {"error": f"Command 'submit' timed out after {timeout}s", "returncode": 124})
+                elif res.get("internal_error"):
+                    self._send_json(500, {"error": "submit execution error", "detail": res.get("stderr")})
+                else:
+                    self._send_json(200, {
+                        "ok": res["returncode"] == 0,
+                        "success": res["returncode"] == 0,
+                        "returncode": res["returncode"],
+                        "stdout": res["stdout"],
+                        "stderr": res["stderr"],
+                    })
+            finally:
+                release_os_lock(lock_file)
             return
 
         if path == "/commands/execute":

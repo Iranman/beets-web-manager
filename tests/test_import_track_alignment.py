@@ -18,6 +18,10 @@ def _app_source() -> str:
     return (root / "app.py").read_text(encoding="utf-8")
 
 
+def _control_agent_source() -> str:
+    root = Path(__file__).resolve().parents[1]
+    return (root / "backend" / "beets_control_agent.py").read_text(encoding="utf-8")
+
 
 def _frontend_import_review_source() -> str:
     root = Path(__file__).resolve().parents[1]
@@ -241,17 +245,16 @@ class PartialImportSubsetTests(unittest.TestCase):
 
 
 class BeetsSelectedReleaseImportConfigTests(unittest.TestCase):
-    """Selected-release imports must not fall back to dirty source tags."""
+    """Selected-release imports must not fall back to dirty source tags and are engine-owned."""
 
     def setUp(self):
         self._app = _app_source()
+        self._agent = _control_agent_source()
 
-    def test_selected_release_import_uses_permissive_distance_threshold(self):
-        self.assertIn('strong_rec_thresh: 1.0', self._app)
-        self.assertIn('medium_rec_thresh: 1.0', self._app)
+    def test_app_does_not_contain_local_beets_import_config(self):
         self.assertNotIn('strong_rec_thresh: 0.0', self._app)
         self.assertNotIn('medium_rec_thresh: 0.0', self._app)
 
-    def test_selected_release_threshold_comment_uses_beets_distance_semantics(self):
-        self.assertIn('Beets thresholds are distances', self._app)
-        self.assertNotIn('lowers the match threshold to 0 so --search-id', self._app)
+    def test_selected_release_threshold_uses_beets_distance_semantics(self):
+        self.assertIn('strong_rec_thresh', self._agent)
+        self.assertNotIn('lowers the match threshold to 0 so --search-id', self._agent)

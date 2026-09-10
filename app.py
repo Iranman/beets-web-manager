@@ -345,7 +345,7 @@ def _install_optional_plugins():
 threading.Thread(target=_install_optional_plugins, daemon=True).start()
 
 from flask import Flask, Response, abort, jsonify, request, send_file, redirect
-from job_engine import _beet_run, Job, PythonJob, JobStore
+from job_engine import PythonJob, JobStore
 from backend.slskd import (
     build_album_candidates as _slskd_build_album_candidates,
     cleanup_failed_candidate_files as _slskd_cleanup_failed_candidate_files_impl,
@@ -507,7 +507,6 @@ def _env_float(name: str, default: float, *, minimum: Optional[float] = None, ma
     return value
 
 LIB_PATH  = os.environ.get("BEETS_LIBRARY", "")
-BEET_BIN  = shutil.which("beet") or "/lsiopy/bin/beet"
 LOG_FILE  = os.environ.get("BEETS_LOG", "/config/beet.log")
 HOST      = "0.0.0.0"
 PORT      = int(os.environ.get("WEBCONTROL_PORT", "8337"))
@@ -1504,22 +1503,6 @@ def _ai_auto_import_allowed(use_case: str, confidence: str,
     return False
 
 
-def _beet_env() -> dict:
-    """Return os.environ plus BEETSDIR for beet subprocesses."""
-    env = {**os.environ, "BEETSDIR": "/config"}
-    py_path = _s(env.get("PYTHONPATH", "")).strip()
-    paths = ["/config"]
-    if py_path:
-        paths.append(py_path)
-    env["PYTHONPATH"] = ":".join(paths)
-    return env
-
-
-_BEETS_PLUGINPATH_CONFIG = (
-    "pluginpath:\n"
-    "  - /config/beetsplug\n"
-    "  - /app/beetsplug\n"
-)
 
 
 def _beet_import_timeout_for_count(count: int, minimum: int = 300, maximum: int = 1200) -> int:
@@ -1567,76 +1550,15 @@ def _read_beets_plugin_list(config_path: str = "/config/config.yaml") -> List[st
     return plugins
 
 
-def _beet_plugins() -> str:
-    """Return the main config's plugin list for temp config overrides."""
-    plugins = _read_beets_plugin_list()
-    return _filter_job_plugins(plugins)
-
-
-def _write_plugin_job_beets_config(temp_path: str, command: str) -> str:
-    """Write a temp config for explicit plugin command jobs."""
-    try:
-        plugins = [
-            p for p in _read_beets_plugin_list()
-            if p and p not in _JOB_PLUGIN_EXCLUDED
-        ]
-        if command not in plugins:
-            plugins.append(command)
-        Path(temp_path).write_text(
-            "include:\n  - /config/config.yaml\n"
-            + _BEETS_PLUGINPATH_CONFIG
-            + (f"plugins: {' '.join(plugins)}\n" if plugins else "")
-            + "lyrics:\n  auto: no\n"
-            "replaygain:\n  auto: no\n"
-        )
-        return temp_path
-    except Exception:
-        return "/config/config.yaml"
-
-
 _ARTIST_FOLDER_PATH_TEMPLATE = "$albumartist%if{$mb_albumartistid, ($mb_albumartistid),}"
 _DEFAULT_ALBUM_PATH_TEMPLATE = _ARTIST_FOLDER_PATH_TEMPLATE + "/$album (%left{$year,4})%if{$mb_releasegroupid, {$mb_releasegroupid$}}/$albumartist - $album - %right{00$track,2} - $title"
 _ALBUMTYPE_SINGLE_PATH_TEMPLATE = _ARTIST_FOLDER_PATH_TEMPLATE + "/%if{$year,%left{$year,4} - }$album [Single]/%right{00$track,2} - $title"
 _SINGLE_TRACK_PATH_TEMPLATE = _ARTIST_FOLDER_PATH_TEMPLATE + "/$album (%left{$year,4})%if{$mb_releasegroupid, {$mb_releasegroupid$}}/$artist - $album - %right{00$track,2} - $title ($disc)%if{$mb_artistid,{$mb_artistid$}}"
-_JOB_PATHS_CONFIG_BLOCK = (
-    "paths:\n"
-    f'  default: "{_DEFAULT_ALBUM_PATH_TEMPLATE}"\n'
-    f'  singleton: "{_SINGLE_TRACK_PATH_TEMPLATE}"\n'
-    f'  comp: "{_DEFAULT_ALBUM_PATH_TEMPLATE}"\n'
-    "  albumtype_soundtrack: Soundtracks/$album (%left{$year,4})/$albumartist - $album - %right{00$track,2} - $title\n"
-    f'  albumtype_single: "{_ALBUMTYPE_SINGLE_PATH_TEMPLATE}"\n'
-)
-
-
-def _write_job_beets_config(temp_path: str, extra: str = "") -> str:
-    """Write a temp beets config for jobs that should not load slow/fragile plugins.
-
-    extra may embed a plugin API key (e.g. AcoustID), so the file is
-    written with owner-only permissions rather than the process default.
-    """
-    try:
-        plugins = _beet_plugins()
-        extra_block = extra or ""
-        if extra_block and not extra_block.endswith("\n"):
-            extra_block += "\n"
-        Path(temp_path).write_text(
-            "include:\n  - /config/config.yaml\n"
-            + _BEETS_PLUGINPATH_CONFIG
-            + (f"plugins: {plugins}\n" if plugins else "")
-            + _JOB_PATHS_CONFIG_BLOCK
-            + extra_block
-            + "lyrics:\n  auto: no\n"
-            "replaygain:\n  auto: no\n"
-        )
-        os.chmod(temp_path, 0o600)
-        return temp_path
-    except Exception:
-        return "/config/config.yaml"
 
 
 def _write_playlist_import_beets_config(temp_path: str) -> str:
     """Use the project single-track path format for playlist download imports."""
-    return _write_job_beets_config(temp_path)
+    return "/config/config.yaml"
 
 
 def _sqlite_timeout_seconds() -> float:
@@ -11844,7 +11766,6 @@ def album_deduplicate(aid):
 
     def _do(log, cancel_event=None):
         _MROOT   = "/data/media/music"
-        env = _beet_env()
 
         # Resolve which MB album ID to use
         mb_albumid = mb_override
@@ -13612,8 +13533,6 @@ def fetch_missing_art():
             f"{len(actionable)} actionable, {len(unresolved_items)} unresolved, {skipped} already have art."
         )
 
-        cfg = _write_plugin_job_beets_config(f"/tmp/beets_fetchart_missing_{uuid.uuid4().hex}.yaml", "fetchart")
-        env = _beet_env()
         saved_items: List[Dict[str, Any]] = []
         failed_items: List[Dict[str, Any]] = []
 
@@ -13626,7 +13545,7 @@ def fetch_missing_art():
             album_name = info["album"]
             log.append(f"[{idx}/{len(actionable)}] Fetching: {artist_name} - {album_name}")
             try:
-                result = _repair_album_art(aid, log, cancel_event, cfg=cfg, env=env)
+                result = _repair_album_art(aid, log, cancel_event)
                 if result.get("status") == "saved":
                     log.append(f"  saved by {result.get('source') or 'repair'}")
                     saved_items.append(result)
@@ -13685,8 +13604,6 @@ def rebuild_album_art():
         started_at = time.time()
         albums = list(lib.albums([]))
         trash_root = METADATA_CACHE_ROOT / "album-art-rebuild-trash" / time.strftime("%Y%m%d-%H%M%S")
-        cfg = _write_plugin_job_beets_config(f"/tmp/beets_fetchart_rebuild_{uuid.uuid4().hex}.yaml", "fetchart")
-        env = _beet_env()
         rebuilt_items: List[Dict[str, Any]] = []
         restored_items: List[Dict[str, Any]] = []
         failed_items: List[Dict[str, Any]] = []
@@ -13718,7 +13635,7 @@ def rebuild_album_art():
                 unresolved_items.append({**entry, "status": "unresolved"})
                 continue
             try:
-                result = _repair_album_art(aid, log, cancel_event, cfg=cfg, env=env, force=True, trash_root=trash_root)
+                result = _repair_album_art(aid, log, cancel_event, force=True, trash_root=trash_root)
                 removed_existing += int(result.get("quarantined_count") or 0)
                 if result.get("status") == "saved" and result.get("saved_path"):
                     log.append(f"  confirmed fresh art: {Path(_s(result.get('saved_path'))).name}")
@@ -21717,32 +21634,6 @@ def import_folder_with_id():
                     )
 
         # ── Step 1: import with specific MB release ID + permissive threshold ──────────
-        # Beets thresholds are distances; a high strong threshold lets the
-        # selected --search-id release win in quiet mode instead of falling
-        # back to dirty as-is tags.
-        # Temp config used for ALL beet sub-commands in this job:
-        # - permissive selected-release threshold for --search-id quiet imports
-        # - lyrics/replaygain auto off so they don't fire web requests per track
-        temp_cfg = "/tmp/beets_import_wid.yaml"
-        try:
-            _plugins = _beet_plugins()
-            Path(temp_cfg).write_text(
-                "include:\n  - /config/config.yaml\n"
-                + _BEETS_PLUGINPATH_CONFIG
-                + (f"plugins: {_plugins}\n" if _plugins else "")
-                + _JOB_PATHS_CONFIG_BLOCK
-                + "match:\n"
-                "  strong_rec_thresh: 1.0\n"
-                "  medium_rec_thresh: 1.0\n"
-                "lyrics:\n"
-                "  auto: no\n"
-                "replaygain:\n"
-                "  auto: no\n"
-            )
-        except Exception:
-            pass
-        base = [BEET_BIN, "-c", temp_cfg]   # used by base_import, _retag, etc.
-        base_import = base
 
         if preserve_torrent_source and use_move:
             log.append(
@@ -22675,7 +22566,6 @@ def reimport_disk():
 
     def _do(log, cancel_event=None):
         nonlocal aldir, mb_albumid, existing_album_id, wanted_tracks
-        env = _beet_env()
 
         # Accept a release UUID, release URL, release-group UUID/URL, or a blank
         # value that can be resolved from the folder/artist context.  The rest
@@ -22720,19 +22610,6 @@ def reimport_disk():
                 "release; repairing tags in-place without re-importing."
             )
             log.append(f"[1/3] {repair_desc}")
-            repair_cfg = _write_job_beets_config("/tmp/beets_existing_album_repair.yaml")
-            base_std = [BEET_BIN, "-c", repair_cfg]
-            # _beet_run/_parse_remote_beet_command strips any "-c <path>" token
-            # from base_std before sending the command to the control agent --
-            # a local web-manager path has no meaning on the remote engine.
-            # The config content itself (plugin list, path templates, disabled
-            # lyrics/replaygain auto-fetch) still needs to reach the engine, so
-            # it's forwarded explicitly via config_override below rather than
-            # silently lost.
-            try:
-                repair_cfg_content = Path(repair_cfg).read_text(encoding="utf-8")
-            except Exception:
-                repair_cfg_content = ""
             expected_tracks = _mb_release_track_count(mb_albumid, log)
             if not expected_tracks:
                 raise RuntimeError(
@@ -23348,39 +23225,6 @@ def reimport_disk():
                         beets_client.apply_album_cleanup(p_ac["operation_id"])
             except Exception as ex:
                 log.append(f"  DB cleanup warning: {ex}")
-
-        # Temp config: no copy/move (import in-place), permissive selected-release match threshold.
-        # Disable slow auto-plugins (lyrics, replaygain) for ALL sub-commands
-        # so they don't fire web requests on every track during write/mbsync.
-        temp_cfg = "/tmp/beets_reimport_disk.yaml"
-        _plugins = _beet_plugins()
-        temp_cfg_content = (
-            "include:\n  - /config/config.yaml\n"
-            + _BEETS_PLUGINPATH_CONFIG
-            + (f"plugins: {_plugins}\n" if _plugins else "")
-            + _JOB_PATHS_CONFIG_BLOCK
-            + "import:\n"
-            "  copy: no\n"
-            "  move: no\n"
-            f"  duplicate_action: {'keep' if existing_album_id else 'remove'}\n"
-            "match:\n"
-            "  strong_rec_thresh: 1.0\n"
-            "  medium_rec_thresh: 1.0\n"
-            "lyrics:\n"
-            "  auto: no\n"
-            "replaygain:\n"
-            "  auto: no\n"
-        )
-        Path(temp_cfg).write_text(temp_cfg_content)
-        # Use temp_cfg (no slow plugins) for ALL beet sub-commands in this job.
-        # The "-c temp_cfg" token itself is stripped by _beet_run before the
-        # command reaches the control agent (a local web-manager path has no
-        # meaning on the remote engine) -- temp_cfg_content is forwarded
-        # explicitly via config_override on every _beet_run call below so the
-        # copy/move/duplicate_action/lyrics/replaygain overrides still apply
-        # on the engine side, not just this now-unused local file.
-        base_tmp = [BEET_BIN, "-c", temp_cfg]
-        base_std = base_tmp   # was "/config/config.yaml" — avoid triggering lyrics/replaygain
 
         # Uses the engine-supplied evidence captured at request time (see
         # import_source_evidence above), not a local scan -- this route's
@@ -27373,50 +27217,6 @@ def create_unmatched_draft():
 def library_move_all():
     """Rename/move all library files to match the current path template (beet move)."""
     def _do(log, cancel_event=None):
-        import subprocess as _sp
-
-        def _stream(cmd, label, deadline):
-            log.append(f"{label}…")
-            try:
-                proc = _sp.Popen(cmd, stdout=_sp.PIPE, stderr=_sp.STDOUT,
-                                 text=True, env=env, bufsize=1)
-            except Exception as ex:
-                raise RuntimeError(f"Failed to start {label}: {ex}")
-            for line in proc.stdout:
-                if cancel_event and cancel_event.is_set():
-                    proc.kill(); proc.communicate()
-                    log.append("[cancelled]"); return -9
-                if time.time() > deadline:
-                    proc.kill(); proc.communicate()
-                    log.append(f"⚠ {label} timed out."); return 124
-                stripped = line.rstrip()
-                if stripped:
-                    log.append(stripped)
-            return proc.wait()
-
-        env = {**_beet_env(), "PYTHONUNBUFFERED": "1"}
-        _cfg = _write_job_beets_config(f"/tmp/beets-move-all-{uuid.uuid4().hex}.yaml")
-        base = [BEET_BIN, "-c", _cfg]
-
-        # ARCH-003 Wave 33: the pre-move candidate-directory set is read
-        # here, BEFORE `beet move` runs -- every directory currently
-        # holding at least one track is a real candidate for going empty
-        # once its file(s) relocate to match the (possibly changed) path
-        # template. This is a read-only DB query (never a mutation), and
-        # is the only way this route can know which directories to even
-        # ask the engine to check: the web-manager container has no
-        # filesystem mount into MUSIC_ROOT in the supported deployment
-        # (docker-compose.full.yml/docker-compose.yml), so it cannot walk
-        # the real directory tree itself the way the old local
-        # os.walk(str(MUSIC_ROOT))-based cleanup below assumed it could --
-        # that step was silently a no-op (or worse, an unhandled
-        # exception swallowed by its own try/except) in the real
-        # deployment before this fix, not just an ARCH-003 sink.
-        # ARCH-007 (Wave 34): structured engine read, not raw _db() SQL --
-        # beets_client.list_distinct_item_paths() -> GET /library/item-paths
-        # already returns plain str (the engine decodes bytes path columns
-        # itself), so no local bytes/text_factory handling is needed here
-        # any more.
         candidate_dirs: set = set()
         try:
             path_values = beets_client.list_distinct_item_paths()
@@ -27424,27 +27224,11 @@ def library_move_all():
                 if not p:
                     continue
                 abs_p = p if p.startswith("/") else f"{MUSIC_ROOT}/{p}"
-                # Every ancestor up to (not including) MUSIC_ROOT is also a
-                # real candidate -- e.g. an artist folder whose only album
-                # folder is the one that just went empty. folder_cleanup_v1
-                # safely no-ops on a directory that still has content, so
-                # over-including ancestors here costs nothing but a
-                # rejected (silently skipped) Plan call.
                 parent = Path(abs_p).parent
                 root = Path(str(MUSIC_ROOT))
                 while parent != root and root in parent.parents:
                     candidate_dirs.add(str(parent))
                     parent = parent.parent
-            # ARCH-007 (Wave 34): a positive success log line for the
-            # engine read step, mirroring library_mbsync_all()'s "Pruned
-            # X/Y ..." line. Before this, a successful scan produced no
-            # log output at all (only the [warn] line on the except
-            # branch below existed), so real Docker acceptance testing
-            # had no job-log-based way to distinguish "the read succeeded"
-            # from "the read was never attempted" -- it could only infer
-            # success from the ABSENCE of the warning, which is weaker
-            # evidence than the explicit positive markers every other
-            # migrated read in this wave already logs.
             log.append(
                 f"Pre-move scan: {len(path_values)} distinct item path(s) read via engine IPC, "
                 f"{len(candidate_dirs)} candidate empty-folder director{'y' if len(candidate_dirs) == 1 else 'ies'}."
@@ -27452,29 +27236,90 @@ def library_move_all():
         except Exception as ex:
             log.append(f"  [warn] Could not enumerate pre-move directories for empty-folder cleanup: {ex}")
 
-        # Step 1: rescan disk to fix any stale DB paths before moving
-        rc = _stream(base + ["update"], "Rescanning library (beet update)", time.time() + 1800)
-        if rc == -9: return
-        if rc not in (0, 1):
-            raise RuntimeError(f"beet update exited with rc={rc}")
+        # Steps 1 & 2: rescan disk (beet update) and move files (beet move) via engine IPC under OS lock
+        log.append("Rescanning and moving library files via engine IPC…")
+        deadline = time.time() + 5400.0  # 1.5-hour hard cap
+        try:
+            move_res = beets_client.move_library(query="", rescan_first=True, async_job=True, timeout=5400.0)
+        except Exception as ex:
+            raise RuntimeError(f"Failed to execute move_library on engine: {ex}") from ex
+
+        remote_job_id = move_res.get("job_id") if isinstance(move_res, dict) else None
+        rc = 0
+        if remote_job_id:
+            seen_stdout = 0
+            seen_stderr = 0
+            while True:
+                if cancel_event and cancel_event.is_set():
+                    try:
+                        beets_client.cancel_job(remote_job_id)
+                    except Exception:
+                        pass
+                    log.append("[cancelled]")
+                    return
+
+                if time.time() > deadline:
+                    try:
+                        beets_client.cancel_job(remote_job_id)
+                    except Exception:
+                        pass
+                    log.append("⚠ move_library timed out.")
+                    return
+
+                try:
+                    job_info = beets_client.get_job(remote_job_id)
+                except Exception:
+                    time.sleep(0.5)
+                    continue
+
+                r_stdout = job_info.get("stdout") or []
+                if len(r_stdout) > seen_stdout:
+                    for line in r_stdout[seen_stdout:]:
+                        stripped = line.rstrip()
+                        if stripped:
+                            log.append(stripped)
+                    seen_stdout = len(r_stdout)
+
+                r_stderr = job_info.get("stderr") or []
+                if len(r_stderr) > seen_stderr:
+                    for line in r_stderr[seen_stderr:]:
+                        stripped = line.rstrip()
+                        if stripped:
+                            log.append(f"  ⚠ {stripped}")
+                    seen_stderr = len(r_stderr)
+
+                status = job_info.get("status")
+                if status in ("success", "failed", "cancelled", "timeout"):
+                    rc = job_info.get("returncode", 0 if status == "success" else 1)
+                    if status == "cancelled":
+                        log.append("[cancelled]")
+                        return
+                    if status == "timeout":
+                        log.append("⚠ move_library timed out.")
+                        return
+                    break
+
+                time.sleep(0.5)
+        elif isinstance(move_res, dict):
+            # Sync response / unit test mock fallback
+            stdout = move_res.get("stdout") or ""
+            stderr = move_res.get("stderr") or ""
+            for line in stdout.splitlines():
+                if line.strip():
+                    log.append(line.rstrip())
+            for line in stderr.splitlines():
+                if line.strip():
+                    log.append(f"  ⚠ {line.rstrip()}")
+            rc = move_res.get("returncode", 0 if move_res.get("ok", True) else 1)
+
+        if (isinstance(move_res, dict) and not move_res.get("ok", True)) or rc not in (0, 1):
+            err = move_res.get("error") if isinstance(move_res, dict) else None
+            raise RuntimeError(err or f"beet move exited with rc={rc}")
 
         if cancel_event and cancel_event.is_set():
             log.append("[cancelled]"); return
 
-        # Step 2: move files to match current path template
-        rc = _stream(base + ["move"], "Moving files to updated path template (beet move)", time.time() + 3600)
-        if rc == -9: return
-        if rc not in (0, 1):
-            raise RuntimeError(f"beet move exited with rc={rc}")
-
-        # Step 3: ask the engine (which -- unlike this container -- has
-        # real filesystem access) to remove whichever pre-move candidate
-        # directories are now actually empty, through folder_cleanup_v1's
-        # existing remove_empty action (SEC-002 Wave 22): it independently
-        # re-verifies the directory is truly empty and has no lingering
-        # Beets DB references before removing anything, so a directory
-        # that is not actually empty (or moved outside the allowed root)
-        # is safely and expectedly skipped, not an error.
+        # Step 3: ask the engine to remove empty candidate directories
         removed_dirs = 0
         for cdir in sorted(candidate_dirs, key=len, reverse=True):
             if cancel_event and cancel_event.is_set():
@@ -27485,10 +27330,6 @@ def library_move_all():
                 log.append(f"  [warn] Folder cleanup plan failed for {cdir}: {ex}")
                 continue
             if not plan_res.get("ok"):
-                # Expected in the common case: most pre-move directories
-                # still have files, or files from a different album now
-                # sitting there -- not an empty-folder candidate. Only
-                # unexpected engine-side codes are worth a log line.
                 code = plan_res.get("code") or ""
                 if code not in ("folder_cleanup_not_empty", "folder_cleanup_db_references"):
                     log.append(f"  [warn] Folder cleanup plan rejected for {cdir}: {plan_res.get('error')}")
@@ -27521,22 +27362,6 @@ def library_move_all():
 def library_mbsync_all():
     """Sync all library tracks against MusicBrainz metadata (beet mbsync)."""
     def _do(log, cancel_event=None):
-        import subprocess as _sp
-        # Remove orphaned album records (albums with no tracks) — mbsync
-        # crashes on them. ARCH-003 Wave 33: previously a raw local
-        # `DELETE FROM albums WHERE id IN (...)` SQL sink -- migrated onto
-        # beets_client.delete_album() (album_maintenance_v1's
-        # mode="remove_album", the same controlled per-album removal path
-        # already used elsewhere for exactly this "album with zero items"
-        # shape). This also fixes a real, latent bug in the code it
-        # replaces: `log.append(f"Pruned {len(ids)} ...")` sat OUTSIDE the
-        # `if rows:` block that defined `ids`, so on the common case of
-        # zero orphaned albums this always raised NameError, silently
-        # swallowed by the surrounding except as a "non-fatal" warning.
-        # ARCH-007 (Wave 34): structured engine read, not raw _db() SQL --
-        # beets_client.find_all_orphan_albums() -> GET /albums?orphan=true
-        # (an `id NOT IN (...)`-equivalent WHERE NOT EXISTS on the engine
-        # side, same semantics as the raw SQL it replaces).
         try:
             orphan_rows = beets_client.find_all_orphan_albums()
             orphan_ids = [int(r["id"]) for r in orphan_rows]
@@ -27559,37 +27384,81 @@ def library_mbsync_all():
         if orphan_ids:
             log.append(f"Pruned {pruned}/{len(orphan_ids)} orphaned album record(s) with no tracks.")
 
-        env = {**_beet_env(), "PYTHONUNBUFFERED": "1"}
-        _cfg = _write_job_beets_config(f"/tmp/beets-mbsync-all-{uuid.uuid4().hex}.yaml")
-        cmd = [BEET_BIN, "-c", _cfg, "mbsync"]
-        log.append("Running beet mbsync on full library — this may take several minutes…")
-        log.append(f"Command: {' '.join(cmd[:3])} mbsync")
+        log.append("Running beet mbsync on full library via engine IPC — this may take several minutes…")
+        deadline = time.time() + 7200.0  # 2-hour hard cap
         try:
-            proc = _sp.Popen(
-                cmd,
-                stdout=_sp.PIPE, stderr=_sp.STDOUT,
-                text=True, env=env, bufsize=1,
-            )
+            mbsync_res = beets_client.mbsync(query="", async_job=True)
         except Exception as ex:
-            raise RuntimeError(f"Failed to start beet mbsync: {ex}")
+            raise RuntimeError(f"Failed to start beet mbsync on engine: {ex}") from ex
 
-        deadline = time.time() + 7200  # 2-hour hard cap
-        for line in proc.stdout:
-            if cancel_event and cancel_event.is_set():
-                proc.kill()
-                proc.communicate()
-                log.append("[cancelled]")
-                return
-            if time.time() > deadline:
-                proc.kill()
-                proc.communicate()
-                log.append("⚠ mbsync timed out after 2 hours.")
-                return
-            stripped = line.rstrip()
-            if stripped:
-                log.append(stripped)
+        remote_job_id = mbsync_res.get("job_id") if isinstance(mbsync_res, dict) else None
+        rc = 0
+        if remote_job_id:
+            seen_stdout = 0
+            seen_stderr = 0
+            while True:
+                if cancel_event and cancel_event.is_set():
+                    try:
+                        beets_client.cancel_job(remote_job_id)
+                    except Exception:
+                        pass
+                    log.append("[cancelled]")
+                    return
 
-        rc = proc.wait()
+                if time.time() > deadline:
+                    try:
+                        beets_client.cancel_job(remote_job_id)
+                    except Exception:
+                        pass
+                    log.append("⚠ mbsync timed out after 2 hours.")
+                    return
+
+                try:
+                    job_info = beets_client.get_job(remote_job_id)
+                except Exception:
+                    time.sleep(0.5)
+                    continue
+
+                r_stdout = job_info.get("stdout") or []
+                if len(r_stdout) > seen_stdout:
+                    for line in r_stdout[seen_stdout:]:
+                        stripped = line.rstrip()
+                        if stripped:
+                            log.append(stripped)
+                    seen_stdout = len(r_stdout)
+
+                r_stderr = job_info.get("stderr") or []
+                if len(r_stderr) > seen_stderr:
+                    for line in r_stderr[seen_stderr:]:
+                        stripped = line.rstrip()
+                        if stripped:
+                            log.append(f"  ⚠ {stripped}")
+                    seen_stderr = len(r_stderr)
+
+                status = job_info.get("status")
+                if status in ("success", "failed", "cancelled", "timeout"):
+                    rc = job_info.get("returncode", 0 if status == "success" else 1)
+                    if status == "cancelled":
+                        log.append("[cancelled]")
+                        return
+                    if status == "timeout":
+                        log.append("⚠ mbsync timed out after 2 hours.")
+                        return
+                    break
+
+                time.sleep(0.5)
+        elif isinstance(mbsync_res, dict):
+            # Sync response / unit test mock fallback
+            stdout = mbsync_res.get("stdout") or ""
+            stderr = mbsync_res.get("stderr") or ""
+            for line in stdout.splitlines():
+                if line.strip():
+                    log.append(line.rstrip())
+            for line in stderr.splitlines():
+                if line.strip():
+                    log.append(f"  ⚠ {line.rstrip()}")
+            rc = mbsync_res.get("returncode", 0 if mbsync_res.get("ok", True) else 1)
+
         if rc not in (0, 1):
             raise RuntimeError(f"beet mbsync exited with rc={rc}")
         _invalidate_lib_cache()
@@ -27731,7 +27600,7 @@ def _log_beet_output_excerpt(log: list, label: str, out: str,
         log.append(f"    {line}")
 
 
-def _apply_genre_to_album(album_id: int, genre: str, log: list, env: dict,
+def _apply_genre_to_album(album_id: int, genre: str, log: list, env: Optional[dict] = None,
                            cancel_event=None) -> bool:
     """Write genre to every track via album_metadata_repair_v1 family."""
     try:
@@ -27746,7 +27615,7 @@ def _apply_genre_to_album(album_id: int, genre: str, log: list, env: dict,
     return True
 
 
-def _lastgenre_cmd(force: bool, query: str, log: list, env: dict,
+def _lastgenre_cmd(force: bool, query: str, log: list, env: Optional[dict] = None,
                    cancel_event=None, timeout: int = 180):
     """Run controlled album-scoped lastgenre repair via BeetsClient IPC."""
     raw_query = _s(query).strip()
@@ -27777,8 +27646,6 @@ def library_fix_genres():
     use_ai   = bool(payload.get("use_ai"))
 
     def _do(log, cancel_event=None):
-        env = _beet_env()
-
         targets = list(lib.albums([]))
         if not force:
             targets = [a for a in targets if not _album_genre_value(a)]
@@ -27801,7 +27668,7 @@ def library_fix_genres():
             log.append(f"  [{idx}/{len(targets)}] {name}")
             before = _album_genre_value(album)
             try:
-                r = _lastgenre_cmd(force, f"album_id:{aid}", log, env, cancel_event)
+                r = _lastgenre_cmd(force, f"album_id:{aid}", log, cancel_event=cancel_event)
                 out = _require_beet_ok(r, "lastgenre", log)
                 if idx == 1:
                     _log_beet_output_excerpt(log, "lastgenre", out)
@@ -27842,7 +27709,7 @@ def library_fix_genres():
                 album.albumartist or "", album.album or "", album.year, api_key, log)
             if genre:
                 try:
-                    _apply_genre_to_album(album.id, genre, log, env, cancel_event)
+                    _apply_genre_to_album(album.id, genre, log, cancel_event=cancel_event)
                     tagged += 1
                 except Exception as ex:
                     failed += 1
@@ -27877,10 +27744,8 @@ def album_fix_genre(aid):
         return jsonify({"ok": False, "error": "Album not found"})
 
     def _do(log, cancel_event=None):
-        env  = _beet_env()
-
         log.append(f"[1/2] Running lastgenre for {album.albumartist or '?'} — {album.album or '?'}…")
-        r = _lastgenre_cmd(False, f"album_id:{aid}", log, env, cancel_event)
+        r = _lastgenre_cmd(False, f"album_id:{aid}", log, cancel_event=cancel_event)
         _require_beet_ok(r, "lastgenre", log)
 
         _invalidate_lib_cache()
@@ -28570,19 +28435,6 @@ def start_import():
                 "intend to remove qBittorrent source files."
             ),
         }), 400
-    command = [BEET_BIN, "-c", "/config/config.yaml", "import",
-               "-q", "--quiet-fallback", fallback]
-    if not write:
-        command.append("--nowrite")
-    if preserve_torrent_source:
-        command.append("--copy")
-    elif move:
-        command.append("--move")
-    if noincremental:
-        command.append("--noincremental")
-    if search_id:
-        command += ["--search-id", search_id]
-    command.append(path)
     label = f"Import: {Path(path).name or path}"
     if search_id:
         label += f" [{search_id[:8]}…]"
@@ -52830,9 +52682,8 @@ def api_plugins_run():
     installed = _plugin_installed_map()
     if not installed.get(cmd):
         return jsonify({"ok": False, "error": f"Plugin is not installed: {cmd}"}), 400
-    cfg = _write_plugin_job_beets_config(f"/tmp/beets_plugin_{cmd}_{uuid.uuid4().hex}.yaml", cmd)
-    full = [BEET_BIN, "-c", cfg] + [str(a) for a in args]
-    job  = jobs.start(full, label=label)
+    sub_args = [str(a) for a in args[1:]]
+    job  = jobs.start(cmd, args=sub_args, label=label)
     return jsonify({"ok": True, "job_id": job.job_id})
 
 
@@ -52862,7 +52713,6 @@ if __name__ == "__main__":
         _start_playlist_index_warm_worker()
     print(f"Beets Web Control → http://{HOST}:{PORT}")
     print(f"Library: {LIB_PATH}")
-    print(f"Beet bin: {BEET_BIN}")
     # Waitress, not Flask's built-in dev server: pure-Python (works
     # identically on the Linux container and on Windows during local
     # development) and single-process/multi-threaded, matching the

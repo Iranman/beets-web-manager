@@ -55,6 +55,13 @@ def setUpModule():
     # before this module's tests run (same defensive pattern documented in
     # test_import_review_attach_enforcement.py / test_ai_batch_retry_race.py).
     os.environ.update(_ENV_OVERRIDES)
+    import tempfile
+    from pathlib import Path
+    integrity_tx_dir = Path(tempfile.mkdtemp(prefix="bw_integrity_tx_"))
+    APP.transactions.root = Path(integrity_tx_dir)
+
+
+
 
 SECOND_RECORDING_ID = "66666666-6666-6666-6666-666666666666"
 SECOND_RELEASE_ID = "77777777-7777-7777-7777-777777777777"
@@ -240,7 +247,6 @@ class _AttachIntegrityTestCase(unittest.TestCase):
         self._patch(mock.patch.object(APP, "_acoustid_lookup_cached", side_effect=acoustid_lookup))
         self._patch(mock.patch.object(APP, "_mb_recording_search", side_effect=mb_search))
         self._patch(mock.patch.object(APP, "_fetch_mb_recording_details", side_effect=fetch_details))
-        self._patch(mock.patch.object(APP, "_beet_run", side_effect=fake_beet_run))
         self._patch(mock.patch.object(APP.beets_client, "plan_album_mb_track_repair", side_effect=fake_plan_track_repair))
         self._patch(mock.patch.object(APP.beets_client, "apply_album_mb_track_repair", side_effect=fake_apply_track_repair))
         self._patch(mock.patch.object(APP.beets_client, "update_item_metadata", side_effect=fake_update_item_metadata))

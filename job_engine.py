@@ -1,6 +1,6 @@
-"""Job engine — subprocess Job/PythonJob, JobStore, and _beet_run helper."""
-import subprocess, threading, time, uuid
-from typing import Any, Dict, List, Optional
+"""Job engine — Job/PythonJob and JobStore."""
+import os, threading, time, uuid
+from typing import Any, Dict, List, Optional, Union
 
 
 def _summarize_result(value):
@@ -29,14 +29,6 @@ def _summarize_result(value):
     return {"type": type(value).__name__, "value": str(value)[:160]}
 
 from backend.beets_client import beets_client, BeetsError, BeetsUnavailableError, BeetsAuthError, BeetsCommandError
-import os, shlex
-from typing import NamedTuple
-
-
-class ParsedRemoteBeetCommand(NamedTuple):
-    subcommand: str
-    args: List[str]
-    config_override: str = ""
 
 
 # How long Job._run() will keep polling for a *confirmed* remote terminal status
@@ -45,139 +37,39 @@ class ParsedRemoteBeetCommand(NamedTuple):
 REMOTE_CANCEL_CONFIRM_TIMEOUT = float(os.environ.get("BEETS_CANCEL_CONFIRM_TIMEOUT", "30.0"))
 
 
-def _is_beet_executable_token(token: str) -> bool:
-    if not token:
-        return False
-    normalized = token.replace("\\", "/")
-    base = normalized.split("/")[-1].lower()
-    return base in ("beet", "beet.exe")
-
-
-def _parse_remote_beet_command(command: Any) -> ParsedRemoteBeetCommand:
-    """Parse and normalize raw Beets command tokens or string for remote execution."""
-    if command is None:
-        raise BeetsCommandError("Command cannot be None")
-
-    if isinstance(command, str):
-        raw_str = command.strip()
-        if not raw_str:
-            raise BeetsCommandError("Command string cannot be empty")
-        try:
-            tokens = shlex.split(raw_str, posix=True)
-        except ValueError as exc:
-            raise BeetsCommandError(f"Invalid shell quoting in command string: {exc}") from exc
-    elif isinstance(command, (list, tuple)):
-        tokens = [str(t) for t in command]
-    else:
-        raise BeetsCommandError(f"Unsupported command type: {type(command)}")
-
-    if not tokens:
-        raise BeetsCommandError("Command tokens list cannot be empty")
-
-    # Strip leading Beets executable token if present (e.g. beet, /lsiopy/bin/beet, C:\...\beet.exe)
-    if tokens and _is_beet_executable_token(tokens[0]):
-        tokens = tokens[1:]
-
-    # Strip -c / --config parameters (the remote engine uses its own authoritative config)
-    clean_tokens: List[str] = []
-    skip_next = False
-    for i, token in enumerate(tokens):
-        if skip_next:
-            skip_next = False
-            continue
-        if token in ("-c", "--config"):
-            if i + 1 < len(tokens):
-                skip_next = True
-            continue
-        clean_tokens.append(token)
-
-    if not clean_tokens:
-        raise BeetsCommandError("No subcommand provided after parsing executable and flags")
-
-    subcommand = clean_tokens[0]
-    args = clean_tokens[1:]
-
-    if not subcommand or subcommand.strip() == "":
-        raise BeetsCommandError("Subcommand cannot be empty")
-
-    # Reject if subcommand is another path or executable
-    sub_norm = subcommand.replace("\\", "/")
-    if "/" in sub_norm or sub_norm.endswith((".py", ".sh", ".exe", ".bin")):
-        raise BeetsCommandError(f"Invalid subcommand name: '{subcommand}'")
-
-    # Reject shell operators/chaining in subcommand and args
-    dangerous_ops = (";", "&&", "||", "|", ">", "<", "`", "$(")
-    for token_to_check in [subcommand] + args:
-        for op in dangerous_ops:
-            if op in token_to_check:
-                raise BeetsCommandError(f"Dangerous shell operator '{op}' rejected in command token: '{token_to_check}'")
-
-    return ParsedRemoteBeetCommand(subcommand=subcommand, args=args, config_override="")
-
-
-def _beet_run(cmd, log, *, timeout=120, env=None, warn_msg=None, cancel=None, config_override=""):
-    """Run a beet command via the external Beets Control Agent API.
-
-    config_override, when given, is forwarded as-is to the control agent's
-    own config_override handling (it writes the string to its own temp YAML
-    file and passes "-c <that file>" to its local beet invocation) -- it is
-    NOT the same as a "-c <path>" token inside cmd, which _parse_remote_beet_command
-    strips and discards (a local path on the caller's side has no meaning on
-    the remote engine). Callers whose command semantics depend on config
-    content (e.g. import's copy/move/duplicate_action policy) must pass that
-    content explicitly here rather than relying on a stripped "-c" token.
-    """
-    class _R:
-        def __init__(self, rc=0, out="", err=""):
-            self.returncode = rc
-            self.stdout = out
-            self.stderr = err
-
-    try:
-        parsed = _parse_remote_beet_command(cmd)
-    except BeetsCommandError as exc:
-        log.append(f"  ⚠ Invalid Beets command: {exc}")
-        return _R(1, "", str(exc))
-    except Exception as exc:
-        log.append(f"  ⚠ _beet_run parsing error: {exc}")
-        return _R(1, "", str(exc))
-
-    try:
-        res = beets_client.run_command(
-            parsed.subcommand, args=parsed.args, timeout=float(timeout),
-            config_override=config_override or parsed.config_override,
-        )
-        rc = res.get("returncode", 0)
-        stdout = res.get("stdout", "")
-        stderr = res.get("stderr", "")
-        if stdout:
-            for line in stdout.splitlines():
-                log.append(line)
-        if stderr:
-            for line in stderr.splitlines():
-                log.append(f"  ⚠ {line}")
-        return _R(rc, stdout, stderr)
-    except BeetsUnavailableError as exc:
-        log.append(f"  ⚠ Beets service unavailable: {exc}")
-        return _R(1, "", str(exc))
-    except BeetsAuthError as exc:
-        log.append(f"  ⚠ Beets authentication failed: {exc}")
-        return _R(1, "", str(exc))
-    except Exception as exc:
-        log.append(f"  ⚠ _beet_run error: {exc}")
-        return _R(1, "", str(exc))
-
-
 class Job:
-    def __init__(self, job_id: str, command: List[str], label: str = "", cancel_confirm_timeout: Optional[float] = None):
-        self.job_id      = job_id
-        self.command     = command
-        self.label       = label or " ".join(command)
-        self.created_at  = time.time()
+    def __init__(
+        self,
+        job_id: str,
+        subcommand_or_command: Union[str, List[str]],
+        args: Optional[List[str]] = None,
+        label: str = "",
+        cancel_confirm_timeout: Optional[float] = None,
+    ):
+        self.job_id = job_id
+        if isinstance(subcommand_or_command, (list, tuple)):
+            if not subcommand_or_command:
+                raise ValueError("Command cannot be empty")
+            tokens = [str(a) for a in subcommand_or_command]
+            if tokens and (tokens[0] in ("beet", "/lsiopy/bin/beet", "/usr/local/bin/beet") or tokens[0].lower().endswith("beet.exe") or tokens[0].lower().endswith("/beet")):
+                tokens = tokens[1:]
+            if tokens and tokens[0] == "-c" and len(tokens) >= 2:
+                tokens = tokens[2:]
+            if not tokens:
+                raise ValueError("Command cannot be empty")
+            self.subcommand = tokens[0]
+            self.args = [str(a) for a in (args if args is not None else tokens[1:])]
+        else:
+            self.subcommand = str(subcommand_or_command)
+            self.args = [str(a) for a in (args or [])]
+
+        self.command = [self.subcommand] + self.args
+        self.label = label or ("beet " + " ".join(self.command))
+        self.created_at = time.time()
         self.started_at: Optional[float] = None
         self.finished_at: Optional[float] = None
-        self.returncode: Optional[int]    = None
-        self.log: List[str]               = []
+        self.returncode: Optional[int] = None
+        self.log: List[str] = []
         self._remote_job_id: Optional[str] = None
         self._cancel_requested = False
         self._cancel_failed = False
@@ -225,18 +117,7 @@ class Job:
                 return
             self._state = "dispatching"
 
-        # 1. Parse command
-        try:
-            parsed = _parse_remote_beet_command(self.command)
-        except Exception as exc:
-            with self._lock:
-                self.log.append(f"  ⚠ Invalid command for job: {exc}")
-                self._state = "failed"
-                self.returncode = 1
-                self.finished_at = time.time()
-            return
-
-        # 2. Check cancel before dispatch
+        # Check cancel before dispatch
         with self._lock:
             if self._cancel_requested:
                 self._state = "cancelled"
@@ -244,13 +125,12 @@ class Job:
                 self.finished_at = time.time()
                 return
 
-        # 3. Dispatch start_job
+        # Dispatch start_job
         try:
             remote_id = beets_client.start_job(
-                parsed.subcommand,
-                args=parsed.args,
+                self.subcommand,
+                args=self.args,
                 label=self.label,
-                config_override=parsed.config_override
             )
         except Exception as exc:
             with self._lock:
@@ -509,10 +389,10 @@ class JobStore:
         self._jobs: Dict[str, Job] = {}
         self._lock = threading.Lock()
 
-    def start(self, command, label="") -> Job:
+    def start(self, subcommand_or_command: Union[str, List[str]], args: Optional[List[str]] = None, label: str = "") -> Job:
         with self._lock:
-            jid  = uuid.uuid4().hex
-            job  = Job(jid, command, label)
+            jid = uuid.uuid4().hex
+            job = Job(jid, subcommand_or_command, args=args, label=label)
             self._jobs[jid] = job
             return job
 
