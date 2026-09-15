@@ -43,6 +43,7 @@ loaded shared CI runner while still catching a reintroduced O(n^2).
 
 from __future__ import annotations
 
+import inspect
 import os
 import random
 import re
@@ -231,10 +232,16 @@ class TitleNormalizerAdversarialTimingTests(unittest.TestCase):
         # deliberately loose factor so runner noise cannot fail this, while
         # a genuine O(n^2) reintroduction (factor ~4) still does.
         def timed(n: int) -> float:
+            # Best-of-3: a shared runner can stall any single sample, and a
+            # slow `base` or a stalled `doubled` would both skew the ratio.
+            # The minimum is the sample least polluted by descheduling.
             payload = "(" * n + "a" * n
-            t0 = time.perf_counter()
-            _strip_bracketed_spans(payload)
-            return time.perf_counter() - t0
+            best = float("inf")
+            for _ in range(3):
+                t0 = time.perf_counter()
+                _strip_bracketed_spans(payload)
+                best = min(best, time.perf_counter() - t0)
+            return best
 
         base = max(timed(40000), 1e-4)
         doubled = timed(80000)
@@ -285,17 +292,21 @@ class PrivateConfigFileTests(unittest.TestCase):
             f"config file mode {oct(mode)} -- group/other must never have access",
         )
 
-    @unittest.skipIf(sys.platform == "win32", "POSIX mode bits are not modelled on Windows")
-    def test_mode_is_owner_only_regardless_of_a_permissive_umask(self):
-        # The pre-fix open()+chmod() pair was umask-dependent for the window
-        # between the two calls; creating with an explicit mode is not.
-        previous = os.umask(0o000)
-        try:
-            path = os.path.join(self._dir, "umask.yaml")
-            _write_private_config_file(path, "x: y\n")
-            self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
-        finally:
-            os.umask(previous)
+    def test_creation_flags_are_exclusive_and_owner_only(self):
+        # Asserted by inspection rather than by flipping the process umask:
+        # os.umask() is global and this suite runs threaded HTTP servers, so
+        # temporarily widening it could change the mode of files another
+        # test creates concurrently.
+        source = inspect.getsource(_write_private_config_file)
+        # Inspect executable lines only -- the docstring deliberately quotes
+        # the old open()+os.chmod() pair it replaced.
+        body = source.split('"""')[-1]
+        self.assertIn("os.O_CREAT", body)
+        self.assertIn("os.O_EXCL", body)
+        self.assertIn("O_NOFOLLOW", body)
+        # The mode must be passed to os.open() itself, not applied after.
+        self.assertIn("os.open(path, flags, 0o600)", body)
+        self.assertNotIn("os.chmod", body)
 
     def test_refuses_a_preexisting_path(self):
         path = os.path.join(self._dir, "exists.yaml")
