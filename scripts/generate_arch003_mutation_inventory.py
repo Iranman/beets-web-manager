@@ -279,6 +279,13 @@ _EXPLICIT_FUNCTION_CLASSIFICATION = {
     "_config_revision": ("ENGINE_CONFIG_STATE", "config_v1", "reviewed-wave27-control-agent-config-state"),
     "_validate_beets_config_candidate": ("ENGINE_NATIVE_READ_ONLY", "config_v1", "reviewed-wave27-control-agent-config-state"),
     "_write_temp_config": ("ENGINE_CONFIG_STATE", "config_v1", "reviewed-wave27-control-agent-config-state"),
+    # ARCH-003 Wave 29 review: shared writer for the short-lived `beet -c`
+    # override files that reimport/confirmed-import/commands-execute/AgentJob
+    # each used to open by hand. Same disposition as _write_temp_config above
+    # -- it writes engine config state to a per-invocation /tmp path that the
+    # caller unlinks in its own finally block, never media and never the
+    # persistent agent config.
+    "_write_private_config_file": ("ENGINE_CONFIG_STATE", "config_v1", "reviewed-wave29-control-agent-temp-config-write"),
     "_read_agent_config_file": ("ENGINE_NATIVE_READ_ONLY", "config_v1", "reviewed-wave27-control-agent-config-state"),
     "_write_agent_config_file": ("ENGINE_CONFIG_STATE", "config_v1", "reviewed-wave27-control-agent-config-state"),
     "_revert_agent_config_file": ("ENGINE_CONFIG_STATE", "config_v1", "reviewed-wave27-control-agent-config-state"),

@@ -525,8 +525,7 @@ class FlaskAlbumArtRouteBoundaryTests(unittest.TestCase):
              ), \
              mock.patch.object(app_module.lib, "get_album", return_value=self.album), \
              mock.patch.object(app_module.jobs, "start_python", side_effect=lambda func, **kwargs: self._run_job_immediately(func, **kwargs)), \
-             mock.patch.object(app_module.beets_client, "replace_album_art", side_effect=fake_replace), \
-             mock.patch.object(app_module, "_beet_run", return_value=SimpleNamespace(returncode=0)):
+             mock.patch.object(app_module.beets_client, "replace_album_art", side_effect=fake_replace):
             resp = app_module.album_upload_art(1)
 
         data = resp.get_json()

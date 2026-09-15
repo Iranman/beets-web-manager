@@ -13,6 +13,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from backend import transaction_engine
 
@@ -30,8 +31,8 @@ class TestBeetsTransactionEngineFamilies(unittest.TestCase):
 
         self.db_path = self.root / "beets.db"
         with sqlite3.connect(self.db_path) as conn:
-            conn.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, path BLOB, album_id INT, title TEXT, artist TEXT, album TEXT)")
-            conn.execute("CREATE TABLE albums (id INTEGER PRIMARY KEY, album TEXT, albumartist TEXT, mb_albumid TEXT, mb_releasegroupid TEXT, artpath BLOB)")
+            conn.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, path BLOB, album_id INT, title TEXT, artist TEXT, album TEXT, albumartist TEXT, mb_trackid TEXT, mb_albumid TEXT, mb_releasegroupid TEXT, disc INT, track INT, length REAL)")
+            conn.execute("CREATE TABLE albums (id INTEGER PRIMARY KEY, album TEXT, albumartist TEXT, mb_albumid TEXT, mb_releasegroupid TEXT, artpath BLOB, year INT, country TEXT, label TEXT)")
             conn.execute("CREATE TABLE item_attributes (id INTEGER PRIMARY KEY, entity_id INT, key TEXT, value TEXT)")
 
         self.store_path = self.root / "transactions.db"
@@ -126,6 +127,109 @@ class TestBeetsTransactionEngineFamilies(unittest.TestCase):
         self.assertTrue(rollback.get("ok"))
         self.assertTrue(src.exists())
         self.assertFalse(dst.exists())
+
+    def test_folder_cleanup_refuses_allowed_root_itself(self):
+        plan = transaction_engine.create_folder_cleanup_plan(
+            self.store,
+            {"action": "remove_empty", "source": str(self.music_dir)},
+            music_allowed_roots=[str(self.music_dir)],
+            db_path=str(self.db_path),
+        )
+        self.assertFalse(plan.get("ok"))
+        self.assertEqual(plan.get("code"), "folder_cleanup_root_refused")
+
+    def test_folder_cleanup_safe_rename_refuses_db_tracked_source(self):
+        src = self.music_dir / "old_album"
+        dst = self.music_dir / "new_album"
+        src.mkdir()
+        track = src / "track1.mp3"
+        track.write_bytes(b"audio content")
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO items (id, path, album_id, title) VALUES (900, ?, 1, 'Track')", (str(track).encode("utf-8"),))
+
+        plan = transaction_engine.create_folder_cleanup_plan(
+            self.store,
+            {"action": "safe_rename", "source": str(src), "target": str(dst)},
+            music_allowed_roots=[str(self.music_dir)],
+            db_path=str(self.db_path),
+        )
+        self.assertFalse(plan.get("ok"))
+        self.assertEqual(plan.get("code"), "folder_cleanup_db_references")
+        self.assertTrue(src.exists())
+        self.assertFalse(dst.exists())
+
+    def test_folder_cleanup_merge_refuses_missing_target_parent(self):
+        src = self.music_dir / "old_album"
+        dst = self.music_dir / "canonical_album"
+        src.mkdir()
+        dst.mkdir()
+        (src / "Disc 2").mkdir()
+        (src / "Disc 2" / "track2.mp3").write_bytes(b"audio content")
+
+        plan = transaction_engine.create_folder_cleanup_plan(
+            self.store,
+            {"action": "merge_source_files", "source": str(src), "target": str(dst)},
+            music_allowed_roots=[str(self.music_dir)],
+            db_path=str(self.db_path),
+        )
+        self.assertFalse(plan.get("ok"))
+        self.assertEqual(plan.get("code"), "folder_cleanup_target_parent_missing")
+        self.assertFalse((dst / "Disc 2").exists())
+
+    def test_folder_cleanup_apply_fails_when_planned_file_disappears(self):
+        src = self.music_dir / "old_album"
+        dst = self.music_dir / "canonical_album"
+        src.mkdir()
+        dst.mkdir()
+        track = src / "track1.mp3"
+        track.write_bytes(b"audio content")
+        plan = transaction_engine.create_folder_cleanup_plan(
+            self.store,
+            {"action": "merge_source_files", "source": str(src), "target": str(dst)},
+            music_allowed_roots=[str(self.music_dir)],
+            db_path=str(self.db_path),
+        )
+        self.assertTrue(plan.get("ok"), msg=plan.get("error"))
+        track.unlink()
+
+        apply = transaction_engine.execute_folder_cleanup_apply(
+            self.store,
+            plan["operation_id"],
+            music_allowed_roots=[str(self.music_dir)],
+            db_path=str(self.db_path),
+        )
+        self.assertFalse(apply.get("ok"))
+        self.assertEqual(apply.get("code"), "folder_cleanup_toctou_mismatch")
+        self.assertFalse((dst / "track1.mp3").exists())
+
+    def test_item_metadata_write_tags_false_updates_db_only(self):
+        track = self.music_dir / "db_only.mp3"
+        track.write_bytes(b"not a real media file")
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO items (id, path, album_id, title, artist, album) VALUES (901, ?, 1, 'Old', 'Artist', 'Album')",
+                (str(track).encode("utf-8"),),
+            )
+
+        plan = transaction_engine.create_item_metadata_plan(
+            self.store,
+            {"item_id": 901, "updates": {"title": "Mapped Title"}, "write_tags": False},
+            music_allowed_roots=[str(self.music_dir)],
+            db_path=str(self.db_path),
+        )
+        self.assertTrue(plan.get("ok"), msg=plan.get("error"))
+        with mock.patch.object(transaction_engine, "native_beets_write_item_tags", side_effect=AssertionError("tag writer called")),              mock.patch.object(transaction_engine, "_write_media_tag_fields", side_effect=AssertionError("fallback tag writer called")):
+            apply = transaction_engine.execute_item_metadata_apply(
+                self.store,
+                plan["operation_id"],
+                music_allowed_roots=[str(self.music_dir)],
+                db_path=str(self.db_path),
+            )
+        self.assertTrue(apply.get("ok"), msg=apply.get("error"))
+        self.assertEqual(apply.get("tags_written_count"), 0)
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute("SELECT title FROM items WHERE id=901").fetchone()
+        self.assertEqual(row[0], "Mapped Title")
 
     # ── 2. playlist_media_cleanup_v1 ──────────────────────────────────────────
 
@@ -431,6 +535,605 @@ class TestBeetsTransactionEngineFamilies(unittest.TestCase):
         )
         self.assertFalse(rollback.get("ok"))
         self.assertEqual(rollback.get("status"), "Recovery Required")
+
+    # ── Wave 29 Engine & BeetsClient Expansion Tests (cherry-picked from
+    # feat/sec002-arch003-wave29-direct-mutations, reconciled against this
+    # branch's folder_cleanup_v1 hardening) ─────────────────────────────────
+
+    def test_folder_cleanup_source_and_target_path_keys(self):
+        src = self.music_dir / "old_src_path"
+        dst = self.music_dir / "new_dst_path"
+        src.mkdir()
+        (src / "track1.mp3").write_bytes(b"audio content")
+
+        plan = transaction_engine.create_folder_cleanup_plan(
+            self.store,
+            {"action": "safe_rename", "source_path": str(src), "target_path": str(dst)},
+            music_allowed_roots=[str(self.music_dir)],
+            db_path=str(self.db_path),
+        )
+        self.assertTrue(plan.get("ok"), msg=plan.get("error"))
+        op_id = plan["operation_id"]
+        apply_res = transaction_engine.execute_folder_cleanup_apply(
+            self.store, op_id, music_allowed_roots=[str(self.music_dir)], db_path=str(self.db_path)
+        )
+        self.assertTrue(apply_res.get("ok"), msg=apply_res.get("error"))
+        self.assertTrue(dst.exists())
+        self.assertFalse(src.exists())
+        self.assertEqual(len(apply_res.get("moved_records", [])), 1)
+        self.assertEqual(apply_res.get("changed_count"), 1)
+
+    def test_album_maintenance_remove_album_empty_album(self):
+        # Insert an orphaned album row with no items
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO albums (id, album, albumartist) VALUES (999, 'Empty Album', 'Ghost Artist')")
+
+        plan = transaction_engine.create_album_maintenance_plan(
+            self.store,
+            {"mode": "remove_album", "album_id": 999},
+            music_allowed_roots=[str(self.music_dir)],
+            db_path=str(self.db_path),
+        )
+        self.assertTrue(plan.get("ok"), msg=plan.get("error"))
+        op_id = plan["operation_id"]
+
+        apply_res = transaction_engine.execute_album_maintenance_apply(
+            self.store, op_id, music_allowed_roots=[str(self.music_dir)], db_path=str(self.db_path)
+        )
+        self.assertTrue(apply_res.get("ok"), msg=apply_res.get("error"))
+
+        # Verify album row deleted from SQLite
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute("SELECT id FROM albums WHERE id=999").fetchone()
+            self.assertIsNone(row)
+
+    def test_existing_album_reconcile_releasegroup_mismatch_has_no_bypass(self):
+        """The Release-Group-mismatch identity gate on existing_album_reconcile_v1
+        is unconditional -- an earlier cherry-picked allow_different_releasegroup/
+        force override was reviewed and removed (see docs/TECHNICAL_DEBT.md
+        ARCH-003) because none of the remaining unmigrated callers need it and
+        every one of this repo's real duplicate/RGID-merge routes already
+        enforces the same RG match requirement itself with no override path.
+        This proves the payload key cannot silently re-enable a bypass."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO albums (id, album, albumartist, mb_releasegroupid) VALUES (101, 'Target Album', 'Artist A', '11111111-1111-1111-1111-111111111111')")
+            conn.execute("INSERT INTO albums (id, album, albumartist, mb_releasegroupid) VALUES (102, 'Source Album', 'Artist A', '22222222-2222-2222-2222-222222222222')")
+            item_file = self.music_dir / "item1.mp3"
+            item_file.write_bytes(b"audio track 1")
+            conn.execute(
+                "INSERT INTO items (id, path, album_id, title, artist, album, mb_trackid, mb_albumid, mb_releasegroupid, disc, track) "
+                "VALUES (501, ?, 102, 'Track 1', 'Artist A', 'Source Album', '33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444444', '22222222-2222-2222-2222-222222222222', 1, 1)",
+                (str(item_file).encode("utf-8"),),
+            )
+
+        plan_rejected = transaction_engine.create_existing_album_reconcile_plan(
+            self.store,
+            {"existing_album_id": 101, "imported_album_id": 102, "move_item_ids": [501]},
+            music_allowed_roots=[str(self.music_dir)],
+            db_path=str(self.db_path),
+        )
+        self.assertFalse(plan_rejected.get("ok"))
+        self.assertEqual(plan_rejected.get("code"), "reconcile_identity_mismatch")
+
+        # Same request, now also carrying the payload keys a bypass would have
+        # read -- still rejected. The gate does not consult these fields at all.
+        plan_still_rejected = transaction_engine.create_existing_album_reconcile_plan(
+            self.store,
+            {
+                "existing_album_id": 101, "imported_album_id": 102, "move_item_ids": [501],
+                "allow_different_releasegroup": True, "force": True,
+            },
+            music_allowed_roots=[str(self.music_dir)],
+            db_path=str(self.db_path),
+        )
+        self.assertFalse(plan_still_rejected.get("ok"))
+        self.assertEqual(plan_still_rejected.get("code"), "reconcile_identity_mismatch")
+
+        # Neither rejected plan mutated anything.
+        with sqlite3.connect(self.db_path) as conn:
+            irow = conn.execute("SELECT album_id FROM items WHERE id=501").fetchone()
+            self.assertEqual(irow[0], 102)
+            arow = conn.execute("SELECT id FROM albums WHERE id=102").fetchone()
+            self.assertIsNotNone(arow)
+
+    @mock.patch("backend.transaction_engine._read_file_audio_tags")
+    def test_album_mb_track_repair_direct_tracks(self, mock_read):
+        mock_read.return_value = {"ok": True, "tags": {"title": "Song 1", "artist": "Artist B"}}
+        # Create album and items
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO albums (id, album, albumartist, year, mb_albumid, mb_releasegroupid) VALUES (201, 'Album MB', 'Artist B', 2000, '55555555-5555-5555-5555-555555555555', '66666666-6666-6666-6666-666666666666')")
+            f1 = self.music_dir / "mb_track1.mp3"
+            f1.write_bytes(b"audio track 1")
+            conn.execute("INSERT INTO items (id, path, album_id, title, artist, album, mb_trackid, mb_albumid, disc, track) VALUES (601, ?, 201, 'Song 1', 'Artist B', 'Album MB', '', '55555555-5555-5555-5555-555555555555', 1, 1)", (str(f1).encode("utf-8"),))
+
+        mb_tracks = [
+            {"track": 1, "disc": 1, "title": "Song 1", "mb_trackid": "77777777-7777-7777-7777-777777777777"}
+        ]
+
+        plan = transaction_engine.create_album_mb_track_repair_plan(
+            self.store,
+            {
+                "album_id": 201,
+                "mb_tracks": mb_tracks,
+            },
+            music_allowed_roots=[str(self.music_dir)],
+            db_path=str(self.db_path),
+        )
+        self.assertTrue(plan.get("ok"), msg=plan.get("error"))
+        op_id = plan["operation_id"]
+
+        apply_res = transaction_engine.execute_album_mb_track_repair_apply(
+            self.store, op_id, music_allowed_roots=[str(self.music_dir)], db_path=str(self.db_path), write_tags=False,
+        )
+        self.assertTrue(apply_res.get("ok"), msg=apply_res.get("error"))
+
+        with sqlite3.connect(self.db_path) as conn:
+            # Check repaired track
+            r1 = conn.execute("SELECT mb_trackid, track FROM items WHERE id=601").fetchone()
+            self.assertEqual(r1[0], "77777777-7777-7777-7777-777777777777")
+            self.assertEqual(r1[1], 1)
+
+    # ── album_duplicate_merge_v1 (Wave 30) ────────────────────────────────────
+
+    def test_duplicate_merge_moves_items_inherits_fields_and_retires_source(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO albums (id, album, albumartist, mb_albumid, year, label) VALUES (301, 'Album', 'Artist', '', 0, '')")
+            conn.execute("INSERT INTO albums (id, album, albumartist, mb_albumid, year, label) VALUES (302, 'Album', 'Artist', '88888888-8888-8888-8888-888888888888', 1999, 'Indie Label')")
+            conn.execute("INSERT INTO items (id, album_id, title) VALUES (701, 302, 'Track 1')")
+            conn.execute("INSERT INTO items (id, album_id, title) VALUES (702, 302, 'Track 2')")
+
+        plan = transaction_engine.create_album_duplicate_merge_plan(
+            self.store, {"target_album_id": 301, "source_album_id": 302}, db_path=str(self.db_path),
+        )
+        self.assertTrue(plan.get("ok"), msg=plan.get("error"))
+        self.assertEqual(plan.get("moved_item_count"), 2)
+        self.assertEqual(plan.get("inherit_fields"), {"mb_albumid": "88888888-8888-8888-8888-888888888888", "year": 1999, "label": "Indie Label"})
+        op_id = plan["operation_id"]
+
+        apply_res = transaction_engine.execute_album_duplicate_merge_apply(self.store, op_id, db_path=str(self.db_path))
+        self.assertTrue(apply_res.get("ok"), msg=apply_res.get("error"))
+        self.assertEqual(apply_res.get("moved"), 2)
+
+        with sqlite3.connect(self.db_path) as conn:
+            rows = conn.execute("SELECT album_id FROM items WHERE id IN (701, 702)").fetchall()
+            self.assertEqual({r[0] for r in rows}, {301})
+            target = conn.execute("SELECT mb_albumid, year, label FROM albums WHERE id=301").fetchone()
+            self.assertEqual(target, ("88888888-8888-8888-8888-888888888888", 1999, "Indie Label"))
+            source = conn.execute("SELECT id FROM albums WHERE id=302").fetchone()
+            self.assertIsNone(source)
+
+    def test_duplicate_merge_apply_rejects_toctou_item_set_change(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO albums (id, album, albumartist) VALUES (301, 'Album', 'Artist')")
+            conn.execute("INSERT INTO albums (id, album, albumartist) VALUES (302, 'Album', 'Artist')")
+            conn.execute("INSERT INTO items (id, album_id, title) VALUES (701, 302, 'Track 1')")
+
+        plan = transaction_engine.create_album_duplicate_merge_plan(
+            self.store, {"target_album_id": 301, "source_album_id": 302}, db_path=str(self.db_path),
+        )
+        self.assertTrue(plan.get("ok"), msg=plan.get("error"))
+        op_id = plan["operation_id"]
+
+        # A new item lands in the source album after Plan but before Apply.
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO items (id, album_id, title) VALUES (702, 302, 'Track 2')")
+
+        apply_res = transaction_engine.execute_album_duplicate_merge_apply(self.store, op_id, db_path=str(self.db_path))
+        self.assertFalse(apply_res.get("ok"))
+        self.assertEqual(apply_res.get("code"), "album_duplicate_merge_toctou_mismatch")
+
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute("SELECT id FROM albums WHERE id=302").fetchone()
+            self.assertIsNotNone(row, "source album must not be deleted when Apply refuses a stale plan")
+
+    def test_duplicate_merge_rollback_restores_source_album_and_items(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO albums (id, album, albumartist, mb_albumid) VALUES (301, 'Album', 'Artist', '')")
+            conn.execute("INSERT INTO albums (id, album, albumartist, mb_albumid) VALUES (302, 'Album', 'Artist', '99999999-9999-9999-9999-999999999999')")
+            conn.execute("INSERT INTO items (id, album_id, title) VALUES (701, 302, 'Track 1')")
+
+        plan = transaction_engine.create_album_duplicate_merge_plan(
+            self.store, {"target_album_id": 301, "source_album_id": 302}, db_path=str(self.db_path),
+        )
+        op_id = plan["operation_id"]
+        apply_res = transaction_engine.execute_album_duplicate_merge_apply(self.store, op_id, db_path=str(self.db_path))
+        self.assertTrue(apply_res.get("ok"), msg=apply_res.get("error"))
+
+        rollback_res = transaction_engine.rollback_album_duplicate_merge(self.store, op_id, db_path=str(self.db_path))
+        self.assertTrue(rollback_res.get("ok"), msg=rollback_res)
+        self.assertEqual(rollback_res.get("status"), "Rolled Back")
+
+        with sqlite3.connect(self.db_path) as conn:
+            source = conn.execute("SELECT id FROM albums WHERE id=302").fetchone()
+            self.assertIsNotNone(source)
+            item = conn.execute("SELECT album_id FROM items WHERE id=701").fetchone()
+            self.assertEqual(item[0], 302)
+            target = conn.execute("SELECT mb_albumid FROM albums WHERE id=301").fetchone()
+            self.assertEqual(target[0], "")
+
+    def test_duplicate_merge_rejects_same_or_missing_album_ids(self):
+        same = transaction_engine.create_album_duplicate_merge_plan(
+            self.store, {"target_album_id": 301, "source_album_id": 301}, db_path=str(self.db_path),
+        )
+        self.assertFalse(same.get("ok"))
+        self.assertEqual(same.get("code"), "album_duplicate_merge_invalid_payload")
+
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO albums (id, album, albumartist) VALUES (301, 'Album', 'Artist')")
+        missing = transaction_engine.create_album_duplicate_merge_plan(
+            self.store, {"target_album_id": 301, "source_album_id": 999}, db_path=str(self.db_path),
+        )
+        self.assertFalse(missing.get("ok"))
+        self.assertEqual(missing.get("code"), "album_duplicate_merge_album_missing")
+
+    # ── album_maintenance_v1 filename_cleanup fix_updates / repoint_db
+    # (ARCH-003 Wave 31: this payload shape had zero path validation
+    # before this wave, found unused by any real caller) ─────────────────
+
+    def test_repoint_db_accepts_relative_stored_path_and_updates_exact_row(self):
+        # Real Beets libraries commonly store items.path RELATIVE to the
+        # music dir; the leaked-db-paths use case this exists for scans
+        # exactly that kind of row.
+        real_dir = self.music_dir / "Artist" / "Album"
+        real_dir.mkdir(parents=True)
+        (real_dir / "01 Track.mp3").write_bytes(b"audio")
+        old_rel = "Artist/Album/%the{}/01 Track.mp3"
+        new_rel = "Artist/Album/01 Track.mp3"
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO albums (id, album) VALUES (50, 'Album')")
+            conn.execute("INSERT INTO items (id, path, album_id) VALUES (500, ?, 50)", (old_rel.encode("utf-8"),))
+
+        plan = transaction_engine.create_album_maintenance_plan(
+            self.store,
+            {"mode": "deduplicate", "album_id": 50, "fix_updates": [{"id": 500, "old_path": old_rel, "new_path": new_rel, "rename": False}]},
+            music_allowed_roots=[str(self.music_dir)],
+            db_path=str(self.db_path),
+        )
+        self.assertTrue(plan.get("ok"), msg=plan.get("error"))
+        op_id = plan["operation_id"]
+
+        apply_res = transaction_engine.execute_album_maintenance_apply(
+            self.store, op_id, music_allowed_roots=[str(self.music_dir)], db_path=str(self.db_path),
+        )
+        self.assertTrue(apply_res.get("ok"), msg=apply_res.get("error"))
+        # No physical move for a repoint -- the real file stays put.
+        self.assertTrue((real_dir / "01 Track.mp3").exists())
+
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute("SELECT path FROM items WHERE id=500").fetchone()
+        self.assertEqual(row[0].decode("utf-8") if isinstance(row[0], bytes) else row[0], new_rel)
+
+    def test_repoint_db_rejects_target_outside_allowed_root(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "escaped.mp3").write_bytes(b"audio")
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO albums (id, album) VALUES (51, 'Album')")
+            conn.execute("INSERT INTO items (id, path, album_id) VALUES (501, ?, 51)", (b"Artist/broken.mp3",))
+
+        plan = transaction_engine.create_album_maintenance_plan(
+            self.store,
+            {"mode": "deduplicate", "album_id": 51, "fix_updates": [{
+                "id": 501, "old_path": "Artist/broken.mp3", "new_path": str(outside / "escaped.mp3"), "rename": False,
+            }]},
+            music_allowed_roots=[str(self.music_dir)],
+            db_path=str(self.db_path),
+        )
+        self.assertFalse(plan.get("ok"))
+        self.assertEqual(plan.get("code"), "album_maintenance_path_out_of_root")
+
+    def test_repoint_db_rejects_when_target_does_not_exist(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO albums (id, album) VALUES (52, 'Album')")
+            conn.execute("INSERT INTO items (id, path, album_id) VALUES (502, ?, 52)", (b"Artist/broken.mp3",))
+
+        plan = transaction_engine.create_album_maintenance_plan(
+            self.store,
+            {"mode": "deduplicate", "album_id": 52, "fix_updates": [{
+                "id": 502, "old_path": "Artist/broken.mp3", "new_path": "Artist/does-not-exist.mp3", "rename": False,
+            }]},
+            music_allowed_roots=[str(self.music_dir)],
+            db_path=str(self.db_path),
+        )
+        self.assertFalse(plan.get("ok"))
+        self.assertEqual(plan.get("code"), "album_maintenance_item_missing")
+
+    def test_repoint_db_apply_toctou_rejects_when_target_changed_since_plan(self):
+        real_dir = self.music_dir / "Artist"
+        real_dir.mkdir()
+        target_file = real_dir / "01 Track.mp3"
+        target_file.write_bytes(b"audio-v1")
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO albums (id, album) VALUES (53, 'Album')")
+            conn.execute("INSERT INTO items (id, path, album_id) VALUES (503, ?, 53)", (b"Artist/%the{}/01 Track.mp3",))
+
+        plan = transaction_engine.create_album_maintenance_plan(
+            self.store,
+            {"mode": "deduplicate", "album_id": 53, "fix_updates": [{
+                "id": 503, "old_path": "Artist/%the{}/01 Track.mp3", "new_path": "Artist/01 Track.mp3", "rename": False,
+            }]},
+            music_allowed_roots=[str(self.music_dir)],
+            db_path=str(self.db_path),
+        )
+        self.assertTrue(plan.get("ok"), msg=plan.get("error"))
+        op_id = plan["operation_id"]
+
+        # Target file content/size changes between Plan and Apply.
+        target_file.write_bytes(b"audio-v2-different-size!!")
+
+        apply_res = transaction_engine.execute_album_maintenance_apply(
+            self.store, op_id, music_allowed_roots=[str(self.music_dir)], db_path=str(self.db_path),
+        )
+        self.assertFalse(apply_res.get("ok"))
+        self.assertEqual(apply_res.get("code"), "album_maintenance_toctou_mismatch")
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute("SELECT path FROM items WHERE id=503").fetchone()
+        self.assertEqual(row[0], b"Artist/%the{}/01 Track.mp3")
+
+    # ── album_duplicate_merge_v1 partial/adopt mode (ARCH-003 Wave 31:
+    # generalized for album_merge_split_album's "split album" shape --
+    # move only a caller-selected item subset, moved items adopt
+    # target's fields instead of target inheriting from source, source
+    # is retired only if it actually ends up empty) ───────────────────────
+
+    def test_partial_move_adopts_target_fields_and_keeps_nonempty_source(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO albums (id, album, albumartist, mb_releasegroupid) VALUES (601, 'Real Album', 'Real Artist', '11111111-1111-1111-1111-111111111111')")
+            conn.execute("INSERT INTO albums (id, album, albumartist, mb_releasegroupid) VALUES (602, 'Mistagged', 'Mistagged Artist', '')")
+            conn.execute("INSERT INTO items (id, album_id, title, album, albumartist, mb_releasegroupid) VALUES (701, 602, 'Track 1', 'Mistagged', 'Mistagged Artist', '')")
+            conn.execute("INSERT INTO items (id, album_id, title, album, albumartist, mb_releasegroupid) VALUES (702, 602, 'Track 2', 'Mistagged', 'Mistagged Artist', '')")
+
+        plan = transaction_engine.create_album_duplicate_merge_plan(
+            self.store,
+            {"target_album_id": 601, "source_album_id": 602, "item_ids": [701], "adopt_target_fields": True},
+            db_path=str(self.db_path),
+        )
+        self.assertTrue(plan.get("ok"), msg=plan.get("error"))
+        self.assertEqual(plan.get("moved_item_count"), 1)
+        self.assertEqual(plan["adopt_fields"].get("album"), "Real Album")
+        self.assertEqual(plan["adopt_fields"].get("albumartist"), "Real Artist")
+        op_id = plan["operation_id"]
+
+        apply_res = transaction_engine.execute_album_duplicate_merge_apply(self.store, op_id, db_path=str(self.db_path))
+        self.assertTrue(apply_res.get("ok"), msg=apply_res.get("error"))
+        self.assertEqual(apply_res.get("moved"), 1)
+        self.assertFalse(apply_res.get("source_album_deleted"))
+
+        with sqlite3.connect(self.db_path) as conn:
+            moved = conn.execute("SELECT album_id, album, albumartist FROM items WHERE id=701").fetchone()
+            self.assertEqual(moved, (601, "Real Album", "Real Artist"))
+            # Item 702 was not selected -- untouched, still in source.
+            unmoved = conn.execute("SELECT album_id, album FROM items WHERE id=702").fetchone()
+            self.assertEqual(unmoved, (602, "Mistagged"))
+            # Source has a remaining item -- its row survives.
+            source = conn.execute("SELECT id FROM albums WHERE id=602").fetchone()
+            self.assertIsNotNone(source)
+
+    def test_partial_move_retires_source_when_it_becomes_empty(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO albums (id, album, albumartist) VALUES (611, 'Real Album', 'Real Artist')")
+            conn.execute("INSERT INTO albums (id, album, albumartist) VALUES (612, 'Mistagged', 'Mistagged Artist')")
+            conn.execute("INSERT INTO items (id, album_id, title) VALUES (711, 612, 'Track 1')")
+
+        plan = transaction_engine.create_album_duplicate_merge_plan(
+            self.store,
+            {"target_album_id": 611, "source_album_id": 612, "item_ids": [711], "adopt_target_fields": True},
+            db_path=str(self.db_path),
+        )
+        self.assertTrue(plan.get("ok"), msg=plan.get("error"))
+        op_id = plan["operation_id"]
+
+        apply_res = transaction_engine.execute_album_duplicate_merge_apply(self.store, op_id, db_path=str(self.db_path))
+        self.assertTrue(apply_res.get("ok"), msg=apply_res.get("error"))
+        self.assertTrue(apply_res.get("source_album_deleted"))
+
+        with sqlite3.connect(self.db_path) as conn:
+            source = conn.execute("SELECT id FROM albums WHERE id=612").fetchone()
+            self.assertIsNone(source)
+
+    def test_partial_move_rejects_conflicting_releasegroup(self):
+        """The real Release-Group identity check this wave adds: a
+        selected item carrying its own established, conflicting
+        mb_releasegroupid is refused, never silently overwritten just
+        because the caller labeled this a 'split album' merge."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO albums (id, album, albumartist, mb_releasegroupid) VALUES (621, 'Real Album', 'Real Artist', '11111111-1111-1111-1111-111111111111')")
+            conn.execute("INSERT INTO albums (id, album, albumartist) VALUES (622, 'Mistagged', 'Mistagged Artist')")
+            conn.execute("INSERT INTO items (id, album_id, title, mb_releasegroupid) VALUES (721, 622, 'Track 1', '22222222-2222-2222-2222-222222222222')")
+
+        plan = transaction_engine.create_album_duplicate_merge_plan(
+            self.store,
+            {"target_album_id": 621, "source_album_id": 622, "item_ids": [721], "adopt_target_fields": True},
+            db_path=str(self.db_path),
+        )
+        self.assertFalse(plan.get("ok"))
+        self.assertEqual(plan.get("code"), "album_duplicate_merge_identity_mismatch")
+
+        with sqlite3.connect(self.db_path) as conn:
+            unchanged = conn.execute("SELECT album_id FROM items WHERE id=721").fetchone()
+            self.assertEqual(unchanged[0], 622)
+
+    def test_partial_move_rollback_restores_adopted_fields_and_membership(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO albums (id, album, albumartist) VALUES (631, 'Real Album', 'Real Artist')")
+            conn.execute("INSERT INTO albums (id, album, albumartist) VALUES (632, 'Mistagged', 'Mistagged Artist')")
+            conn.execute("INSERT INTO items (id, album_id, title, album, albumartist) VALUES (731, 632, 'Track 1', 'Mistagged', 'Mistagged Artist')")
+            conn.execute("INSERT INTO items (id, album_id, title) VALUES (732, 632, 'Track 2')")
+
+        plan = transaction_engine.create_album_duplicate_merge_plan(
+            self.store,
+            {"target_album_id": 631, "source_album_id": 632, "item_ids": [731], "adopt_target_fields": True},
+            db_path=str(self.db_path),
+        )
+        op_id = plan["operation_id"]
+        apply_res = transaction_engine.execute_album_duplicate_merge_apply(self.store, op_id, db_path=str(self.db_path))
+        self.assertTrue(apply_res.get("ok"), msg=apply_res.get("error"))
+
+        rollback_res = transaction_engine.rollback_album_duplicate_merge(self.store, op_id, db_path=str(self.db_path))
+        self.assertTrue(rollback_res.get("ok"), msg=rollback_res)
+
+        with sqlite3.connect(self.db_path) as conn:
+            restored = conn.execute("SELECT album_id, album, albumartist FROM items WHERE id=731").fetchone()
+            self.assertEqual(restored, (632, "Mistagged", "Mistagged Artist"))
+
+    # ── item_field_overrides (ARCH-003 Wave 33 continuation) ─────────────────
+    # Supports apply_album_duplicate_resolver()'s retag path, decomposed
+    # into N single-source-album calls to this family (see
+    # docs/TECHNICAL_DEBT.md) -- each moved item receives its own,
+    # caller-specific mb_trackid/disc/track/title values (a different
+    # missing-track slot per item), never one uniform value the way
+    # adopt_target_fields' fields are.
+
+    def test_item_field_overrides_applies_per_item_distinct_values(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO albums (id, album, albumartist) VALUES (801, 'Target Album', 'Target Artist')")
+            conn.execute("INSERT INTO albums (id, album, albumartist) VALUES (802, 'Dupes', 'Dupes Artist')")
+            conn.execute("INSERT INTO items (id, album_id, title, mb_trackid, disc, track) VALUES (901, 802, 'Old Title A', '', 1, 0)")
+            conn.execute("INSERT INTO items (id, album_id, title, mb_trackid, disc, track) VALUES (902, 802, 'Old Title B', '', 1, 0)")
+
+        plan = transaction_engine.create_album_duplicate_merge_plan(
+            self.store,
+            {
+                "target_album_id": 801, "source_album_id": 802,
+                "item_ids": [901, 902],
+                "item_field_overrides": {
+                    "901": {"mb_trackid": "aaaaaaaa-0000-0000-0000-000000000001", "disc": 1, "track": 1, "title": "New Title A"},
+                    "902": {"mb_trackid": "bbbbbbbb-0000-0000-0000-000000000002", "disc": 1, "track": 2, "title": "New Title B"},
+                },
+            },
+            db_path=str(self.db_path),
+        )
+        self.assertTrue(plan.get("ok"), msg=plan.get("error"))
+        op_id = plan["operation_id"]
+
+        apply_res = transaction_engine.execute_album_duplicate_merge_apply(self.store, op_id, db_path=str(self.db_path))
+        self.assertTrue(apply_res.get("ok"), msg=apply_res.get("error"))
+
+        with sqlite3.connect(self.db_path) as conn:
+            row_a = conn.execute("SELECT album_id, mb_trackid, track, title FROM items WHERE id=901").fetchone()
+            row_b = conn.execute("SELECT album_id, mb_trackid, track, title FROM items WHERE id=902").fetchone()
+            self.assertEqual(row_a, (801, "aaaaaaaa-0000-0000-0000-000000000001", 1, "New Title A"))
+            self.assertEqual(row_b, (801, "bbbbbbbb-0000-0000-0000-000000000002", 2, "New Title B"))
+
+    def test_item_field_overrides_rejects_unknown_field(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO albums (id, album, albumartist) VALUES (811, 'Target Album', 'Target Artist')")
+            conn.execute("INSERT INTO albums (id, album, albumartist) VALUES (812, 'Dupes', 'Dupes Artist')")
+            conn.execute("INSERT INTO items (id, album_id, title) VALUES (911, 812, 'Old Title')")
+
+        plan = transaction_engine.create_album_duplicate_merge_plan(
+            self.store,
+            {
+                "target_album_id": 811, "source_album_id": 812,
+                "item_ids": [911],
+                "item_field_overrides": {"911": {"albumartist": "Sneaky Album-Level Field"}},
+            },
+            db_path=str(self.db_path),
+        )
+        self.assertFalse(plan.get("ok"))
+        self.assertEqual(plan.get("code"), "album_duplicate_merge_invalid_payload")
+        with sqlite3.connect(self.db_path) as conn:
+            unchanged = conn.execute("SELECT album_id FROM items WHERE id=911").fetchone()
+            self.assertEqual(unchanged[0], 812)
+
+    def test_item_field_overrides_rejects_item_outside_item_ids(self):
+        """An override key naming an item NOT in item_ids must never be
+        silently ignored or silently authorize a write to an unrelated
+        item -- refused outright."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO albums (id, album, albumartist) VALUES (821, 'Target Album', 'Target Artist')")
+            conn.execute("INSERT INTO albums (id, album, albumartist) VALUES (822, 'Dupes', 'Dupes Artist')")
+            conn.execute("INSERT INTO items (id, album_id, title) VALUES (921, 822, 'Selected')")
+            conn.execute("INSERT INTO items (id, album_id, title) VALUES (922, 822, 'Not Selected')")
+
+        plan = transaction_engine.create_album_duplicate_merge_plan(
+            self.store,
+            {
+                "target_album_id": 821, "source_album_id": 822,
+                "item_ids": [921],
+                "item_field_overrides": {"922": {"title": "Should never apply"}},
+            },
+            db_path=str(self.db_path),
+        )
+        self.assertFalse(plan.get("ok"))
+        self.assertEqual(plan.get("code"), "album_duplicate_merge_invalid_payload")
+
+    def test_item_field_overrides_requires_item_ids(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO albums (id, album, albumartist) VALUES (831, 'Target Album', 'Target Artist')")
+            conn.execute("INSERT INTO albums (id, album, albumartist) VALUES (832, 'Dupes', 'Dupes Artist')")
+            conn.execute("INSERT INTO items (id, album_id, title) VALUES (931, 832, 'Track')")
+
+        plan = transaction_engine.create_album_duplicate_merge_plan(
+            self.store,
+            {
+                "target_album_id": 831, "source_album_id": 832,
+                "item_field_overrides": {"931": {"title": "New Title"}},
+            },
+            db_path=str(self.db_path),
+        )
+        self.assertFalse(plan.get("ok"))
+        self.assertEqual(plan.get("code"), "album_duplicate_merge_invalid_payload")
+
+    def test_item_field_overrides_rollback_restores_original_track_fields(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO albums (id, album, albumartist) VALUES (841, 'Target Album', 'Target Artist')")
+            conn.execute("INSERT INTO albums (id, album, albumartist) VALUES (842, 'Dupes', 'Dupes Artist')")
+            conn.execute("INSERT INTO items (id, album_id, title, mb_trackid, disc, track) VALUES (941, 842, 'Old Title', 'oldid', 1, 9)")
+
+        plan = transaction_engine.create_album_duplicate_merge_plan(
+            self.store,
+            {
+                "target_album_id": 841, "source_album_id": 842,
+                "item_ids": [941],
+                "item_field_overrides": {"941": {"mb_trackid": "newid", "disc": 1, "track": 1, "title": "New Title"}},
+            },
+            db_path=str(self.db_path),
+        )
+        op_id = plan["operation_id"]
+        apply_res = transaction_engine.execute_album_duplicate_merge_apply(self.store, op_id, db_path=str(self.db_path))
+        self.assertTrue(apply_res.get("ok"), msg=apply_res.get("error"))
+
+        rollback_res = transaction_engine.rollback_album_duplicate_merge(self.store, op_id, db_path=str(self.db_path))
+        self.assertTrue(rollback_res.get("ok"), msg=rollback_res)
+
+        with sqlite3.connect(self.db_path) as conn:
+            restored = conn.execute("SELECT album_id, mb_trackid, track, title FROM items WHERE id=941").fetchone()
+            self.assertEqual(restored, (842, "oldid", 9, "Old Title"))
+
+    def test_item_field_overrides_composes_with_adopt_target_fields(self):
+        """Both capabilities together: the moved item adopts the target
+        album's uniform albumartist/album AND receives its own specific
+        track fields -- exactly what the real retag decomposition needs
+        (see docs/TECHNICAL_DEBT.md)."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT INTO albums (id, album, albumartist) VALUES (851, 'Real Album', 'Real Artist')")
+            conn.execute("INSERT INTO albums (id, album, albumartist) VALUES (852, 'Mistagged', 'Mistagged Artist')")
+            conn.execute("INSERT INTO items (id, album_id, title, album, albumartist, mb_trackid, disc, track) VALUES (951, 852, 'Old Title', 'Mistagged', 'Mistagged Artist', '', 1, 0)")
+
+        plan = transaction_engine.create_album_duplicate_merge_plan(
+            self.store,
+            {
+                "target_album_id": 851, "source_album_id": 852,
+                "item_ids": [951], "adopt_target_fields": True,
+                "item_field_overrides": {"951": {"mb_trackid": "newid", "disc": 1, "track": 3, "title": "New Title"}},
+            },
+            db_path=str(self.db_path),
+        )
+        self.assertTrue(plan.get("ok"), msg=plan.get("error"))
+        op_id = plan["operation_id"]
+        apply_res = transaction_engine.execute_album_duplicate_merge_apply(self.store, op_id, db_path=str(self.db_path))
+        self.assertTrue(apply_res.get("ok"), msg=apply_res.get("error"))
+
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute("SELECT album_id, album, albumartist, mb_trackid, track, title FROM items WHERE id=951").fetchone()
+            self.assertEqual(row, (851, "Real Album", "Real Artist", "newid", 3, "New Title"))
+
+        rollback_res = transaction_engine.rollback_album_duplicate_merge(self.store, op_id, db_path=str(self.db_path))
+        self.assertTrue(rollback_res.get("ok"), msg=rollback_res)
+        with sqlite3.connect(self.db_path) as conn:
+            restored = conn.execute("SELECT album_id, album, albumartist, mb_trackid, track, title FROM items WHERE id=951").fetchone()
+            self.assertEqual(restored, (852, "Mistagged", "Mistagged Artist", "", 0, "Old Title"))
 
 
 if __name__ == "__main__":

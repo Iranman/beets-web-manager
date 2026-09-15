@@ -68,28 +68,13 @@ class PluginJobConfigCommandAllowlistTests(unittest.TestCase):
 
 
 class JobBeetsConfigSecretPermissionTests(unittest.TestCase):
-    """Alert #332 (py/clear-text-storage-sensitive-data, app.py write_text
-    sink): _acoustid_key() (an environment-sourced API key) can flow into
-    _write_job_beets_config()'s extra block. The generated temp config must
-    not be left world-readable."""
+    """Alert #332 (py/clear-text-storage-sensitive-data): _write_job_beets_config
+    was completely eliminated as part of Wave 29; Web Manager no longer generates
+    temporary Beets config files containing secrets."""
 
-    def test_generated_job_config_is_owner_only_permissions(self):
-        tmp_dir = tempfile.mkdtemp(prefix="sec002-jobcfg-")
-        try:
-            target = os.path.join(tmp_dir, f"beets_acoustid_submit_{uuid.uuid4().hex}.yaml")
-            result_path = app_module._write_job_beets_config(
-                target, 'chroma:\n  auto: no\n  apikey: "super-secret-key"\n'
-            )
-            self.assertEqual(result_path, target)
-            self.assertTrue(os.path.exists(target))
-            if os.name != "nt":
-                mode = stat.S_IMODE(os.stat(target).st_mode)
-                self.assertEqual(mode, 0o600)
-            contents = Path(target).read_text(encoding="utf-8")
-            self.assertIn("super-secret-key", contents)
-        finally:
-            import shutil
-            shutil.rmtree(tmp_dir, ignore_errors=True)
+    def test_legacy_job_beets_config_helper_is_eliminated(self):
+        self.assertFalse(hasattr(app_module, "_write_job_beets_config"))
+        self.assertFalse(hasattr(app_module, "_write_plugin_job_beets_config"))
 
 
 class FolderImportTrackCountRootContainmentTests(unittest.TestCase):

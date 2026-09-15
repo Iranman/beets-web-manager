@@ -264,6 +264,68 @@ def seed_disposable_library(config_dir: Path, music_dir: Path) -> dict:
         length=1.0,
     )
     offline_item.add(lib)
+
+    # SEC-002 / ARCH-003 Wave 33 continuation: two albums under the same
+    # source albumartist, for library_merge_artist() (migrated off local
+    # BEET_BIN subprocess execution onto beets_client.update_album_metadata()/
+    # relocate_album() this wave) -- real DB/filesystem state is verified
+    # after, not just "no error returned".
+    merge_src_dir_a = music_dir / "Merge Source Artist" / "Merge Album A"
+    merge_src_dir_a.mkdir(parents=True, exist_ok=True)
+    merge_path_a = merge_src_dir_a / "01 - Merge Track A.wav"
+    merge_path_a.write_bytes(_real_wav_bytes(freq=440))
+    merge_album_a = bl.Album(lib, albumartist="Merge Source Artist", album="Merge Album A", year=2024)
+    merge_album_a.add(lib)
+    merge_item_a = bl.Item(
+        albumartist="Merge Source Artist", album="Merge Album A",
+        artist="Merge Source Artist", title="Merge Track A",
+        track=1, disc=1, year=2024, album_id=merge_album_a.id,
+        path=str(merge_path_a).encode("utf-8"), length=1.0,
+    )
+    merge_item_a.add(lib)
+
+    merge_src_dir_b = music_dir / "Merge Source Artist" / "Merge Album B"
+    merge_src_dir_b.mkdir(parents=True, exist_ok=True)
+    merge_path_b = merge_src_dir_b / "01 - Merge Track B.wav"
+    merge_path_b.write_bytes(_real_wav_bytes(freq=445))
+    merge_album_b = bl.Album(lib, albumartist="Merge Source Artist", album="Merge Album B", year=2024)
+    merge_album_b.add(lib)
+    merge_item_b = bl.Item(
+        albumartist="Merge Source Artist", album="Merge Album B",
+        artist="Merge Source Artist", title="Merge Track B",
+        track=1, disc=1, year=2024, album_id=merge_album_b.id,
+        path=str(merge_path_b).encode("utf-8"), length=1.0,
+    )
+    merge_item_b.add(lib)
+
+    # One album with a Unicode "fancy" hyphen (U+2010) in its albumartist,
+    # for library_normalize_artists() (same migration, same wave).
+    normalize_dir = music_dir / "Normalize‐Artist" / "Normalize Album"
+    normalize_dir.mkdir(parents=True, exist_ok=True)
+    normalize_path = normalize_dir / "01 - Normalize Track.wav"
+    normalize_path.write_bytes(_real_wav_bytes(freq=460))
+    normalize_album = bl.Album(lib, albumartist="Normalize‐Artist", album="Normalize Album", year=2024)
+    normalize_album.add(lib)
+    normalize_item = bl.Item(
+        albumartist="Normalize‐Artist", album="Normalize Album",
+        artist="Normalize‐Artist", title="Normalize Track",
+        track=1, disc=1, year=2024, album_id=normalize_album.id,
+        path=str(normalize_path).encode("utf-8"), length=1.0,
+    )
+    normalize_item.add(lib)
+
+    # ARCH-007 (Wave 34): an album with ZERO item rows, for
+    # library_mbsync_all()'s pre-mbsync orphan-album prune step (migrated
+    # this wave off a raw `_db()` SELECT onto
+    # beets_client.find_all_orphan_albums() -> GET /albums?orphan=true).
+    # `beet mbsync` crashes on rows like this if they are not pruned
+    # first, and the prune step itself was completely non-functional in
+    # the real two-service topology before this wave's fix.
+    orphan_album = bl.Album(
+        lib, albumartist="Orphan Artist", album="Orphan Album (No Tracks)", year=2024,
+    )
+    orphan_album.add(lib)
+
     lib._close()
 
     return {
@@ -277,6 +339,13 @@ def seed_disposable_library(config_dir: Path, music_dir: Path) -> dict:
         "offline_item_path": str(offline_path),
         "offline_container_path": "/data/media/music/" + offline_path.relative_to(music_dir).as_posix(),
         "db_path": str(db_path),
+        "merge_album_a_id": int(merge_album_a.id),
+        "merge_album_b_id": int(merge_album_b.id),
+        "merge_item_a_id": int(merge_item_a.id),
+        "merge_item_b_id": int(merge_item_b.id),
+        "normalize_album_id": int(normalize_album.id),
+        "normalize_item_id": int(normalize_item.id),
+        "orphan_album_id": int(orphan_album.id),
     }
 
 
@@ -447,6 +516,45 @@ WAVE26_ENGINE_OFFLINE_RELEASEGROUP_ID = "6f9f6899-c0d3-311d-ae87-a10ae6bc53a9"
 WAVE26_ENGINE_OFFLINE_ARTIST = "Massive Attack"
 WAVE26_ENGINE_OFFLINE_ALBUM = "Mezzanine"
 
+_WAVE25_FALLBACK_TRACKLISTS: dict = {
+    "1834eae1-741b-3c03-9ca5-0df3decb43ea": [  # Radiohead - OK Computer
+        {"position": 1, "title": "Airbag", "duration_seconds": 284.0, "mb_trackid": "902d338a-ff99-4c7a-909a-bb8f4be645c1"},
+        {"position": 2, "title": "Paranoid Android", "duration_seconds": 383.0, "mb_trackid": "3be60431-b6a8-48b4-934c-d9c0cb1f760e"},
+        {"position": 3, "title": "Subterranean Homesick Alien", "duration_seconds": 267.0, "mb_trackid": "7662c161-5ef2-480a-9d93-3c990263309a"},
+        {"position": 4, "title": "Exit Music (for a Film)", "duration_seconds": 264.0, "mb_trackid": "aa1c94fc-ce77-4b77-8c43-1e967a57a027"},
+        {"position": 5, "title": "Let Down", "duration_seconds": 299.0, "mb_trackid": "a988d5e8-b778-43d9-9523-fc3f1d9faec2"},
+        {"position": 6, "title": "Karma Police", "duration_seconds": 261.0, "mb_trackid": "da5926ec-f5c7-4c4f-9e67-d86ea5ab4db1"},
+        {"position": 7, "title": "Electioneering", "duration_seconds": 230.0, "mb_trackid": "7f139ef1-4b7d-41da-b789-943b1850125e"},
+        {"position": 8, "title": "Climbing Up the Walls", "duration_seconds": 285.0, "mb_trackid": "6d91bbca-165f-46e3-bdff-c081aaeb430d"},
+        {"position": 9, "title": "No Surprises", "duration_seconds": 228.0, "mb_trackid": "27ae7246-a4f6-4991-b3b4-4b553e1a06a3"},
+        {"position": 10, "title": "Lucky", "duration_seconds": 259.0, "mb_trackid": "b319e7a8-d9f2-4f36-96b6-bf25a6663f73"},
+        {"position": 11, "title": "The Tourist", "duration_seconds": 324.0, "mb_trackid": "efbdfba2-66be-45a8-927a-8fbb87f46eb2"},
+    ],
+    "b84ee12a-09ef-421b-82de-0441a926375b": [  # Pink Floyd - The Dark Side of the Moon
+        {"position": 1, "title": "Speak to Me", "duration_seconds": 65.0, "mb_trackid": "f516a245-c4fb-4b56-8e50-8b1e102f9c73"},
+        {"position": 2, "title": "Breathe (in the Air)", "duration_seconds": 169.0, "mb_trackid": "e301d013-d143-4ce4-82a1-12be5c1f0bcf"},
+        {"position": 3, "title": "On the Run", "duration_seconds": 215.0, "mb_trackid": "a9aaef33-5c02-4c28-98ca-fb80df8df1ec"},
+        {"position": 4, "title": "Time", "duration_seconds": 421.0, "mb_trackid": "8bbce2c6-d92e-4b68-80f4-5f532a24cce6"},
+        {"position": 5, "title": "The Great Gig in the Sky", "duration_seconds": 284.0, "mb_trackid": "2e06a3d6-69d8-4f81-9b16-56c42954a727"},
+        {"position": 6, "title": "Money", "duration_seconds": 382.0, "mb_trackid": "3196924d-e9c5-4d2b-a359-5f257d0f117c"},
+        {"position": 7, "title": "Us and Them", "duration_seconds": 472.0, "mb_trackid": "673f8d34-f7b5-4b0d-9b5d-006f8510c4d9"},
+        {"position": 8, "title": "Any Colour You Like", "duration_seconds": 205.0, "mb_trackid": "2daefcf0-60b6-4554-b580-b2f7eaae9876"},
+        {"position": 9, "title": "Brain Damage", "duration_seconds": 228.0, "mb_trackid": "50e41f02-a720-4c3e-9eb3-97992cfa7297"},
+        {"position": 10, "title": "Eclipse", "duration_seconds": 123.0, "mb_trackid": "2987a027-e435-46ae-bfeb-db905c1d6837"},
+    ],
+    "bd3bb36e-16c8-438f-850e-dfbf4d1478f0": [  # Daft Punk - Discovery
+        {"position": 1, "title": "One More Time", "duration_seconds": 320.0, "mb_trackid": "18f5ec41-7ff4-4db2-942a-9951b145b206"},
+        {"position": 2, "title": "Aerodynamic", "duration_seconds": 207.0, "mb_trackid": "e229c158-b648-438b-8772-c286431908ef"},
+        {"position": 3, "title": "Digital Love", "duration_seconds": 298.0, "mb_trackid": "542a1772-5bb9-4113-a44a-f3c5ecb0ea10"},
+        {"position": 4, "title": "Harder, Better, Faster, Stronger", "duration_seconds": 224.0, "mb_trackid": "c1f77d33-4f9e-4e94-a149-cbe9c085022e"},
+    ],
+    "2fa63133-a4c9-3f41-8deb-162189de83ff": [  # Massive Attack - Mezzanine
+        {"position": 1, "title": "Angel", "duration_seconds": 379.0, "mb_trackid": "b9686008-01bb-4613-886f-2d6e469542a4"},
+        {"position": 2, "title": "Risingson", "duration_seconds": 298.0, "mb_trackid": "2708fb56-bf55-4677-849a-5f0ae812c3f8"},
+        {"position": 3, "title": "Teardrop", "duration_seconds": 331.0, "mb_trackid": "dc9f0293-1382-411b-90f7-6c2e3919e831"},
+    ],
+}
+
 _WAVE25_TRACKLIST_CACHE: dict = {}
 
 
@@ -485,15 +593,20 @@ def _fetch_release_tracklist(release_id: str) -> list:
                 print(f"  MusicBrainz fetch transient error ({ex.code}) for {release_id}; retrying {attempt + 1}/3")
                 time.sleep(2.0 * attempt)
                 continue
-            raise
+            break
         except Exception as ex:
             last_ex = ex
             if attempt < 3:
                 print(f"  MusicBrainz fetch error ({ex}) for {release_id}; retrying {attempt + 1}/3")
                 time.sleep(2.0 * attempt)
                 continue
-            raise
+            break
     if data is None:
+        if release_id in _WAVE25_FALLBACK_TRACKLISTS:
+            print(f"  [warn] MusicBrainz fetch failed ({last_ex}); using embedded fallback tracklist for {release_id}")
+            tracks = _WAVE25_FALLBACK_TRACKLISTS[release_id]
+            _WAVE25_TRACKLIST_CACHE[release_id] = tracks
+            return tracks
         raise RuntimeError(f"Could not fetch MusicBrainz tracklist for {release_id} after retries: {last_ex}")
     tracks = []
     for medium in data.get("media", []) or []:
@@ -509,9 +622,12 @@ def _fetch_release_tracklist(release_id: str) -> list:
                 "mb_trackid": str(rec.get("id") or ""),
             })
     if not tracks:
-        raise RuntimeError(
-            f"MusicBrainz returned no tracks for release {release_id} -- cannot build a realistic fixture"
-        )
+        if release_id in _WAVE25_FALLBACK_TRACKLISTS:
+            tracks = _WAVE25_FALLBACK_TRACKLISTS[release_id]
+        else:
+            raise RuntimeError(
+                f"MusicBrainz returned no tracks for release {release_id} -- cannot build a realistic fixture"
+            )
     _WAVE25_TRACKLIST_CACHE[release_id] = tracks
     return tracks
 
@@ -2282,6 +2398,243 @@ sys.exit(0 if ok else 1)
     else:
         print("[PASS] attach-recording-dict-shaped-ipc-failure-stops-before-success")
 
+
+def run_wave33_scenarios(client: "HttpClient", db_path: str) -> None:
+    """SEC-002 / ARCH-003 Wave 33 continuation Docker acceptance: exercises
+    library_merge_artist()/library_normalize_artists() -- migrated off local
+    BEET_BIN subprocess execution onto beets_client.update_album_metadata()/
+    relocate_album() this wave -- through the real production HTTP route ->
+    real engine IPC -> real Beets DB write + real on-disk tag write/
+    relocate. Exact host-mounted DB state is verified after, not just "no
+    error returned"."""
+
+    def scenario_pass(name: str) -> None:
+        print(f"[PASS] {name}")
+
+    def scenario_fail(name: str, detail: str) -> None:
+        _fail(f"{name}: {detail}")
+
+    print("==> [Wave33] library_merge_artist(): merging 2 albums under 'Merge Source Artist'...")
+    status, body = client.request(
+        "POST", "/api/library/merge-artist",
+        json_body={"from_artist": "Merge Source Artist", "to_artist": "Merge Target Artist Wave33"},
+        timeout=15,
+    )
+    if status != 200 or not body.get("ok"):
+        scenario_fail("wave33-library-merge-artist", f"request rejected: {status} {body}")
+    else:
+        try:
+            result = client.wait_job(body["job_id"], timeout=60)
+        except TimeoutError as ex:
+            scenario_fail("wave33-library-merge-artist", f"job did not complete: {ex}")
+            result = None
+        if result is not None:
+            if result.get("status") != "success":
+                scenario_fail("wave33-library-merge-artist", f"job did not succeed: {result.get('status')} / {result.get('log')}")
+            else:
+                con = sqlite3.connect(db_path)
+                con.row_factory = sqlite3.Row
+                target_albums = con.execute(
+                    "SELECT id FROM albums WHERE albumartist='Merge Target Artist Wave33'"
+                ).fetchall()
+                remaining_src = con.execute(
+                    "SELECT COUNT(*) FROM albums WHERE albumartist='Merge Source Artist'"
+                ).fetchone()[0]
+                target_items = con.execute(
+                    "SELECT i.albumartist, i.artist FROM items i JOIN albums a ON a.id=i.album_id "
+                    "WHERE a.albumartist='Merge Target Artist Wave33'"
+                ).fetchall()
+                con.close()
+                if len(target_albums) != 2:
+                    scenario_fail("wave33-library-merge-artist", f"expected exactly 2 albums renamed to the target artist, found {len(target_albums)}")
+                elif remaining_src != 0:
+                    scenario_fail("wave33-library-merge-artist", f"expected 0 albums left under the source artist, found {remaining_src}")
+                elif len(target_items) != 2 or any(r["albumartist"] != "Merge Target Artist Wave33" for r in target_items):
+                    scenario_fail("wave33-library-merge-artist", f"item rows under the merged albums do not all show the new albumartist: {[dict(r) for r in target_items]}")
+                else:
+                    scenario_pass("wave33-library-merge-artist (both albums+items renamed via real engine IPC, no local BEET_BIN, host-mounted DB verified)")
+
+    print("==> [Wave33] library_normalize_artists(): normalizing Unicode punctuation in albumartist...")
+    status, body = client.request("POST", "/api/library/normalize-artists", json_body={}, timeout=15)
+    if status != 200 or not body.get("ok"):
+        scenario_fail("wave33-library-normalize-artists", f"request rejected: {status} {body}")
+    else:
+        try:
+            result = client.wait_job(body["job_id"], timeout=60)
+        except TimeoutError as ex:
+            scenario_fail("wave33-library-normalize-artists", f"job did not complete: {ex}")
+            result = None
+        if result is not None:
+            if result.get("status") != "success":
+                scenario_fail("wave33-library-normalize-artists", f"job did not succeed: {result.get('status')} / {result.get('log')}")
+            else:
+                con = sqlite3.connect(db_path)
+                con.row_factory = sqlite3.Row
+                row = con.execute("SELECT albumartist FROM albums WHERE album='Normalize Album'").fetchone()
+                con.close()
+                normalized = row["albumartist"] if row else None
+                if row is None:
+                    scenario_fail("wave33-library-normalize-artists", "normalize-scenario album row disappeared")
+                elif normalized == "Normalize‐Artist":
+                    scenario_fail("wave33-library-normalize-artists", "albumartist Unicode hyphen (U+2010) was not normalized")
+                elif "‐" in (normalized or ""):
+                    scenario_fail("wave33-library-normalize-artists", f"unexpected: normalized value still contains U+2010: {normalized!r}")
+                else:
+                    scenario_pass(f"wave33-library-normalize-artists (normalized to {normalized!r} via real engine IPC, host-mounted DB verified)")
+
+
+def run_wave34_scenarios(client: "HttpClient", db_path: str, fixture: dict) -> None:
+    """ARCH-007 (Wave 34): library_mbsync_all() and library_move_all() were
+    checked for the same latent defect class the two Wave 33 scenarios
+    above found (a raw `_db()` read that unconditionally raises in the
+    real two-service topology) -- both had it. Migrated onto
+    beets_client.find_all_orphan_albums() / beets_client.list_distinct_item_paths()
+    respectively. Both scenarios below exercise the real production HTTP
+    route -> real engine IPC -> real Beets DB read, with exact host-mounted
+    DB/log state and (for library_move_all(), which has no positive
+    success log line of its own for this step) the engine container's own
+    HTTP access log verified after, not just "no error returned".
+
+    Real Docker acceptance for these two routes surfaced a SECOND, entirely
+    separate, pre-existing defect while proving the first one fixed: the
+    web-manager container has no `beet` CLI at all (not in requirements.txt;
+    BEET_BIN's own fallback `/lsiopy/bin/beet` is a stale path left over
+    from an apparently pre-ARCH-003 single-container assumption), so the
+    `beet mbsync`/`beet update`/`beet move` subprocess steps these two
+    routes still run locally (a separately-tracked, already-documented
+    BEET_BIN debt class -- see docs/TECHNICAL_DEBT.md) fail outright in the
+    real deployed image. That is NOT the ARCH-007 defect this scenario
+    exists to prove fixed, and this wave does not attempt to fix it (a real
+    fix means either reinstalling all of `beets` in the web-manager image,
+    undoing the whole point of the two-service separation, or building new
+    engine-side execution endpoints for these 3 beet subcommands -- a real,
+    nontrivial new engine surface, out of scope for an ARCH-007 read-path
+    fix). Reported honestly below as its own, separately-named [FAIL] --
+    not suppressed, and not conflated with the ARCH-007 read-step result."""
+
+    def scenario_pass(name: str) -> None:
+        print(f"[PASS] {name}")
+
+    def scenario_fail(name: str, detail: str) -> None:
+        _fail(f"{name}: {detail}")
+
+    print("==> [Wave34] library_mbsync_all(): ARCH-007 read-step proof (orphan lookup + prune via real engine IPC)...")
+    status, body = client.request("POST", "/api/library/mbsync-all", json_body={}, timeout=15)
+    if status != 200 or not body.get("ok"):
+        scenario_fail("wave34-library-mbsync-all-read-step", f"request rejected: {status} {body}")
+        mbsync_result = None
+    else:
+        try:
+            mbsync_result = client.wait_job(body["job_id"], timeout=180)
+        except TimeoutError as ex:
+            scenario_fail("wave34-library-mbsync-all-read-step", f"job did not complete: {ex}")
+            mbsync_result = None
+        if mbsync_result is not None:
+            log_lines = mbsync_result.get("log") or []
+            if any("Orphan lookup failed" in line for line in log_lines):
+                scenario_fail(
+                    "wave34-library-mbsync-all-read-step",
+                    f"orphan lookup failed (the exact ARCH-007 defect this scenario exists to catch): {log_lines}",
+                )
+            elif not any("Pruned 1/1" in line for line in log_lines):
+                scenario_fail(
+                    "wave34-library-mbsync-all-read-step",
+                    f"expected positive evidence of a successful real-engine-IPC read+prune "
+                    f"('Pruned 1/1 ...') was not found in the job log: {log_lines}",
+                )
+            else:
+                con = sqlite3.connect(db_path)
+                remaining = con.execute(
+                    "SELECT COUNT(*) FROM albums WHERE id=?", (fixture["orphan_album_id"],)
+                ).fetchone()[0]
+                con.close()
+                if remaining != 0:
+                    scenario_fail(
+                        "wave34-library-mbsync-all-read-step",
+                        f"orphan album id={fixture['orphan_album_id']} was not pruned (still present in host-mounted DB)",
+                    )
+                else:
+                    scenario_pass(
+                        "wave34-library-mbsync-all-read-step (zero-item album found + pruned via real engine "
+                        "IPC, no raw-SQL orphan-lookup failure, host-mounted DB verified -- the ARCH-007 fix "
+                        "this scenario exists to prove)"
+                    )
+
+    if mbsync_result is not None:
+        if mbsync_result.get("status") != "success":
+            scenario_fail(
+                "wave34-library-mbsync-all-beet-subprocess-KNOWN-GAP",
+                "job's `beet mbsync` subprocess step failed for a real, pre-existing, unrelated reason "
+                f"(no `beet` CLI in the web-manager image -- see docs/TECHNICAL_DEBT.md): {mbsync_result.get('log')}",
+            )
+        else:
+            scenario_pass("wave34-library-mbsync-all-beet-subprocess (beet mbsync ran to completion)")
+
+    print("==> [Wave34] library_move_all(): ARCH-007 read-step proof (pre-move candidate-directory scan via real engine IPC)...")
+    status, body = client.request("POST", "/api/library/move-all", json_body={}, timeout=15)
+    if status != 200 or not body.get("ok"):
+        scenario_fail("wave34-library-move-all-read-step", f"request rejected: {status} {body}")
+        move_result = None
+    else:
+        try:
+            move_result = client.wait_job(body["job_id"], timeout=180)
+        except TimeoutError as ex:
+            scenario_fail("wave34-library-move-all-read-step", f"job did not complete: {ex}")
+            move_result = None
+        if move_result is not None:
+            log_lines = move_result.get("log") or []
+            # This scenario originally tried to cross-check the engine
+            # container's own HTTP access log for a real GET
+            # /library/item-paths request, on the theory that
+            # library_move_all()'s candidate-directory read had no
+            # positive success log line of its own. That check could
+            # never pass, in any circumstance: ControlAgentHandler
+            # overrides BaseHTTPRequestHandler.log_message() as a bare
+            # `pass` ("Quiet HTTP handler logging" -- see
+            # backend/beets_control_agent.py), so `docker logs beets`
+            # contains zero per-request access-log lines by design, for
+            # every request the engine ever serves, not just this one.
+            # Found by this wave's own real Docker acceptance run: the
+            # ARCH-007 read step actually succeeded (no "Could not
+            # enumerate pre-move directories" warning below), yet the
+            # access-log check still failed, proving the check itself was
+            # broken rather than the fix. Corrected two ways: (1)
+            # app.py's library_move_all() now logs an explicit positive
+            # "Pre-move scan: N distinct item path(s) read via engine
+            # IPC, ..." line on success, the same pattern
+            # library_mbsync_all()'s "Pruned X/Y ..." line already
+            # established; (2) this scenario now checks that job-log line
+            # directly instead of grepping container output that is
+            # never populated.
+            if any("Could not enumerate pre-move directories" in line for line in log_lines):
+                scenario_fail(
+                    "wave34-library-move-all-read-step",
+                    f"pre-move candidate-directory scan failed (the exact ARCH-007 defect this scenario exists to catch): {log_lines}",
+                )
+            elif not any("Pre-move scan:" in line and "via engine IPC" in line for line in log_lines):
+                scenario_fail(
+                    "wave34-library-move-all-read-step",
+                    f"expected positive evidence of a successful real-engine-IPC read "
+                    f"('Pre-move scan: ... via engine IPC') was not found in the job log: {log_lines}",
+                )
+            else:
+                scenario_pass(
+                    "wave34-library-move-all-read-step (pre-move candidate-directory scan succeeded via real "
+                    "engine IPC -- positive 'Pre-move scan: ... via engine IPC' evidence in the job log, no "
+                    "raw-SQL path-enumeration failure -- the ARCH-007 fix this scenario exists to prove)"
+                )
+
+    if move_result is not None:
+        if move_result.get("status") != "success":
+            scenario_fail(
+                "wave34-library-move-all-beet-subprocess-KNOWN-GAP",
+                "job's `beet update`/`beet move` subprocess step failed for a real, pre-existing, unrelated "
+                f"reason (no `beet` CLI in the web-manager image -- see docs/TECHNICAL_DEBT.md): {move_result.get('log')}",
+            )
+        else:
+            scenario_pass("wave34-library-move-all-beet-subprocess (beet update/beet move ran to completion)")
+
+
 def main() -> int:
     print("==> Checking Docker daemon / compose availability...")
     require_docker()
@@ -2583,6 +2936,12 @@ def main() -> int:
 
         print("\n==> Wave 26 AI Batch Import scenarios ==>")
         run_wave26_ai_import_scenarios(client, web_container, engine_container, downloads_dir, db_path)
+
+        print("\n==> Wave 33 continuation scenarios ==>")
+        run_wave33_scenarios(client, db_path)
+
+        print("\n==> Wave 34 (ARCH-007 real fix) scenarios ==>")
+        run_wave34_scenarios(client, db_path, fixture)
 
         if FAILURES:
             print(f"\n[SUMMARY] {len(FAILURES)} failure(s):")

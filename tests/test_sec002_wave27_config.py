@@ -290,6 +290,36 @@ class TestWave27RootResolution(unittest.TestCase):
                     os.environ.pop("STAGING_ROOT", None)
                     self.assertEqual(agent._resolved_staging_root(), str(Path(downloads).resolve(strict=False)))
 
+    def test_resolved_torrent_source_roots_default_matches_real_docker_topology(self):
+        """Wave 32 root-default audit: with TORRENT_SOURCE_ROOTS unset --
+        the real docker-compose.full.yml `beets` container's actual
+        condition, which never sets this var -- the default must be a
+        real, multi-path list (not the old single-string "/torrents",
+        which never matches this container's real mount point,
+        /data/torrents from DOWNLOAD_PATH, and was never even reachable
+        as more than one root)."""
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("TORRENT_SOURCE_ROOTS", None)
+            roots = agent._resolved_torrent_source_roots()
+        self.assertIsInstance(roots, list)
+        self.assertGreater(len(roots), 1)
+        self.assertIn("/data/torrents", roots)
+        self.assertNotIn("/torrents", roots)
+
+    def test_resolved_torrent_source_roots_honors_comma_separated_override(self):
+        """Same env var name and comma-separated format app.py's own
+        TORRENT_SOURCE_ROOTS already uses -- one operator-set value must
+        govern both containers, matching the MUSIC_ROOT/PLAYLIST_DIR
+        convention. Before this fix, the control agent's own reads of
+        this var treated the whole comma-joined string as a single
+        literal path, silently discarding every root past the first."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root_a = str(Path(tmp) / "a")
+            root_b = str(Path(tmp) / "b")
+            with mock.patch.dict(os.environ, {"TORRENT_SOURCE_ROOTS": f"{root_a},{root_b}"}, clear=False):
+                roots = agent._resolved_torrent_source_roots()
+        self.assertEqual(roots, [root_a, root_b])
+
 
     def test_allowed_roots_use_configured_roots_not_phantom_defaults(self):
         with tempfile.TemporaryDirectory() as tmp:

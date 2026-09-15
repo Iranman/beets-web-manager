@@ -295,8 +295,8 @@ class RoutesSetupRemoteBeetsDiagnosticsTests(unittest.TestCase):
                  "importable_in_process": False,
                  "bundled_namespace_merged": False,
              }), \
-             mock.patch.object(self.module.subprocess, "run", side_effect=AssertionError("local subprocess was used")), \
-             mock.patch.object(self.module.shutil, "which", side_effect=AssertionError("local executable lookup was used")):
+             mock.patch("subprocess.run", side_effect=AssertionError("local subprocess was used")), \
+             mock.patch("shutil.which", side_effect=AssertionError("local executable lookup was used")):
             response = self.client.get("/api/setup/status")
         return response, get_status
 

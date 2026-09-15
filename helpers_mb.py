@@ -892,5 +892,15 @@ def fetch_mb_release_tracklist(mb_albumid: str, log: Optional[List[str]] = None)
         "release_group": release_group_id,
         "release_title": _mb_text(mb_data.get("title")),
         "tracks": tracks,
+        # ARCH-003 Wave 33: top-level fields already present on the same MB
+        # Release API response (no extra request needed) -- added so
+        # album_mb_track_repair_v1's stamp_release_metadata option (used by
+        # the migrated _match_tracks_from_mb_shared()) can plan year/
+        # country stamping from this same fetch, matching app.py's own
+        # (app.py-local) _fetch_mb_release_tracklist(), which already
+        # returns both. Purely additive: no existing caller of this
+        # function reads either key today.
+        "country": _mb_text(mb_data.get("country")),
+        "date": _mb_text(mb_data.get("date")),
     }
 

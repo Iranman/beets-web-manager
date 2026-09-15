@@ -112,6 +112,7 @@ def verify_mutation_inventory(repo_root: Path, check_mode: bool = True) -> bool:
     errors = []
     warnings = []
 
+    real_families = _real_transaction_families(repo_root)
     by_key = {}
     for entry in inventory:
         key = entry.get("key")
@@ -123,7 +124,6 @@ def verify_mutation_inventory(repo_root: Path, check_mode: bool = True) -> bool:
         if classification not in ALLOWED_CLASSIFICATIONS:
             errors.append(f"Invalid classification '{classification}' for {symbol} in {file_path}")
         if classification == "CONTROLLED_MEDIA_MUTATION":
-            real_families = _real_transaction_families(repo_root)
             if family not in real_families:
                 errors.append(f"Unknown/stale transaction family '{family}' for controlled entry {symbol} in {file_path}")
             # Anti-laundering guard (independent review finding): a real

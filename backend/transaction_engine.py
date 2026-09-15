@@ -27,6 +27,32 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import urllib.parse
 import unicodedata
 
+# Small, dependency-free (re/typing only), already used at module level by
+# app.py -- confirmed zero circular-import risk (Wave 32/33 root-cause
+# investigation into why _match_tracks_from_mb_shared() was thought to need
+# a normalization-pipeline port: it did not, this module can import it
+# directly). Used by album_mb_track_repair_v1's target_tracks subset filter.
+#
+# Wave 33 real-Docker-acceptance fix: this module is deployed two different
+# ways -- as a real `backend` package member (this repo, the web-manager
+# container, and this file's own test suite), and flattened into a single
+# directory with no package structure at all inside the `beets` engine
+# container (Dockerfile.beets COPYs backend/*.py to
+# /opt/beets-web-manager-agent/*.py directly, imported bare -- e.g.
+# `import transaction_engine`, not `from backend import transaction_engine`).
+# A bare `from backend.import_guard import ...` therefore crashed the
+# engine container at startup with `ModuleNotFoundError: No module named
+# 'backend'` -- found only by actually booting this exact image, not by
+# py_compile or the unit test suite, neither of which exercises the
+# engine's own flattened layout. track_align.py (imported later in this
+# same file, inside confirmed_import_v1) already solves this exact problem
+# with a flat-import-first, package-import-fallback try/except; mirrored
+# here.
+try:
+    from import_guard import release_track_matches_missing_target
+except ImportError:
+    from backend.import_guard import release_track_matches_missing_target
+
 LOG = logging.getLogger("beets_web.transaction_engine")
 
 
@@ -1482,15 +1508,33 @@ def create_album_cleanup_plan(
         return {"ok": False, "error": f"Album {album_id} has no track items in database."}
 
     album_dir = item_paths[0].parent.resolve(strict=False)
-    music_root = Path(os.environ.get("BEETS_MUSIC_DIR", os.environ.get("MUSIC_ROOT", "/music"))).resolve(strict=False)
+    # SEC-002 / ARCH-003 Wave 32 root-default audit: this previously
+    # unconditionally prepended an env-derived music_root to `roots`
+    # regardless of whether the caller supplied `allowed_roots` -- unlike
+    # every sibling function in this module, which only falls back to an
+    # env-derived root when the caller-supplied roots list is empty. The
+    # real production caller (beets_control_agent.py's
+    # /albums/cleanup/plan handler) always supplies allowed_roots via
+    # _resolved_music_root()/_resolved_downloads_root(), so this was inert
+    # in practice (the stale "/music" default below never matches this
+    # container's real mount, /data/media/music, so it only ever added a
+    # dead extra root) -- but it is fixed here for defense-in-depth
+    # consistency with the rest of the module and so a real default is
+    # used if this function is ever called (directly, or by a future
+    # caller) without allowed_roots.
+    music_root = Path(
+        os.environ.get("BEETS_MUSIC_DIR")
+        or os.environ.get("MUSIC_ROOT")
+        or os.environ.get("MUSIC_LIBRARY_PATH", "/data/media/music")
+    ).resolve(strict=False)
 
-    roots = [music_root] + [Path(r).resolve(strict=False) for r in (allowed_roots or [])]
+    roots = [Path(r).resolve(strict=False) for r in (allowed_roots or [])] or [music_root]
     is_under_root = any(album_dir == r or r in album_dir.parents for r in roots)
     if not is_under_root:
         return {"ok": False, "error": f"Album path {album_dir} is outside authorized music roots."}
 
-    if album_dir == music_root:
-        return {"ok": False, "error": f"Refusing to delete music root directory {music_root} itself."}
+    if any(album_dir == r for r in roots):
+        return {"ok": False, "error": f"Refusing to delete music root directory {album_dir} itself."}
 
     steps: List[Dict[str, Any]] = []
     step_idx = 1
@@ -3593,6 +3637,152 @@ def _write_file_audio_tags(file_path: Path, tags: Dict[str, Any]) -> Dict[str, A
     return {"ok": True, "reason": None}
 
 
+_TITLE_BRACKET_OPEN = "([{"
+_TITLE_BRACKET_CLOSE = ")]}"
+
+
+def _strip_bracketed_spans(text: str) -> str:
+    """Linear-time, byte-identical replacement for
+    re.sub(r"[\\(\\[\\{].*?[\\)\\]\\}]", "", text).
+
+    ARCH-003 Wave 29 review, CodeQL py/polynomial-redos: the regex form is
+    quadratic on caller-supplied titles. Every unmatched opening bracket
+    restarts a lazy `.*?` scan that runs to the next closer / newline / end
+    of string, so an input of N opening brackets costs O(N**2) -- measured
+    at 11.6s for a 64k-char `(`*n + `a`*n payload, which reaches this
+    normalizer through album_mb_track_repair_v1's caller-supplied
+    target_tracks titles.
+
+    This single forward pass precomputes, for each offset, the next closing
+    bracket not separated from it by a newline (`.` never crosses one), so
+    an opener with no reachable closer is emitted literally without any
+    rescan -- exactly what the regex does, in O(len(text)).
+    """
+    n = len(text)
+    if n == 0:
+        return text
+    next_close = [-1] * (n + 1)
+    for j in range(n - 1, -1, -1):
+        ch = text[j]
+        if ch in _TITLE_BRACKET_CLOSE:
+            next_close[j] = j
+        elif ch == "\n":
+            next_close[j] = -1
+        else:
+            next_close[j] = next_close[j + 1]
+    out: List[str] = []
+    i = 0
+    while i < n:
+        if text[i] in _TITLE_BRACKET_OPEN:
+            close_at = next_close[i + 1]
+            if close_at != -1:
+                i = close_at + 1
+                continue
+        out.append(text[i])
+        i += 1
+    return "".join(out)
+
+
+def _mb_track_repair_title_norm(text: Any) -> str:
+    """Title normalizer for album_mb_track_repair_v1's target_tracks
+    subset filter and AcoustID cross-check. Deliberately self-contained
+    (no import of backend.mb_alignment.album_track_norm, which is only
+    ever lazily imported inside create_album_mb_track_repair_plan itself,
+    behind a try/except, to keep a mb_alignment import failure from
+    breaking this whole module's import) -- same normalization shape
+    (casefold, strip bracketed content, strip punctuation, collapse
+    whitespace) as both app.py's _album_track_norm() and
+    backend.mb_alignment.album_track_norm()."""
+    t = str(text or "").lower()
+    t = _strip_bracketed_spans(t)
+    t = re.sub(r"[^\w\s]", "", t)
+    return " ".join(t.split())
+
+
+def _normalise_target_tracks(raw: Any) -> List[Dict[str, Any]]:
+    """Compact a caller-supplied target_tracks list (album_mb_track_repair_v1's
+    subset filter) down to the fields release_track_matches_missing_target()
+    needs. Mirrors app.py's _normalise_wanted_tracks() field names/aliases
+    without depending on any app.py-only helper."""
+    if not raw or not isinstance(raw, list):
+        return []
+    tracks: List[Dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            disc = int(item.get("disc") or item.get("medium") or 1)
+        except Exception:
+            disc = 1
+        try:
+            track = int(item.get("track") or item.get("position") or item.get("number") or 0)
+        except Exception:
+            track = 0
+        title = str(item.get("title") or item.get("name") or "").strip()
+        mb_trackid = str(item.get("mb_trackid") or item.get("recording_id") or "").strip().lower()
+        if not track and not title and not mb_trackid:
+            continue
+        tracks.append({
+            "disc": max(disc, 1),
+            "track": max(track, 0),
+            "title": title,
+            "mb_trackid": mb_trackid,
+        })
+    return tracks
+
+
+def _mb_track_repair_acoustid_check(
+    item_path: Path,
+    mb_tracks: List[Dict[str, Any]],
+    lookup_fn: Any,
+) -> Dict[str, Any]:
+    """Cross-check a fuzzy title/position/duration match against the file's
+    AcoustID fingerprint before trusting it enough to auto-repair
+    mb_trackid/track/disc/title (album_mb_track_repair_v1's
+    acoustid_verify option). Mirrors app.py's
+    _album_track_fingerprint_check() policy: fuzzy scoring alone can be
+    fooled by similarly-named tracks (intros, live/remix versions), so a
+    confirmed fingerprint mismatch against every track on the release means
+    this file isn't actually the fuzzy-matched track, regardless of how
+    good the text match looked. Only "mismatch" ever excludes a row from
+    repair -- "none"/"unavailable"/"unclear" all fall through to trusting
+    the fuzzy match as before, same as app.py's version."""
+    if not item_path.exists():
+        return {"status": "missing"}
+    try:
+        candidates = lookup_fn(item_path)
+    except Exception:
+        candidates = None
+    if candidates is None:
+        return {"status": "unavailable"}
+    if not candidates:
+        return {"status": "none"}
+
+    mb_ids = {str(t.get("mb_trackid") or "").strip().lower() for t in mb_tracks if t.get("mb_trackid")}
+    for cand in candidates:
+        cand_id = str(cand.get("mb_trackid") or "").strip().lower()
+        if cand_id and cand_id in mb_ids:
+            return {"status": "match", "candidate": cand}
+
+    from difflib import SequenceMatcher
+    best_cand = candidates[0]
+    cand_title = _mb_track_repair_title_norm(best_cand.get("title", ""))
+    best_title_score = max(
+        (
+            SequenceMatcher(None, cand_title, _mb_track_repair_title_norm(t.get("title", ""))).ratio()
+            for t in mb_tracks if cand_title and t.get("title")
+        ),
+        default=0.0,
+    )
+    try:
+        cand_score = int(best_cand.get("score") or 0)
+    except Exception:
+        cand_score = 0
+    if cand_score >= 70 and best_title_score < 0.72:
+        return {"status": "mismatch", "candidate": best_cand, "best_title_score": round(best_title_score, 3)}
+    return {"status": "unclear", "candidate": best_cand, "best_title_score": round(best_title_score, 3)}
+
+
 def create_album_mb_track_repair_plan(
     store: TransactionStore,
     payload: Dict[str, Any],
@@ -3600,8 +3790,43 @@ def create_album_mb_track_repair_plan(
     music_allowed_roots: Optional[List[str]] = None,
     db_path: Optional[str] = None,
     fetch_tracklist_fn: Optional[Any] = None,
+    acoustid_lookup_fn: Optional[Any] = None,
 ) -> Dict[str, Any]:
-    """Create transaction plan for repairing MusicBrainz track IDs for an album (SEC-002 Wave 19)."""
+    """Create transaction plan for repairing MusicBrainz track IDs for an album (SEC-002 Wave 19).
+
+    Wave 32/33 extensions (all opt-in via `payload`, default-off, and none
+    change behavior for a caller that does not set them -- every existing
+    caller and test for this family is unaffected):
+
+    - `payload["target_tracks"]`: restrict matching to a caller-supplied
+      subset of the release's tracklist (e.g. "only match these specific
+      missing tracks"), using the same shared, already-proven
+      `release_track_matches_missing_target()` guard app.py's own
+      `_match_tracks_from_mb_shared()` uses.
+    - `payload["acoustid_verify"]`: cross-check every fuzzy title/position/
+      duration match (i.e. every row with no pre-existing recording ID of
+      its own) against the file's AcoustID fingerprint before trusting it
+      enough to auto-repair -- mirrors app.py's
+      `_album_track_fingerprint_check()` policy. A confirmed fingerprint
+      mismatch against every track on the release excludes that row from
+      repair entirely rather than relabeling it on fuzzy evidence alone.
+    - `payload["zero_unmatched"]`: for items that align to no track on the
+      (possibly target_tracks-filtered) release at all, plan zeroing their
+      `track` column (a dedup/cleanup signal for a later pass, never a tag
+      write) -- mirrors app.py's `zero_unmatched` contract.
+    - `payload["allow_establish_release_group"]`: the family's default
+      behavior (`repair_rg_not_established`) refuses to let a recording-ID
+      repair silently stamp `mb_releasegroupid` for an album that has
+      never had one -- correct and load-bearing for this family's plain
+      repair callers, which must never establish identity as a side
+      effect. Some callers (e.g. a fresh, MB-confirmed reimport establishing
+      an album's identity for the very first time) are legitimately
+      performing that establishment on purpose; this flag lets exactly
+      those callers opt in, still failing closed at Apply if the album's
+      Release Group is no longer blank by Apply time. `repair_identity_mismatch`
+      (a REAL conflict, not merely "not yet set") is never bypassed by this
+      flag -- that check always fires regardless.
+    """
     payload = payload or {}
     try:
         album_id = int(payload.get("album_id") or payload.get("aid") or 0)
@@ -3631,7 +3856,7 @@ def create_album_mb_track_repair_plan(
         con.row_factory = sqlite3.Row
         cur = con.cursor()
         cur.execute(
-            "SELECT id, album, albumartist, year, mb_albumid, mb_releasegroupid "
+            "SELECT id, album, albumartist, year, country, mb_albumid, mb_releasegroupid "
             "FROM albums WHERE id=?",
             (album_id,),
         )
@@ -3656,6 +3881,7 @@ def create_album_mb_track_repair_plan(
     album_artist = str(album_row["albumartist"] or "").strip()
     album_title = str(album_row["album"] or "").strip()
     album_year = str(album_row["year"] or "").strip()
+    album_country = str(album_row["country"] or "").strip()
     album_rg = str(album_row["mb_releasegroupid"] or "").strip().lower()
     caller_override = str(payload.get("mb_albumid") or "").strip().lower()
     target_mb_albumid = caller_override or str(album_row["mb_albumid"] or "").strip().lower()
@@ -3670,7 +3896,9 @@ def create_album_mb_track_repair_plan(
     if not target_mb_albumid:
         return {"ok": False, "error": "Album does not have a MusicBrainz release ID"}
 
-    if fetch_tracklist_fn is not None:
+    if payload.get("mb_tracks") or payload.get("track_matches"):
+        mb = {"ok": True, "tracks": payload.get("mb_tracks") or payload.get("track_matches"), "release_group": payload.get("release_group", album_rg)}
+    elif fetch_tracklist_fn is not None:
         mb = fetch_tracklist_fn(target_mb_albumid)
     else:
         try:
@@ -3681,6 +3909,28 @@ def create_album_mb_track_repair_plan(
 
     if not isinstance(mb, dict) or not mb.get("ok"):
         return {"ok": False, "error": (mb.get("error") if isinstance(mb, dict) else None) or "MusicBrainz release lookup failed"}
+
+    # stamp_release_metadata (Wave 33): the album-level year/country fields
+    # app.py's own _match_tracks_from_mb_shared() has always stamped from
+    # the same MB release lookup this function already performs --
+    # opt-in, default-off, and independent of every other option here.
+    # Only a genuine value difference plans a change; an already-matching
+    # value is left alone rather than rewritten as a no-op "change".
+    release_metadata_changes: Dict[str, Dict[str, Any]] = {}
+    if payload.get("stamp_release_metadata"):
+        mb_date = str(mb.get("date") or "").strip()
+        mb_year_str = mb_date[:4]
+        if mb_year_str.isdigit():
+            mb_year = int(mb_year_str)
+            current_year = int(album_year) if album_year.isdigit() else None
+            if mb_year != current_year:
+                release_metadata_changes["year"] = {"before": current_year, "after": mb_year}
+        mb_country = str(mb.get("country") or "").strip()
+        if mb_country and mb_country != album_country:
+            release_metadata_changes["country"] = {"before": album_country, "after": mb_country}
+
+    allow_establish_release_group = bool(payload.get("allow_establish_release_group"))
+    establish_release_group_id = ""
 
     candidate_rg = str(mb.get("release_group") or "").strip().lower()
     # Release Group ID remains the canonical album-family identity; Release
@@ -3694,25 +3944,63 @@ def create_album_mb_track_repair_plan(
     # a blank album_rg went completely unchecked.
     if candidate_rg:
         if album_rg and candidate_rg != album_rg:
+            # A REAL conflict (an already-established identity disagreeing
+            # with the requested release) is never bypassable by
+            # allow_establish_release_group -- that flag only ever covers
+            # "not yet set", never "set to something else".
             return {
                 "ok": False,
                 "error": "Requested release belongs to a different Release Group than this album's established identity; refusing repair.",
                 "code": "repair_identity_mismatch",
             }
         if not album_rg:
-            return {
-                "ok": False,
-                "error": (
-                    "This album has no established MusicBrainz Release Group identity "
-                    "(mb_releasegroupid is blank); refusing recording-ID repair until a "
-                    "canonical Release Group is established for this album."
-                ),
-                "code": "repair_rg_not_established",
-            }
+            if not allow_establish_release_group:
+                return {
+                    "ok": False,
+                    "error": (
+                        "This album has no established MusicBrainz Release Group identity "
+                        "(mb_releasegroupid is blank); refusing recording-ID repair until a "
+                        "canonical Release Group is established for this album."
+                    ),
+                    "code": "repair_rg_not_established",
+                }
+            # Caller has explicitly opted in to establishing this album's
+            # Release Group identity as part of this repair (Wave 33) --
+            # e.g. a fresh, MB-confirmed reimport doing so for the first
+            # time. Apply re-validates the album's mb_releasegroupid is
+            # STILL blank immediately before writing (TOCTOU), so a
+            # concurrent edit establishing a different RG between Plan and
+            # Apply is never silently overwritten.
+            establish_release_group_id = candidate_rg
 
     mb_tracks = mb.get("tracks") or []
     if not mb_tracks:
         return {"ok": False, "error": "MusicBrainz release tracklist is empty"}
+
+    target_tracks_raw = payload.get("target_tracks")
+    if target_tracks_raw:
+        wanted_targets = _normalise_target_tracks(target_tracks_raw)
+        if wanted_targets:
+            release_title_counts: Dict[str, int] = {}
+            for mbt in mb_tracks:
+                title_norm = _mb_track_repair_title_norm(mbt.get("title", ""))
+                if title_norm:
+                    release_title_counts[title_norm] = release_title_counts.get(title_norm, 0) + 1
+            target_mb_tracks = [
+                t for t in mb_tracks
+                if release_track_matches_missing_target(
+                    t, wanted_targets,
+                    title_norm_fn=_mb_track_repair_title_norm,
+                    release_title_counts=release_title_counts,
+                )
+            ]
+            if not target_mb_tracks:
+                return {
+                    "ok": False,
+                    "error": "None of the requested target track(s) were found in the selected MusicBrainz release.",
+                    "code": "repair_target_tracks_not_found",
+                }
+            mb_tracks = target_mb_tracks
 
     items_list: List[Dict[str, Any]] = []
     item_stats: Dict[int, Dict[str, Any]] = {}
@@ -3774,19 +4062,49 @@ def create_album_mb_track_repair_plan(
             "length": float(row["length"] or 0),
         })
 
+    items_by_id: Dict[int, Dict[str, Any]] = {it["id"]: it for it in items_list}
+
     try:
-        from backend.mb_alignment import summarize_mb_track_alignment, best_album_track_match
-        alignment = summarize_mb_track_alignment(
+        # SEC-002 / ARCH-003 Wave 33 continuation: this family's alignment
+        # procedure IS app.py's own _match_tracks_from_mb_shared() matching
+        # loop (greedy_album_track_alignment, ported verbatim), not an
+        # independently-written approximation of it -- eliminates the
+        # correctness risk of the two ever silently disagreeing on which
+        # specific track a file gets permanently relabeled as, rather than
+        # merely bounding it. items_list is already read in the same
+        # `ORDER BY disc, track, title, id` app.py's own DB query used, so
+        # the greedy, order-dependent claim order is identical.
+        try:
+            from mb_alignment import greedy_album_track_alignment, album_track_score
+        except ImportError:
+            from backend.mb_alignment import greedy_album_track_alignment, album_track_score
+        alignment = greedy_album_track_alignment(
             items_list,
             mb_tracks,
-            match_fn=best_album_track_match,
+            score_fn=album_track_score,
             threshold=0.72,
-            repair_threshold=0.65,
         )
     except Exception as ex:
         return {"ok": False, "error": f"Track alignment failed: {ex}"}
 
+    acoustid_verify = bool(payload.get("acoustid_verify"))
+    _acoustid_lookup = acoustid_lookup_fn
+    if acoustid_verify and _acoustid_lookup is None:
+        try:
+            try:
+                from beets_control_agent import _engine_acoustid_lookup as _acoustid_lookup
+            except ImportError:
+                from backend.beets_control_agent import _engine_acoustid_lookup as _acoustid_lookup
+        except Exception:
+            # Engine-side fpcalc/AcoustID machinery unavailable (e.g. this
+            # module imported outside the beets_control_agent process) --
+            # fail the *verification*, not the whole repair: every row
+            # falls through to "unavailable" below and is trusted on fuzzy
+            # evidence alone, same as acoustid_verify=False.
+            _acoustid_lookup = lambda _path: None
+
     tracks_to_repair: List[Dict[str, Any]] = []
+    acoustid_rejected: List[Dict[str, Any]] = []
     conflicts_requiring_review: List[Dict[str, Any]] = []
     changes: List[Dict[str, Any]] = []
     unreadable_items: List[Dict[str, Any]] = []
@@ -3890,6 +4208,19 @@ def create_album_mb_track_repair_plan(
             )
             conflicts_requiring_review.append(repair_spec)
         else:
+            if acoustid_verify:
+                fp = _mb_track_repair_acoustid_check(item_path, mb_tracks, _acoustid_lookup)
+                change_row["acoustid"] = fp
+                if fp.get("status") == "mismatch":
+                    change_row["status"] = "rejected"
+                    change_row["review_reason"] = (
+                        "AcoustID fingerprint does not match any track on this "
+                        "release; fuzzy title/position/duration scoring alone is "
+                        "not sufficient evidence to relabel this item."
+                    )
+                    acoustid_rejected.append(repair_spec)
+                    changes.append(change_row)
+                    continue
             change_row["status"] = "planned"
             tracks_to_repair.append(repair_spec)
         changes.append(change_row)
@@ -3942,6 +4273,40 @@ def create_album_mb_track_repair_plan(
                 "status": "planned",
             })
 
+    # zero_unmatched (Wave 33): items that align to no track on the
+    # (possibly target_tracks-filtered) release at all -- plus any item
+    # this Plan's own AcoustID cross-check just rejected -- get their
+    # `track` column zeroed as a dedup/cleanup signal for a later pass,
+    # mirroring app.py's zero_unmatched contract exactly (including that
+    # an AcoustID-rejected row is treated the same as a never-matched row).
+    # This never writes an audio tag -- DB-only, like the rest of this
+    # option -- and is skipped entirely for a row already at track=0.
+    zero_unmatched = bool(payload.get("zero_unmatched"))
+    zero_unmatched_rows: List[Dict[str, Any]] = []
+    if zero_unmatched:
+        unmatched_ids = {int(it.get("id") or 0) for it in (alignment.get("extra_items") or [])}
+        unmatched_ids |= {t["item_id"] for t in acoustid_rejected}
+        for iid in sorted(unmatched_ids):
+            it = items_by_id.get(iid)
+            if not it:
+                continue
+            current_track = int(it.get("track") or 0)
+            if current_track == 0:
+                continue
+            zero_unmatched_rows.append({
+                "item_id": iid,
+                "before": {"track": current_track},
+                "after": {"track": 0},
+            })
+            changes.append({
+                "id": iid,
+                "track": f"zero-unmatched: {it.get('title') or ''}",
+                "before": {"track": current_track},
+                "after": {"track": 0},
+                "identity_evidence": {"source": "musicbrainz_no_alignment_match"},
+                "status": "planned",
+            })
+
     album_before = {
         "mb_albumid": str(album_row["mb_albumid"] or "").strip().lower(),
         "mb_releasegroupid": album_rg,
@@ -3949,15 +4314,54 @@ def create_album_mb_track_repair_plan(
     release_stamping_needed = bool(album_release_stamp_rows) or (
         bool(target_mb_albumid) and target_mb_albumid != album_before["mb_albumid"]
     )
+    release_group_establishment_needed = bool(establish_release_group_id)
 
-    if not tracks_to_repair and not conflicts_requiring_review and not release_stamping_needed:
+    if (
+        not tracks_to_repair
+        and not conflicts_requiring_review
+        and not acoustid_rejected
+        and not release_stamping_needed
+        and not zero_unmatched_rows
+        and not release_group_establishment_needed
+        and not release_metadata_changes
+    ):
         return {
             "ok": True,
             "updated": 0,
             "conflicts": 0,
+            "acoustid_rejected": 0,
+            "zero_unmatched_rows": 0,
+            "establishing_release_group": False,
+            "release_metadata_changes": {},
             "message": "No MusicBrainz recording IDs needed safe repair.",
             "unreadable_items": unreadable_items,
         }
+
+    if release_group_establishment_needed:
+        changes.append({
+            "id": album_id,
+            "track": "album Release Group identity",
+            "before": {"mb_releasegroupid": ""},
+            "after": {"mb_releasegroupid": establish_release_group_id},
+            "identity_evidence": {
+                "source": "musicbrainz_release_group_establishment",
+                "mb_releasegroupid": establish_release_group_id,
+            },
+            "status": "planned",
+        })
+
+    if release_metadata_changes:
+        changes.append({
+            "id": album_id,
+            "track": "album year/country metadata",
+            "before": {k: v["before"] for k, v in release_metadata_changes.items()},
+            "after": {k: v["after"] for k, v in release_metadata_changes.items()},
+            "identity_evidence": {
+                "source": "musicbrainz_release_metadata",
+                "mb_albumid": target_mb_albumid,
+            },
+            "status": "planned",
+        })
 
     summary = (
         f"Repair MB track IDs for album {album_id}: {len(tracks_to_repair)} track(s), "
@@ -3970,9 +4374,13 @@ def create_album_mb_track_repair_plan(
         "mb_releasegroupid": album_rg,
         "tracks_to_repair": tracks_to_repair,
         "conflicts_requiring_review": conflicts_requiring_review,
+        "acoustid_rejected": acoustid_rejected,
         "album_release_stamp_rows": album_release_stamp_rows,
+        "zero_unmatched_rows": zero_unmatched_rows,
         "album_before": album_before,
         "release_stamping_needed": release_stamping_needed,
+        "establish_release_group_id": establish_release_group_id,
+        "release_metadata_changes": release_metadata_changes,
         "unreadable_items": unreadable_items,
     }
     # Rollback is only ever advertised for rows we actually captured full
@@ -4002,8 +4410,12 @@ def create_album_mb_track_repair_plan(
         "transaction": tx_res,
         "updated": len(tracks_to_repair),
         "conflicts": len(conflicts_requiring_review),
+        "acoustid_rejected": len(acoustid_rejected),
         "release_stamping_needed": release_stamping_needed,
         "release_stamp_rows": len(album_release_stamp_rows),
+        "zero_unmatched_rows": len(zero_unmatched_rows),
+        "establishing_release_group": release_group_establishment_needed,
+        "release_metadata_changes": release_metadata_changes,
         "unreadable_items": unreadable_items,
     }
 
@@ -4039,7 +4451,10 @@ def execute_album_mb_track_repair_apply(
         payload = meta.get("payload") or meta or tx.get("payload") or {}
         tracks_to_repair: List[Dict[str, Any]] = payload.get("tracks_to_repair") or []
         album_release_stamp_rows: List[Dict[str, Any]] = payload.get("album_release_stamp_rows") or []
+        zero_unmatched_rows: List[Dict[str, Any]] = payload.get("zero_unmatched_rows") or []
         album_before: Dict[str, Any] = payload.get("album_before") or {}
+        establish_release_group_id = str(payload.get("establish_release_group_id") or "").strip().lower()
+        release_metadata_changes: Dict[str, Dict[str, Any]] = payload.get("release_metadata_changes") or {}
 
         if tx.get("status") == "Completed":
             return {
@@ -4054,7 +4469,11 @@ def execute_album_mb_track_repair_apply(
         album_id = int(payload.get("album_id") or 0)
         target_mb_albumid = str(payload.get("mb_albumid") or "").strip().lower()
 
-        item_ids = sorted({int(t["item_id"]) for t in tracks_to_repair} | {int(t["item_id"]) for t in album_release_stamp_rows})
+        item_ids = sorted(
+            {int(t["item_id"]) for t in tracks_to_repair}
+            | {int(t["item_id"]) for t in album_release_stamp_rows}
+            | {int(t["item_id"]) for t in zero_unmatched_rows}
+        )
 
         # Resource locking: album lock + every item lock this Apply can
         # touch, in deterministic order (album_mb_track_repair_v1's own
@@ -4161,10 +4580,21 @@ def execute_album_mb_track_repair_apply(
                 con.row_factory = sqlite3.Row
                 try:
                     cur = con.cursor()
-                    cur.execute("SELECT id, mb_albumid, mb_releasegroupid FROM albums WHERE id=?", (album_id,))
+                    cur.execute("SELECT id, mb_albumid, mb_releasegroupid, year, country FROM albums WHERE id=?", (album_id,))
                     alb_row = cur.fetchone()
                     if not alb_row:
                         return _fail(f"Album {album_id} no longer exists.", "repair_album_missing")
+
+                    if release_metadata_changes:
+                        if "year" in release_metadata_changes:
+                            live_year_str = str(alb_row["year"] or "").strip()
+                            live_year = int(live_year_str) if live_year_str.isdigit() else None
+                            if live_year != release_metadata_changes["year"].get("before"):
+                                return _fail("Album year changed since plan.", "repair_toctou_mismatch")
+                        if "country" in release_metadata_changes:
+                            live_country = str(alb_row["country"] or "").strip()
+                            if live_country != release_metadata_changes["country"].get("before"):
+                                return _fail("Album country changed since plan.", "repair_toctou_mismatch")
 
                     expected_rg = str(payload.get("mb_releasegroupid") or "").strip().lower()
                     live_rg = str(alb_row["mb_releasegroupid"] or "").strip().lower()
@@ -4175,6 +4605,31 @@ def execute_album_mb_track_repair_apply(
                     expected_album_mbid = str(album_before.get("mb_albumid") or "").strip().lower()
                     if live_album_mbid != expected_album_mbid:
                         return _fail("Album Release ID changed since plan.", "repair_toctou_mismatch")
+
+                    if establish_release_group_id and live_rg:
+                        # Someone else established (or changed) this
+                        # album's Release Group identity between Plan and
+                        # Apply -- refuse to silently overwrite it, whether
+                        # it now matches what this Plan would have set or
+                        # not (Wave 33: allow_establish_release_group's
+                        # TOCTOU revalidation).
+                        return _fail(
+                            "Album Release Group ID was established by another operation since plan.",
+                            "repair_toctou_mismatch",
+                        )
+
+                    for spec in zero_unmatched_rows:
+                        iid = int(spec["item_id"])
+                        cur.execute("SELECT id, album_id, track FROM items WHERE id=?", (iid,))
+                        irow2 = cur.fetchone()
+                        if not irow2:
+                            return _fail(f"Item {iid} no longer exists.", "repair_item_missing")
+                        if int(irow2["album_id"]) != album_id:
+                            return _fail(f"Item {iid} no longer belongs to this album.", "repair_album_membership_changed")
+                        live_track = int(irow2["track"] or 0)
+                        expected_track = int(spec["before"]["track"])
+                        if live_track != expected_track:
+                            return _fail(f"Item {iid} track number changed since plan.", "repair_toctou_mismatch")
 
                     for spec in tracks_to_repair:
                         iid = int(spec["item_id"])
@@ -4248,11 +4703,34 @@ def execute_album_mb_track_repair_apply(
                             con.rollback()
                             return _fail(f"Expected to update exactly 1 row for item {spec['item_id']}, updated {cur.rowcount}.", "repair_rowcount_mismatch")
 
+                    for spec in zero_unmatched_rows:
+                        cur.execute("UPDATE items SET track=0 WHERE id=?", (spec["item_id"],))
+                        if cur.rowcount != 1:
+                            con.rollback()
+                            return _fail(f"Expected to update exactly 1 row for item {spec['item_id']}, updated {cur.rowcount}.", "repair_rowcount_mismatch")
+
                     if target_mb_albumid:
                         cur.execute("UPDATE albums SET mb_albumid=? WHERE id=?", (target_mb_albumid, album_id))
                         if cur.rowcount != 1:
                             con.rollback()
                             return _fail(f"Expected to update exactly 1 album row, updated {cur.rowcount}.", "repair_rowcount_mismatch")
+
+                    if establish_release_group_id:
+                        cur.execute(
+                            "UPDATE albums SET mb_releasegroupid=? WHERE id=? AND (mb_releasegroupid IS NULL OR mb_releasegroupid='')",
+                            (establish_release_group_id, album_id),
+                        )
+                        if cur.rowcount != 1:
+                            con.rollback()
+                            return _fail("Album Release Group ID was no longer blank at write time.", "repair_toctou_mismatch")
+
+                    if release_metadata_changes:
+                        cols = [f"{field}=?" for field in release_metadata_changes]
+                        vals = [change["after"] for change in release_metadata_changes.values()] + [album_id]
+                        cur.execute(f"UPDATE albums SET {', '.join(cols)} WHERE id=?", vals)
+                        if cur.rowcount != 1:
+                            con.rollback()
+                            return _fail(f"Expected to update exactly 1 album row for release metadata, updated {cur.rowcount}.", "repair_rowcount_mismatch")
 
                     con.commit()
                 finally:
@@ -4362,6 +4840,29 @@ def execute_album_mb_track_repair_apply(
                         arow = cur.fetchone()
                         if not arow or str(arow["mb_albumid"] or "").strip().lower() != target_mb_albumid:
                             return _fail("Post-write verification failed for album row.", "repair_verification_failed", mutated=True)
+
+                    for spec in zero_unmatched_rows:
+                        iid = spec["item_id"]
+                        cur.execute("SELECT track FROM items WHERE id=?", (iid,))
+                        row = cur.fetchone()
+                        if not row or int(row["track"] or 0) != 0:
+                            return _fail(f"Post-write verification failed for item {iid}.", "repair_verification_failed", mutated=True)
+
+                    if establish_release_group_id:
+                        cur.execute("SELECT mb_releasegroupid FROM albums WHERE id=?", (album_id,))
+                        arow = cur.fetchone()
+                        if not arow or str(arow["mb_releasegroupid"] or "").strip().lower() != establish_release_group_id:
+                            return _fail("Post-write verification failed for album Release Group establishment.", "repair_verification_failed", mutated=True)
+
+                    if release_metadata_changes:
+                        cur.execute("SELECT year, country FROM albums WHERE id=?", (album_id,))
+                        arow = cur.fetchone()
+                        if not arow:
+                            return _fail("Post-write verification failed for album release metadata.", "repair_verification_failed", mutated=True)
+                        if "year" in release_metadata_changes and int(arow["year"] or 0) != release_metadata_changes["year"]["after"]:
+                            return _fail("Post-write verification failed for album year.", "repair_verification_failed", mutated=True)
+                        if "country" in release_metadata_changes and str(arow["country"] or "").strip() != release_metadata_changes["country"]["after"]:
+                            return _fail("Post-write verification failed for album country.", "repair_verification_failed", mutated=True)
                 finally:
                     con.close()
                 _persist_step("result_verified", "Completed")
@@ -4376,6 +4877,9 @@ def execute_album_mb_track_repair_apply(
                 "operation_id": operation_id,
                 "updated": len(tracks_to_repair),
                 "release_stamp_rows": len(album_release_stamp_rows),
+                "zero_unmatched_rows": len(zero_unmatched_rows),
+                "established_release_group": bool(establish_release_group_id),
+                "release_metadata_changes": sorted(release_metadata_changes.keys()),
                 "tags_written": bool(write_tags),
             }
 
@@ -4411,10 +4915,17 @@ def rollback_album_mb_track_repair(
         album_id = int(payload.get("album_id") or 0)
         tracks_to_repair: List[Dict[str, Any]] = payload.get("tracks_to_repair") or []
         album_release_stamp_rows: List[Dict[str, Any]] = payload.get("album_release_stamp_rows") or []
+        zero_unmatched_rows: List[Dict[str, Any]] = payload.get("zero_unmatched_rows") or []
         album_before: Dict[str, Any] = payload.get("album_before") or {}
+        establish_release_group_id = str(payload.get("establish_release_group_id") or "").strip().lower()
+        release_metadata_changes: Dict[str, Dict[str, Any]] = payload.get("release_metadata_changes") or {}
         tags_mutated = bool(meta.get("tags_mutated"))
 
-        item_ids = sorted({int(t["item_id"]) for t in tracks_to_repair} | {int(t["item_id"]) for t in album_release_stamp_rows})
+        item_ids = sorted(
+            {int(t["item_id"]) for t in tracks_to_repair}
+            | {int(t["item_id"]) for t in album_release_stamp_rows}
+            | {int(t["item_id"]) for t in zero_unmatched_rows}
+        )
 
         # Same resource-locking discipline as Apply (album lock + every
         # item lock, deterministic order) -- SEC-002 Wave 19 final review:
@@ -4497,6 +5008,38 @@ def rollback_album_mb_track_repair(
                         if live_albumid != spec["after"]["mb_albumid"]:
                             store.update(operation_id, logs=[f"Rollback precondition failed: item {iid} was modified after this repair."])
                             return {"ok": False, "error": f"Item {iid} was modified after this repair; refusing to overwrite a later change.", "code": "repair_rollback_stale"}
+                    for spec in zero_unmatched_rows:
+                        iid = int(spec["item_id"])
+                        cur.execute("SELECT track FROM items WHERE id=?", (iid,))
+                        row = cur.fetchone()
+                        if not row:
+                            store.update(operation_id, logs=[f"Rollback precondition failed: item {iid} no longer exists."])
+                            return {"ok": False, "error": f"Item {iid} no longer exists.", "code": "repair_rollback_precondition_failed"}
+                        if int(row["track"] or 0) != 0:
+                            store.update(operation_id, logs=[f"Rollback precondition failed: item {iid} was modified after this repair."])
+                            return {"ok": False, "error": f"Item {iid} was modified after this repair; refusing to overwrite a later change.", "code": "repair_rollback_stale"}
+                    if establish_release_group_id:
+                        cur.execute("SELECT mb_releasegroupid FROM albums WHERE id=?", (album_id,))
+                        arow = cur.fetchone()
+                        if not arow:
+                            store.update(operation_id, logs=["Rollback precondition failed: album no longer exists."])
+                            return {"ok": False, "error": "Album no longer exists.", "code": "repair_rollback_precondition_failed"}
+                        live_established_rg = str(arow["mb_releasegroupid"] or "").strip().lower()
+                        if live_established_rg != establish_release_group_id:
+                            store.update(operation_id, logs=["Rollback precondition failed: album Release Group was modified after this repair."])
+                            return {"ok": False, "error": "Album Release Group ID was modified after this repair; refusing to overwrite a later change.", "code": "repair_rollback_stale"}
+                    if release_metadata_changes:
+                        cur.execute("SELECT year, country FROM albums WHERE id=?", (album_id,))
+                        arow = cur.fetchone()
+                        if not arow:
+                            store.update(operation_id, logs=["Rollback precondition failed: album no longer exists."])
+                            return {"ok": False, "error": "Album no longer exists.", "code": "repair_rollback_precondition_failed"}
+                        if "year" in release_metadata_changes and int(arow["year"] or 0) != release_metadata_changes["year"]["after"]:
+                            store.update(operation_id, logs=["Rollback precondition failed: album year was modified after this repair."])
+                            return {"ok": False, "error": "Album year was modified after this repair; refusing to overwrite a later change.", "code": "repair_rollback_stale"}
+                        if "country" in release_metadata_changes and str(arow["country"] or "").strip() != release_metadata_changes["country"]["after"]:
+                            store.update(operation_id, logs=["Rollback precondition failed: album country was modified after this repair."])
+                            return {"ok": False, "error": "Album country was modified after this repair; refusing to overwrite a later change.", "code": "repair_rollback_stale"}
                 finally:
                     con.close()
             except sqlite3.Error as ex:
@@ -4530,12 +5073,42 @@ def rollback_album_mb_track_repair(
                         else:
                             db_failed_ids.append(iid)
 
+                    for spec in zero_unmatched_rows:
+                        iid = spec["item_id"]
+                        before = spec["before"]
+                        cur.execute("UPDATE items SET track=? WHERE id=?", (before["track"], iid))
+                        if cur.rowcount == 1:
+                            db_restored += 1
+                        else:
+                            db_failed_ids.append(iid)
+
                     # Restore the album's own original value -- captured
                     # explicitly at Plan time, not inferred from the first
                     # repaired track (which is not necessarily the same
                     # value the album row itself held before Apply).
                     if album_before.get("mb_albumid") is not None:
                         cur.execute("UPDATE albums SET mb_albumid=? WHERE id=?", (album_before["mb_albumid"], album_id))
+                    if establish_release_group_id:
+                        # Restore to blank -- this transaction is what
+                        # established it in the first place (the
+                        # precondition check above already confirmed the
+                        # live value still matches what this transaction
+                        # wrote, so this can only ever be undoing this
+                        # transaction's own establishment, never a later,
+                        # unrelated edit).
+                        cur.execute(
+                            "UPDATE albums SET mb_releasegroupid='' WHERE id=? AND mb_releasegroupid=?",
+                            (album_id, establish_release_group_id),
+                        )
+                    if release_metadata_changes:
+                        # Same "this transaction's own precondition-checked
+                        # write" reasoning as the Release Group restore
+                        # above -- the precondition check already confirmed
+                        # the live value(s) still match what this
+                        # transaction wrote before restoring.
+                        cols = [f"{field}=?" for field in release_metadata_changes]
+                        vals = [change["before"] for change in release_metadata_changes.values()] + [album_id]
+                        cur.execute(f"UPDATE albums SET {', '.join(cols)} WHERE id=?", vals)
                     con.commit()
                 finally:
                     con.close()
@@ -4568,7 +5141,7 @@ def rollback_album_mb_track_repair(
                     else:
                         tags_failed_ids.append(iid)
 
-            total_rows = len(tracks_to_repair) + len(album_release_stamp_rows)
+            total_rows = len(tracks_to_repair) + len(album_release_stamp_rows) + len(zero_unmatched_rows)
             full_success = (not db_failed_ids) and (not tags_failed_ids)
             any_restored = db_restored > 0 or tags_restored > 0
             final_status = "Rolled Back" if full_success else ("Partially Rolled Back" if any_restored else "Failed")
@@ -7532,7 +8105,7 @@ def create_album_maintenance_plan(
     issue resolution, and filename normalization under an engine-owned boundary.
     """
     mode = str(payload.get("mode") or "deduplicate").strip()
-    _ALBUM_MAINTENANCE_MODES = frozenset({"remove_tracks", "deduplicate", "filename_cleanup"})
+    _ALBUM_MAINTENANCE_MODES = frozenset({"remove_tracks", "remove_album", "deduplicate", "filename_cleanup"})
     if mode not in _ALBUM_MAINTENANCE_MODES:
         # SEC-002 Wave 22 final review, finding #14/#15: "cleanup_issue" and
         # any other unimplemented mode must never silently fall through to
@@ -7555,7 +8128,7 @@ def create_album_maintenance_plan(
     captured_album_rows: List[Dict[str, Any]] = []
     skipped_unsafe_files_count = 0
 
-    if mode == "remove_tracks":
+    if mode in ("remove_tracks", "remove_album"):
         try:
             aid = int(payload.get("album_id") or 0)
         except Exception:
@@ -7564,7 +8137,7 @@ def create_album_maintenance_plan(
         delete_files = bool(payload.get("delete_files", True))
         clean_empty_folders = bool(payload.get("clean_empty_folders", False))
 
-        if aid <= 0 or not raw_item_ids:
+        if aid <= 0 or (mode == "remove_tracks" and not raw_item_ids):
             return {"ok": False, "error": "album_id and item_ids required", "code": "album_maintenance_invalid_payload"}
 
         item_ids = []
@@ -7575,53 +8148,57 @@ def create_album_maintenance_plan(
                     item_ids.append(val)
             except Exception:
                 continue
-        if not item_ids:
-            return {"ok": False, "error": "No valid item_ids provided", "code": "album_maintenance_invalid_payload"}
 
         resource_keys.add(f"album:{aid}")
-        for iid in item_ids:
-            resource_keys.add(f"item:{iid}")
 
         if lib_db and Path(lib_db).exists():
             con = sqlite3.connect(lib_db, timeout=10)
             con.row_factory = sqlite3.Row
             try:
-                q_marks = ",".join("?" for _ in item_ids)
-                rows = con.execute(
-                    f"SELECT * FROM items WHERE album_id=? AND id IN ({q_marks})",
-                    [aid] + item_ids,
-                ).fetchall()
-                for r in rows:
-                    r_dict = dict(r)
-                    captured_item_rows.append(r_dict)
-                    raw_p = r["path"]
-                    p_str = raw_p.decode("utf-8", "replace") if isinstance(raw_p, bytes) else str(raw_p or "")
-                    if not p_str:
-                        continue
-                    p_path = Path(p_str)
-                    if not p_path.is_absolute():
-                        p_path = Path(allowed_roots[0]) / p_str
+                if mode == "remove_album" and not item_ids:
+                    all_rows = con.execute("SELECT id FROM items WHERE album_id=?", (aid,)).fetchall()
+                    item_ids = [int(r["id"]) for r in all_rows]
 
-                    is_safe_file = any(_path_under(p_path, Path(r)) for r in allowed_roots) and not any(_path_has_symlink_under(p_path, Path(r)) for r in allowed_roots)
-                    if is_safe_file and delete_files and p_path.exists() and p_path.is_file():
-                        st = p_path.stat()
-                        dup_quarantines.append({
-                            "item_id": int(r["id"]),
-                            "source": str(p_path),
-                            "stat": {"dev": st.st_dev, "ino": st.st_ino, "size": st.st_size, "mtime_ns": st.st_mtime_ns},
+                for iid in item_ids:
+                    resource_keys.add(f"item:{iid}")
+
+                if item_ids:
+                    q_marks = ",".join("?" for _ in item_ids)
+                    rows = con.execute(
+                        f"SELECT * FROM items WHERE album_id=? AND id IN ({q_marks})",
+                        [aid] + item_ids,
+                    ).fetchall()
+                    for r in rows:
+                        r_dict = dict(r)
+                        captured_item_rows.append(r_dict)
+                        raw_p = r["path"]
+                        p_str = raw_p.decode("utf-8", "replace") if isinstance(raw_p, bytes) else str(raw_p or "")
+                        if not p_str:
+                            continue
+                        p_path = Path(p_str)
+                        if not p_path.is_absolute():
+                            p_path = Path(allowed_roots[0]) / p_str
+
+                        is_safe_file = any(_path_under(p_path, Path(r)) for r in allowed_roots) and not any(_path_has_symlink_under(p_path, Path(r)) for r in allowed_roots)
+                        if is_safe_file and delete_files and p_path.exists() and p_path.is_file():
+                            st = p_path.stat()
+                            dup_quarantines.append({
+                                "item_id": int(r["id"]),
+                                "source": str(p_path),
+                                "stat": {"dev": st.st_dev, "ino": st.st_ino, "size": st.st_size, "mtime_ns": st.st_mtime_ns},
+                            })
+                        elif not is_safe_file and delete_files and p_path.exists():
+                            skipped_unsafe_files_count += 1
+
+                        db_item_deletes.append({
+                            "id": int(r["id"]),
+                            "album_id": aid,
+                            "old_path": str(p_path),
                         })
-                    elif not is_safe_file and delete_files and p_path.exists():
-                        skipped_unsafe_files_count += 1
-
-                    db_item_deletes.append({
-                        "id": int(r["id"]),
-                        "album_id": aid,
-                        "old_path": str(p_path),
-                    })
 
                 tot_row = con.execute("SELECT COUNT(*) FROM items WHERE album_id=?", (aid,)).fetchone()
                 total_items_in_album = int(tot_row[0]) if tot_row else 0
-                if total_items_in_album > 0 and len(db_item_deletes) == total_items_in_album:
+                if total_items_in_album == 0 or len(db_item_deletes) == total_items_in_album:
                     arow = con.execute("SELECT * FROM albums WHERE id=?", (aid,)).fetchone()
                     if arow:
                         captured_album_rows.append(dict(arow))
@@ -7714,28 +8291,70 @@ def create_album_maintenance_plan(
                         continue
                     old_path_str = str(fu.get("old_path") or "")
                     new_path_str = str(fu.get("new_path") or "")
+                    if not old_path_str or not new_path_str:
+                        continue
+                    # old_path/new_path are stored in db_item_updates and
+                    # bound verbatim into `UPDATE items SET path=? WHERE
+                    # id=? AND path=?` at Apply -- they must stay exactly
+                    # the caller's literal strings (a real Beets library
+                    # commonly stores items.path RELATIVE to the music
+                    # dir, see _resolve_db_path()'s docstring, so this can
+                    # legitimately be relative). Filesystem
+                    # containment/symlink/existence checks below resolve
+                    # a relative value against allowed_roots first --
+                    # resolving an already-absolute value is a no-op, so
+                    # this does not change behavior for the existing
+                    # "candidates" callers, which have always passed
+                    # absolute paths.
+                    src_p = _resolve_db_path(old_path_str, allowed_roots)
+                    dst_p = _resolve_db_path(new_path_str, allowed_roots)
                     entry = {
                         "item_id": iid,
                         "type": "move_file" if fu.get("rename") else "repoint_db",
-                        "source": old_path_str,
-                        "destination": new_path_str,
+                        "source": str(src_p),
+                        "destination": str(dst_p),
                     }
+                    # SEC-002 Wave 22 final review, CodeQL triage: this
+                    # caller-supplied old_path/new_path pair reached a
+                    # filesystem stat() with no root/symlink validation at
+                    # all -- unlike the filename_cleanup mode added this
+                    # same review just below, which does validate. Close
+                    # the same gap here.
+                    #
+                    # ARCH-003 Wave 31 review: that fix only covered the
+                    # rename=True ("move_file") branch. The rename=False
+                    # ("repoint_db") branch -- which changes an item's
+                    # authoritative on-disk path in the DB with no actual
+                    # file move -- had ZERO path validation at all, and
+                    # execute_album_maintenance_apply()'s TOCTOU/root/
+                    # symlink revalidation loop explicitly filters to only
+                    # `type == "move_file"` entries, so repoint_db never
+                    # got revalidated there either. A caller reaching this
+                    # payload shape (none currently do; found unused, not
+                    # exploited) could point an item's official path at
+                    # any unvalidated string. Every fix_updates entry now
+                    # gets the same root/symlink checks regardless of
+                    # rename, and repoint_db additionally requires the new
+                    # path to already exist as a real file (that is its
+                    # whole premise -- repointing the DB at a file that is
+                    # already really there) and the old path to NOT exist
+                    # (refusing to silently orphan a real file still
+                    # sitting at the path being abandoned).
+                    if not _path_under(src_p, Path(allowed_roots[0])) or not _path_under(dst_p, Path(allowed_roots[0])):
+                        return {"ok": False, "error": f"Path outside allowed roots: {dst_p}", "code": "album_maintenance_path_out_of_root"}
+                    if _path_has_symlink_under(src_p, Path(allowed_roots[0])) or _path_has_symlink_under(dst_p, Path(allowed_roots[0])):
+                        return {"ok": False, "error": f"Symlink rejected: {dst_p}", "code": "album_maintenance_symlink_rejected"}
                     if fu.get("rename"):
-                        # SEC-002 Wave 22 final review, CodeQL triage: this
-                        # caller-supplied old_path/new_path pair reached a
-                        # filesystem stat() with no root/symlink validation
-                        # at all -- unlike the filename_cleanup mode added
-                        # this same review just below, which does validate.
-                        # Close the same gap here.
-                        src_p = Path(old_path_str)
-                        dst_p = Path(new_path_str)
-                        if not _path_under(src_p, Path(allowed_roots[0])) or not _path_under(dst_p, Path(allowed_roots[0])):
-                            return {"ok": False, "error": f"Path outside allowed roots: {src_p}", "code": "album_maintenance_path_out_of_root"}
-                        if _path_has_symlink_under(src_p, Path(allowed_roots[0])) or _path_has_symlink_under(dst_p, Path(allowed_roots[0])):
-                            return {"ok": False, "error": f"Symlink rejected: {src_p}", "code": "album_maintenance_symlink_rejected"}
                         if src_p.exists() and src_p.is_file():
                             st = src_p.stat()
                             entry["stat"] = {"dev": st.st_dev, "ino": st.st_ino, "size": st.st_size, "mtime_ns": st.st_mtime_ns}
+                    else:
+                        if not dst_p.exists() or not dst_p.is_file():
+                            return {"ok": False, "error": f"Repoint target does not exist: {dst_p}", "code": "album_maintenance_item_missing"}
+                        if src_p.exists():
+                            return {"ok": False, "error": f"Refusing DB repoint: a file already exists at the old path: {src_p}", "code": "album_maintenance_target_exists"}
+                        st = dst_p.stat()
+                        entry["stat"] = {"dev": st.st_dev, "ino": st.st_ino, "size": st.st_size, "mtime_ns": st.st_mtime_ns}
                     resource_keys.add(f"item:{iid}")
                     moves_plan.append(entry)
                     db_item_updates.append({"id": iid, "old_path": old_path_str, "new_path": new_path_str})
@@ -7921,6 +8540,30 @@ def execute_album_maintenance_apply(
                 if dst_p.parent.exists() and _path_has_symlink_under(dst_p.parent, Path(allowed_roots[0])):
                     return _fail(f"Symlink detected on destination: {dst_p}", "album_maintenance_symlink_rejected")
 
+            # repoint_db entries change an item's authoritative on-disk
+            # path with no physical move -- excluded from real_moves
+            # above (nothing to rename), but the destination they point
+            # the DB at still needs the same TOCTOU/root/symlink proof
+            # immediately before mutation, or a file that vanished or
+            # changed between Plan and now would get silently pointed to.
+            repoint_updates = [m for m in moves_plan if m.get("type") == "repoint_db"]
+            for m in repoint_updates:
+                src_p = Path(str(m.get("source") or ""))
+                dst_p = Path(str(m.get("destination") or ""))
+                if not _path_under(src_p, Path(allowed_roots[0])) or not _path_under(dst_p, Path(allowed_roots[0])):
+                    return _fail(f"Repoint path outside allowed roots: {dst_p}", "album_maintenance_path_out_of_root")
+                if _path_has_symlink_under(src_p, Path(allowed_roots[0])) or _path_has_symlink_under(dst_p, Path(allowed_roots[0])):
+                    return _fail(f"Symlink detected on repoint path: {dst_p}", "album_maintenance_symlink_rejected")
+                if src_p.exists():
+                    return _fail(f"Repoint source now exists (no longer safe to abandon): {src_p}", "album_maintenance_toctou_mismatch")
+                if not dst_p.exists() or not dst_p.is_file():
+                    return _fail(f"Repoint target missing since plan: {dst_p}", "album_maintenance_toctou_mismatch")
+                exp_st = m.get("stat") or {}
+                st = dst_p.stat()
+                if (st.st_dev != exp_st.get("dev") or st.st_ino != exp_st.get("ino")
+                        or st.st_size != exp_st.get("size") or st.st_mtime_ns != exp_st.get("mtime_ns")):
+                    return _fail(f"Repoint target changed since plan: {dst_p}", "album_maintenance_toctou_mismatch")
+
             store.update(operation_id, status="Running", metadata={**meta, "mutation_started": True})
 
             q_base = quarantine_base_root or os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
@@ -8024,6 +8667,15 @@ def execute_album_maintenance_apply(
                             con.rollback()
                             return _fail(f"Expected to delete exactly 1 item row for id={d['id']}, affected {cur.rowcount}.", "album_maintenance_rowcount_mismatch")
                         deleted_items_count += 1
+                        # Best-effort orphaned-attribute cleanup: item_attributes
+                        # is a side table keyed by entity_id with no DB-level FK
+                        # cascade, so a deleted item would otherwise leave
+                        # orphaned rows behind. Non-fatal if the table doesn't
+                        # exist in this schema (older/test DBs).
+                        try:
+                            con.execute("DELETE FROM item_attributes WHERE entity_id=?", (d["id"],))
+                        except sqlite3.Error:
+                            pass
 
                     for aid in db_album_deletes:
                         # Re-verify zero items remaining before deleting album row
@@ -8239,6 +8891,531 @@ def rollback_album_maintenance(
                 "status": final_status,
                 "files_restored": files_restored,
                 "files_failed": files_failed,
+                "db_restored": db_restored,
+                "db_failed": db_failed,
+                "partial_mutation": final_status == "Partially Rolled Back",
+            }
+
+
+# ── album_duplicate_merge_v1 ──────────────────────────────────────────────────
+# Wave 30: a narrow, DB-only family for merging two library album rows that
+# are the same real album -- move every item from source to target, inherit
+# any of a fixed field set (mb_albumid, mb_releasegroupid, year, label) the
+# target is missing but the source has, then retire the (now-empty) source
+# album row. No filesystem paths are involved at all (audio files are never
+# touched), so no root/symlink validation applies -- this is exactly what
+# the pre-migration app.py callers (clean_merge_duplicate_album,
+# clean_rgid_group_merge) did, just moved behind Plan/Apply/rollback with
+# real TOCTOU revalidation instead of one uncontrolled local transaction.
+# No existing family fits: album_maintenance_v1 only ever deletes items, it
+# has no bulk item.album_id reassignment; existing_album_reconcile_v1 is a
+# different, stricter shape (requires each moved item's file to exist on
+# disk and re-verifies its path/stat/symlink -- appropriate for its actual
+# import-reconciliation use case, wrong for a DB-only duplicate-row merge
+# with no file involvement, and it has no target-field-inheritance step).
+
+_ALBUM_DUPLICATE_MERGE_INHERIT_FIELDS = ("mb_albumid", "mb_releasegroupid", "year", "label")
+
+
+_ALBUM_DUPLICATE_MERGE_ADOPT_FIELDS = (
+    "album", "albumartist", "albumartist_sort", "albumartist_credit",
+    "albumartists", "albumartists_sort", "albumartists_credit",
+    "mb_albumid", "mb_albumartistid", "mb_albumartistids",
+    "mb_releasegroupid", "albumtype", "albumtypes", "albumstatus",
+    "country", "label", "catalognum", "albumdisambig",
+    "year", "month", "day", "original_year", "original_month",
+    "original_day", "disctotal",
+)
+
+# ARCH-003 Wave 33 continuation: deliberately separate, small, track-level
+# allowlist for item_field_overrides -- distinct from the album-level
+# _ALBUM_DUPLICATE_MERGE_ADOPT_FIELDS set above. Supports the
+# apply_album_duplicate_resolver() retag path (decomposed into N single-
+# source-album album_duplicate_merge_v1 calls at the app.py layer, see
+# docs/TECHNICAL_DEBT.md): each moved item is manually assigned to a
+# specific, caller-supplied missing-track slot on the target release --
+# per-item DIFFERENT values, never a single uniform value the way
+# adopt_target_fields' fields are.
+_ALBUM_DUPLICATE_MERGE_ITEM_OVERRIDE_FIELDS = ("mb_trackid", "disc", "track", "title")
+
+
+def create_album_duplicate_merge_plan(
+    store: TransactionStore,
+    payload: Dict[str, Any],
+    *,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Create a non-mutating preview plan for merging two duplicate album rows.
+
+    Default shape (item_ids omitted): move every item from source into
+    target, target inherits any of _ALBUM_DUPLICATE_MERGE_INHERIT_FIELDS
+    it's missing but source has, retire the now-empty source row.
+
+    ARCH-003 Wave 31: item_ids (optional) restricts the move to a caller-
+    selected subset of source's items instead of all of them -- the
+    "split album" shape, where files already sitting together on disk
+    got split across two album rows by inconsistent tags, and only some
+    of source's items actually belong with target. adopt_target_fields
+    (optional, only meaningful with item_ids) reverses the field-copy
+    direction for the moved items specifically: instead of target
+    inheriting blank fields from source, the moved items adopt target's
+    values for the broader _ALBUM_DUPLICATE_MERGE_ADOPT_FIELDS set
+    (matching what a real split-album merge needs -- the moved rows
+    must end up describing target's album, not keep source's stale
+    values), while target's own album row is left untouched.
+
+    ARCH-003 Wave 33 continuation: item_field_overrides (optional, also
+    only meaningful with item_ids) is the per-item counterpart to
+    adopt_target_fields -- {str(item_id): {field: value}}, restricted to
+    the small, deliberately separate track-level
+    _ALBUM_DUPLICATE_MERGE_ITEM_OVERRIDE_FIELDS allowlist (mb_trackid,
+    disc, track, title). Unlike adopt_target_fields' single uniform
+    value applied to every moved item, this lets each moved item receive
+    its own distinct values -- e.g. each duplicate item assigned to a
+    different, caller-supplied missing-track slot on the target release
+    (apply_album_duplicate_resolver()'s retag path, decomposed into N
+    single-source-album calls to this family at the app.py layer rather
+    than this family growing multi-source-album support -- see
+    docs/TECHNICAL_DEBT.md). Every override key must name an item
+    actually in item_ids; an id outside that set is refused, never
+    silently ignored or silently authorizing a write to an unrelated
+    item.
+
+    Either shape now requires a real Release-Group identity check that
+    did not exist here before this wave for the split case: an item
+    actually being moved that carries its own non-blank
+    mb_releasegroupid conflicting with target's non-blank
+    mb_releasegroupid is refused outright, not silently overwritten --
+    a "split album" claim is not evidence strong enough to discard a
+    real, established MusicBrainz identity mismatch.
+    """
+    try:
+        target_id = int(payload.get("target_album_id") or 0)
+    except Exception:
+        target_id = 0
+    try:
+        source_id = int(payload.get("source_album_id") or 0)
+    except Exception:
+        source_id = 0
+    if target_id <= 0 or source_id <= 0 or target_id == source_id:
+        return {"ok": False, "error": "target_album_id and source_album_id are required and must differ", "code": "album_duplicate_merge_invalid_payload"}
+
+    requested_item_ids: Optional[List[int]] = None
+    if payload.get("item_ids") is not None:
+        requested_item_ids = sorted({int(v) for v in (payload.get("item_ids") or []) if int(v or 0) > 0})
+        if not requested_item_ids:
+            return {"ok": False, "error": "item_ids, if provided, must be a non-empty list of positive item ids", "code": "album_duplicate_merge_invalid_payload"}
+
+    adopt_target_fields = bool(payload.get("adopt_target_fields"))
+
+    # item_field_overrides (Wave 33 continuation): {str(item_id): {field:
+    # value}}, restricted to _ALBUM_DUPLICATE_MERGE_ITEM_OVERRIDE_FIELDS.
+    # Every key must name an item actually being moved -- never an
+    # arbitrary, unvalidated item id the caller can reach through this
+    # payload alone.
+    raw_item_overrides = payload.get("item_field_overrides")
+    item_field_overrides: Dict[str, Dict[str, Any]] = {}
+    if raw_item_overrides:
+        if not isinstance(raw_item_overrides, dict):
+            return {"ok": False, "error": "item_field_overrides must be an object keyed by item id", "code": "album_duplicate_merge_invalid_payload"}
+        if requested_item_ids is None:
+            return {"ok": False, "error": "item_field_overrides requires item_ids to also be supplied", "code": "album_duplicate_merge_invalid_payload"}
+        allowed_override_ids = set(requested_item_ids)
+        for raw_iid, raw_fields in raw_item_overrides.items():
+            try:
+                iid = int(raw_iid)
+            except Exception:
+                return {"ok": False, "error": f"item_field_overrides key {raw_iid!r} is not a valid item id", "code": "album_duplicate_merge_invalid_payload"}
+            if iid not in allowed_override_ids:
+                return {"ok": False, "error": f"item_field_overrides item {iid} is not one of the requested item_ids", "code": "album_duplicate_merge_invalid_payload"}
+            if not isinstance(raw_fields, dict):
+                return {"ok": False, "error": f"item_field_overrides value for item {iid} must be an object", "code": "album_duplicate_merge_invalid_payload"}
+            unknown = set(raw_fields) - set(_ALBUM_DUPLICATE_MERGE_ITEM_OVERRIDE_FIELDS)
+            if unknown:
+                return {"ok": False, "error": f"item_field_overrides field(s) not allowed: {sorted(unknown)}", "code": "album_duplicate_merge_invalid_payload"}
+            if raw_fields:
+                item_field_overrides[str(iid)] = dict(raw_fields)
+
+    lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB", "")
+    if not lib_db or not Path(lib_db).exists():
+        return {"ok": False, "error": "Beets library database not found", "code": "album_duplicate_merge_db_not_found"}
+
+    con = sqlite3.connect(lib_db, timeout=10)
+    con.row_factory = sqlite3.Row
+    try:
+        target_row = con.execute("SELECT * FROM albums WHERE id=?", (target_id,)).fetchone()
+        source_row = con.execute("SELECT * FROM albums WHERE id=?", (source_id,)).fetchone()
+        if not target_row:
+            return {"ok": False, "error": f"Target album_id {target_id} not found", "code": "album_duplicate_merge_album_missing"}
+        if not source_row:
+            return {"ok": False, "error": f"Source album_id {source_id} not found", "code": "album_duplicate_merge_album_missing"}
+        target_before = _row_to_dict(target_row)
+        source_before = _row_to_dict(source_row)
+
+        source_item_rows = con.execute(
+            "SELECT id, COALESCE(mb_releasegroupid, '') AS mb_releasegroupid FROM items WHERE album_id=?",
+            (source_id,),
+        ).fetchall()
+        source_item_ids = sorted(int(r["id"]) for r in source_item_rows)
+        source_item_rg = {int(r["id"]): _s(r["mb_releasegroupid"]).strip().lower() for r in source_item_rows}
+    finally:
+        con.close()
+
+    if requested_item_ids is not None:
+        missing = [iid for iid in requested_item_ids if iid not in source_item_rg]
+        if missing:
+            return {"ok": False, "error": f"item(s) {missing} do not belong to source album {source_id}", "code": "album_duplicate_merge_identity_mismatch"}
+        move_item_ids = requested_item_ids
+    else:
+        move_item_ids = source_item_ids
+
+    # Real Release-Group identity check (ARCH-003 Wave 31 -- previously
+    # absent for the split-album caller entirely). Caller-supplied item
+    # selection is never treated as identity evidence on its own.
+    target_rg = _s(target_before.get("mb_releasegroupid")).strip().lower()
+    if target_rg:
+        conflicting = [iid for iid in move_item_ids if source_item_rg.get(iid) and source_item_rg[iid] != target_rg]
+        if conflicting:
+            return {
+                "ok": False,
+                "error": f"item(s) {conflicting} carry a MusicBrainz release-group id that conflicts with target album {target_id}'s established identity; refusing merge",
+                "code": "album_duplicate_merge_identity_mismatch",
+            }
+
+    inherit_fields: Dict[str, Any] = {}
+    adopt_fields: Dict[str, Any] = {}
+    moved_items_before: Dict[str, Dict[str, Any]] = {}
+    if adopt_target_fields:
+        for col in _ALBUM_DUPLICATE_MERGE_ADOPT_FIELDS:
+            if col in target_before and target_before.get(col) is not None:
+                adopt_fields[col] = target_before[col]
+    else:
+        for col in _ALBUM_DUPLICATE_MERGE_INHERIT_FIELDS:
+            t_val = _s(target_before.get(col)).strip()
+            s_val = _s(source_before.get(col)).strip()
+            if not t_val and s_val:
+                inherit_fields[col] = source_before.get(col)
+
+    if adopt_fields or item_field_overrides:
+        # Capture each moved item's own pre-overwrite values for the
+        # exact fields about to change (the uniform adopt_fields set,
+        # this item's own specific item_field_overrides, or both), so
+        # rollback can restore them -- not just re-parent the item back
+        # to source, its changed fields must revert too.
+        con = sqlite3.connect(lib_db, timeout=10)
+        con.row_factory = sqlite3.Row
+        try:
+            for iid in move_item_ids:
+                fields_for_item = set(adopt_fields) | set(item_field_overrides.get(str(iid)) or {})
+                if not fields_for_item:
+                    continue
+                row = con.execute("SELECT * FROM items WHERE id=?", (iid,)).fetchone()
+                if row:
+                    row_dict = _row_to_dict(row)
+                    moved_items_before[str(iid)] = {k: row_dict.get(k) for k in fields_for_item}
+        finally:
+            con.close()
+
+    resource_keys = {f"album:{target_id}", f"album:{source_id}"}
+    for iid in move_item_ids:
+        resource_keys.add(f"item:{iid}")
+
+    tx = store.create(
+        operation_type="Merge Album",
+        status="Pending",
+        summary=f"Merge {'selected item(s) of' if requested_item_ids is not None else 'duplicate album'} {source_id} into {target_id} ({len(move_item_ids)} item(s))",
+        rollback_available=True,
+        metadata={
+            "mutation_family": "album_duplicate_merge_v1",
+            "target_album_id": target_id,
+            "source_album_id": source_id,
+            "source_item_ids": source_item_ids,
+            "move_item_ids": move_item_ids,
+            "partial_move": requested_item_ids is not None,
+            "inherit_fields": inherit_fields,
+            "adopt_fields": adopt_fields,
+            "item_field_overrides": item_field_overrides,
+            "moved_items_before": moved_items_before,
+            "target_before": target_before,
+            "source_before": source_before,
+            "resource_keys": sorted(resource_keys),
+        },
+    )
+    return {
+        "ok": True,
+        "operation_id": tx["id"],
+        "target_album_id": target_id,
+        "source_album_id": source_id,
+        "moved_item_count": len(move_item_ids),
+        "inherit_fields": inherit_fields,
+        "adopt_fields": adopt_fields,
+        "item_field_overrides": item_field_overrides,
+    }
+
+
+def execute_album_duplicate_merge_apply(
+    store: TransactionStore,
+    operation_id: str,
+    *,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    if not _TRANSACTION_ID_RE.match(operation_id):
+        return {"ok": False, "error": "Invalid transaction ID format", "code": "album_duplicate_merge_invalid_id"}
+    with _get_apply_lock(operation_id):
+        try:
+            tx = store.get(operation_id)
+        except KeyError:
+            return {"ok": False, "error": f"Transaction {operation_id} not found", "code": "album_duplicate_merge_not_found"}
+        meta = tx.get("metadata") or {}
+        if meta.get("mutation_family") != "album_duplicate_merge_v1":
+            return {"ok": False, "error": "Transaction is not an album_duplicate_merge_v1 operation", "code": "album_duplicate_merge_family_mismatch"}
+        if tx.get("status") == "Completed":
+            return {"ok": True, "operation_id": operation_id, "status": "Completed", "mutated": True}
+
+        lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB", "")
+        if not lib_db or not Path(lib_db).exists():
+            return {"ok": False, "error": "Beets library database not found", "code": "album_duplicate_merge_db_not_found"}
+
+        target_id = int(meta.get("target_album_id") or 0)
+        source_id = int(meta.get("source_album_id") or 0)
+        source_item_ids = sorted(int(i) for i in (meta.get("source_item_ids") or []))
+        move_item_ids = sorted(int(i) for i in (meta.get("move_item_ids") or source_item_ids))
+        partial_move = bool(meta.get("partial_move"))
+        inherit_fields = meta.get("inherit_fields") or {}
+        adopt_fields = meta.get("adopt_fields") or {}
+        item_field_overrides: Dict[str, Dict[str, Any]] = meta.get("item_field_overrides") or {}
+
+        def _fail(msg: str, code: str) -> Dict[str, Any]:
+            store.update(operation_id, status="Failed", logs=[f"Apply failed: {msg}"])
+            return {"ok": False, "error": msg, "code": code, "mutated": False, "status": "Failed"}
+
+        with _lock_resources(meta.get("resource_keys") or [f"album:{target_id}", f"album:{source_id}"]):
+            con = sqlite3.connect(lib_db, timeout=10)
+            con.row_factory = sqlite3.Row
+            try:
+                if not con.execute("SELECT 1 FROM albums WHERE id=?", (target_id,)).fetchone():
+                    return _fail(f"Target album_id {target_id} no longer exists", "album_duplicate_merge_album_missing")
+                if not con.execute("SELECT 1 FROM albums WHERE id=?", (source_id,)).fetchone():
+                    return _fail(f"Source album_id {source_id} no longer exists", "album_duplicate_merge_album_missing")
+
+                # TOCTOU: source's item set must be exactly what Plan saw --
+                # not more (an item added since Plan would be silently
+                # swept into the merge without ever having been reviewed)
+                # and not fewer (a concurrent operation already moved/
+                # deleted one, so Plan's captured rollback data no longer
+                # describes reality).
+                live_rows = con.execute("SELECT id FROM items WHERE album_id=?", (source_id,)).fetchall()
+                live_ids = sorted(int(r["id"]) for r in live_rows)
+                if live_ids != source_item_ids:
+                    return _fail(
+                        f"Source album_id {source_id}'s item set changed since plan "
+                        f"(expected {len(source_item_ids)} item(s), found {len(live_ids)})",
+                        "album_duplicate_merge_toctou_mismatch",
+                    )
+
+                store.update(operation_id, status="Running", metadata={**meta, "mutation_started": True})
+
+                moved = 0
+                if move_item_ids:
+                    q_marks = ",".join("?" for _ in move_item_ids)
+                    cur = con.execute(
+                        f"UPDATE items SET album_id=? WHERE album_id=? AND id IN ({q_marks})",
+                        [target_id, source_id] + move_item_ids,
+                    )
+                    moved = cur.rowcount
+                    if moved != len(move_item_ids):
+                        con.rollback()
+                        return _fail(
+                            f"Expected to move {len(move_item_ids)} item(s), moved {moved}",
+                            "album_duplicate_merge_rowcount_mismatch",
+                        )
+
+                if adopt_fields and move_item_ids:
+                    # Split-album direction: the moved items adopt target's
+                    # values (they now belong to target's album, not
+                    # source's stale one) rather than target inheriting
+                    # from source.
+                    cols = [f"{k}=?" for k in adopt_fields]
+                    q_marks = ",".join("?" for _ in move_item_ids)
+                    vals = list(adopt_fields.values()) + move_item_ids
+                    cur = con.execute(f"UPDATE items SET {', '.join(cols)} WHERE id IN ({q_marks})", vals)
+                    if cur.rowcount != len(move_item_ids):
+                        con.rollback()
+                        return _fail(f"Expected to update {len(move_item_ids)} moved item row(s) with target fields, affected {cur.rowcount}", "album_duplicate_merge_rowcount_mismatch")
+
+                if item_field_overrides:
+                    # Per-item, potentially different values -- unlike
+                    # adopt_fields above, this cannot be one shared query;
+                    # each moved item may receive entirely different
+                    # mb_trackid/disc/track/title values (its own specific
+                    # missing-track slot), never a uniform one.
+                    for iid in move_item_ids:
+                        fields = item_field_overrides.get(str(iid))
+                        if not fields:
+                            continue
+                        cols = [f"{k}=?" for k in fields]
+                        vals = list(fields.values()) + [iid]
+                        cur = con.execute(f"UPDATE items SET {', '.join(cols)} WHERE id=?", vals)
+                        if cur.rowcount != 1:
+                            con.rollback()
+                            return _fail(f"Expected to update exactly 1 item row for item {iid}'s field overrides, affected {cur.rowcount}", "album_duplicate_merge_rowcount_mismatch")
+
+                if inherit_fields:
+                    cols = [f"{k}=?" for k in inherit_fields]
+                    vals = list(inherit_fields.values()) + [target_id]
+                    cur = con.execute(f"UPDATE albums SET {', '.join(cols)} WHERE id=?", vals)
+                    if cur.rowcount != 1:
+                        con.rollback()
+                        return _fail(f"Expected to update exactly 1 target album row, affected {cur.rowcount}", "album_duplicate_merge_rowcount_mismatch")
+
+                remaining = con.execute("SELECT COUNT(*) FROM items WHERE album_id=?", (source_id,)).fetchone()[0]
+                source_deleted = False
+                if int(remaining or 0) == 0:
+                    cur = con.execute("DELETE FROM albums WHERE id=?", (source_id,))
+                    if cur.rowcount != 1:
+                        con.rollback()
+                        return _fail(f"Expected to delete exactly 1 source album row, affected {cur.rowcount}", "album_duplicate_merge_rowcount_mismatch")
+                    source_deleted = True
+                elif not partial_move:
+                    # Whole-album merge (the original, still-tested shape)
+                    # planned every one of source's items for the move --
+                    # anything left over means a concurrent write slipped
+                    # in since the TOCTOU check above, or the move itself
+                    # did not fully succeed. Refuse rather than leave a
+                    # part-merged, part-orphaned source row.
+                    con.rollback()
+                    return _fail(f"Source album_id {source_id} still has items after move; refusing to delete its row", "album_duplicate_merge_rowcount_mismatch")
+                con.commit()
+            finally:
+                con.close()
+
+            store.update(operation_id, status="Completed", metadata={
+                **store.get(operation_id).get("metadata", {}),
+                "db_mutated": True,
+                "moved_count": moved,
+                "source_deleted": source_deleted,
+                "completed_at": _now(),
+            })
+            return {
+                "ok": True,
+                "operation_id": operation_id,
+                "status": "Completed",
+                "mutated": True,
+                "moved": moved,
+                "source_album_deleted": source_deleted,
+                "target_album_id": target_id,
+                "source_album_id": source_id,
+            }
+
+
+def rollback_album_duplicate_merge(
+    store: TransactionStore,
+    operation_id: str,
+    *,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    if not _TRANSACTION_ID_RE.match(operation_id):
+        return {"ok": False, "error": "Invalid transaction ID format", "code": "album_duplicate_merge_invalid_id"}
+    with _get_apply_lock(operation_id):
+        try:
+            tx = store.get(operation_id)
+        except KeyError:
+            return {"ok": False, "error": f"Transaction {operation_id} not found", "code": "album_duplicate_merge_not_found"}
+        meta = tx.get("metadata") or {}
+        if meta.get("mutation_family") != "album_duplicate_merge_v1":
+            return {"ok": False, "error": "Transaction is not an album_duplicate_merge_v1 operation", "code": "album_duplicate_merge_family_mismatch"}
+        if tx.get("status") != "Completed":
+            return {"ok": False, "error": "Only a Completed merge can be rolled back", "code": "album_duplicate_merge_not_completed"}
+
+        lib_db = db_path or os.environ.get("BEETS_LIBRARY_DB", "")
+        if not lib_db or not Path(lib_db).exists():
+            return {"ok": False, "error": "Beets library database not found", "code": "album_duplicate_merge_db_not_found"}
+
+        target_id = int(meta.get("target_album_id") or 0)
+        source_id = int(meta.get("source_album_id") or 0)
+        source_item_ids = sorted(int(i) for i in (meta.get("source_item_ids") or []))
+        move_item_ids = sorted(int(i) for i in (meta.get("move_item_ids") or source_item_ids))
+        inherit_fields = meta.get("inherit_fields") or {}
+        adopt_fields = meta.get("adopt_fields") or {}
+        moved_items_before = meta.get("moved_items_before") or {}
+        target_before = meta.get("target_before") or {}
+        source_before = meta.get("source_before") or {}
+
+        with _lock_resources(meta.get("resource_keys") or [f"album:{target_id}", f"album:{source_id}"]):
+            con = sqlite3.connect(lib_db, timeout=10)
+            con.row_factory = sqlite3.Row
+            db_restored = 0
+            db_failed = 0
+            try:
+                if source_before and not con.execute("SELECT 1 FROM albums WHERE id=?", (source_id,)).fetchone():
+                    cols = list(source_before.keys())
+                    placeholders = ",".join("?" * len(cols))
+                    cur = con.execute(
+                        f"INSERT INTO albums ({','.join(cols)}) VALUES ({placeholders})",
+                        [source_before[c] for c in cols],
+                    )
+                    if cur.rowcount == 1:
+                        db_restored += 1
+                    else:
+                        db_failed += 1
+
+                if move_item_ids:
+                    q_marks = ",".join("?" for _ in move_item_ids)
+                    cur = con.execute(
+                        f"UPDATE items SET album_id=? WHERE album_id=? AND id IN ({q_marks})",
+                        [source_id, target_id] + move_item_ids,
+                    )
+                    db_restored += cur.rowcount
+                    if cur.rowcount != len(move_item_ids):
+                        db_failed += (len(move_item_ids) - cur.rowcount)
+
+                if moved_items_before:
+                    # Restores whatever fields were actually snapshotted
+                    # per item, whether from adopt_fields (a uniform value
+                    # every moved item shares) or item_field_overrides (a
+                    # value specific to that one item) -- moved_items_before
+                    # already only ever contains the exact keys that were
+                    # actually about to change for that item (Wave 33
+                    # continuation: previously gated on `adopt_fields`
+                    # alone, which is correct only because adopt_fields was
+                    # the sole populator of moved_items_before before this
+                    # wave; item_field_overrides is now a second one).
+                    for iid in move_item_ids:
+                        before = moved_items_before.get(str(iid))
+                        if not before:
+                            continue
+                        cols = [f"{k}=?" for k in before]
+                        vals = list(before.values()) + [iid]
+                        cur = con.execute(f"UPDATE items SET {', '.join(cols)} WHERE id=?", vals)
+                        if cur.rowcount == 1:
+                            db_restored += 1
+                        else:
+                            db_failed += 1
+
+                if inherit_fields and target_before:
+                    cols = [f"{k}=?" for k in inherit_fields]
+                    vals = [target_before.get(k) for k in inherit_fields] + [target_id]
+                    cur = con.execute(f"UPDATE albums SET {', '.join(cols)} WHERE id=?", vals)
+                    if cur.rowcount == 1:
+                        db_restored += 1
+                    else:
+                        db_failed += 1
+                con.commit()
+            finally:
+                con.close()
+
+            final_status = "Rolled Back" if db_failed == 0 else ("Partially Rolled Back" if db_restored else "Failed")
+            store.update(operation_id, status=final_status, metadata={
+                **meta,
+                "rollback_available": False,
+                "db_restored_count": db_restored,
+                "db_failed_count": db_failed,
+                "rolled_back_at": _now(),
+            })
+            return {
+                "ok": db_failed == 0,
+                "operation_id": operation_id,
+                "status": final_status,
                 "db_restored": db_restored,
                 "db_failed": db_failed,
                 "partial_mutation": final_status == "Partially Rolled Back",
@@ -10449,6 +11626,23 @@ def _cleanup_stat_record(path: Path, root: Path) -> Dict[str, Any]:
     return stat_record
 
 
+def _cleanup_dir_stat_record(path: Path, root: Path) -> Dict[str, Any]:
+    if not _path_under(path, root) or _path_has_symlink_under(path, root):
+        raise ValueError("cleanup directory outside validated root")
+    st = path.stat()
+    return {"dev": st.st_dev, "ino": st.st_ino, "mtime_ns": st.st_mtime_ns, "type": "directory"}
+
+
+def _cleanup_dir_stat_matches(path: Path, expected: Dict[str, Any], root: Path) -> bool:
+    if not expected:
+        return False
+    try:
+        st = path.stat()
+    except OSError:
+        return False
+    return st.st_dev == expected.get("dev") and st.st_ino == expected.get("ino")
+
+
 def _cleanup_stat_matches(path: Path, expected: Dict[str, Any], root: Path) -> bool:
     if not expected:
         return False
@@ -11130,8 +12324,8 @@ def create_folder_cleanup_plan(
 ) -> Dict[str, Any]:
     """Create a non-mutating preview plan for folder/placeholder cleanup actions."""
     action = str(payload.get("action") or payload.get("mode") or "remove_empty").strip()
-    src_folder = str(payload.get("source") or payload.get("source_folder") or "").strip()
-    target_folder = str(payload.get("target") or payload.get("target_folder") or "").strip()
+    src_folder = str(payload.get("source") or payload.get("source_folder") or payload.get("source_path") or "").strip()
+    target_folder = str(payload.get("target") or payload.get("target_folder") or payload.get("target_path") or payload.get("proposed_path") or "").strip()
 
     if not src_folder:
         return {"ok": False, "error": "source folder required", "code": "folder_cleanup_invalid_payload"}
@@ -11146,6 +12340,11 @@ def create_folder_cleanup_plan(
     root = _cleanup_root_for_path(src_p, allowed_roots)
     if root is None:
         return {"ok": False, "error": f"Folder outside allowed root: {src_display}", "code": "folder_cleanup_path_out_of_root"}
+
+    src_path_text = os.path.abspath(os.path.normpath(str(src_p)))
+    root_text = os.path.abspath(os.path.normpath(str(root)))
+    if src_path_text == root_text:
+        return {"ok": False, "error": "Refusing to modify allowed root directory itself", "code": "folder_cleanup_root_refused"}
 
     file_moves: List[Dict[str, Any]] = []
     dir_removals: List[Any] = []
@@ -11171,30 +12370,86 @@ def create_folder_cleanup_plan(
             refs = _library_cleanup_db_refs_beneath_folder(db_path or "", src_p, allowed_roots)
             if refs:
                 return {"ok": False, "error": "Directory still has Beets DB references", "code": "folder_cleanup_db_references", "references": refs[:20]}
-            dir_removals.append({"path": str(src_p), "expected_empty": True})
-    elif action in ("safe_rename", "rename_folder") and target_folder:
+            dir_removals.append({"path": str(src_p), "expected_empty": True, "stat": _cleanup_dir_stat_record(src_p, root)})
+    elif action in ("safe_rename", "rename_folder"):
+        if not target_folder:
+            return {"ok": False, "error": "target folder required", "code": "folder_cleanup_invalid_payload"}
         tgt_p = _cleanup_resolve_path(Path(target_folder))
+        tgt_display = str(tgt_p)
+        if not _normpath_within_roots(str(tgt_p), allowed_roots):
+            return {"ok": False, "error": f"Target outside allowed root: {tgt_display}", "code": "folder_cleanup_path_out_of_root"}
         tgt_root = _cleanup_root_for_path(tgt_p, allowed_roots)
-        if tgt_root is not None:
-            dir_renames.append({"source": str(src_p), "target": str(tgt_p)})
-    elif action in ("merge_source_files", "merge") and target_folder:
+        if tgt_root is None:
+            return {"ok": False, "error": f"Target outside allowed root: {tgt_display}", "code": "folder_cleanup_path_out_of_root"}
+        if not src_p.exists() or not src_p.is_dir():
+            return {"ok": False, "error": f"Source is not a directory: {src_display}", "code": "folder_cleanup_not_directory"}
+        if not tgt_p.parent.exists() or not tgt_p.parent.is_dir():
+            return {"ok": False, "error": "Target parent directory does not exist", "code": "folder_cleanup_target_parent_missing"}
+        if _path_has_symlink_under(tgt_p.parent, tgt_root):
+            return {"ok": False, "error": f"Symlink rejected: {tgt_display}", "code": "folder_cleanup_symlink_rejected"}
+        if tgt_p.exists() or tgt_p.is_symlink():
+            return {"ok": False, "error": "Target folder already exists", "code": "folder_cleanup_target_exists"}
+        refs = _library_cleanup_db_refs_beneath_folder(db_path or "", src_p, allowed_roots)
+        if refs:
+            return {"ok": False, "error": "Source folder still has Beets DB references", "code": "folder_cleanup_db_references", "references": refs[:20]}
+        dir_renames.append({"source": str(src_p), "target": str(tgt_p), "stat": _cleanup_dir_stat_record(src_p, root)})
+    elif action in ("merge_source_files", "merge"):
+        if not target_folder:
+            return {"ok": False, "error": "target folder required", "code": "folder_cleanup_invalid_payload"}
         tgt_p = _cleanup_resolve_path(Path(target_folder))
+        tgt_display = str(tgt_p)
+        if not _normpath_within_roots(str(tgt_p), allowed_roots):
+            return {"ok": False, "error": f"Target outside allowed root: {tgt_display}", "code": "folder_cleanup_path_out_of_root"}
         tgt_root = _cleanup_root_for_path(tgt_p, allowed_roots)
-        if tgt_root is not None:
-            if src_p.exists() and src_p.is_dir():
-                for f in src_p.rglob("*"):
-                    if f.is_file():
-                        rel = f.relative_to(src_p)
-                        dest_f = tgt_p / rel
-                        st = f.stat()
-                        file_moves.append({
-                            "source": str(f),
-                            "target": str(dest_f),
-                            "stat": {"dev": st.st_dev, "ino": st.st_ino, "size": st.st_size, "mtime_ns": st.st_mtime_ns},
-                        })
-                dir_removals.append(str(src_p))
+        if tgt_root is None:
+            return {"ok": False, "error": f"Target outside allowed root: {tgt_display}", "code": "folder_cleanup_path_out_of_root"}
+        if not src_p.exists() or not src_p.is_dir():
+            return {"ok": False, "error": f"Source is not a directory: {src_display}", "code": "folder_cleanup_not_directory"}
+        if not tgt_p.exists() or not tgt_p.is_dir():
+            return {"ok": False, "error": "Target folder does not exist", "code": "folder_cleanup_target_missing"}
+        if src_p.resolve(strict=False) == tgt_p.resolve(strict=False):
+            return {"ok": False, "error": "Source and target folders must differ", "code": "folder_cleanup_invalid_payload"}
+        if _path_has_symlink_under(tgt_p, tgt_root):
+            return {"ok": False, "error": f"Symlink rejected: {tgt_display}", "code": "folder_cleanup_symlink_rejected"}
+        refs = _library_cleanup_db_refs_beneath_folder(db_path or "", src_p, allowed_roots)
+        if refs:
+            return {"ok": False, "error": "Source folder still has Beets DB references", "code": "folder_cleanup_db_references", "references": refs[:20]}
+        source_dirs: List[Path] = []
+        for f in src_p.rglob("*"):
+            if f.is_dir():
+                source_dirs.append(f)
+                continue
+            if not f.is_file():
+                continue
+            if _path_has_symlink_under(f, root):
+                return {"ok": False, "error": f"Symlink rejected: {f}", "code": "folder_cleanup_symlink_rejected"}
+            rel = f.relative_to(src_p)
+            dest_f = tgt_p / rel
+            if not _path_under(dest_f, tgt_p):
+                return {"ok": False, "error": f"Target outside merge folder: {dest_f}", "code": "folder_cleanup_path_out_of_root"}
+            if not dest_f.parent.exists() or not dest_f.parent.is_dir():
+                return {"ok": False, "error": "Target subfolder does not exist; cleanup apply will not create folders", "code": "folder_cleanup_target_parent_missing"}
+            if _path_has_symlink_under(dest_f.parent, tgt_root):
+                return {"ok": False, "error": f"Symlink rejected: {dest_f}", "code": "folder_cleanup_symlink_rejected"}
+            if dest_f.exists() or dest_f.is_symlink():
+                return {"ok": False, "error": "Target file already exists", "code": "folder_cleanup_target_exists"}
+            st = f.stat()
+            file_moves.append({
+                "source": str(f),
+                "target": str(dest_f),
+                "stat": {"dev": st.st_dev, "ino": st.st_ino, "size": st.st_size, "mtime_ns": st.st_mtime_ns},
+            })
+        if not file_moves:
+            return {"ok": False, "error": "No source-only files are available to merge", "code": "folder_cleanup_noop"}
+        for d in sorted(source_dirs, key=lambda p: len(p.parts), reverse=True):
+            dir_removals.append({"path": str(d), "expected_empty": True, "stat": _cleanup_dir_stat_record(d, root)})
+        dir_removals.append({"path": str(src_p), "expected_empty": True, "stat": _cleanup_dir_stat_record(src_p, root)})
+    else:
+        return {"ok": False, "error": f"Unsupported folder cleanup action: {action}", "code": "folder_cleanup_invalid_payload"}
 
     resource_keys = [f"folder:{hashlib.sha256(str(src_p).encode('utf-8', 'surrogateescape')).hexdigest()}"]
+    if target_folder:
+        resource_keys.append(f"folder:{hashlib.sha256(str(_cleanup_resolve_path(Path(target_folder))).encode('utf-8', 'surrogateescape')).hexdigest()}")
 
     tx = store.create(
         operation_type="Folder Cleanup",
@@ -11267,9 +12522,20 @@ def execute_folder_cleanup_apply(
                     return _fail(f"Source outside allowed roots: {sp}", "folder_cleanup_path_out_of_root")
                 if _path_has_symlink_under(sp, root):
                     return _fail(f"Symlink detected on source: {sp}", "folder_cleanup_symlink_rejected")
-                if sp.exists() and "stat" in fm:
-                    if not _cleanup_stat_matches(sp, fm["stat"], root):
-                        return _fail(f"Source file stat changed: {sp}", "folder_cleanup_toctou_mismatch")
+                if not sp.exists() or not sp.is_file():
+                    return _fail(f"Source file missing: {sp}", "folder_cleanup_toctou_mismatch")
+                if "stat" in fm and not _cleanup_stat_matches(sp, fm["stat"], root):
+                    return _fail(f"Source file stat changed: {sp}", "folder_cleanup_toctou_mismatch")
+                tp = Path(fm["target"])
+                tp_root = _cleanup_root_for_path(tp, allowed_roots)
+                if tp_root is None:
+                    return _fail(f"Target outside allowed roots: {tp}", "folder_cleanup_path_out_of_root")
+                if not tp.parent.exists() or not tp.parent.is_dir():
+                    return _fail(f"Target parent directory missing: {tp.parent}", "folder_cleanup_target_parent_missing")
+                if _path_has_symlink_under(tp.parent, tp_root):
+                    return _fail(f"Symlink detected on target: {tp}", "folder_cleanup_symlink_rejected")
+                if tp.exists() or tp.is_symlink():
+                    return _fail(f"Target already exists: {tp}", "folder_cleanup_target_exists")
 
             store.update(operation_id, status="Running", metadata={**meta, "mutation_started": True})
 
@@ -11277,31 +12543,46 @@ def execute_folder_cleanup_apply(
             for fm in file_moves:
                 sp = Path(fm["source"])
                 tp = Path(fm["target"])
-                if sp.exists():
-                    tp_root = _cleanup_root_for_path(tp, allowed_roots)
-                    if tp_root is None:
-                        return _fail(f"Target outside allowed roots: {tp}", "folder_cleanup_path_out_of_root")
-                    tp.parent.mkdir(parents=True, exist_ok=True)
-                    try:
-                        _safe_rename(sp, tp)
-                        moved_records.append({"source": str(sp), "target": str(tp)})
-                    except Exception as e:
-                        return _fail(f"Move failed {sp} -> {tp}: {e}", "folder_cleanup_move_failed")
+                if not sp.exists() or not sp.is_file():
+                    return _fail(f"Source file missing: {sp}", "folder_cleanup_toctou_mismatch")
+                tp_root = _cleanup_root_for_path(tp, allowed_roots)
+                if tp_root is None:
+                    return _fail(f"Target outside allowed roots: {tp}", "folder_cleanup_path_out_of_root")
+                if not tp.parent.exists() or not tp.parent.is_dir():
+                    return _fail(f"Target parent directory missing: {tp.parent}", "folder_cleanup_target_parent_missing")
+                if _path_has_symlink_under(tp.parent, tp_root):
+                    return _fail(f"Symlink detected on target: {tp}", "folder_cleanup_symlink_rejected")
+                if tp.exists() or tp.is_symlink():
+                    return _fail(f"Target already exists: {tp}", "folder_cleanup_target_exists")
+                try:
+                    _safe_rename(sp, tp)
+                    moved_records.append({"source": str(sp), "target": str(tp)})
+                except Exception as e:
+                    return _fail(f"Move failed {sp} -> {tp}: {e}", "folder_cleanup_move_failed")
 
             dir_renames = meta.get("dir_renames") or []
             for dr in dir_renames:
                 sp = Path(dr["source"])
                 tp = Path(dr["target"])
-                if sp.exists():
-                    tp_root = _cleanup_root_for_path(tp, allowed_roots)
-                    if tp_root is None:
-                        return _fail(f"Target outside allowed roots: {tp}", "folder_cleanup_path_out_of_root")
-                    tp.parent.mkdir(parents=True, exist_ok=True)
-                    try:
-                        _safe_rename(sp, tp)
-                        moved_records.append({"source": str(sp), "target": str(tp)})
-                    except Exception as e:
-                        return _fail(f"Folder rename failed {sp} -> {tp}: {e}", "folder_cleanup_rename_failed")
+                root = _cleanup_root_for_path(sp, allowed_roots)
+                tp_root = _cleanup_root_for_path(tp, allowed_roots)
+                if root is None or tp_root is None:
+                    return _fail(f"Folder rename outside allowed roots: {sp} -> {tp}", "folder_cleanup_path_out_of_root")
+                if _path_has_symlink_under(sp, root) or _path_has_symlink_under(tp.parent, tp_root):
+                    return _fail(f"Symlink detected on folder rename path: {sp} -> {tp}", "folder_cleanup_symlink_rejected")
+                if not sp.exists() or not sp.is_dir():
+                    return _fail(f"Rename source missing: {sp}", "folder_cleanup_toctou_mismatch")
+                if dr.get("stat") and not _cleanup_dir_stat_matches(sp, dr["stat"], root):
+                    return _fail(f"Rename source changed since plan: {sp}", "folder_cleanup_toctou_mismatch")
+                if not tp.parent.exists() or not tp.parent.is_dir():
+                    return _fail(f"Target parent directory missing: {tp.parent}", "folder_cleanup_target_parent_missing")
+                if tp.exists() or tp.is_symlink():
+                    return _fail(f"Rename target already exists: {tp}", "folder_cleanup_target_exists")
+                try:
+                    _safe_rename(sp, tp)
+                    moved_records.append({"source": str(sp), "target": str(tp)})
+                except Exception as e:
+                    return _fail(f"Folder rename failed {sp} -> {tp}: {e}", "folder_cleanup_rename_failed")
 
             dir_removals = meta.get("dir_removals") or []
             removed_dirs = []
@@ -11329,7 +12610,7 @@ def execute_folder_cleanup_apply(
                 expected = spec.get("stat") if isinstance(spec, dict) else None
                 if expected:
                     try:
-                        current = _cleanup_stat_record(dp, root)
+                        current = _cleanup_dir_stat_record(dp, root)
                     except Exception:
                         return _fail(f"Directory disappeared before removal: {dp}", "folder_cleanup_toctou_mismatch")
                     if current.get("dev") != expected.get("dev") or current.get("ino") != expected.get("ino"):
@@ -11349,7 +12630,15 @@ def execute_folder_cleanup_apply(
                 "completed_at": _now(),
             })
 
-            return {"ok": True, "operation_id": operation_id, "status": "Completed", "mutated": mutated, "removed_dirs": removed_dirs}
+            return {
+                "ok": True,
+                "operation_id": operation_id,
+                "status": "Completed",
+                "mutated": mutated,
+                "moved_records": moved_records,
+                "removed_dirs": removed_dirs,
+                "changed_count": len(moved_records) + len(removed_dirs),
+            }
 
 def rollback_folder_cleanup(
     store: TransactionStore,
@@ -12465,6 +13754,7 @@ ITEM_METADATA_FIELDS = frozenset({
     "disctotal", "genres", "label", "language",
     "mb_albumartistid", "mb_albumartistids", "mb_albumid",
     "mb_artistid", "mb_artistids", "mb_releasegroupid",
+    "mb_trackid",
     "month", "original_day", "original_month", "original_year",
     "release_group_title", "releasegroupdisambig", "script", "style", "year",
     "comments", "lyrics", "bpm", "initial_key", "isrc", "media", "grouping", "title",
@@ -12523,8 +13813,8 @@ def create_album_metadata_plan(
         return {"ok": False, "error": "album_id required", "code": "album_metadata_invalid_payload"}
 
     force_write_tags = bool(payload.get("force_write_tags"))
-    raw_updates = payload.get("updates") or {}
-    raw_item_updates = payload.get("item_updates") or {}
+    raw_updates = payload.get("updates") or payload.get("album_fields") or {}
+    raw_item_updates = payload.get("item_updates") or payload.get("track_fields") or {}
 
     updates, rejected = _normalize_metadata_fields(raw_updates, ALBUM_METADATA_FIELDS)
     if rejected:
@@ -12940,6 +14230,9 @@ def create_item_metadata_plan(
     if item_id <= 0:
         return {"ok": False, "error": "item_id required", "code": "item_metadata_invalid_payload"}
     force_write_tags = bool(payload.get("force_write_tags"))
+    write_tags = payload.get("write_tags", True) is not False
+    if force_write_tags:
+        write_tags = True
     updates, rejected = _normalize_metadata_fields(payload.get("updates") or {}, ITEM_METADATA_FIELDS)
     if rejected:
         return {"ok": False, "error": f"Unknown/disallowed item metadata field(s): {sorted(rejected)}", "code": "item_metadata_field_not_allowed"}
@@ -12975,9 +14268,9 @@ def create_item_metadata_plan(
 
     if not diff and not force_write_tags:
         return {"ok": True, "operation_id": None, "item_fields_changed": 0}
-    capture_fields = set(diff.keys()) | (ITEM_METADATA_FIELDS if force_write_tags else set())
-    before_state = _capture_media_tag_state(item_path, capture_fields)
-    if force_write_tags and not before_state.get("exists"):
+    capture_fields = (set(diff.keys()) | (ITEM_METADATA_FIELDS if force_write_tags else set())) if write_tags else set()
+    before_state = _capture_media_tag_state(item_path, capture_fields) if capture_fields else {"stat": None, "tags": {}}
+    if write_tags and force_write_tags and not before_state.get("exists"):
         return {"ok": False, "error": f"Media file missing for item {item_id}", "code": "item_metadata_media_missing"}
     tx = store.create(
         operation_type="Metadata Update",
@@ -12991,6 +14284,7 @@ def create_item_metadata_plan(
             "item_diff": diff,
             "item_path": str(item_path),
             "force_write_tags": force_write_tags,
+            "write_tags": write_tags,
             "file_before_stat": before_state.get("stat"),
             "before_tags": before_state.get("tags") or {},
             "allowed_roots": allowed_roots,
@@ -13028,6 +14322,7 @@ def execute_item_metadata_apply(
         item_path = Path(meta.get("item_path") or "")
         allowed_roots = music_allowed_roots or meta.get("allowed_roots") or [str(os.environ.get("MUSIC_ROOT", "/music"))]
         music_root = allowed_roots[0]
+        write_tags = meta.get("write_tags", True) is not False
 
         def _fail(msg: str, code: str, *, recover: bool = False) -> Dict[str, Any]:
             if recover:
@@ -13068,7 +14363,7 @@ def execute_item_metadata_apply(
                     con.close()
             store.update(operation_id, metadata={**store.get(operation_id).get("metadata", {}), "db_mutated": db_mutated})
             tags_written = False
-            if diff or meta.get("force_write_tags"):
+            if write_tags and (diff or meta.get("force_write_tags")):
                 result = native_beets_write_item_tags(lib_db, music_root, item_id)
                 if not result.get("ok"):
                     fields = {key: value["after"] for key, value in diff.items()}

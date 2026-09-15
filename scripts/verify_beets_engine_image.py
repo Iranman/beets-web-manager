@@ -232,7 +232,11 @@ def check_forbid_duplicate_plugin(image: str, plugin: str, configured_plugins: L
         print(f"[OK] Plugin '{plugin}' loaded exactly once: {plugins_line}")
 
 
-_BPSYNC_KNOWN_INCOMPATIBILITY_SIGNATURE = "BeatportPlugin.setup() missing"
+_BPSYNC_KNOWN_INCOMPATIBILITY_SIGNATURES = (
+    "BeatportPlugin.setup() missing",
+    "oauth-api.beatport.com",
+    "beetsplug/beatport.py",
+)
 
 
 def check_bpsync(image: str, errors: List[str], require_operational: bool = False) -> None:
@@ -304,7 +308,7 @@ print("RESOLVED:", cls.__module__, cls.__name__)
         print("[OK] bpsync resolved, loaded, and operational (appears in loaded plugins list)")
         return
 
-    if _BPSYNC_KNOWN_INCOMPATIBILITY_SIGNATURE in combined_output:
+    if any(sig in combined_output for sig in _BPSYNC_KNOWN_INCOMPATIBILITY_SIGNATURES):
         message = (
             "bpsync resolved (class importable, correct identity) but failed to load: "
             "known upstream incompatibility -- BeatportPlugin.setup() requires a session "

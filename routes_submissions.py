@@ -22,15 +22,12 @@ from flask import jsonify, request
 
 from app import (  # noqa: E402
     AUDIO_EXT,
-    BEET_BIN,
     DISCOGS_TOKEN,
     DOWNLOADS_ROOT,
     MUSIC_ROOT,
     _ANSI_RE,
     _MB_UUID_RE,
     _artist_folder_key,
-    _beet_env,
-    _beet_run,
     _build_folder_evidence,
     _extract_mb_uuid,
     _fetch_mb_release_tracklist,
@@ -40,7 +37,6 @@ from app import (  # noqa: E402
     _path_is_under,
     _read_beets_plugin_list,
     _s,
-    _write_job_beets_config,
     _ytdlp_js_runtime_options,
     _ytdlp_ready,
     _ytdlp_remote_components,
@@ -48,7 +44,7 @@ from app import (  # noqa: E402
     jobs,
     lib,
 )
-from backend.beets_client import beets_client
+from backend.beets_client import beets_client, BeetsError, BeetsUnavailableError
 from backend.security import OutboundPolicyError, validate_outbound_url
 
 _SUBMISSION_ALLOWED_ROOTS = (MUSIC_ROOT, DOWNLOADS_ROOT)
@@ -63,20 +59,6 @@ def _acoustid_key() -> str:
     )
 
 
-def _acoustid_submit_config_extra() -> str:
-    key = _acoustid_key()
-    if not key:
-        return "chroma:\n  auto: no\n"
-    safe_key = key.replace("\\", "\\\\").replace('"', '\\"')
-    return (
-        "chroma:\n"
-        "  auto: no\n"
-        f'  apikey: "{safe_key}"\n'
-        "acoustid:\n"
-        f'  apikey: "{safe_key}"\n'
-    )
-
-
 def _append_clean_output(log, stdout: str = "", stderr: str = "") -> str:
     output = _ANSI_RE.sub("", ((stdout or "") + (stderr or "")).strip())
     for line in output.splitlines():
@@ -86,24 +68,37 @@ def _append_clean_output(log, stdout: str = "", stderr: str = "") -> str:
 
 
 def _start_acoustid_submit_job(query: str, label: str):
+    """Execute AcoustID "submit" job via control agent IPC."""
     def _do(log, cancel_event=None):
-        cfg = _write_job_beets_config(
-            f"/tmp/beets_acoustid_submit_{uuid.uuid4().hex}.yaml",
-            _acoustid_submit_config_extra(),
-        )
-        if not _acoustid_key():
+        if cancel_event is not None and cancel_event.is_set():
+            log.append("[job cancelled before submission]")
+            return {"cancelled": True, "query": query}
+
+        api_key = _acoustid_key()
+        if not api_key:
             log.append("ACOUSTID_API_KEY/ACOUSTID_KEY is not set in the environment; using Beets config if present.")
-        log.append(f"Running beet submit {query}")
-        result = _beet_run(
-            [BEET_BIN, "-c", cfg, "submit", query],
-            log,
-            timeout=300,
-            env=_beet_env(),
-            cancel=cancel_event,
-        )
-        output = _append_clean_output(log, result.stdout, result.stderr)
-        if result.returncode != 0:
-            raise RuntimeError(f"beet submit failed with exit code {result.returncode}")
+        try:
+            result = beets_client.acoustid_submit(
+                query=query,
+                api_key=api_key or None,
+                timeout=300.0,
+            )
+        except BeetsUnavailableError as exc:
+            log.append(f"Beets engine is offline: {exc}")
+            raise RuntimeError(f"Beets engine is offline: {exc}") from exc
+        except BeetsError as exc:
+            log.append(f"AcoustID submission rejected by engine: {exc}")
+            raise RuntimeError(f"AcoustID submission rejected by engine: {exc}") from exc
+        except Exception as exc:
+            log.append(f"AcoustID submission failed: {exc}")
+            raise RuntimeError(f"AcoustID submission failed: {exc}") from exc
+
+        stdout = result.get("stdout") or ""
+        stderr = result.get("stderr") or ""
+        output = _append_clean_output(log, stdout, stderr)
+        rc = result.get("returncode", 0)
+        if rc != 0 or not result.get("ok", True):
+            raise RuntimeError(f"beet submit failed with exit code {rc}")
         return {"output": output, "query": query}
 
     job = jobs.start_python(_do, label=label)
@@ -1484,37 +1479,66 @@ def attach_album_mbids(aid: int):
             clean_recordings.append({"item_id": item_id, "mb_trackid": mb_trackid})
 
     def _do(log, cancel_event=None, update_state=None):
-        cfg = _write_job_beets_config(f"/tmp/beets_attach_mbids_{uuid.uuid4().hex}.yaml")
-        query = f"album_id:{aid}"
-        modify_args = [f"mb_albumartistid={mb_albumartistid}", f"mb_releasegroupid={mb_releasegroupid}"]
+        if cancel_event is not None and cancel_event.is_set():
+            return {"cancelled": True}
+
+        # Step 1: Construct payload for album_metadata_repair_v1
+        album_fields = {
+            "mb_albumartistid": mb_albumartistid,
+            "mb_releasegroupid": mb_releasegroupid,
+        }
         if mb_albumid:
-            modify_args.append(f"mb_albumid={mb_albumid}")
-        log.append(f"Attaching MusicBrainz album IDs to album {aid}.")
+            album_fields["mb_albumid"] = mb_albumid
+
+        track_fields = {
+            str(row["item_id"]): {"mb_trackid": row["mb_trackid"]}
+            for row in clean_recordings
+        }
+
+        log.append(f"Planning atomic MusicBrainz ID attachment for album {aid} ({len(clean_recordings)} track(s)).")
         if update_state:
-            update_state(stage="album_ids", completed=0, total=len(clean_recordings) + 2)
-        result = _beet_run([BEET_BIN, "-c", cfg, "modify", "--yes", "--nowrite", query] + modify_args, log, timeout=120, env=_beet_env(), cancel=cancel_event)
-        output = _append_clean_output(log, result.stdout, result.stderr)
-        if result.returncode not in (0, -9, 124):
-            raise RuntimeError(f"beet modify failed with exit code {result.returncode}")
-        for idx, row in enumerate(clean_recordings, start=1):
-            if cancel_event is not None and cancel_event.is_set():
-                return {"cancelled": True}
-            if update_state:
-                update_state(stage="recording_ids", current_track=idx, completed=idx, total=len(clean_recordings) + 2)
-            log.append(f"Attaching recording MBID to item {row['item_id']}.")
-            result = _beet_run([BEET_BIN, "-c", cfg, "modify", "--yes", "--nowrite", f"id:{row['item_id']}", f"mb_trackid={row['mb_trackid']}"], log, timeout=60, env=_beet_env(), cancel=cancel_event)
-            chunk = _append_clean_output(log, result.stdout, result.stderr)
-            output = (output + "\n" + chunk).strip()
-            if result.returncode not in (0, -9, 124):
-                raise RuntimeError(f"beet modify failed for item {row['item_id']} with exit code {result.returncode}")
+            update_state(stage="planning", completed=0, total=len(clean_recordings) + 2)
+
+        plan = beets_client.plan_album_metadata(
+            album_id=aid,
+            album_fields=album_fields,
+            track_fields=track_fields,
+        )
+
+        if not plan.get("ok"):
+            err_msg = plan.get("error") or "Metadata plan rejected by engine"
+            log.append(f"Metadata plan failed: {err_msg}")
+            raise RuntimeError(f"Metadata plan failed: {err_msg}")
+
+        plan_token = plan.get("token") or plan.get("operation_id")
+        if not plan_token:
+            log.append("No changes detected in metadata plan.")
+            return {"output": "No changes needed", "album_id": aid, "recording_mbids_attached": 0, "files_moved": 0, "verified": True}
+
+        if cancel_event is not None and cancel_event.is_set():
+            log.append("[cancel requested before apply]")
+            return {"cancelled": True}
+
+        # Step 2: Apply plan with tag writing under exclusive engine lock
         if update_state:
-            update_state(stage="write_tags", completed=len(clean_recordings) + 1, total=len(clean_recordings) + 2)
-        log.append("Writing updated MusicBrainz IDs to file tags.")
-        result = _beet_run([BEET_BIN, "-c", cfg, "write", "--yes", query], log, timeout=240, env=_beet_env(), cancel=cancel_event)
-        chunk = _append_clean_output(log, result.stdout, result.stderr)
-        output = (output + "\n" + chunk).strip()
-        if result.returncode not in (0, -9, 124):
-            raise RuntimeError(f"beet write failed with exit code {result.returncode}")
+            update_state(stage="applying", completed=1, total=len(clean_recordings) + 2)
+        log.append("Applying metadata updates and writing tags via engine...")
+
+        apply_res = beets_client.apply_album_metadata(
+            plan_token=plan_token,
+            force_write_tags=True,
+        )
+
+        if not apply_res.get("ok"):
+            err_msg = apply_res.get("error") or "Metadata apply rejected by engine"
+            log.append(f"Metadata apply failed: {err_msg}")
+            raise RuntimeError(f"Metadata apply failed: {err_msg}")
+
+        # Step 3: Library cache invalidation and database verification
+        if update_state:
+            update_state(stage="verifying", completed=len(clean_recordings) + 1, total=len(clean_recordings) + 2)
+        _invalidate_lib_cache()
+
         updated_album = lib.get_album(aid)
         verify_albumartist = _s(getattr(updated_album, "mb_albumartistid", "") or getattr(updated_album, "mb_albumartistids", "") or "").lower() if updated_album else ""
         verify_releasegroup = _s(getattr(updated_album, "mb_releasegroupid", "") or "").lower() if updated_album else ""
@@ -1530,8 +1554,14 @@ def attach_album_mbids(aid: int):
         _invalidate_lib_cache()
         if update_state:
             update_state(stage="verified", completed=len(clean_recordings) + 2, total=len(clean_recordings) + 2)
-        log.append(f"Verified MusicBrainz IDs. Updated {verified_recordings} recording ID(s). Files were not moved or renamed.")
-        return {"output": output.strip(), "album_id": aid, "recording_mbids_attached": verified_recordings, "files_moved": 0, "verified": True}
+        log.append(f"Verified MusicBrainz IDs. Attached {verified_recordings} recording ID(s). Files were not moved or renamed.")
+        return {
+            "output": f"Attached MusicBrainz IDs to album {aid} ({verified_recordings} recording IDs attached).",
+            "album_id": aid,
+            "recording_mbids_attached": verified_recordings,
+            "files_moved": 0,
+            "verified": True,
+        }
 
     job = jobs.start_python(_do, label=f"Attach MusicBrainz IDs: album {aid}", metadata={"type": "musicbrainz-match", "album_id": aid, "transaction_operation": "MusicBrainz Match"})
     return jsonify({"ok": True, "job_id": job.job_id})

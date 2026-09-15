@@ -6,6 +6,7 @@ Replaces local subprocess execution and direct SQLite access with authenticated 
 import base64
 import json
 import os
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -55,6 +56,9 @@ class BeetsCommandError(BeetsError):
         self.returncode = returncode
         self.stdout = stdout
         self.stderr = stderr
+
+
+BeetsClientError = BeetsError
 
 
 class ParsedQuery:
@@ -331,9 +335,34 @@ class BeetsClient:
         """Engine-side bulk import replacement rollback (SEC-002 Wave 18)."""
         return self._request("POST", "/imports/bulk-replacement/rollback", {"operation_id": operation_id}, timeout=timeout)
 
-    def plan_album_mb_track_repair(self, payload: Dict[str, Any], *, timeout: float = 30.0) -> Dict[str, Any]:
+    def plan_album_mb_track_repair(
+        self,
+        payload_or_album_id: Any = None,
+        *,
+        album_id: Optional[int] = None,
+        track_matches: Optional[List[Dict[str, Any]]] = None,
+        album_metadata: Optional[Dict[str, Any]] = None,
+        zero_unmatched: bool = False,
+        timeout: float = 30.0,
+        **kwargs,
+    ) -> Dict[str, Any]:
         """Engine-side album MB track repair planning (SEC-002 Wave 19)."""
-        return self._request("POST", "/albums/mb-track-repair/plan", payload, timeout=timeout)
+        if isinstance(payload_or_album_id, dict):
+            body = dict(payload_or_album_id)
+        elif isinstance(payload_or_album_id, (int, str)) and str(payload_or_album_id).isdigit():
+            body = {"album_id": int(payload_or_album_id)}
+        else:
+            body = {}
+        if album_id is not None:
+            body["album_id"] = int(album_id)
+        if track_matches is not None:
+            body["track_matches"] = track_matches
+        if album_metadata is not None:
+            body["album_metadata"] = album_metadata
+        if zero_unmatched:
+            body["zero_unmatched"] = bool(zero_unmatched)
+        body.update(kwargs)
+        return self._request("POST", "/albums/mb-track-repair/plan", body, timeout=timeout)
 
     def apply_album_mb_track_repair(self, operation_id: str, *, write_tags: bool = True, timeout: float = 60.0) -> Dict[str, Any]:
         """Engine-side album MB track repair application (SEC-002 Wave 19).
@@ -352,9 +381,47 @@ class BeetsClient:
         """Engine-side album MB track repair rollback (SEC-002 Wave 19)."""
         return self._request("POST", "/albums/mb-track-repair/rollback", {"operation_id": operation_id}, timeout=timeout)
 
-    def plan_existing_album_reconcile(self, payload: Dict[str, Any], *, timeout: float = 30.0) -> Dict[str, Any]:
-        """Engine-side existing-album duplicate & move reconciliation planning (SEC-002 Wave 20)."""
-        return self._request("POST", "/albums/existing-reconcile/plan", payload, timeout=timeout)
+    def plan_existing_album_reconcile(
+        self,
+        payload_or_target_id: Any = None,
+        *,
+        existing_album_id: Optional[int] = None,
+        imported_album_id: Optional[int] = None,
+        dup_item_ids: Optional[List[int]] = None,
+        move_item_ids: Optional[List[int]] = None,
+        retire_imported_album: bool = False,
+        timeout: float = 30.0,
+        **kwargs,
+    ) -> Dict[str, Any]:
+        """Engine-side existing-album duplicate & move reconciliation planning (SEC-002 Wave 20).
+
+        No `allow_different_releasegroup`/`force` override exists here or on
+        the engine side -- the Release-Group-mismatch identity gate in
+        `create_existing_album_reconcile_plan`/`execute_existing_album_reconcile_apply`
+        is unconditional. See docs/TECHNICAL_DEBT.md ARCH-003 for why a
+        cherry-picked version of this bypass was reviewed and removed rather
+        than kept dormant.
+        """
+        if isinstance(payload_or_target_id, dict):
+            body = dict(payload_or_target_id)
+        elif isinstance(payload_or_target_id, (int, str)) and str(payload_or_target_id).isdigit():
+            body = {"existing_album_id": int(payload_or_target_id)}
+        else:
+            body = {}
+        if existing_album_id is not None:
+            body["existing_album_id"] = int(existing_album_id)
+        if imported_album_id is not None:
+            body["imported_album_id"] = int(imported_album_id)
+        if dup_item_ids is not None:
+            body["dup_item_ids"] = list(dup_item_ids)
+        if move_item_ids is not None:
+            body["move_item_ids"] = list(move_item_ids)
+        if retire_imported_album:
+            body["retire_imported_album"] = bool(retire_imported_album)
+        body.pop("allow_different_releasegroup", None)
+        body.pop("force", None)
+        body.update(kwargs)
+        return self._request("POST", "/albums/existing-reconcile/plan", body, timeout=timeout)
 
     def apply_existing_album_reconcile(self, operation_id: str, *, timeout: float = 60.0) -> Dict[str, Any]:
         """Engine-side existing-album duplicate & move reconciliation application (SEC-002 Wave 20)."""
@@ -364,9 +431,34 @@ class BeetsClient:
         """Engine-side existing-album duplicate & move reconciliation rollback (SEC-002 Wave 20)."""
         return self._request("POST", "/albums/existing-reconcile/rollback", {"operation_id": operation_id}, timeout=timeout)
 
-    def plan_artist_folder_reconcile(self, payload: Dict[str, Any], *, timeout: float = 30.0) -> Dict[str, Any]:
+    def plan_artist_folder_reconcile(
+        self,
+        payload_or_root: Any = None,
+        *,
+        root: Optional[str] = None,
+        mode: Optional[str] = None,
+        selected_keys: Optional[List[str]] = None,
+        candidates: Optional[List[Dict[str, Any]]] = None,
+        timeout: float = 30.0,
+        **kwargs,
+    ) -> Dict[str, Any]:
         """Engine-side artist-folder merge & MBID stamping planning (SEC-002 Wave 21)."""
-        return self._request("POST", "/artists/reconcile/plan", payload, timeout=timeout)
+        if isinstance(payload_or_root, dict):
+            body = dict(payload_or_root)
+        elif isinstance(payload_or_root, str):
+            body = {"root": payload_or_root}
+        else:
+            body = {}
+        if root is not None:
+            body["root"] = root
+        if mode is not None:
+            body["mode"] = mode
+        if selected_keys is not None:
+            body["selected_keys"] = list(selected_keys)
+        if candidates is not None:
+            body["candidates"] = list(candidates)
+        body.update(kwargs)
+        return self._request("POST", "/artists/reconcile/plan", body, timeout=timeout)
 
     def apply_artist_folder_reconcile(self, operation_id: str, *, timeout: float = 60.0) -> Dict[str, Any]:
         """Engine-side artist-folder merge & MBID stamping application (SEC-002 Wave 21)."""
@@ -387,6 +479,70 @@ class BeetsClient:
     def rollback_album_maintenance(self, operation_id: str, *, timeout: float = 60.0) -> Dict[str, Any]:
         """Engine-side album maintenance rollback (SEC-002 Wave 22)."""
         return self._request("POST", "/albums/maintenance/rollback", {"operation_id": operation_id}, timeout=timeout)
+
+    def plan_album_duplicate_merge(self, payload: Dict[str, Any], *, timeout: float = 30.0) -> Dict[str, Any]:
+        """Engine-side duplicate-album-row merge planning (ARCH-003 Wave 30)."""
+        return self._request("POST", "/albums/duplicate-merge/plan", payload, timeout=timeout)
+
+    def apply_album_duplicate_merge(self, operation_id: str, *, timeout: float = 60.0) -> Dict[str, Any]:
+        """Engine-side duplicate-album-row merge application (ARCH-003 Wave 30)."""
+        return self._request("POST", "/albums/duplicate-merge/apply", {"operation_id": operation_id}, timeout=timeout)
+
+    def rollback_album_duplicate_merge(self, operation_id: str, *, timeout: float = 60.0) -> Dict[str, Any]:
+        """Engine-side duplicate-album-row merge rollback (ARCH-003 Wave 30)."""
+        return self._request("POST", "/albums/duplicate-merge/rollback", {"operation_id": operation_id}, timeout=timeout)
+
+    def merge_duplicate_albums(self, target_album_id: int, source_album_id: int) -> Dict[str, Any]:
+        """Merge source album's items into target and retire source through album_duplicate_merge_v1."""
+        plan_res = self.plan_album_duplicate_merge({
+            "target_album_id": target_album_id,
+            "source_album_id": source_album_id,
+        })
+        if not plan_res.get("ok"):
+            return {"ok": False, "error": plan_res.get("error") or "Duplicate merge plan rejected", "code": plan_res.get("code")}
+        op_id = plan_res.get("operation_id")
+        if not op_id:
+            return {"ok": True, "moved": 0}
+        apply_res = self.apply_album_duplicate_merge(op_id)
+        if not apply_res.get("ok"):
+            return {"ok": False, "error": apply_res.get("error") or "Duplicate merge apply failed", "code": apply_res.get("code")}
+        return {
+            "ok": True,
+            "moved": apply_res.get("moved", 0),
+            "target_album_id": target_album_id,
+            "source_album_id": source_album_id,
+            "operation_id": op_id,
+            "inherit_fields": plan_res.get("inherit_fields") or {},
+        }
+
+    def merge_split_album_items(self, target_album_id: int, source_album_id: int, item_ids: List[int]) -> Dict[str, Any]:
+        """Move a selected item subset from source into target through
+        album_duplicate_merge_v1's partial/adopt mode (ARCH-003 Wave 31):
+        moved items adopt target's album-level fields, source is retired
+        only if the move empties it, and the engine enforces a real
+        Release-Group identity check on the selected items."""
+        plan_res = self.plan_album_duplicate_merge({
+            "target_album_id": target_album_id,
+            "source_album_id": source_album_id,
+            "item_ids": item_ids,
+            "adopt_target_fields": True,
+        })
+        if not plan_res.get("ok"):
+            return {"ok": False, "error": plan_res.get("error") or "Split-album merge plan rejected", "code": plan_res.get("code")}
+        op_id = plan_res.get("operation_id")
+        if not op_id:
+            return {"ok": True, "moved": 0, "source_album_deleted": False}
+        apply_res = self.apply_album_duplicate_merge(op_id)
+        if not apply_res.get("ok"):
+            return {"ok": False, "error": apply_res.get("error") or "Split-album merge apply failed", "code": apply_res.get("code")}
+        return {
+            "ok": True,
+            "moved": apply_res.get("moved", 0),
+            "source_album_deleted": bool(apply_res.get("source_album_deleted")),
+            "target_album_id": target_album_id,
+            "source_album_id": source_album_id,
+            "operation_id": op_id,
+        }
 
     def plan_album_artwork(self, payload: Dict[str, Any], *, timeout: float = 30.0) -> Dict[str, Any]:
         """Engine-side album artwork planning (SEC-002 Wave 22)."""
@@ -491,21 +647,69 @@ class BeetsClient:
         """Engine-side import folder rollback (SEC-002 Wave 22 Closure)."""
         return self._request("POST", "/import/rollback", {"operation_id": operation_id}, timeout=timeout)
 
-    def plan_folder_cleanup(self, payload: Dict[str, Any], *, timeout: float = 30.0) -> Dict[str, Any]:
+    def plan_folder_cleanup(
+        self,
+        payload_or_action: Any = None,
+        *,
+        action: Optional[str] = None,
+        source_path: Optional[str] = None,
+        target_path: Optional[str] = None,
+        preview_token: Optional[str] = None,
+        timeout: float = 30.0,
+        **kwargs,
+    ) -> Dict[str, Any]:
         """Engine-side folder cleanup planning (SEC-002 Wave 22 Closure)."""
-        return self._request("POST", "/folders/cleanup/plan", payload, timeout=timeout)
+        if isinstance(payload_or_action, dict):
+            body = dict(payload_or_action)
+        elif isinstance(payload_or_action, str):
+            body = {"action": payload_or_action}
+        else:
+            body = {}
+        if action is not None:
+            body["action"] = action
+        if source_path is not None:
+            body["source_path"] = source_path
+        if target_path is not None:
+            body["target_path"] = target_path
+        if preview_token is not None:
+            body["preview_token"] = preview_token
+        body.update(kwargs)
+        return self._request("POST", "/folders/cleanup/plan", body, timeout=timeout)
 
-    def apply_folder_cleanup(self, operation_id: str, *, timeout: float = 60.0) -> Dict[str, Any]:
+    def apply_folder_cleanup(self, operation_id: str, *, confirmed: bool = True, timeout: float = 60.0, **kwargs) -> Dict[str, Any]:
         """Engine-side folder cleanup application (SEC-002 Wave 22 Closure)."""
-        return self._request("POST", "/folders/cleanup/apply", {"operation_id": operation_id}, timeout=timeout)
+        body = {"operation_id": operation_id, "confirmed": bool(confirmed), **kwargs}
+        return self._request("POST", "/folders/cleanup/apply", body, timeout=timeout)
 
     def rollback_folder_cleanup(self, operation_id: str, *, timeout: float = 60.0) -> Dict[str, Any]:
         """Engine-side folder cleanup rollback (SEC-002 Wave 22 Closure)."""
         return self._request("POST", "/folders/cleanup/rollback", {"operation_id": operation_id}, timeout=timeout)
 
-    def plan_library_cleanup(self, payload: Dict[str, Any], *, timeout: float = 30.0) -> Dict[str, Any]:
+    def plan_library_cleanup(
+        self,
+        payload_or_action: Any = None,
+        *,
+        action: Optional[str] = None,
+        paths: Optional[List[str]] = None,
+        files: Optional[List[str]] = None,
+        timeout: float = 30.0,
+        **kwargs,
+    ) -> Dict[str, Any]:
         """Engine-side library cleanup planning (SEC-002 / ARCH-003 library_cleanup_v1)."""
-        return self._request("POST", "/library/cleanup/plan", payload, timeout=timeout)
+        if isinstance(payload_or_action, dict):
+            body = dict(payload_or_action)
+        elif isinstance(payload_or_action, str):
+            body = {"action": payload_or_action}
+        else:
+            body = {}
+        if action is not None:
+            body["action"] = action
+        if paths is not None:
+            body["paths"] = list(paths)
+        if files is not None:
+            body["files"] = list(files)
+        body.update(kwargs)
+        return self._request("POST", "/library/cleanup/plan", body, timeout=timeout)
 
     def apply_library_cleanup(self, operation_id: str, *, timeout: float = 60.0) -> Dict[str, Any]:
         """Engine-side library cleanup application (SEC-002 / ARCH-003 library_cleanup_v1)."""
@@ -896,6 +1100,67 @@ class BeetsClient:
         """Fetch all items by paginating through all available pages up to safety ceiling."""
         return self._fetch_all_paginated("/items", "items", page_size=page_size, safety_ceiling=safety_ceiling)
 
+    # ARCH-007 (Wave 34): structured, workflow-specific read methods that
+    # replace app.py's own raw `_db()`-based SELECTs in
+    # library_merge_artist(), library_normalize_artists(),
+    # library_mbsync_all(), and library_move_all() -- all four previously
+    # routed their read/detection step through `_db()` ->
+    # RemoteSQLiteConnection -> raw_sqlite_query(), which unconditionally
+    # raises in the real two-service topology (confirmed by real Docker
+    # acceptance testing, not theoretical). Each method below is a narrow,
+    # fixed-shape query engineered for exactly the one caller need it
+    # serves -- server-owned WHERE clauses with bound parameters, never
+    # caller-supplied SQL -- not a reopening of the raw-SQL boundary
+    # raw_sqlite_query() deliberately closed.
+
+    def find_all_albums_by_albumartist(self, albumartist: str) -> List[Dict[str, Any]]:
+        """Every album row whose albumartist is EXACTLY the given string
+        (an equality match, not the substring `query=artist:...` LIKE
+        filter /albums also supports -- a LIKE match here could silently
+        pull in an unrelated album, e.g. "Bob" also matching "Bobby").
+        Structured replacement for library_merge_artist()'s and
+        library_normalize_artists()'s per-name album lookup."""
+        if not albumartist or not albumartist.strip():
+            raise BeetsError("albumartist cannot be empty")
+        return self._fetch_all_paginated(
+            f"/albums?albumartist={urllib.parse.quote(albumartist)}", "albums", safety_ceiling=20000
+        )
+
+    def list_distinct_albumartists(self) -> List[str]:
+        """Every distinct, non-empty albumartist value library-wide.
+        Structured replacement for library_normalize_artists()'s
+        scan-every-albumartist step."""
+        res = self._request("GET", "/library/albumartists")
+        values = res.get("albumartists", [])
+        if not isinstance(values, list):
+            raise BeetsError(
+                f"Malformed /library/albumartists response: 'albumartists' is not a list ({type(values).__name__})"
+            )
+        return [str(v) for v in values]
+
+    def find_all_orphan_albums(self) -> List[Dict[str, Any]]:
+        """Every album row with zero item rows. Structured replacement for
+        library_mbsync_all()'s pre-mbsync orphan-album prune step (`beet
+        mbsync` crashes on these rows if they are not pruned first)."""
+        return self._fetch_all_paginated("/albums?orphan=true", "albums", safety_ceiling=20000)
+
+    def list_distinct_item_paths(self) -> List[str]:
+        """Every distinct item path library-wide. Structured replacement for
+        library_move_all()'s pre-move empty-folder-cleanup candidate scan
+        (the web manager has no filesystem mount into MUSIC_ROOT in the
+        supported deployment, so it cannot walk the real directory tree
+        itself and must derive candidate directories from item paths
+        instead). Raises BeetsError if the engine's own response-size
+        safety cap is exceeded (HTTP 413) rather than silently returning a
+        partial list."""
+        res = self._request("GET", "/library/item-paths")
+        values = res.get("paths", [])
+        if not isinstance(values, list):
+            raise BeetsError(
+                f"Malformed /library/item-paths response: 'paths' is not a list ({type(values).__name__})"
+            )
+        return [str(v) for v in values]
+
     def update_item_fields(self, item_id: int, fields: Dict[str, Any]) -> Dict[str, Any]:
         """Update fields on item row in SQLite under lock."""
         return self._request("PATCH", f"/items/{item_id}", {"fields": fields})
@@ -985,11 +1250,9 @@ class BeetsClient:
         album_data = self.get_album(album_id) or {}
         items = album_data.get("items") or []
         item_ids = [int(it.get("id") or 0) for it in items if int(it.get("id") or 0) > 0]
-        if not item_ids:
-            return {"ok": False, "error": f"Album {album_id} has no track items"}
 
         plan_res = self.plan_album_maintenance({
-            "mode": "remove_tracks",
+            "mode": "remove_album" if not item_ids else "remove_tracks",
             "album_id": album_id,
             "item_ids": item_ids,
             "delete_files": delete_files,
@@ -1010,6 +1273,29 @@ class BeetsClient:
             "items_deleted": len(item_ids),
             "files_deleted": len(item_ids) if delete_files else 0,
         }
+
+    def repoint_item_db_path(self, item_id: int, album_id: int, old_path: str, new_path: str) -> Dict[str, Any]:
+        """Correct one item's items.path DB value to an already-existing
+        file through album_maintenance_v1's deduplicate-mode fix_updates/
+        repoint_db path (ARCH-003 Wave 31). No file is moved -- the target
+        must already exist there; the engine validates root containment,
+        rejects symlinks, and TOCTOU-revalidates the target is unchanged
+        immediately before writing.
+        """
+        plan_res = self.plan_album_maintenance({
+            "mode": "deduplicate",
+            "album_id": album_id,
+            "fix_updates": [{"id": item_id, "old_path": old_path, "new_path": new_path, "rename": False}],
+        })
+        if not plan_res.get("ok"):
+            return {"ok": False, "error": plan_res.get("error") or "Path repair plan rejected", "code": plan_res.get("code")}
+        op_id = plan_res.get("operation_id")
+        if not op_id:
+            return {"ok": True, "repointed": False}
+        apply_res = self.apply_album_maintenance(op_id)
+        if not apply_res.get("ok"):
+            return {"ok": False, "error": apply_res.get("error") or "Path repair apply failed", "code": apply_res.get("code")}
+        return {"ok": True, "repointed": True, "operation_id": op_id}
 
     # ── album_relocation_v1 Pure HTTP Client Methods ────────────────────────────
 
@@ -1045,13 +1331,49 @@ class BeetsClient:
 
     # ── album_metadata_repair_v1 Pure HTTP Client Methods ──────────────────────
 
-    def plan_album_metadata(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def plan_album_metadata(
+        self,
+        payload: Optional[Dict[str, Any]] = None,
+        *,
+        album_id: Optional[int] = None,
+        album_fields: Optional[Dict[str, Any]] = None,
+        track_fields: Optional[Dict[Any, Dict[str, Any]]] = None,
+        updates: Optional[Dict[str, Any]] = None,
+        item_updates: Optional[Dict[Any, Dict[str, Any]]] = None,
+        force_write_tags: bool = False,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
         """Request preview plan for album metadata update via HTTP."""
-        return self._request("POST", "/albums/metadata/plan", payload)
+        if payload is None:
+            payload = {
+                "album_id": album_id,
+                "updates": album_fields if album_fields is not None else (updates or {}),
+                "item_updates": track_fields if track_fields is not None else (item_updates or {}),
+                "force_write_tags": force_write_tags,
+                **kwargs,
+            }
+        res = self._request("POST", "/albums/metadata/plan", payload)
+        if isinstance(res, dict) and "operation_id" in res and "token" not in res:
+            res["token"] = res["operation_id"]
+        return res
 
-    def apply_album_metadata(self, operation_id: str) -> Dict[str, Any]:
+    def apply_album_metadata(
+        self,
+        operation_id: Optional[str] = None,
+        *,
+        plan_token: Optional[str] = None,
+        force_write_tags: bool = False,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
         """Execute album metadata apply via HTTP."""
-        return self._request("POST", "/albums/metadata/apply", {"operation_id": operation_id})
+        op_id = operation_id or plan_token
+        if not op_id:
+            raise BeetsError("operation_id or plan_token is required", error_code="INVALID_PARAMETER")
+        payload = {"operation_id": op_id}
+        if force_write_tags:
+            payload["force_write_tags"] = True
+        payload.update(kwargs)
+        return self._request("POST", "/albums/metadata/apply", payload)
 
     def rollback_album_metadata(self, operation_id: str) -> Dict[str, Any]:
         """Roll back album metadata update via HTTP."""
@@ -1136,6 +1458,105 @@ class BeetsClient:
         if not apply_res.get("ok"):
             return {"ok": False, "error": apply_res.get("error") or "Genre repair apply failed", "code": apply_res.get("code")}
         return {"ok": True, "output": apply_res.get("output") or "", "genre_after": apply_res.get("genre_after")}
+
+    # ── Library Maintenance & Submissions (ARCH-003 / Milestone 1) ─────────────
+
+    def mbsync(
+        self,
+        query: str = "",
+        pretend: bool = False,
+        async_job: bool = False,
+        timeout: Optional[float] = None,
+        async_: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        """Execute beet mbsync inside the Beets engine container under engine OS lock.
+
+        Replaces local Web Manager subprocess execution in library_mbsync_all().
+        Fails closed: raises BeetsUnavailableError if engine is unreachable,
+        BeetsAuthError on 401, or BeetsError on non-zero exit / timeout.
+        Never falls back to local subprocess.
+        """
+        if query is not None and not isinstance(query, str):
+            raise BeetsError("query must be a string", error_code="INVALID_PARAMETER")
+        q_str = (query or "").strip()
+        if any(c in q_str for c in ("\x00", "\n", "\r", ";", "&&", "||", "|", ">", "<", "$", "`")):
+            raise BeetsError("query contains forbidden control or shell characters", error_code="INVALID_PARAMETER")
+        if len(q_str) > 256:
+            raise BeetsError("query exceeds maximum length of 256 characters", error_code="INVALID_PARAMETER")
+
+        is_async = bool(async_) if async_ is not None else bool(async_job)
+        payload: Dict[str, Any] = {
+            "query": q_str,
+            "pretend": bool(pretend),
+            "async": is_async,
+        }
+        req_timeout = float(timeout) if timeout is not None else (15.0 if is_async else 7200.0)
+        return self._request("POST", "/library/mbsync", payload, timeout=req_timeout)
+
+    def move_library(
+        self,
+        query: str = "",
+        rescan_first: bool = True,
+        pretend: bool = False,
+        timeout: Optional[float] = None,
+        async_job: bool = False,
+        async_: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        """Execute beet update + beet move inside the Beets engine container under exclusive OS lock.
+
+        Replaces local Web Manager subprocess execution in library_move_all().
+        Fails closed: raises BeetsUnavailableError if engine is unreachable.
+        Never falls back to local subprocess.
+        """
+        if query is not None and not isinstance(query, str):
+            raise BeetsError("query must be a string", error_code="INVALID_PARAMETER")
+        q_str = (query or "").strip()
+        if any(c in q_str for c in ("\x00", "\n", "\r", ";", "&&", "||", "|", ">", "<", "$", "`")):
+            raise BeetsError("query contains forbidden control or shell characters", error_code="INVALID_PARAMETER")
+        if len(q_str) > 256:
+            raise BeetsError("query exceeds maximum length of 256 characters", error_code="INVALID_PARAMETER")
+
+        is_async = bool(async_) if async_ is not None else bool(async_job)
+        payload: Dict[str, Any] = {
+            "query": q_str,
+            "rescan_first": bool(rescan_first),
+            "pretend": bool(pretend),
+        }
+        if is_async:
+            payload["async"] = True
+        req_timeout = float(timeout) if timeout is not None else (15.0 if is_async else 3600.0)
+        return self._request("POST", "/library/move", payload, timeout=req_timeout)
+
+    def acoustid_submit(
+        self,
+        query: str,
+        api_key: Optional[str] = None,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Submit audio fingerprints to AcoustID via engine-owned beet submit.
+
+        Replaces local Web Manager subprocess execution in routes_submissions.py.
+        Fails closed: raises BeetsUnavailableError if engine is unreachable.
+        Never falls back to local subprocess.
+        """
+        if not query or not isinstance(query, str) or not query.strip():
+            raise BeetsError("Query string is required for acoustid_submit", error_code="INVALID_PARAMETER")
+        q_str = query.strip()
+        if any(c in q_str for c in ("\x00", "\n", "\r", ";", "&&", "||", "|", ">", "<", "$", "`")):
+            raise BeetsError("query contains forbidden control or shell characters", error_code="INVALID_PARAMETER")
+
+        payload: Dict[str, Any] = {"query": q_str}
+        if api_key:
+            if not isinstance(api_key, str):
+                raise BeetsError("api_key must be a string", error_code="INVALID_PARAMETER")
+            key_str = api_key.strip()
+            if not re.match(r"^[a-zA-Z0-9_-]{1,64}$", key_str):
+                raise BeetsError("api_key must be alphanumeric and <= 64 characters", error_code="INVALID_PARAMETER")
+            payload["api_key"] = key_str
+
+        req_timeout = float(timeout) if timeout is not None else 300.0
+        return self._request("POST", "/submissions/submit", payload, timeout=req_timeout)
+
 
 
 class RemoteSQLiteCursor:

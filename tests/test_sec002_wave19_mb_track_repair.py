@@ -35,7 +35,8 @@ CREATE TABLE IF NOT EXISTS albums (
     albumartist TEXT,
     mb_albumid TEXT,
     mb_releasegroupid TEXT,
-    year INTEGER
+    year INTEGER,
+    country TEXT
 );
 CREATE TABLE IF NOT EXISTS items (
     id INTEGER PRIMARY KEY,

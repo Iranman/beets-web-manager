@@ -974,3 +974,138 @@ recorded per the review's own explicit instruction to distinguish directly-verif
 reports' claims that could not be independently reproduced. The prior claim ("P3, Windows-only, safe to
 leave open") could not be reproduced once `main`'s own independent fix was empirically tested; it is
 superseded by this section, not silently replaced.
+
+---
+
+## 12. PR #112 / Wave 29 PR-scoped closure — two real findings, 22 false positives (2026-09-15)
+
+After the frontend dependency-security PR (#113, `next` 16.2.11→16.3.4, `sharp` override 0.35.3→0.35.4,
+`vitest` 4.1.10→4.1.11) merged to `main` at `8ebe35b` and Wave 29 merged that `main` in at `66c1d300`,
+the GitHub Advanced Security `CodeQL` check on PR #112 reported **24 new PR-scoped alerts, all high**
+(`#1069`-`#1092`), while `Analyze (python)`, `Analyze (javascript-typescript)` and `Analyze (actions)`
+all passed. `main` itself carried **0 open** alerts and 573 dismissed ones, so the working hypothesis was
+re-fingerprinting of already-dispositioned code by Wave 29's line movement.
+
+**That hypothesis was tested rather than assumed, and it was wrong for two of the 24.** `git blame` on
+every flagged line showed 23 of them landed in Wave-29-only commits (`5a42faea`, `30367b31`,
+`642048ab`) — genuinely new code, not moved code. Each was then read in source rather than triaged from
+its rule name.
+
+### Alert #1091 — `py/polynomial-redos`, high — `backend/transaction_engine.py`, `_mb_track_repair_title_norm` — REAL, FIXED
+
+`_mb_track_repair_title_norm()` stripped bracketed annotations with
+`re.sub(r"[\(\[\{].*?[\)\]\}]", "", t)`. CodeQL's claim ("may run slow on strings starting with `(` and
+with many repetitions of `(`") is correct, and this was **verified by measurement, per Section 6's
+methodology**, not by inspection:
+
+| input (`"(" * n + "a" * n`) | pre-fix regex |
+|---|---|
+| 2,000 chars | 11 ms |
+| 8,000 chars | 181 ms |
+| 32,000 chars | 1.4 s |
+| 64,000 chars | **11.6 s** |
+
+Time quadruples as input doubles — textbook quadratic. The lazy `.*?` stops at the first closing
+bracket, so an opening bracket with no reachable closer fails only after scanning to the newline or end
+of string, and `re.sub` then retries at the next offset over the same tail. This is reachable in a
+single request body: these titles arrive as `album_mb_track_repair_v1`'s caller-supplied `target_tracks`.
+
+Note this is **not** the same disposition as the 13 `py/polynomial-redos` alerts dismissed in Section 6
+and "The other 13" — those were dismissed as `SAFE_BUT_CODEQL_BLIND` precisely *because* empirical timing
+showed them linear. The same method applied here showed the opposite, so the same standard required a fix.
+
+Replaced with `_strip_bracketed_spans()`: one forward pass over a precomputed
+next-reachable-closing-bracket table (a newline resets it, because `.` never crosses one), so an opener
+with no reachable closer is emitted literally with no rescan. **Byte-identical output**, proven over 28
+fixed edge cases plus 300,000 randomized inputs before the change landed, and re-proven in-repo over
+200,000 randomized inputs against both call sites. Post-fix: 64,000 chars in **14 ms** (from 11.6 s),
+and scaling is linear (256,000 chars in 56 ms).
+
+The identical regex in `backend/mb_alignment.py`'s `album_track_norm()` was fixed the same way. CodeQL
+had not flagged that copy (no traced path from a user-controlled source reaches it), but it is the same
+quadratic construct on the same kind of data, and the two functions are deliberately duplicated rather
+than shared — fixing only the flagged copy would have left the bug live behind a different entry point.
+`app.py`'s `_album_track_norm()` needed no change: it uses the keyword-gated
+`_ALBUM_TRACK_ANNOT_RE`/`_ALBUM_TRACK_UNCLOSED_RE` pair, not this pattern.
+
+### Alert #1092 — `py/clear-text-storage-sensitive-data`, high — `backend/beets_control_agent.py` — REAL (partially), FIXED
+
+The eight code flows trace to `/fingerprint`'s handler, which builds
+`config_override = f'chroma:\n  auto: no\n  apikey: "{safe_k}"\nacoustid:\n  apikey: "{safe_k}"\n'` — a
+real credential. The plaintext-on-disk itself is **not** fixable and is not claimed to be: beets only
+accepts a config as a real file, the architecture decision already recorded for `app.py`'s generated
+config (alert #332, `docs/TECHNICAL_DEBT.md` SEC-002).
+
+What *was* fixable is how the file got created. All four `beet -c` override sites used:
+
+```python
+with open(tmp_cfg_path, "w", encoding="utf-8") as f:
+    f.write(config_override)
+os.chmod(tmp_cfg_path, 0o600)
+```
+
+That creates the file under the process umask (0644 on these images) and only narrows it afterwards,
+leaving a window in a shared `/tmp` where any other local user could read the API key — and the plain
+`open()` would also follow a pre-planted symlink, truncating and writing the secret wherever it pointed.
+Consolidated into `_write_private_config_file()` using
+`O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW` with mode `0o600`, which creates the file atomically at its final
+mode and refuses outright if anything already exists at the path. Every call site already unlinked in a
+`finally` block, and every `job_id`/path component is uuid-derived, so `O_EXCL` cannot collide with a
+legitimate retry; `FileExistsError` is an `OSError`, which these sites already had to tolerate from
+`open()`.
+
+Side effect: consolidating four hand-rolled write+chmod pairs into one shared writer **reduced the
+ARCH-003 mutation surface from 444 to 437 sinks** (8 sinks replaced by 1, classified
+`ENGINE_CONFIG_STATE`/`config_v1` alongside `_write_temp_config`). `NEEDS_REVIEW` stayed 0 and
+unresolved domain counts stayed 0.
+
+### Alerts #1069-#1090 — `py/path-injection`, high — `backend/transaction_engine.py` (22 alerts) — FALSE POSITIVES, dismissed individually
+
+All 22 were read in source against the current head and dismissed one at a time, each with a comment
+naming the exact validating lines that dominate the flagged expression — no blanket text, no shared
+boilerplate standing in for a rationale:
+
+* **#1069-#1072** (`8352`, `8354`, `8356`), `album_maintenance` `repoint_db` branch — `src_p`/`dst_p` are
+  gated by `_path_under(..., allowed_roots[0])` at `8343` and `_path_has_symlink_under(...)` at `8345`,
+  both returning early. Same class as the 9 identical `album_maintenance` dismissals on `main`.
+* **#1073** (`11632`), `_cleanup_dir_stat_record` — the function raises `ValueError` at `11631` unless
+  containment holds and no symlink component exists under root, two lines above the flagged `stat()`.
+* **#1074-#1090** (`12384`-`12434`), `create_folder_cleanup_plan` `safe_rename`/`merge` branches — every
+  flagged expression is a read-only `exists()`/`is_dir()`/`is_symlink()`/`resolve()`/`rglob()` probe used
+  to *compute* the containment decision applied immediately after. `src_p` is validated at the function
+  head (`_normpath_within_roots` `12335`, `_cleanup_validate_path_under_roots` `12337`,
+  `_cleanup_root_for_path` `12340`); `tgt_p` at `12379`/`12381` (rename) and `12401`/`12403` (merge);
+  `dest_f` by `_path_under(dest_f, tgt_p)` at `12428` with its parent symlink-walked at `12432`. Nothing
+  is appended to `file_moves`/`dir_renames`/`dir_removals` until every check passes. Same class as the 29
+  read-only-probe and 7 `rglob`/`iterdir` enumeration dismissals on `main`.
+
+Several of these alerts flag *the guard itself* — `if tgt_p.exists() or tgt_p.is_symlink(): return
+folder_cleanup_target_exists` is the line that refuses an occupied or symlinked target, reported as
+though it were the sink.
+
+### Verification
+
+* Backend suite: **3104 passed, 0 failed, 146 skipped, 514 subtests passed**.
+* ARCH-003 inventory: 437 entries, 0 unresolved, 0 `NEEDS_REVIEW`, all discovered sinks matched.
+* Endpoint inventory: 244 routes, 0 manual review, date-only drift.
+* Secret scan and compose security validation: pass.
+* `tests/test_sec002_wave29_title_norm_redos.py` added — equivalence (fixed + randomized, both copies),
+  adversarial timing, a non-quadratic scaling assertion, a source guard against the pattern being pasted
+  back in, and owner-only/`O_EXCL`/symlink-refusal coverage for the config writer. No test was disabled
+  or weakened for any of this.
+
+### One CI failure investigated and shown not to be ours
+
+The first `security` run on the fix commit (`4e6f264`) failed with
+`Segmentation fault (core dumped) python3 -m unittest discover` (exit 139) — an interpreter crash, not a
+test assertion. The `push`-triggered run of **the same SHA** passed, `python-tests` passed twice on it,
+and re-running the failed job on that same SHA returned **success**. Recorded here rather than silently
+re-run: the changes in this section are pure-Python string and file-descriptor work with no native
+extension involvement, and the crash trace sits in the threaded HTTP-server teardown of the engine
+import-handoff tests. Treated as pre-existing nondeterministic infrastructure flakiness.
+
+One genuine hazard *was* found while reviewing that failure, in the new test file rather than in
+production code: a test called `os.umask(0o000)`, which is process-global while this suite runs threaded
+HTTP servers, and could have changed the mode of a file another test created concurrently. Removed in
+favour of asserting the creation flags by inspection; real owner-only mode is still asserted against a
+real created file elsewhere in the same class.

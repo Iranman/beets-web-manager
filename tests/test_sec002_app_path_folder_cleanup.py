@@ -192,5 +192,92 @@ class SafeRenamesJobRootAndDestinationContainmentTests(unittest.TestCase):
         mock_rename.assert_not_called()
 
 
+class FolderCleanupEngineErrorResponseTests(unittest.TestCase):
+    """`_plan_and_apply()`'s internal helper `_engine_reject()` and
+    `_engine_exception()` both return a plain (Response, status_code)
+    2-tuple, which the original `isinstance(result, tuple)` check could
+    not tell apart from the 3-item `(plan_res, apply_res, op_id)` success
+    tuple -- every rejected/failed plan or apply unpacked a 2-tuple into
+    3 names and raised an uncaught ValueError instead of the intended
+    structured JSON error. These prove each rejection/failure/offline
+    path returns a real JSON body with the right status code instead of
+    crashing."""
+
+    def _post_apply(self, payload, source=Path("/data/media/music/Artist/Album")):
+        with mock.patch.object(app_module, "MUSIC_ROOT", Path("/data/media/music")), \
+             mock.patch.object(app_module, "_folder_cleanup_path", return_value=(source, None)):
+            with app_module.app.test_request_context(
+                "/api/clean/folder-placeholder/apply", method="POST",
+                data=json.dumps(payload), content_type="application/json",
+            ):
+                return app_module.apply_folder_placeholder_action_api()
+
+    def test_plan_rejection_returns_structured_json_not_valueerror(self):
+        with mock.patch.object(
+            app_module.beets_client, "plan_folder_cleanup",
+            return_value={"ok": False, "error": "not empty", "code": "folder_cleanup_not_empty"},
+        ):
+            response = self._post_apply({
+                "action": "remove_empty_source", "confirmed": True,
+                "source_path": "/data/media/music/Artist/Album", "preview_token": "x",
+            })
+        data = response[0].get_json()
+        self.assertEqual(response[1], 400)
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["code"], "folder_cleanup_not_empty")
+
+    def test_apply_rejection_returns_structured_json_not_valueerror(self):
+        with mock.patch.object(
+            app_module.beets_client, "plan_folder_cleanup",
+            return_value={"ok": True, "operation_id": "op-1"},
+        ), mock.patch.object(
+            app_module.beets_client, "apply_folder_cleanup",
+            return_value={"ok": False, "error": "stale", "code": "folder_cleanup_toctou_mismatch", "mutated": False},
+        ):
+            response = self._post_apply({
+                "action": "remove_empty_source", "confirmed": True,
+                "source_path": "/data/media/music/Artist/Album", "preview_token": "x",
+            })
+        data = response[0].get_json()
+        self.assertEqual(response[1], 409)
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["code"], "folder_cleanup_toctou_mismatch")
+
+    def test_engine_unavailable_during_apply_returns_503_not_valueerror(self):
+        with mock.patch.object(
+            app_module.beets_client, "plan_folder_cleanup",
+            return_value={"ok": True, "operation_id": "op-1"},
+        ), mock.patch.object(
+            app_module.beets_client, "apply_folder_cleanup",
+            side_effect=app_module.BeetsUnavailableError("offline"),
+        ):
+            response = self._post_apply({
+                "action": "remove_empty_source", "confirmed": True,
+                "source_path": "/data/media/music/Artist/Album", "preview_token": "x",
+            })
+        data = response[0].get_json()
+        self.assertEqual(response[1], 503)
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["code"], "ENGINE_OFFLINE")
+
+    def test_success_path_still_returns_plan_apply_result(self):
+        with mock.patch.object(
+            app_module.beets_client, "plan_folder_cleanup",
+            return_value={"ok": True, "operation_id": "op-1"},
+        ), mock.patch.object(
+            app_module.beets_client, "apply_folder_cleanup",
+            return_value={"ok": True, "mutated": True, "removed_dirs": ["/data/media/music/Artist/Album"]},
+        ):
+            response = self._post_apply({
+                "action": "remove_empty_source", "confirmed": True,
+                "source_path": "/data/media/music/Artist/Album", "preview_token": "x",
+            })
+        body, status = (response if isinstance(response, tuple) else (response, 200))
+        data = body.get_json()
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["operation_id"], "op-1")
+
+
 if __name__ == "__main__":
     unittest.main()

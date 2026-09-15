@@ -96,7 +96,7 @@ _PLACEHOLDER_API_TOKENS = {
     "changeme_required_strong_token", "replace_with_a_generated_strong_token",
     "your-token-here", "your_token_here",
 }
-BEETSDIR = os.environ.get("BEETSDIR", "/config")
+BEETSDIR = os.environ.get("BEETSDIR", "/config" if os.path.exists("/config") or os.name == "nt" else tempfile.gettempdir())
 MUSIC_LIBRARY_PATH = os.environ.get("MUSIC_LIBRARY_PATH", "/data/media/music")
 DOWNLOAD_PATH = os.environ.get("DOWNLOAD_PATH", "/data/torrents")
 # Path objects for the playlist-specific engine endpoints below
@@ -127,6 +127,28 @@ def _resolved_downloads_root() -> str:
 
 def _resolved_staging_root() -> str:
     return str(Path(os.environ.get("STAGING_ROOT") or _resolved_downloads_root()).resolve(strict=False))
+
+
+# Same env var name, same comma-separated parsing, and the same default
+# literal as app.py's module-level TORRENT_SOURCE_ROOTS (see app.py's
+# DEFAULT_TORRENT_SOURCE_ROOTS) so one operator-set value governs both
+# containers, matching the MUSIC_ROOT/PLAYLIST_DIR convention above. Every
+# call site below previously read this with
+# os.environ.get("TORRENT_SOURCE_ROOTS", "/torrents") as a single list
+# entry: a comma-separated value (the only format app.py itself ever
+# produces or documents for this name) was treated as one literal path that
+# never resolves to a real directory, silently dropping every root past the
+# first from consideration, and the "/torrents" fallback did not match this
+# container's real mount point (/data/torrents, from DOWNLOAD_PATH) --
+# Wave 32 root-default audit.
+_DEFAULT_TORRENT_SOURCE_ROOTS = "/data/torrents/music,/data/torrents,/data/downloads"
+
+
+def _resolved_torrent_source_roots() -> list:
+    raw = os.environ.get("TORRENT_SOURCE_ROOTS", _DEFAULT_TORRENT_SOURCE_ROOTS)
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
 PLAYLIST_DIR = Path(os.environ.get("PLAYLIST_DIR", "/data/media/music/playlists"))
 PLAYLIST_DOWNLOAD_ROOT = Path(os.environ.get(
     "PLAYLIST_DOWNLOAD_ROOT",
@@ -339,6 +361,13 @@ _AGENT_CONFIG_CONTENT_MAX_BYTES = _env_int_clamped(
 )
 _AGENT_CONFIG_REQUEST_MAX_BYTES = _AGENT_CONFIG_CONTENT_MAX_BYTES + 4096
 _AGENT_CONFIG_LOCK = threading.Lock()
+
+# ARCH-007 (Wave 34): safety cap for GET /library/item-paths -- a single
+# unbounded response covering every distinct item path in the library. A
+# real library this size is implausible, but refusing outright with a
+# clear error is safer than either an unbounded response or a silent
+# truncation a caller could mistake for the complete set.
+MAX_ITEM_PATHS_RESPONSE = 500_000
 
 
 def _agent_config_raw_root() -> Path:
@@ -2339,6 +2368,31 @@ _REIMPORT_ALLOWED_DUPLICATE_ACTIONS = {"skip", "keep", "remove", "merge"}
 _REIMPORT_CONFIG_OVERRIDE_MAX_CHARS = 8192
 
 
+def _write_private_config_file(path: str, content: str) -> None:
+    """Write a beets `-c` override file that is never readable by anyone else.
+
+    ARCH-003 Wave 29 review, CodeQL py/clear-text-storage-sensitive-data
+    triage: a config_override can carry a credential -- /fingerprint builds
+    one containing the chroma/acoustid `apikey` -- so this file is a secret
+    on disk in a shared /tmp. Beets only accepts a config as a real file, so
+    the plaintext itself is unavoidable (same architecture decision recorded
+    for app.py's generated config in docs/TECHNICAL_DEBT.md SEC-002); what is
+    avoidable is how it gets created.
+
+    The previous `open(path, "w")` + `os.chmod(path, 0o600)` pair created the
+    file under the process umask (0644 on these images) and only narrowed it
+    afterwards, leaving a window in which any other local user could read the
+    API key -- and it silently followed a pre-planted symlink, truncating and
+    writing the secret wherever that pointed. O_CREAT|O_EXCL|O_NOFOLLOW with
+    mode 0o600 creates the file atomically at the final mode and refuses
+    outright if anything already exists at the path.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(content)
+
+
 def _reimport_timeout_for_count(count: int, minimum: int = 300, maximum: int = 1200) -> int:
     """Scale the Beets import subprocess timeout with the freshly re-inspected
     audio_count, mirroring reimport_disk()'s own _beet_import_timeout_for_count()
@@ -2436,9 +2490,7 @@ def reimport_source_atomic(
         full_cmd = [BEET_BIN]
         if config_override:
             tmp_cfg_path = f"/tmp/beets_reimport_cfg_{uuid.uuid4().hex}.yaml"
-            with open(tmp_cfg_path, "w", encoding="utf-8") as f:
-                f.write(config_override)
-            os.chmod(tmp_cfg_path, 0o600)
+            _write_private_config_file(tmp_cfg_path, config_override)
             full_cmd.extend(["-c", tmp_cfg_path])
 
         # Beets' `import` has no `-D`/`--duplicate-action` CLI flag at all
@@ -2660,9 +2712,7 @@ def run_confirmed_import_native(source_path: str, mb_albumid: str, *, use_move: 
         full_cmd = [BEET_BIN]
         if config_override:
             tmp_cfg_path = f"/tmp/beets_confirmed_import_cfg_{uuid.uuid4().hex}.yaml"
-            with open(tmp_cfg_path, "w", encoding="utf-8") as f:
-                f.write(config_override)
-            os.chmod(tmp_cfg_path, 0o600)
+            _write_private_config_file(tmp_cfg_path, config_override)
             full_cmd.extend(["-c", tmp_cfg_path])
 
         cmd_args = ["import", "-q", "--noincremental", "--quiet-fallback", "skip"]
@@ -3162,7 +3212,48 @@ def _sanitize_command_path_args(args: Any, allowed_types: list) -> list:
     return sanitized
 
 
-def _run_beet_subcommand_locked(cmd_list: list, *, config_override: str = "", timeout: float = 120.0) -> dict[str, Any]:
+_FORBIDDEN_QUERY_CHARS = frozenset(";&|><$`\\\x00\n\r")
+
+
+def _validate_safe_beet_query(query: Any, *, max_length: int = 512, required: bool = False) -> str:
+    r"""Validate and sanitize a Beets CLI query argument.
+
+    Rejects:
+    - Non-string types (unless None/empty and not required)
+    - Empty string if required
+    - Lengths exceeding max_length
+    - Leading '-' or '--' (flag injection prevention)
+    - Dangerous control characters and shell metacharacters (; & | > < $ ` \ null newline)
+    """
+    if query is None or query == "":
+        if required:
+            raise ValueError("query is required and must be non-empty")
+        return ""
+    if not isinstance(query, str):
+        raise ValueError("query must be a string")
+    trimmed = query.strip()
+    if not trimmed:
+        if required:
+            raise ValueError("query is required and must be non-empty")
+        return ""
+    if len(trimmed) > max_length:
+        raise ValueError(f"query exceeds maximum length of {max_length} characters")
+    if trimmed.startswith("-"):
+        raise ValueError("query cannot start with '-' (flag injection prevented)")
+    found = _FORBIDDEN_QUERY_CHARS.intersection(trimmed)
+    if found:
+        raise ValueError("Invalid query: dangerous characters detected")
+    return trimmed
+
+
+def _run_beet_subcommand_locked(
+    cmd_list: list,
+    *,
+    config_override: str = "",
+    timeout: float = 120.0,
+    read_only: Optional[bool] = None,
+    lock_file: Any = None,
+) -> dict[str, Any]:
     """Run a `beet` subcommand under the OS concurrency lock and return a
     plain result dict -- the shared implementation behind /commands/execute
     and any in-process caller (e.g. album_artwork_fetch_v1's Apply, which
@@ -3176,15 +3267,18 @@ def _run_beet_subcommand_locked(cmd_list: list, *, config_override: str = "", ti
         "import", "update", "write", "move", "modify", "mbsync",
         "fetchart", "embedart", "lastgenre", "alt", "remove", "rm"
     }
-    lock_file = acquire_os_lock(read_only=not mutating)
+    own_lock = False
+    if lock_file is None:
+        actual_read_only = (not mutating) if read_only is None else bool(read_only)
+        lock_file = acquire_os_lock(read_only=actual_read_only)
+        own_lock = True
+
     tmp_cfg_path = None
     try:
         full_cmd = [BEET_BIN]
         if config_override:
             tmp_cfg_path = f"/tmp/beets_exec_cfg_{uuid.uuid4().hex}.yaml"
-            with open(tmp_cfg_path, "w", encoding="utf-8") as f:
-                f.write(config_override)
-            os.chmod(tmp_cfg_path, 0o600)
+            _write_private_config_file(tmp_cfg_path, config_override)
             full_cmd.extend(["-c", tmp_cfg_path])
 
         full_cmd.extend(cmd_list)
@@ -3208,7 +3302,8 @@ def _run_beet_subcommand_locked(cmd_list: list, *, config_override: str = "", ti
                 os.unlink(tmp_cfg_path)
             except Exception:
                 pass
-        release_os_lock(lock_file)
+        if own_lock:
+            release_os_lock(lock_file)
 
 
 def acquire_os_lock(read_only: bool = False):
@@ -3233,11 +3328,29 @@ def release_os_lock(lock_file):
 
 
 class AgentJob:
-    def __init__(self, job_id: str, command: list, label: str = "", config_override: str = ""):
+    def __init__(
+        self,
+        job_id: str,
+        command: list,
+        label: str = "",
+        config_override: str = "",
+        timeout: float = 600.0,
+        read_only: Optional[bool] = None,
+    ):
         self.job_id = job_id
         self.command = command
-        self.label = label or " ".join(command)
+        if label:
+            self.label = label
+        elif isinstance(command, list) and command:
+            if isinstance(command[0], list):
+                self.label = " && ".join(" ".join(str(x) for x in c) for c in command)
+            else:
+                self.label = " ".join(str(x) for x in command)
+        else:
+            self.label = ""
         self.config_override = config_override
+        self.timeout = float(timeout)
+        self.read_only = read_only
         self.created_at = time.time()
         self.started_at = None
         self.finished_at = None
@@ -3265,42 +3378,54 @@ class AgentJob:
         lock_file = None
         tmp_cfg_path = None
         try:
-            mutating = self.command and self.command[0] in {
-                "import", "update", "write", "move", "modify", "mbsync",
-                "fetchart", "embedart", "lastgenre", "alt", "remove", "rm"
-            }
-            lock_file = acquire_os_lock(read_only=not mutating)
+            is_seq = bool(self.command and isinstance(self.command[0], list))
+            cmd_sequence = self.command if is_seq else [self.command]
 
-            full_cmd = [BEET_BIN]
+            mutating = any(
+                cmd and cmd[0] in {
+                    "import", "update", "write", "move", "modify", "mbsync",
+                    "fetchart", "embedart", "lastgenre", "alt", "remove", "rm"
+                }
+                for cmd in cmd_sequence
+            )
+            actual_read_only = (not mutating) if self.read_only is None else bool(self.read_only)
+            lock_file = acquire_os_lock(read_only=actual_read_only)
+
             if self.config_override:
                 tmp_cfg_path = f"/tmp/beets_job_cfg_{self.job_id}.yaml"
-                with open(tmp_cfg_path, "w", encoding="utf-8") as f:
-                    f.write(self.config_override)
-                os.chmod(tmp_cfg_path, 0o600)
-                full_cmd.extend(["-c", tmp_cfg_path])
+                _write_private_config_file(tmp_cfg_path, self.config_override)
 
-            full_cmd.extend(self.command)
             env = os.environ.copy()
             env["BEETSDIR"] = BEETSDIR
 
-            self.proc = subprocess.Popen(
-                full_cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                env=env
-            )
-            out, err = self.proc.communicate(timeout=600)
-            self.returncode = self.proc.returncode
-            if out:
-                self.stdout = out.splitlines()[-5000:]
-            if err:
-                self.stderr = err.splitlines()[-5000:]
+            for single_cmd in cmd_sequence:
+                if self._cancel.is_set():
+                    break
+                full_cmd = [BEET_BIN]
+                if tmp_cfg_path:
+                    full_cmd.extend(["-c", tmp_cfg_path])
+                full_cmd.extend(single_cmd)
+
+                self.proc = subprocess.Popen(
+                    full_cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    env=env
+                )
+                out, err = self.proc.communicate(timeout=self.timeout)
+                self.returncode = self.proc.returncode
+                if out:
+                    self.stdout.extend(out.splitlines()[-5000:])
+                if err:
+                    self.stderr.extend(err.splitlines()[-5000:])
+                if self.returncode != 0:
+                    break
         except subprocess.TimeoutExpired:
             if self.proc:
                 self.proc.kill()
             self.returncode = 124
-            self.stderr.append("Command timed out after 600 seconds")
+            self.stderr.append(f"Command timed out after {self.timeout} seconds")
         except Exception as exc:
             self.returncode = 1
             self.stderr.append(f"Execution error: {exc}")
@@ -4086,6 +4211,12 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 header_token = auth_header[7:]
 
         if not hmac.compare_digest(header_token.strip(), BEETS_API_TOKEN.strip()):
+            try:
+                cl = int(self.headers.get("Content-Length", 0))
+                if 0 < cl < 65536:
+                    self.rfile.read(cl)
+            except Exception:
+                pass
             self._send_json(401, {"error": "Unauthorized: invalid API token"})
             return False
         return True
@@ -4351,6 +4482,16 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             query = params.get("query", [None])[0]
             mb_albumid = params.get("mb_albumid", [None])[0]
             mb_releasegroupid = params.get("mb_releasegroupid", [None])[0]
+            # ARCH-007 (Wave 34): exact-match albumartist filter, distinct
+            # from the substring `query=artist:...` LIKE match above --
+            # library_merge_artist()/library_normalize_artists() need every
+            # album whose albumartist is EXACTLY a given string (a LIKE
+            # match could silently pull in an unrelated album, e.g.
+            # "Bob" also matching "Bobby"). "orphan" is a boolean filter
+            # for albums with zero item rows (library_mbsync_all()'s
+            # pre-mbsync prune step -- mbsync crashes on these).
+            albumartist_exact = params.get("albumartist", [None])[0]
+            orphan_raw = params.get("orphan", [None])[0]
             offset = max(int(params.get("offset", [0])[0]), 0)
             limit = min(max(int(params.get("limit", [500])[0]), 1), 2000)
 
@@ -4372,6 +4513,19 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 elif mb_releasegroupid:
                     where_clause = "WHERE mb_releasegroupid = ?"
                     sql_params.append(mb_releasegroupid)
+                elif albumartist_exact is not None:
+                    where_clause = "WHERE albumartist = ?"
+                    sql_params.append(albumartist_exact)
+                elif orphan_raw is not None:
+                    if str(orphan_raw).strip().lower() not in {"true", "false", "1", "0"}:
+                        self._send_json(400, {"error": f"Invalid orphan parameter value: {orphan_raw!r}"})
+                        con.close()
+                        return
+                    orphan_bool = str(orphan_raw).strip().lower() in {"true", "1"}
+                    if orphan_bool:
+                        where_clause = "WHERE NOT EXISTS (SELECT 1 FROM items WHERE items.album_id = albums.id)"
+                    else:
+                        where_clause = "WHERE EXISTS (SELECT 1 FROM items WHERE items.album_id = albums.id)"
                 elif query is not None:
                     q_str = str(query).strip()
                     if not q_str:
@@ -4410,6 +4564,72 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                     "has_more": has_more,
                     "next_offset": next_offset
                 })
+            except Exception as exc:
+                self._send_json(500, {"error": f"Database error: {exc}"})
+            finally:
+                release_os_lock(lock)
+            return
+
+        if path == "/library/albumartists":
+            # ARCH-007 (Wave 34): structured, workflow-specific replacement
+            # for library_normalize_artists()'s scan step -- distinct,
+            # non-empty albumartist values across the whole library. Not a
+            # general query surface: no caller-supplied SQL, no filter
+            # params, one fixed shape.
+            if not os.path.exists(LIB_PATH):
+                self._send_json(404, {"error": "Database file musiclibrary.blb not found"})
+                return
+            lock = acquire_os_lock(read_only=True)
+            try:
+                con = sqlite3.connect(LIB_PATH, timeout=10)
+                cur = con.cursor()
+                cur.execute("SELECT DISTINCT albumartist FROM albums WHERE albumartist != ''")
+                values = [r[0] for r in cur.fetchall()]
+                con.close()
+                self._send_json(200, {"albumartists": values, "count": len(values)})
+            except Exception as exc:
+                self._send_json(500, {"error": f"Database error: {exc}"})
+            finally:
+                release_os_lock(lock)
+            return
+
+        if path == "/library/item-paths":
+            # ARCH-007 (Wave 34): structured, workflow-specific replacement
+            # for library_move_all()'s pre-move candidate-directory scan --
+            # every distinct item path in the library, so the web-manager
+            # (which has no filesystem mount into MUSIC_ROOT) can compute
+            # which ancestor directories are real empty-folder-cleanup
+            # candidates once `beet move` finishes. Same fixed shape as
+            # /library/albumartists: no caller-supplied SQL, no filters.
+            # Capped at MAX_ITEM_PATHS_RESPONSE rows (a real, if very large,
+            # library could exceed a safe single-response size) -- refused
+            # outright with a clear error rather than silently truncated,
+            # so a caller never mistakes a partial list for the complete
+            # set.
+            if not os.path.exists(LIB_PATH):
+                self._send_json(404, {"error": "Database file musiclibrary.blb not found"})
+                return
+            lock = acquire_os_lock(read_only=True)
+            try:
+                con = sqlite3.connect(LIB_PATH, timeout=10)
+                cur = con.cursor()
+                cur.execute("SELECT COUNT(*) FROM (SELECT DISTINCT path FROM items)")
+                distinct_count = cur.fetchone()[0]
+                if distinct_count > MAX_ITEM_PATHS_RESPONSE:
+                    con.close()
+                    self._send_json(413, {
+                        "error": f"{distinct_count} distinct item paths exceeds the "
+                                 f"{MAX_ITEM_PATHS_RESPONSE}-row response cap for this endpoint",
+                    })
+                    return
+                cur.execute("SELECT DISTINCT path FROM items")
+                raw_values = [r[0] for r in cur.fetchall()]
+                con.close()
+                values = [
+                    (v.decode("utf-8", "replace") if isinstance(v, (bytes, bytearray)) else str(v or ""))
+                    for v in raw_values
+                ]
+                self._send_json(200, {"paths": values, "count": len(values)})
             except Exception as exc:
                 self._send_json(500, {"error": f"Database error: {exc}"})
             finally:
@@ -4757,7 +4977,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             allowed_roots = [
                 _resolved_downloads_root(),
                 os.environ.get("PLAYLIST_DOWNLOAD_ROOT", "/data/torrents/music/Playlist Downloads"),
-                os.environ.get("TORRENT_SOURCE_ROOTS", "/torrents"),
+                *_resolved_torrent_source_roots(),
                 tempfile.gettempdir(),
                 os.environ.get("IMPORT_REVIEW_QUARANTINE_DIR", "/config/import_review_quarantine"),
                 music_root_env,
@@ -4826,7 +5046,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             candidate_allowed_roots = [
                 _resolved_downloads_root(),
                 os.environ.get("PLAYLIST_DOWNLOAD_ROOT", "/data/torrents/music/Playlist Downloads"),
-                os.environ.get("TORRENT_SOURCE_ROOTS", "/torrents"),
+                *_resolved_torrent_source_roots(),
                 tempfile.gettempdir(),
             ]
             res = transaction_engine.create_track_replacement_plan(
@@ -4850,7 +5070,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             candidate_allowed_roots = [
                 _resolved_downloads_root(),
                 os.environ.get("PLAYLIST_DOWNLOAD_ROOT", "/data/torrents/music/Playlist Downloads"),
-                os.environ.get("TORRENT_SOURCE_ROOTS", "/torrents"),
+                *_resolved_torrent_source_roots(),
                 tempfile.gettempdir(),
             ]
             res = transaction_engine.execute_track_replacement_apply(
@@ -5003,7 +5223,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             staging_allowed_roots = [
                 _resolved_downloads_root(),
                 os.environ.get("PLAYLIST_DOWNLOAD_ROOT", "/data/torrents/music/Playlist Downloads"),
-                os.environ.get("TORRENT_SOURCE_ROOTS", "/torrents"),
+                *_resolved_torrent_source_roots(),
                 tempfile.gettempdir(),
             ]
             res = transaction_engine.create_existing_album_reconcile_plan(
@@ -5027,7 +5247,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             staging_allowed_roots = [
                 _resolved_downloads_root(),
                 os.environ.get("PLAYLIST_DOWNLOAD_ROOT", "/data/torrents/music/Playlist Downloads"),
-                os.environ.get("TORRENT_SOURCE_ROOTS", "/torrents"),
+                *_resolved_torrent_source_roots(),
                 tempfile.gettempdir(),
             ]
             res = transaction_engine.execute_existing_album_reconcile_apply(
@@ -5141,6 +5361,41 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 _txn_store, op_id,
                 db_path=LIB_PATH,
                 music_allowed_roots=[music_root_env],
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        if path == "/albums/duplicate-merge/plan":
+            res = transaction_engine.create_album_duplicate_merge_plan(
+                _txn_store, body,
+                db_path=LIB_PATH,
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        if path == "/albums/duplicate-merge/apply":
+            op_id = str(body.get("operation_id") or "").strip()
+            if not op_id:
+                self._send_json(400, {"ok": False, "error": "operation_id required"})
+                return
+            res = transaction_engine.execute_album_duplicate_merge_apply(
+                _txn_store, op_id,
+                db_path=LIB_PATH,
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        if path == "/albums/duplicate-merge/rollback":
+            op_id = str(body.get("operation_id") or "").strip()
+            if not op_id:
+                self._send_json(400, {"ok": False, "error": "operation_id required"})
+                return
+            res = transaction_engine.rollback_album_duplicate_merge(
+                _txn_store, op_id,
+                db_path=LIB_PATH,
             )
             code = 200 if res.get("ok") else 400
             self._send_json(code, res)
@@ -5804,6 +6059,307 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 self._send_json(status, {"ok": False, "error": result.get("error_code", "reimport_failed"), "message": result.get("message", "")})
                 return
             self._send_json(200, result)
+            return
+
+        if path == "/library/mbsync":
+            if not isinstance(body, dict):
+                self._send_json(400, {"error": "Request body must be a JSON object"})
+                return
+
+            raw_query = body.get("query", "")
+            try:
+                safe_query = _validate_safe_beet_query(raw_query)
+            except ValueError as val_err:
+                self._send_json(400, {"error": str(val_err)})
+                return
+
+            if "pretend" in body and not isinstance(body["pretend"], bool):
+                self._send_json(400, {"error": "pretend must be a boolean"})
+                return
+            pretend = bool(body.get("pretend", False))
+
+            async_val = body.get("async", body.get("async_mode", False))
+            if ("async" in body or "async_mode" in body) and not isinstance(async_val, bool):
+                self._send_json(400, {"error": "async must be a boolean"})
+                return
+            async_mode = bool(async_val)
+
+            timeout = body.get("timeout", 7200.0)
+            try:
+                timeout = float(timeout)
+                if timeout <= 0:
+                    raise ValueError()
+                timeout = max(5.0, min(timeout, 14400.0))
+            except (ValueError, TypeError):
+                self._send_json(400, {"error": "Invalid timeout parameter"})
+                return
+
+            cmd_list = ["mbsync"]
+            if pretend:
+                cmd_list.append("-p")
+            if safe_query:
+                cmd_list.append(safe_query)
+
+            read_only_lock = bool(pretend)
+
+            if async_mode:
+                job_id = f"mbsync-{uuid.uuid4().hex[:12]}"
+                label = "beet mbsync" + (" -p" if pretend else "") + (f" {safe_query}" if safe_query else "")
+                job = AgentJob(job_id, cmd_list, label=label, timeout=timeout, read_only=read_only_lock)
+                with JOBS_LOCK:
+                    JOBS[job_id] = job
+                self._send_json(200, {
+                    "ok": True,
+                    "success": True,
+                    "job_id": job_id,
+                    "status": "started",
+                    "endpoint": f"/jobs/{job_id}",
+                    "label": label,
+                })
+                return
+
+            try:
+                lock_file = acquire_os_lock(read_only=read_only_lock)
+            except (BlockingIOError, TimeoutError, OSError, RuntimeError) as lock_err:
+                self._send_json(503, {"error": "Failed to acquire engine OS lock", "detail": str(lock_err)})
+                return
+
+            try:
+                res = _run_beet_subcommand_locked(cmd_list, timeout=timeout, read_only=read_only_lock, lock_file=lock_file)
+                if res.get("timed_out"):
+                    self._send_json(408, {"error": f"Command 'mbsync' timed out after {timeout}s", "returncode": 124})
+                elif res.get("internal_error"):
+                    self._send_json(500, {"error": "mbsync execution error", "detail": res.get("stderr")})
+                else:
+                    self._send_json(200, {
+                        "ok": res["returncode"] == 0,
+                        "success": res["returncode"] == 0,
+                        "returncode": res["returncode"],
+                        "stdout": res["stdout"],
+                        "stderr": res["stderr"],
+                    })
+            finally:
+                release_os_lock(lock_file)
+            return
+
+        if path == "/library/move":
+            if not isinstance(body, dict):
+                self._send_json(400, {"error": "Request body must be a JSON object"})
+                return
+
+            raw_query = body.get("query", "")
+            try:
+                safe_query = _validate_safe_beet_query(raw_query)
+            except ValueError as val_err:
+                self._send_json(400, {"error": str(val_err)})
+                return
+
+            if "rescan_first" in body and not isinstance(body["rescan_first"], bool):
+                self._send_json(400, {"error": "rescan_first must be a boolean"})
+                return
+            rescan_first = bool(body.get("rescan_first", True))
+
+            if "pretend" in body and not isinstance(body["pretend"], bool):
+                self._send_json(400, {"error": "pretend must be a boolean"})
+                return
+            pretend = bool(body.get("pretend", False))
+
+            async_val = body.get("async", body.get("async_mode", False))
+            if ("async" in body or "async_mode" in body) and not isinstance(async_val, bool):
+                self._send_json(400, {"error": "async must be a boolean"})
+                return
+            async_mode = bool(async_val)
+
+            timeout = body.get("timeout", 3600.0)
+            try:
+                timeout = float(timeout)
+                if timeout <= 0:
+                    raise ValueError()
+                timeout = max(5.0, min(timeout, 7200.0))
+            except (ValueError, TypeError):
+                self._send_json(400, {"error": "Invalid timeout parameter"})
+                return
+
+            cmd_sequence = []
+            if rescan_first:
+                update_cmd = ["update"]
+                if pretend:
+                    update_cmd.append("-p")
+                if safe_query:
+                    update_cmd.append(safe_query)
+                cmd_sequence.append(update_cmd)
+
+            move_cmd = ["move"]
+            if pretend:
+                move_cmd.append("-p")
+            if safe_query:
+                move_cmd.append(safe_query)
+            cmd_sequence.append(move_cmd)
+
+            read_only_lock = bool(pretend)
+
+            if async_mode:
+                job_id = f"move-{uuid.uuid4().hex[:12]}"
+                label = "beet move" + (" (with update)" if rescan_first else "") + (" -p" if pretend else "") + (f" {safe_query}" if safe_query else "")
+                job = AgentJob(job_id, cmd_sequence, label=label, timeout=timeout, read_only=read_only_lock)
+                with JOBS_LOCK:
+                    JOBS[job_id] = job
+                self._send_json(200, {
+                    "ok": True,
+                    "success": True,
+                    "job_id": job_id,
+                    "status": "started",
+                    "endpoint": f"/jobs/{job_id}",
+                    "label": label,
+                })
+                return
+
+            try:
+                lock_file = acquire_os_lock(read_only=read_only_lock)
+            except (BlockingIOError, TimeoutError, OSError, RuntimeError) as lock_err:
+                self._send_json(503, {"error": "Failed to acquire engine OS lock", "detail": str(lock_err)})
+                return
+
+            try:
+                steps_summary = []
+                combined_stdout = []
+                combined_stderr = []
+                last_rc = 0
+                update_failed = False
+
+                env = os.environ.copy()
+                env["BEETSDIR"] = BEETSDIR
+
+                for single_cmd in cmd_sequence:
+                    step_name = single_cmd[0]
+                    full_cmd = [BEET_BIN] + single_cmd
+                    try:
+                        sub_res = subprocess.run(
+                            full_cmd,
+                            capture_output=True,
+                            text=True,
+                            timeout=timeout,
+                            env=env,
+                        )
+                        last_rc = sub_res.returncode
+                        steps_summary.append({"step": step_name, "returncode": last_rc})
+                        if sub_res.stdout:
+                            combined_stdout.append(sub_res.stdout)
+                        if sub_res.stderr:
+                            combined_stderr.append(sub_res.stderr)
+                        if last_rc != 0:
+                            if step_name == "update":
+                                update_failed = True
+                            break
+                    except subprocess.TimeoutExpired:
+                        self._send_json(408, {"error": f"Command '{step_name}' timed out after {timeout}s", "returncode": 124})
+                        return
+                    except Exception as exc:
+                        self._send_json(500, {"error": f"Command '{step_name}' execution error", "detail": str(exc)})
+                        return
+
+                if update_failed:
+                    self._send_json(200, {
+                        "ok": False,
+                        "success": False,
+                        "updated": False,
+                        "moved": False,
+                        "returncode": last_rc,
+                        "stdout": "\n".join(combined_stdout),
+                        "stderr": "\n".join(combined_stderr),
+                        "error": "Rescan (beet update) failed; move aborted",
+                        "steps": steps_summary,
+                    })
+                    return
+
+                all_ok = (last_rc == 0)
+                self._send_json(200, {
+                    "ok": all_ok,
+                    "success": all_ok,
+                    "updated": rescan_first,
+                    "moved": all_ok,
+                    "returncode": last_rc,
+                    "stdout": "\n".join(combined_stdout),
+                    "stderr": "\n".join(combined_stderr),
+                    "steps": steps_summary,
+                })
+            finally:
+                release_os_lock(lock_file)
+            return
+
+        if path == "/submissions/submit":
+            if not isinstance(body, dict):
+                self._send_json(400, {"error": "Request body must be a JSON object"})
+                return
+
+            capability_error = require_command_capability("submit")
+            if capability_error is not None:
+                self._send_json(409, capability_error)
+                return
+
+            raw_query = body.get("query", "")
+            try:
+                safe_query = _validate_safe_beet_query(raw_query, required=True, max_length=256)
+            except ValueError as val_err:
+                self._send_json(400, {"error": str(val_err)})
+                return
+
+            api_key = body.get("api_key")
+            if api_key is not None:
+                if not isinstance(api_key, str):
+                    self._send_json(400, {"error": "api_key must be a string"})
+                    return
+                api_key = api_key.strip()
+                if api_key and not re.match(r"^[a-zA-Z0-9_-]{1,64}$", api_key):
+                    self._send_json(400, {"error": "Invalid api_key format"})
+                    return
+            else:
+                api_key = os.environ.get("ACOUSTID_API_KEY", "").strip() or os.environ.get("ACOUSTID_KEY", "").strip()
+
+            timeout = body.get("timeout", 300.0)
+            try:
+                timeout = float(timeout)
+                if timeout <= 0:
+                    raise ValueError()
+                timeout = max(5.0, min(timeout, 600.0))
+            except (ValueError, TypeError):
+                self._send_json(400, {"error": "Invalid timeout parameter"})
+                return
+
+            config_override = ""
+            if api_key:
+                safe_k = api_key.replace("\\", "\\\\").replace('"', '\\"')
+                config_override = f'chroma:\n  auto: no\n  apikey: "{safe_k}"\nacoustid:\n  apikey: "{safe_k}"\n'
+
+            try:
+                lock_file = acquire_os_lock(read_only=True)
+            except (BlockingIOError, TimeoutError, OSError, RuntimeError) as lock_err:
+                self._send_json(503, {"error": "Failed to acquire engine OS lock", "detail": str(lock_err)})
+                return
+
+            try:
+                cmd_list = ["submit", safe_query]
+                res = _run_beet_subcommand_locked(
+                    cmd_list,
+                    config_override=config_override,
+                    timeout=timeout,
+                    read_only=True,
+                    lock_file=lock_file,
+                )
+                if res.get("timed_out"):
+                    self._send_json(408, {"error": f"Command 'submit' timed out after {timeout}s", "returncode": 124})
+                elif res.get("internal_error"):
+                    self._send_json(500, {"error": "submit execution error", "detail": res.get("stderr")})
+                else:
+                    self._send_json(200, {
+                        "ok": res["returncode"] == 0,
+                        "success": res["returncode"] == 0,
+                        "returncode": res["returncode"],
+                        "stdout": res["stdout"],
+                        "stderr": res["stderr"],
+                    })
+            finally:
+                release_os_lock(lock_file)
             return
 
         if path == "/commands/execute":

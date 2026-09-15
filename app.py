@@ -345,7 +345,7 @@ def _install_optional_plugins():
 threading.Thread(target=_install_optional_plugins, daemon=True).start()
 
 from flask import Flask, Response, abort, jsonify, request, send_file, redirect
-from job_engine import _beet_run, Job, PythonJob, JobStore
+from job_engine import PythonJob, JobStore
 from backend.slskd import (
     build_album_candidates as _slskd_build_album_candidates,
     cleanup_failed_candidate_files as _slskd_cleanup_failed_candidate_files_impl,
@@ -507,7 +507,6 @@ def _env_float(name: str, default: float, *, minimum: Optional[float] = None, ma
     return value
 
 LIB_PATH  = os.environ.get("BEETS_LIBRARY", "")
-BEET_BIN  = shutil.which("beet") or "/lsiopy/bin/beet"
 LOG_FILE  = os.environ.get("BEETS_LOG", "/config/beet.log")
 HOST      = "0.0.0.0"
 PORT      = int(os.environ.get("WEBCONTROL_PORT", "8337"))
@@ -1504,22 +1503,6 @@ def _ai_auto_import_allowed(use_case: str, confidence: str,
     return False
 
 
-def _beet_env() -> dict:
-    """Return os.environ plus BEETSDIR for beet subprocesses."""
-    env = {**os.environ, "BEETSDIR": "/config"}
-    py_path = _s(env.get("PYTHONPATH", "")).strip()
-    paths = ["/config"]
-    if py_path:
-        paths.append(py_path)
-    env["PYTHONPATH"] = ":".join(paths)
-    return env
-
-
-_BEETS_PLUGINPATH_CONFIG = (
-    "pluginpath:\n"
-    "  - /config/beetsplug\n"
-    "  - /app/beetsplug\n"
-)
 
 
 def _beet_import_timeout_for_count(count: int, minimum: int = 300, maximum: int = 1200) -> int:
@@ -1567,76 +1550,15 @@ def _read_beets_plugin_list(config_path: str = "/config/config.yaml") -> List[st
     return plugins
 
 
-def _beet_plugins() -> str:
-    """Return the main config's plugin list for temp config overrides."""
-    plugins = _read_beets_plugin_list()
-    return _filter_job_plugins(plugins)
-
-
-def _write_plugin_job_beets_config(temp_path: str, command: str) -> str:
-    """Write a temp config for explicit plugin command jobs."""
-    try:
-        plugins = [
-            p for p in _read_beets_plugin_list()
-            if p and p not in _JOB_PLUGIN_EXCLUDED
-        ]
-        if command not in plugins:
-            plugins.append(command)
-        Path(temp_path).write_text(
-            "include:\n  - /config/config.yaml\n"
-            + _BEETS_PLUGINPATH_CONFIG
-            + (f"plugins: {' '.join(plugins)}\n" if plugins else "")
-            + "lyrics:\n  auto: no\n"
-            "replaygain:\n  auto: no\n"
-        )
-        return temp_path
-    except Exception:
-        return "/config/config.yaml"
-
-
 _ARTIST_FOLDER_PATH_TEMPLATE = "$albumartist%if{$mb_albumartistid, ($mb_albumartistid),}"
 _DEFAULT_ALBUM_PATH_TEMPLATE = _ARTIST_FOLDER_PATH_TEMPLATE + "/$album (%left{$year,4})%if{$mb_releasegroupid, {$mb_releasegroupid$}}/$albumartist - $album - %right{00$track,2} - $title"
 _ALBUMTYPE_SINGLE_PATH_TEMPLATE = _ARTIST_FOLDER_PATH_TEMPLATE + "/%if{$year,%left{$year,4} - }$album [Single]/%right{00$track,2} - $title"
 _SINGLE_TRACK_PATH_TEMPLATE = _ARTIST_FOLDER_PATH_TEMPLATE + "/$album (%left{$year,4})%if{$mb_releasegroupid, {$mb_releasegroupid$}}/$artist - $album - %right{00$track,2} - $title ($disc)%if{$mb_artistid,{$mb_artistid$}}"
-_JOB_PATHS_CONFIG_BLOCK = (
-    "paths:\n"
-    f'  default: "{_DEFAULT_ALBUM_PATH_TEMPLATE}"\n'
-    f'  singleton: "{_SINGLE_TRACK_PATH_TEMPLATE}"\n'
-    f'  comp: "{_DEFAULT_ALBUM_PATH_TEMPLATE}"\n'
-    "  albumtype_soundtrack: Soundtracks/$album (%left{$year,4})/$albumartist - $album - %right{00$track,2} - $title\n"
-    f'  albumtype_single: "{_ALBUMTYPE_SINGLE_PATH_TEMPLATE}"\n'
-)
-
-
-def _write_job_beets_config(temp_path: str, extra: str = "") -> str:
-    """Write a temp beets config for jobs that should not load slow/fragile plugins.
-
-    extra may embed a plugin API key (e.g. AcoustID), so the file is
-    written with owner-only permissions rather than the process default.
-    """
-    try:
-        plugins = _beet_plugins()
-        extra_block = extra or ""
-        if extra_block and not extra_block.endswith("\n"):
-            extra_block += "\n"
-        Path(temp_path).write_text(
-            "include:\n  - /config/config.yaml\n"
-            + _BEETS_PLUGINPATH_CONFIG
-            + (f"plugins: {plugins}\n" if plugins else "")
-            + _JOB_PATHS_CONFIG_BLOCK
-            + extra_block
-            + "lyrics:\n  auto: no\n"
-            "replaygain:\n  auto: no\n"
-        )
-        os.chmod(temp_path, 0o600)
-        return temp_path
-    except Exception:
-        return "/config/config.yaml"
 
 
 def _write_playlist_import_beets_config(temp_path: str) -> str:
     """Use the project single-track path format for playlist download imports."""
-    return _write_job_beets_config(temp_path)
+    return "/config/config.yaml"
 
 
 def _sqlite_timeout_seconds() -> float:
@@ -11844,7 +11766,6 @@ def album_deduplicate(aid):
 
     def _do(log, cancel_event=None):
         _MROOT   = "/data/media/music"
-        env = _beet_env()
 
         # Resolve which MB album ID to use
         mb_albumid = mb_override
@@ -12807,58 +12728,6 @@ def _library_no_mb_album_matches_folder(album_id: int, folder_path: str) -> bool
     return matched > 0
 
 
-def _delete_library_db_rows_under_folder(folder_path: str, log: list) -> int:
-    """Remove Beets DB rows for files under a deleted library folder."""
-    folder = Path(folder_path).resolve(strict=False)
-    delete_ids: List[int] = []
-    album_ids: set = set()
-    try:
-        with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:
-            rows = con.execute(
-                "SELECT id, album_id, path FROM items WHERE path IS NOT NULL"
-            ).fetchall()
-    except Exception as ex:
-        log.append(f"  Library DB cleanup warning: {ex}")
-        return 0
-
-    for row in rows:
-        raw_path = _s(row["path"])
-        if not raw_path:
-            continue
-        abs_path = Path(raw_path)
-        if not abs_path.is_absolute():
-            abs_path = MUSIC_ROOT / raw_path
-        try:
-            abs_path.resolve(strict=False).relative_to(folder)
-        except Exception:
-            continue
-        delete_ids.append(int(row["id"]))
-        if row["album_id"]:
-            album_ids.add(int(row["album_id"]))
-
-    if not delete_ids:
-        return 0
-    try:
-        with _db() as con:
-            con.execute(
-                f"DELETE FROM items WHERE id IN ({','.join('?' * len(delete_ids))})",
-                delete_ids,
-            )
-            if album_ids:
-                ids = sorted(album_ids)
-                con.execute(
-                    f"DELETE FROM albums WHERE id IN ({','.join('?' * len(ids))}) "
-                    "AND NOT EXISTS (SELECT 1 FROM items WHERE items.album_id = albums.id)",
-                    ids,
-                )
-            con.commit()
-        log.append(f"  Removed {len(delete_ids)} Beets DB row(s) for deleted library folder.")
-        return len(delete_ids)
-    except Exception as ex:
-        log.append(f"  Library DB cleanup warning: {ex}")
-        return 0
-
-
 def _delete_review_source_folder(src_path: str, log: list,
                                  confirmed_wrong_library_folder: bool = False,
                                  album_id: int = 0) -> Dict[str, Any]:
@@ -13203,125 +13072,40 @@ def _classify_album_cleanup_apply_failure(res: Dict[str, Any]) -> Tuple[str, str
 
 def _delete_album_ids_from_db(album_ids: list, log: list, *,
                               delete_files: bool = False) -> int:
-    """Remove imported DB rows for failed validation.
-
-    When delete_files is true, also delete the matching audio files from the
-    music library. Use this only for albums that were just imported and failed
-    validation, not for pre-existing library albums.
-    """
+    """Remove failed imported album rows through the engine transaction boundary."""
     ids = [int(aid) for aid in album_ids if str(aid).isdigit()]
     if not ids:
         return 0
-    deleted_files = 0
-    parent_dirs: List[Path] = []
-    try:
-        with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:
-            if delete_files:
-                rows = con.execute(
-                    f"SELECT path FROM items WHERE album_id IN ({','.join('?' * len(ids))})",
-                    ids,
-                ).fetchall()
-                music_root_res = MUSIC_ROOT.resolve(strict=False)
-                for row in rows:
-                    raw_path = _s(row["path"])
-                    if not raw_path:
-                        continue
-                    fpath = Path(raw_path)
-                    if not fpath.is_absolute():
-                        fpath = MUSIC_ROOT / raw_path
-                    try:
-                        resolved = fpath.resolve(strict=False)
-                        resolved.relative_to(music_root_res)
-                        if resolved.suffix.lower() in AUDIO_EXT:
-                            parent_dirs.append(resolved.parent)
-                            resolved.unlink(missing_ok=True)
-                            deleted_files += 1
-                            log.append(f"  Removed failed import file: {resolved.name}")
-                    except Exception as ex:
-                        log.append(f"  WARN failed import file cleanup skipped for {fpath}: {ex}")
-            con.execute(
-                f"DELETE FROM items WHERE album_id IN ({','.join('?' * len(ids))})",
-                ids,
-            )
-            con.execute(
-                f"DELETE FROM albums WHERE id IN ({','.join('?' * len(ids))})",
-                ids,
-            )
-            con.commit()
-        if delete_files:
-            music_root_res = MUSIC_ROOT.resolve(strict=False)
-            for folder in sorted(set(parent_dirs), key=lambda p: len(p.parts), reverse=True):
-                for _ in range(6):
-                    try:
-                        resolved_folder = folder.resolve(strict=False)
-                        resolved_folder.relative_to(music_root_res)
-                        if resolved_folder == music_root_res:
-                            break
-                        if any(resolved_folder.iterdir()):
-                            break
-                        resolved_folder.rmdir()
-                        log.append(f"  Removed empty failed-import folder: {resolved_folder}")
-                        folder = resolved_folder.parent
-                    except Exception:
-                        break
-        log.append(
-            f"  Removed failed import DB rows for album_id(s): {ids}"
-            + (f" and {deleted_files} file(s)" if delete_files else "")
-        )
-        return deleted_files
-    except Exception as ex:
-        log.append(f"  DB cleanup warning after failed validation: {ex}")
-    return deleted_files
-
-
-def _delete_unmatched_items_in_folder(album_id: int, folder_path: str, log: list) -> int:
-    """Delete track=0 extras from one imported folder, including files."""
-    folder = Path(folder_path).resolve(strict=False)
-    try:
-        with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:
-            rows = con.execute(
-                "SELECT id, title, path FROM items "
-                "WHERE album_id=? AND (track IS NULL OR track=0)",
-                (album_id,),
-            ).fetchall()
-    except Exception as ex:
-        log.append(f"  Extra cleanup warning: {ex}")
-        return 0
-
-    delete_ids: list = []
-    for row in rows:
-        raw_path = _s(row["path"])
-        if not raw_path:
-            continue
-        abs_path = Path(raw_path)
-        if not abs_path.is_absolute():
-            abs_path = MUSIC_ROOT / raw_path
+    removed_files = 0
+    removed_albums = 0
+    for aid in ids:
         try:
-            abs_resolved = abs_path.resolve(strict=False)
-            abs_resolved.relative_to(folder)
-        except Exception:
+            res = beets_client.delete_album(aid, delete_files=delete_files)
+        except BeetsUnavailableError as ex:
+            log.append(f"  Engine unavailable during failed-import cleanup for album_id {aid}: {ex}")
             continue
-        delete_ids.append(int(row["id"]))
-        try:
-            abs_resolved.unlink(missing_ok=True)
-            log.append(f"  Removed unmatched extra: {abs_resolved.name}")
+        except BeetsError as ex:
+            log.append(f"  Engine cleanup rejected album_id {aid}: {ex}")
+            continue
         except Exception as ex:
-            log.append(f"  WARN deleting unmatched extra {abs_resolved.name}: {ex}")
-
-    if not delete_ids:
-        return 0
-    try:
-        with _db() as con:
-            con.execute(
-                f"DELETE FROM items WHERE id IN ({','.join('?' * len(delete_ids))})",
-                delete_ids,
-            )
-            con.commit()
-    except Exception as ex:
-        log.append(f"  Extra DB cleanup warning: {ex}")
-        return 0
-    log.append(f"  Removed {len(delete_ids)} unmatched extra DB item(s)")
-    return len(delete_ids)
+            app.logger.warning("Failed-import cleanup failed for album_id=%s: %s", aid, type(ex).__name__)
+            log.append(f"  Engine cleanup failed for album_id {aid}")
+            continue
+        if not res.get("ok") and not res.get("success"):
+            log.append(f"  Engine cleanup rejected album_id {aid}: {res.get('error') or 'unknown error'}")
+            continue
+        removed_albums += 1
+        removed_files += int(res.get("files_deleted") or 0)
+        log.append(
+            f"  Removed failed import album_id {aid} through engine transaction"
+            + (f" ({int(res.get('files_deleted') or 0)} file(s))" if delete_files else "")
+        )
+    if removed_albums:
+        log.append(
+            f"  Removed failed import DB rows for {removed_albums} album(s)"
+            + (f" and {removed_files} file(s)" if delete_files else "")
+        )
+    return removed_files
 
 
 def _delete_album_items_under_folder(album_id: int, folder_path: str, log: list) -> int:
@@ -13749,8 +13533,6 @@ def fetch_missing_art():
             f"{len(actionable)} actionable, {len(unresolved_items)} unresolved, {skipped} already have art."
         )
 
-        cfg = _write_plugin_job_beets_config(f"/tmp/beets_fetchart_missing_{uuid.uuid4().hex}.yaml", "fetchart")
-        env = _beet_env()
         saved_items: List[Dict[str, Any]] = []
         failed_items: List[Dict[str, Any]] = []
 
@@ -13763,7 +13545,7 @@ def fetch_missing_art():
             album_name = info["album"]
             log.append(f"[{idx}/{len(actionable)}] Fetching: {artist_name} - {album_name}")
             try:
-                result = _repair_album_art(aid, log, cancel_event, cfg=cfg, env=env)
+                result = _repair_album_art(aid, log, cancel_event)
                 if result.get("status") == "saved":
                     log.append(f"  saved by {result.get('source') or 'repair'}")
                     saved_items.append(result)
@@ -13822,8 +13604,6 @@ def rebuild_album_art():
         started_at = time.time()
         albums = list(lib.albums([]))
         trash_root = METADATA_CACHE_ROOT / "album-art-rebuild-trash" / time.strftime("%Y%m%d-%H%M%S")
-        cfg = _write_plugin_job_beets_config(f"/tmp/beets_fetchart_rebuild_{uuid.uuid4().hex}.yaml", "fetchart")
-        env = _beet_env()
         rebuilt_items: List[Dict[str, Any]] = []
         restored_items: List[Dict[str, Any]] = []
         failed_items: List[Dict[str, Any]] = []
@@ -13855,7 +13635,7 @@ def rebuild_album_art():
                 unresolved_items.append({**entry, "status": "unresolved"})
                 continue
             try:
-                result = _repair_album_art(aid, log, cancel_event, cfg=cfg, env=env, force=True, trash_root=trash_root)
+                result = _repair_album_art(aid, log, cancel_event, force=True, trash_root=trash_root)
                 removed_existing += int(result.get("quarantined_count") or 0)
                 if result.get("status") == "saved" and result.get("saved_path"):
                     log.append(f"  confirmed fresh art: {Path(_s(result.get('saved_path'))).name}")
@@ -16074,52 +15854,23 @@ def album_merge_split_album(target_aid):
                     "target_album_id": target_id,
                     "item_count": len(move_ids),
                     "source_album_deleted": False,
-                    "backup": "",
                 }
 
-            backup = f"{LIB_PATH}.bak-{int(time.time())}-split-album-merge"
-            try:
-                shutil.copy2(LIB_PATH, backup)
-                log.append(f"DB backup: {backup}")
-            except Exception as ex:
-                raise RuntimeError(f"Could not create DB backup before split-album merge: {ex}")
-
-            item_cols = _sqlite_columns(con, "items")
-            updates: Dict[str, Any] = {"album_id": target_id}
-            album_level_cols = (
-                "album", "albumartist", "albumartist_sort", "albumartist_credit",
-                "albumartists", "albumartists_sort", "albumartists_credit",
-                "mb_albumid", "mb_albumartistid", "mb_albumartistids",
-                "mb_releasegroupid", "albumtype", "albumtypes", "albumstatus",
-                "country", "label", "catalognum", "albumdisambig",
-                "year", "month", "day", "original_year", "original_month",
-                "original_day", "disctotal",
-            )
-            numeric_album_cols = {
-                "year", "month", "day", "original_year", "original_month",
-                "original_day", "disctotal",
-            }
-            target_keys = set(target.keys())
-            for col in album_level_cols:
-                if col in item_cols and col in target_keys:
-                    value = target[col]
-                    if value is not None:
-                        updates[col] = value if col in numeric_album_cols else _s(value)
-            set_clause = ", ".join(f"{col}=?" for col in updates)
-            con.execute(
-                f"UPDATE items SET {set_clause} WHERE id IN ("
-                + ",".join("?" for _ in move_ids) + ")",
-                list(updates.values()) + move_ids,
-            )
-            remaining = con.execute(
-                "SELECT COUNT(*) FROM items WHERE album_id=?",
-                (source_id,),
-            ).fetchone()[0]
-            source_album_deleted = False
-            if int(remaining or 0) == 0:
-                con.execute("DELETE FROM albums WHERE id=?", (source_id,))
-                source_album_deleted = True
-            con.commit()
+        # The actual reassignment (item_ids -> target's album_id, moved
+        # items adopt target's album-level fields, source retired only if
+        # the move empties it) and the Release-Group identity check this
+        # migration adds go through album_duplicate_merge_v1's partial/
+        # adopt mode -- see BeetsClient.merge_split_album_items(). The
+        # previous local `shutil.copy2(LIB_PATH, ...)` DB backup is
+        # superseded by that engine transaction's own Plan-captured
+        # rollback data (rollback_album_duplicate_merge); LIB_PATH is not
+        # actually reachable from the web-manager container in the
+        # supported two-service deployment, so that backup step never
+        # really worked there anyway.
+        merge_res = beets_client.merge_split_album_items(target_id, source_id, move_ids)
+        if not merge_res.get("ok"):
+            raise RuntimeError(merge_res.get("error") or "Engine rejected split-album merge")
+        source_album_deleted = bool(merge_res.get("source_album_deleted"))
 
         _invalidate_lib_cache()
         log.append(
@@ -16132,7 +15883,6 @@ def album_merge_split_album(target_aid):
             "target_album_id": target_id,
             "item_count": len(move_ids),
             "source_album_deleted": source_album_deleted,
-            "backup": backup,
         }
 
     job = jobs.start_python(
@@ -21884,32 +21634,6 @@ def import_folder_with_id():
                     )
 
         # ── Step 1: import with specific MB release ID + permissive threshold ──────────
-        # Beets thresholds are distances; a high strong threshold lets the
-        # selected --search-id release win in quiet mode instead of falling
-        # back to dirty as-is tags.
-        # Temp config used for ALL beet sub-commands in this job:
-        # - permissive selected-release threshold for --search-id quiet imports
-        # - lyrics/replaygain auto off so they don't fire web requests per track
-        temp_cfg = "/tmp/beets_import_wid.yaml"
-        try:
-            _plugins = _beet_plugins()
-            Path(temp_cfg).write_text(
-                "include:\n  - /config/config.yaml\n"
-                + _BEETS_PLUGINPATH_CONFIG
-                + (f"plugins: {_plugins}\n" if _plugins else "")
-                + _JOB_PATHS_CONFIG_BLOCK
-                + "match:\n"
-                "  strong_rec_thresh: 1.0\n"
-                "  medium_rec_thresh: 1.0\n"
-                "lyrics:\n"
-                "  auto: no\n"
-                "replaygain:\n"
-                "  auto: no\n"
-            )
-        except Exception:
-            pass
-        base = [BEET_BIN, "-c", temp_cfg]   # used by base_import, _retag, etc.
-        base_import = base
 
         if preserve_torrent_source and use_move:
             log.append(
@@ -22320,39 +22044,54 @@ def import_folder_with_id():
                         "SELECT id, path FROM items WHERE album_id=?",
                         (album_db_id,),
                     ).fetchall()
-                    for item_row in item_rows:
-                        item_name = Path(_s(item_row["path"])).name.casefold()
-                        mapping = mapped_by_name.get(item_name)
-                        if not mapping:
-                            continue
-                        track_num = int(mapping.get("num") or mapping.get("track") or 0)
-                        disc_num = int(mapping.get("disc") or 1)
-                        mb_trackid = _s(mapping.get("mb_trackid") or mapping.get("recording_id")).strip().lower()
-                        title = _s(mapping.get("mb_title") or mapping.get("title") or mapping.get("local_title")).strip()
-                        updates: Dict[str, Any] = {}
-                        if track_num > 0:
-                            updates["track"] = track_num
-                        if disc_num > 0:
-                            updates["disc"] = disc_num
-                        if mb_trackid:
-                            updates["mb_trackid"] = mb_trackid
-                        if title:
-                            updates["title"] = title
-                        if not updates:
-                            continue
-                        cols = _sqlite_columns(con, "items")
-                        clean = {k: v for k, v in updates.items() if k in cols}
-                        if not clean:
-                            continue
-                        con.execute(
-                            "UPDATE items SET " + ", ".join(f"{k}=?" for k in clean) + " WHERE id=?",
-                            list(clean.values()) + [int(item_row["id"])],
-                        )
-                        updated += 1
-                    con.commit()
             except Exception as ex:
                 log.append(f"  Verified review mapping warning: {ex}")
                 return 0
+            for item_row in item_rows:
+                try:
+                    item_name = Path(_s(item_row["path"])).name.casefold()
+                    mapping = mapped_by_name.get(item_name)
+                    if not mapping:
+                        continue
+                    track_num = int(mapping.get("num") or mapping.get("track") or 0)
+                    disc_num = int(mapping.get("disc") or 1)
+                    mb_trackid = _s(mapping.get("mb_trackid") or mapping.get("recording_id")).strip().lower()
+                    title = _s(mapping.get("mb_title") or mapping.get("title") or mapping.get("local_title")).strip()
+                    updates: Dict[str, Any] = {}
+                    if track_num > 0:
+                        updates["track"] = track_num
+                    if disc_num > 0:
+                        updates["disc"] = disc_num
+                    if mb_trackid:
+                        updates["mb_trackid"] = mb_trackid
+                    if title:
+                        updates["title"] = title
+                    clean = {k: v for k, v in updates.items() if k in {"track", "disc", "mb_trackid", "title"}}
+                    if not clean:
+                        continue
+                    try:
+                        res = beets_client.update_item_metadata(
+                            int(item_row["id"]),
+                            clean,
+                            force_write_tags=False,
+                            write_tags=False,
+                        )
+                    except (BeetsUnavailableError, BeetsError) as ex:
+                        log.append(f"  Verified review mapping engine warning: {ex}")
+                        return updated
+                    if not res.get("ok"):
+                        log.append(f"  Verified review mapping engine warning: {res.get('error') or 'item metadata update rejected'}")
+                        return updated
+                    updated += int(res.get("item_fields_changed") or 0) or 1
+                except Exception as ex:
+                    # Regression guard: this loop used to run inside one
+                    # broad try/except (raw SQL UPDATE path). Migrating to
+                    # per-item engine calls must not let one malformed
+                    # mapping row (bad int(), missing key, etc.) raise
+                    # uncaught out of this helper and abort the whole
+                    # import job -- skip the row and keep going.
+                    log.append(f"  Verified review mapping warning for item {item_row['id']}: {ex}")
+                    continue
             if updated:
                 log.append(f"  Applied verified Import Review track mapping to {updated} item(s).")
             return updated
@@ -22618,335 +22357,124 @@ def _match_tracks_from_mb(mb_albumid: str, album_db_id, log: list,
         target_tracks=target_tracks,
     )
 
-    from difflib import SequenceMatcher
-
-    # ── Fetch release from MusicBrainz ────────────────────────────────────────
-    try:
-        mb_url = (f"https://musicbrainz.org/ws/2/release/{mb_albumid}"
-                  "?inc=recordings+release-groups&fmt=json")
-        req = _ur.Request(mb_url,
-                          headers={"User-Agent": "BeetsWebControl/1.0 (beets-webcntrl)"})
-        with _ur.urlopen(req, timeout=30) as resp:
-            mb_data = json.loads(resp.read())
-    except Exception as ex:
-        log.append(f"  MB fetch warning: {ex}")
-        return 0
-
-    # ── Flatten tracklist across all discs ────────────────────────────────────
-    mb_tracks: list = []
-    for medium in mb_data.get("media", []):
-        disc_num = int(medium.get("position") or 1)
-        for trk in medium.get("tracks", []):
-            mb_tracks.append({
-                "track":      int(trk.get("position") or 0),
-                "disc":       disc_num,
-                "title":      (trk.get("title") or "").strip(),
-                "mb_trackid": (trk.get("recording") or {}).get("id", ""),
-                "duration_ms": int(trk.get("length") or 0),
-            })
-
-    if not mb_tracks:
-        log.append("  MB release has no tracks — cannot match")
-        return 0
-
-    log.append(f"  MB release has {len(mb_tracks)} track(s) across "
-               f"{len(mb_data.get('media', []))} disc(s)")
-
-    # ── Get album items from DB ───────────────────────────────────────────────
-    try:
-        with _db(row_factory=sqlite3.Row) as con:
-            items = con.execute(
-                "SELECT id, title, track, length FROM items WHERE album_id = ?",
-                (album_db_id,)).fetchall()
-    except Exception as ex:
-        log.append(f"  DB read warning: {ex}")
-        return 0
-
-    if not items:
-        log.append("  No items found in DB for this album_id")
-        return 0
-
-    # ── Helpers to extract clean title from beets-stored value ──────────────────
-    # Patterns to strip from filenames used as titles:
-    #   "Artist - Album - NN - Title"  →  "Title"
-    #   "Artist - Album - %02i{$track} - Title"  →  "Title"
-    #   "NN - Title"  →  "Title"
-    #   "NN. Title"   →  "Title"
-    _PREFIX_RE = re.compile(
-        r'^(?:.*?\s+-\s+)?'           # optional "Artist - Album -" prefix
-        r'(?:\d+|%\w+\{[^}]+\})'     # track number OR template like %02i{$track}
-        r'\s*[-\.]\s*',               # separator
-        re.IGNORECASE
-    )
-
-    def _clean_title(raw: str) -> str:
-        """Strip filename-style prefixes (Artist - Album - NN -) to get bare track title."""
-        t = raw.strip()
-        # Apply up to 3 times to handle multi-segment prefixes
-        for _ in range(3):
-            stripped = _PREFIX_RE.sub('', t).strip()
-            if stripped == t:
-                break
-            t = stripped
-        return t.lower()
-
-    # Regex to strip bracketed annotations like "(ft. Jaden)", "[slowed + reverb]",
-    # "(remaster)", "(radio edit)", etc. from item titles before matching.
-    _ANNOT_RE = re.compile(
-        r'\s*[\(\[]\s*(?:ft\.|feat\.|with\b|slowed|reverb|remix|edit|remaster'
-        r'|radio|live|acoustic|version|bonus|instrumental|deluxe).*?[\)\]]\s*',
-        re.IGNORECASE
-    )
-    # Strip unclosed bracket/paren to end-of-string (e.g., "[slowed + reverb" with no closing "]")
-    _UNCLOSED_RE = re.compile(r'\s*[\(\[](?!.*[\)\]]).*$')
-
-    # ── Match items to MB tracks by title + duration ──────────────────────────
-    used_mb_indices: set = set()
-    updates: list = []
-    unmatched_ids: list = []
-    for item in items:
-        raw_title   = (item["title"] or "").strip()
-        item_title  = raw_title.lower()
-        clean_title = _clean_title(raw_title)   # stripped of Artist/Album/NN prefix
-        # "Bare" title = annotations like "(ft. X)" / "[slowed+reverb]" removed,
-        # including unclosed brackets (e.g. "[slowed + reverb" without closing "]")
-        bare_title  = _UNCLOSED_RE.sub('', _ANNOT_RE.sub('', item_title)).strip()
-        bare_clean  = _UNCLOSED_RE.sub('', _ANNOT_RE.sub('', clean_title)).strip()
-        item_dur_ms = int((item["length"] or 0) * 1000)
-
-        best_idx   = -1
-        best_score = -1.0
-        for mi, mb_trk in enumerate(mb_tracks):
-            if mi in used_mb_indices:
-                continue
-            mb_title_lc = mb_trk["title"].lower()
-            # Score using raw, cleaned, and annotation-stripped titles; take best
-            sim_raw   = SequenceMatcher(None, item_title,  mb_title_lc).ratio()
-            sim_clean = SequenceMatcher(None, clean_title, mb_title_lc).ratio()
-            sim_bare  = max(
-                SequenceMatcher(None, bare_title, mb_title_lc).ratio(),
-                SequenceMatcher(None, bare_clean, mb_title_lc).ratio(),
-            )
-            title_sim = max(sim_raw, sim_clean, sim_bare)
-            # Duration bonus
-            dur_sim = 0.0
-            if item_dur_ms and mb_trk["duration_ms"]:
-                diff_s = abs(item_dur_ms - mb_trk["duration_ms"]) / 1000.0
-                dur_sim = 0.06 if diff_s <= 3 else (0.03 if diff_s <= 8 else 0.0)
-            score = title_sim + dur_sim
-            if score > best_score:
-                best_score = score
-                best_idx   = mi
-
-        if best_idx >= 0 and best_score >= _MB_TRACK_REPAIR_MATCH_THRESHOLD:
-            mb_trk = mb_tracks[best_idx]
-            used_mb_indices.add(best_idx)
-            updates.append((mb_trk["mb_trackid"], mb_trk["track"], mb_trk["disc"],
-                            mb_trk["title"], item["id"]))
-            log.append(f"  #{mb_trk['track']:02d} '{mb_trk['title']}'"
-                       f"  ← '{raw_title}' ({best_score:.0%})")
-        else:
-            log.append(f"  No match for '{raw_title}' (best {best_score:.0%})")
-            unmatched_ids.append(item["id"])
-
-    # ── Write matches back to DB ──────────────────────────────────────────────
-    if updates or (zero_unmatched and unmatched_ids):
-        try:
-            with _db() as con:
-                con.executemany(
-                    "UPDATE items SET mb_trackid=?, track=?, disc=?, title=? WHERE id=?",
-                    updates)
-            # Also stamp album-level fields from MB
-            rg    = mb_data.get("release-group") or {}
-            year  = (mb_data.get("date") or "")[:4]
-            label_info = (mb_data.get("label-info") or [{}])[0]
-            label = ((label_info.get("label") or {}).get("name") or "")
-            country = mb_data.get("country") or ""
-            if year and year.isdigit():
-                con.execute("UPDATE albums SET year=? WHERE id=?", (int(year), album_db_id))
-            if label:
-                con.execute("UPDATE albums SET label=? WHERE id=?", (label, album_db_id))
-            if country:
-                con.execute("UPDATE albums SET country=? WHERE id=?", (country, album_db_id))
-            rg_id = rg.get("id", "")
-            if rg_id:
-                con.execute("UPDATE albums SET mb_releasegroupid=? WHERE id=?",
-                            (rg_id, album_db_id))
-            if zero_unmatched and unmatched_ids:
-                con.executemany(
-                    "UPDATE items SET track=0 WHERE id=?",
-                    [(iid,) for iid in unmatched_ids])
-                log.append(f"  Zeroed track# for {len(unmatched_ids)} unmatched item(s) (will be removed by dedup)")
-            con.commit()
-            con.close()
-            log.append(f"  Updated {len(updates)} item(s) in DB with MB track data.")
-        except Exception as ex:
-            log.append(f"  DB write warning: {ex}")
-
-    return len(updates)
-
-
 def _match_tracks_from_mb_shared(mb_albumid: str, album_db_id, log: list,
                                  zero_unmatched: bool = False,
                                  target_tracks: Optional[List[Dict[str, Any]]] = None) -> int:
-    """Shared MB track matcher used by import/repair after preflight."""
-    mb = _fetch_mb_release_tracklist(mb_albumid, log)
-    if not mb.get("ok"):
-        log.append(f"  MB fetch warning: {mb.get('error') or 'MusicBrainz release lookup failed'}")
-        return -1
-    mb_tracks = mb.get("tracks") or []
-    if not mb_tracks:
-        log.append("  MB release has no tracks — cannot match")
-        return 0
+    """Shared MB track matcher used by import/repair after preflight.
 
-    log.append(
-        f"  MB release has {len(mb_tracks)} track(s) across "
-        f"{len(set(int(t.get('disc') or 1) for t in mb_tracks))} disc(s)"
-    )
-    wanted_targets = _normalise_wanted_tracks(target_tracks)
-    if wanted_targets:
-        release_title_counts: Dict[str, int] = {}
-        for mbt in mb_tracks:
-            title_norm = _album_track_norm(mbt.get("title", ""))
-            if title_norm:
-                release_title_counts[title_norm] = release_title_counts.get(title_norm, 0) + 1
-        target_mb_tracks = [
-            t for t in mb_tracks
-            if _guard_release_track_matches_missing_target(
-                t,
-                wanted_targets,
-                title_norm_fn=_album_track_norm,
-                release_title_counts=release_title_counts,
-            )
-        ]
-        if target_mb_tracks:
-            mb_tracks = target_mb_tracks
-            log.append(
-                "  Restricting MB match to requested track(s): "
-                + ", ".join(_wanted_track_label(t) for t in wanted_targets[:8])
-            )
-        else:
-            log.append(
-                "  WARN: requested missing track(s) were not found in the selected "
-                "MusicBrainz release; no imported items will be matched."
-            )
-            mb_tracks = []
+    ARCH-003 Wave 33 continuation: migrated from raw local
+    UPDATE items/UPDATE albums SQL onto album_mb_track_repair_v1 (through
+    beets_client), using the target_tracks/acoustid_verify/zero_unmatched/
+    allow_establish_release_group/stamp_release_metadata options built
+    this same wave specifically to close this migration, and the family's
+    alignment procedure (backend/mb_alignment.greedy_album_track_alignment),
+    ported verbatim from this function's own former matching loop so the
+    engine and this call site can never again risk disagreeing on which
+    specific track a file gets permanently relabeled as.
+
+    acoustid_verify/allow_establish_release_group/stamp_release_metadata
+    are always requested here (not opt-in like they are for other
+    callers of the family): this function's own pre-migration behavior
+    always ran the AcoustID cross-check unconditionally, always stamped
+    mb_releasegroupid whenever the release had one (with no conflict
+    check at all -- the engine's repair_identity_mismatch guard is a
+    strict, real improvement over that), and always stamped year/country.
+
+    Return-value contract preserved for this function's 6 real callers,
+    3 of which check `matched < 0` and raise/abort on it: -1 means the
+    MusicBrainz lookup itself genuinely failed (network/API error, no
+    engine "code" at all -- the same signal this function's own MB fetch
+    failure used to produce); 0-or-more means the engine ran the request
+    to completion, whatever it decided (matched some tracks, decided
+    there was nothing to do, or refused for a specific, named reason --
+    e.g. target_tracks entirely absent from the release, a real identity
+    conflict). None of app.py's other 3 callers key off any value beyond
+    `< 0`, only log it.
+    """
+    payload: Dict[str, Any] = {
+        "album_id": int(album_db_id or 0),
+        "mb_albumid": mb_albumid,
+        "acoustid_verify": True,
+        "allow_establish_release_group": True,
+        "stamp_release_metadata": True,
+    }
+    if target_tracks:
+        payload["target_tracks"] = target_tracks
+    if zero_unmatched:
+        payload["zero_unmatched"] = True
 
     try:
-        with _db(row_factory=sqlite3.Row) as con:
-            items = con.execute(
-                "SELECT id, title, track, disc, path, mb_trackid, length "
-                "FROM items WHERE album_id=? ORDER BY disc, track, title, id",
-                (album_db_id,),
-            ).fetchall()
+        plan_res = beets_client.plan_album_mb_track_repair(payload)
     except Exception as ex:
-        log.append(f"  DB read warning: {ex}")
+        log.append(f"  MB fetch warning: {ex}")
+        return -1
+
+    if not plan_res.get("ok"):
+        code = plan_res.get("code") or ""
+        error_text = str(plan_res.get("error") or "")
+        if not code:
+            # The engine's MB-lookup-failure path returns {"ok": False,
+            # "error": ...} with no "code" at all -- the one case that
+            # must still map to -1 (refuse to proceed), matching every
+            # real caller's own `matched < 0` check.
+            log.append(f"  MB fetch warning: {error_text or 'MusicBrainz release lookup failed'}")
+            return -1
+        log.append(f"  {error_text or 'MB track repair planning failed'}")
         return 0
 
-    if not items:
-        log.append("  No items found in DB for this album_id")
+    op_id = plan_res.get("operation_id")
+    if not op_id:
+        log.append("  " + str(plan_res.get("message") or "No MusicBrainz recording IDs needed safe repair."))
         return 0
 
-    used_mb_indices: set = set()
-    updates: list = []
-    unmatched_ids: list = []
-    for item in items:
-        raw_title = _s(item["title"]).strip()
-        item_obj = {
-            "title": raw_title,
-            "track": int(item["track"] or 0),
-            "disc": int(item["disc"] or 1),
-            "path": _s(item["path"]),
-            "mb_trackid": _s(item["mb_trackid"]).strip().lower(),
-            "length": float(item["length"] or 0),
-        }
+    updated = int(plan_res.get("updated") or 0)
+    conflicts = int(plan_res.get("conflicts") or 0)
+    acoustid_rejected = int(plan_res.get("acoustid_rejected") or 0)
+    zero_planned = int(plan_res.get("zero_unmatched_rows") or 0)
+    log.append(
+        f"  MB release match: {updated} track(s) to repair, {conflicts} conflict(s) "
+        f"requiring review, {acoustid_rejected} AcoustID-rejected fuzzy match(es)"
+        + (f", {zero_planned} unmatched item(s) to zero" if zero_unmatched else "")
+    )
 
-        best_idx = -1
-        best_score = -1.0
-        best_track: Dict[str, Any] = {}
-        for idx, mb_trk in enumerate(mb_tracks):
-            if idx in used_mb_indices:
-                continue
-            score = _album_track_score(item_obj, mb_trk)
-            if score > best_score:
-                best_score = score
-                best_idx = idx
-                best_track = mb_trk
+    try:
+        apply_res = beets_client.apply_album_mb_track_repair(op_id, write_tags=True)
+    except Exception as ex:
+        log.append(f"  DB write warning: {ex}")
+        return 0
+    if not apply_res.get("ok"):
+        log.append(f"  DB write warning: {apply_res.get('error') or 'apply failed'}")
+        return 0
 
-        if best_idx >= 0 and best_score >= _MB_TRACK_REPAIR_MATCH_THRESHOLD:
-            # Fuzzy title/duration scoring can be fooled by similarly-named
-            # tracks (intros, live/remix versions, etc). Cross-check with the
-            # file's AcoustID fingerprint before permanently relabeling
-            # mb_trackid/track/disc/title in the DB — a confirmed fingerprint
-            # mismatch against every track on the release means this file
-            # isn't actually part of this release, whichever track fuzzy
-            # scoring picked.
-            fp = _album_track_fingerprint_check(item_obj, mb_tracks)
-            if fp.get("status") == "mismatch":
-                log.append(
-                    f"  ✗ REJECTED '{raw_title}' → '{best_track.get('title', '')}' "
-                    f"({best_score:.0%} text match) — AcoustID fingerprint doesn't match any track on this release"
-                )
-                unmatched_ids.append(int(item["id"]))
-                continue
-            used_mb_indices.add(best_idx)
-            updates.append((
-                best_track.get("mb_trackid", ""),
-                int(best_track.get("track") or 0),
-                int(best_track.get("disc") or 1),
-                _s(best_track.get("title", "")),
-                int(item["id"]),
-            ))
-            log.append(
-                f"  #{int(best_track.get('track') or 0):02d} "
-                f"'{best_track.get('title', '')}'  ← '{raw_title}' ({best_score:.0%})"
-            )
-        else:
-            log.append(f"  No match for '{raw_title}' (best {best_score:.0%})")
-            unmatched_ids.append(int(item["id"]))
-
-    if updates or (zero_unmatched and unmatched_ids):
-        try:
-            with _db() as con:
-                con.executemany(
-                    "UPDATE items SET mb_trackid=?, track=?, disc=?, title=? WHERE id=?",
-                    updates,
-                )
-                year = (mb.get("date") or "")[:4]
-                if year and year.isdigit():
-                    con.execute("UPDATE albums SET year=? WHERE id=?",
-                                (int(year), album_db_id))
-                country = mb.get("country") or ""
-                if country:
-                    con.execute("UPDATE albums SET country=? WHERE id=?",
-                                (country, album_db_id))
-                rg_id = mb.get("release_group", "")
-                if rg_id:
-                    con.execute("UPDATE albums SET mb_releasegroupid=? WHERE id=?",
-                                (rg_id, album_db_id))
-                if zero_unmatched and unmatched_ids:
-                    con.executemany(
-                        "UPDATE items SET track=0 WHERE id=?",
-                        [(iid,) for iid in unmatched_ids],
-                    )
-                    log.append(
-                        f"  Zeroed track# for {len(unmatched_ids)} unmatched item(s) "
-                        "(will be removed by dedup)"
-                    )
-                con.commit()
-            log.append(f"  Updated {len(updates)} item(s) in DB with MB track data.")
-        except Exception as ex:
-            log.append(f"  DB write warning: {ex}")
-
-    _stamp_album_release_id(int(album_db_id or 0), mb_albumid, log)
-    return len(updates)
+    log.append(f"  Updated {updated} item(s) in DB with MB track data.")
+    return updated
 
 
 @app.post("/api/albums/reimport-disk")
 def reimport_disk():
     """Tag & import audio files that are already in the music folder but not in the beets DB.
     Body: {aldir, mb_albumid}
-    Uses a temp config with copy/move disabled + zero threshold so beets matches in-place."""
+    Uses a temp config with copy/move disabled + zero threshold so beets matches in-place.
+
+    ARCH-003 Wave 33 bugfix: every plan_album_mb_track_repair() call in this
+    function passes allow_establish_release_group=True. Without it, this
+    function is a real, confirmed-live case of album_mb_track_repair_v1's
+    repair_rg_not_established guard: a fresh reimport genuinely can be the
+    FIRST time this specific album row's mb_releasegroupid gets set (a
+    brand-new album, or an existing album row that predates this project's
+    RG tracking), and the engine's default (correct for a plain repair
+    caller) refuses to silently establish that identity as a side effect.
+    Before this fix, that refusal was surfaced here as a raised
+    RuntimeError, silently failing the entire reimport rather than
+    completing it -- this function's whole premise is that mb_albumid was
+    already independently confirmed (a real beets import against a chosen
+    MB release, or explicit user/caller selection), so establishing the
+    corresponding Release Group here is the correct, evidence-backed
+    behavior, not a silent side effect. A real identity CONFLICT
+    (repair_identity_mismatch -- the album already has a DIFFERENT
+    established Release Group) is never bypassed by this flag and still
+    fails the reimport exactly as before.
+    """
     payload    = request.get_json(silent=True) or {}
     aldir      = payload.get("aldir", "").strip()
     mb_albumid = payload.get("mb_albumid", "").strip()
@@ -23038,7 +22566,6 @@ def reimport_disk():
 
     def _do(log, cancel_event=None):
         nonlocal aldir, mb_albumid, existing_album_id, wanted_tracks
-        env = _beet_env()
 
         # Accept a release UUID, release URL, release-group UUID/URL, or a blank
         # value that can be resolved from the folder/artist context.  The rest
@@ -23083,19 +22610,6 @@ def reimport_disk():
                 "release; repairing tags in-place without re-importing."
             )
             log.append(f"[1/3] {repair_desc}")
-            repair_cfg = _write_job_beets_config("/tmp/beets_existing_album_repair.yaml")
-            base_std = [BEET_BIN, "-c", repair_cfg]
-            # _beet_run/_parse_remote_beet_command strips any "-c <path>" token
-            # from base_std before sending the command to the control agent --
-            # a local web-manager path has no meaning on the remote engine.
-            # The config content itself (plugin list, path templates, disabled
-            # lyrics/replaygain auto-fetch) still needs to reach the engine, so
-            # it's forwarded explicitly via config_override below rather than
-            # silently lost.
-            try:
-                repair_cfg_content = Path(repair_cfg).read_text(encoding="utf-8")
-            except Exception:
-                repair_cfg_content = ""
             expected_tracks = _mb_release_track_count(mb_albumid, log)
             if not expected_tracks:
                 raise RuntimeError(
@@ -23135,7 +22649,7 @@ def reimport_disk():
                         f"Existing album repair did not match enough tracks: "
                         f"{matched}/{expected_tracks}"
                     )
-            p_res = beets_client.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mb_albumid})
+            p_res = beets_client.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mb_albumid, "allow_establish_release_group": True})
             if not p_res.get("ok") or not p_res.get("operation_id"):
                 raise RuntimeError(f"Engine plan_album_mb_track_repair failed for album {aid}")
             app_res = beets_client.apply_album_mb_track_repair(p_res["operation_id"], write_tags=True)
@@ -23712,39 +23226,6 @@ def reimport_disk():
             except Exception as ex:
                 log.append(f"  DB cleanup warning: {ex}")
 
-        # Temp config: no copy/move (import in-place), permissive selected-release match threshold.
-        # Disable slow auto-plugins (lyrics, replaygain) for ALL sub-commands
-        # so they don't fire web requests on every track during write/mbsync.
-        temp_cfg = "/tmp/beets_reimport_disk.yaml"
-        _plugins = _beet_plugins()
-        temp_cfg_content = (
-            "include:\n  - /config/config.yaml\n"
-            + _BEETS_PLUGINPATH_CONFIG
-            + (f"plugins: {_plugins}\n" if _plugins else "")
-            + _JOB_PATHS_CONFIG_BLOCK
-            + "import:\n"
-            "  copy: no\n"
-            "  move: no\n"
-            f"  duplicate_action: {'keep' if existing_album_id else 'remove'}\n"
-            "match:\n"
-            "  strong_rec_thresh: 1.0\n"
-            "  medium_rec_thresh: 1.0\n"
-            "lyrics:\n"
-            "  auto: no\n"
-            "replaygain:\n"
-            "  auto: no\n"
-        )
-        Path(temp_cfg).write_text(temp_cfg_content)
-        # Use temp_cfg (no slow plugins) for ALL beet sub-commands in this job.
-        # The "-c temp_cfg" token itself is stripped by _beet_run before the
-        # command reaches the control agent (a local web-manager path has no
-        # meaning on the remote engine) -- temp_cfg_content is forwarded
-        # explicitly via config_override on every _beet_run call below so the
-        # copy/move/duplicate_action/lyrics/replaygain overrides still apply
-        # on the engine side, not just this now-unused local file.
-        base_tmp = [BEET_BIN, "-c", temp_cfg]
-        base_std = base_tmp   # was "/config/config.yaml" — avoid triggering lyrics/replaygain
-
         # Uses the engine-supplied evidence captured at request time (see
         # import_source_evidence above), not a local scan -- this route's
         # source lives on the Beets engine, not the web manager.
@@ -23910,7 +23391,7 @@ def reimport_disk():
                         f"{labels or len(still_missing_before_retag)}"
                     )
 
-            p_res = beets_client.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mb_albumid})
+            p_res = beets_client.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mb_albumid, "allow_establish_release_group": True})
             if not p_res.get("ok") or not p_res.get("operation_id"):
                 raise RuntimeError(f"Engine plan_album_mb_track_repair failed for album {aid}")
             app_res = beets_client.apply_album_mb_track_repair(p_res["operation_id"], write_tags=True)
@@ -23962,7 +23443,7 @@ def reimport_disk():
                     replace_existing_item_ids=replace_existing_item_ids)
                 if merged_aid != aid:
                     aid = merged_aid
-                    p_res = beets_client.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mb_albumid})
+                    p_res = beets_client.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mb_albumid, "allow_establish_release_group": True})
                     if not p_res.get("ok") or not p_res.get("operation_id"):
                         raise RuntimeError(f"Engine plan_album_mb_track_repair failed for album {aid} after merge")
                     app_res = beets_client.apply_album_mb_track_repair(p_res["operation_id"], write_tags=True)
@@ -24081,7 +23562,7 @@ def reimport_disk():
                 except Exception:
                     pass
 
-            p_res = beets_client.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mb_albumid})
+            p_res = beets_client.plan_album_mb_track_repair({"album_id": aid, "mb_albumid": mb_albumid, "allow_establish_release_group": True})
             if not p_res.get("ok") or not p_res.get("operation_id"):
                 raise RuntimeError(f"Engine plan_album_mb_track_repair failed for album {aid}")
             app_res = beets_client.apply_album_mb_track_repair(p_res["operation_id"], write_tags=True)
@@ -24183,7 +23664,7 @@ def reimport_disk():
 
             _strip_year_from_album_name(_real_aid, log)
 
-            p_res = beets_client.plan_album_mb_track_repair({"album_id": _real_aid, "mb_albumid": mb_albumid})
+            p_res = beets_client.plan_album_mb_track_repair({"album_id": _real_aid, "mb_albumid": mb_albumid, "allow_establish_release_group": True})
             if not p_res.get("ok") or not p_res.get("operation_id"):
                 raise RuntimeError(f"Engine plan_album_mb_track_repair failed for album {_real_aid}")
             app_res = beets_client.apply_album_mb_track_repair(p_res["operation_id"], write_tags=True)
@@ -27107,6 +26588,7 @@ def _do_scan_job() -> str:
 
         lib_paths: set = set()
         item_by_path: Dict[str, int] = {}
+        item_album_by_id: Dict[int, int] = {}
         album_ids: set = set()
         for idx, row in enumerate(rows, start=1):
             if idx % 5000 == 0:
@@ -27117,9 +26599,12 @@ def _do_scan_job() -> str:
             if p and not p.startswith("/"):
                 p = _mroot_str + "/" + p
             lib_paths.add(p)
-            item_by_path[p] = int(row["id"] or 0)
+            item_id_val = int(row["id"] or 0)
+            item_by_path[p] = item_id_val
             if row["album_id"] is not None:
-                album_ids.add(int(row["album_id"] or 0))
+                aid_val = int(row["album_id"] or 0)
+                album_ids.add(aid_val)
+                item_album_by_id[item_id_val] = aid_val
         album_count = len(album_ids)
 
         disk_files: set = set()
@@ -27146,27 +26631,79 @@ def _do_scan_job() -> str:
         new_count = len(disk_files - lib_paths)
 
         # ── Auto-clean stale DB entries for deleted files ──────────────────────
+        # Deletion goes through album_maintenance_v1 per album (ARCH-003
+        # Wave 31), the same pattern as library_sync_deleted(): stale item
+        # ids are grouped by album and one Plan/Apply call per album
+        # removes them, which already deletes an album row that becomes
+        # fully empty as a result. A second, separate pass then reproduces
+        # the original global "any album left with zero items" sweep
+        # (which could catch pre-existing empty rows unrelated to this
+        # scan's own findings) by reusing beets_client.delete_album() --
+        # the same primitive _clean_remove_empty_albums() already uses --
+        # on a fresh, read-only query for currently-empty albums.
         removed_count = 0
         if missing and root_accessible and disk_files:
             # Safety: skip cleanup if >50 % of library appears missing
             # (guards against mount failure wiping the whole DB)
             pct_missing = len(missing) / max(len(lib_paths), 1)
             if pct_missing < 0.5:
+                stale_ids = [item_by_path[p] for p in missing if item_by_path.get(p)]
+                stale_by_album: Dict[int, List[int]] = {}
+                orphan_stale_ids: List[int] = []
+                for iid in stale_ids:
+                    aid = item_album_by_id.get(iid, 0)
+                    if aid > 0:
+                        stale_by_album.setdefault(aid, []).append(iid)
+                    else:
+                        orphan_stale_ids.append(iid)
+
+                for aid, aid_item_ids in sorted(stale_by_album.items()):
+                    try:
+                        plan_res = beets_client.plan_album_maintenance({
+                            "mode": "remove_tracks",
+                            "album_id": aid,
+                            "item_ids": aid_item_ids,
+                            "delete_files": False,
+                            "clean_empty_folders": False,
+                        })
+                        if not plan_res.get("ok"):
+                            log.append(f"warn:DB cleanup plan rejected for album_id {aid}: {plan_res.get('error')}")
+                            continue
+                        op_id = plan_res.get("operation_id")
+                        if not op_id:
+                            continue
+                        apply_res = beets_client.apply_album_maintenance(op_id)
+                        if not apply_res.get("ok"):
+                            log.append(f"warn:DB cleanup apply rejected for album_id {aid}: {apply_res.get('error')}")
+                            continue
+                        removed_count += int(apply_res.get("deleted_items") or 0)
+                    except (BeetsUnavailableError, BeetsError) as ex:
+                        log.append(f"warn:DB cleanup engine unavailable for album_id {aid}: {ex}")
+
+                if orphan_stale_ids:
+                    log.append(
+                        f"warn:{len(orphan_stale_ids)} stale item(s) have no album_id and "
+                        "cannot be removed through the engine's album_maintenance_v1 boundary; skipped"
+                    )
+
                 try:
-                    stale_ids = [item_by_path[p] for p in missing if item_by_path.get(p)]
-                    if stale_ids:
-                        with _db() as con:
-                            placeholders = ",".join("?" * len(stale_ids))
-                            con.execute(f"DELETE FROM items WHERE id IN ({placeholders})", stale_ids)
-                            con.execute(
-                                "DELETE FROM albums WHERE id NOT IN "
-                                "(SELECT DISTINCT album_id FROM items WHERE album_id IS NOT NULL)"
-                            )
-                            con.commit()
-                        removed_count = len(stale_ids)
-                        log.append(f"cleaned:{removed_count} stale DB entr{'y' if removed_count==1 else 'ies'} removed")
+                    with _db(row_factory=sqlite3.Row) as con:
+                        empty_album_rows = con.execute(
+                            "SELECT a.id FROM albums a LEFT JOIN items i ON i.album_id = a.id "
+                            "GROUP BY a.id HAVING COUNT(i.id) = 0"
+                        ).fetchall()
+                    for row in empty_album_rows:
+                        try:
+                            empty_res = beets_client.delete_album(int(row["id"]), delete_files=False)
+                        except (BeetsUnavailableError, BeetsError) as ex:
+                            log.append(f"warn:empty-album cleanup engine unavailable for album_id {row['id']}: {ex}")
+                            continue
+                        if not empty_res.get("ok"):
+                            log.append(f"warn:empty-album cleanup rejected for album_id {row['id']}: {empty_res.get('error') or 'unknown error'}")
                 except Exception as ex:
-                    log.append(f"warn:DB cleanup error: {ex}")
+                    log.append(f"warn:empty-album sweep read failed: {ex}")
+
+                log.append(f"cleaned:{removed_count} stale DB entr{'y' if removed_count==1 else 'ies'} removed")
             else:
                 log.append(f"warn:skipping DB cleanup — {len(missing)}/{len(lib_paths)} entries missing (mount issue?)")
 
@@ -27234,40 +26771,53 @@ def library_merge_artist():
         return jsonify({"ok": False, "error": "from_artist and to_artist are the same"})
 
     def _do(log, cancel_event=None):
-        with _db() as con:
-            album_rows = con.execute(
-                "SELECT id FROM albums WHERE albumartist = ?", (from_artist,)
-            ).fetchall()
-            if not album_rows:
-                log.append(f"No albums found for artist '{from_artist}'")
-                return
-            album_ids = [r[0] for r in album_rows]
-            log.append(f"Renaming {len(album_ids)} album(s): {from_artist!r} → {to_artist!r}")
-            con.execute("UPDATE albums SET albumartist = ? WHERE albumartist = ?",
-                        (to_artist, from_artist))
-            con.execute("UPDATE items SET albumartist = ? WHERE albumartist = ?",
-                        (to_artist, from_artist))
-            con.commit()
-        log.append("DB updated.")
-        # Write tags and move files for each affected album
-        cfg = "/config/config.yaml"
-        for i, aid in enumerate(album_ids, 1):
-            log.append(f"[{i}/{len(album_ids)}] Writing tags for album_id={aid}…")
-            r = subprocess.run(
-                [BEET_BIN, "-c", cfg, "write", f"album_id:{aid}"],
-                capture_output=True, text=True, timeout=120
-            )
-            for line in (r.stdout + r.stderr).splitlines():
-                if line.strip(): log.append("  " + line)
-            log.append(f"[{i}/{len(album_ids)}] Moving files for album_id={aid}…")
-            r = subprocess.run(
-                [BEET_BIN, "-c", cfg, "move", f"album_id:{aid}"],
-                capture_output=True, text=True, timeout=120
-            )
-            for line in (r.stdout + r.stderr).splitlines():
-                if line.strip(): log.append("  " + line)
+        # ARCH-007 (Wave 34): structured engine read, not raw _db() SQL --
+        # see backend.beets_client.find_all_albums_by_albumartist()'s own
+        # docstring for why this is an exact-match query, not a substring
+        # LIKE match.
+        try:
+            album_rows = beets_client.find_all_albums_by_albumartist(from_artist)
+        except (BeetsUnavailableError, BeetsError) as ex:
+            log.append(f"ERROR: Engine unavailable looking up artist '{from_artist}': {ex}")
+            return
+        if not album_rows:
+            log.append(f"No albums found for artist '{from_artist}'")
+            return
+        album_ids = [int(r["id"]) for r in album_rows]
+        log.append(f"Renaming {len(album_ids)} album(s): {from_artist!r} → {to_artist!r}")
+
+        # Same album_metadata_repair_v1 migration already applied to
+        # library_normalize_artists()/_run_normalize_artists_if_needed()
+        # (ARCH-003 Wave 30/32): updates={"albumartist": to_artist}
+        # propagates to every item row of each album too, and
+        # force_write_tags=True performs the real on-disk tag write --
+        # no local subprocess execution needed for either the DB rename
+        # or the write step.
+        renamed_ids: List[int] = []
+        for aid in album_ids:
+            try:
+                res = beets_client.update_album_metadata(aid, {"albumartist": to_artist}, force_write_tags=True)
+            except (BeetsUnavailableError, BeetsError) as ex:
+                log.append(f"  Engine unavailable renaming album_id {aid}: {ex}")
+                continue
+            if not res.get("ok"):
+                log.append(f"  Engine rejected rename for album_id {aid}: {res.get('error') or 'unknown error'}")
+                continue
+            renamed_ids.append(aid)
+        log.append(f"DB updated: {len(renamed_ids)}/{len(album_ids)} album(s).")
+
+        for i, aid in enumerate(renamed_ids, 1):
+            log.append(f"[{i}/{len(renamed_ids)}] Moving files for album_id={aid}…")
+            try:
+                rel_res = beets_client.relocate_album(aid, mode="rename")
+                if rel_res.get("ok"):
+                    log.append(f"  ✓ Relocated album {aid} to: {rel_res.get('dest_dir')}")
+                else:
+                    log.append(f"  relocate warning: {rel_res.get('error')}")
+            except Exception as _ex:
+                log.append(f"  relocate warning: {_ex}")
         _invalidate_lib_cache()
-        log.append(f"Done — all albums now under '{to_artist}'.")
+        log.append(f"Done — {len(renamed_ids)} album(s) now under '{to_artist}'.")
 
     job = jobs.start_python(_do, label=f"Merge artist: {from_artist!r} → {to_artist!r}")
     return jsonify({"ok": True, "job_id": job.job_id})
@@ -27444,30 +26994,61 @@ def library_sync_deleted():
                 })
             return
 
-        try:
-            with _db() as con3:
-                _batch = 500
-                for i in range(0, len(rm_item_ids), _batch):
-                    ch = rm_item_ids[i:i+_batch]
-                    con3.execute(f"DELETE FROM items WHERE id IN ({','.join('?'*len(ch))})", ch)
-                for i in range(0, len(rm_album_ids), _batch):
-                    ch = rm_album_ids[i:i+_batch]
-                    con3.execute(f"DELETE FROM albums WHERE id IN ({','.join('?'*len(ch))})", ch)
-        except Exception as ex:
-            log.append(f"ERROR deleting from DB: {ex}"); return
+        # Deletion goes through album_maintenance_v1 per album (files are
+        # already confirmed gone above -- delete_files=False, nothing real
+        # to unlink; remove_tracks mode already deletes the album row too
+        # once every one of its items is included in one call).
+        removed_item_total = 0
+        removed_album_total = 0
+        for aid_i, missing_ids in album_missing.items():
+            if cancel_event and cancel_event.is_set():
+                log.append("[cancelled]"); return
+            try:
+                plan_res = beets_client.plan_album_maintenance({
+                    "mode": "remove_tracks",
+                    "album_id": aid_i,
+                    "item_ids": missing_ids,
+                    "delete_files": False,
+                    "clean_empty_folders": False,
+                })
+            except (BeetsUnavailableError, BeetsError) as ex:
+                log.append(f"  ERROR: engine unavailable syncing album_id {aid_i}: {ex}")
+                continue
+            if not plan_res.get("ok"):
+                log.append(f"  ERROR: engine rejected sync plan for album_id {aid_i}: {plan_res.get('error') or 'unknown error'}")
+                continue
+            op_id = plan_res.get("operation_id")
+            if not op_id:
+                continue
+            try:
+                apply_res = beets_client.apply_album_maintenance(op_id)
+            except (BeetsUnavailableError, BeetsError) as ex:
+                log.append(f"  ERROR: engine unavailable applying sync for album_id {aid_i}: {ex}")
+                continue
+            if not apply_res.get("ok"):
+                log.append(f"  ERROR: engine rejected sync apply for album_id {aid_i}: {apply_res.get('error') or 'unknown error'}")
+                continue
+            removed_item_total += int(apply_res.get("deleted_items") or 0)
+            removed_album_total += int(apply_res.get("deleted_albums") or 0)
+
+        if orphan_item_ids:
+            log.append(
+                f"  WARN: {len(orphan_item_ids)} missing-file item(s) have no album_id and "
+                "cannot be removed through the engine's album_maintenance_v1 boundary; skipped."
+            )
 
         _invalidate_lib_cache()
-        log.append(f"Done - removed {len(rm_album_ids)} album(s), "
-                   f"{len(rm_item_ids)} track(s) from DB (files already gone from disk)")
+        log.append(f"Done - removed {removed_album_total} album(s), "
+                   f"{removed_item_total} track(s) from DB (files already gone from disk)")
         if update_state:
             update_state({
                 "current_task": "Missing-file DB sync applied",
-                "affected_count": len(rm_item_ids),
-                "changed_count": len(rm_album_ids) + len(rm_item_ids),
+                "affected_count": removed_item_total,
+                "changed_count": removed_album_total + removed_item_total,
                 "final_summary": {
                     "DB rows scanned": len(all_items),
-                    "Missing item rows removed": len(rm_item_ids),
-                    "Album rows removed": len(rm_album_ids),
+                    "Missing item rows removed": removed_item_total,
+                    "Album rows removed": removed_album_total,
                     "Mode": "Applied after confirmation",
                 },
             })
@@ -27636,63 +27217,136 @@ def create_unmatched_draft():
 def library_move_all():
     """Rename/move all library files to match the current path template (beet move)."""
     def _do(log, cancel_event=None):
-        import subprocess as _sp
+        candidate_dirs: set = set()
+        try:
+            path_values = beets_client.list_distinct_item_paths()
+            for p in path_values:
+                if not p:
+                    continue
+                abs_p = p if p.startswith("/") else f"{MUSIC_ROOT}/{p}"
+                parent = Path(abs_p).parent
+                root = Path(str(MUSIC_ROOT))
+                while parent != root and root in parent.parents:
+                    candidate_dirs.add(str(parent))
+                    parent = parent.parent
+            log.append(
+                f"Pre-move scan: {len(path_values)} distinct item path(s) read via engine IPC, "
+                f"{len(candidate_dirs)} candidate empty-folder director{'y' if len(candidate_dirs) == 1 else 'ies'}."
+            )
+        except Exception as ex:
+            log.append(f"  [warn] Could not enumerate pre-move directories for empty-folder cleanup: {ex}")
 
-        def _stream(cmd, label, deadline):
-            log.append(f"{label}…")
-            try:
-                proc = _sp.Popen(cmd, stdout=_sp.PIPE, stderr=_sp.STDOUT,
-                                 text=True, env=env, bufsize=1)
-            except Exception as ex:
-                raise RuntimeError(f"Failed to start {label}: {ex}")
-            for line in proc.stdout:
+        # Steps 1 & 2: rescan disk (beet update) and move files (beet move) via engine IPC under OS lock
+        log.append("Rescanning and moving library files via engine IPC…")
+        deadline = time.time() + 5400.0  # 1.5-hour hard cap
+        try:
+            move_res = beets_client.move_library(query="", rescan_first=True, async_job=True, timeout=5400.0)
+        except Exception as ex:
+            raise RuntimeError(f"Failed to execute move_library on engine: {ex}") from ex
+
+        remote_job_id = move_res.get("job_id") if isinstance(move_res, dict) else None
+        rc = 0
+        if remote_job_id:
+            seen_stdout = 0
+            seen_stderr = 0
+            while True:
                 if cancel_event and cancel_event.is_set():
-                    proc.kill(); proc.communicate()
-                    log.append("[cancelled]"); return -9
+                    try:
+                        beets_client.cancel_job(remote_job_id)
+                    except Exception:
+                        pass
+                    log.append("[cancelled]")
+                    return
+
                 if time.time() > deadline:
-                    proc.kill(); proc.communicate()
-                    log.append(f"⚠ {label} timed out."); return 124
-                stripped = line.rstrip()
-                if stripped:
-                    log.append(stripped)
-            return proc.wait()
+                    try:
+                        beets_client.cancel_job(remote_job_id)
+                    except Exception:
+                        pass
+                    log.append("⚠ move_library timed out.")
+                    return
 
-        env = {**_beet_env(), "PYTHONUNBUFFERED": "1"}
-        _cfg = _write_job_beets_config(f"/tmp/beets-move-all-{uuid.uuid4().hex}.yaml")
-        base = [BEET_BIN, "-c", _cfg]
+                try:
+                    job_info = beets_client.get_job(remote_job_id)
+                except Exception:
+                    time.sleep(0.5)
+                    continue
 
-        # Step 1: rescan disk to fix any stale DB paths before moving
-        rc = _stream(base + ["update"], "Rescanning library (beet update)", time.time() + 1800)
-        if rc == -9: return
-        if rc not in (0, 1):
-            raise RuntimeError(f"beet update exited with rc={rc}")
+                r_stdout = job_info.get("stdout") or []
+                if len(r_stdout) > seen_stdout:
+                    for line in r_stdout[seen_stdout:]:
+                        stripped = line.rstrip()
+                        if stripped:
+                            log.append(stripped)
+                    seen_stdout = len(r_stdout)
+
+                r_stderr = job_info.get("stderr") or []
+                if len(r_stderr) > seen_stderr:
+                    for line in r_stderr[seen_stderr:]:
+                        stripped = line.rstrip()
+                        if stripped:
+                            log.append(f"  ⚠ {stripped}")
+                    seen_stderr = len(r_stderr)
+
+                status = job_info.get("status")
+                if status in ("success", "failed", "cancelled", "timeout"):
+                    rc = job_info.get("returncode", 0 if status == "success" else 1)
+                    if status == "cancelled":
+                        log.append("[cancelled]")
+                        return
+                    if status == "timeout":
+                        log.append("⚠ move_library timed out.")
+                        return
+                    break
+
+                time.sleep(0.5)
+        elif isinstance(move_res, dict):
+            # Sync response / unit test mock fallback
+            stdout = move_res.get("stdout") or ""
+            stderr = move_res.get("stderr") or ""
+            for line in stdout.splitlines():
+                if line.strip():
+                    log.append(line.rstrip())
+            for line in stderr.splitlines():
+                if line.strip():
+                    log.append(f"  ⚠ {line.rstrip()}")
+            rc = move_res.get("returncode", 0 if move_res.get("ok", True) else 1)
+
+        if (isinstance(move_res, dict) and not move_res.get("ok", True)) or rc not in (0, 1):
+            err = move_res.get("error") if isinstance(move_res, dict) else None
+            raise RuntimeError(err or f"beet move exited with rc={rc}")
 
         if cancel_event and cancel_event.is_set():
             log.append("[cancelled]"); return
 
-        # Step 2: move files to match current path template
-        rc = _stream(base + ["move"], "Moving files to updated path template (beet move)", time.time() + 3600)
-        if rc == -9: return
-        if rc not in (0, 1):
-            raise RuntimeError(f"beet move exited with rc={rc}")
-
-        # Step 3: remove empty directories left behind by the move
+        # Step 3: ask the engine to remove empty candidate directories
         removed_dirs = 0
-        try:
-            # Walk bottom-up so inner empty dirs are removed before their parents
-            for dirpath, dirnames, filenames in os.walk(str(MUSIC_ROOT), topdown=False):
-                dp = Path(dirpath)
-                if dp == MUSIC_ROOT:
-                    continue
-                try:
-                    if not any(dp.iterdir()):
-                        dp.rmdir()
-                        removed_dirs += 1
-                        log.append(f"  Removed empty folder: {dp.relative_to(MUSIC_ROOT)}")
-                except Exception:
-                    pass
-        except Exception as ex:
-            log.append(f"  [warn] Empty-folder cleanup failed (non-fatal): {ex}")
+        for cdir in sorted(candidate_dirs, key=len, reverse=True):
+            if cancel_event and cancel_event.is_set():
+                log.append("[cancelled]"); return
+            try:
+                plan_res = beets_client.plan_folder_cleanup({"source": cdir, "action": "remove_empty"})
+            except Exception as ex:
+                log.append(f"  [warn] Folder cleanup plan failed for {cdir}: {ex}")
+                continue
+            if not plan_res.get("ok"):
+                code = plan_res.get("code") or ""
+                if code not in ("folder_cleanup_not_empty", "folder_cleanup_db_references"):
+                    log.append(f"  [warn] Folder cleanup plan rejected for {cdir}: {plan_res.get('error')}")
+                continue
+            op_id = plan_res.get("operation_id")
+            if not op_id:
+                continue
+            try:
+                apply_res = beets_client.apply_folder_cleanup(op_id)
+            except Exception as ex:
+                log.append(f"  [warn] Folder cleanup apply failed for {cdir}: {ex}")
+                continue
+            if apply_res.get("ok"):
+                removed_dirs += 1
+                log.append(f"  Removed empty folder: {cdir}")
+            else:
+                log.append(f"  [warn] Folder cleanup apply rejected for {cdir}: {apply_res.get('error')}")
         if removed_dirs:
             log.append(f"Cleaned up {removed_dirs} empty folder(s).")
 
@@ -27708,52 +27362,103 @@ def library_move_all():
 def library_mbsync_all():
     """Sync all library tracks against MusicBrainz metadata (beet mbsync)."""
     def _do(log, cancel_event=None):
-        import subprocess as _sp
-        # Remove orphaned album records (albums with no tracks) — mbsync crashes on them
         try:
-            with _db() as con:
-                rows = con.execute(
-                    "SELECT id FROM albums WHERE id NOT IN (SELECT DISTINCT album_id FROM items WHERE album_id IS NOT NULL)"
-                ).fetchall()
-                if rows:
-                    ids = [r[0] for r in rows]
-                    con.execute(f"DELETE FROM albums WHERE id IN ({','.join('?'*len(ids))})", ids)
-                log.append(f"Pruned {len(ids)} orphaned album record(s) with no tracks.")
-            con.close()
+            orphan_rows = beets_client.find_all_orphan_albums()
+            orphan_ids = [int(r["id"]) for r in orphan_rows]
         except Exception as ex:
-            log.append(f"  [warn] Orphan prune failed (non-fatal): {ex}")
+            log.append(f"  [warn] Orphan lookup failed (non-fatal): {ex}")
+            orphan_ids = []
 
-        env = {**_beet_env(), "PYTHONUNBUFFERED": "1"}
-        _cfg = _write_job_beets_config(f"/tmp/beets-mbsync-all-{uuid.uuid4().hex}.yaml")
-        cmd = [BEET_BIN, "-c", _cfg, "mbsync"]
-        log.append("Running beet mbsync on full library — this may take several minutes…")
-        log.append(f"Command: {' '.join(cmd[:3])} mbsync")
-        try:
-            proc = _sp.Popen(
-                cmd,
-                stdout=_sp.PIPE, stderr=_sp.STDOUT,
-                text=True, env=env, bufsize=1,
-            )
-        except Exception as ex:
-            raise RuntimeError(f"Failed to start beet mbsync: {ex}")
-
-        deadline = time.time() + 7200  # 2-hour hard cap
-        for line in proc.stdout:
+        pruned = 0
+        for oid in orphan_ids:
             if cancel_event and cancel_event.is_set():
-                proc.kill()
-                proc.communicate()
-                log.append("[cancelled]")
-                return
-            if time.time() > deadline:
-                proc.kill()
-                proc.communicate()
-                log.append("⚠ mbsync timed out after 2 hours.")
-                return
-            stripped = line.rstrip()
-            if stripped:
-                log.append(stripped)
+                log.append("[cancelled]"); return
+            try:
+                res = beets_client.delete_album(oid, delete_files=True)
+                if res.get("ok"):
+                    pruned += 1
+                else:
+                    log.append(f"  [warn] Could not prune orphaned album {oid}: {res.get('error')}")
+            except Exception as ex:
+                log.append(f"  [warn] Could not prune orphaned album {oid}: {ex}")
+        if orphan_ids:
+            log.append(f"Pruned {pruned}/{len(orphan_ids)} orphaned album record(s) with no tracks.")
 
-        rc = proc.wait()
+        log.append("Running beet mbsync on full library via engine IPC — this may take several minutes…")
+        deadline = time.time() + 7200.0  # 2-hour hard cap
+        try:
+            mbsync_res = beets_client.mbsync(query="", async_job=True)
+        except Exception as ex:
+            raise RuntimeError(f"Failed to start beet mbsync on engine: {ex}") from ex
+
+        remote_job_id = mbsync_res.get("job_id") if isinstance(mbsync_res, dict) else None
+        rc = 0
+        if remote_job_id:
+            seen_stdout = 0
+            seen_stderr = 0
+            while True:
+                if cancel_event and cancel_event.is_set():
+                    try:
+                        beets_client.cancel_job(remote_job_id)
+                    except Exception:
+                        pass
+                    log.append("[cancelled]")
+                    return
+
+                if time.time() > deadline:
+                    try:
+                        beets_client.cancel_job(remote_job_id)
+                    except Exception:
+                        pass
+                    log.append("⚠ mbsync timed out after 2 hours.")
+                    return
+
+                try:
+                    job_info = beets_client.get_job(remote_job_id)
+                except Exception:
+                    time.sleep(0.5)
+                    continue
+
+                r_stdout = job_info.get("stdout") or []
+                if len(r_stdout) > seen_stdout:
+                    for line in r_stdout[seen_stdout:]:
+                        stripped = line.rstrip()
+                        if stripped:
+                            log.append(stripped)
+                    seen_stdout = len(r_stdout)
+
+                r_stderr = job_info.get("stderr") or []
+                if len(r_stderr) > seen_stderr:
+                    for line in r_stderr[seen_stderr:]:
+                        stripped = line.rstrip()
+                        if stripped:
+                            log.append(f"  ⚠ {stripped}")
+                    seen_stderr = len(r_stderr)
+
+                status = job_info.get("status")
+                if status in ("success", "failed", "cancelled", "timeout"):
+                    rc = job_info.get("returncode", 0 if status == "success" else 1)
+                    if status == "cancelled":
+                        log.append("[cancelled]")
+                        return
+                    if status == "timeout":
+                        log.append("⚠ mbsync timed out after 2 hours.")
+                        return
+                    break
+
+                time.sleep(0.5)
+        elif isinstance(mbsync_res, dict):
+            # Sync response / unit test mock fallback
+            stdout = mbsync_res.get("stdout") or ""
+            stderr = mbsync_res.get("stderr") or ""
+            for line in stdout.splitlines():
+                if line.strip():
+                    log.append(line.rstrip())
+            for line in stderr.splitlines():
+                if line.strip():
+                    log.append(f"  ⚠ {line.rstrip()}")
+            rc = mbsync_res.get("returncode", 0 if mbsync_res.get("ok", True) else 1)
+
         if rc not in (0, 1):
             raise RuntimeError(f"beet mbsync exited with rc={rc}")
         _invalidate_lib_cache()
@@ -27895,7 +27600,7 @@ def _log_beet_output_excerpt(log: list, label: str, out: str,
         log.append(f"    {line}")
 
 
-def _apply_genre_to_album(album_id: int, genre: str, log: list, env: dict,
+def _apply_genre_to_album(album_id: int, genre: str, log: list, env: Optional[dict] = None,
                            cancel_event=None) -> bool:
     """Write genre to every track via album_metadata_repair_v1 family."""
     try:
@@ -27910,7 +27615,7 @@ def _apply_genre_to_album(album_id: int, genre: str, log: list, env: dict,
     return True
 
 
-def _lastgenre_cmd(force: bool, query: str, log: list, env: dict,
+def _lastgenre_cmd(force: bool, query: str, log: list, env: Optional[dict] = None,
                    cancel_event=None, timeout: int = 180):
     """Run controlled album-scoped lastgenre repair via BeetsClient IPC."""
     raw_query = _s(query).strip()
@@ -27941,8 +27646,6 @@ def library_fix_genres():
     use_ai   = bool(payload.get("use_ai"))
 
     def _do(log, cancel_event=None):
-        env = _beet_env()
-
         targets = list(lib.albums([]))
         if not force:
             targets = [a for a in targets if not _album_genre_value(a)]
@@ -27965,7 +27668,7 @@ def library_fix_genres():
             log.append(f"  [{idx}/{len(targets)}] {name}")
             before = _album_genre_value(album)
             try:
-                r = _lastgenre_cmd(force, f"album_id:{aid}", log, env, cancel_event)
+                r = _lastgenre_cmd(force, f"album_id:{aid}", log, cancel_event=cancel_event)
                 out = _require_beet_ok(r, "lastgenre", log)
                 if idx == 1:
                     _log_beet_output_excerpt(log, "lastgenre", out)
@@ -28006,7 +27709,7 @@ def library_fix_genres():
                 album.albumartist or "", album.album or "", album.year, api_key, log)
             if genre:
                 try:
-                    _apply_genre_to_album(album.id, genre, log, env, cancel_event)
+                    _apply_genre_to_album(album.id, genre, log, cancel_event=cancel_event)
                     tagged += 1
                 except Exception as ex:
                     failed += 1
@@ -28041,10 +27744,8 @@ def album_fix_genre(aid):
         return jsonify({"ok": False, "error": "Album not found"})
 
     def _do(log, cancel_event=None):
-        env  = _beet_env()
-
         log.append(f"[1/2] Running lastgenre for {album.albumartist or '?'} — {album.album or '?'}…")
-        r = _lastgenre_cmd(False, f"album_id:{aid}", log, env, cancel_event)
+        r = _lastgenre_cmd(False, f"album_id:{aid}", log, cancel_event=cancel_event)
         _require_beet_ok(r, "lastgenre", log)
 
         _invalidate_lib_cache()
@@ -28077,49 +27778,63 @@ def library_normalize_artists():
     """Normalize Unicode punctuation (fancy hyphens, smart quotes, etc.) in all
     albumartist and artist fields in the DB, then move files for affected albums."""
     def _do(log, cancel_event=None):
-        cfg = "/config/config.yaml"
-        with _db() as con:
-            # Collect all distinct albumartist values
-            aa_rows = con.execute("SELECT DISTINCT albumartist FROM albums WHERE albumartist != ''").fetchall()
-            changed_artists = {}  # old → new
-            for (aa,) in aa_rows:
-                clean = _normalize_albumartist(aa)
-                if clean != aa:
-                    changed_artists[aa] = clean
-                    log.append(f"  Renamed: {aa!r} → {clean!r}")
+        # ARCH-007 (Wave 34): structured engine read, not raw _db() SQL.
+        try:
+            aa_values = beets_client.list_distinct_albumartists()
+        except (BeetsUnavailableError, BeetsError) as ex:
+            log.append(f"ERROR: Engine unavailable listing artist names: {ex}")
+            return
+        to_fix = []
+        for aa in aa_values:
+            clean = _normalize_albumartist(aa)
+            if clean != aa:
+                to_fix.append((aa, clean))
+                log.append(f"  Renamed: {aa!r} → {clean!r}")
 
-            if not changed_artists:
-                log.append("No artist names needed normalization.")
-                return
+        if not to_fix:
+            log.append("No artist names needed normalization.")
+            return
 
-            # Collect affected album IDs before updating
-            affected_ids = []
-            for old_aa in changed_artists:
-                rows = con.execute("SELECT id FROM albums WHERE albumartist = ?", (old_aa,)).fetchall()
-                affected_ids.extend(r[0] for r in rows)
+        # Selection (which album rows currently hold the un-normalized
+        # value) stays a non-mutating structured read; the rename itself is
+        # one album_metadata_repair_v1 call per affected album --
+        # updates={"albumartist": new_aa} already propagates to every
+        # item row of that album too (create_album_metadata_plan merges
+        # album-level identity fields into each item's diff when the
+        # item doesn't already set its own), so no separate
+        # UPDATE items SET albumartist=... step is needed. Same
+        # migration already applied to the sibling auto-triggered
+        # function _run_normalize_artists_if_needed() (ARCH-003 Wave 30/34).
+        affected_ids: List[int] = []
+        for old_aa, new_aa in to_fix:
+            try:
+                rows = beets_client.find_all_albums_by_albumartist(old_aa)
+            except (BeetsUnavailableError, BeetsError) as ex:
+                log.append(f"  Engine unavailable looking up albums for {old_aa!r}: {ex}")
+                continue
+            for row in rows:
+                aid = int(row["id"])
+                try:
+                    res = beets_client.update_album_metadata(aid, {"albumartist": new_aa}, force_write_tags=True)
+                except (BeetsUnavailableError, BeetsError) as ex:
+                    log.append(f"  Engine unavailable normalizing album_id {aid}: {ex}")
+                    continue
+                if not res.get("ok"):
+                    log.append(f"  Engine rejected normalize for album_id {aid}: {res.get('error') or 'unknown error'}")
+                    continue
+                affected_ids.append(aid)
+        log.append(f"DB updated: {len(to_fix)} artist name(s) normalized across {len(affected_ids)} album(s).")
 
-            # Apply updates
-            for old_aa, new_aa in changed_artists.items():
-                con.execute("UPDATE albums SET albumartist = ? WHERE albumartist = ?", (new_aa, old_aa))
-                con.execute("UPDATE items  SET albumartist = ? WHERE albumartist = ?", (new_aa, old_aa))
-            con.commit()
-        log.append(f"DB updated: {len(changed_artists)} artist name(s) normalized.")
-
-        # Write tags + move files for each affected album
         for i, aid in enumerate(affected_ids, 1):
             log.append(f"[{i}/{len(affected_ids)}] Moving album_id={aid}…")
-            r = subprocess.run(
-                [BEET_BIN, "-c", cfg, "write", f"album_id:{aid}"],
-                capture_output=True, text=True, timeout=120
-            )
-            for line in (r.stdout + r.stderr).splitlines():
-                if line.strip(): log.append("  " + line)
-            r = subprocess.run(
-                [BEET_BIN, "-c", cfg, "move", f"album_id:{aid}"],
-                capture_output=True, text=True, timeout=120
-            )
-            for line in (r.stdout + r.stderr).splitlines():
-                if line.strip(): log.append("  " + line)
+            try:
+                rel_res = beets_client.relocate_album(aid, mode="rename")
+                if rel_res.get("ok"):
+                    log.append(f"  ✓ Relocated album {aid} to: {rel_res.get('dest_dir')}")
+                else:
+                    log.append(f"  relocate warning: {rel_res.get('error')}")
+            except Exception as _ex:
+                log.append(f"  relocate warning: {_ex}")
 
         _invalidate_lib_cache()
         log.append("Done.")
@@ -28542,39 +28257,58 @@ def _run_normalize_artists_if_needed():
     Runs silently as a background job when anything needs fixing.
     """
     try:
-        with _db() as con:
-            aa_rows = con.execute(
-                "SELECT DISTINCT albumartist FROM albums WHERE albumartist != ''"
-            ).fetchall()
+        # ARCH-007 (Wave 34): structured engine read, not raw _db() SQL --
+        # this background function silently no-op'd via the outer
+        # `except Exception: pass` on every run in the real two-service
+        # topology before this fix (found tracing this function as the
+        # "sibling" of library_normalize_artists(), per its own comment
+        # above, while fixing that function's identical defect).
+        aa_values = beets_client.list_distinct_albumartists()
         to_fix = [
             (aa, _normalize_albumartist(aa))
-            for (aa,) in aa_rows
+            for aa in aa_values
             if _normalize_albumartist(aa) != aa
         ]
         if not to_fix:
             return
         def _do(log, cancel_event=None):
-            with _db() as con:
-                affected_ids = []
-                for old_aa, new_aa in to_fix:
-                    rows = con.execute("SELECT id FROM albums WHERE albumartist = ?", (old_aa,)).fetchall()
-                    affected_ids.extend(r[0] for r in rows)
-                    log.append(f"  Renamed: {old_aa!r} → {new_aa!r}")
-                    con.execute("UPDATE albums SET albumartist = ? WHERE albumartist = ?", (new_aa, old_aa))
-                    con.execute("UPDATE items  SET albumartist = ? WHERE albumartist = ?", (new_aa, old_aa))
-                con.commit()
-            cfg = "/config/config.yaml"
+            # Selection (which album rows currently hold the un-normalized
+            # value) is a non-mutating structured read; the actual rename is
+            # one album_metadata_repair_v1 call per affected album --
+            # updates={"albumartist": new_aa} already propagates to every
+            # item row of that album too (create_album_metadata_plan merges
+            # album-level identity fields into each item's diff when the
+            # item doesn't already set its own), so no separate
+            # UPDATE items SET albumartist=... step is needed.
+            affected_ids: List[int] = []
+            for old_aa, new_aa in to_fix:
+                try:
+                    rows = beets_client.find_all_albums_by_albumartist(old_aa)
+                except (BeetsUnavailableError, BeetsError) as ex:
+                    log.append(f"  Engine unavailable looking up albums for {old_aa!r}: {ex}")
+                    continue
+                log.append(f"  Renamed: {old_aa!r} → {new_aa!r}")
+                for row in rows:
+                    aid = int(row["id"])
+                    try:
+                        res = beets_client.update_album_metadata(aid, {"albumartist": new_aa}, force_write_tags=True)
+                    except (BeetsUnavailableError, BeetsError) as ex:
+                        log.append(f"  Engine unavailable normalizing album_id {aid}: {ex}")
+                        continue
+                    if not res.get("ok"):
+                        log.append(f"  Engine rejected normalize for album_id {aid}: {res.get('error') or 'unknown error'}")
+                        continue
+                    affected_ids.append(aid)
             for i, aid in enumerate(affected_ids, 1):
                 log.append(f"[{i}/{len(affected_ids)}] Moving album_id={aid}…")
                 try:
-                    beets_client.update_album_metadata(aid, {}, force_write_tags=True)
                     rel_res = beets_client.relocate_album(aid, mode="rename")
                     if rel_res.get("ok"):
                         log.append(f"  ✓ Relocated album {aid} to: {rel_res.get('dest_dir')}")
                 except Exception as _ex:
                     log.append(f"  relocate warning: {_ex}")
             _invalidate_lib_cache()
-            log.append(f"Auto-normalized {len(to_fix)} artist name(s).")
+            log.append(f"Auto-normalized {len(affected_ids)} album(s) across {len(to_fix)} artist name(s).")
         jobs.start_python(_do, label="Auto-normalize artist names")
     except Exception:
         pass
@@ -28701,19 +28435,6 @@ def start_import():
                 "intend to remove qBittorrent source files."
             ),
         }), 400
-    command = [BEET_BIN, "-c", "/config/config.yaml", "import",
-               "-q", "--quiet-fallback", fallback]
-    if not write:
-        command.append("--nowrite")
-    if preserve_torrent_source:
-        command.append("--copy")
-    elif move:
-        command.append("--move")
-    if noincremental:
-        command.append("--noincremental")
-    if search_id:
-        command += ["--search-id", search_id]
-    command.append(path)
     label = f"Import: {Path(path).name or path}"
     if search_id:
         label += f" [{search_id[:8]}…]"
@@ -30784,11 +30505,11 @@ def clean_merge_duplicate_album():
     def _do(log, cancel_event=None):
         with _db(row_factory=sqlite3.Row) as con:
             target_row = con.execute(
-                "SELECT id, albumartist, album, mb_albumid, year, label FROM albums WHERE id=?",
+                "SELECT id, albumartist, album FROM albums WHERE id=?",
                 (target_id,),
             ).fetchone()
             source_row = con.execute(
-                "SELECT id, albumartist, album, mb_albumid, year, label FROM albums WHERE id=?",
+                "SELECT id, albumartist, album FROM albums WHERE id=?",
                 (source_id,),
             ).fetchone()
         if not target_row:
@@ -30800,33 +30521,14 @@ def clean_merge_duplicate_album():
         s_label = f"{_s(source_row['albumartist'])} — {_s(source_row['album'])} (id={source_id})"
         log.append(f"Merging: {s_label}  →  {t_label}")
 
-        with _db() as con:
-            moved = con.execute(
-                "UPDATE items SET album_id=? WHERE album_id=?",
-                (target_id, source_id),
-            ).rowcount
-            log.append(f"  Moved {moved} item(s) to target album")
-
-            # Inherit any non-blank metadata target is missing
-            updates: list = []
-            params: list = []
-            for col in ("mb_albumid", "year", "label"):
-                t_val = _s(target_row[col]).strip() if target_row[col] is not None else ""
-                s_val = _s(source_row[col]).strip() if source_row[col] is not None else ""
-                if not t_val and s_val:
-                    updates.append(f"{col}=?")
-                    params.append(source_row[col])
-                    log.append(f"  Inherited {col}={s_val!r} from source")
-            if updates:
-                params.append(target_id)
-                con.execute(
-                    f"UPDATE albums SET {', '.join(updates)} WHERE id=?",
-                    params,
-                )
-
-            con.execute("DELETE FROM albums WHERE id=?", (source_id,))
-            log.append(f"  Deleted source album row {source_id}")
-            con.commit()
+        merge_res = beets_client.merge_duplicate_albums(target_id, source_id)
+        if not merge_res.get("ok"):
+            raise RuntimeError(merge_res.get("error") or "Engine rejected duplicate album merge")
+        moved = int(merge_res.get("moved") or 0)
+        log.append(f"  Moved {moved} item(s) to target album")
+        for col, val in (merge_res.get("inherit_fields") or {}).items():
+            log.append(f"  Inherited {col}={_s(val)!r} from source")
+        log.append(f"  Deleted source album row {source_id}")
 
         _invalidate_lib_cache()
         log.append("Done.")
@@ -30966,37 +30668,25 @@ def clean_rgid_group_merge():
     def _do(log, cancel_event=None):
         with _db(row_factory=sqlite3.Row) as con:
             target_row = con.execute(
-                "SELECT id, albumartist, album, mb_albumid, year, label FROM albums WHERE id=?",
+                "SELECT id, albumartist, album FROM albums WHERE id=?",
                 (target_id,),
             ).fetchone()
             source_row = con.execute(
-                "SELECT id, albumartist, album, mb_albumid, year, label FROM albums WHERE id=?",
+                "SELECT id, albumartist, album FROM albums WHERE id=?",
                 (source_id,),
             ).fetchone()
         if not target_row or not source_row:
             raise RuntimeError("album row(s) not found")
 
         log.append(f"Merging release-group {rgid} cluster: album {source_id} → {target_id}")
-        with _db() as con:
-            moved = con.execute(
-                "UPDATE items SET album_id=? WHERE album_id=?", (target_id, source_id),
-            ).rowcount
-            log.append(f"  Moved {moved} item(s) to target album")
-            updates: list = []
-            params: list = []
-            for col in ("mb_albumid", "year", "label"):
-                t_val = _s(target_row[col]).strip() if target_row[col] is not None else ""
-                s_val = _s(source_row[col]).strip() if source_row[col] is not None else ""
-                if not t_val and s_val:
-                    updates.append(f"{col}=?")
-                    params.append(source_row[col])
-                    log.append(f"  Inherited {col}={s_val!r} from source")
-            if updates:
-                params.append(target_id)
-                con.execute(f"UPDATE albums SET {', '.join(updates)} WHERE id=?", params)
-            con.execute("DELETE FROM albums WHERE id=?", (source_id,))
-            log.append(f"  Deleted source album row {source_id}")
-            con.commit()
+        merge_res = beets_client.merge_duplicate_albums(target_id, source_id)
+        if not merge_res.get("ok"):
+            raise RuntimeError(merge_res.get("error") or "Engine rejected release-group duplicate merge")
+        moved = int(merge_res.get("moved") or 0)
+        log.append(f"  Moved {moved} item(s) to target album")
+        for col, val in (merge_res.get("inherit_fields") or {}).items():
+            log.append(f"  Inherited {col}={_s(val)!r} from source")
+        log.append(f"  Deleted source album row {source_id}")
 
         _clear_rgid_resolution(rgid)
         _invalidate_lib_cache()
@@ -31122,15 +30812,12 @@ def clean_rgid_group_relink():
             cand = _fetch_mb_release_candidate(target_mbid) or {}
             target_rgid = _s(cand.get("mb_releasegroupid") or "").strip().lower()
 
-        with _db() as con:
-            if target_rgid:
-                con.execute(
-                    "UPDATE albums SET mb_albumid=?, mb_releasegroupid=? WHERE id=?",
-                    (target_mbid, target_rgid, album_id),
-                )
-            else:
-                con.execute("UPDATE albums SET mb_albumid=? WHERE id=?", (target_mbid, album_id))
-            con.commit()
+        relink_updates: Dict[str, Any] = {"mb_albumid": target_mbid}
+        if target_rgid:
+            relink_updates["mb_releasegroupid"] = target_rgid
+        relink_res = beets_client.update_album_metadata(album_id, relink_updates)
+        if not relink_res.get("ok"):
+            raise RuntimeError(relink_res.get("error") or "Engine rejected release relink")
         log.append(
             f"Relinked album_id {album_id} to release {target_mbid}"
             + (f" (release group {target_rgid})" if target_rgid else "")
@@ -31202,6 +30889,15 @@ def _clean_remove_orphaned_items(item_ids: List[int], *,
                                  dry_run: bool,
                                  log: List[str],
                                  trigger_plex: bool = True) -> Dict[str, Any]:
+    """Remove item rows whose backing audio file no longer exists.
+
+    Selection (which items are "orphaned") is a read-only, non-mutating
+    file-existence check done here; the actual deletion is performed
+    per-album through album_maintenance_v1's remove_tracks/remove_album
+    modes via the engine transaction boundary -- files are already gone
+    for these items by definition, so delete_files=False (nothing real
+    to unlink; the engine skips missing files gracefully either way).
+    """
     ids = sorted({int(i) for i in item_ids if str(i).isdigit() and int(i) > 0})
     if not ids:
         return {"ok": True, "dry_run": dry_run, "selected": 0, "removed": 0, "skipped": 0}
@@ -31213,8 +30909,8 @@ def _clean_remove_orphaned_items(item_ids: List[int], *,
             ids,
         ).fetchall()
 
-    stale_ids: List[int] = []
-    album_ids: set[int] = set()
+    stale_by_album: Dict[int, List[int]] = {}
+    unowned_stale_ids: List[int] = []
     skipped = 0
     for row in rows:
         raw_path = _s(row["path"])
@@ -31222,56 +30918,83 @@ def _clean_remove_orphaned_items(item_ids: List[int], *,
             skipped += 1
             continue
         iid = int(row["id"])
-        stale_ids.append(iid)
-        if row["album_id"]:
-            album_ids.add(int(row["album_id"]))
+        aid = int(row["album_id"] or 0)
         label = f"{_s(row['artist'])} - {_s(row['title'])}".strip(" -")
         log.append(f"  {'Would remove' if dry_run else 'Removing'} orphaned item id={iid}: {label}")
+        if aid > 0:
+            stale_by_album.setdefault(aid, []).append(iid)
+        else:
+            # album_maintenance_v1 requires a positive album_id; an item
+            # with no album row cannot go through this engine family.
+            # Fail safe (leave the row in place, log it) rather than
+            # inventing a bypass or a new mutation path for an edge case
+            # no real caller has been observed to hit.
+            unowned_stale_ids.append(iid)
 
-    if dry_run or not stale_ids:
+    stale_ids_total = sum(len(v) for v in stale_by_album.values()) + len(unowned_stale_ids)
+
+    if dry_run or stale_ids_total == 0:
+        if unowned_stale_ids:
+            log.append(
+                f"  WARN: {len(unowned_stale_ids)} orphaned item(s) have no album_id and "
+                "cannot be removed through the engine's album_maintenance_v1 boundary; skipped."
+            )
         return {
             "ok": True,
             "dry_run": dry_run,
             "selected": len(ids),
-            "removed": len(stale_ids) if dry_run else 0,
+            "removed": stale_ids_total if dry_run else 0,
             "skipped": skipped + max(0, len(ids) - len(rows)),
         }
 
+    removed_items = 0
     removed_albums = 0
-    with _db() as con:
-        con.execute(
-            "DELETE FROM items WHERE id IN (" + ",".join("?" for _ in stale_ids) + ")",
-            stale_ids,
-        )
+    for aid, aid_item_ids in sorted(stale_by_album.items()):
         try:
-            con.execute(
-                "DELETE FROM item_attributes WHERE entity_id IN ("
-                + ",".join("?" for _ in stale_ids) + ")",
-                stale_ids,
-            )
-        except Exception as ex:
-            log.append(f"  item_attributes cleanup skipped: {ex}")
-        if album_ids:
-            aid_list = sorted(album_ids)
-            cur = con.execute(
-                "DELETE FROM albums WHERE id IN (" + ",".join("?" for _ in aid_list) + ") "
-                "AND NOT EXISTS (SELECT 1 FROM items WHERE items.album_id = albums.id)",
-                aid_list,
-            )
-            removed_albums = max(0, cur.rowcount)
-        con.commit()
+            plan_res = beets_client.plan_album_maintenance({
+                "mode": "remove_tracks",
+                "album_id": aid,
+                "item_ids": aid_item_ids,
+                "delete_files": False,
+                "clean_empty_folders": False,
+            })
+        except (BeetsUnavailableError, BeetsError) as ex:
+            log.append(f"  Engine unavailable for orphaned-item cleanup on album_id {aid}: {ex}")
+            continue
+        if not plan_res.get("ok"):
+            log.append(f"  Engine rejected orphaned-item cleanup plan for album_id {aid}: {plan_res.get('error') or 'unknown error'}")
+            continue
+        op_id = plan_res.get("operation_id")
+        if not op_id:
+            continue
+        try:
+            apply_res = beets_client.apply_album_maintenance(op_id)
+        except (BeetsUnavailableError, BeetsError) as ex:
+            log.append(f"  Engine unavailable applying orphaned-item cleanup for album_id {aid}: {ex}")
+            continue
+        if not apply_res.get("ok"):
+            log.append(f"  Engine rejected orphaned-item cleanup apply for album_id {aid}: {apply_res.get('error') or 'unknown error'}")
+            continue
+        removed_items += int(apply_res.get("deleted_items") or 0)
+        removed_albums += int(apply_res.get("deleted_albums") or 0)
+
+    if unowned_stale_ids:
+        log.append(
+            f"  WARN: {len(unowned_stale_ids)} orphaned item(s) have no album_id and "
+            "cannot be removed through the engine's album_maintenance_v1 boundary; skipped."
+        )
 
     _invalidate_lib_cache()
     if trigger_plex:
         _trigger_plex_refresh(log)
-    log.append(f"Done: removed {len(stale_ids)} orphaned item row(s) and {removed_albums} empty album row(s).")
+    log.append(f"Done: removed {removed_items} orphaned item row(s) and {removed_albums} empty album row(s).")
     return {
         "ok": True,
         "dry_run": False,
         "selected": len(ids),
-        "removed": len(stale_ids),
+        "removed": removed_items,
         "empty_albums_removed": removed_albums,
-        "skipped": skipped + max(0, len(ids) - len(rows)),
+        "skipped": skipped + max(0, len(ids) - len(rows)) + len(unowned_stale_ids),
     }
 
 
@@ -31329,14 +31052,17 @@ def _clean_remove_empty_albums(album_ids: List[int], *,
             "skipped": skipped,
         }
 
-    with _db() as con:
-        cur = con.execute(
-            "DELETE FROM albums WHERE id IN (" + ",".join("?" for _ in removable) + ") "
-            "AND NOT EXISTS (SELECT 1 FROM items WHERE items.album_id = albums.id)",
-            removable,
-        )
-        removed = max(0, cur.rowcount)
-        con.commit()
+    removed = 0
+    for aid in removable:
+        try:
+            res = beets_client.delete_album(aid, delete_files=False)
+        except (BeetsUnavailableError, BeetsError) as ex:
+            log.append(f"  Engine unavailable removing empty album_id {aid}: {ex}")
+            continue
+        if not res.get("ok"):
+            log.append(f"  Engine rejected removal of empty album_id {aid}: {res.get('error') or 'unknown error'}")
+            continue
+        removed += 1
 
     _invalidate_lib_cache()
     _trigger_plex_refresh(log)
@@ -32855,18 +32581,8 @@ def apply_album_duplicate_resolver(aid):
 
         retagged = 0
         retagged_ids: List[int] = []
+        retag_failures: List[Dict[str, Any]] = []
         if retags:
-            try:
-                with _db(row_factory=sqlite3.Row) as con:
-                    album_row = con.execute(
-                        "SELECT album, albumartist, year FROM albums WHERE id=?",
-                        (int(aid),),
-                    ).fetchone()
-            except Exception as ex:
-                raise RuntimeError(f"Could not read selected album row: {ex}") from ex
-            if not album_row:
-                raise RuntimeError(f"Selected album_id {aid} no longer exists")
-
             if dry_run:
                 for entry in retags:
                     item = entry["item"]
@@ -32882,72 +32598,147 @@ def apply_album_duplicate_resolver(aid):
                     )
                 retagged = len(retags)
             else:
-                updates = []
-                old_album_ids: set[int] = set()
+                # ARCH-003 Wave 33 continuation: decomposed into N single-
+                # source-album album_duplicate_merge_v1 calls (one per
+                # distinct source album among the selected retag items)
+                # rather than extending that shared family's Plan/Apply/
+                # Rollback control flow to support multiple source albums
+                # in one call -- the family has other real callers, and
+                # touching its core flow for this one edge case risked
+                # regressing them. adopt_target_fields=True makes each
+                # moved item inherit the target album's own current
+                # album/albumartist/year/mb_albumid; item_field_overrides
+                # gives each moved item its own specific
+                # mb_trackid/disc/track/title (the actual retag: each
+                # duplicate item assigned to a different missing-track
+                # slot). album_duplicate_merge_v1's own Apply already
+                # retires a source album row that becomes empty -- no
+                # separate cleanup step is needed here the way the old
+                # raw-SQL code needed one.
+                #
+                # DELIBERATE, ACCEPTED TRADE-OFF (see docs/TECHNICAL_DEBT.md):
+                # this sacrifices the old code's whole-batch atomicity
+                # (one SQL transaction covering every retagged item
+                # across every source album at once) for N independent
+                # atomic operations, one per source album. A later
+                # source's merge failing after an earlier one already
+                # committed is a real, possible partial-completion
+                # outcome now -- reported truthfully below (per-source
+                # success/failure in retag_failures, never silently
+                # folded into an overall "ok": true), and each
+                # succeeded source's merge remains individually
+                # rollback-able through the family's own existing
+                # rollback endpoint exactly as any other
+                # album_duplicate_merge_v1 operation would be.
+                by_source: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
                 for entry in retags:
-                    item = entry["item"]
-                    target = entry["target"]
-                    item_id = int(item.get("id") or 0)
-                    old_album_ids.add(int(item.get("album_id") or 0))
-                    updates.append((
-                        int(aid),
-                        _s(album_row["album"]),
-                        _s(album_row["albumartist"]),
-                        int(album_row["year"] or 0),
-                        plan.get("mb_albumid", ""),
-                        _s(target.get("mb_trackid") or ""),
-                        int(target.get("disc") or 1),
-                        int(target.get("track") or 0),
-                        _s(target.get("title") or ""),
-                        item_id,
-                    ))
-                    retagged_ids.append(item_id)
-                with _db() as con:
-                    con.executemany(
-                        "UPDATE items SET album_id=?, album=?, albumartist=?, year=?, "
-                        "mb_albumid=?, mb_trackid=?, disc=?, track=?, title=? WHERE id=?",
-                        updates,
-                    )
-                    con.execute(
-                        "UPDATE albums SET mb_albumid=? WHERE id=?",
-                        (_s(plan.get("mb_albumid") or ""), int(aid)),
-                    )
-                    for old_aid in old_album_ids:
-                        if old_aid <= 0 or old_aid == int(aid):
-                            continue
-                        remaining = con.execute(
-                            "SELECT COUNT(*) FROM items WHERE album_id=?",
-                            (old_aid,),
-                        ).fetchone()[0]
-                        if int(remaining or 0) == 0:
-                            con.execute("DELETE FROM albums WHERE id=?", (old_aid,))
-                            log.append(f"  Removed empty duplicate album row {old_aid}")
-                    con.commit()
-                retagged = len(updates)
+                    by_source[int(entry["item"].get("album_id") or 0)].append(entry)
 
-                if write_tags:
+                for src_aid, entries in sorted(by_source.items()):
+                    item_ids = [int(e["item"].get("id") or 0) for e in entries]
+                    if src_aid <= 0:
+                        retag_failures.append({
+                            "source_album_id": src_aid, "item_ids": item_ids,
+                            "error": "Retag item does not have a valid source album_id",
+                        })
+                        continue
                     if cancel_event is not None and cancel_event.is_set():
                         raise RuntimeError("cancelled")
-                    for entry in retags:
-                        item = entry["item"]
-                        target = entry["target"]
+
+                    item_field_overrides = {
+                        str(int(e["item"].get("id") or 0)): {
+                            "mb_trackid": _s(e["target"].get("mb_trackid") or ""),
+                            "disc": int(e["target"].get("disc") or 1),
+                            "track": int(e["target"].get("track") or 0),
+                            "title": _s(e["target"].get("title") or ""),
+                        }
+                        for e in entries
+                    }
+                    merge_payload = {
+                        "target_album_id": int(aid),
+                        "source_album_id": src_aid,
+                        "item_ids": item_ids,
+                        "adopt_target_fields": True,
+                        "item_field_overrides": item_field_overrides,
+                    }
+                    try:
+                        plan_res = beets_client.plan_album_duplicate_merge(merge_payload)
+                    except Exception as ex:
+                        retag_failures.append({"source_album_id": src_aid, "item_ids": item_ids, "error": str(ex)})
+                        log.append(f"  Retag from album {src_aid} failed (plan): {ex}")
+                        continue
+                    if not plan_res.get("ok") or not plan_res.get("operation_id"):
+                        err = plan_res.get("error") or "plan rejected"
+                        retag_failures.append({"source_album_id": src_aid, "item_ids": item_ids, "error": err})
+                        log.append(f"  Retag from album {src_aid} failed (plan): {err}")
+                        continue
+                    try:
+                        apply_res = beets_client.apply_album_duplicate_merge(plan_res["operation_id"])
+                    except Exception as ex:
+                        retag_failures.append({"source_album_id": src_aid, "item_ids": item_ids, "error": str(ex)})
+                        log.append(f"  Retag from album {src_aid} failed (apply): {ex}")
+                        continue
+                    if not apply_res.get("ok"):
+                        err = apply_res.get("error") or "apply failed"
+                        retag_failures.append({"source_album_id": src_aid, "item_ids": item_ids, "error": err})
+                        log.append(f"  Retag from album {src_aid} failed (apply): {err}")
+                        continue
+
+                    retagged += len(item_ids)
+                    retagged_ids.extend(item_ids)
+                    for e in entries:
+                        item = e["item"]
+                        target = e["target"]
                         item_id = int(item.get("id") or 0)
                         label = f"{int(target.get('disc') or 1)}.{int(target.get('track') or 0):02d} {_s(target.get('title') or '')}"
                         log.append(f"  Retagged item {item_id}: {label}")
-                    tag_result = beets_client.update_album_metadata(int(aid), {}, force_write_tags=True)
-                    _require_attach_stage_success(tag_result, "duplicate resolver tag write")
-                    relocate_result = beets_client.relocate_album(int(aid), mode="rename")
-                    _require_attach_stage_success(relocate_result, "duplicate resolver relocation")
+
+                if retag_failures:
+                    log.append(
+                        f"  {len(retag_failures)} source album(s) failed to retag "
+                        f"(see above); {retagged} item(s) succeeded across the rest."
+                    )
+
+                if retagged:
+                    # album_duplicate_merge_v1 never touches the target
+                    # album's own row -- adopt_target_fields only ever
+                    # copies FROM it into moved items. Stamp the target's
+                    # own mb_albumid to the selected release separately,
+                    # through the same controlled per-album metadata
+                    # update every other album-level field write in this
+                    # route already uses.
+                    stamp_mbid = _s(plan.get("mb_albumid") or "")
+                    if stamp_mbid:
+                        stamp_res = beets_client.update_album_metadata(int(aid), {"mb_albumid": stamp_mbid})
+                        if not stamp_res.get("ok"):
+                            log.append(f"  WARN: could not stamp target album mb_albumid: {stamp_res.get('error')}")
+
+                    if write_tags:
+                        if cancel_event is not None and cancel_event.is_set():
+                            raise RuntimeError("cancelled")
+                        tag_result = beets_client.update_album_metadata(int(aid), {}, force_write_tags=True)
+                        _require_attach_stage_success(tag_result, "duplicate resolver tag write")
+                        relocate_result = beets_client.relocate_album(int(aid), mode="rename")
+                        _require_attach_stage_success(relocate_result, "duplicate resolver relocation")
 
         if not dry_run and retagged:
             _invalidate_lib_cache()
             _trigger_plex_refresh(log)
-        log.append(f"Done - deleted {deleted} row(s), retagged {retagged} row(s).")
+        log.append(
+            f"Done - deleted {deleted} row(s), retagged {retagged} row(s)"
+            + (f", {len(retag_failures)} source album(s) failed" if retag_failures else "")
+            + "."
+        )
         return {
+            # Truthful even when some (not all) source albums failed to
+            # retag: the job itself ran to completion and did not crash,
+            # but a caller must inspect retag_failures -- never assume
+            # every requested retag succeeded just because "ok" is true.
             "ok": True,
             "deleted": deleted,
             "retagged": retagged,
             "retagged_ids": retagged_ids,
+            "retag_failures": retag_failures,
             "delete_summaries": delete_summaries,
             "dry_run": dry_run,
         }
@@ -34825,41 +34616,6 @@ def _album_template_token_cleanup_candidates(album_id: int) -> List[Dict[str, An
         })
     return candidates
 
-def _update_item_path_after_rename(old_path: Path, new_path: Path) -> int:
-    old_abs = str(old_path)
-    new_abs = str(new_path)
-    old_rel = _db_path_value(old_path)
-    new_rel = _db_path_value(new_path)
-    changed = 0
-    with _db() as con:
-        cur = con.execute(
-            "UPDATE items SET path=? WHERE path=? OR path=?",
-            (new_rel, old_rel, old_abs),
-        )
-        changed += int(cur.rowcount or 0)
-        cur = con.execute(
-            "UPDATE items SET path=? WHERE path=? OR path=?",
-            (new_rel.encode(), old_rel.encode(), old_abs.encode()),
-        )
-        changed += int(cur.rowcount or 0)
-        con.commit()
-    return changed
-
-
-def _force_item_path_after_rename(item_id: int, new_path: Path) -> int:
-    try:
-        iid = int(item_id or 0)
-    except Exception:
-        iid = 0
-    if iid <= 0:
-        return 0
-    new_rel = _db_path_value(new_path)
-    with _db() as con:
-        cur = con.execute("UPDATE items SET path=? WHERE id=?", (new_rel, iid))
-        con.commit()
-        return int(cur.rowcount or 0)
-
-
 def _template_token_cleanup_candidates(paths: Iterable[Path],
                                        *,
                                        recursive: bool) -> List[Dict[str, Any]]:
@@ -34913,25 +34669,6 @@ def _template_token_cleanup_candidates(paths: Iterable[Path],
                 "duplicate_check_required": conflict,
             })
     return candidates
-
-def _delete_item_path_after_quarantine(item_id: int, old_path: Path) -> int:
-    try:
-        iid = int(item_id or 0)
-    except Exception:
-        iid = 0
-    old_abs = str(old_path)
-    old_rel = _db_path_value(old_path)
-    with _db() as con:
-        if iid > 0:
-            cur = con.execute("DELETE FROM items WHERE id=?", (iid,))
-        else:
-            cur = con.execute(
-                "DELETE FROM items WHERE path=? OR path=? OR path=? OR path=?",
-                (old_rel, old_abs, old_rel.encode(), old_abs.encode()),
-            )
-        con.commit()
-        return int(cur.rowcount or 0)
-
 
 def _filename_cleanup_duplicate_quarantine_path(old_path: Path) -> Path:
     return _unique_import_review_cleanup_path(
@@ -35445,21 +35182,29 @@ def fix_leaked_db_paths():
                 )
                 fixed += 1
             else:
-                try:
-                    with _db() as con:
-                        cur = con.execute("UPDATE items SET path=? WHERE id=?", (db_val, item_id))
-                        con.commit()
-                    if int(cur.rowcount or 0) > 0:
-                        fixed += 1
-                        log.append(
-                            f"  Fixed item {item_id}: {Path(old_path).name!r} -> {Path(new_path_str).name!r}"
-                        )
-                    else:
-                        errors += 1
-                        log.append(f"  WARN: no row updated for item {item_id}")
-                except Exception as ex:
+                album_id = int(r.get("album_id") or 0)
+                if album_id <= 0:
                     errors += 1
-                    log.append(f"  ERROR item {item_id}: {ex}")
+                    log.append(f"  ERROR item {item_id}: has no album_id; cannot repair through album_maintenance_v1")
+                    continue
+                try:
+                    res = beets_client.repoint_item_db_path(item_id, album_id, old_path, db_val)
+                except (BeetsUnavailableError, BeetsError) as ex:
+                    errors += 1
+                    log.append(f"  ERROR item {item_id}: engine unavailable: {ex}")
+                    continue
+                if res.get("ok") and res.get("repointed"):
+                    fixed += 1
+                    log.append(
+                        f"  Fixed item {item_id}: {Path(old_path).name!r} -> {Path(new_path_str).name!r}"
+                    )
+                elif res.get("ok"):
+                    # Plan found nothing to change (e.g. row already
+                    # matched -- a legitimate no-op, not a failure).
+                    log.append(f"  No change needed for item {item_id}")
+                else:
+                    errors += 1
+                    log.append(f"  ERROR item {item_id}: {res.get('error') or 'engine rejected repair'}")
             if update_state:
                 update_state({
                     "category": "Cleanup",
@@ -37594,23 +37339,113 @@ def apply_folder_placeholder_action_api():
     if action != "mark_reviewed" and action != "skip" and _folder_cleanup_is_approved_root(source):
         return jsonify({"ok": False, "error": "Refusing to modify the music library root itself"}), 400
 
+    class _PlanApplyOk:
+        __slots__ = ("plan_res", "apply_res", "op_id")
+
+        def __init__(self, plan_res, apply_res, op_id):
+            self.plan_res = plan_res
+            self.apply_res = apply_res
+            self.op_id = op_id
+
+    def _engine_reject(result: Dict[str, Any], *, default_error: str, target: Optional[Path] = None,
+                       status: int = 400, blocking_reasons: Optional[List[str]] = None):
+        code = _s(result.get("code") or result.get("error_code")).strip()
+        refs = result.get("references") if isinstance(result, dict) else None
+        ref_count = len(refs) if isinstance(refs, list) else 0
+        message = default_error
+        if code == "folder_cleanup_db_references":
+            if action in {"remove_empty_source", "remove_empty"}:
+                message = f"{ref_count} DB item(s) tracked under source; cannot remove"
+            elif action in {"safe_rename", "rename_folder"}:
+                message = f"{ref_count} DB item(s) tracked under source - use beet move instead of plain rename"
+            else:
+                message = "Merge is not safe to apply"
+        elif code == "folder_cleanup_not_empty":
+            message = "Folder is not empty; cannot remove"
+        elif code in {"folder_cleanup_not_directory", "folder_cleanup_target_missing"}:
+            message = "Source folder does not exist" if "source" in default_error.lower() else "Target folder does not exist"
+        elif code == "folder_cleanup_target_parent_missing":
+            message = "Target subfolder does not exist; cleanup apply will not create folders"
+        elif code == "folder_cleanup_target_exists":
+            message = f"Target folder already exists: {target.name}" if target is not None else "Target folder already exists"
+            status = 409
+        elif code in {"folder_cleanup_toctou_mismatch", "folder_cleanup_noop"}:
+            status = 409
+            if code == "folder_cleanup_noop":
+                message = "No source-only files are available to merge"
+            else:
+                message = "Stale preview; rerun preview before applying"
+        elif code in {"folder_cleanup_path_out_of_root", "folder_cleanup_symlink_rejected", "folder_cleanup_root_refused"}:
+            message = "Access denied for folder cleanup path"
+            status = 403 if code != "folder_cleanup_root_refused" else 400
+        body: Dict[str, Any] = {"ok": False, "error": message, "code": code or "folder_cleanup_rejected"}
+        if blocking_reasons:
+            body["blocking_reasons"] = blocking_reasons
+        return jsonify(body), status
+
+    def _engine_exception(exc: Exception, *, phase: str, operation_id: str = ""):
+        if isinstance(exc, BeetsUnavailableError):
+            app.logger.warning("Folder cleanup %s failed because engine is unavailable: %s", phase, type(exc).__name__)
+            return jsonify({
+                "ok": False,
+                "error": "Beets engine is unavailable; folder cleanup was not performed.",
+                "error_code": "ENGINE_OFFLINE",
+                "code": getattr(exc, "error_code", "") or "ENGINE_OFFLINE",
+                "operation_id": operation_id,
+            }), 503
+        app.logger.warning("Folder cleanup %s rejected by engine: %s", phase, getattr(exc, "error_code", "") or type(exc).__name__)
+        return jsonify({
+            "ok": False,
+            "error": "Beets engine rejected folder cleanup.",
+            "code": getattr(exc, "error_code", "") or "beets_error",
+            "operation_id": operation_id,
+        }), getattr(exc, "status_code", 409) or 409
+
+    def _plan_and_apply(engine_payload: Dict[str, Any], *, target: Optional[Path] = None,
+                        default_error: str = "Folder cleanup was rejected"):
+        # Bug fix: error responses from _engine_reject()/_engine_exception()
+        # are themselves plain (Response, status_code) tuples, which is
+        # indistinguishable from a bare `isinstance(result, tuple)` check
+        # against the 3-item success tuple below -- every rejected/failed
+        # plan or apply used to unpack a 2-tuple into 3 names and raise an
+        # uncaught ValueError instead of returning the intended structured
+        # error JSON. Wrap the success case in a distinct, unambiguous type
+        # so callers can tell success from a Flask error response reliably.
+        try:
+            plan_res = beets_client.plan_folder_cleanup(engine_payload)
+        except (BeetsUnavailableError, BeetsError) as exc:
+            return _engine_exception(exc, phase="plan")
+        if not plan_res.get("ok"):
+            return _engine_reject(plan_res, default_error=default_error, target=target)
+        op_id = _s(plan_res.get("operation_id")).strip()
+        if not op_id:
+            return jsonify({"ok": True, "action": engine_payload.get("action"), "changed_count": 0})
+        try:
+            apply_res = beets_client.apply_folder_cleanup(op_id)
+        except (BeetsUnavailableError, BeetsError) as exc:
+            return _engine_exception(exc, phase="apply", operation_id=op_id)
+        if not apply_res.get("ok"):
+            return _engine_reject(apply_res, default_error="Folder cleanup apply failed", target=target,
+                                  status=409 if apply_res.get("mutated") else 400)
+        return _PlanApplyOk(plan_res, apply_res, op_id)
+
     if action in {"remove_empty_source", "remove_empty"}:
         preview_token = _s(payload.get("preview_token")).strip()
         if not preview_token:
             return jsonify({"ok": False, "error": "Preview token is required; rerun preview before applying"}), 400
-        if not source.exists() or not source.is_dir():
-            return jsonify({"ok": False, "error": "Source folder does not exist"}), 400
-        db_items = _folder_cleanup_db_items(source)
-        if db_items:
-            return jsonify({"ok": False, "error": f"{len(db_items)} DB item(s) tracked under source; cannot remove"}), 400
-        if not _folder_cleanup_is_empty(source):
-            return jsonify({"ok": False, "error": "Folder is not empty; cannot remove"}), 400
-        try:
-            source.rmdir()
-        except Exception as exc:
-            app.logger.warning("Could not remove empty folder %r: %s", str(source), type(exc).__name__)
-            return jsonify({"ok": False, "error": "Failed to remove empty folder."}), 500
-        return jsonify({"ok": True, "action": "remove_empty_source", "removed": str(source), "changed_count": 1})
+        result = _plan_and_apply({"action": "remove_empty", "source": str(source)}, default_error="Source folder does not exist")
+        if not isinstance(result, _PlanApplyOk):
+            return result
+        _plan_res, apply_res, op_id = result.plan_res, result.apply_res, result.op_id
+        removed_folders = [_s(p) for p in apply_res.get("removed_dirs") or ([] if not apply_res.get("mutated") else [str(source)]) if _s(p)]
+        return jsonify({
+            "ok": True,
+            "action": "remove_empty_source",
+            "removed": removed_folders[0] if removed_folders else str(source),
+            "removed_folders": removed_folders,
+            "changed_count": len(removed_folders),
+            "operation_id": op_id,
+        })
 
     if action in {"safe_rename", "rename_folder"}:
         target_raw = _s(payload.get("target_path") or payload.get("proposed_path")).strip()
@@ -37619,21 +37454,24 @@ def apply_folder_placeholder_action_api():
         target, target_error = _folder_cleanup_path(target_raw)
         if target_error or target is None:
             return jsonify({"ok": False, "error": target_error or "Invalid target path"}), 400
-        if not source.exists() or not source.is_dir():
-            return jsonify({"ok": False, "error": "Source folder does not exist"}), 400
-        if target.exists():
-            return jsonify({"ok": False, "error": f"Target folder already exists: {target.name}"}), 409
-        db_items = _folder_cleanup_db_items(source)
-        if db_items:
-            return jsonify({"ok": False, "error": f"{len(db_items)} DB item(s) tracked under source — use beet move instead of plain rename"}), 400
-        if not _path_under(target.resolve(strict=False), MUSIC_ROOT):
-            return jsonify({"ok": False, "error": "Target path is outside the configured music library"}), 400
-        try:
-            source.rename(target)
-        except OSError as exc:
-            app.logger.warning("Rename failed (%r -> %r): %s", str(source), str(target), type(exc).__name__)
-            return jsonify({"ok": False, "error": "Rename failed."}), 500
-        return jsonify({"ok": True, "action": "safe_rename", "renamed_from": str(source), "renamed_to": str(target), "changed_count": 1})
+        result = _plan_and_apply(
+            {"action": "safe_rename", "source": str(source), "target": str(target)},
+            target=target,
+            default_error="Source folder does not exist",
+        )
+        if not isinstance(result, _PlanApplyOk):
+            return result
+        _plan_res, apply_res, op_id = result.plan_res, result.apply_res, result.op_id
+        moved = apply_res.get("moved_records") or [{"source": str(source), "target": str(target)}]
+        return jsonify({
+            "ok": True,
+            "action": "safe_rename",
+            "renamed_from": str(source),
+            "renamed_to": str(target),
+            "moved": moved,
+            "changed_count": len(moved),
+            "operation_id": op_id,
+        })
 
     if action in {"merge_source_files", "merge"}:
         preview_token = _s(payload.get("preview_token")).strip()
@@ -37646,49 +37484,33 @@ def apply_folder_placeholder_action_api():
         if preview_token != preview.get("preview_token"):
             return jsonify({"ok": False, "error": "Stale preview; rerun preview before applying"}), 409
         if not preview.get("safe"):
-            return jsonify({"ok": False, "error": "Merge is not safe to apply", "blocking_reasons": preview.get("blocking_reasons", [])}), 400
-        moved: List[Dict[str, str]] = []
-        try:
-            for move in preview.get("moves", []):
-                src = Path(_s(move.get("source")))
-                dst = Path(_s(move.get("target")))
-                src_resolved = src.resolve(strict=False)
-                dst_resolved = dst.resolve(strict=False)
-                if not _path_under(src_resolved, source) or not _path_under(dst_resolved, target):
-                    raise RuntimeError("Move path is outside the approved source/target folders")
-                if not src.exists() or not src.is_file():
-                    raise RuntimeError(f"Source file is missing: {src}")
-                if dst.exists():
-                    raise RuntimeError(f"Target file already exists: {dst}")
-                if not dst.parent.exists():
-                    raise RuntimeError(f"Target folder does not exist: {dst.parent}")
-                shutil.move(str(src), str(dst))
-                moved.append({"source": str(src), "target": str(dst)})
-            removed_folders: List[str] = []
-            for child in sorted(source.rglob("*"), key=lambda p: len(p.parts), reverse=True):
-                if child.is_dir() and _folder_cleanup_is_empty(child):
-                    child.rmdir()
-                    removed_folders.append(str(child))
-            if source.exists() and _folder_cleanup_is_empty(source):
-                source.rmdir()
-                removed_folders.append(str(source))
-        except Exception as exc:
-            app.logger.warning("Failed to apply folder merge: %s", type(exc).__name__)
-            return jsonify({"ok": False, "error": "Failed to apply merge.", "moved": moved}), 500
-        return jsonify(
-            {
-                "ok": True,
-                "action": "merge_source_files",
-                "moved": moved,
-                "removed_folders": removed_folders,
-                "changed_count": len(moved) + len(removed_folders),
-            }
+            return jsonify({
+                "ok": False,
+                "error": "Merge is not safe to apply",
+                "blocking_reasons": preview.get("blocking_reasons", []),
+            }), 400
+        result = _plan_and_apply(
+            {"action": "merge_source_files", "source": str(source), "target": str(target)},
+            target=target,
+            default_error="Merge is not safe to apply",
         )
+        if not isinstance(result, _PlanApplyOk):
+            return result
+        _plan_res, apply_res, op_id = result.plan_res, result.apply_res, result.op_id
+        moved = apply_res.get("moved_records") or []
+        removed_folders = [_s(p) for p in apply_res.get("removed_dirs") or [] if _s(p)]
+        return jsonify({
+            "ok": True,
+            "action": "merge_source_files",
+            "moved": moved,
+            "removed_folders": removed_folders,
+            "changed_count": len(moved) + len(removed_folders),
+            "operation_id": op_id,
+        })
 
     if action in {"mark_reviewed", "skip"}:
         return jsonify({"ok": True, "action": action, "changed_count": 0})
     return jsonify({"ok": False, "error": f"Unsupported cleanup action: {action}"}), 400
-
 
 @app.post("/api/clean/folder-placeholder/apply-safe-renames")
 def apply_safe_folder_placeholder_renames_job():
@@ -52860,9 +52682,8 @@ def api_plugins_run():
     installed = _plugin_installed_map()
     if not installed.get(cmd):
         return jsonify({"ok": False, "error": f"Plugin is not installed: {cmd}"}), 400
-    cfg = _write_plugin_job_beets_config(f"/tmp/beets_plugin_{cmd}_{uuid.uuid4().hex}.yaml", cmd)
-    full = [BEET_BIN, "-c", cfg] + [str(a) for a in args]
-    job  = jobs.start(full, label=label)
+    sub_args = [str(a) for a in args[1:]]
+    job  = jobs.start(cmd, args=sub_args, label=label)
     return jsonify({"ok": True, "job_id": job.job_id})
 
 
@@ -52892,7 +52713,6 @@ if __name__ == "__main__":
         _start_playlist_index_warm_worker()
     print(f"Beets Web Control → http://{HOST}:{PORT}")
     print(f"Library: {LIB_PATH}")
-    print(f"Beet bin: {BEET_BIN}")
     # Waitress, not Flask's built-in dev server: pure-Python (works
     # identically on the Linux container and on Windows during local
     # development) and single-process/multi-threaded, matching the

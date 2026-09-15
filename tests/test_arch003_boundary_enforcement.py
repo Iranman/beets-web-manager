@@ -81,6 +81,25 @@ class TestArch003BoundaryEnforcement(unittest.TestCase):
         self.assertIn("beets_client.plan_folder_cleanup(", self.app_source)
         self.assertIn("beets_client.apply_folder_cleanup(", self.app_source)
 
+    def test_folder_placeholder_apply_has_no_direct_mutation_calls(self):
+        src = self._function_source("apply_folder_placeholder_action_api")
+        tree = ast.parse(src)
+        found = []
+        banned_calls = {
+            "mkdir", "makedirs", "unlink", "remove", "rename", "replace",
+            "move", "rmdir", "removedirs", "rmtree", "copy", "copy2",
+            "copyfile", "copytree", "write_text", "write_bytes", "touch",
+        }
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                name = node.func.attr if isinstance(node.func, ast.Attribute) else (
+                    node.func.id if isinstance(node.func, ast.Name) else None)
+                if name in banned_calls:
+                    found.append(f"call:{name}@{node.lineno}")
+        self.assertEqual(found, [], f"found prohibited local-mutation call node(s) in folder placeholder apply: {found}")
+        self.assertIn("beets_client.plan_folder_cleanup(", src)
+        self.assertIn("beets_client.apply_folder_cleanup(", src)
+
     def test_app_delegates_playlist_media_cleanup_to_beets_client(self):
         self.assertIn("beets_client.plan_playlist_media_cleanup(", self.app_source)
         self.assertIn("beets_client.apply_playlist_media_cleanup(", self.app_source)
@@ -218,3 +237,72 @@ class TestArch003BoundaryEnforcement(unittest.TestCase):
                 (tmp_path / "backend").mkdir()
                 (tmp_path / "backend" / "transaction_engine.py").write_text((self.repo_root / "backend" / "transaction_engine.py").read_text(encoding="utf-8"), encoding="utf-8")
                 self.assertFalse(verify_mutation_inventory(tmp_path, check_mode=True))
+
+    def test_no_production_web_manager_beets_local_subprocess_execution(self):
+        """Wave 29 / ARCH-003: Enforce zero local Beets CLI subprocess execution in Web Manager.
+        
+        Bans BEET_BIN, _beet_run, and any subprocess calls targeting Beets across all
+        production Web Manager modules, while permitting legitimate tools (ffprobe, ffmpeg,
+        ldd, node/quickjs/bun/deno runtime probes, spotiflac).
+        """
+        web_manager_files = [
+            self.repo_root / "app.py",
+            self.repo_root / "job_engine.py",
+            self.repo_root / "routes_jobs.py",
+            self.repo_root / "routes_lidarr.py",
+            self.repo_root / "routes_setup.py",
+            self.repo_root / "routes_submissions.py",
+            self.repo_root / "helpers_mb.py",
+        ]
+        backend_dir = self.repo_root / "backend"
+        for p in backend_dir.glob("*.py"):
+            if p.name != "beets_control_agent.py":
+                web_manager_files.append(p)
+
+        def _scan_file_for_beets_execution(file_path: Path, source_text: str) -> list[str]:
+            violations = []
+            tree = ast.parse(source_text, filename=str(file_path))
+            for node in ast.walk(tree):
+                # 1. Ban BEET_BIN name references
+                if isinstance(node, ast.Name) and node.id == "BEET_BIN":
+                    violations.append(f"{file_path.name}:{node.lineno}: Prohibited reference to 'BEET_BIN'")
+                # 2. Ban _beet_run name references
+                elif isinstance(node, ast.Name) and node.id in ("_beet_run", "_beet_env"):
+                    violations.append(f"{file_path.name}:{node.lineno}: Prohibited reference to '{node.id}'")
+                # 3. Inspect subprocess calls
+                elif isinstance(node, ast.Call):
+                    func = node.func
+                    is_subprocess = False
+                    if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id in ("subprocess", "_sp"):
+                        is_subprocess = True
+                    elif isinstance(func, ast.Name) and func.id in ("Popen", "run", "check_output", "check_call", "call"):
+                        is_subprocess = True
+
+                    if is_subprocess:
+                        call_repr = ast.unparse(node)
+                        if "beet" in call_repr.lower() and not any(ok in call_repr.lower() for ok in ("beets_client", "beets_api", "x-beets")):
+                            violations.append(f"{file_path.name}:{node.lineno}: Prohibited Beets subprocess call: {call_repr[:100]}")
+            return violations
+
+        all_violations = []
+        for f in web_manager_files:
+            if f.exists():
+                src = f.read_text(encoding="utf-8")
+                all_violations.extend(_scan_file_for_beets_execution(f, src))
+
+        self.assertEqual(all_violations, [], f"Discovered prohibited local Beets execution in Web Manager: {all_violations}")
+
+        # Adversarial proof: Verify detector fails closed if a simulated Beets subprocess or BEET_BIN is introduced
+        synthetic_bad_1 = "import subprocess\nsubprocess.run(['beet', 'mbsync'])"
+        self.assertTrue(len(_scan_file_for_beets_execution(Path("synthetic_1.py"), synthetic_bad_1)) > 0)
+
+        synthetic_bad_2 = "cmd = [BEET_BIN, 'move']"
+        self.assertTrue(len(_scan_file_for_beets_execution(Path("synthetic_2.py"), synthetic_bad_2)) > 0)
+
+        synthetic_bad_3 = "def do_sync(): _beet_run(['mbsync'])"
+        self.assertTrue(len(_scan_file_for_beets_execution(Path("synthetic_3.py"), synthetic_bad_3)) > 0)
+
+        # Allow legitimate tools
+        synthetic_good = "import subprocess\nsubprocess.run(['ffprobe', '-version'])"
+        self.assertEqual(_scan_file_for_beets_execution(Path("synthetic_good.py"), synthetic_good), [])
+

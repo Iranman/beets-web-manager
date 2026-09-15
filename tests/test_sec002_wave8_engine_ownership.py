@@ -26,6 +26,7 @@ This module guards both fixes:
    containment/collision/secret-redaction tests.
 """
 import os
+import re
 import shutil
 import tempfile
 import unittest
@@ -82,80 +83,176 @@ class ReimportDiskNoLocalSubprocessTests(unittest.TestCase):
         self.assertIn("UNMATCHED_DRAFT_ROOT", code_only)
 
 
+class ReimportDiskEstablishesReleaseGroupTests(unittest.TestCase):
+    """ARCH-003 Wave 33 bugfix regression.
+
+    Before this fix, every plan_album_mb_track_repair() call in
+    reimport_disk() omitted allow_establish_release_group -- so a fresh
+    reimport establishing an album's mb_releasegroupid for the first time
+    (routine: a brand-new album, or an existing album row that predates
+    this project's RG tracking) hit album_mb_track_repair_v1's
+    repair_rg_not_established guard and reimport_disk() unconditionally
+    raised RuntimeError on that rejection, silently failing the entire
+    reimport. This was previously undocumented and untested: no existing
+    test exercised this call with a blank-RG fixture.
+    """
+
+    def test_every_plan_album_mb_track_repair_call_passes_allow_establish_release_group(self):
+        source = function_source("reimport_disk")
+        calls = re.findall(r'plan_album_mb_track_repair\(\{[^}]*\}\)', source)
+        self.assertGreaterEqual(len(calls), 5, "expected at least 5 plan_album_mb_track_repair() calls in reimport_disk()")
+        offending = [c for c in calls if '"allow_establish_release_group": True' not in c]
+        self.assertEqual(offending, [], f"call(s) missing allow_establish_release_group=True: {offending}")
+
+    def test_reimport_disk_payload_shape_establishes_rg_end_to_end_on_a_blank_rg_album(self):
+        """Real engine test (not a mock) using the EXACT payload shape
+        reimport_disk() sends: {"album_id", "mb_albumid",
+        "allow_establish_release_group": True}. Proves the specific
+        mechanism the bug lived in now succeeds where it previously would
+        have raised."""
+        from tests.test_sec002_wave19_mb_track_repair import (
+            RG_A, REL_A, Wave19FixtureBase, _fake_tracklist_a, _write_test_audio,
+        )
+        import sqlite3
+
+        class _Harness(Wave19FixtureBase):
+            def runTest(self):
+                pass
+
+        h = _Harness()
+        h.setUp()
+        try:
+            con = sqlite3.connect(h.db_path)
+            con.execute(
+                "INSERT INTO albums (id, album, albumartist, mb_albumid, mb_releasegroupid, year) VALUES (?, ?, ?, ?, ?, ?)",
+                (1, "Test Album Title", "Test Artist", REL_A, "", 2024),
+            )
+            album_dir = h.music_root / "album_1"
+            album_dir.mkdir(parents=True, exist_ok=True)
+            for i in (1, 2):
+                p = album_dir / f"track{i}.wav"
+                _write_test_audio(p, freq=220.0 * i, mb_albumid=REL_A, title=f"Track {i} Old Title", track=i, disc=1)
+                con.execute(
+                    "INSERT INTO items (id, album_id, title, artist, album, albumartist, disc, track, path, mb_trackid, mb_albumid, mb_releasegroupid, length) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (i, 1, f"Track {i} Old Title", "Test Artist", "Test Album Title", "Test Artist", 1, i, str(p), "", REL_A, "", 180.0),
+                )
+            con.commit()
+            con.close()
+
+            from backend.transaction_engine import (
+                create_album_mb_track_repair_plan,
+                execute_album_mb_track_repair_apply,
+            )
+
+            # The literal payload shape reimport_disk() now constructs.
+            payload = {"album_id": 1, "mb_albumid": REL_A, "allow_establish_release_group": True}
+            plan_res = create_album_mb_track_repair_plan(
+                h.store, payload,
+                music_allowed_roots=[str(h.music_root)],
+                db_path=str(h.db_path),
+                fetch_tracklist_fn=lambda _: _fake_tracklist_a(),
+            )
+            self.assertTrue(plan_res.get("ok"), plan_res)
+            apply_res = execute_album_mb_track_repair_apply(
+                h.store, plan_res["operation_id"], db_path=str(h.db_path),
+                music_allowed_roots=[str(h.music_root)], write_tags=False,
+            )
+            self.assertTrue(apply_res.get("ok"), apply_res)
+
+            con = sqlite3.connect(h.db_path)
+            con.row_factory = sqlite3.Row
+            row = con.execute("SELECT mb_releasegroupid FROM albums WHERE id=1").fetchone()
+            con.close()
+            self.assertEqual(row["mb_releasegroupid"], RG_A)
+        finally:
+            h.doCleanups()
+
+    def test_reimport_disk_payload_shape_still_rejects_a_real_rg_conflict(self):
+        """Same payload shape, but the album already has a DIFFERENT,
+        established Release Group -- allow_establish_release_group must
+        never bypass a real conflict. Behavior must be identical to
+        before this fix (repair_identity_mismatch)."""
+        from tests.test_sec002_wave19_mb_track_repair import Wave19FixtureBase, _fake_tracklist_a
+
+        class _Harness(Wave19FixtureBase):
+            def runTest(self):
+                pass
+
+        h = _Harness()
+        h.setUp()
+        try:
+            RG_A = "aaaaaaaa-0000-0000-0000-000000000000"
+            RG_B = "bbbbbbbb-0000-0000-0000-000000000000"
+            REL_B = "22222222-2222-2222-2222-222222222222"
+            h._create_album_and_items(album_id=1, rg_id=RG_A)
+
+            from backend.transaction_engine import create_album_mb_track_repair_plan
+
+            payload = {"album_id": 1, "mb_albumid": REL_B, "allow_establish_release_group": True}
+            plan_res = create_album_mb_track_repair_plan(
+                h.store, payload,
+                music_allowed_roots=[str(h.music_root)],
+                db_path=str(h.db_path),
+                fetch_tracklist_fn=lambda _: _fake_tracklist_a(rel_id=REL_B, rg_id=RG_B),
+            )
+            self.assertFalse(plan_res.get("ok"))
+            self.assertEqual(plan_res.get("code"), "repair_identity_mismatch")
+        finally:
+            h.doCleanups()
+
+
 class BeetRunConfigOverrideTests(unittest.TestCase):
-    """_beet_run must forward config_override to the remote engine call
-    rather than silently discarding it (a "-c <path>" token embedded in cmd
-    is always stripped, since a local web-manager path has no meaning on
-    the remote engine -- only the explicit config_override kwarg reaches
-    the control agent)."""
+    """Under Milestone 2, _beet_run was eliminated completely in favor of direct
+    beets_client IPC calls. These tests assert that neither _beet_run nor BEET_BIN
+    exist in job_engine / app, and that beets_client forwards config overrides."""
 
     def test_config_override_is_forwarded_to_run_command(self):
-        log: list = []
-        with mock.patch.object(job_engine.beets_client, "run_command",
-                                return_value={"returncode": 0, "stdout": "", "stderr": ""}) as mock_run:
-            job_engine._beet_run(
-                ["/lsiopy/bin/beet", "-c", "/tmp/should-be-ignored.yaml", "import", "/data/torrents/music/x"],
-                log, config_override="import:\n  copy: no\n",
+        with mock.patch.object(job_engine.beets_client, "_request",
+                                return_value={"returncode": 0, "stdout": "", "stderr": ""}) as mock_req:
+            job_engine.beets_client.run_command(
+                "import", args=["/data/torrents/music/x"], config_override="import:\n  copy: no\n",
             )
-        mock_run.assert_called_once()
-        _, kwargs = mock_run.call_args
-        self.assertEqual(kwargs.get("config_override"), "import:\n  copy: no\n")
-        # The stripped local "-c" token must never reach the remote call.
-        called_args = mock_run.call_args.args
-        self.assertNotIn("/tmp/should-be-ignored.yaml", called_args)
+        mock_req.assert_called_once()
+        _, endpoint, payload = mock_req.call_args.args[:3]
+        self.assertEqual(endpoint, "/commands/execute")
+        self.assertEqual(payload.get("config_override"), "import:\n  copy: no\n")
 
-    def test_beet_executable_token_and_dash_c_are_stripped_not_forwarded(self):
-        log: list = []
-        with mock.patch.object(job_engine.beets_client, "run_command",
-                                return_value={"returncode": 0, "stdout": "ok", "stderr": ""}) as mock_run:
-            r = job_engine._beet_run(["/lsiopy/bin/beet", "-c", "/tmp/x.yaml", "mbsync", "album_id:1"], log)
-        self.assertEqual(r.returncode, 0)
-        mock_run.assert_called_once_with(
-            "mbsync", args=["album_id:1"], timeout=120.0, config_override="",
-        )
+    def test_beet_executable_token_and_dash_c_are_stripped_by_job(self):
+        with mock.patch.object(job_engine.beets_client, "start_job",
+                                return_value="rem-job-1") as mock_start:
+            job = job_engine.Job("j1", ["/lsiopy/bin/beet", "-c", "/tmp/x.yaml", "mbsync", "album_id:1"])
+        self.assertEqual(job.subcommand, "mbsync")
+        self.assertEqual(job.args, ["album_id:1"])
 
     def test_remote_timeout_is_surfaced_not_silently_swallowed(self):
-        """The control agent maps a subprocess timeout to HTTP 408; the
-        client wraps that as a BeetsError. reimport_disk()'s import step
-        detects this via "timed out" in the returned stderr to preserve its
-        pre-migration "treat timeout as inconclusive, check the DB
-        afterward" behavior instead of a hard failure."""
         from backend.beets_client import BeetsError
-        log: list = []
-        with mock.patch.object(job_engine.beets_client, "run_command",
+        with mock.patch.object(job_engine.beets_client, "_request",
                                 side_effect=BeetsError("Beets API request error: Command 'import' timed out after 300s")):
-            r = job_engine._beet_run(["/lsiopy/bin/beet", "import", "/data/torrents/music/x"], log, timeout=300)
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("timed out", r.stderr.lower())
+            with self.assertRaises(BeetsError) as ctx:
+                job_engine.beets_client.run_command("import", args=["/data/torrents/music/x"], timeout=300)
+            self.assertIn("timed out", str(ctx.exception).lower())
 
 
 class ReimportDiskNoBeetBinaryRequiredTests(unittest.TestCase):
-    """Proves the architecture fix, not just its source shape: the import
-    step succeeds via the mocked remote engine call even when BEET_BIN
-    resolves to a path that does not exist on this machine at all --
-    reproducing the real web-manager container, which has no beet binary."""
+    """Proves the architecture fix under Milestone 2: BEET_BIN and _beet_run are entirely
+    eliminated from the Web Manager container, which has no beet binary at all."""
 
     def test_import_step_succeeds_with_no_local_beet_binary_present(self):
-        log: list = []
-        # Ends in "/beet" (matching how BEET_BIN is actually named -- see
-        # app.py: BEET_BIN = shutil.which("beet") or "/lsiopy/bin/beet") but
-        # the path itself does not exist anywhere on this machine, exactly
-        # reproducing the real web-manager container.
-        with mock.patch.object(APP, "BEET_BIN", "/nonexistent/path/does/not/exist/beet"), \
-             mock.patch.object(job_engine.beets_client, "run_command",
-                                return_value={"returncode": 0, "stdout": "tagged and imported", "stderr": ""}) as mock_run, \
-             mock.patch("subprocess.run", side_effect=AssertionError(
-                 "reimport_disk must not call subprocess.run locally")):
-            r = job_engine._beet_run(
-                [APP.BEET_BIN, "-c", "/tmp/beets_reimport_disk.yaml", "import", "-q",
-                 "--noincremental", "--quiet-fallback", "asis", "--search-id",
-                 "11111111-1111-1111-1111-111111111111", "/data/torrents/music/Artist/Album"],
-                log, timeout=300, config_override="import:\n  copy: no\n  move: no\n",
-            )
-        self.assertEqual(r.returncode, 0)
-        self.assertEqual(r.stdout, "tagged and imported")
-        mock_run.assert_called_once()
-        self.assertEqual(mock_run.call_args.args[0], "import")
+        import ast
+        self.assertFalse(hasattr(APP, "BEET_BIN"), "APP.BEET_BIN must not exist")
+        self.assertFalse(hasattr(job_engine, "_beet_run"), "job_engine._beet_run must not exist")
+        source = function_source("reimport_disk")
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                func = node.func
+                if isinstance(func, ast.Name) and func.id == "_beet_run":
+                    self.fail("reimport_disk must not call _beet_run")
+                if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id == "subprocess":
+                    self.fail(f"reimport_disk must not call subprocess.{func.attr}")
+
+
 
 
 @unittest.skipUnless(os.name == "posix", "resolve_safe_path() requires POSIX-absolute paths; the control agent only ever runs inside the Linux engine container")

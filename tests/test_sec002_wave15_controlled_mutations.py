@@ -546,6 +546,134 @@ class AlbumCleanupDbConsistencyTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# 8b. Wave 32 root-default audit regression: create_album_cleanup_plan must
+# never fall back to a phantom "/music" root that doesn't exist in the real
+# two-container Docker topology (see docker-compose.full.yml: the `beets`
+# engine container mounts MUSIC_LIBRARY_PATH at /data/media/music, never at
+# /music, and the web manager container never sets MUSIC_ROOT or
+# BEETS_MUSIC_DIR at all). Before this fix, create_album_cleanup_plan
+# unconditionally prepended that phantom root to `roots` regardless of
+# whether the caller supplied allowed_roots, which was inert in production
+# (the real caller always supplies allowed_roots, and /music never matches
+# a real album_dir) but was still a live landmine for any other caller and
+# made the "refuse to delete the root itself" check permanently dead code.
+# ---------------------------------------------------------------------------
+
+class AlbumCleanupRootDefaultRegressionTests(unittest.TestCase):
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.tmp_path = Path(self._tmpdir.name)
+        store_dir = self.tmp_path / "transactions"
+        store_dir.mkdir(parents=True, exist_ok=True)
+        self.tx_store = TransactionStore(root=str(store_dir))
+
+    def _make_album_fixture(self, music_root_name="music"):
+        music_root = self.tmp_path / music_root_name
+        music_root.mkdir()
+        album_dir = music_root / "Artist" / "TestAlbum"
+        album_dir.mkdir(parents=True)
+        track1 = album_dir / "track1.mp3"
+        track1.write_text("audio 1")
+
+        db_file = self.tmp_path / "musiclibrary.blb"
+        con = sqlite3.connect(db_file)
+        cur = con.cursor()
+        cur.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, album_id INTEGER, path TEXT)")
+        cur.execute("CREATE TABLE albums (id INTEGER PRIMARY KEY, album TEXT, artpath TEXT)")
+        cur.execute("INSERT INTO albums (id, album) VALUES (10, 'TestAlbum')")
+        cur.execute("INSERT INTO items (id, album_id, path) VALUES (101, 10, ?)", (str(track1),))
+        con.commit()
+        con.close()
+        return music_root, album_dir, track1, db_file
+
+    def test_real_docker_topology_env_never_leaks_phantom_music_root(self):
+        """With none of MUSIC_ROOT / BEETS_MUSIC_DIR / MUSIC_LIBRARY_PATH set
+        (the real docker-compose.full.yml `beets` container's actual
+        environment: only BEETSDIR/BEETS_API_TOKEN/BEETS_AGENT_PORT/etc are
+        set there, never these), a real allowed_roots-scoped album under a
+        temp "music" root is accepted -- proving the fix does not depend on
+        any of these env vars being set to work correctly."""
+        music_root, album_dir, track1, db_file = self._make_album_fixture()
+        with mock.patch.dict(os.environ, {}, clear=False):
+            for var in ("MUSIC_ROOT", "BEETS_MUSIC_DIR", "MUSIC_LIBRARY_PATH"):
+                os.environ.pop(var, None)
+            plan_res = create_album_cleanup_plan(
+                self.tx_store, album_id=10, db_path=str(db_file),
+                allowed_roots=[str(music_root)],
+            )
+        self.assertTrue(plan_res["ok"], plan_res)
+
+    def test_unrelated_sibling_root_no_longer_falsely_treated_as_authorizing(self):
+        """Before the fix, `roots` always additionally contained the
+        env-derived (here: phantom, non-existent) "/music" root regardless
+        of what allowed_roots said. That never happened to falsely
+        authorize anything in production only because "/music" can never
+        equal or contain a real album_dir -- but this test pins the
+        *actual* mechanism: authorization now comes exclusively from
+        allowed_roots, not from an always-added extra root a caller never
+        asked for."""
+        music_root, album_dir, track1, db_file = self._make_album_fixture()
+        other_root = self.tmp_path / "unrelated_other_root"
+        other_root.mkdir()
+        plan_res = create_album_cleanup_plan(
+            self.tx_store, album_id=10, db_path=str(db_file),
+            allowed_roots=[str(other_root)],
+        )
+        self.assertFalse(plan_res["ok"])
+        self.assertIn("outside authorized music roots", plan_res["error"])
+
+    def test_no_allowed_roots_falls_back_to_real_default_not_phantom_music(self):
+        """When a caller omits allowed_roots entirely, the fallback must be
+        a real default (matching MUSIC_LIBRARY_PATH's own real-topology
+        default, /data/media/music) rather than the stale, never-mounted
+        "/music" literal. This is exercised via MUSIC_LIBRARY_PATH (the
+        lowest-priority, always-defined rung of the fallback chain) so the
+        test does not depend on any real filesystem content at
+        /data/media/music."""
+        music_root, album_dir, track1, db_file = self._make_album_fixture(
+            music_root_name="data_media_music_stand_in",
+        )
+        with mock.patch.dict(os.environ, {"MUSIC_LIBRARY_PATH": str(music_root)}, clear=False):
+            for var in ("MUSIC_ROOT", "BEETS_MUSIC_DIR"):
+                os.environ.pop(var, None)
+            plan_res = create_album_cleanup_plan(
+                self.tx_store, album_id=10, db_path=str(db_file),
+            )
+        self.assertTrue(plan_res["ok"], plan_res)
+
+    def test_refusing_to_delete_root_itself_now_actually_fires(self):
+        """The "refuse to delete the music root directory itself" guard was
+        dead code in production before this fix (it only ever compared
+        against the phantom env-derived root, never the real
+        allowed_roots). Pin that it now actually fires when an album's
+        directory *is* one of the caller-supplied allowed_roots."""
+        music_root = self.tmp_path / "music"
+        music_root.mkdir()
+        # Album's own directory *is* the allowed root itself (a
+        # pathological/misconfigured case: album files live directly at
+        # the music library root instead of an Artist/Album subdir).
+        track1 = music_root / "track1.mp3"
+        track1.write_text("audio 1")
+        db_file = self.tmp_path / "musiclibrary.blb"
+        con = sqlite3.connect(db_file)
+        cur = con.cursor()
+        cur.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, album_id INTEGER, path TEXT)")
+        cur.execute("CREATE TABLE albums (id INTEGER PRIMARY KEY, album TEXT, artpath TEXT)")
+        cur.execute("INSERT INTO albums (id, album) VALUES (10, 'TestAlbum')")
+        cur.execute("INSERT INTO items (id, album_id, path) VALUES (101, 10, ?)", (str(track1),))
+        con.commit()
+        con.close()
+
+        plan_res = create_album_cleanup_plan(
+            self.tx_store, album_id=10, db_path=str(db_file),
+            allowed_roots=[str(music_root)],
+        )
+        self.assertFalse(plan_res["ok"])
+        self.assertIn("Refusing to delete music root directory", plan_res["error"])
+
+
+# ---------------------------------------------------------------------------
 # 9. Crash Resume & Truthful Rollback Tests
 # ---------------------------------------------------------------------------
 

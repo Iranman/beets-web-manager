@@ -21,7 +21,6 @@ import os
 import re
 import secrets
 import shutil
-import subprocess
 import sys
 import threading
 import time

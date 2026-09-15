@@ -73,19 +73,26 @@ class DedupAcoustidFingerprintTests(unittest.TestCase):
         self.assertIn("spared", dedup_album_source)
 
     def test_track_relabel_rejects_fingerprint_mismatch(self):
-        # _match_tracks_from_mb_shared permanently rewrites mb_trackid/track/
-        # disc/title in the DB based on fuzzy title/duration scoring alone.
-        # Verify it now cross-checks with the existing per-item AcoustID
-        # helper before accepting a fuzzy match, so a title-similar-but-wrong
-        # track (intro/live/remix) doesn't get silently relabeled.
+        # ARCH-003 Wave 33 continuation: _match_tracks_from_mb_shared no
+        # longer rewrites mb_trackid/track/disc/title via raw local SQL at
+        # all -- it delegates through beets_client to
+        # album_mb_track_repair_v1 (backend/transaction_engine.py), which
+        # owns the actual mutation and its own AcoustID cross-check
+        # (acoustid_verify option, backed by
+        # _mb_track_repair_acoustid_check() -- see
+        # tests/test_arch003_wave33_mb_track_repair_extensions.py::
+        # AcoustidVerifyTests for the engine-side "mismatch" rejection
+        # behavior itself, and GreedyAlignmentAdversarialTests for the
+        # alignment/tie-break behavior). What must still hold here, at
+        # the app.py call site, is that this function always requests
+        # that cross-check -- it is not optional for this caller, since
+        # the pre-migration behavior always ran it unconditionally.
         start = self.app_source.index("def _match_tracks_from_mb_shared(")
-        end = self.app_source.index(
-            "def ", self.app_source.index("UPDATE items SET mb_trackid=?, track=?, disc=?, title=?", start)
-        )
+        end = self.app_source.index("\ndef ", start + 10)
         relabel_source = self.app_source[start:end]
-        self.assertIn("_album_track_fingerprint_check(item_obj, mb_tracks)", relabel_source)
-        self.assertIn('fp.get("status") == "mismatch"', relabel_source)
-        self.assertIn("REJECTED", relabel_source)
+        self.assertIn('"acoustid_verify": True', relabel_source)
+        self.assertIn("beets_client.plan_album_mb_track_repair(payload)", relabel_source)
+        self.assertIn("beets_client.apply_album_mb_track_repair(op_id", relabel_source)
 
     def test_artist_folder_name_merge_fingerprint_verified(self):
         # The plain-named-folder -> same-named-stamped-folder merge candidate

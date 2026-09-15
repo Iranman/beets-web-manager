@@ -117,6 +117,13 @@ class SqlPositiveTests(unittest.TestCase):
     def test_sql_executescript(self):
         self.assertIn(("f", "sql"), _kinds('def f(con):\n    con.executescript("DELETE FROM items;")\n'))
 
+    def test_sql_dynamic_update_prefix(self):
+        source = (
+            'def f(con, clean):\n'
+            '    con.execute("UPDATE items SET " + ", ".join(f"{k}=?" for k in clean) + " WHERE id=?", [])\n'
+        )
+        self.assertIn(("f", "sql"), _kinds(source))
+
 
 class SubprocessPositiveTests(unittest.TestCase):
     def test_subprocess_run_beet_remove(self):
