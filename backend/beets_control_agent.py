@@ -2368,6 +2368,31 @@ _REIMPORT_ALLOWED_DUPLICATE_ACTIONS = {"skip", "keep", "remove", "merge"}
 _REIMPORT_CONFIG_OVERRIDE_MAX_CHARS = 8192
 
 
+def _write_private_config_file(path: str, content: str) -> None:
+    """Write a beets `-c` override file that is never readable by anyone else.
+
+    ARCH-003 Wave 29 review, CodeQL py/clear-text-storage-sensitive-data
+    triage: a config_override can carry a credential -- /fingerprint builds
+    one containing the chroma/acoustid `apikey` -- so this file is a secret
+    on disk in a shared /tmp. Beets only accepts a config as a real file, so
+    the plaintext itself is unavoidable (same architecture decision recorded
+    for app.py's generated config in docs/TECHNICAL_DEBT.md SEC-002); what is
+    avoidable is how it gets created.
+
+    The previous `open(path, "w")` + `os.chmod(path, 0o600)` pair created the
+    file under the process umask (0644 on these images) and only narrowed it
+    afterwards, leaving a window in which any other local user could read the
+    API key -- and it silently followed a pre-planted symlink, truncating and
+    writing the secret wherever that pointed. O_CREAT|O_EXCL|O_NOFOLLOW with
+    mode 0o600 creates the file atomically at the final mode and refuses
+    outright if anything already exists at the path.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(content)
+
+
 def _reimport_timeout_for_count(count: int, minimum: int = 300, maximum: int = 1200) -> int:
     """Scale the Beets import subprocess timeout with the freshly re-inspected
     audio_count, mirroring reimport_disk()'s own _beet_import_timeout_for_count()
@@ -2465,9 +2490,7 @@ def reimport_source_atomic(
         full_cmd = [BEET_BIN]
         if config_override:
             tmp_cfg_path = f"/tmp/beets_reimport_cfg_{uuid.uuid4().hex}.yaml"
-            with open(tmp_cfg_path, "w", encoding="utf-8") as f:
-                f.write(config_override)
-            os.chmod(tmp_cfg_path, 0o600)
+            _write_private_config_file(tmp_cfg_path, config_override)
             full_cmd.extend(["-c", tmp_cfg_path])
 
         # Beets' `import` has no `-D`/`--duplicate-action` CLI flag at all
@@ -2689,9 +2712,7 @@ def run_confirmed_import_native(source_path: str, mb_albumid: str, *, use_move: 
         full_cmd = [BEET_BIN]
         if config_override:
             tmp_cfg_path = f"/tmp/beets_confirmed_import_cfg_{uuid.uuid4().hex}.yaml"
-            with open(tmp_cfg_path, "w", encoding="utf-8") as f:
-                f.write(config_override)
-            os.chmod(tmp_cfg_path, 0o600)
+            _write_private_config_file(tmp_cfg_path, config_override)
             full_cmd.extend(["-c", tmp_cfg_path])
 
         cmd_args = ["import", "-q", "--noincremental", "--quiet-fallback", "skip"]
@@ -3257,9 +3278,7 @@ def _run_beet_subcommand_locked(
         full_cmd = [BEET_BIN]
         if config_override:
             tmp_cfg_path = f"/tmp/beets_exec_cfg_{uuid.uuid4().hex}.yaml"
-            with open(tmp_cfg_path, "w", encoding="utf-8") as f:
-                f.write(config_override)
-            os.chmod(tmp_cfg_path, 0o600)
+            _write_private_config_file(tmp_cfg_path, config_override)
             full_cmd.extend(["-c", tmp_cfg_path])
 
         full_cmd.extend(cmd_list)
@@ -3374,9 +3393,7 @@ class AgentJob:
 
             if self.config_override:
                 tmp_cfg_path = f"/tmp/beets_job_cfg_{self.job_id}.yaml"
-                with open(tmp_cfg_path, "w", encoding="utf-8") as f:
-                    f.write(self.config_override)
-                os.chmod(tmp_cfg_path, 0o600)
+                _write_private_config_file(tmp_cfg_path, self.config_override)
 
             env = os.environ.copy()
             env["BEETSDIR"] = BEETSDIR

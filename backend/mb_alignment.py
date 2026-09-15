@@ -107,10 +107,50 @@ def _duplicate_recording_groups(
     return groups
 
 
+_TITLE_BRACKET_OPEN = "([{"
+_TITLE_BRACKET_CLOSE = ")]}"
+
+
+def _strip_bracketed_spans(text: str) -> str:
+    """Linear-time, byte-identical replacement for
+    re.sub(r"[\\(\\[\\{].*?[\\)\\]\\}]", "", text).
+
+    Mirrors backend.transaction_engine._strip_bracketed_spans (kept
+    duplicated for the same reason album_track_norm itself is duplicated
+    there -- neither module may import the other). The regex form is
+    quadratic on titles carrying many unmatched opening brackets, since
+    each one restarts a lazy `.*?` scan; this pass is O(len(text)) and
+    produces identical output.
+    """
+    n = len(text)
+    if n == 0:
+        return text
+    next_close = [-1] * (n + 1)
+    for j in range(n - 1, -1, -1):
+        ch = text[j]
+        if ch in _TITLE_BRACKET_CLOSE:
+            next_close[j] = j
+        elif ch == "\n":
+            next_close[j] = -1
+        else:
+            next_close[j] = next_close[j + 1]
+    out: List[str] = []
+    i = 0
+    while i < n:
+        if text[i] in _TITLE_BRACKET_OPEN:
+            close_at = next_close[i + 1]
+            if close_at != -1:
+                i = close_at + 1
+                continue
+        out.append(text[i])
+        i += 1
+    return "".join(out)
+
+
 def album_track_norm(text: Any) -> str:
     import re
     t = _s(text).lower()
-    t = re.sub(r"[\(\[\{].*?[\)\]\}]", "", t)
+    t = _strip_bracketed_spans(t)
     t = re.sub(r"[^\w\s]", "", t)
     return " ".join(t.split())
 

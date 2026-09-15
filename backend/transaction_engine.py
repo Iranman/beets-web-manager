@@ -3637,6 +3637,52 @@ def _write_file_audio_tags(file_path: Path, tags: Dict[str, Any]) -> Dict[str, A
     return {"ok": True, "reason": None}
 
 
+_TITLE_BRACKET_OPEN = "([{"
+_TITLE_BRACKET_CLOSE = ")]}"
+
+
+def _strip_bracketed_spans(text: str) -> str:
+    """Linear-time, byte-identical replacement for
+    re.sub(r"[\\(\\[\\{].*?[\\)\\]\\}]", "", text).
+
+    ARCH-003 Wave 29 review, CodeQL py/polynomial-redos: the regex form is
+    quadratic on caller-supplied titles. Every unmatched opening bracket
+    restarts a lazy `.*?` scan that runs to the next closer / newline / end
+    of string, so an input of N opening brackets costs O(N**2) -- measured
+    at 11.6s for a 64k-char `(`*n + `a`*n payload, which reaches this
+    normalizer through album_mb_track_repair_v1's caller-supplied
+    target_tracks titles.
+
+    This single forward pass precomputes, for each offset, the next closing
+    bracket not separated from it by a newline (`.` never crosses one), so
+    an opener with no reachable closer is emitted literally without any
+    rescan -- exactly what the regex does, in O(len(text)).
+    """
+    n = len(text)
+    if n == 0:
+        return text
+    next_close = [-1] * (n + 1)
+    for j in range(n - 1, -1, -1):
+        ch = text[j]
+        if ch in _TITLE_BRACKET_CLOSE:
+            next_close[j] = j
+        elif ch == "\n":
+            next_close[j] = -1
+        else:
+            next_close[j] = next_close[j + 1]
+    out: List[str] = []
+    i = 0
+    while i < n:
+        if text[i] in _TITLE_BRACKET_OPEN:
+            close_at = next_close[i + 1]
+            if close_at != -1:
+                i = close_at + 1
+                continue
+        out.append(text[i])
+        i += 1
+    return "".join(out)
+
+
 def _mb_track_repair_title_norm(text: Any) -> str:
     """Title normalizer for album_mb_track_repair_v1's target_tracks
     subset filter and AcoustID cross-check. Deliberately self-contained
@@ -3648,7 +3694,7 @@ def _mb_track_repair_title_norm(text: Any) -> str:
     whitespace) as both app.py's _album_track_norm() and
     backend.mb_alignment.album_track_norm()."""
     t = str(text or "").lower()
-    t = re.sub(r"[\(\[\{].*?[\)\]\}]", "", t)
+    t = _strip_bracketed_spans(t)
     t = re.sub(r"[^\w\s]", "", t)
     return " ".join(t.split())
 
