@@ -87,7 +87,7 @@ class EngineeringGovernanceDocsTest(unittest.TestCase):
         # Every entry currently in the lean, current-debt-only register.
         # This list is expected to change as items open/close -- update it
         # alongside the register, it is not meant to pin a fixed count.
-        for debt_id in ("ARCH-001", "ARCH-002", "ARCH-004", "ARCH-005", "ARCH-006", "ARCH-009", "ARCH-012"):
+        for debt_id in ("ARCH-001", "ARCH-002", "ARCH-004", "ARCH-005", "ARCH-006", "ARCH-009"):
             with self.subTest(debt_id=debt_id):
                 self.assertIn(debt_id, content)
 

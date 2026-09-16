@@ -14026,14 +14026,15 @@ def _build_library_payload() -> dict:
     """Walk /data/media/music on disk + inject library items whose files are
     missing (shown in red). Pure builder -- no caching or request handling,
     so both library_full() and the background cache-warmer can call it.
-    Do not change this traversal logic without a side-by-side parity check
-    (see docs/TECHNICAL_DEBT.md ARCH-012 -- this is high-risk traversal
-    logic with a known, real undercount defect and no fix attempted here).
+    Do not change this traversal logic without running the parity suite
+    (tests/test_arch012_missing_album_library_parity.py).
     """
     # Build lookup: file path → beets item (for import-status annotation)
     # Beets stores paths relative to the music root (e.g. "Artist/Album/song.flac").
     # We register BOTH the relative form AND the absolute form so the disk-walk lookup works.
     _MROOT = "/data/media/music"
+    _TYPE_ORDER = {"album": 0, "ep": 1, "mixtape": 2, "single": 3,
+                   "broadcast": 4, "other": 5, "": 6}
     path_to_id:   Dict[str, int] = {}
     path_to_item: Dict[str, Any] = {}
     all_lib_items = list(lib.items([]))
@@ -14360,26 +14361,42 @@ def _build_library_payload() -> dict:
 
         # Inject missing-only albums (library items with no matching disk folder).
         # Group multiple beets entries for the SAME album (different release dates) into ONE card.
-        missing_album_groups: Dict[str, dict] = {}  # album_bare_lc → merged card data
+        missing_album_groups: Dict[str, dict] = {}  # group_key → merged card data
         for (mart, malb, myr), mitems in list(missing_by_bucket.items()):
             if mart.lower() != artist_name_lc_bare:
                 continue
             missing_by_bucket.pop((mart, malb, myr), None)
+            m_album_ids = [
+                int(t.get("album_id") or 0)
+                for t in mitems
+                if int(t.get("album_id") or 0) > 0
+            ]
+            m_dom_aid = (
+                Counter(m_album_ids).most_common(1)[0][0]
+                if m_album_ids else 0
+            )
+
             malb_bare = re.sub(r'\s*[\(\[]\d{4,8}[\)\]]\s*$', '', malb).strip()
             malb_bare = _restore_time_colon_title(malb_bare)
             malb_key  = malb_bare.lower()
-            ba_info2  = beets_album_lk.get((mart.lower(), malb.lower()), {})
-            ba_info2_id = int(ba_info2.get("id") or 0)
+            ba_info2  = (
+                beets_album_lk_by_id.get(m_dom_aid)
+                or beets_album_lk.get((mart.lower(), malb.lower()))
+                or beets_album_lk.get((_artist_folder_name_without_mbid(mart).lower(), malb_key))
+                or {}
+            )
+            ba_info2_id = int(ba_info2.get("id") or m_dom_aid or 0)
             if ba_info2_id and ba_info2_id in seen_disk_album_ids:
-                missing_by_bucket.pop((mart, malb, myr), None)
                 continue
-            if malb_key not in missing_album_groups:
-                missing_album_groups[malb_key] = {
+
+            group_key = f"id:{ba_info2_id}" if ba_info2_id > 0 else f"name:{malb_key}"
+            if group_key not in missing_album_groups:
+                missing_album_groups[group_key] = {
                     "album":             malb_bare or malb,
                     "year":              myr,
                     "tracks":            [],
                     "track_count":        0,
-                    "album_id":          ba_info2.get("id", 0),
+                    "album_id":          ba_info2_id,
                     "albumartist":        ba_info2.get("albumartist", mart),
                     "albumartist_credit": ba_info2.get("albumartist_credit", ""),
                     "albumartists":       ba_info2.get("albumartists", ""),
@@ -14398,18 +14415,18 @@ def _build_library_payload() -> dict:
             # Merge tracks, dedup by (title, track)
             existing_keys = {
                 (t.get("title","").lower(), t.get("track",0))
-                for t in missing_album_groups[malb_key]["tracks"]
+                for t in missing_album_groups[group_key]["tracks"]
             }
             for t in mitems:
                 tk = (t.get("title","").lower(), t.get("track",0))
                 if tk not in existing_keys:
                     existing_keys.add(tk)
-                    missing_album_groups[malb_key]["tracks"].append(t)
+                    missing_album_groups[group_key]["tracks"].append(t)
             # Keep best year (prefer 4-digit year)
             if myr and str(myr)[:4].isdigit():
-                cur_yr = missing_album_groups[malb_key]["year"]
+                cur_yr = missing_album_groups[group_key]["year"]
                 if not cur_yr or len(str(cur_yr)) > 4:
-                    missing_album_groups[malb_key]["year"] = int(str(myr)[:4])
+                    missing_album_groups[group_key]["year"] = int(str(myr)[:4])
         for grp in missing_album_groups.values():
             grp["not_imported"] = 0
             grp["missing"]      = len(grp["tracks"])
@@ -14444,40 +14461,114 @@ def _build_library_payload() -> dict:
 
     # Any remaining missing items belong to artists not on disk at all
     artist_extras: Dict[str, dict] = {}
-    for (mart, malb, myr), mitems in missing_by_bucket.items():
-        if mart not in artist_extras:
-            artist_extras[mart] = {"name": mart, "albums": [], "total": 0,
-                                   "imported": 0, "not_imported": 0, "missing": 0}
-        _ext_ba = beets_album_lk.get((mart.lower(), malb.lower()), {})
-        artist_extras[mart]["albums"].append({
-            "album": _restore_time_colon_title(malb), "year": myr,
-            "tracks": sorted(mitems, key=lambda t: t["track"] or 999),
-            "track_count": len(mitems),
-            "expected_track_count": _expected_track_count_from_library_rows(mitems),
-            "albumartist": mart,
-            "not_imported": 0, "missing": len(mitems),
-            "pending_review":    False,
-            "aldir":             "",
-            "disk_art":          "",
-            "album_id":          int(_ext_ba.get("id") or 0),
-            "artpath":           _ext_ba.get("artpath", ""),
-            "mb_albumid":        _ext_ba.get("mb_albumid", ""),
-            "mb_releasegroupid": _ext_ba.get("mb_releasegroupid", ""),
-            "albumtype":         _ext_ba.get("albumtype", ""),
-            "albumtypes":        _ext_ba.get("albumtypes", ""),
-            "albumartist_credit":  _ext_ba.get("albumartist_credit", ""),
-            "albumartists":        _ext_ba.get("albumartists", ""),
-            "albumartists_credit": _ext_ba.get("albumartists_credit", ""),
-            "mb_albumartistid":    _ext_ba.get("mb_albumartistid", ""),
-            "mb_albumartistids":   _ext_ba.get("mb_albumartistids", ""),
-            "not_imported_is_extra": False,
-            **_fast_album_mb_health_fields(
-                mitems, _expected_track_count_from_library_rows(mitems), len(mitems)),
-        })
-        artist_extras[mart]["total"]   += len(mitems)
-        artist_extras[mart]["missing"] += len(mitems)
+    for (mart, malb, myr), mitems in list(missing_by_bucket.items()):
+        m_album_ids = [
+            int(t.get("album_id") or 0)
+            for t in mitems
+            if int(t.get("album_id") or 0) > 0
+        ]
+        m_dom_aid = (
+            Counter(m_album_ids).most_common(1)[0][0]
+            if m_album_ids else 0
+        )
 
-    result.extend(sorted(artist_extras.values(), key=lambda a: a["name"].lower()))
+        malb_bare = re.sub(r'\s*[\(\[]\d{4,8}[\)\]]\s*$', '', malb).strip()
+        malb_bare = _restore_time_colon_title(malb_bare)
+        malb_key  = malb_bare.lower()
+
+        _ext_ba = (
+            beets_album_lk_by_id.get(m_dom_aid)
+            or beets_album_lk.get((mart.lower(), malb.lower()))
+            or beets_album_lk.get((_artist_folder_name_without_mbid(mart).lower(), malb_key))
+            or {}
+        )
+        ext_aid = int(_ext_ba.get("id") or m_dom_aid or 0)
+        artist_display_name = _ext_ba.get("albumartist") or mart
+        artist_key = artist_display_name.lower()
+
+        if artist_key not in artist_extras:
+            artist_extras[artist_key] = {
+                "name": artist_display_name,
+                "albums_by_key": {},
+                "path": "",
+            }
+
+        album_key = f"id:{ext_aid}" if ext_aid > 0 else f"name:{malb_key}"
+        if album_key not in artist_extras[artist_key]["albums_by_key"]:
+            artist_extras[artist_key]["albums_by_key"][album_key] = {
+                "album":               _restore_time_colon_title(malb_bare or malb),
+                "year":                myr,
+                "tracks":              [],
+                "track_count":          0,
+                "expected_track_count": 0,
+                "albumartist":          artist_display_name,
+                "not_imported":         0,
+                "missing":              0,
+                "pending_review":       False,
+                "aldir":                "",
+                "disk_art":             "",
+                "album_id":             ext_aid,
+                "artpath":              _ext_ba.get("artpath", ""),
+                "mb_albumid":           _ext_ba.get("mb_albumid", ""),
+                "mb_releasegroupid":    _ext_ba.get("mb_releasegroupid", ""),
+                "albumtype":            _ext_ba.get("albumtype", ""),
+                "albumtypes":           _ext_ba.get("albumtypes", ""),
+                "albumartist_credit":   _ext_ba.get("albumartist_credit", ""),
+                "albumartists":         _ext_ba.get("albumartists", ""),
+                "albumartists_credit":  _ext_ba.get("albumartists_credit", ""),
+                "mb_albumartistid":     _ext_ba.get("mb_albumartistid", ""),
+                "mb_albumartistids":    _ext_ba.get("mb_albumartistids", ""),
+                "not_imported_is_extra": False,
+            }
+
+        album_entry = artist_extras[artist_key]["albums_by_key"][album_key]
+        existing_keys = {
+            (t.get("title", "").lower(), t.get("track", 0))
+            for t in album_entry["tracks"]
+        }
+        for t in mitems:
+            tk = (t.get("title", "").lower(), t.get("track", 0))
+            if tk not in existing_keys:
+                existing_keys.add(tk)
+                album_entry["tracks"].append(t)
+
+        if myr and str(myr)[:4].isdigit():
+            cur_yr = album_entry["year"]
+            if not cur_yr or len(str(cur_yr)) > 4:
+                album_entry["year"] = int(str(myr)[:4])
+
+    final_extras = []
+    for art_data in artist_extras.values():
+        album_list = []
+        art_total = 0
+        for grp in art_data["albums_by_key"].values():
+            grp["not_imported"] = 0
+            grp["missing"] = len(grp["tracks"])
+            grp["track_count"] = len(grp["tracks"])
+            grp["expected_track_count"] = _expected_track_count_from_library_rows(grp["tracks"])
+            grp["tracks"] = sorted(grp["tracks"], key=lambda t: t["track"] or 999)
+            grp.update(_fast_album_mb_health_fields(
+                grp["tracks"], grp["expected_track_count"], grp["missing"]))
+            album_list.append(grp)
+            art_total += grp["missing"]
+
+        album_list.sort(key=lambda a: (
+            _TYPE_ORDER.get(a.get("albumtype", ""), 6),
+            a["year"] or 0,
+            a["album"].lower()
+        ))
+        final_extras.append({
+            "name": art_data["name"],
+            "albums": album_list,
+            "total": art_total,
+            "imported": 0,
+            "not_imported": 0,
+            "missing": art_total,
+            "empty_artist_folder": not album_list,
+            "path": "",
+        })
+
+    result.extend(sorted(final_extras, key=lambda a: a["name"].lower()))
     _apply_collaboration_album_views(result)
     _attach_artist_image_cache_urls(result)
     result.sort(key=lambda a: a["name"].lower())

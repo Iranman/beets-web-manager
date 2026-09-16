@@ -69,16 +69,6 @@ Each entry: affected area, evidence, current risk, desired state, safe migration
 - Required tests: Unit tests for release-vs-release-group normalization; contract tests for MusicBrainz release/release-group candidates; import review tests for selected-match propagation; playlist placement tests for representative release evidence; repair/replacement tests that keep release-group folder identity stable; cleanup tests that do not merge distinct release groups; a regression test proving a release ID is never written where a release-group ID is required.
 - Priority: P0. Status: Open.
 
-## ARCH-012 Library Disk-Walk Loses Real Albums Whose Folder Is Entirely Missing
-
-- Affected area: `app.py` `_build_library_payload()`, the leftover-`missing_by_bucket` injection pass ("any remaining missing items belong to artists not on disk at all").
-- Evidence: When an entire album's on-disk folder is removed but its Beets rows remain, the leftover-injection code's artist/album name-based lookup can fail to match items back to their real `album_id`, landing the album in the singleton bucket instead of being counted as a real album — undercounting `/api/library`'s `albums`/`tracks` totals.
-- Current risk: Medium. Read-only display accuracy only (no data mutation risk), but a real and reproducible undercount.
-- Desired state: The leftover-missing-item injection reliably resolves every fully-missing album back to its real `album_id`, most likely by keying off each missing item's own `album_id` (already present on the item row) rather than an artist/album name-string lookup, which is fragile to normalization differences between stored fields and on-disk folder names.
-- Safe migration approach: This is disk-walk traversal logic — build a side-by-side parity harness (old output vs. new output over a real or realistically-shaped fixture) before changing `_build_library_payload()`, so a fix cannot silently regress a different part of the walk.
-- Required tests: A parity/regression test modeling a real album whose entire folder is missing from disk, asserting it is still counted in `albums`/`tracks`, not `singleton_tracks`.
-- Priority: P1. Status: Open.
-
 ## ARCH-019 Job/Transaction-Status Test Can Be Intermittently Flaky Under CI Load
 
 - Affected area: `tests/test_import_review_attach_enforcement.py::test_undo_restores_previous_identity_values`, which asserts a transaction's `status` is already `"Rolled Back"` immediately after its rollback job reports `success`.
