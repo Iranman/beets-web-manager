@@ -49,6 +49,17 @@ class BeetsAuthError(BeetsError):
     pass
 
 
+class BeetsBadRequestError(BeetsError):
+    """Raised when the Beets Control Agent returns HTTP 400 Bad Request (invalid parameters/payload)
+    or when client-side preflight parameter validation fails."""
+    pass
+
+
+class BeetsNotFoundError(BeetsError):
+    """Raised when a requested resource (album, item, releasegroup, transaction) is not found (HTTP 404)."""
+    pass
+
+
 class BeetsCommandError(BeetsError):
     """Raised when a Beets command fails or returns a non-zero exit code."""
     def __init__(self, message: str, returncode: int = 1, stdout: str = "", stderr: str = ""):
@@ -59,6 +70,8 @@ class BeetsCommandError(BeetsError):
 
 
 BeetsClientError = BeetsError
+
+_UUID_REGEX = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
 
 class ParsedQuery:
@@ -162,11 +175,41 @@ class BeetsClient:
                 err_diagnostics = err_json.get("diagnostics") if isinstance(err_json.get("diagnostics"), dict) else None
             except Exception:
                 msg = f"HTTP {exc.code}: {err_body[:200]}"
-            if exc.code == 401:
+            if exc.code in (401, 403):
+                auth_msg = "Authentication with Beets Control Agent failed" if exc.code == 401 else "Access to Beets Control Agent forbidden"
+                auth_code = "ENGINE_AUTH_FAILED" if exc.code == 401 else "FORBIDDEN"
                 raise BeetsAuthError(
-                    f"Authentication with Beets Control Agent failed: {msg}",
-                    error_code=err_code or "ENGINE_AUTH_FAILED",
-                    status_code=401,
+                    f"{auth_msg}: {msg}",
+                    error_code=err_code or auth_code,
+                    status_code=exc.code,
+                    diagnostics=err_diagnostics,
+                ) from exc
+            elif exc.code == 400:
+                raise BeetsBadRequestError(
+                    f"Beets API bad request: {msg}",
+                    error_code=err_code or "INVALID_PARAMETER",
+                    status_code=400,
+                    diagnostics=err_diagnostics,
+                ) from exc
+            elif exc.code == 404:
+                raise BeetsNotFoundError(
+                    f"Beets API resource not found: {msg}",
+                    error_code=err_code or "NOT_FOUND",
+                    status_code=404,
+                    diagnostics=err_diagnostics,
+                ) from exc
+            elif exc.code in (502, 503, 504):
+                raise BeetsUnavailableError(
+                    f"Beets Control Agent is unavailable (HTTP {exc.code}): {msg}",
+                    error_code=err_code or "ENGINE_UNAVAILABLE",
+                    status_code=exc.code,
+                    diagnostics=err_diagnostics,
+                ) from exc
+            elif exc.code >= 500:
+                raise BeetsError(
+                    f"Beets Control Agent server error: {msg}",
+                    error_code=err_code or "ENGINE_SERVER_ERROR",
+                    status_code=exc.code,
                     diagnostics=err_diagnostics,
                 ) from exc
             raise BeetsError(f"Beets API request error: {msg}", error_code=err_code, status_code=exc.code, diagnostics=err_diagnostics) from exc
@@ -1161,6 +1204,40 @@ class BeetsClient:
             )
         return [str(v) for v in values]
 
+    def list_item_paths(self, details: bool = False) -> Any:
+        """Fetch distinct item paths, or full item id/album_id/path dicts if details=True."""
+        param = "?details=true" if details else ""
+        res = self._request("GET", f"/library/item-paths{param}")
+        if details:
+            return res.get("items", [])
+        values = res.get("paths", [])
+        return [str(v) for v in values]
+
+    def get_artist_counts(self) -> Dict[str, Dict[str, int]]:
+        """Fetch album and track counts grouped by albumartist."""
+        res = self._request("GET", "/library/albumartists?counts=true")
+        return res.get("counts", {})
+
+    def get_album_cleanup_index(self) -> List[Dict[str, Any]]:
+        """Fetch library-wide items and albums joined for cleanup indexing."""
+        res = self._request("GET", "/library/album-cleanup-index")
+        return res.get("rows", [])
+
+    def get_artist_folder_album_mbids(self) -> List[Dict[str, Any]]:
+        """Fetch distinct (album_id, mb_albumartistid, path) rows."""
+        res = self._request("GET", "/library/artist-folder-mbids")
+        return res.get("rows", [])
+
+    def get_folder_items(self, prefixes: List[str]) -> List[Dict[str, Any]]:
+        """Fetch item and album details for items whose path is under any given folder prefix."""
+        res = self._request("POST", "/library/folder-items", {"prefixes": prefixes})
+        return res.get("items", [])
+
+    def find_albums_with_mbid(self, limit: int = 100, sort: str = "desc") -> List[Dict[str, Any]]:
+        """Fetch albums with non-empty mb_albumid, ordered by id desc/asc."""
+        res = self._request("GET", f"/albums?has_mbid=true&sort={sort}&limit={limit}")
+        return res.get("albums", [])
+
     def update_item_fields(self, item_id: int, fields: Dict[str, Any]) -> Dict[str, Any]:
         """Update fields on item row in SQLite under lock."""
         return self._request("PATCH", f"/items/{item_id}", {"fields": fields})
@@ -1556,6 +1633,348 @@ class BeetsClient:
 
         req_timeout = float(timeout) if timeout is not None else 300.0
         return self._request("POST", "/submissions/submit", payload, timeout=req_timeout)
+
+    # ── ARCH-007 (Wave 35 / Milestone 1): Structured Semantic Read Methods ──
+
+    def resolve_folder_to_albums(
+        self,
+        folder_path: str,
+        since: Optional[float] = None,
+        *,
+        timeout: float = 30.0,
+    ) -> Dict[str, Any]:
+        """Resolve a filesystem folder path to matching library album IDs, item IDs, and track count."""
+        if not isinstance(folder_path, str) or not folder_path.strip():
+            raise BeetsBadRequestError("folder_path must be a non-empty string", error_code="INVALID_PARAMETER", status_code=400)
+        if "\x00" in folder_path:
+            raise BeetsBadRequestError("folder_path contains invalid characters", error_code="INVALID_PARAMETER", status_code=400)
+        payload: Dict[str, Any] = {"folder_path": folder_path.strip()}
+        if since is not None:
+            if not isinstance(since, (int, float)) or since < 0:
+                raise BeetsBadRequestError("since must be a non-negative number", error_code="INVALID_PARAMETER", status_code=400)
+            payload["since"] = float(since)
+        res = self._request("POST", "/library/resolve-folder", payload, timeout=timeout)
+        return res
+
+    resolve_folder = resolve_folder_to_albums
+
+    def get_unmatched_review_items(
+        self,
+        limit: int = 200,
+        offset: int = 0,
+        *,
+        include_singletons: bool = True,
+        timeout: float = 30.0,
+    ) -> Dict[str, Any]:
+        """Fetch unmatched albums and singletons for the import review queue."""
+        if not isinstance(limit, int) or limit < 1 or limit > 1000:
+            raise BeetsBadRequestError("limit must be an integer between 1 and 1000", error_code="INVALID_PARAMETER", status_code=400)
+        if not isinstance(offset, int) or offset < 0:
+            raise BeetsBadRequestError("offset must be a non-negative integer", error_code="INVALID_PARAMETER", status_code=400)
+        q = f"/review/queue/unmatched?limit={limit}&offset={offset}&include_singletons={'true' if include_singletons else 'false'}"
+        return self._request("GET", q, timeout=timeout)
+
+    get_unmatched_review_queue = get_unmatched_review_items
+
+    def get_library_stats(self, *, timeout: float = 15.0) -> Dict[str, Any]:
+        """Fetch total counts for tracks, albums, and artists in the library."""
+        return self._request("GET", "/stats/library", timeout=timeout)
+
+    def get_genre_stats(self, missing_limit: int = 200, *, timeout: float = 30.0) -> Dict[str, Any]:
+        """Fetch genre distribution and albums missing genre metadata."""
+        if not isinstance(missing_limit, int) or missing_limit < 0 or missing_limit > 2000:
+            raise BeetsBadRequestError("missing_limit must be an integer between 0 and 2000", error_code="INVALID_PARAMETER", status_code=400)
+        return self._request("GET", f"/stats/genres?missing_limit={missing_limit}", timeout=timeout)
+
+    def get_rgid_groups(
+        self,
+        limit: int = 100,
+        offset: int = 0,
+        min_albums: int = 2,
+        *,
+        timeout: float = 30.0,
+    ) -> Dict[str, Any]:
+        """Fetch groups of albums sharing the same MusicBrainz Release Group ID."""
+        if not isinstance(limit, int) or limit < 1 or limit > 500:
+            raise BeetsBadRequestError("limit must be between 1 and 500", error_code="INVALID_PARAMETER", status_code=400)
+        if not isinstance(offset, int) or offset < 0:
+            raise BeetsBadRequestError("offset must be >= 0", error_code="INVALID_PARAMETER", status_code=400)
+        if not isinstance(min_albums, int) or min_albums < 2 or min_albums > 50:
+            raise BeetsBadRequestError("min_albums must be between 2 and 50", error_code="INVALID_PARAMETER", status_code=400)
+        return self._request("GET", f"/clean/rgid-groups?limit={limit}&offset={offset}&min_albums={min_albums}", timeout=timeout)
+
+    def get_rgid_group_detail(self, rgid: str, *, timeout: float = 30.0) -> Dict[str, Any]:
+        """Fetch full details and tracklists for an RGID group."""
+        if not isinstance(rgid, str) or not _UUID_REGEX.match(rgid.strip()):
+            raise BeetsBadRequestError("rgid must be a valid UUID", error_code="INVALID_PARAMETER", status_code=400)
+        return self._request("GET", f"/clean/rgid-groups/{urllib.parse.quote(rgid.strip())}", timeout=timeout)
+
+    def merge_rgid_group(
+        self,
+        target_aid_or_rgid: Any,
+        source_aids_or_target: Any = None,
+        source_album_ids: Optional[List[int]] = None,
+        *,
+        rgid: Optional[str] = None,
+        timeout: float = 120.0,
+    ) -> Dict[str, Any]:
+        """Merge duplicate releases in an RGID group into a target album.
+        Supports signatures:
+          merge_rgid_group(target_aid, source_aids, rgid=...)
+          merge_rgid_group(rgid, target_aid, source_aids)
+        """
+        eff_rgid = None
+        if isinstance(target_aid_or_rgid, str) and (source_aids_or_target is not None and source_album_ids is not None):
+            if not _UUID_REGEX.match(target_aid_or_rgid.strip()):
+                raise BeetsBadRequestError("rgid must be a valid UUID", error_code="INVALID_PARAMETER", status_code=400)
+            eff_rgid = target_aid_or_rgid.strip()
+            eff_target = int(source_aids_or_target)
+            eff_sources = [int(x) for x in source_album_ids]
+        else:
+            if rgid is not None:
+                if not isinstance(rgid, str) or not _UUID_REGEX.match(rgid.strip()):
+                    raise BeetsBadRequestError("rgid must be a valid UUID", error_code="INVALID_PARAMETER", status_code=400)
+                eff_rgid = rgid.strip()
+            eff_target = int(target_aid_or_rgid)
+            if isinstance(source_aids_or_target, list):
+                eff_sources = [int(x) for x in source_aids_or_target]
+            elif isinstance(source_album_ids, list):
+                eff_sources = [int(x) for x in source_album_ids]
+            elif isinstance(source_aids_or_target, (int, str)) and str(source_aids_or_target).isdigit():
+                eff_sources = [int(source_aids_or_target)]
+            else:
+                raise BeetsBadRequestError("source_aids must be a non-empty list of integers", error_code="INVALID_PARAMETER", status_code=400)
+
+        if eff_target <= 0:
+            raise BeetsBadRequestError("target_album_id must be a positive integer", error_code="INVALID_PARAMETER", status_code=400)
+        if not eff_sources:
+            raise BeetsBadRequestError("source_aids must not be empty", error_code="INVALID_PARAMETER", status_code=400)
+        if any(s <= 0 for s in eff_sources):
+            raise BeetsBadRequestError("source_aids must contain positive integers", error_code="INVALID_PARAMETER", status_code=400)
+        if eff_target in eff_sources:
+            raise BeetsBadRequestError("target_album_id cannot be in source_album_ids", error_code="INVALID_PARAMETER", status_code=400)
+
+        body: Dict[str, Any] = {
+            "target_album_id": eff_target,
+            "source_album_ids": eff_sources,
+        }
+        if eff_rgid:
+            body["mb_releasegroupid"] = eff_rgid
+        return self._request("POST", "/clean/rgid-groups/merge", body, timeout=timeout)
+
+    def clean_orphaned_items(
+        self,
+        item_ids: Optional[List[int]] = None,
+        dry_run: bool = True,
+        *,
+        candidate_ids: Optional[List[int]] = None,
+        timeout: float = 60.0,
+    ) -> Dict[str, Any]:
+        """Identify and safely prune items not belonging to any album."""
+        ids = item_ids if item_ids is not None else candidate_ids
+        if ids is not None:
+            if not isinstance(ids, list) or any(not isinstance(x, int) or x <= 0 for x in ids):
+                raise BeetsBadRequestError("item_ids must be a list of positive integers", error_code="INVALID_PARAMETER", status_code=400)
+        body: Dict[str, Any] = {"dry_run": bool(dry_run)}
+        if ids is not None:
+            body["item_ids"] = ids
+        return self._request("POST", "/clean/orphaned-items", body, timeout=timeout)
+
+    def clean_empty_albums(
+        self,
+        album_ids: Optional[List[int]] = None,
+        dry_run: bool = True,
+        *,
+        candidate_ids: Optional[List[int]] = None,
+        timeout: float = 60.0,
+    ) -> Dict[str, Any]:
+        """Identify and safely prune album rows containing 0 items."""
+        ids = album_ids if album_ids is not None else candidate_ids
+        if ids is not None:
+            if not isinstance(ids, list) or any(not isinstance(x, int) or x <= 0 for x in ids):
+                raise BeetsBadRequestError("album_ids must be a list of positive integers", error_code="INVALID_PARAMETER", status_code=400)
+        body: Dict[str, Any] = {"dry_run": bool(dry_run)}
+        if ids is not None:
+            body["album_ids"] = ids
+        return self._request("POST", "/clean/empty-albums", body, timeout=timeout)
+
+    def get_mbid_sticking_candidates(
+        self,
+        mode: str = "all",
+        limit: int = 100,
+        *,
+        phase: Optional[int] = None,
+        offset: int = 0,
+        timeout: float = 30.0,
+    ) -> Dict[str, Any]:
+        """Identify albums with MusicBrainz sticking gaps."""
+        if phase is not None:
+            if not isinstance(phase, int) or phase not in {1, 2, 3}:
+                raise BeetsBadRequestError("phase must be 1, 2, or 3", error_code="INVALID_PARAMETER", status_code=400)
+            phase_map = {1: "inferred", 2: "blank", 3: "track_gaps"}
+            mode = phase_map[phase]
+        valid_modes = {"all", "inferred", "blank", "track_gaps", "unmatched_agree", "missing_release", "mismatched_tracks"}
+        if not isinstance(mode, str) or mode.lower() not in valid_modes:
+            raise BeetsBadRequestError(f"mode must be one of {sorted(valid_modes)}", error_code="INVALID_PARAMETER", status_code=400)
+        if not isinstance(limit, int) or limit < 1 or limit > 1000:
+            raise BeetsBadRequestError("limit must be an integer between 1 and 1000", error_code="INVALID_PARAMETER", status_code=400)
+        if not isinstance(offset, int) or offset < 0:
+            raise BeetsBadRequestError("offset must be >= 0", error_code="INVALID_PARAMETER", status_code=400)
+        return self._request("GET", f"/library/mbid-sticking/candidates?mode={urllib.parse.quote(mode.lower())}&limit={limit}&offset={offset}", timeout=timeout)
+
+    def get_album_mb_completeness(self, album_id: int, *, timeout: float = 30.0) -> Dict[str, Any]:
+        """Fetch album and track-level MusicBrainz completeness details."""
+        if not isinstance(album_id, int) or album_id <= 0:
+            raise BeetsBadRequestError("album_id must be a positive integer", error_code="INVALID_PARAMETER", status_code=400)
+        return self._request("GET", f"/albums/{album_id}/mb-completeness", timeout=timeout)
+
+    def sync_deleted_files(self, dry_run: bool = True, limit: int = 1000, *, timeout: float = 300.0) -> Dict[str, Any]:
+        """Scan library items and remove missing files from the database (engine-owned)."""
+        if not isinstance(limit, int) or limit < 1 or limit > 50000:
+            raise BeetsBadRequestError("limit must be between 1 and 50000", error_code="INVALID_PARAMETER", status_code=400)
+        return self._request("POST", "/library/sync-deleted", {"dry_run": bool(dry_run), "limit": limit}, timeout=timeout)
+
+    def scan_library_integrity(self, *, fix: bool = False, timeout: float = 300.0) -> Dict[str, Any]:
+        """Perform comprehensive engine-side library integrity scan."""
+        return self._request("POST", "/library/scan-integrity", {"fix": bool(fix)}, timeout=timeout)
+
+    def get_artist_alias_groups(self, *, timeout: float = 30.0) -> Dict[str, Any]:
+        """Fetch artist name spelling variations grouped by MusicBrainz Artist ID."""
+        return self._request("GET", "/library/artist-aliases", timeout=timeout)
+
+    list_artist_alias_groups = get_artist_alias_groups
+
+    def stamp_artist_folder_mbids(
+        self,
+        dry_run: bool = False,
+        *,
+        folder_path: Optional[str] = None,
+        mbid: Optional[str] = None,
+        artist_folders: Optional[List[str]] = None,
+        timeout: float = 120.0,
+    ) -> Dict[str, Any]:
+        """Write directory-level MBID stamp files in artist folders (engine-owned)."""
+        body: Dict[str, Any] = {"dry_run": bool(dry_run)}
+        if folder_path is not None:
+            if not folder_path or not isinstance(folder_path, str) or not folder_path.strip() or "\x00" in folder_path:
+                raise BeetsBadRequestError("Invalid folder_path: null byte or empty string", error_code="INVALID_PARAMETER", status_code=400)
+            body["folder_path"] = folder_path.strip()
+        if mbid is not None:
+            if not isinstance(mbid, str) or not _UUID_REGEX.match(mbid.strip()):
+                raise BeetsBadRequestError("mbid must be a valid UUID", error_code="INVALID_PARAMETER", status_code=400)
+            body["mbid"] = mbid.strip()
+        if artist_folders is not None:
+            if not isinstance(artist_folders, list):
+                raise BeetsBadRequestError("artist_folders must be a list", error_code="INVALID_PARAMETER", status_code=400)
+            body["artist_folders"] = artist_folders
+        return self._request("POST", "/maintenance/artist-folders/stamp-mbids", body, timeout=timeout)
+
+    def find_item_by_path(self, path: str, *, timeout: float = 15.0) -> Optional[Dict[str, Any]]:
+        """Find single item by its library path."""
+        if not path or not isinstance(path, str):
+            return None
+        res = self._request("GET", f"/items?path={urllib.parse.quote(path)}&limit=1", timeout=timeout)
+        items = res.get("items", [])
+        return items[0] if items else None
+
+    def find_files_for_hardlink(
+        self,
+        filename: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
+        *,
+        torrent_filename: Optional[str] = None,
+        audio_meta: Optional[Dict[str, Any]] = None,
+        limit: int = 50,
+        timeout: float = 30.0,
+    ) -> List[Dict[str, Any]]:
+        """Search library files matching torrent filename or audio metadata for hardlinking."""
+        fname = filename or torrent_filename or ""
+        meta = metadata if metadata is not None else (audio_meta or {})
+        if not (isinstance(fname, str) and fname.strip()) and not meta:
+            raise BeetsBadRequestError("filename or metadata required", error_code="INVALID_PARAMETER", status_code=400)
+        if not isinstance(limit, int) or limit < 1 or limit > 200:
+            raise BeetsBadRequestError("limit must be between 1 and 200", error_code="INVALID_PARAMETER", status_code=400)
+        body = {"filename": fname.strip() if isinstance(fname, str) else "", "metadata": meta, "limit": limit}
+        res = self._request("POST", "/library/find-hardlink-candidates", body, timeout=timeout)
+        return res.get("candidates", [])
+
+    find_hardlink_candidates = find_files_for_hardlink
+
+    def get_format_upgrade_candidates(
+        self,
+        format_filter: str = "MP3",
+        limit: int = 100,
+        offset: int = 0,
+        *,
+        timeout: float = 30.0,
+    ) -> List[Dict[str, Any]]:
+        """Fetch items matching audio format criteria for upgrades."""
+        is_all = isinstance(format_filter, str) and format_filter.lower() in {"all", "*"}
+        if not is_all and (not isinstance(format_filter, str) or not re.fullmatch(r"[A-Za-z0-9]{2,10}\Z", format_filter)):
+            raise BeetsBadRequestError("format_filter must be alphanumeric (2-10 characters)", error_code="INVALID_PARAMETER", status_code=400)
+        if not isinstance(limit, int) or limit < 1 or limit > 1000:
+            raise BeetsBadRequestError("limit must be between 1 and 1000", error_code="INVALID_PARAMETER", status_code=400)
+        if not isinstance(offset, int) or offset < 0:
+            raise BeetsBadRequestError("offset must be >= 0", error_code="INVALID_PARAMETER", status_code=400)
+        fmt_val = "all" if is_all else format_filter.strip()
+        res = self._request(
+            "GET",
+            f"/library/format-upgrades?format={urllib.parse.quote(fmt_val)}&limit={limit}&offset={offset}",
+            timeout=timeout,
+        )
+        return res.get("candidates", res.get("items", []))
+
+    def find_recording_replacement(
+        self,
+        mb_trackid: Any,
+        *,
+        exclude_item_id: Optional[int] = None,
+        limit: int = 20,
+        timeout: float = 30.0,
+    ) -> List[Dict[str, Any]]:
+        """Find lossless library replacement tracks by MusicBrainz Recording ID."""
+        if isinstance(mb_trackid, list):
+            results = []
+            for tid in mb_trackid:
+                if isinstance(tid, str) and _UUID_REGEX.match(tid.strip()):
+                    res = self._request("GET", f"/library/recording-replacements?mb_trackid={urllib.parse.quote(tid.strip())}&limit={limit}", timeout=timeout)
+                    results.extend(res.get("candidates", res.get("replacements", [])))
+            return results
+        if not isinstance(mb_trackid, str) or not _UUID_REGEX.match(mb_trackid.strip()):
+            raise BeetsBadRequestError("mb_trackid must be a valid UUID", error_code="INVALID_PARAMETER", status_code=400)
+        if not isinstance(limit, int) or limit < 1 or limit > 50:
+            raise BeetsBadRequestError("limit must be between 1 and 50", error_code="INVALID_PARAMETER", status_code=400)
+        q = f"/library/recording-replacements?mb_trackid={urllib.parse.quote(mb_trackid.strip())}&limit={limit}"
+        if exclude_item_id is not None:
+            if not isinstance(exclude_item_id, int) or exclude_item_id <= 0:
+                raise BeetsBadRequestError("exclude_item_id must be a positive integer", error_code="INVALID_PARAMETER", status_code=400)
+            q += f"&exclude_item_id={exclude_item_id}"
+        res = self._request("GET", q, timeout=timeout)
+        return res.get("candidates", res.get("replacements", []))
+
+    find_recording_replacements = find_recording_replacement
+
+    def merge_imported_album(
+        self,
+        target_album_id_or_existing: int,
+        source_album_id_or_imported: int,
+        *,
+        replace_duplicates: bool = False,
+        timeout: float = 120.0,
+    ) -> Dict[str, Any]:
+        """Merge tracks from an imported album into an existing library album."""
+        if not isinstance(target_album_id_or_existing, int) or target_album_id_or_existing <= 0:
+            raise BeetsBadRequestError("target_album_id must be a positive integer", error_code="INVALID_PARAMETER", status_code=400)
+        if not isinstance(source_album_id_or_imported, int) or source_album_id_or_imported <= 0:
+            raise BeetsBadRequestError("source_album_id must be a positive integer", error_code="INVALID_PARAMETER", status_code=400)
+        if target_album_id_or_existing == source_album_id_or_imported:
+            raise BeetsBadRequestError("target_album_id and source_album_id must be different", error_code="INVALID_PARAMETER", status_code=400)
+        body = {
+            "target_album_id": target_album_id_or_existing,
+            "source_album_id": source_album_id_or_imported,
+            "replace_duplicates": bool(replace_duplicates),
+        }
+        return self._request("POST", "/library/albums/merge", body, timeout=timeout)
 
 
 

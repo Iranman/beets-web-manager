@@ -33,7 +33,9 @@ class MbidGapsRepairFixesTheBugTests(unittest.TestCase):
         )
 
     def test_scans_albums_with_blank_album_mb_albumid(self):
-        self.assertIn("trim(COALESCE(a.mb_albumid, ''))=''", self._fn)
+        # Under ARCH-007, uses structured BeetsClient endpoint
+        self.assertIn('beets_client.get_mbid_sticking_candidates(mode="blank"', self._fn)
+
 
     def test_attempts_resolution_via_release_group_or_search(self):
         # Release-group-first: pass a release-group URL as mb_input when we
@@ -120,14 +122,9 @@ class MbidGapsRepairIdempotencyTests(unittest.TestCase):
         self._fn = _repair_fn_source(_app_source())
 
     def test_resolution_query_excludes_albums_that_already_have_a_release_id(self):
-        # Once an album gets mb_albumid stamped, the blank_rows query (which
-        # filters WHERE a.mb_albumid is blank) will no longer select it on a
-        # subsequent run -- this is what makes the discovery step idempotent.
-        blank_query = self._fn[
-            self._fn.index("blank_rows = con.execute("):
-            self._fn.index("summary[\"unlinked_track_gap_albums\"]")
-        ]
-        self.assertIn("trim(COALESCE(a.mb_albumid, ''))=''", blank_query)
+        # Under ARCH-007, server-owned get_mbid_sticking_candidates(mode="blank") returns albums missing mb_albumid
+        self.assertIn('beets_client.get_mbid_sticking_candidates(mode="blank"', self._fn)
+
 
     def test_release_id_stamping_uses_idempotent_helper(self):
         # _stamp_album_release_id only updates item rows that actually differ.

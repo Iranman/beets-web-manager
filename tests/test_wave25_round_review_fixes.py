@@ -69,17 +69,18 @@ class TestWave25ReviewStructuralFixes(unittest.TestCase):
 
     def test_reimport_disk_item_loop_resolves_real_album_id(self):
         """The fixed loop must re-derive a genuine album_id (queried fresh
-        from the items table) before calling any album-scoped engine
+        via beets_client) before calling any album-scoped engine
         method, and must skip items that have none rather than substitute
         the item's own id."""
         idx = self.app_source.index("_item_repaired_album_ids: set = set()")
         window = self.app_source[idx: idx + 2200]
-        self.assertIn('SELECT album_id FROM items WHERE id = ?', window)
-        self.assertIn("_real_aid = int(_aid_row[0])", window)
+        self.assertIn("beets_client.get_item(iid)", window)
+        self.assertIn("_real_aid = int(_item_data.get(\"album_id\") or 0)", window)
         self.assertIn("if _real_aid <= 0:", window)
         self.assertIn('beets_client.plan_album_mb_track_repair({"album_id": _real_aid', window)
         self.assertIn("beets_client.update_album_metadata(_real_aid,", window)
         self.assertIn("beets_client.relocate_album(_real_aid,", window)
+
 
     # ── Bug: plan_album_mb_track_repair() called without album_id ──────────
 

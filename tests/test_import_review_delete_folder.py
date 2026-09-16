@@ -29,9 +29,9 @@ class ImportReviewDeleteFolderTests(unittest.TestCase):
 
         self.assertIn("def _library_no_mb_album_matches_folder", delete_source)
         self.assertIn("if not _path_is_under(folder, MUSIC_ROOT):", delete_source)
-        self.assertIn("SELECT mb_albumid FROM albums WHERE id=?", delete_source)
-        self.assertIn('_s(album_row["mb_albumid"]).strip()', delete_source)
-        self.assertIn("SELECT path FROM items WHERE album_id=? AND path IS NOT NULL", delete_source)
+        self.assertIn("beets_client.get_album(aid)", delete_source)
+        self.assertIn('_s(album_row.get("mb_albumid")).strip()', delete_source)
+        self.assertIn("beets_client.find_all_items_by_album_id(aid)", delete_source)
         self.assertIn("if not _path_is_under(abs_path, folder):", delete_source)
         self.assertIn(
             "missing_mbid_album_match = _library_no_mb_album_matches_folder(album_id, str(resolved))",
