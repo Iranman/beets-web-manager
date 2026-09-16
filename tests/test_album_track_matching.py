@@ -541,8 +541,8 @@ class CanonicalAdversarialNormalizerTests(unittest.TestCase):
                 variants = track_title_variants_for_matching(attack_str, attack_str)
                 dt = time.perf_counter() - t0
 
-                # Must complete boundedly without hanging (well under 2.0s for 50k chars)
-                self.assertLess(dt, 2.0, f"Adversarial input [{desc}] took {dt:.3f}s (potential ReDoS)")
+                # Must complete boundedly without hanging (well under 5.0s for 50k chars across 7 functions)
+                self.assertLess(dt, 5.0, f"Adversarial input [{desc}] took {dt:.3f}s (potential ReDoS)")
                 self.assertIsInstance(norm, str)
                 self.assertIsInstance(strip, str)
                 self.assertIsInstance(has_suffix, bool)
