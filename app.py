@@ -40952,8 +40952,8 @@ def clean_artist_folders_stamp_mbid():
 
     job = jobs.start_python(
         _do,
-        label=f"Stamp MB IDs on artist folders: {root_path.name or root_str}",
-        metadata={"type": "stamp-mbid-folders", "path": root_str},
+        label=f"Stamp MB IDs on artist folders: {root_path.name or root_path}",
+        metadata={"type": "stamp-mbid-folders", "path": str(root_path)},
     )
     return jsonify({"ok": True, "job_id": job.job_id})
 

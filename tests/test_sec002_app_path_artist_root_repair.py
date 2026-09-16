@@ -197,6 +197,40 @@ class ArtistFolderRepairRootBoundaryTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 200, data)
         self.assertTrue(data["ok"])
 
+    def test_stamp_mbid_job_uses_validated_root_not_raw_request_text(self):
+        # Regression test: the apply (non-dry-run) branch previously
+        # referenced an undefined `root_str` in the job label/metadata,
+        # raising NameError as soon as the route built the job -- before
+        # jobs.start_python was even entered. Exercise that construction
+        # synchronously, the same way
+        # test_merge_job_uses_validated_root_not_raw_request_text does for
+        # merge, to prove it no longer raises and that the recorded
+        # label/metadata use the canonicalized music root, never raw
+        # (trailing-slash) request text.
+        payload = {"root": str(self.music) + "/", "dry_run": False}
+        with app_module.app.test_request_context(
+            "/api/clean/artist-folders/stamp-mbid", method="POST",
+            data=json.dumps(payload), content_type="application/json",
+        ):
+            captured = {}
+
+            def fake_start_python(fn, label=None, metadata=None):
+                log = []
+                fn(log, cancel_event=None)
+                captured["log"] = log
+                captured["label"] = label
+                captured["metadata"] = metadata
+                return mock.Mock(job_id="job-test")
+
+            with mock.patch.object(app_module.jobs, "start_python", side_effect=fake_start_python):
+                response = app_module.clean_artist_folders_stamp_mbid()
+        data = response.get_json()
+        self.assertTrue(data["ok"], data)
+        self.assertEqual(captured["metadata"]["path"], str(self.music))
+        self.assertEqual(
+            captured["label"], f"Stamp MB IDs on artist folders: {self.music.name}"
+        )
+
 
 class ArtistFolderRepairRootHelperTests(unittest.TestCase):
     """Direct coverage of _artist_folder_repair_root()'s decode-depth and

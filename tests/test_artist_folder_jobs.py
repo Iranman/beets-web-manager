@@ -35,6 +35,8 @@ class ArtistFolderJobsTests(unittest.TestCase):
         self.assertIn('"name_group_count": name_count', scan_route)
         self.assertIn('"type": "artist-folder-merge"', merge_route)
         self.assertIn('"type": "stamp-mbid-folders"', stamp_route)
+        self.assertNotIn("root_str", stamp_route)
+        self.assertIn('"path": str(root_path)', stamp_route)
         self.assertIn('def _stamp_artist_folder_scan', app_source)
         self.assertIn('def _replace_stamp_db_path_prefixes', app_source)
         self.assertIn('def _replace_stamp_db_exact_paths', app_source)
