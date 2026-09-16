@@ -366,7 +366,7 @@ from backend.matching_contract import (
     build_recording_matching_decision,
     compute_decision_version,
 )
-from backend.matching import evaluate_release_group_candidate
+from backend.matching import AcoustIDStatus, evaluate_release_group_candidate
 from backend.import_guard import (
     existing_track_can_block_downloaded_replacement as _guard_existing_track_can_block_downloaded_replacement,
     filter_wanted_tracks_against_missing as _guard_filter_wanted_tracks_against_missing,
@@ -18554,10 +18554,10 @@ def _candidate_track_build_comparison(
             fp_status = _s(fp.get("status") or "unknown")
             fingerprint_status_counts[fp_status] = fingerprint_status_counts.get(fp_status, 0) + 1
             cand["fingerprint_status"] = fp_status
-            if fp.get("status") == "mismatch":
+            if fp.get("status") == AcoustIDStatus.CONFLICT:
                 cand["acoustid_mismatch"] = True
                 continue
-            if fp.get("status") != "match":
+            if fp.get("status") != AcoustIDStatus.CONFIRMED:
                 continue
             fp_candidate = fp.get("candidate") if isinstance(fp.get("candidate"), dict) else {}
             fp_mbid = _s(fp_candidate.get("mb_trackid", "")).strip().lower()
@@ -18621,11 +18621,11 @@ def _candidate_track_build_comparison(
     release_ratio = matched_count / max(1, mb_track_count)
     preflight_error = ""
     if not matched_count:
-        if fingerprint_status_counts.get("mismatch"):
+        if fingerprint_status_counts.get(AcoustIDStatus.CONFLICT.value):
             preflight_error = "Fuzzy title matching failed; AcoustID matched a recording outside this Release Group."
-        elif fingerprint_status_counts.get("none"):
+        elif fingerprint_status_counts.get(AcoustIDStatus.NO_RESULT.value):
             preflight_error = "Fuzzy title matching failed; AcoustID lookup returned no recording."
-        elif fingerprint_status_counts.get("missing"):
+        elif fingerprint_status_counts.get(AcoustIDStatus.UNAVAILABLE.value):
             preflight_error = "Fingerprint unavailable: source file missing."
         elif local_track_count:
             preflight_error = "No track in selected Release Group matches cleaned local title."
@@ -21199,7 +21199,7 @@ def import_folder_with_id():
                 score = float(best.get("score") or 0.0)
                 title_score = float(best.get("title_score") or 0.0)
                 fp = _album_track_fingerprint_check(item, mb_tracks)
-                if fp.get("status") == "mismatch":
+                if fp.get("status") == AcoustIDStatus.CONFLICT:
                     unmatched += 1
                 elif (
                     (best.get("exact_mbid") and title_score >= _MB_TRACK_REPAIR_MATCH_THRESHOLD)
@@ -31575,18 +31575,34 @@ def _best_album_track_match(item: Dict[str, Any], mb_tracks: List[Dict[str, Any]
 
 def _album_track_fingerprint_check(item: Dict[str, Any],
                                    mb_tracks: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Fingerprint-check one library item against a candidate MB tracklist.
+
+    ARCH-002 Part 7: `status` is a canonical `AcoustIDStatus` value, not an
+    independent vocabulary -- callers that used to compare against the
+    legacy strings ("missing"/"none"/"match"/"mismatch"/"unclear") now
+    compare against `AcoustIDStatus` members (a `str` subclass, so either
+    the enum member or its plain `.value` string works). The decision logic
+    itself is unchanged from before this migration -- only the returned
+    vocabulary changed, verified against every one of this function's five
+    production callers before the rename:
+      "missing"  (no readable local file)         -> UNAVAILABLE
+      "none"     (fingerprinted, zero candidates)  -> NO_RESULT
+      "match"    (a candidate's MBID is in mb_tracks) -> CONFIRMED
+      "mismatch" (confident candidate, no title match) -> CONFLICT
+      "unclear"  (weak/uncertain candidate)        -> AMBIGUOUS
+    """
     path = _album_item_abs_path(item.get("path", ""))
     if not path or not Path(path).exists():
-        return {"status": "missing", "path": path}
+        return {"status": AcoustIDStatus.UNAVAILABLE.value, "path": path}
     cands = _acoustid_lookup_cached(path)
     if not cands:
-        return {"status": "none"}
+        return {"status": AcoustIDStatus.NO_RESULT.value}
 
     mb_ids = {t.get("mb_trackid") for t in mb_tracks if t.get("mb_trackid")}
     for cand in cands:
         cand_id = _s(cand.get("mb_trackid", "")).strip().lower()
         if cand_id and cand_id in mb_ids:
-            return {"status": "match", "candidate": cand}
+            return {"status": AcoustIDStatus.CONFIRMED.value, "candidate": cand}
 
     from difflib import SequenceMatcher
     best_cand = cands[0]
@@ -31598,12 +31614,12 @@ def _album_track_fingerprint_check(item: Dict[str, Any],
     )
     if int(best_cand.get("score") or 0) >= 70 and best_title_score < 0.72:
         return {
-            "status": "mismatch",
+            "status": AcoustIDStatus.CONFLICT.value,
             "candidate": best_cand,
             "best_title_score": round(best_title_score, 3),
         }
     return {
-        "status": "unclear",
+        "status": AcoustIDStatus.AMBIGUOUS.value,
         "candidate": best_cand,
         "best_title_score": round(best_title_score, 3),
     }
@@ -31912,12 +31928,12 @@ def _scan_album_track_integrity(album_row: Dict[str, Any], *,
 
         if do_fingerprint:
             fp = _album_track_fingerprint_check(item, mb_tracks)
-            if fp.get("status") == "mismatch":
+            if fp.get("status") == AcoustIDStatus.CONFLICT:
                 decision = "remove"
                 cand = fp.get("candidate") or {}
                 reason = ("Audio fingerprint points to "
                           f"{cand.get('artist','')} - {cand.get('title','')}".strip(" -"))
-            elif fp.get("status") == "unclear" and decision == "keep" and score < 0.96:
+            elif fp.get("status") == AcoustIDStatus.AMBIGUOUS and decision == "keep" and score < 0.96:
                 decision = "review"
                 reason = "Fingerprint did not confirm the MusicBrainz recording"
 
@@ -31950,7 +31966,7 @@ def _scan_album_track_integrity(album_row: Dict[str, Any], *,
         if len(group) <= 1:
             continue
         group.sort(key=lambda r: (
-            0 if (r.get("fingerprint") or {}).get("status") == "match" else 1,
+            0 if (r.get("fingerprint") or {}).get("status") == AcoustIDStatus.CONFIRMED else 1,
             0 if r.get("exact_mbid") else 1,
             -float(r.get("score") or 0),
             _collision_rank(r.get("path", "")),
@@ -32068,9 +32084,9 @@ def _album_mb_match_plan(album_id: int, mb_albumid: str,
         best = _best_album_track_match(item, tracks)
         if int(best.get("idx", -1)) >= 0:
             fp = _album_track_fingerprint_check(item, tracks)
-            if fp.get("status") == "match":
+            if fp.get("status") == AcoustIDStatus.CONFIRMED:
                 return best
-            if fp.get("status") == "mismatch":
+            if fp.get("status") == AcoustIDStatus.CONFLICT:
                 return {
                     "idx": -1,
                     "track": {},

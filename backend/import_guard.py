@@ -6,6 +6,11 @@ import re
 
 from typing import Callable, Dict, Iterable, List, Optional
 
+try:
+    from matching import AcoustIDStatus
+except ImportError:
+    from backend.matching import AcoustIDStatus
+
 
 def existing_track_matches_target(
     *,
@@ -20,11 +25,21 @@ def existing_track_matches_target(
     This intentionally uses title-only score from the caller. Folder/file-path
     variants can include the album title and must not make a wrong existing row
     look like a duplicate of a newly downloaded correct track.
+
+    ARCH-002: `fingerprint_status` is expected to be a canonical
+    `AcoustIDStatus` value (its callers pass `_album_track_fingerprint_check()`'s
+    `status` field, which now returns canonical values directly -- see that
+    function's docstring). `AcoustIDStatus` is a `str` subclass, so passing
+    either the enum member or its `.value` string works identically here.
+    Only `CONFLICT` is a hard block; `NO_RESULT`/`UNAVAILABLE`/`AMBIGUOUS` (or
+    an empty/unrecognized status) all fall through to the text-score
+    fallback below, same as before -- "no result" and "unavailable" have
+    never been treated as a conflict by this function, and still are not.
     """
     status = (fingerprint_status or "").strip().lower()
-    if status == "mismatch":
+    if status == AcoustIDStatus.CONFLICT:
         return False
-    if status == "match":
+    if status == AcoustIDStatus.CONFIRMED:
         return True
     if exact_mbid:
         return float(title_score or 0.0) >= float(repair_threshold)
