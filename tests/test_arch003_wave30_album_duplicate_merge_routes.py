@@ -53,12 +53,47 @@ class _MergeTestBase(unittest.TestCase):
             finally:
                 con.close()
 
+        def fake_get_album(aid):
+            with sqlite3.connect(self.db_path) as con:
+                con.row_factory = sqlite3.Row
+                row = con.execute("SELECT * FROM albums WHERE id=?", (int(aid),)).fetchone()
+                return dict(row) if row else None
+
+        def fake_find_items_by_album(aid):
+            with sqlite3.connect(self.db_path) as con:
+                con.row_factory = sqlite3.Row
+                rows = con.execute("SELECT * FROM items WHERE album_id=?", (int(aid),)).fetchall()
+                return [dict(r) for r in rows]
+
+        def fake_get_rgid_group_detail(rgid):
+            with sqlite3.connect(self.db_path) as con:
+                con.row_factory = sqlite3.Row
+                rows = con.execute("SELECT * FROM albums WHERE lower(COALESCE(mb_releasegroupid, ''))=?", (str(rgid).lower(),)).fetchall()
+                albums = []
+                for r in rows:
+                    alb_dict = dict(r)
+                    items = con.execute("SELECT * FROM items WHERE album_id=?", (alb_dict["id"],)).fetchall()
+                    alb_dict["tracks"] = [dict(it) for it in items]
+                    alb_dict["track_count"] = len(items)
+                    albums.append(alb_dict)
+                return {"ok": True, "rgid": rgid, "albums": albums, "album_count": len(albums)}
+
+        self._get_album_patch = mock.patch.object(app_module.beets_client, "get_album", side_effect=fake_get_album)
+        self._get_album_patch.start()
+        self._find_items_patch = mock.patch.object(app_module.beets_client, "find_all_items_by_album_id", side_effect=fake_find_items_by_album)
+        self._find_items_patch.start()
+        self._get_rgid_patch = mock.patch.object(app_module.beets_client, "get_rgid_group_detail", side_effect=fake_get_rgid_group_detail)
+        self._get_rgid_patch.start()
+
         self._db_patch = mock.patch.object(app_module, "_db", side_effect=_mock_db_cm)
         self._db_patch.start()
         self._invalidate_patch = mock.patch.object(app_module, "_invalidate_lib_cache")
         self._invalidate_patch.start()
 
     def tearDown(self):
+        self._get_rgid_patch.stop()
+        self._find_items_patch.stop()
+        self._get_album_patch.stop()
         self._invalidate_patch.stop()
         self._db_patch.stop()
         try:

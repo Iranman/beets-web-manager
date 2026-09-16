@@ -317,13 +317,8 @@ class PlaylistPipelineTests(unittest.TestCase):
 
     def test_release_group_drives_album_reuse_and_beets_path(self):
         # Wave 13: album placement mutations moved into the engine
-        # (backend/beets_control_agent.py); _playlist_find_or_create_album_row
-        # is now bounded by the next helper that follows it in app.py rather
-        # than by _playlist_apply_album_placement, which precedes it.
-        find_start = APP_SOURCE.index("def _playlist_find_or_create_album_row")
-        find_end = APP_SOURCE.index("def _playlist_repair_quality_candidate", find_start)
-        find_source = APP_SOURCE[find_start:find_end]
-        self.assertLess(find_source.index("if mb_releasegroupid"), find_source.index("if not row and mb_albumid"))
+        # (backend/beets_control_agent.py); dead _playlist_find_or_create_album_row
+        # eliminated under ARCH-007 Milestone 2.
         self.assertIn("$mb_releasegroupid", APP_SOURCE)
         # Wave 13: the actual mb_releasegroupid/mb_albumartistid -> UPDATE
         # items mutation now happens engine-side in
@@ -427,7 +422,7 @@ class PlaylistPipelineTests(unittest.TestCase):
         # _playlist_apply_album_placement must delegate via BeetsClient IPC
         # and must not perform the SQLite write itself.
         apply_start = APP_SOURCE.index("def _playlist_apply_album_placement")
-        apply_end = APP_SOURCE.index("def _playlist_find_or_create_album_row", apply_start)
+        apply_end = APP_SOURCE.index("def _playlist_repair_quality_candidate", apply_start)
         apply_source = APP_SOURCE[apply_start:apply_end]
         self.assertNotIn("_sqlite_write_retry", apply_source)
         self.assertIn("beets_client.place_playlist_imported_item", apply_source)
