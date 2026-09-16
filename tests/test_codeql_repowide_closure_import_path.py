@@ -18,7 +18,7 @@ filesystem path the container process can reach:
 
 The engine-side reimport_source_atomic() validation (backend/beets_control_agent.py)
 is a separate, later trust boundary and does not protect these earlier,
-web-manager-side filesystem probes. See docs/security/codeql_repository_closure.md.
+web-manager-side filesystem probes.
 
 The same class of bug (alert 241, py/path-injection, app.py:29237 at
 baseline) existed in /api/dedup/scan: Path(path).exists() and

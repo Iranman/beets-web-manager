@@ -4,5 +4,3 @@ frontend/dist/
 frontend/.next/
 frontend/out/
 .local-archive/
-_codex_backups/
-.codex-live-backups/

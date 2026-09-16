@@ -840,7 +840,7 @@ class ScriptSourceSafetyInvariantTests(unittest.TestCase):
         self.assertIn('--force-recreate "$SERVICE"', SCRIPT_SOURCE)
 
     def test_documentation_and_script_specify_explicit_bash_invocation(self):
-        doc_source = (ROOT / "docs" / "operations" / "TRUENAS_ROLLOUT.md").read_text(encoding="utf-8")
+        doc_source = (ROOT / "docs" / "TRUENAS_ROLLOUT.md").read_text(encoding="utf-8")
         self.assertIn("/bin/bash", doc_source)
         self.assertIn("/bin/bash", SCRIPT_SOURCE)
 

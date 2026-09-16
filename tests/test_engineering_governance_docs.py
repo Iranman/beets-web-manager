@@ -10,72 +10,56 @@ def read_repo_file(relative_path: str) -> str:
 
 
 class EngineeringGovernanceDocsTest(unittest.TestCase):
-    def test_required_governance_files_exist(self) -> None:
+    """Structural checks on the repository's canonical documentation set.
+
+    Scoped to product/architecture documentation only -- these assert that
+    the documents a contributor actually needs exist and stay internally
+    consistent, not that any particular AI-agent workflow prose is present.
+    """
+
+    def test_required_documentation_exists(self) -> None:
         required_paths = [
-            "AGENTS.md",
-            "CLAUDE.md",
             "REVIEW.md",
-            "docs/AI_ENGINEERING_RULES.md",
-            "docs/AGENT_WORKFLOW.md",
+            "CONTRIBUTING.md",
+            "SECURITY.md",
             "docs/ARCHITECTURE.md",
+            "docs/DEVELOPMENT.md",
             "docs/TECHNICAL_DEBT.md",
-            "docs/operations/DEVELOPMENT_AND_DEPLOYMENT.md",
-            "docs/incidents/LEGACY_AGENT_FILE_RECOVERY.md",
+            "docs/CONFIGURATION.md",
+            "docs/INSTALLATION.md",
+            "docs/TROUBLESHOOTING.md",
         ]
 
         for relative_path in required_paths:
             with self.subTest(path=relative_path):
                 self.assertTrue((REPO_ROOT / relative_path).is_file())
 
-    def test_agent_files_point_to_shared_source_of_truth(self) -> None:
-        required_references = [
-            "docs/AI_ENGINEERING_RULES.md",
-            "docs/AGENT_WORKFLOW.md",
-            "docs/ARCHITECTURE.md",
-            "docs/TECHNICAL_DEBT.md",
-            "REVIEW.md",
-        ]
+    def test_no_agent_convenience_files_at_repo_root(self) -> None:
+        """AGENTS.md/CLAUDE.md were deliberately removed: neither provided
+        any information a human contributor could not get from README.md's
+        "Documentation" section plus CONTRIBUTING.md/docs/DEVELOPMENT.md.
+        Being the filename a specific coding-agent tool looks for is not
+        sufficient justification to reintroduce either one -- if a real
+        need for either resurfaces, put the content in CONTRIBUTING.md or
+        docs/DEVELOPMENT.md instead."""
+        for filename in ("AGENTS.md", "CLAUDE.md"):
+            with self.subTest(filename=filename):
+                self.assertFalse((REPO_ROOT / filename).exists())
 
-        for agent_file in ("AGENTS.md", "CLAUDE.md"):
-            content = read_repo_file(agent_file)
-            for reference in required_references:
-                with self.subTest(agent_file=agent_file, reference=reference):
-                    self.assertIn(reference, content)
-
-    def test_agent_files_do_not_contain_regression_markers(self) -> None:
-        for agent_file in ("AGENTS.md", "CLAUDE.md"):
-            with self.subTest(agent_file=agent_file):
-                self.assertNotIn("Regression Markers", read_repo_file(agent_file))
-
-    def test_shared_rules_record_non_negotiable_product_and_safety_rules(self) -> None:
-        content = read_repo_file("docs/AI_ENGINEERING_RULES.md")
+    def test_architecture_doc_records_non_negotiable_product_rules(self) -> None:
+        content = read_repo_file("docs/ARCHITECTURE.md")
         expected_rules = [
             "Beets remains",
             "MusicBrainz and AcoustID are the primary identity evidence",
             "AI is optional and untrusted",
             "release-group ID",
-            "Never silently modify the music library",
-            "Persistent status",
-            "Never expose credentials",
+            "No silent library mutations",
+            "Never expose secrets",
         ]
 
         for rule in expected_rules:
             with self.subTest(rule=rule):
                 self.assertIn(rule, content)
-
-    def test_architecture_doc_is_evidence_based_and_marks_incomplete_migration(self) -> None:
-        content = read_repo_file("docs/ARCHITECTURE.md")
-        expected_evidence = [
-            "Current migration status: incomplete",
-            "app.py",
-            "job_engine.py",
-            "helpers_mb.py",
-            "frontend/src/api/client.ts",
-        ]
-
-        for evidence in expected_evidence:
-            with self.subTest(evidence=evidence):
-                self.assertIn(evidence, content)
 
     def test_documented_repository_boundaries_exist(self) -> None:
         expected_paths = [
@@ -100,7 +84,10 @@ class EngineeringGovernanceDocsTest(unittest.TestCase):
     def test_technical_debt_register_has_stable_ids_and_required_fields(self) -> None:
         content = read_repo_file("docs/TECHNICAL_DEBT.md")
 
-        for debt_id in [f"ARCH-{index:03d}" for index in range(1, 10)]:
+        # Every entry currently in the lean, current-debt-only register.
+        # This list is expected to change as items open/close -- update it
+        # alongside the register, it is not meant to pin a fixed count.
+        for debt_id in ("ARCH-001", "ARCH-002", "ARCH-004", "ARCH-005", "ARCH-006", "ARCH-007", "ARCH-009", "ARCH-012"):
             with self.subTest(debt_id=debt_id):
                 self.assertIn(debt_id, content)
 
@@ -117,16 +104,17 @@ class EngineeringGovernanceDocsTest(unittest.TestCase):
             with self.subTest(field=field):
                 self.assertIn(field, content)
 
-        arch_009 = content[content.index("ARCH-009") :]
-        for phrase in (
-            "release-group identity",
-            "mb_albumid",
-            "mb_releasegroupid",
-            "Diagnostic snapshot",
-            "Required tests:",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, arch_009)
+    def test_technical_debt_register_does_not_accumulate_closed_history(self) -> None:
+        """Resolved debt is removed from the active register (Git history
+        and the closing PR are the historical record), not kept forever as
+        a "Done"/"Closed"/"Resolved" narrative entry."""
+        content = read_repo_file("docs/TECHNICAL_DEBT.md")
+        self.assertLess(
+            len(content.splitlines()),
+            400,
+            "docs/TECHNICAL_DEBT.md has grown large again -- audit for "
+            "resolved items that should be removed rather than accumulated.",
+        )
 
     def test_initial_adrs_exist_and_have_required_sections(self) -> None:
         adr_paths = sorted((REPO_ROOT / "docs" / "adr").glob("*.md"))
@@ -138,55 +126,38 @@ class EngineeringGovernanceDocsTest(unittest.TestCase):
                 with self.subTest(adr=adr_path.name, heading=heading):
                     self.assertIn(heading, content)
 
-    def test_backup_files_are_ignored_narrowly(self) -> None:
-        gitignore = read_repo_file(".gitignore")
-        self.assertIn("AGENTS.md.bak-*", gitignore)
-        self.assertIn("CLAUDE.md.bak-*", gitignore)
-        self.assertIn("!docs/AI_ENGINEERING_RULES.md", gitignore)
-        self.assertIn("!docs/AGENT_WORKFLOW.md", gitignore)
-        self.assertIn("!docs/operations/*.md", gitignore)
-        self.assertIn("!docs/incidents/*.md", gitignore)
+    def test_architecture_doc_links_to_adrs(self) -> None:
+        content = read_repo_file("docs/ARCHITECTURE.md")
+        self.assertIn("docs/adr/", content)
 
-    def test_agent_workflow_defines_chain_of_command(self) -> None:
-        content = read_repo_file("docs/AGENT_WORKFLOW.md")
-        expected_roles = [
-            "Project Owner — Iran",
-            "Project Manager — ChatGPT",
-            "Technical Lead and Final Reviewer — Claude",
-            "Implementation Engineer — Agy",
-        ]
-        for role in expected_roles:
-            with self.subTest(role=role):
-                self.assertIn(role, content)
-
-    def test_agent_workflow_gives_claude_fix_authority_not_review_only(self) -> None:
-        content = read_repo_file("docs/AGENT_WORKFLOW.md")
-        self.assertIn(
-            "Do not only report findings. Fix every issue you identify directly, "
-            "add or correct tests, rerun all required validation, and leave the "
-            "branch in a clean final state.",
-            content,
+    def test_no_documentation_links_to_removed_agent_process_files(self) -> None:
+        """Regression guard: agent-workflow-process documents were removed
+        from the product repository (see Git history for the originals).
+        No remaining documentation should link to them."""
+        removed_paths = (
+            "AGENTS.md",
+            "CLAUDE.md",
+            "docs/AGENT_WORKFLOW.md",
+            "docs/AI_ENGINEERING_RULES.md",
+            "docs/incidents/LEGACY_AGENT_FILE_RECOVERY.md",
+            "docs/operations/DEVELOPMENT_AND_DEPLOYMENT.md",
+            "docs/security/codeql_repository_closure.md",
+            "SECURITY_AUDIT.md",
+            "security_best_practices_report.md",
         )
-        self.assertIn("Fix issues directly in code rather than producing a findings-only report", content)
-
-    def test_agent_workflow_restricts_push_pr_merge_deploy_authority(self) -> None:
-        content = read_repo_file("docs/AGENT_WORKFLOW.md")
-        restricted_actions = [
-            "`git push` or `git push --force`",
-            "Open a pull request or modify an existing pull request",
-            "Mark a draft PR as ready for review",
-            "`git merge` or merge PRs on GitHub",
-            "Deploy to TrueNAS or production environments",
+        doc_files = [
+            p for p in REPO_ROOT.rglob("*.md")
+            if "node_modules" not in p.parts and ".git" not in p.parts
         ]
-        for action in restricted_actions:
-            with self.subTest(action=action):
-                self.assertIn(action, content)
-
-    def test_agent_workflow_is_not_a_conversation_transcript(self) -> None:
-        content = read_repo_file("docs/AGENT_WORKFLOW.md")
-        for banned_phrase in ("as we discussed", "in this session", "in this conversation", "as requested above"):
-            with self.subTest(phrase=banned_phrase):
-                self.assertNotIn(banned_phrase, content.lower())
+        for doc_path in doc_files:
+            content = doc_path.read_text(encoding="utf-8")
+            for removed in removed_paths:
+                with self.subTest(doc=str(doc_path.relative_to(REPO_ROOT)), removed=removed):
+                    # CHANGELOG.md is a historical record and may legitimately
+                    # mention a since-removed file in a past-dated entry.
+                    if doc_path.name == "CHANGELOG.md":
+                        continue
+                    self.assertNotIn(removed, content)
 
 
 if __name__ == "__main__":

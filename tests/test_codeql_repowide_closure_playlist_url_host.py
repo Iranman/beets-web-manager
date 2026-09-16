@@ -4,8 +4,8 @@ app.py:45292/45328/45332 at baseline commit 7b05844d58d657ce6f1ae6c5b1724f5ba70e
 during the repository-wide CodeQL closure pass's browser/URL-security
 tranche.
 
-Unlike the cosmetic frontend badge findings in the same rule class (Phase 4,
-docs/security/codeql_repository_closure.md), playlist_parse()'s
+Unlike the cosmetic frontend badge findings in the same rule class,
+playlist_parse()'s
 "spotify.com"/"youtube.com"/"youtu.be"/"soundcloud.com" substring checks
 were a genuine trust decision: the soundcloud.com branch calls
 _apply_ytdlp_netrc(ydl_opts), which instructs yt-dlp to attach the

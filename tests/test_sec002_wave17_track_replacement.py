@@ -5,9 +5,8 @@ This is a from-scratch rewrite matching the from-scratch rewrite of
 backend/transaction_engine.py's track-replacement functions -- the
 original implementation this replaces had a signature shape
 (allowed_roots + a client-suppliable quarantine_root) this review found
-to be unsafe and removed. See the final-review commit message /
-docs/operations/wave17_track_replacement_design.md for the corrected
-architecture: role-specific roots (original = music root only,
+to be unsafe and removed. The corrected architecture: role-specific
+roots (original = music root only,
 candidate = staging/acquisition roots only), a server-derived quarantine
 root, item-id-bound original resolution, and required (not optional)
 matching-authority evidence.

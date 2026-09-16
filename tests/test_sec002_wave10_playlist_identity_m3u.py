@@ -408,8 +408,8 @@ class TestWave10PlaylistIdentityAndM3ULifecycle(unittest.TestCase):
 
 
 class TestWave10SecondFinalReviewCorrectionTests(unittest.TestCase):
-    """Regression tests for the corrections made during Claude's independent
-    final review of PR #83 (SEC-002 Wave 10). Each test proves the specific
+    """Regression tests for the corrections made during final review of PR #83
+    (SEC-002 Wave 10). Each test proves the specific
     vulnerable behavior the correction closes."""
 
     def setUp(self):
@@ -584,8 +584,7 @@ class TestWave10SecondFinalReviewCorrectionTests(unittest.TestCase):
 
 class TestWave10EngineM3USecondFinalReviewTests(unittest.TestCase):
     """Real ControlAgentHandler.do_POST invocations for the engine-side M3U
-    tempfile/TOCTOU corrections made during Claude's independent final
-    review of PR #83."""
+    tempfile/TOCTOU corrections made during final review of PR #83."""
 
     def setUp(self):
         self.tmp_dir = tempfile.TemporaryDirectory()

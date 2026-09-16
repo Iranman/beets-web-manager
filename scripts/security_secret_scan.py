@@ -25,7 +25,7 @@ SKIP_DIRS = {
     ".git", ".github_cache", ".mypy_cache", ".next", ".playwright-cli",
     ".pytest_cache", "__pycache__", "dist", "node_modules", "out",
 }
-LOCAL_ARTIFACT_DIRS = {"_codex_backups", ".codex-live-backups", ".local-archive", "output"}
+LOCAL_ARTIFACT_DIRS = {".local-archive", "output"}
 
 # Safe in ANY scanned file: generic non-secret-shaped values a real credential
 # could never plausibly be. These do not depend on the file being a template.

@@ -14027,7 +14027,8 @@ def _build_library_payload() -> dict:
     missing (shown in red). Pure builder -- no caching or request handling,
     so both library_full() and the background cache-warmer can call it.
     Do not change this traversal logic without a side-by-side parity check
-    (see CLAUDE.md's "/api/library is high risk" note).
+    (see docs/TECHNICAL_DEBT.md ARCH-012 -- this is high-risk traversal
+    logic with a known, real undercount defect and no fix attempted here).
     """
     # Build lookup: file path → beets item (for import-status annotation)
     # Beets stores paths relative to the music root (e.g. "Artist/Album/song.flac").
@@ -21589,8 +21590,7 @@ def import_folder_with_id():
         # / POST /imports/reimport). confirmed_import_v1 instead binds
         # authorization to an immutable source manifest digest (re-checked
         # at Apply), this already-resolved concrete Release ID + Release
-        # Group, and best-effort track/fingerprint alignment -- see
-        # docs/operations/wave25_import_reconciliation_design.md.
+        # Group, and best-effort track/fingerprint alignment.
         plan_res = beets_client.plan_confirmed_import({
             "source_folder": import_folder_path,
             "existing_album_id": existing_album_id,
@@ -44422,8 +44422,7 @@ def playlist_parse():
         # provider-routing checks below used to be plain substring tests
         # ("spotify.com" in content, "youtube.com"/"soundcloud.com" in
         # parse_lower). Unlike the cosmetic frontend badge findings in the
-        # same rule class (see docs/security/codeql_repository_closure.md
-        # Phase 4), this one is a genuine trust decision: the soundcloud.com
+        # same rule class, this one is a genuine trust decision: the soundcloud.com
         # branch attaches the operator's stored netrc credentials
         # (_apply_ytdlp_netrc) to whatever URL yt-dlp is given. A URL that
         # merely CONTAINS "soundcloud.com" as a substring without actually
@@ -44455,9 +44454,8 @@ def playlist_parse():
 
             # SEC-002 CodeQL repository-wide closure finding
             # (py/polynomial-redos): the same unbounded-content-between-
-            # delimiters shape as the playlist title/artist cleaners
-            # (docs/security/codeql_repository_closure.md) -- not itself
-            # CodeQL-flagged at this line, but the identical, already-
+            # delimiters shape as the playlist title/artist cleaners --
+            # not itself CodeQL-flagged at this line, but the identical, already-
             # empirically-proven-quadratic pattern, fixed the same way.
             # PR-scoped re-check (post-Wave-27 rebase) additionally found
             # the leading \s* also needed bounding (see the identical note

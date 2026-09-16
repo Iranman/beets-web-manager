@@ -2,6 +2,18 @@
 
 This document describes the architecture that exists today and the intended direction. It does not claim that the intended architecture is complete.
 
+## Non-Negotiable Rules
+
+These are standing product/architecture invariants, not aspirations. Each is backed by an Architecture Decision Record under `docs/adr/` and, where practical, a regression test — see the linked ADR for full context and consequences.
+
+- Beets remains the library backend and source of library mutations; the app does not grow a parallel music-library database. (`docs/adr/0001-beets-remains-library-backend.md`)
+- MusicBrainz and AcoustID are the primary identity evidence. The canonical album-level identity is the MusicBrainz release-group ID (`mb_releasegroupid`); a release ID (`mb_albumid`) is edition-level secondary data and must never be substituted where a release-group ID is required. (`docs/adr/0002-release-group-id-is-canonical-album-identity.md`)
+- AI is optional and untrusted. It may rank or explain candidates already found through deterministic sources; it must not invent an identity and treat it as verified, and its unavailability must never stop MusicBrainz/AcoustID matching. (`docs/adr/0003-ai-is-optional-and-not-source-of-truth.md`)
+- No silent library mutations. Any move, rename, merge, delete, tag write, replacement, or artwork write requires the controlled preview/apply/audit/recovery workflow in `backend/transaction_engine.py`. (`docs/adr/0004-library-mutations-use-controlled-workflow.md`)
+- Long-running operations use the shared job infrastructure (`job_engine.py`) rather than ad hoc background threads or bespoke checkpoint logic. (`docs/adr/0005-long-running-operations-use-shared-job-infrastructure.md`)
+- Ambiguous or conflicting evidence goes to review; destructive actions require stronger evidence than suggestions.
+- Never expose secrets in logs, API responses, frontend state, or committed files.
+
 ## Current Main Components
 
 - `beets` (Beets Engine Container): authoritative Beets installation built from `Dockerfile.beets`, whose `ARG BEETS_BASE_IMAGE` selects the upstream LinuxServer Beets image at build time (default: the tested production candidate, currently `lscr.io/linuxserver/beets:2.13.1`; see `docs/BEETS_ENGINE_MIGRATION.md` for the version policy and `docker/beets/apply_patches.py` for the version-aware plugin-resolution compatibility patch). Contains the Beets CLI, `/config/config.yaml`, `/config/musiclibrary.blb`, bundled plugins (`/opt/beets-web-manager-agent/beetsplug/discpath.py`), and the HTTP control agent (`backend/beets_control_agent.py`) supervised under S6 (`/custom-services.d/beets-control-agent`). Port 8338 is internal-only.
@@ -28,7 +40,7 @@ Frontend
   -> Beets CLI, SQLite DB (/config/musiclibrary.blb), & Media Filesystem
 ```
 
-Current migration status: incomplete. Service split is complete; route/service migration is incomplete. The web manager service has zero direct Beets imports and no local SQLite file handles; `backend.beets_client.RemoteLibrary` and `RemoteSQLiteConnection` translate legacy library/SQL call shapes into authenticated internal HTTP requests. Remaining work is to replace those compatibility call shapes with explicit service/repository methods and to move residual media-file mutation call sites behind the control-agent boundary.
+Current migration status: the service split is complete and every production Beets/media mutation runs behind the control-agent boundary. The web manager service has zero direct Beets imports and no local SQLite file handles; `backend.beets_client.RemoteLibrary` and `RemoteSQLiteConnection` translate legacy library/SQL call shapes into authenticated internal HTTP requests — a legacy raw-SQL-shaped *read* attempted over that compatibility layer is a hard, unconditional failure by design (`raw_sqlite_query()` always raises), not a silent fallback, so a route still expressing a read that way is non-functional rather than degraded. Remaining work is replacing the routes that still express reads as raw-SQL-shaped compatibility calls with explicit, narrow `BeetsClient` repository methods (see `docs/TECHNICAL_DEBT.md`, ARCH-007) — route/service migration toward thin routes calling explicit services is otherwise still in progress (ARCH-001).
 
 ## External Boundaries
 
@@ -89,16 +101,13 @@ Intended direction:
 
 Existing mutation mechanisms include:
 
-- Legacy Beets `modify`, `write`, `move`, `import`, `submit`, and `mbsubmit` command arrays in `app.py`, `job_engine.py`, and `routes_submissions.py`. These arrays are normalized and executed remotely through `backend.beets_client.BeetsClient`; they must not shell out in the web-manager container.
-- Control-agent endpoints for Beets commands, tag writes, file moves/deletes, and direct SQLite-backed compatibility queries inside the `beets` container.
-- Residual direct filesystem moves, deletes, copies, and directory removals in `app.py`. Under the supported Compose files the web-manager image is not the media owner, so these call sites need ARCH-003 controlled-boundary cleanup before being treated as architecture-complete. The old local `/api/library/scan` filesystem walk and background loop are disabled unless `BEETS_ENABLE_LEGACY_LOCAL_SCAN=1`.
-  - **ARCH-003 decision (SEC-002 Wave 8)**: engine-owned paths (anything under `MUSIC_LIBRARY_PATH`/`DOWNLOAD_PATH`) must be validated and inspected by the Beets engine, not the web manager -- the web manager has no local view of those roots in any shipped Compose topology, confirmed by a disposable two-service runtime test reproducing the exact failure (`reimport_disk()` unconditionally returning "Source path does not exist" for any real path). The engine exposes `POST /imports/source/inspect` (`backend/beets_control_agent.py:inspect_import_source()`), reusing the engine's own `resolve_safe_path()` for authoritative containment/symlink-safety (never letting a caller choose its own trusted root -- it names a fixed operation, e.g. `"reimport"`, and the engine owns that operation's root policy) plus a bounded audio inventory (real `ffprobe` inspection, capped scan/file counts, never following symlinked subdirectories out of the trusted root). `backend.beets_client.BeetsClient.inspect_import_source()` is the corresponding web-manager-side client method.
-  - **Migrated**: `reimport_disk()`'s source validation and audio-format inspection (`_validate_import_source_evidence()`, fed by the engine's evidence instead of a local scan); `_ai_batch_find_audio_dirs()` (engine-side recursive discovery via `POST /imports/source/discover` / `discover_import_sources()`, with cursor-based pagination and resource limits, replacing the local `os.walk()`); torrent-staged reimport source copying (engine-side `POST /imports/source/preserve` / `preserve_import_source()`, staging-only). `reimport_disk()`'s actual Beets mutation itself is now bound to the engine's `POST /imports/reimport` / `reimport_source_atomic()`, which re-verifies the source signature and (where real deterministic evidence exists -- an existing library DB row, or embedded MusicBrainz tags matching the requested release) the resulting album identity immediately before any file is touched, replacing a bare `_beet_run(... "import" ...)` call that had no such check at the mutation point. See `docs/TECHNICAL_DEBT.md` ("Claude independent review of a user-authored ARCH-003 completion commit" and "Codex: wire production reimport_disk() to the reviewed atomic engine mutation") for the full trace and remaining limits (notably: a from-scratch import of untagged staged audio with no prior library row and no embedded MusicBrainz tags now correctly requires manual review rather than importing on trust, since neither the engine nor the caller can independently re-verify AcoustID evidence at the mutation boundary).
-  - **Not yet migrated**: every other pre-existing local-filesystem call site in `app.py` outside the Wave 8 selected routes (unaudited as part of this fix).
-- A file-backed `TransactionStore` in `backend/transaction_engine.py` with statuses, changes, metadata diffs, rollback fields, settings, and job attachment. Its default storage root (`/config/transactions`) assumes local `/config` access the web manager also does not have in any shipped Compose file (only `/web-manager-data` is mounted) -- a separate, pre-existing gap from ARCH-003 (general web-manager local state, not engine-owned media), surfaced by the same Wave 8 runtime test but out of that fix's scope.
+- Beets `modify`, `write`, `move`, `import`, `submit`, and `mbsubmit` command arrays in `app.py`, `job_engine.py`, and `routes_submissions.py`. These arrays are normalized and executed remotely through `backend.beets_client.BeetsClient`; the web-manager container never shells out to `beet` locally (enforced by an AST-based structural test, `tests/test_arch003_boundary_enforcement.py`).
+- Control-agent endpoints for Beets commands, tag writes, file moves/deletes, and structured library reads inside the `beets` container.
+- A file-backed `TransactionStore` in `backend/transaction_engine.py` (plan/apply/verify/recover) with statuses, changes, metadata diffs, rollback fields, and job attachment.
+- Engine-owned source inspection for import/reimport: `POST /imports/source/inspect` (`backend/beets_control_agent.py:inspect_import_source()`), `POST /imports/source/discover`, and `POST /imports/source/preserve` validate and inventory engine-owned paths from inside the engine container, which has the real filesystem view the web manager does not have in any shipped Compose topology.
 - Several workflow-specific preview/dry-run routes, including import target preview, cleanup scans, folder placeholder preview, and transaction endpoints.
 
-Intended direction:
+Intended direction (now the default shape for every production mutation path):
 
 1. Inspect current state.
 2. Produce a mutation plan.
@@ -108,7 +117,7 @@ Intended direction:
 6. Verify final filesystem and application state.
 7. Record completed steps and recovery information.
 
-Current migration status: partial. The transaction engine and remote control agent are foundations, but not every mutating route uses one plan/apply/verify/recover boundary yet.
+Current migration status: the controlled-mutation boundary itself is complete for every production Beets/media mutation path (`security/arch003_mutation_inventory.json`'s CI gate holds at 0 unresolved blockers) and the web-manager container performs zero local Beets CLI execution and zero local Beets database/media mutation — all of that runs inside the `beets` container behind the control agent. The web manager still owns and writes its own local state (`/web-manager-data`: config store, auth token, transaction/audit records), which is expected, not a boundary violation. What remains open is not the mutation boundary's existence but converging the many entry points that reach it on one shared matching/confidence contract — see `docs/TECHNICAL_DEBT.md` (ARCH-002).
 
 ## Frontend Architecture
 
@@ -127,9 +136,11 @@ Frontend direction:
 
 ## Areas Still Being Migrated
 
-- `app.py` route/domain/mutation/job coupling.
-- Duplicated matching and confidence rules across import review, playlist, replacement, cleanup, and submission flows.
-- Residual legacy filesystem and remote Beets command call sites outside a single controlled mutation boundary.
-- Job idempotency and checkpoint consistency across all long-running workflows.
-- Consistent provider-adapter contracts for AI, MusicBrainz, AcoustID, Plex, and download providers.
+- `app.py` route/domain/mutation/job coupling (ARCH-001).
+- Duplicated matching and confidence rules across import review, playlist, replacement, cleanup, and submission flows: a canonical matching evidence engine exists (`backend/matching/`), but not every production entry point uses it yet (ARCH-002).
+- Routes that still express a Beets library *read* as a raw-SQL-shaped compatibility call instead of an explicit `BeetsClient` repository method (ARCH-007).
+- Job idempotency and checkpoint consistency across all long-running workflows (ARCH-004).
+- Consistent provider-adapter contracts for AI, MusicBrainz, AcoustID, Plex, and download providers (ARCH-006).
+
+See `docs/TECHNICAL_DEBT.md` for the full current list, including affected areas, risk, and desired state for each.
 - Large frontend modules that mix rendering, polling, local state machines, and decision presentation.

@@ -34,7 +34,6 @@ SEC-002 / ARCH-003 controlled-mutation closure across Waves 15-29 (PRs #88-#102,
 - ARCH-002 (duplicated matching/confidence rules across entry points) remains open, P0.
 - ARCH-007's broader scope (other, not-yet-audited routes still expressing reads in a raw-SQL-compatibility shape) remains open; this release closed the five callers directly proven broken by real Docker acceptance testing, not a full repository audit.
 - ARCH-001 (monolithic `app.py` route/domain/mutation coupling) remains open, incremental extraction ongoing.
-- Full detail for every wave, including individual finding writeups and test names, is in `docs/TECHNICAL_DEBT.md`.
 
 ## v0.1.14 - 2026-08-19
 
@@ -44,7 +43,6 @@ SEC-002 playlist-pipeline and MusicBrainz-identity engine-ownership work, Waves 
 
 - **Playlist pipeline engine ownership completed (Waves 9-13):** removed every remaining local fallback in the playlist acquisition/staging/validation/import/placement path (local directory listing, local AcoustID fingerprinting, local media-tag reads, local `pl_default`-keyed staging) in favor of engine-owned `BeetsClient` IPC; fixed `playlist_id`/`playlist_key` confusion across six call sites with one strict shared resolver that refuses rather than guesses; closed an unauthenticated arbitrary-item mutation gap in the engine's `/playlists/place-imported` endpoint (an `item_id` is now required to belong to a recorded import operation for the calling `playlist_key`); restored DB backup and write/move-both-must-succeed truthfulness for placement; fixed a fabricated-candidacy regression in manual quality-repair; bounded and locked the playlist staging file-listing endpoint; fixed cross-playlist Plex ratingKey collision, checkpoint-corruption isolation, and non-circular AcoustID/fingerprint verification for playlist import (Waves 9-12).
 - **MusicBrainz identity/matching authority consolidated (Wave 14):** introduced a single shared `MatchingDecision` contract (`backend/matching_contract.py`) so deterministic identity proof (Release Group ID equality, exact Recording ID matches) -- not independent per-workflow heuristics -- is the sole authority for whether a candidate can auto-import/auto-repair versus require manual review, across Import Review, Folder Preflight, Release Resolution, Reimport, Duplicate Cleanup, and the existing recording-attach gate. Fixed a disconnect where two response-compaction layers silently stripped the shared decision before it reached the real Import Review auto-import gate, letting an old independent heuristic authorize import even when the shared decision withheld it; fixed the same class of bypass in the oversized-partial-release acceptance path; fixed a generic-mapping-treated-as-a-release bug and a Release-ID-only-misclassified-as-a-hard-conflict bug in the matching contract itself; added a narrow Release-Group-ID consistency guard to the MusicBrainz track-repair workflow, which had no deterministic identity check at all.
-- Full detail for both waves, including individual finding writeups and test names, is in `docs/TECHNICAL_DEBT.md`.
 
 ## v0.1.0 - 2026-07-16
 
@@ -63,7 +61,7 @@ SEC-002 playlist-pipeline and MusicBrainz-identity engine-ownership work, Waves 
 ### Fixed
 
 - `config.yaml` (contains plaintext integration secret fields) was not excluded by `.gitignore`.
-- Baseline CI no longer depends on local-only `AGENTS.md`, `CLAUDE.md`, or private `config.yaml` files, and Docker dependency installation uses the available `pylistenbrainz==0.5.1` pin.
+- Baseline CI no longer depends on local-only agent instruction files or private `config.yaml` files, and Docker dependency installation uses the available `pylistenbrainz==0.5.1` pin.
 
 ### Known Limitations
 

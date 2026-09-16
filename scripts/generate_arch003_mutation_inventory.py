@@ -266,7 +266,7 @@ _EXPLICIT_FUNCTION_CLASSIFICATION = {
     # run_native_import_fn (same dependency-injection pattern as
     # run_beet_command_fn/beets_import_runner elsewhere). Deliberately does
     # NOT call reimport_source_atomic/verify_deterministic_identity -- see
-    # its own docstring and docs/operations/wave25_import_reconciliation_design.md.
+    # its own docstring.
     # Like reimport_source_atomic, this function itself has no
     # TransactionStore/mutation_family/operation_id awareness (that lives in
     # the caller, execute_confirmed_import_apply), so it is truthfully

@@ -10728,9 +10728,8 @@ def execute_album_artwork_fetch_apply(
 # previously-untagged source audio, deliberately separate from
 # reimport_source_atomic()/verify_deterministic_identity() (which remain
 # unchanged and continue to gate genuine *re*-imports of already-tagged
-# library content). See docs/operations/wave25_import_reconciliation_design.md
-# for the full security-model writeup ("REIMPORT TRUST MODEL" vs "FRESH
-# REVIEWED IMPORT TRUST MODEL").
+# library content) -- the "REIMPORT TRUST MODEL" vs "FRESH REVIEWED IMPORT
+# TRUST MODEL" distinction.
 #
 # Trust model: missing embedded MusicBrainz tags are the EXPECTED case for a
 # fresh download and are never treated as identity evidence one way or the

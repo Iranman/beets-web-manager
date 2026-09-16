@@ -116,9 +116,8 @@ class TestArch003BoundaryEnforcement(unittest.TestCase):
         # Wave 25 Round 3: import_folder_with_id() now routes fresh reviewed
         # imports through confirmed_import_v1 (plan_confirmed_import /
         # apply_confirmed_import), not the old import_folder_v1 family --
-        # see docs/operations/wave25_import_reconciliation_design.md for
-        # why (verify_deterministic_identity's embedded-tag requirement is
-        # incompatible with importing untagged fresh downloads). The old
+        # verify_deterministic_identity's embedded-tag requirement is
+        # incompatible with importing untagged fresh downloads. The old
         # plan_import_folder/apply_import_folder methods still exist on
         # BeetsClient and the import_folder_v1 family is still tested, but
         # neither is invoked by production app.py code any more.
