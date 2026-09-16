@@ -40679,6 +40679,7 @@ def clean_artist_folders_stamp_mbid():
     root_path, root_error = _artist_folder_repair_root(payload.get("root") or str(MUSIC_ROOT))
     if root_path is None:
         return jsonify({"ok": False, "error": root_error}), 400
+    root_str = str(root_path)
     dry_run = bool(payload.get("dry_run", True))
     compact_log = bool(payload.get("compact_log", False))
 
