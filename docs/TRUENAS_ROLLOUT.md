@@ -139,7 +139,7 @@ VERSION                required for --dry-run/rollout only, no default (e.g. 1.0
 EXPECTED_REVISION       strongly recommended; when set, validates exact Git commit revision label
 SERVICE                default beets-web-manager
 ENGINE_SERVICE          default beets
-COMPOSE_FILE            auto-detected (docker-compose.arrs.yml, then docker-compose.yml)
+COMPOSE_FILE            auto-detected: tries a legacy `docker-compose.arrs.yml` name first (a combined-stack convention from one earlier deployment, not a Beets Web Manager requirement), then `docker-compose.yml`. Set this explicitly -- to whatever your own Compose file is actually named -- rather than relying on auto-detection.
 MIN_ITEM_COUNT          default 10 -- raise to your real library size
 STALE_DB_MAX_ITEMS      default 100000
 HEALTH_TIMEOUT_SECONDS  default 120

@@ -385,8 +385,8 @@ class Wave9M3UAndPlexTranslationSecurityTests(unittest.TestCase):
 
 
 class Wave9FinalReviewCorrectionTests(unittest.TestCase):
-    """Regression tests for the corrections made during Claude's independent
-    final review of PR #82 (SEC-002 Wave 9). Each test proves the specific
+    """Regression tests for the corrections made during final review of PR #82
+    (SEC-002 Wave 9). Each test proves the specific
     vulnerable behavior the correction closes, not just the new code shape."""
 
     def test_unauthorized_absolute_path_does_not_gain_basename_authority(self):

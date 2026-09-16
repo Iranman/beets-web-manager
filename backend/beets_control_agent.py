@@ -946,7 +946,7 @@ def _agent_status_payload(*, force_refresh: bool = False) -> dict[str, Any]:
         "status": "ok",
         "service": "beets-control-agent",
         "agent_version": "1.0.0",
-        "engine_release": os.environ.get("BEETS_WEB_MANAGER_VERSION") or os.environ.get("BEETS_ENGINE_RELEASE") or "0.1.10",
+        "engine_release": os.environ.get("BEETS_WEB_MANAGER_VERSION") or os.environ.get("BEETS_ENGINE_RELEASE") or "0.1.15",
         "engine_revision": os.environ.get("BEETS_ENGINE_REVISION") or os.environ.get("VCS_REF") or "",
         "control_api_version": 1,
         "beets_version": snapshot.get("version") or "",
@@ -2250,9 +2250,8 @@ def verify_deterministic_identity(
     expected_identity argument, and a DB verification error are all
     *absence of evidence*, not evidence of a match -- silently treating
     them as success would let path containment plus an unverified caller
-    claim stand in for actual identity proof (SEC-002 Wave 8, Claude's
-    independent review of the original implementation, which did exactly
-    that)."""
+    claim stand in for actual identity proof (SEC-002 Wave 8 regression
+    review of the original implementation, which did exactly that)."""
     if not expected_identity or not isinstance(expected_identity, dict):
         return {"ok": False, "error_code": "review_required", "message": "No expected identity supplied to verify against"}
 
@@ -2335,8 +2334,8 @@ def verify_deterministic_identity(
             # already live: an unrelated trusted folder plus an arbitrary
             # existing_album_id must never be treated as authorized just
             # because the row happens to exist (found via adversarial
-            # testing during Claude's final review of this exact code path
-            # -- the original version returned ok: True here for any
+            # regression testing of this exact code path -- the original
+            # version returned ok: True here for any
             # trusted-but-unrelated, untagged source).
             source_canonical = str(source_inspect.get("canonical_path") or "")
             bound = False
@@ -2503,7 +2502,7 @@ def reimport_source_atomic(
         # value -- a bare trailing "asis" is parsed as an extra positional
         # PATH argument, which does not exist and aborts the whole import
         # before it ever reaches the real target (found and proven against
-        # a real beet binary during Claude's final review of this exact
+        # a real beet binary during regression review of this exact
         # code path; the previous version of this command could never
         # succeed against a live engine).
         cmd_args = ["import", "-q", "--noincremental", "--quiet-fallback", "asis"]

@@ -19,7 +19,6 @@ class EngineeringGovernanceDocsTest(unittest.TestCase):
 
     def test_required_documentation_exists(self) -> None:
         required_paths = [
-            "AGENTS.md",
             "REVIEW.md",
             "CONTRIBUTING.md",
             "SECURITY.md",
@@ -34,6 +33,18 @@ class EngineeringGovernanceDocsTest(unittest.TestCase):
         for relative_path in required_paths:
             with self.subTest(path=relative_path):
                 self.assertTrue((REPO_ROOT / relative_path).is_file())
+
+    def test_no_agent_convenience_files_at_repo_root(self) -> None:
+        """AGENTS.md/CLAUDE.md were deliberately removed: neither provided
+        any information a human contributor could not get from README.md's
+        "Documentation" section plus CONTRIBUTING.md/docs/DEVELOPMENT.md.
+        Being the filename a specific coding-agent tool looks for is not
+        sufficient justification to reintroduce either one -- if a real
+        need for either resurfaces, put the content in CONTRIBUTING.md or
+        docs/DEVELOPMENT.md instead."""
+        for filename in ("AGENTS.md", "CLAUDE.md"):
+            with self.subTest(filename=filename):
+                self.assertFalse((REPO_ROOT / filename).exists())
 
     def test_architecture_doc_records_non_negotiable_product_rules(self) -> None:
         content = read_repo_file("docs/ARCHITECTURE.md")
@@ -124,6 +135,7 @@ class EngineeringGovernanceDocsTest(unittest.TestCase):
         from the product repository (see Git history for the originals).
         No remaining documentation should link to them."""
         removed_paths = (
+            "AGENTS.md",
             "CLAUDE.md",
             "docs/AGENT_WORKFLOW.md",
             "docs/AI_ENGINEERING_RULES.md",

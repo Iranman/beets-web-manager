@@ -1,10 +1,10 @@
 # Installation & Deployment Guide
 
 Beets Web Manager is packaged as a matched two-container release pair published to GitHub Container Registry:
-- **`beets`** (`ghcr.io/iranman/beets-engine:0.1.10`): Authoritative Beets engine, plugins, SQLite library, and control agent.
-- **`beets-web-manager`** (`ghcr.io/iranman/beets-web-manager:0.1.10`): Web UI, API backend, import queue, and job engine.
+- **`beets`** (`ghcr.io/iranman/beets-engine:${BEETS_WEB_MANAGER_VERSION:-stable}`): Authoritative Beets engine, plugins, SQLite library, and control agent.
+- **`beets-web-manager`** (`ghcr.io/iranman/beets-web-manager:${BEETS_WEB_MANAGER_VERSION:-stable}`): Web UI, API backend, import queue, and job engine.
 
-Setting `BEETS_WEB_MANAGER_VERSION=0.1.10` in `.env` pulls matching pre-built release images for both containers automatically.
+Leaving `BEETS_WEB_MANAGER_VERSION=stable` in `.env` pulls the matched stable release images for both containers automatically. Pin an exact release such as `0.1.15` when you need predictable rollback to a known image pair.
 
 ---
 
@@ -115,13 +115,13 @@ BEETS_WEB_MANAGER_VERSION=stable
 BEETS_WEB_MANAGER_VERSION=latest
 
 # Exact version for predictable deployment and rollback
-BEETS_WEB_MANAGER_VERSION=0.1.0
+BEETS_WEB_MANAGER_VERSION=0.1.15
 
 # Development builds from main; not recommended for production
 BEETS_WEB_MANAGER_VERSION=edge
 ```
 
-`stable` is the recommended default for production deployments. Using an exact version tag (e.g. `0.1.0`) is recommended for predictable deployments and rollbacks. Prerelease tags (such as `v0.2.0-rc.1`) publish exact prerelease image tags for testing, but never touch `stable` or `latest`.
+`stable` is the recommended default for production deployments. Using an exact version tag (e.g. `0.1.15`) is recommended for predictable deployments and rollbacks. Prerelease tags (such as `v0.2.0-rc.1`) publish exact prerelease image tags for testing, but never touch `stable` or `latest`.
 
 ---
 
@@ -144,7 +144,7 @@ To roll back to a specific previous release:
 
 1. Pin the exact release version in `.env`:
    ```env
-   BEETS_WEB_MANAGER_VERSION=0.1.0
+   BEETS_WEB_MANAGER_VERSION=0.1.15
    ```
 2. Recreate the service:
    ```bash

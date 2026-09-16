@@ -281,7 +281,7 @@ _HOST_SPECIFIC_PATH_PATTERNS = (
 def _check_no_owner_specific_paths(text: str, label: str, errors: list[str]) -> None:
     """Regression guard: no public Compose file may ship a maintainer's
     actual host paths or LAN addresses as an active default (see the
-    deployment-architecture rule in AGENTS.md)."""
+    "Deployment Files Stay Generic" rule in docs/DEVELOPMENT.md)."""
     for line_no, line in enumerate(text.splitlines(), start=1):
         if line.strip().startswith("#"):
             continue

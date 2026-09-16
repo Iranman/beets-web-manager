@@ -15,7 +15,7 @@ This guide covers common errors and resolution steps for Beets Web Manager.
 ---
 
 ### 2. `pull access denied for beets-web-manager`
-* **Cause**: Compose is attempting to pull a local-only image name (e.g. `beets-web-manager:0.1.0`) from Docker Hub instead of using the published GitHub Container Registry image.
+* **Cause**: Compose is attempting to pull a local-only image name (e.g. `beets-web-manager:0.1.15`) from Docker Hub instead of using the published GitHub Container Registry image.
 * **Fix**: Ensure your `docker-compose.yml` references the official published registry image:
   ```yaml
   image: ghcr.io/iranman/beets-web-manager:${BEETS_WEB_MANAGER_VERSION:-stable}

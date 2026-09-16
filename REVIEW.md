@@ -1,6 +1,6 @@
 # Review Checklist
 
-Use this checklist for every change that touches application behavior, jobs, matching, filesystem operations, provider integrations, or frontend decision UI.
+Use this checklist for every change that touches application behavior, jobs, matching, filesystem operations, provider integrations, or frontend decision UI. The canonical statement of the underlying rules lives in `docs/ARCHITECTURE.md` ("Non-Negotiable Rules") and `docs/adr/`; this file restates them as things to actively verify during review, not as a second source of truth.
 
 ## Architecture Boundaries
 

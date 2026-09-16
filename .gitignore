@@ -64,8 +64,6 @@ cache/
 .cache/
 output/
 .local-archive/
-.codex-live-backups/
-_codex_backups/
 .playwright-cli/
 frontend/.playwright-cli/
 

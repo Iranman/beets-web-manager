@@ -1203,7 +1203,7 @@ class RealProductionPathIntegrationTests(Wave19FixtureBase):
 
 
 class WebManagerMutationProhibitionTests(unittest.TestCase):
-    """SEC-002 Wave 19 final review: AGY's own architecture scan only
+    """SEC-002 Wave 19 final review: the initial architecture scan only
     inspected `repair_album_mb_tracks`, but `_repair_album_mbid_sticking_once`
     is a second, automatic production caller of the same mutation family --
     it must be held to the identical no-local-mutation standard."""

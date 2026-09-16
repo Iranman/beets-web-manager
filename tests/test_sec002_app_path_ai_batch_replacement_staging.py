@@ -20,8 +20,7 @@ positives:
    field into a single safe path component before folder-name construction,
    plus a final containment re-check before any destructive filesystem call.
 
-Claude's independent final review (docs/TECHNICAL_DEBT.md, "Claude
-independent final review of Wave 8") additionally found that
+A later regression review additionally found that
 create_unmatched_draft() writing under MUSIC_ROOT was itself an
 architecture violation: the web manager neither owns nor (in the shipped
 Compose topology) has MUSIC_ROOT mounted at all. The route now writes
@@ -130,8 +129,8 @@ class UnmatchedDraftPathSafetyTests(unittest.TestCase):
 
     def test_bidi_override_and_zero_width_chars_stripped_from_artist(self):
         # U+202E (RIGHT-TO-LEFT OVERRIDE) and U+200B (ZERO WIDTH SPACE) are
-        # Unicode format characters, not ASCII control characters -- Claude's
-        # independent review (SEC-002 Wave 8 final review) found the
+        # Unicode format characters, not ASCII control characters -- a
+        # SEC-002 Wave 8 final review found the
         # pre-existing ASCII-only control-char strip in _safe_path_component
         # let these through unchanged. They can't escape draft_root (still a
         # single safe path component either way), but can make the resulting

@@ -1,7 +1,7 @@
 """SEC-002 / ARCH-003 Wave 18 final review: bulk_import_replacement_v1.
 
-The original Wave 18 implementation reported "PASS -- READY FOR CLAUDE
-REVIEW". Independent inspection found it did not hold up: the only real
+The original Wave 18 implementation reported itself ready for review.
+Independent inspection found it did not hold up: the only real
 production caller (_merge_imported_album_into_existing) had been reduced
 to a silent no-op by an indentation bug that nested its entire body as
 unreachable dead code inside a sibling helper function; the transaction

@@ -1,6 +1,6 @@
 """SEC-002 Wave 8 architecture-unblock regression tests.
 
-Claude's independent final review of PR #70 blocked it with:
+Independent final review of PR #70 blocked it with:
 
     blocked -- web-manager media mutation violates architecture
 
@@ -370,8 +370,8 @@ class ImportSourceInspectionTests(unittest.TestCase):
 @unittest.skipUnless(os.name == "posix", "resolve_safe_path() requires POSIX-absolute paths; the control agent only ever runs inside the Linux engine container")
 class DiscoverImportSourcesPaginationTests(unittest.TestCase):
     """Real, unmocked tests of discover_import_sources() -- specifically its
-    pagination correctness, which Claude's independent review proved
-    unsound in the original implementation.
+    pagination correctness, which independent review proved unsound in
+    the original implementation.
 
     The original cursor was a lexicographic "resume after this relative
     path" string marker. That looks equivalent to DFS traversal order but
@@ -537,8 +537,8 @@ class ReimportDiskSinglePreservationTests(unittest.TestCase):
 
 class VerifyDeterministicIdentityFailClosedTests(unittest.TestCase):
     """verify_deterministic_identity() must never return ok: True on the
-    strength of absent evidence -- Claude's independent review found the
-    original implementation did exactly that (empty expected_identity,
+    strength of absent evidence -- independent review found the original
+    implementation did exactly that (empty expected_identity,
     empty source MBID sets, and a swallowed DB exception all produced
     ok: True). None of these tests touch a real database (existing_album_id
     is omitted throughout), so they need no POSIX/engine-container
@@ -555,7 +555,7 @@ class VerifyDeterministicIdentityFailClosedTests(unittest.TestCase):
         self.assertEqual(result["error_code"], "review_required")
 
     def test_target_mb_albumid_with_no_source_tags_requires_review_not_success(self):
-        # This is the exact fail-open case Claude's review found: expecting
+        # This is the exact fail-open case found in review: expecting
         # mb_albumid but the source has zero embedded MusicBrainz tags to
         # check it against previously produced ok: True.
         source_inspect = {"audio_files": [{"properties": {}}, {"properties": {}}]}
@@ -606,8 +606,8 @@ class VerifyDeterministicIdentityFailClosedTests(unittest.TestCase):
         # existing_album_id alone only proves that DB row exists -- it says
         # nothing about whether THIS source folder's content is that
         # album's content. An earlier version of this check returned
-        # ok: True here on the strength of the DB row alone, which Claude's
-        # adversarial testing during final review proved lets an
+        # ok: True here on the strength of the DB row alone, which
+        # adversarial final-review testing proved lets an
         # authenticated caller attach any trusted-but-unrelated, untagged
         # staging folder to any existing album ID and have it imported with
         # zero content verification. See
@@ -1090,7 +1090,7 @@ class ReimportSourceAtomicProductionPathTests(unittest.TestCase):
         self.assertIn("copy: no", cfg_content)
         self.assertIn("move: no", cfg_content)
         # CRITICAL command-shape regression guard, found live during
-        # Claude's final review: "asis" is only meaningful as
+        # final review: "asis" is only meaningful as
         # --quiet-fallback's VALUE. A bare trailing "asis" not immediately
         # preceded by --quiet-fallback is parsed by real beets as an extra
         # positional PATH argument that does not exist, aborting the whole
@@ -1176,8 +1176,8 @@ class ReimportSourceAtomicProductionPathTests(unittest.TestCase):
         self.assertGreater(kwargs["timeout"], 180)
 
     def test_unrelated_source_with_existing_album_id_is_never_authorized(self):
-        # CRITICAL regression test: found live during Claude's final review
-        # of this exact production wiring. An authenticated caller can
+        # CRITICAL regression test: found live during final review of this
+        # exact production wiring. An authenticated caller can
         # supply ANY trusted source_path alongside ANY existing_album_id --
         # both are ordinary request parameters. existing_album_id alone
         # (an earlier version of verify_deterministic_identity()) only
