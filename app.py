@@ -10,6 +10,25 @@ from backend.security import (OutboundPolicyError, bounded_rate_key_store_sweep,
 install_secure_urllib()
 from backend.ai_batch_state_store import AiBatchStateConflictError, AiBatchStateStore
 from backend.web_manager_config_store import WebManagerConfigStore, WebManagerConfigStoreError
+from backend.matching import (
+    AcoustIDStatus,
+    ConfidenceState,
+    album_track_score as _canonical_album_track_score,
+    align_tracks_global,
+    best_album_track_match as _canonical_best_album_track_match,
+    evaluate_release_group_candidate,
+    normalize_artist as _canonical_normalize_artist,
+    normalize_title as _canonical_normalize_title,
+    normalize_track_title_for_matching,
+    similarity as _canonical_similarity,
+    strip_track_filename_id_suffix as _canonical_strip_track_filename_id_suffix,
+    title_variants as _canonical_title_variants,
+    track_feature_variants as _canonical_track_feature_variants,
+    track_filename_has_source_id_suffix as _canonical_track_filename_has_source_id_suffix,
+    track_parenthetical_alias_variants as _canonical_track_parenthetical_alias_variants,
+    track_path_prefixes as _canonical_track_path_prefixes,
+    track_title_variants_for_matching as _canonical_track_title_variants_for_matching,
+)
 from collections import Counter, OrderedDict, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -31150,86 +31169,45 @@ _TRACK_FILENAME_SHORT_SOURCE_ID_SUFFIX_RE = re.compile(
 
 
 def _strip_track_filename_id_suffix(value: Any) -> str:
-    text = _s(value).strip()
-    for _ in range(4):
-        cleaned = _TRACK_FILENAME_SOURCE_ID_SUFFIX_RE.sub("", text).strip(" -_.")
-        if cleaned == text:
-            short_cleaned = _TRACK_FILENAME_SHORT_SOURCE_ID_SUFFIX_RE.sub("", text).strip(" -_.")
-            dirty_prefix_hint = bool(
-                re.search(r"[_\(\)\[\]]", short_cleaned)
-                or re.match(r"^\s*\d{1,3}[\s._-]+", short_cleaned)
-            )
-            if short_cleaned != text and dirty_prefix_hint:
-                cleaned = short_cleaned
-        if cleaned == text or not cleaned:
-            break
-        text = cleaned
-    return text
+    try:
+        return _canonical_strip_track_filename_id_suffix(value)
+    except NameError:
+        from backend.matching import strip_track_filename_id_suffix as _fallback_strip
+        return _fallback_strip(value)
 
 
 def _track_filename_has_source_id_suffix(value: Any) -> bool:
-    text = _s(value).strip()
-    return bool(text and _strip_track_filename_id_suffix(text) != text)
+    try:
+        return _canonical_track_filename_has_source_id_suffix(value)
+    except NameError:
+        from backend.matching import track_filename_has_source_id_suffix as _fallback_has_suffix
+        return _fallback_has_suffix(value)
+
 
 def _album_track_norm(value: str) -> str:
-    import unicodedata
-
-    text = _strip_track_filename_id_suffix(value).casefold()
-    text = unicodedata.normalize("NFKD", text)
-    text = "".join(ch for ch in text if not unicodedata.combining(ch))
-    text = text.replace("&", " and ")
-    text = _ALBUM_TRACK_UNCLOSED_RE.sub("", _ALBUM_TRACK_ANNOT_RE.sub("", text))
-    text = re.sub(r"@\w+", " ", text)
-    text = re.sub(r"\b(?:feat|ft)\.?\s+.*$", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"[^a-z0-9]+", " ", text)
-    text = re.sub(r"^(?:bonus\s+track\s*)+", "", text, flags=re.IGNORECASE)
-    return " ".join(text.split())
+    try:
+        return normalize_track_title_for_matching(value)
+    except NameError:
+        from backend.matching import normalize_track_title_for_matching as _fallback_norm
+        return _fallback_norm(value)
 
 
 def _album_track_feature_variants(value: str) -> List[str]:
     """Return title candidates with normal and glued feature suffixes removed."""
-    text = _s(value).strip()
-    if not text:
-        return []
-    variants = [text]
-    stripped = _ALBUM_TRACK_FEATURE_SUFFIX_RE.sub("", text).strip(" -_–—:;,.")
-    if stripped and stripped != text:
-        variants.append(stripped)
-    glued = _ALBUM_TRACK_GLUED_FEATURE_SUFFIX_RE.sub(r"\1", text).strip(" -_–—:;,.")
-    if glued and glued != text:
-        variants.append(glued)
-    spaced = re.sub(
-        r'(?i)^(.{4,}?)(featuring|feat|ft)(\.?\s+[A-Za-z0-9].*)$',
-        r'\1 \2\3',
-        text,
-    )
-    if spaced and spaced != text:
-        variants.append(spaced)
-        spaced_stripped = _ALBUM_TRACK_FEATURE_SUFFIX_RE.sub("", spaced).strip(" -_–—:;,.")
-        if spaced_stripped and spaced_stripped != spaced:
-            variants.append(spaced_stripped)
-    out: List[str] = []
-    seen: set = set()
-    for val in variants:
-        key = val.casefold()
-        if val and key not in seen:
-            seen.add(key)
-            out.append(val)
-    return out
+    try:
+        return _canonical_track_feature_variants(value)
+    except NameError:
+        from backend.matching import track_feature_variants as _fallback_features
+        return _fallback_features(value)
 
 
 def _album_track_parenthetical_alias_variants(value: str) -> List[str]:
     """Return conservative title aliases such as "Money (That's What I Want)" -> "Money"."""
-    text = _s(value).strip()
-    if not text:
-        return []
-    variants: List[str] = []
-    match = _ALBUM_TRACK_TRAILING_ALIAS_RE.search(text)
-    if match and not _ALBUM_TRACK_VERSION_MARKER_RE.search(match.group(1)):
-        base = text[:match.start()].strip(" -_–—:;,.")
-        if len(_album_track_norm(base)) >= 3:
-            variants.append(base)
-    return variants
+    try:
+        return _canonical_track_parenthetical_alias_variants(value)
+    except NameError:
+        from backend.matching import track_parenthetical_alias_variants as _fallback_alias
+        return _fallback_alias(value)
 
 
 def _album_track_path_prefixes(path: str) -> List[str]:
@@ -31296,6 +31274,7 @@ def _album_track_path_prefixes(path: str) -> List[str]:
             seen.add(norm)
             out.append(norm)
     return out
+
 
 def _album_track_title_variants(title: str, path: str = "") -> List[str]:
     raw_values = [_s(title).strip()]
@@ -31516,61 +31495,20 @@ def _fetch_mb_release_tracklist(mb_albumid: str, log: Optional[List[str]] = None
 
 
 def _album_track_score(item: Dict[str, Any], mb_trk: Dict[str, Any]) -> float:
-    from difflib import SequenceMatcher
-
-    mb_norm = mb_trk.get("title_norm") or _album_track_norm(mb_trk.get("title", ""))
-    variants = _album_track_title_variants(item.get("title", ""), item.get("path", ""))
-    title_score = max(
-        (SequenceMatcher(None, v, mb_norm).ratio() for v in variants if v and mb_norm),
-        default=0.0,
-    )
-    pos_bonus = 0.0
-    item_disc, item_track = _album_item_position_hints(item)
-    if item_track == int(mb_trk.get("track") or 0):
-        pos_bonus += 0.04
-        if item_disc == int(mb_trk.get("disc") or 1):
-            pos_bonus += 0.02
-    dur_bonus = 0.0
-    item_ms = int(float(item.get("length") or 0) * 1000)
-    mb_ms = int(mb_trk.get("duration_ms") or 0)
-    if item_ms and mb_ms:
-        diff_s = abs(item_ms - mb_ms) / 1000.0
-        dur_bonus = 0.04 if diff_s <= 4 else (0.02 if diff_s <= 10 else 0.0)
-    return min(1.0, title_score + pos_bonus + dur_bonus)
+    try:
+        return _canonical_album_track_score(item, mb_trk)
+    except NameError:
+        from backend.matching import album_track_score as _fallback_score
+        return _fallback_score(item, mb_trk)
 
 
 def _best_album_track_match(item: Dict[str, Any], mb_tracks: List[Dict[str, Any]]) -> Dict[str, Any]:
-    item_mbid = _s(item.get("mb_trackid", "")).strip().lower()
-    if item_mbid:
-        for idx, trk in enumerate(mb_tracks):
-            if item_mbid and item_mbid == trk.get("mb_trackid"):
-                title_score = _album_track_score(item, trk)
-                return {"idx": idx, "track": trk, "score": max(0.98, title_score),
-                        "title_score": title_score, "exact_mbid": True}
+    try:
+        return _canonical_best_album_track_match(item, mb_tracks)
+    except NameError:
+        from backend.matching import best_album_track_match as _fallback_best
+        return _fallback_best(item, mb_tracks)
 
-    best_idx = -1
-    best_score = -1.0
-    best_rank = (-1.0, -1, -1)
-    item_disc, item_track = _album_item_position_hints(item)
-    for idx, trk in enumerate(mb_tracks):
-        score = _album_track_score(item, trk)
-        exact_pos = int(
-            bool(item_track and item_track == int(trk.get("track") or 0))
-            and bool(item_disc == int(trk.get("disc") or 1))
-        )
-        track_pos = int(bool(item_track and item_track == int(trk.get("track") or 0)))
-        rank = (score, exact_pos, track_pos)
-        if rank > best_rank:
-            best_rank = rank
-            best_score = score
-            best_idx = idx
-    return {
-        "idx": best_idx,
-        "track": mb_tracks[best_idx] if best_idx >= 0 else {},
-        "score": max(best_score, 0.0),
-        "title_score": max(best_score, 0.0),
-        "exact_mbid": False,
-    }
 
 
 def _album_track_fingerprint_check(item: Dict[str, Any],

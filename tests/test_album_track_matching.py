@@ -1,4 +1,3 @@
-import ast
 import re
 import sys
 import unittest
@@ -6,7 +5,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _app_ast_cache import get_app_ast  # noqa: E402
+from _app_ast_cache import load_app_symbols  # noqa: E402
 
 from backend.matching import AcoustIDStatus
 
@@ -14,7 +13,6 @@ APP_SOURCE = Path(__file__).resolve().parents[1] / "app.py"
 
 
 def _load_matcher_namespace(*, with_fingerprint_check: bool = False, acoustid_lookup=None):
-    tree = get_app_ast()
     names = {
         "_ALBUM_TRACK_PREFIX_RE",
         "_ALBUM_TRACK_ANNOT_RE",
@@ -38,12 +36,7 @@ def _load_matcher_namespace(*, with_fingerprint_check: bool = False, acoustid_lo
     }
     if with_fingerprint_check:
         names.add("_album_track_fingerprint_check")
-    ns = {
-        "Any": Any,
-        "Dict": Dict,
-        "List": List,
-        "Path": Path,
-        "re": re,
+    extra_ns = {
         "AcoustIDStatus": AcoustIDStatus,
         "_s": lambda value: (
             value.decode("utf-8", errors="replace")
@@ -64,17 +57,7 @@ def _load_matcher_namespace(*, with_fingerprint_check: bool = False, acoustid_lo
         "_album_item_abs_path": lambda raw_path: str(raw_path or ""),
         "_acoustid_lookup_cached": acoustid_lookup or (lambda _path: []),
     }
-    for node in tree.body:
-        node_name = ""
-        if isinstance(node, ast.Assign):
-            node_name = getattr(node.targets[0], "id", "")
-        elif isinstance(node, ast.FunctionDef):
-            node_name = node.name
-        if node_name in names:
-            mod = ast.Module(body=[node], type_ignores=[])
-            ast.fix_missing_locations(mod)
-            exec(compile(mod, str(APP_SOURCE), "exec"), ns)
-    return ns
+    return load_app_symbols(names, extra_ns=extra_ns)
 
 
 class AlbumTrackMatchingTests(unittest.TestCase):
@@ -389,7 +372,6 @@ class AlbumTrackFingerprintCheckAcoustIDMatrixTests(unittest.TestCase):
         caller (not a reimplementation) must mark a fingerprint-conflicting
         candidate as "conflicting", never silently accept it as a match."""
         import tempfile
-        tree = get_app_ast()
         names = {
             "_candidate_track_build_comparison",
             "_album_track_fingerprint_check",
@@ -414,11 +396,8 @@ class AlbumTrackFingerprintCheckAcoustIDMatrixTests(unittest.TestCase):
             "_slskd_title_guess_from_name",
         }
         with tempfile.NamedTemporaryFile(suffix=".flac") as tf:
-            ns = {
-                "Any": Any, "Dict": Dict, "List": List, "Path": Path, "re": re,
+            extra_ns = {
                 "AcoustIDStatus": AcoustIDStatus,
-                "Tuple": __import__("typing").Tuple,
-                "defaultdict": __import__("collections").defaultdict,
                 "_s": lambda value: str(value or ""),
                 "_album_item_position_hints": lambda item: (int(item.get("disc") or 1), int(item.get("track") or 0)),
                 "_album_item_abs_path": lambda raw_path: str(raw_path or ""),
@@ -427,17 +406,7 @@ class AlbumTrackFingerprintCheckAcoustIDMatrixTests(unittest.TestCase):
                 ],
                 "_MB_TRACK_PREFLIGHT_MATCH_THRESHOLD": 0.82,
             }
-            for node in tree.body:
-                node_name = ""
-                if isinstance(node, ast.Assign):
-                    node_name = getattr(node.targets[0], "id", "")
-                elif isinstance(node, ast.FunctionDef):
-                    node_name = node.name
-                if node_name in names:
-                    mod = ast.Module(body=[node], type_ignores=[])
-                    ast.fix_missing_locations(mod)
-                    exec(compile(mod, str(APP_SOURCE), "exec"), ns)
-
+            ns = load_app_symbols(names, extra_ns=extra_ns)
             build_comparison = ns["_candidate_track_build_comparison"]
             candidate = {"title": "Wrong Title Entirely", "path": tf.name}
             tracklist = {
@@ -454,8 +423,87 @@ class AlbumTrackFingerprintCheckAcoustIDMatrixTests(unittest.TestCase):
             self.assertEqual(matched_rows, [])
 
 
+class CanonicalMatchingEquivalenceTests(unittest.TestCase):
+    """ARCH-002: Verify backend.matching canonical engine matches app.py delegates identically."""
+
+    def test_golden_equivalence_corpus(self):
+        from backend.matching import (
+            album_track_score,
+            best_album_track_match,
+            normalize_track_title_for_matching,
+            strip_track_filename_id_suffix,
+            track_feature_variants,
+            track_filename_has_source_id_suffix,
+            track_parenthetical_alias_variants,
+            track_title_variants_for_matching,
+        )
+
+        ns = _load_matcher_namespace()
+        app_norm = ns["_album_track_norm"]
+        app_score = ns["_album_track_score"]
+        app_best = ns["_best_album_track_match"]
+        app_strip = ns["_strip_track_filename_id_suffix"]
+        app_has_suffix = ns["_track_filename_has_source_id_suffix"]
+        app_feature = ns["_album_track_feature_variants"]
+        app_alias = ns["_album_track_parenthetical_alias_variants"]
+        app_variants = ns["_album_track_title_variants"]
+
+        test_corpus = [
+            "Money (That's What I Want)",
+            "Many Men (Wish Death)",
+            "Syrup Damage_639189505313367522",
+            "2 Feet-639189505752092846",
+            "spesh-trust_life_(feat_benny)-b3e356",
+            "01-38_spesh-intro_(feat_uncle_black)-28bb",
+            "Light It Upft Pop Smoke",
+            "Malibufeat Polo G",
+            "Intro (Explicit Album Version) [Remastered 2024]",
+            "Bonus Track: Secret Song (Live @ Wembley)",
+            "Song & Dance (feat. Artist A and Artist B)",
+            "99 Problems",
+            "Track 01 - Hello World [Lidarr-abc123456]",
+        ]
+
+        for title in test_corpus:
+            with self.subTest(title=title):
+                self.assertEqual(normalize_track_title_for_matching(title), app_norm(title))
+                self.assertEqual(strip_track_filename_id_suffix(title), app_strip(title))
+                self.assertEqual(track_filename_has_source_id_suffix(title), app_has_suffix(title))
+                self.assertEqual(track_feature_variants(title), app_feature(title))
+                self.assertEqual(track_parenthetical_alias_variants(title), app_alias(title))
+                self.assertEqual(
+                    track_title_variants_for_matching(title, "/data/torrents/music/Artist/Album/01.flac"),
+                    app_variants(title, "/data/torrents/music/Artist/Album/01.flac"),
+                )
+
+        # Scoring & Best match equivalence
+        mb_tracks = [
+            {"title": "Money", "title_norm": "money", "track": 1, "disc": 1, "duration_ms": 180000, "mb_trackid": "rec-1"},
+            {"title": "Many Men (Wish Death)", "title_norm": "many men wish death", "track": 2, "disc": 1, "duration_ms": 200000, "mb_trackid": "rec-2"},
+            {"title": "Syrup Damage", "title_norm": "syrup damage", "track": 3, "disc": 1, "duration_ms": 150000, "mb_trackid": "rec-3"},
+        ]
+
+        local_item = {"title": "Money (That's What I Want)", "track": 1, "disc": 1, "length": 180.0, "path": "01 - Money.flac"}
+        self.assertAlmostEqual(album_track_score(local_item, mb_tracks[0]), app_score(local_item, mb_tracks[0]), places=5)
+        self.assertEqual(best_album_track_match(local_item, mb_tracks)["idx"], app_best(local_item, mb_tracks)["idx"])
+
+    def test_multi_disc_position_hints(self):
+        from backend.matching import album_track_score
+
+        item_d2_t1 = {"title": "Overture Live in Concert", "track": 1, "disc": 2, "length": 120.0}
+        target_d1_t1 = {"title": "Overture", "title_norm": "overture", "track": 1, "disc": 1, "duration_ms": 120000}
+        target_d2_t1 = {"title": "Overture", "title_norm": "overture", "track": 1, "disc": 2, "duration_ms": 120000}
+
+        score_diff_disc = album_track_score(item_d2_t1, target_d1_t1)
+        score_same_disc = album_track_score(item_d2_t1, target_d2_t1)
+
+        # Same disc + track gets full position bonus (+0.06 vs +0.04)
+        self.assertGreater(score_same_disc, score_diff_disc)
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

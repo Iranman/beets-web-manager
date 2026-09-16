@@ -16,8 +16,24 @@ from .models import (
     TrackAssignment,
     UnmatchedLocalTrack,
 )
-from .normalize import normalize_artist, normalize_title, similarity, title_variants
-from .track_alignment import align_tracks_global
+from .normalize import (
+    normalize_artist,
+    normalize_title,
+    normalize_track_title_for_matching,
+    similarity,
+    strip_track_filename_id_suffix,
+    title_variants,
+    track_feature_variants,
+    track_filename_has_source_id_suffix,
+    track_parenthetical_alias_variants,
+    track_path_prefixes,
+    track_title_variants_for_matching,
+)
+from .track_alignment import (
+    album_track_score,
+    align_tracks_global,
+    best_album_track_match,
+)
 
 __all__ = [
     "AcoustIDStatus",
@@ -29,10 +45,20 @@ __all__ = [
     "TrackAlignmentResult",
     "TrackAssignment",
     "UnmatchedLocalTrack",
+    "album_track_score",
     "align_tracks_global",
+    "best_album_track_match",
     "evaluate_release_group_candidate",
     "normalize_artist",
     "normalize_title",
+    "normalize_track_title_for_matching",
     "similarity",
+    "strip_track_filename_id_suffix",
     "title_variants",
+    "track_feature_variants",
+    "track_filename_has_source_id_suffix",
+    "track_parenthetical_alias_variants",
+    "track_path_prefixes",
+    "track_title_variants_for_matching",
 ]
+

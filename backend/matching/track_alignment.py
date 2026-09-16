@@ -6,7 +6,14 @@ from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Tuple
 
 from .models import AcoustIDStatus, TrackAlignmentResult, TrackAssignment, UnmatchedLocalTrack
-from .normalize import normalize_artist, normalize_title, similarity, title_variants
+from .normalize import (
+    normalize_artist,
+    normalize_title,
+    normalize_track_title_for_matching,
+    similarity,
+    title_variants,
+    track_title_variants_for_matching,
+)
 
 
 def _s(value: Any) -> str:
@@ -474,3 +481,77 @@ def align_tracks_global(
         conflicts=unique_conflicts,
         warnings=warnings,
     )
+
+
+def album_track_score(item: Dict[str, Any], mb_trk: Dict[str, Any]) -> float:
+    """Compute title/position/duration match score between a local item and an MB release track."""
+    mb_norm = mb_trk.get("title_norm") or normalize_track_title_for_matching(mb_trk.get("title", ""))
+    variants = track_title_variants_for_matching(item.get("title", ""), item.get("path", ""))
+    title_score = max(
+        (SequenceMatcher(None, v, mb_norm).ratio() for v in variants if v and mb_norm),
+        default=0.0,
+    )
+    pos_bonus = 0.0
+    item_disc = _int(item.get("disc"), 1)
+    item_track = _int(item.get("track"), 0)
+    mb_track = _int(mb_trk.get("track"), 0)
+    mb_disc = _int(mb_trk.get("disc"), 1)
+    if item_track == mb_track and item_track > 0:
+        pos_bonus += 0.04
+        if item_disc == mb_disc:
+            pos_bonus += 0.02
+    dur_bonus = 0.0
+    item_len = item.get("length")
+    if item_len is not None and item_len != "":
+        item_ms = int(float(item_len or 0) * 1000)
+    else:
+        item_ms = _int(item.get("duration_ms"), 0)
+    mb_ms = _int(mb_trk.get("duration_ms"), 0)
+    if not mb_ms and mb_trk.get("length"):
+        mb_ms = int(float(mb_trk.get("length") or 0) * 1000)
+    if item_ms and mb_ms:
+        diff_s = abs(item_ms - mb_ms) / 1000.0
+        dur_bonus = 0.04 if diff_s <= 4 else (0.02 if diff_s <= 10 else 0.0)
+    return min(1.0, title_score + pos_bonus + dur_bonus)
+
+
+def best_album_track_match(item: Dict[str, Any], mb_tracks: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Find the best matching MusicBrainz release track for a local item."""
+    item_mbid = _s(item.get("mb_trackid", "")).strip().lower()
+    if item_mbid:
+        for idx, trk in enumerate(mb_tracks):
+            if item_mbid == _s(trk.get("mb_trackid", "")).strip().lower():
+                title_score = album_track_score(item, trk)
+                return {
+                    "idx": idx,
+                    "track": trk,
+                    "score": max(0.98, title_score),
+                    "title_score": title_score,
+                    "exact_mbid": True,
+                }
+
+    best_idx = -1
+    best_score = -1.0
+    best_rank = (-1.0, -1, -1)
+    item_disc = _int(item.get("disc"), 1)
+    item_track = _int(item.get("track"), 0)
+    for idx, trk in enumerate(mb_tracks):
+        score = album_track_score(item, trk)
+        exact_pos = int(
+            bool(item_track and item_track == _int(trk.get("track"), 0))
+            and bool(item_disc == _int(trk.get("disc"), 1))
+        )
+        track_pos = int(bool(item_track and item_track == _int(trk.get("track"), 0)))
+        rank = (score, exact_pos, track_pos)
+        if rank > best_rank:
+            best_rank = rank
+            best_score = score
+            best_idx = idx
+    return {
+        "idx": best_idx,
+        "track": mb_tracks[best_idx] if best_idx >= 0 else {},
+        "score": max(best_score, 0.0),
+        "title_score": max(best_score, 0.0),
+        "exact_mbid": False,
+    }
+
