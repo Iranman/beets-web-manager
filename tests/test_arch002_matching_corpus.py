@@ -161,6 +161,94 @@ class TestArch002KnownFailures(unittest.TestCase):
         self.assertEqual(len(target_ids), len(set(target_ids)))
         self.assertEqual(alignment.matched_count, 2)
 
+    def test_three_way_same_title_collision_resolves_globally_not_greedily(self):
+        """ARCH-002 Part 6: 3+ competing local files, not just 2. All three
+        local tracks share the exact same title ("Silence") and only
+        duration distinguishes which MusicBrainz track each one really is.
+        Fed in scrambled (non-positional, non-duration-sorted) order, a
+        first-match/greedy scan can grab a locally-plausible but globally
+        wrong pairing for an early file and then have no correct option
+        left for a later one. The real min-cost global assignment must
+        still find the fully correct one-to-one pairing regardless of
+        input order.
+        """
+        # Deliberately scrambled: local file order does not match either
+        # the target disc/track order or the target duration order.
+        local_tracks = [
+            _local("Silence", 3, duration=45),  # really the 45s target
+            _local("Silence", 1, duration=15),  # really the 15s target
+            _local("Silence", 2, duration=30),  # really the 30s target
+        ]
+        mb_tracks = [
+            _mb("Silence", 1, "rec-silence-15", duration=15, track_id="silence-15"),
+            _mb("Silence", 2, "rec-silence-30", duration=30, track_id="silence-30"),
+            _mb("Silence", 3, "rec-silence-45", duration=45, track_id="silence-45"),
+        ]
+
+        alignment = align_tracks_global(local_tracks, mb_tracks)
+
+        self.assertEqual(alignment.matched_count, 3)
+        target_ids = [a.target_track_id for a in alignment.assignments]
+        self.assertEqual(len(target_ids), len(set(target_ids)), "each MB track claimed at most once")
+        local_indices = [a.local_index for a in alignment.assignments]
+        self.assertEqual(len(local_indices), len(set(local_indices)), "each local file used at most once")
+
+        by_recording = {a.target_recording_id: a.local_track for a in alignment.assignments}
+        self.assertEqual(by_recording["rec-silence-15"]["duration_seconds"], 15)
+        self.assertEqual(by_recording["rec-silence-30"]["duration_seconds"], 30)
+        self.assertEqual(by_recording["rec-silence-45"]["duration_seconds"], 45)
+
+    def test_three_way_collision_is_order_invariant(self):
+        """The same collision as above, permuted every possible way, must
+        always converge on the identical correct global assignment -- input
+        order must never change which local file lands on which target."""
+        import itertools
+
+        base = [
+            ("Silence", 1, 15, "rec-silence-15"),
+            ("Silence", 2, 30, "rec-silence-30"),
+            ("Silence", 3, 45, "rec-silence-45"),
+        ]
+        mb_tracks = [_mb(title, track, rec, duration=dur) for title, track, rec, dur in
+                     [(t, tr, r, d) for t, tr, d, r in base]]
+
+        expected = None
+        for perm in itertools.permutations(range(3)):
+            local_tracks = [_local("Silence", base[i][1], duration=base[i][2]) for i in perm]
+            alignment = align_tracks_global(local_tracks, mb_tracks)
+            mapping = {
+                a.target_recording_id: a.local_track["duration_seconds"]
+                for a in alignment.assignments
+            }
+            if expected is None:
+                expected = mapping
+            self.assertEqual(mapping, expected, f"permutation {perm} produced a different assignment")
+        self.assertEqual(expected, {"rec-silence-15": 15, "rec-silence-30": 30, "rec-silence-45": 45})
+
+    def test_extra_same_title_file_is_left_unmatched_not_forced(self):
+        """4 local files share one generic title but only 3 MB targets
+        exist. The algorithm must leave exactly one local file unmatched
+        rather than force it onto an already-claimed or wrong target."""
+        local_tracks = [
+            _local("Silence", 1, duration=15),
+            _local("Silence", 2, duration=30),
+            _local("Silence", 3, duration=45),
+            _local("Silence", 4, duration=999),  # no corresponding MB track at all
+        ]
+        mb_tracks = [
+            _mb("Silence", 1, "rec-silence-15", duration=15),
+            _mb("Silence", 2, "rec-silence-30", duration=30),
+            _mb("Silence", 3, "rec-silence-45", duration=45),
+        ]
+
+        alignment = align_tracks_global(local_tracks, mb_tracks)
+
+        self.assertEqual(alignment.matched_count, 3)
+        self.assertEqual(alignment.unmatched_local_count, 1)
+        self.assertEqual(alignment.unmatched_local[0].local_track["duration_seconds"], 999)
+        target_ids = [a.target_track_id for a in alignment.assignments]
+        self.assertEqual(len(target_ids), len(set(target_ids)))
+
     def test_bonus_track_preserves_release_group_and_marks_exact_release_uncertain(self):
         local_tracks = [
             _local("Crossfire", 1),
