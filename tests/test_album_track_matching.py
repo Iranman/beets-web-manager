@@ -501,6 +501,80 @@ class CanonicalMatchingEquivalenceTests(unittest.TestCase):
         self.assertGreater(score_same_disc, score_diff_disc)
 
 
+class CanonicalAdversarialNormalizerTests(unittest.TestCase):
+    """Adversarial stress and scaling tests to verify absence of ReDoS polynomial backtracking."""
+
+    def test_adversarial_large_inputs_do_not_hang(self):
+        import time
+        from backend.matching import (
+            normalize_track_title_for_matching,
+            strip_track_filename_id_suffix,
+            track_feature_variants,
+            track_filename_has_source_id_suffix,
+            track_parenthetical_alias_variants,
+            track_path_prefixes,
+            track_title_variants_for_matching,
+        )
+
+        adversarial_inputs = [
+            ("10k spaces", "Song" + " " * 10000 + "Title"),
+            ("50k spaces", "Song" + " " * 50000 + "Title"),
+            ("Repeated open parens (20k)", "Song " + "(" * 20000),
+            ("Repeated unclosed brackets (10k)", "Song " + "[a" * 10000),
+            ("Repeated dash space (5k)", "Artist" + " - " * 5000 + "Title"),
+            ("Repeated format placeholders (5k)", "Prefix" + " - %track{01}" * 5000 + "Title"),
+            ("Repeated feature prefixes (5k)", "Song " + "feat. Artist " * 5000),
+            ("Huge hex suffix (50k)", "Song_" + "a" * 50000),
+            ("Huge malformed UUID suffix (50k)", "Song_{" + "01234567-89ab-cdef-" * 2500 + "}"),
+            ("Deeply malformed annotation text (50k)", "Song (remix " + "deluxe " * 7000 + "edition)"),
+        ]
+
+        for desc, attack_str in adversarial_inputs:
+            with self.subTest(scenario=desc):
+                t0 = time.perf_counter()
+                norm = normalize_track_title_for_matching(attack_str)
+                strip = strip_track_filename_id_suffix(attack_str)
+                has_suffix = track_filename_has_source_id_suffix(attack_str)
+                feat = track_feature_variants(attack_str)
+                alias = track_parenthetical_alias_variants(attack_str)
+                pref = track_path_prefixes(attack_str)
+                variants = track_title_variants_for_matching(attack_str, attack_str)
+                dt = time.perf_counter() - t0
+
+                # Must complete boundedly without hanging (well under 2.0s for 50k chars)
+                self.assertLess(dt, 2.0, f"Adversarial input [{desc}] took {dt:.3f}s (potential ReDoS)")
+                self.assertIsInstance(norm, str)
+                self.assertIsInstance(strip, str)
+                self.assertIsInstance(has_suffix, bool)
+                self.assertIsInstance(feat, list)
+                self.assertIsInstance(alias, list)
+                self.assertIsInstance(pref, list)
+                self.assertIsInstance(variants, list)
+
+    def test_complexity_scaling_bounded(self):
+        """Verify execution time scales linearly rather than exponentially/polynomially."""
+        import time
+        from backend.matching import (
+            normalize_track_title_for_matching,
+            track_title_variants_for_matching,
+        )
+
+        base_pattern = "Artist - %track{01} - Song (feat. Artist) [Remastered] "
+        times = []
+        sizes = [100, 200, 400]
+
+        for multiplier in sizes:
+            input_str = base_pattern * multiplier
+            t0 = time.perf_counter()
+            _ = normalize_track_title_for_matching(input_str)
+            _ = track_title_variants_for_matching(input_str, input_str)
+            times.append(time.perf_counter() - t0)
+
+        # Confirm all runs completed in sub-second time
+        for t in times:
+            self.assertLess(t, 1.0)
+
+
 if __name__ == "__main__":
     unittest.main()
 

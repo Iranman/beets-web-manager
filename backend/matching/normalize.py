@@ -26,19 +26,17 @@ _VERSION_TOKENS = {
     "demo",
 }
 
-_ALBUM_TRACK_PREFIX_RE = re.compile(
-    r'^(?:.*?\s+[-–—]\s+)?(?:\d+|%\w+\{[^}]+\})\s*[-–—\.]\s*',
-    re.IGNORECASE,
+_HEX_CHARS = set("0123456789abcdefABCDEF")
+
+_ANNOTATION_KEYWORDS = (
+    "ft.", "feat.", "with", "prod.", "prod", "produced by", "remix", "re-mix",
+    "edit", "remaster", "remastered", "radio", "live", "acoustic",
+    "album version", "single version", "original version", "explicit album version",
+    "clean version", "version", "bonus", "instrumental", "deluxe",
+    "explicit", "clean", "official", "lyrics", "lyric", "letra oficial",
+    "hq audio", "hq", "hd", "audio", "video", "mv",
 )
-_ALBUM_TRACK_ANNOT_RE = re.compile(
-    r'\s*[\(\[]\s*(?:ft\.|feat\.|with\b|prod\.?|produced\s+by|remix|edit|remaster|radio|live|'
-    r'acoustic|album\s+version|single\s+version|original\s+version|explicit\s+album\s+version|'
-    r'clean\s+version|version|bonus|instrumental|deluxe|explicit|clean|official|'
-    r'lyrics?|letra\s+oficial|hq(?:\s+audio)?|hd|audio|video|mv).*?[\)\]]\s*',
-    re.IGNORECASE,
-)
-_ALBUM_TRACK_UNCLOSED_RE = re.compile(r'\s*[\(\[](?!.*[\)\]]).*$')
-_ALBUM_TRACK_TRAILING_ALIAS_RE = re.compile(r'\s*[\(\[]\s*([^\)\]]{2,})\s*[\)\]]\s*$')
+
 _ALBUM_TRACK_VERSION_MARKER_RE = re.compile(
     r"\b(?:remix|re-?mix|edit|remaster(?:ed)?|radio|live|acoustic|acappella|"
     r"a\s*cappella|a\s*pella|instrumental|karaoke|dub|extended|club|vip|"
@@ -46,12 +44,19 @@ _ALBUM_TRACK_VERSION_MARKER_RE = re.compile(
     r"clean|bonus|deluxe|single|album\s+edit)\b",
     re.IGNORECASE,
 )
-_ALBUM_TRACK_FEATURE_SUFFIX_RE = re.compile(
-    r'\b(?:featuring|feat|ft|with)\.?\s+.+$',
+
+_BARE_FEATURE_PREFIX_RE = re.compile(
+    r'\b(?:featuring|feat|ft)\.?\s+',
     re.IGNORECASE,
 )
-_ALBUM_TRACK_GLUED_FEATURE_SUFFIX_RE = re.compile(
-    r'^(.{4,}?)(?:featuring|feat|ft)\.?\s+([A-Za-z0-9].*)$',
+
+_VARIANTS_FEATURE_PREFIX_RE = re.compile(
+    r'\b(?:featuring|feat|ft|with)\.?\s+',
+    re.IGNORECASE,
+)
+
+_GLUED_FEATURE_RE = re.compile(
+    r'(?<=[a-zA-Z0-9]{4})(?:featuring|feat|ft)(?:\.|\s)',
     re.IGNORECASE,
 )
 
@@ -68,17 +73,13 @@ _TRACK_FILENAME_SOURCE_ID_SUFFIX_RE = re.compile(
     ''',
     re.IGNORECASE,
 )
+
 _TRACK_FILENAME_SHORT_SOURCE_ID_SUFFIX_RE = re.compile(
     r'''(?ix)
     (?:[\s._-]+|\s*[\(\[]\s*)
     (?=[a-f0-9]*[a-f])[a-f0-9]{4,5}
     \s*[\)\]]?\s*$
     ''',
-    re.IGNORECASE,
-)
-
-_STAMP_UUID_IN_NAME_RE = re.compile(
-    r'\s*(?:\{|\()[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:\}|\))\s*$',
     re.IGNORECASE,
 )
 
@@ -149,7 +150,6 @@ def _without_balanced_parenthetical_segments(value: Any) -> str:
     normalization keeps parenthetical content so distinct identities like
     "Intro" and "Intro (Live at Wembley)" do not collapse by default.
     """
-
     text = _s(value)
     out: List[str] = []
     stack: List[str] = []
@@ -174,6 +174,123 @@ def _without_balanced_parenthetical_segments(value: Any) -> str:
     return "".join(out)
 
 
+def _is_hex_uuid(val: str) -> bool:
+    if len(val) != 36:
+        return False
+    if val[8] != "-" or val[13] != "-" or val[18] != "-" or val[23] != "-":
+        return False
+    for idx, ch in enumerate(val):
+        if idx in (8, 13, 18, 23):
+            continue
+        if ch not in _HEX_CHARS:
+            return False
+    return True
+
+
+def _split_dashed_segments(s: str) -> List[str]:
+    """Split string on dash/en-dash/em-dash boundaries that have space on either side."""
+    if not s:
+        return []
+    parts: List[str] = []
+    current: List[str] = []
+    i = 0
+    n = len(s)
+    while i < n:
+        ch = s[i]
+        if ch in "-–—":
+            prev_space = (i > 0 and s[i - 1].isspace())
+            next_space = (i + 1 < n and s[i + 1].isspace())
+            if prev_space or next_space:
+                part = "".join(current).strip()
+                if part:
+                    parts.append(part)
+                current = []
+                i += 1
+                while i < n and s[i].isspace():
+                    i += 1
+                continue
+        current.append(ch)
+        i += 1
+    if current:
+        part = "".join(current).strip()
+        if part:
+            parts.append(part)
+    return parts
+
+
+def _is_annotation_bracket_content(content: str) -> bool:
+    trimmed = content.strip().lower()
+    if not trimmed:
+        return False
+    for kw in _ANNOTATION_KEYWORDS:
+        if trimmed == kw:
+            return True
+        if trimmed.startswith(kw):
+            rest = trimmed[len(kw):]
+            if not rest or rest[0] in " \t:;.,-_–—)]/\\|":
+                return True
+    return False
+
+
+def _strip_annotations_and_unclosed(text: str) -> str:
+    """Strip balanced annotation bracket spans and unclosed trailing brackets in linear time."""
+    if not text:
+        return ""
+    n = len(text)
+    out: List[str] = []
+    i = 0
+    while i < n:
+        ch = text[i]
+        if ch in "([":
+            closer = ")" if ch == "(" else "]"
+            depth = 1
+            j = i + 1
+            while j < n:
+                if text[j] == ch:
+                    depth += 1
+                elif text[j] == closer:
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j += 1
+            if depth == 0:
+                content = text[i + 1:j]
+                if _is_annotation_bracket_content(content):
+                    i = j + 1
+                    while i < n and text[i].isspace():
+                        i += 1
+                    continue
+                else:
+                    out.append(text[i:j + 1])
+                    i = j + 1
+                    continue
+            else:
+                break
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out).strip()
+
+
+def _strip_leading_track_num(s: str) -> str:
+    """Strip leading numeric or format track token prefix such as '01 - ' or '%track{01} - '."""
+    trimmed = s.lstrip()
+    if trimmed.startswith("%"):
+        brace_close = trimmed.find("}")
+        if brace_close > 1:
+            rest = trimmed[brace_close + 1:].lstrip(" -–—.")
+            return rest.strip()
+    i = 0
+    while i < len(trimmed) and trimmed[i].isdigit():
+        i += 1
+    if i > 0 and i < len(trimmed):
+        delims = trimmed[i:]
+        m = re.match(r'^\s*[-–—\.]\s*', delims)
+        if m:
+            return delims[m.end():].strip()
+    return s
+
+
 def normalize_title(value: Any, *, strip_track_number: bool = False) -> str:
     tokens = _tokens(value)
     if strip_track_number:
@@ -189,15 +306,24 @@ def strip_track_filename_id_suffix(value: Any) -> str:
     """Strip trailing Lidarr/Soulseek/hash ID suffixes from track filenames/titles."""
     text = _s(value).strip()
     for _ in range(4):
-        cleaned = _TRACK_FILENAME_SOURCE_ID_SUFFIX_RE.sub("", text).strip(" -_.")
+        if not text:
+            break
+        search_start = max(0, len(text) - 120)
+        m = _TRACK_FILENAME_SOURCE_ID_SUFFIX_RE.search(text, search_start)
+        if m and m.end() == len(text):
+            cleaned = text[:m.start()].strip(" -_.")
+        else:
+            cleaned = text
         if cleaned == text:
-            short_cleaned = _TRACK_FILENAME_SHORT_SOURCE_ID_SUFFIX_RE.sub("", text).strip(" -_.")
-            dirty_prefix_hint = bool(
-                re.search(r"[_\(\)\[\]]", short_cleaned)
-                or re.match(r"^\s*\d{1,3}[\s._-]+", short_cleaned)
-            )
-            if short_cleaned != text and dirty_prefix_hint:
-                cleaned = short_cleaned
+            m_short = _TRACK_FILENAME_SHORT_SOURCE_ID_SUFFIX_RE.search(text, search_start)
+            if m_short and m_short.end() == len(text):
+                short_cleaned = text[:m_short.start()].strip(" -_.")
+                dirty_prefix_hint = bool(
+                    re.search(r"[_\(\)\[\]]", short_cleaned)
+                    or re.match(r"^\s*\d{1,3}[\s._-]+", short_cleaned)
+                )
+                if short_cleaned != text and dirty_prefix_hint:
+                    cleaned = short_cleaned
         if cleaned == text or not cleaned:
             break
         text = cleaned
@@ -215,17 +341,21 @@ def normalize_track_title_for_matching(value: Any) -> str:
 
     Strips source ID suffixes (Lidarr/Soularr/short hashes), annotation brackets,
     @handle mentions, feature suffixes (feat./ft.), non-alphanumeric chars,
-    and leading 'bonus track' prefixes.
+    and leading 'bonus track' prefixes in linear time without catastrophic backtracking.
     """
     text = strip_track_filename_id_suffix(value).casefold()
     text = unicodedata.normalize("NFKD", text)
     text = "".join(ch for ch in text if not unicodedata.combining(ch))
     text = text.replace("&", " and ")
-    text = _ALBUM_TRACK_UNCLOSED_RE.sub("", _ALBUM_TRACK_ANNOT_RE.sub("", text))
+    text = _strip_annotations_and_unclosed(text)
     text = re.sub(r"@\w+", " ", text)
-    text = re.sub(r"\b(?:feat|ft)\.?\s+.*$", "", text, flags=re.IGNORECASE)
+    m_feat = _BARE_FEATURE_PREFIX_RE.search(text)
+    if m_feat:
+        text = text[:m_feat.start()]
     text = re.sub(r"[^a-z0-9]+", " ", text)
-    text = re.sub(r"^(?:bonus\s+track\s*)+", "", text, flags=re.IGNORECASE)
+    text = text.strip()
+    while text.startswith("bonus track"):
+        text = text[11:].strip()
     return " ".join(text.split())
 
 
@@ -235,22 +365,27 @@ def track_feature_variants(value: Any) -> List[str]:
     if not text:
         return []
     variants = [text]
-    stripped = _ALBUM_TRACK_FEATURE_SUFFIX_RE.sub("", text).strip(" -_–—:;,.")
-    if stripped and stripped != text:
-        variants.append(stripped)
-    glued = _ALBUM_TRACK_GLUED_FEATURE_SUFFIX_RE.sub(r"\1", text).strip(" -_–—:;,.")
-    if glued and glued != text:
-        variants.append(glued)
-    spaced = re.sub(
-        r'(?i)^(.{4,}?)(featuring|feat|ft)(\.?\s+[A-Za-z0-9].*)$',
-        r'\1 \2\3',
-        text,
-    )
-    if spaced and spaced != text:
-        variants.append(spaced)
-        spaced_stripped = _ALBUM_TRACK_FEATURE_SUFFIX_RE.sub("", spaced).strip(" -_–—:;,.")
-        if spaced_stripped and spaced_stripped != spaced:
-            variants.append(spaced_stripped)
+
+    m = _VARIANTS_FEATURE_PREFIX_RE.search(text)
+    if m and m.start() > 0:
+        stripped = text[:m.start()].strip(" -_–—:;,.")
+        if stripped and stripped != text:
+            variants.append(stripped)
+
+    m_glue = _GLUED_FEATURE_RE.search(text)
+    if m_glue and m_glue.start() >= 4:
+        glued = text[:m_glue.start()].strip(" -_–—:;,.")
+        if glued and glued != text:
+            variants.append(glued)
+        spaced = text[:m_glue.start()] + " " + text[m_glue.start():]
+        if spaced and spaced != text:
+            variants.append(spaced)
+            m_sp = _VARIANTS_FEATURE_PREFIX_RE.search(spaced)
+            if m_sp and m_sp.start() > 0:
+                spaced_stripped = spaced[:m_sp.start()].strip(" -_–—:;,.")
+                if spaced_stripped and spaced_stripped != spaced:
+                    variants.append(spaced_stripped)
+
     out: List[str] = []
     seen: set[str] = set()
     for val in variants:
@@ -264,15 +399,33 @@ def track_feature_variants(value: Any) -> List[str]:
 def track_parenthetical_alias_variants(value: Any) -> List[str]:
     """Return conservative title aliases such as 'Money (That\\'s What I Want)' -> 'Money'."""
     text = _s(value).strip()
-    if not text:
+    if not text or len(text) < 5:
         return []
-    variants: List[str] = []
-    match = _ALBUM_TRACK_TRAILING_ALIAS_RE.search(text)
-    if match and not _ALBUM_TRACK_VERSION_MARKER_RE.search(match.group(1)):
-        base = text[:match.start()].strip(" -_–—:;,.")
-        if len(normalize_track_title_for_matching(base)) >= 3:
-            variants.append(base)
-    return variants
+    if not (text.endswith(")") or text.endswith("]")):
+        return []
+    closer = text[-1]
+    opener = "(" if closer == ")" else "["
+    depth = 0
+    open_idx = -1
+    for idx in range(len(text) - 1, -1, -1):
+        if text[idx] == closer:
+            depth += 1
+        elif text[idx] == opener:
+            depth -= 1
+            if depth == 0:
+                open_idx = idx
+                break
+    if open_idx <= 0:
+        return []
+    inside = text[open_idx + 1:-1].strip()
+    if len(inside) < 2:
+        return []
+    if _ALBUM_TRACK_VERSION_MARKER_RE.search(inside):
+        return []
+    base = text[:open_idx].strip(" -_–—:;,.")
+    if len(normalize_track_title_for_matching(base)) >= 3:
+        return [base]
+    return []
 
 
 def track_path_prefixes(path: Any) -> List[str]:
@@ -298,24 +451,48 @@ def track_path_prefixes(path: Any) -> List[str]:
         if not text:
             return []
         candidates = [text]
-        no_year = re.sub(r"\s*[\(\[]\d{4}[\)\]]\s*$", "", text).strip()
-        if no_year and no_year != text:
-            candidates.append(no_year)
-        no_mbid = re.sub(
-            r"\s*[\{\(\[]\s*[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\s*[\}\)\]]\s*$",
-            "",
-            text,
-            flags=re.I,
-        ).strip()
-        if no_mbid and no_mbid != text:
-            candidates.append(no_mbid)
+
+        # 1. Trailing 4-digit year in parens/brackets
+        s = text.rstrip()
+        if len(s) >= 6 and s[-1] in ")]" and s[-6] in "([" and s[-5:-1].isdigit():
+            no_year = s[:-6].rstrip()
+            if no_year and no_year != text:
+                candidates.append(no_year)
+        else:
+            no_year = ""
+
+        # 2. Trailing MBID in brackets/braces/parens
+        if len(s) >= 38 and s[-1] in ")}]" and s[-38] in "({[":
+            cand_uuid = s[-37:-1]
+            if _is_hex_uuid(cand_uuid):
+                no_mbid = s[:-38].rstrip()
+                if no_mbid and no_mbid != text:
+                    candidates.append(no_mbid)
+            else:
+                no_mbid = ""
+        else:
+            no_mbid = ""
+
+        # 3. Leading track/index number
         numeric_alias_base = no_mbid or no_year or text
-        no_leading_number = re.sub(r"^\s*\d+[\s._-]+", "", numeric_alias_base).strip()
-        if no_leading_number and no_leading_number != numeric_alias_base:
-            candidates.append(no_leading_number)
-        bare_artist = _STAMP_UUID_IN_NAME_RE.sub("", text).strip() or text.strip()
-        if bare_artist and bare_artist != text:
-            candidates.append(bare_artist)
+        sn = numeric_alias_base.lstrip()
+        i = 0
+        while i < len(sn) and sn[i].isdigit():
+            i += 1
+        if i > 0 and i < len(sn) and sn[i] in " ._-\t":
+            while i < len(sn) and sn[i] in " ._-\t":
+                i += 1
+            no_leading_number = sn[i:].strip()
+            if no_leading_number and no_leading_number != numeric_alias_base:
+                candidates.append(no_leading_number)
+
+        # 4. Bare artist without UUID stamp
+        if len(s) >= 38 and s[-1] in ")}]" and s[-38] in "({[":
+            cand_uuid = s[-37:-1]
+            if _is_hex_uuid(cand_uuid):
+                bare_artist = s[:-38].strip()
+                if bare_artist and bare_artist != text:
+                    candidates.append(bare_artist)
         return candidates
 
     if len(parts) >= 2:
@@ -323,7 +500,7 @@ def track_path_prefixes(path: Any) -> List[str]:
         prefixes.extend(_prefix_candidates(parts[1]))
     if len(parts) >= 1:
         stem = Path(parts[-1]).stem
-        file_parts = [p.strip() for p in re.split(r"\s+[-–—]\s*|\s*[-–—]\s+", stem) if p.strip()]
+        file_parts = _split_dashed_segments(stem)
         if file_parts:
             prefixes.extend(_prefix_candidates(file_parts[0]))
     out: List[str] = []
@@ -352,14 +529,14 @@ def track_title_variants_for_matching(title: Any, path: Any = "") -> List[str]:
         if not raw:
             continue
         candidates = [raw]
-        parts = [p.strip() for p in re.split(r"\s+[-–—]\s*|\s*[-–—]\s+", raw) if p.strip()]
+        parts = _split_dashed_segments(raw)
         if len(parts) > 1:
-            for idx in range(1, len(parts)):
+            for idx in range(1, min(len(parts), 8)):
                 candidates.append(" - ".join(parts[idx:]))
             candidates.append(parts[-1])
         stripped = raw
         for _ in range(3):
-            nxt = _ALBUM_TRACK_PREFIX_RE.sub("", stripped).strip()
+            nxt = _strip_leading_track_num(stripped)
             if nxt == stripped:
                 break
             stripped = nxt
@@ -369,7 +546,7 @@ def track_title_variants_for_matching(title: Any, path: Any = "") -> List[str]:
             expanded_candidates.append(cand)
             stripped_cand = cand
             for _ in range(3):
-                nxt = _ALBUM_TRACK_PREFIX_RE.sub("", stripped_cand).strip()
+                nxt = _strip_leading_track_num(stripped_cand)
                 if nxt == stripped_cand:
                     break
                 stripped_cand = nxt
@@ -382,9 +559,7 @@ def track_title_variants_for_matching(title: Any, path: Any = "") -> List[str]:
             alias_candidates.append(cand)
             alias_candidates.extend(track_parenthetical_alias_variants(cand))
         for cand in alias_candidates:
-            bare = _ALBUM_TRACK_UNCLOSED_RE.sub(
-                "", _ALBUM_TRACK_ANNOT_RE.sub("", cand)
-            ).strip()
+            bare = _strip_annotations_and_unclosed(cand)
             for val in (cand, bare):
                 norm = normalize_track_title_for_matching(val)
                 norm_options = [norm] if norm else []
