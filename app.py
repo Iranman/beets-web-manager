@@ -4355,32 +4355,25 @@ def _item_ai_abs_path(item) -> str:
 
 
 def _track_ai_norm(value: str) -> str:
-    import unicodedata
-
-    text = unicodedata.normalize("NFKD", _s(value).casefold())
-    text = "".join(ch for ch in text if not unicodedata.combining(ch))
-    text = text.replace("&", " and ")
-    text = re.sub(r"\b(?:feat|ft|featuring)\.?\s+.*$", "", text, flags=re.I)
-    text = re.sub(r"[^a-z0-9]+", " ", text)
-    return " ".join(text.split())
+    """Canonical track title normalization wrapper for AI suggestions."""
+    return normalize_track_title_for_matching(value)
 
 
 def _track_ai_similarity(left: str, right: str) -> float:
-    from difflib import SequenceMatcher
-
-    a = _track_ai_norm(left)
-    b = _track_ai_norm(right)
-    if not a or not b:
-        return 0.0
-    score = SequenceMatcher(None, a, b).ratio()
-    if set(a.split()) & set(b.split()):
-        score = max(score, 0.70)
-    return score
+    """Canonical string similarity wrapper for AI suggestions."""
+    return _canonical_similarity(left, right)
 
 
 def _score_track_ai_candidate(current: Dict[str, Any], search_title: str,
                               search_artist: str, filename: str,
                               candidate: Dict[str, Any]) -> Dict[str, Any]:
+    """Rank AI track candidates for candidate generation / prompt ordering only.
+
+    This function computes an initial heuristic score for ordering candidates.
+    It is CANDIDATE_GENERATION_ONLY and does NOT authorize identity or actions.
+    Final identity decisions and safety gates are governed exclusively by
+    build_recording_matching_decision.
+    """
     try:
         title_variants = _album_track_title_variants(
             current.get("title") or search_title or filename,
@@ -6026,21 +6019,12 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
     )
     result["folder_artist"] = folder_artist
     try:
-        import unicodedata
-        from difflib import SequenceMatcher
-
-        def _artist_key(value: str) -> str:
-            value = unicodedata.normalize("NFKC", _s(value).casefold())
-            value = value.replace("&", " and ")
-            chars = [c if c.isalnum() else " " for c in value]
-            return " ".join("".join(chars).split())
-
-        folder_key = _artist_key(folder_artist)
-        release_key = _artist_key(result["release_artist"])
+        folder_key = _canonical_normalize_artist(folder_artist)
+        release_key = _canonical_normalize_artist(result["release_artist"])
         if folder_key and release_key:
             folder_tokens = set(folder_key.split())
             release_tokens = set(release_key.split())
-            score = SequenceMatcher(None, folder_key, release_key).ratio()
+            score = _canonical_similarity(folder_key, release_key)
             result["artist_score"] = round(score, 3)
             result["artist_ok"] = bool(folder_tokens & release_tokens) or score >= 0.48
     except Exception:
@@ -17344,13 +17328,6 @@ def _score_mb_release_candidate(
     Returns component scores and a combined total (higher = better match).
     Pass acoustid_release_hits (int) in candidate if available.
     """
-    from difflib import SequenceMatcher
-    import unicodedata
-
-    def _nk(s: str) -> str:
-        s = unicodedata.normalize("NFKC", _s(s).casefold())
-        return " ".join(re.sub(r"[^a-z0-9]+", " ", s).split())
-
     guessed_artist     = folder_evidence.get("guessed_artist", "")
     guessed_album      = folder_evidence.get("guessed_album", "")
     guessed_year       = folder_evidence.get("guessed_year", "")
@@ -17365,16 +17342,12 @@ def _score_mb_release_candidate(
     acoustid_hits = int(candidate.get("acoustid_release_hits", 0) or 0)
 
     if guessed_artist and cand_artist:
-        na, nb = _nk(guessed_artist), _nk(cand_artist)
-        artist_sim = SequenceMatcher(None, na, nb).ratio()
-        if set(na.split()) & set(nb.split()):
-            artist_sim = max(artist_sim, 0.70)
+        artist_sim = _canonical_similarity(guessed_artist, cand_artist)
     else:
         artist_sim = 0.5
 
     if guessed_album and cand_album:
-        na, nb = _nk(guessed_album), _nk(cand_album)
-        album_sim = SequenceMatcher(None, na, nb).ratio()
+        album_sim = _canonical_similarity(guessed_album, cand_album)
     else:
         album_sim = 0.5
 

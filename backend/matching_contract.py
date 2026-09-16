@@ -10,9 +10,19 @@ import re
 import unicodedata
 
 try:
-    from matching import ConfidenceState, evaluate_release_group_candidate
+    from matching import (
+        ConfidenceState,
+        evaluate_release_group_candidate,
+        normalize_track_title_for_matching,
+        similarity as _canonical_similarity,
+    )
 except ImportError:
-    from backend.matching import ConfidenceState, evaluate_release_group_candidate
+    from backend.matching import (
+        ConfidenceState,
+        evaluate_release_group_candidate,
+        normalize_track_title_for_matching,
+        similarity as _canonical_similarity,
+    )
 
 
 SimilarityFn = Callable[[str, str], float]
@@ -97,23 +107,11 @@ def _duration_seconds(value: Any) -> Optional[float]:
 
 
 def _norm(value: str) -> str:
-    text = unicodedata.normalize("NFKD", _s(value).casefold())
-    text = "".join(ch for ch in text if not unicodedata.combining(ch))
-    text = text.replace("&", " and ")
-    text = re.sub(r"\b(?:feat|ft|featuring)\.?\s+.*$", "", text, flags=re.I)
-    text = re.sub(r"[^a-z0-9]+", " ", text)
-    return " ".join(text.split())
+    return normalize_track_title_for_matching(value)
 
 
 def _similarity(left: str, right: str) -> float:
-    a = _norm(left)
-    b = _norm(right)
-    if not a or not b:
-        return 0.0
-    score = SequenceMatcher(None, a, b).ratio()
-    if set(a.split()) & set(b.split()):
-        score = max(score, 0.70)
-    return score
+    return _canonical_similarity(left, right)
 
 
 def _status(score: float, strong: float = 0.82, fuzzy: float = 0.68) -> str:
