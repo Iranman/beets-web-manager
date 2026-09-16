@@ -182,6 +182,49 @@ class ReleaseMatch:
         }
 
 
+@dataclass(frozen=True)
+class MatchPolicy:
+    """Configurable requirements for `ReleaseGroupMatchResult.can_auto_accept()`.
+
+    ARCH-002 Part 14: every production caller that decides whether a match is
+    safe to act on automatically must go through this one policy object
+    instead of writing its own `if confidence >= 0.70 and ...` check. A
+    caller with stricter needs (e.g. "never auto-accept a fresh reviewed
+    import without full track coverage") passes a narrower policy; it never
+    invents new evaluation logic of its own.
+
+    A hard conflict always blocks acceptance regardless of policy -- that is
+    enforced in `can_auto_accept()` itself, not configurable here, because
+    "hard conflicts cannot be averaged away" is a non-negotiable rule, not a
+    caller preference.
+    """
+
+    # States considered acceptable for unattended automation, in addition to
+    # CONFIRMED (always acceptable when reached -- it already requires a
+    # validated Release Group and complete track alignment or a hard
+    # per-track identity positive).
+    allow_strong_match: bool = True
+    # Minimum track_alignment coverage (matched / total_target_tracks)
+    # required when the state is STRONG_MATCH rather than CONFIRMED. Ignored
+    # for CONFIRMED, which already implies complete alignment.
+    min_coverage_for_strong_match: float = 0.0
+    # Trust models this policy accepts automation from at all. A caller that
+    # must never auto-accept a fresh, unreviewed import (only ever a
+    # validated existing-library match) passes {"existing_library"} here.
+    allowed_trust_models: Optional[frozenset] = None
+
+    def trust_model_allowed(self, trust_model: str) -> bool:
+        return self.allowed_trust_models is None or trust_model in self.allowed_trust_models
+
+
+#: Default policy: matches the historical inline decision in
+#: evaluate_release_group_candidate() -- CONFIRMED or STRONG_MATCH, any
+#: trust model, no extra coverage floor beyond what produced STRONG_MATCH in
+#: the first place. Kept as the module default so existing callers that
+#: already consume `action_allowed` see no behavior change.
+DEFAULT_MATCH_POLICY = MatchPolicy()
+
+
 @dataclass
 class ReleaseGroupMatchResult:
     suggested_identity: Dict[str, Any]
@@ -197,6 +240,43 @@ class ReleaseGroupMatchResult:
     review_reasons: List[str] = field(default_factory=list)
     action_allowed: bool = False
     trust_model: str = ""
+
+    def can_auto_accept(self, policy: MatchPolicy = DEFAULT_MATCH_POLICY) -> bool:
+        """The one method every production caller should use to decide
+        whether this match may authorize an unattended mutation.
+
+        `action_allowed` (set once, by `evaluate_release_group_candidate()`,
+        from the real evidence -- hard identity, complete alignment, or an
+        explicitly reviewed+bound fresh import over threshold) is the single
+        ground-truth authorization. This method can only NARROW that
+        decision for a caller with stricter needs; it can never grant
+        automation `action_allowed` itself withheld. That asymmetry is
+        deliberate: a caller passing a laxer policy must not be able to
+        widen what the canonical evaluator already decided was not yet safe
+        (e.g. a STRONG_MATCH reached only through a validated embedded
+        Release Group ID with incomplete track alignment -- real identity
+        evidence, but not enough by itself to mutate unattended). Hard
+        conflicts always block, unconditionally -- not policy-configurable,
+        per the standing rule that they cannot be averaged away.
+        """
+        if self.conflicts or self.state == ConfidenceState.CONFLICT:
+            return False
+        if not self.action_allowed:
+            return False
+        if not policy.trust_model_allowed(self.trust_model):
+            return False
+        if self.state == ConfidenceState.STRONG_MATCH:
+            if not policy.allow_strong_match:
+                return False
+            if policy.min_coverage_for_strong_match > 0.0:
+                coverage = (
+                    self.track_alignment.matched_count / self.track_alignment.total_target_tracks
+                    if self.track_alignment.total_target_tracks
+                    else 0.0
+                )
+                if coverage < policy.min_coverage_for_strong_match:
+                    return False
+        return True
 
     def to_dict(self) -> Dict[str, Any]:
         return {

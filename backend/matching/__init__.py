@@ -8,6 +8,8 @@ from .evidence import evaluate_release_group_candidate
 from .models import (
     AcoustIDStatus,
     ConfidenceState,
+    DEFAULT_MATCH_POLICY,
+    MatchPolicy,
     ReleaseGroupMatchResult,
     ReleaseMatch,
     TrackAlignmentResult,
@@ -20,6 +22,8 @@ from .track_alignment import align_tracks_global
 __all__ = [
     "AcoustIDStatus",
     "ConfidenceState",
+    "DEFAULT_MATCH_POLICY",
+    "MatchPolicy",
     "ReleaseGroupMatchResult",
     "ReleaseMatch",
     "TrackAlignmentResult",

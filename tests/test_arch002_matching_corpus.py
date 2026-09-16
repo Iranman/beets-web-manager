@@ -4,6 +4,8 @@ import unittest
 from backend.matching import (
     AcoustIDStatus,
     ConfidenceState,
+    DEFAULT_MATCH_POLICY,
+    MatchPolicy,
     align_tracks_global,
     evaluate_release_group_candidate,
     normalize_title,
@@ -207,6 +209,109 @@ class TestArch002KnownFailures(unittest.TestCase):
         self.assertIn("extra_local_tracks", result.review_reasons)
         unmatched_titles = [row.local_title for row in result.track_alignment.unmatched_local]
         self.assertEqual(unmatched_titles, ["Unrelated Song"])
+
+    def test_wrong_but_textually_similar_release_group_loses_to_correct_one(self):
+        """ARCH-002 Part 5: local files clearly belong to album A (311 -
+        Voyager). A search/AI step returns two candidates: the correct
+        album A, and a textually very similar but wrong album B (same
+        artist, a near-identical title) whose actual tracklist does not
+        correspond to the local audio at all. The canonical evaluator must
+        rank/resolve based on the complete evidence model -- hard track
+        alignment coverage -- not on album-title text similarity alone, and
+        must not need a special-cased score bonus to get there.
+        """
+        local_tracks = [
+            _local("Crossfire", 1),
+            _local("Space and Time", 2),
+            _local("Dodging Raindrops", 3),
+        ]
+        # Embedded RGID simulates a reimport/already-tagged case -- without
+        # any embedded or fingerprint identity evidence, text-only matching
+        # correctly cannot reach CONFIRMED for *either* candidate (that is
+        # itself part of the point: no amount of text similarity alone ever
+        # auto-authorizes anything). See test_absent_embedded_ids_do_not_...
+        # below for the fresh-untagged-import path.
+        local_album = {"artist": "311", "album": "Voyager", "embedded_release_group_id": RG_311_VOYAGER}
+
+        candidate_correct = _candidate()  # RG_311_VOYAGER, "Voyager", real Voyager tracklist
+        candidate_wrong = _candidate(
+            rgid=RG_OTHER,
+            title="Voyager - Live From Boston",  # near-identical title text
+            release_id="44444444-4444-4444-4444-444444444444",
+            tracks=[
+                _mb("Intro Tape", 1, "rec-live-intro"),
+                _mb("Beautiful Disaster (Live)", 2, "rec-live-bd"),
+                _mb("Down (Live)", 3, "rec-live-down"),
+            ],
+        )
+
+        # Confirm this is a genuine trap, not a strawman: the wrong
+        # candidate's title really is textually close to the local album.
+        title_similarity = normalize_title(candidate_wrong["release_group_title"])
+        self.assertIn("voyager", title_similarity)
+
+        result_correct = evaluate_release_group_candidate(
+            local_album, candidate_correct, local_tracks=local_tracks,
+        )
+        result_wrong = evaluate_release_group_candidate(
+            local_album, candidate_wrong, local_tracks=local_tracks,
+        )
+
+        self.assertEqual(result_correct.state, ConfidenceState.CONFIRMED)
+        self.assertTrue(result_correct.can_auto_accept())
+        self.assertEqual(result_correct.track_alignment.matched_count, 3)
+
+        # The wrong candidate must not reach an auto-acceptable state despite
+        # its deceptively similar title -- its tracklist simply does not
+        # align with the local audio.
+        self.assertIn(
+            result_wrong.state,
+            (ConfidenceState.INSUFFICIENT_EVIDENCE, ConfidenceState.REVIEW_RECOMMENDED, ConfidenceState.CONFLICT),
+        )
+        self.assertFalse(result_wrong.can_auto_accept())
+        self.assertEqual(result_wrong.track_alignment.matched_count, 0)
+        self.assertLess(result_wrong.score, result_correct.score)
+
+    def test_wrong_audio_identity_is_not_silently_retitled(self):
+        """ARCH-002 Part 34: local filename/title says the expected track
+        ("Crossfire"), but fingerprint/recording evidence unambiguously
+        identifies a *different* recording ("Space and Time"). The engine
+        must not let Track B's audio be assigned under Track A's identity:
+        no match for that local file may be produced under the wrong
+        target, the album-level result must be a hard CONFLICT (never
+        auto-acceptable), and the conflict must be explained rather than
+        silently discarded.
+        """
+        local_tracks = [
+            _local(
+                "Crossfire",
+                1,
+                acoustid_hits=[{"recording_id": "rec-space-time", "score": 98, "acoustid": "aid-wrong-audio"}],
+            )
+        ]
+        result = evaluate_release_group_candidate(
+            {"artist": "311", "album": "Voyager", "embedded_release_group_id": RG_311_VOYAGER},
+            _candidate(tracks=[_mb("Crossfire", 1, "rec-crossfire"), _mb("Space and Time", 2, "rec-space-time")]),
+            local_tracks=local_tracks,
+        )
+
+        # No assignment may pair this local file with the "Crossfire" MB
+        # track under its own filename/title identity -- the fingerprint
+        # conflict must win, not be silently ignored in favor of the label.
+        crossfire_assignments = [
+            row for row in result.track_alignment.assignments
+            if row.target_recording_id == "rec-crossfire" and row.status == "matched"
+        ]
+        self.assertEqual(crossfire_assignments, [])
+        self.assertEqual(result.state, ConfidenceState.CONFLICT)
+        self.assertFalse(result.action_allowed)
+        self.assertFalse(result.can_auto_accept())
+        self.assertFalse(result.can_auto_accept(MatchPolicy(allow_strong_match=True, allowed_trust_models=None)))
+        self.assertIn("acoustid_conflict", result.conflicts)
+        # The conflict must be explained, not just silently withheld.
+        self.assertTrue(
+            any("acoustid_conflict" in row.conflicts for row in result.track_alignment.assignments)
+        )
 
     def test_same_title_tracks_use_position_duration_and_one_to_one_assignment(self):
         local_tracks = [
