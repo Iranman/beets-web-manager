@@ -1823,7 +1823,7 @@ function optionalAiWarning(message: string): string {
     ? 'AI ranking was skipped because no provider is configured.'
     : '';
 }
-function matchingSafetyData(response?: AiSuggestResponse, selectedMatch?: SelectedMatch): { rows: MatchingSafetyRow[]; warnings: string[] } {
+export function matchingSafetyData(response?: AiSuggestResponse, selectedMatch?: SelectedMatch): { rows: MatchingSafetyRow[]; warnings: string[] } {
   const suggestion = response?.suggestion ?? response?.suggestions;
   const contract = isRecordValue(selectedMatch?.matching_contract)
     ? selectedMatch?.matching_contract
@@ -1835,6 +1835,27 @@ function matchingSafetyData(response?: AiSuggestResponse, selectedMatch?: Select
   const rows: MatchingSafetyRow[] = [];
   const source = selectedMatch?.source || safetyText(suggestion?.matching_method || response?.matching_method || contract?.source);
   if (source) rows.push({ label: 'Matching source', value: source.replace(/_/g, ' '), tone: 'neutral' });
+  const evidence = isRecordValue(contract?.evidence) ? contract?.evidence as Record<string, unknown> : undefined;
+  const canonical = isRecordValue(evidence?.canonical_match) ? evidence?.canonical_match as Record<string, unknown> : undefined;
+  const canonicalAlignment = isRecordValue(canonical?.track_alignment) ? canonical?.track_alignment as Record<string, unknown> : undefined;
+  const canonicalIdentity = isRecordValue(canonical?.suggested_identity) ? canonical?.suggested_identity as Record<string, unknown> : undefined;
+  if (canonical?.state) {
+    const value = safetyText(canonical.state).replace(/_/g, ' ');
+    rows.push({ label: 'Evidence state', value, tone: /conflict|insufficient/i.test(value) ? 'warn' : 'ok' });
+  }
+  if (canonical?.release_group_status) {
+    const value = safetyText(canonical.release_group_status).replace(/_/g, ' ');
+    rows.push({ label: 'Release Group evidence', value, tone: /conflict|missing/i.test(value) ? 'warn' : 'ok' });
+  }
+  const canonicalRgid = safetyText(canonicalIdentity?.release_group_id);
+  if (canonicalRgid) rows.push({ label: 'Canonical RGID', value: canonicalRgid, tone: 'neutral' });
+  const matchedCount = safetyText(canonicalAlignment?.matched_count);
+  const targetCount = safetyText(canonicalAlignment?.total_target_tracks);
+  if (matchedCount || targetCount) rows.push({ label: 'Canonical alignment', value: `${matchedCount || '0'}/${targetCount || '0'} tracks`, tone: matchedCount === targetCount && matchedCount !== '0' ? 'ok' : 'warn' });
+  const missingCount = safetyText(canonicalAlignment?.missing_count);
+  if (missingCount && missingCount !== '0') rows.push({ label: 'Missing canonical tracks', value: missingCount, tone: 'warn' });
+  const extraCount = safetyText(canonicalAlignment?.unmatched_local_count);
+  if (extraCount && extraCount !== '0') rows.push({ label: 'Unmatched local files', value: extraCount, tone: 'warn' });
   const aiAvailable = selectedMatch?.ai_available ?? suggestion?.ai_available ?? response?.ai_available;
   const aiReason = selectedMatch?.ai_unavailable_reason || suggestion?.ai_unavailable_reason || response?.ai_unavailable_reason || '';
   if (aiAvailable !== undefined || aiReason) {
@@ -1858,6 +1879,9 @@ function matchingSafetyData(response?: AiSuggestResponse, selectedMatch?: Select
     suggestion?.warnings,
     response?.warnings,
     contract?.warnings,
+    contract?.conflicts,
+    canonical?.conflicts,
+    canonical?.review_reasons,
     selectedMatch?.fingerprint_conflicts,
     suggestion?.fingerprint_conflicts,
     response?.fingerprint_conflicts,
@@ -1874,7 +1898,7 @@ function matchingSafetyData(response?: AiSuggestResponse, selectedMatch?: Select
   return { rows, warnings };
 }
 
-function MatchingSafetyPanel({ response, selectedMatch }: { response?: AiSuggestResponse; selectedMatch?: SelectedMatch }) {
+export function MatchingSafetyPanel({ response, selectedMatch }: { response?: AiSuggestResponse; selectedMatch?: SelectedMatch }) {
   const { rows, warnings } = matchingSafetyData(response, selectedMatch);
   if (!rows.length && !warnings.length) return null;
   return (

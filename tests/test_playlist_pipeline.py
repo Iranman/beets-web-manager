@@ -303,17 +303,94 @@ class PlaylistPipelineTests(unittest.TestCase):
                     requested_path=str(library_file),
                 )
 
-    def test_low_confidence_or_missing_release_group_requires_review(self):
-        namespace = {
-            "_MB_UUID_RE": re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"),
-            "_s": lambda value: str(value or ""),
-        }
-        allowed = load_function("_playlist_auto_placement_allowed", namespace)
+    def test_legacy_text_only_confidence_threshold_no_longer_exists_in_production(self):
+        """ARCH-002 regression proof (Part 3): the historical
+        `_playlist_auto_placement_allowed(confidence, mb_releasegroupid)` --
+        `score >= 0.70` plus a bare release-group UUID-shape check, with NO
+        identity-evidence requirement -- authorized a real unattended
+        `beet write` + `beet move` against the live library (see
+        `/playlists/place-imported` in backend/beets_control_agent.py) for
+        ANY sufficiently text-similar candidate. Reproduced here inline
+        (the function itself is deleted from production, so it can no
+        longer be imported/extracted) to document exactly what the removed
+        vulnerable logic was and prove it really did accept a case with no
+        real identity evidence at all -- text confidence alone."""
+        mb_uuid_re = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+        def legacy_auto_placement_allowed(confidence, mb_releasegroupid):
+            try:
+                score = float(confidence)
+            except Exception:
+                score = 0.0
+            return score >= 0.70 and bool(mb_uuid_re.match(str(mb_releasegroupid or "").strip().lower()))
+
         rgid = "11111111-1111-1111-1111-111111111111"
-        self.assertFalse(allowed(0.699, rgid))
-        self.assertFalse(allowed(0.95, ""))
-        self.assertTrue(allowed(0.70, rgid))
+        # The historical bug, proven: a plausible-looking text confidence
+        # crossing 0.70 was sufficient on its own -- no AcoustID, no
+        # embedded recording ID, no canonical evidence of any kind.
+        self.assertTrue(legacy_auto_placement_allowed(0.70, rgid))
+        self.assertTrue(legacy_auto_placement_allowed(0.95, rgid))
+        self.assertFalse(legacy_auto_placement_allowed(0.699, rgid))
+        self.assertFalse(legacy_auto_placement_allowed(0.95, ""))
+        # And the function itself must genuinely be gone from production,
+        # not just unused -- this is a regression test against
+        # reintroduction, not only a historical record.
+        self.assertNotIn("def _playlist_auto_placement_allowed(", APP_SOURCE)
         self.assertIn("review_required", APP_SOURCE)
+
+    def test_canonical_placement_evidence_requires_real_identity_not_text_score(self):
+        """ARCH-002 fix proof: `_playlist_canonical_placement_evidence()` --
+        the function that replaced the legacy threshold above at both
+        production call sites -- must reject the exact case the legacy
+        function would have accepted (strong text score, zero identity
+        evidence), and must accept only when real evidence (here, AcoustID
+        confirmation of the specific target recording) is present."""
+        from backend.matching import evaluate_release_group_candidate
+
+        namespace = {
+            "Dict": Dict,
+            "Any": Any,
+            "Optional": Optional,
+            "List": List,
+            "_s": lambda value: str(value or ""),
+            "evaluate_release_group_candidate": evaluate_release_group_candidate,
+        }
+        canonical_evidence = load_function("_playlist_canonical_placement_evidence", namespace)
+
+        rgid = "11111111-1111-1111-1111-111111111111"
+        local_probe = {
+            "title": "Crossfire", "path": "/x/Crossfire.flac", "length": 180.0,
+            "mb_trackid": "", "track": 1, "disc": 1,
+        }
+        target_track = {
+            "title": "Crossfire", "mb_trackid": "rec-crossfire", "disc": 1, "track": 1,
+            "duration_ms": 180000,
+        }
+
+        # The exact legacy-vulnerable shape: strong text/title match (this
+        # probe's title is identical to the target's), but no fingerprint
+        # evidence was ever gathered for this file. Must NOT auto-accept.
+        no_evidence = canonical_evidence(local_probe, target_track, rgid, acoustid_hits=None)
+        self.assertFalse(no_evidence.can_auto_accept())
+
+        # Real evidence: AcoustID confirms this exact recording. Must
+        # auto-accept -- the legitimate unattended workflow still works.
+        confirmed = canonical_evidence(
+            local_probe, target_track, rgid,
+            acoustid_hits=[{"recording_id": "rec-crossfire", "score": 96, "acoustid": "a1"}],
+        )
+        self.assertTrue(confirmed.can_auto_accept())
+        self.assertEqual(confirmed.conflicts, [])
+
+        # AcoustID confirms a DIFFERENT recording than the one text
+        # matching selected -- a hard conflict, never auto-acceptable no
+        # matter how strong the surrounding text score looked.
+        conflicting = canonical_evidence(
+            local_probe, target_track, rgid,
+            acoustid_hits=[{"recording_id": "rec-a-totally-different-song", "score": 97, "acoustid": "a2"}],
+        )
+        self.assertFalse(conflicting.can_auto_accept())
+        self.assertIn("acoustid_conflict", conflicting.conflicts)
 
     def test_release_group_drives_album_reuse_and_beets_path(self):
         # Wave 13: album placement mutations moved into the engine

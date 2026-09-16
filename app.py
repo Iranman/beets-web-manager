@@ -10,6 +10,25 @@ from backend.security import (OutboundPolicyError, bounded_rate_key_store_sweep,
 install_secure_urllib()
 from backend.ai_batch_state_store import AiBatchStateConflictError, AiBatchStateStore
 from backend.web_manager_config_store import WebManagerConfigStore, WebManagerConfigStoreError
+from backend.matching import (
+    AcoustIDStatus,
+    ConfidenceState,
+    album_track_score as _canonical_album_track_score,
+    align_tracks_global,
+    best_album_track_match as _canonical_best_album_track_match,
+    evaluate_release_group_candidate,
+    normalize_artist as _canonical_normalize_artist,
+    normalize_title as _canonical_normalize_title,
+    normalize_track_title_for_matching,
+    similarity as _canonical_similarity,
+    strip_track_filename_id_suffix as _canonical_strip_track_filename_id_suffix,
+    title_variants as _canonical_title_variants,
+    track_feature_variants as _canonical_track_feature_variants,
+    track_filename_has_source_id_suffix as _canonical_track_filename_has_source_id_suffix,
+    track_parenthetical_alias_variants as _canonical_track_parenthetical_alias_variants,
+    track_path_prefixes as _canonical_track_path_prefixes,
+    track_title_variants_for_matching as _canonical_track_title_variants_for_matching,
+)
 from collections import Counter, OrderedDict, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -366,6 +385,7 @@ from backend.matching_contract import (
     build_recording_matching_decision,
     compute_decision_version,
 )
+from backend.matching import AcoustIDStatus, evaluate_release_group_candidate
 from backend.import_guard import (
     existing_track_can_block_downloaded_replacement as _guard_existing_track_can_block_downloaded_replacement,
     filter_wanted_tracks_against_missing as _guard_filter_wanted_tracks_against_missing,
@@ -4335,32 +4355,25 @@ def _item_ai_abs_path(item) -> str:
 
 
 def _track_ai_norm(value: str) -> str:
-    import unicodedata
-
-    text = unicodedata.normalize("NFKD", _s(value).casefold())
-    text = "".join(ch for ch in text if not unicodedata.combining(ch))
-    text = text.replace("&", " and ")
-    text = re.sub(r"\b(?:feat|ft|featuring)\.?\s+.*$", "", text, flags=re.I)
-    text = re.sub(r"[^a-z0-9]+", " ", text)
-    return " ".join(text.split())
+    """Canonical track title normalization wrapper for AI suggestions."""
+    return normalize_track_title_for_matching(value)
 
 
 def _track_ai_similarity(left: str, right: str) -> float:
-    from difflib import SequenceMatcher
-
-    a = _track_ai_norm(left)
-    b = _track_ai_norm(right)
-    if not a or not b:
-        return 0.0
-    score = SequenceMatcher(None, a, b).ratio()
-    if set(a.split()) & set(b.split()):
-        score = max(score, 0.70)
-    return score
+    """Canonical string similarity wrapper for AI suggestions."""
+    return _canonical_similarity(left, right)
 
 
 def _score_track_ai_candidate(current: Dict[str, Any], search_title: str,
                               search_artist: str, filename: str,
                               candidate: Dict[str, Any]) -> Dict[str, Any]:
+    """Rank AI track candidates for candidate generation / prompt ordering only.
+
+    This function computes an initial heuristic score for ordering candidates.
+    It is CANDIDATE_GENERATION_ONLY and does NOT authorize identity or actions.
+    Final identity decisions and safety gates are governed exclusively by
+    build_recording_matching_decision.
+    """
     try:
         title_variants = _album_track_title_variants(
             current.get("title") or search_title or filename,
@@ -6007,21 +6020,12 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
     )
     result["folder_artist"] = folder_artist
     try:
-        import unicodedata
-        from difflib import SequenceMatcher
-
-        def _artist_key(value: str) -> str:
-            value = unicodedata.normalize("NFKC", _s(value).casefold())
-            value = value.replace("&", " and ")
-            chars = [c if c.isalnum() else " " for c in value]
-            return " ".join("".join(chars).split())
-
-        folder_key = _artist_key(folder_artist)
-        release_key = _artist_key(result["release_artist"])
+        folder_key = _canonical_normalize_artist(folder_artist)
+        release_key = _canonical_normalize_artist(result["release_artist"])
         if folder_key and release_key:
             folder_tokens = set(folder_key.split())
             release_tokens = set(release_key.split())
-            score = SequenceMatcher(None, folder_key, release_key).ratio()
+            score = _canonical_similarity(folder_key, release_key)
             result["artist_score"] = round(score, 3)
             result["artist_ok"] = bool(folder_tokens & release_tokens) or score >= 0.48
     except Exception:
@@ -17262,13 +17266,6 @@ def _score_mb_release_candidate(
     Returns component scores and a combined total (higher = better match).
     Pass acoustid_release_hits (int) in candidate if available.
     """
-    from difflib import SequenceMatcher
-    import unicodedata
-
-    def _nk(s: str) -> str:
-        s = unicodedata.normalize("NFKC", _s(s).casefold())
-        return " ".join(re.sub(r"[^a-z0-9]+", " ", s).split())
-
     guessed_artist     = folder_evidence.get("guessed_artist", "")
     guessed_album      = folder_evidence.get("guessed_album", "")
     guessed_year       = folder_evidence.get("guessed_year", "")
@@ -17283,16 +17280,12 @@ def _score_mb_release_candidate(
     acoustid_hits = int(candidate.get("acoustid_release_hits", 0) or 0)
 
     if guessed_artist and cand_artist:
-        na, nb = _nk(guessed_artist), _nk(cand_artist)
-        artist_sim = SequenceMatcher(None, na, nb).ratio()
-        if set(na.split()) & set(nb.split()):
-            artist_sim = max(artist_sim, 0.70)
+        artist_sim = _canonical_similarity(guessed_artist, cand_artist)
     else:
         artist_sim = 0.5
 
     if guessed_album and cand_album:
-        na, nb = _nk(guessed_album), _nk(cand_album)
-        album_sim = SequenceMatcher(None, na, nb).ratio()
+        album_sim = _canonical_similarity(guessed_album, cand_album)
     else:
         album_sim = 0.5
 
@@ -18491,10 +18484,10 @@ def _candidate_track_build_comparison(
             fp_status = _s(fp.get("status") or "unknown")
             fingerprint_status_counts[fp_status] = fingerprint_status_counts.get(fp_status, 0) + 1
             cand["fingerprint_status"] = fp_status
-            if fp.get("status") == "mismatch":
+            if fp.get("status") == AcoustIDStatus.CONFLICT:
                 cand["acoustid_mismatch"] = True
                 continue
-            if fp.get("status") != "match":
+            if fp.get("status") != AcoustIDStatus.CONFIRMED:
                 continue
             fp_candidate = fp.get("candidate") if isinstance(fp.get("candidate"), dict) else {}
             fp_mbid = _s(fp_candidate.get("mb_trackid", "")).strip().lower()
@@ -18558,11 +18551,11 @@ def _candidate_track_build_comparison(
     release_ratio = matched_count / max(1, mb_track_count)
     preflight_error = ""
     if not matched_count:
-        if fingerprint_status_counts.get("mismatch"):
+        if fingerprint_status_counts.get(AcoustIDStatus.CONFLICT.value):
             preflight_error = "Fuzzy title matching failed; AcoustID matched a recording outside this Release Group."
-        elif fingerprint_status_counts.get("none"):
+        elif fingerprint_status_counts.get(AcoustIDStatus.NO_RESULT.value):
             preflight_error = "Fuzzy title matching failed; AcoustID lookup returned no recording."
-        elif fingerprint_status_counts.get("missing"):
+        elif fingerprint_status_counts.get(AcoustIDStatus.UNAVAILABLE.value):
             preflight_error = "Fingerprint unavailable: source file missing."
         elif local_track_count:
             preflight_error = "No track in selected Release Group matches cleaned local title."
@@ -21115,7 +21108,7 @@ def import_folder_with_id():
                 score = float(best.get("score") or 0.0)
                 title_score = float(best.get("title_score") or 0.0)
                 fp = _album_track_fingerprint_check(item, mb_tracks)
-                if fp.get("status") == "mismatch":
+                if fp.get("status") == AcoustIDStatus.CONFLICT:
                     unmatched += 1
                 elif (
                     (best.get("exact_mbid") and title_score >= _MB_TRACK_REPAIR_MATCH_THRESHOLD)
@@ -30605,86 +30598,45 @@ _TRACK_FILENAME_SHORT_SOURCE_ID_SUFFIX_RE = re.compile(
 
 
 def _strip_track_filename_id_suffix(value: Any) -> str:
-    text = _s(value).strip()
-    for _ in range(4):
-        cleaned = _TRACK_FILENAME_SOURCE_ID_SUFFIX_RE.sub("", text).strip(" -_.")
-        if cleaned == text:
-            short_cleaned = _TRACK_FILENAME_SHORT_SOURCE_ID_SUFFIX_RE.sub("", text).strip(" -_.")
-            dirty_prefix_hint = bool(
-                re.search(r"[_\(\)\[\]]", short_cleaned)
-                or re.match(r"^\s*\d{1,3}[\s._-]+", short_cleaned)
-            )
-            if short_cleaned != text and dirty_prefix_hint:
-                cleaned = short_cleaned
-        if cleaned == text or not cleaned:
-            break
-        text = cleaned
-    return text
+    try:
+        return _canonical_strip_track_filename_id_suffix(value)
+    except NameError:
+        from backend.matching import strip_track_filename_id_suffix as _fallback_strip
+        return _fallback_strip(value)
 
 
 def _track_filename_has_source_id_suffix(value: Any) -> bool:
-    text = _s(value).strip()
-    return bool(text and _strip_track_filename_id_suffix(text) != text)
+    try:
+        return _canonical_track_filename_has_source_id_suffix(value)
+    except NameError:
+        from backend.matching import track_filename_has_source_id_suffix as _fallback_has_suffix
+        return _fallback_has_suffix(value)
+
 
 def _album_track_norm(value: str) -> str:
-    import unicodedata
-
-    text = _strip_track_filename_id_suffix(value).casefold()
-    text = unicodedata.normalize("NFKD", text)
-    text = "".join(ch for ch in text if not unicodedata.combining(ch))
-    text = text.replace("&", " and ")
-    text = _ALBUM_TRACK_UNCLOSED_RE.sub("", _ALBUM_TRACK_ANNOT_RE.sub("", text))
-    text = re.sub(r"@\w+", " ", text)
-    text = re.sub(r"\b(?:feat|ft)\.?\s+.*$", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"[^a-z0-9]+", " ", text)
-    text = re.sub(r"^(?:bonus\s+track\s*)+", "", text, flags=re.IGNORECASE)
-    return " ".join(text.split())
+    try:
+        return normalize_track_title_for_matching(value)
+    except NameError:
+        from backend.matching import normalize_track_title_for_matching as _fallback_norm
+        return _fallback_norm(value)
 
 
 def _album_track_feature_variants(value: str) -> List[str]:
     """Return title candidates with normal and glued feature suffixes removed."""
-    text = _s(value).strip()
-    if not text:
-        return []
-    variants = [text]
-    stripped = _ALBUM_TRACK_FEATURE_SUFFIX_RE.sub("", text).strip(" -_–—:;,.")
-    if stripped and stripped != text:
-        variants.append(stripped)
-    glued = _ALBUM_TRACK_GLUED_FEATURE_SUFFIX_RE.sub(r"\1", text).strip(" -_–—:;,.")
-    if glued and glued != text:
-        variants.append(glued)
-    spaced = re.sub(
-        r'(?i)^(.{4,}?)(featuring|feat|ft)(\.?\s+[A-Za-z0-9].*)$',
-        r'\1 \2\3',
-        text,
-    )
-    if spaced and spaced != text:
-        variants.append(spaced)
-        spaced_stripped = _ALBUM_TRACK_FEATURE_SUFFIX_RE.sub("", spaced).strip(" -_–—:;,.")
-        if spaced_stripped and spaced_stripped != spaced:
-            variants.append(spaced_stripped)
-    out: List[str] = []
-    seen: set = set()
-    for val in variants:
-        key = val.casefold()
-        if val and key not in seen:
-            seen.add(key)
-            out.append(val)
-    return out
+    try:
+        return _canonical_track_feature_variants(value)
+    except NameError:
+        from backend.matching import track_feature_variants as _fallback_features
+        return _fallback_features(value)
 
 
 def _album_track_parenthetical_alias_variants(value: str) -> List[str]:
     """Return conservative title aliases such as "Money (That's What I Want)" -> "Money"."""
-    text = _s(value).strip()
-    if not text:
-        return []
-    variants: List[str] = []
-    match = _ALBUM_TRACK_TRAILING_ALIAS_RE.search(text)
-    if match and not _ALBUM_TRACK_VERSION_MARKER_RE.search(match.group(1)):
-        base = text[:match.start()].strip(" -_–—:;,.")
-        if len(_album_track_norm(base)) >= 3:
-            variants.append(base)
-    return variants
+    try:
+        return _canonical_track_parenthetical_alias_variants(value)
+    except NameError:
+        from backend.matching import track_parenthetical_alias_variants as _fallback_alias
+        return _fallback_alias(value)
 
 
 def _album_track_path_prefixes(path: str) -> List[str]:
@@ -30751,6 +30703,7 @@ def _album_track_path_prefixes(path: str) -> List[str]:
             seen.add(norm)
             out.append(norm)
     return out
+
 
 def _album_track_title_variants(title: str, path: str = "") -> List[str]:
     raw_values = [_s(title).strip()]
@@ -30971,77 +30924,52 @@ def _fetch_mb_release_tracklist(mb_albumid: str, log: Optional[List[str]] = None
 
 
 def _album_track_score(item: Dict[str, Any], mb_trk: Dict[str, Any]) -> float:
-    from difflib import SequenceMatcher
-
-    mb_norm = mb_trk.get("title_norm") or _album_track_norm(mb_trk.get("title", ""))
-    variants = _album_track_title_variants(item.get("title", ""), item.get("path", ""))
-    title_score = max(
-        (SequenceMatcher(None, v, mb_norm).ratio() for v in variants if v and mb_norm),
-        default=0.0,
-    )
-    pos_bonus = 0.0
-    item_disc, item_track = _album_item_position_hints(item)
-    if item_track == int(mb_trk.get("track") or 0):
-        pos_bonus += 0.04
-        if item_disc == int(mb_trk.get("disc") or 1):
-            pos_bonus += 0.02
-    dur_bonus = 0.0
-    item_ms = int(float(item.get("length") or 0) * 1000)
-    mb_ms = int(mb_trk.get("duration_ms") or 0)
-    if item_ms and mb_ms:
-        diff_s = abs(item_ms - mb_ms) / 1000.0
-        dur_bonus = 0.04 if diff_s <= 4 else (0.02 if diff_s <= 10 else 0.0)
-    return min(1.0, title_score + pos_bonus + dur_bonus)
+    try:
+        return _canonical_album_track_score(item, mb_trk)
+    except NameError:
+        from backend.matching import album_track_score as _fallback_score
+        return _fallback_score(item, mb_trk)
 
 
 def _best_album_track_match(item: Dict[str, Any], mb_tracks: List[Dict[str, Any]]) -> Dict[str, Any]:
-    item_mbid = _s(item.get("mb_trackid", "")).strip().lower()
-    if item_mbid:
-        for idx, trk in enumerate(mb_tracks):
-            if item_mbid and item_mbid == trk.get("mb_trackid"):
-                title_score = _album_track_score(item, trk)
-                return {"idx": idx, "track": trk, "score": max(0.98, title_score),
-                        "title_score": title_score, "exact_mbid": True}
+    try:
+        return _canonical_best_album_track_match(item, mb_tracks)
+    except NameError:
+        from backend.matching import best_album_track_match as _fallback_best
+        return _fallback_best(item, mb_tracks)
 
-    best_idx = -1
-    best_score = -1.0
-    best_rank = (-1.0, -1, -1)
-    item_disc, item_track = _album_item_position_hints(item)
-    for idx, trk in enumerate(mb_tracks):
-        score = _album_track_score(item, trk)
-        exact_pos = int(
-            bool(item_track and item_track == int(trk.get("track") or 0))
-            and bool(item_disc == int(trk.get("disc") or 1))
-        )
-        track_pos = int(bool(item_track and item_track == int(trk.get("track") or 0)))
-        rank = (score, exact_pos, track_pos)
-        if rank > best_rank:
-            best_rank = rank
-            best_score = score
-            best_idx = idx
-    return {
-        "idx": best_idx,
-        "track": mb_tracks[best_idx] if best_idx >= 0 else {},
-        "score": max(best_score, 0.0),
-        "title_score": max(best_score, 0.0),
-        "exact_mbid": False,
-    }
 
 
 def _album_track_fingerprint_check(item: Dict[str, Any],
                                    mb_tracks: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Fingerprint-check one library item against a candidate MB tracklist.
+
+    ARCH-002 Part 7: `status` is a canonical `AcoustIDStatus` value, not an
+    independent vocabulary -- callers that used to compare against the
+    legacy strings ("missing"/"none"/"match"/"mismatch"/"unclear") now
+    compare against `AcoustIDStatus` members (a `str` subclass, so either
+    the enum member or its plain `.value` string works). The decision logic
+    itself is unchanged from before this migration -- only the returned
+    vocabulary changed, verified against every one of this function's five
+    production callers before the rename:
+      "missing"  (no readable local file)         -> UNAVAILABLE
+      "none"     (fingerprinted, zero candidates)  -> NO_RESULT
+      "match"    (a candidate's MBID is in mb_tracks) -> CONFIRMED
+      "mismatch" (confident candidate, no title match) -> CONFLICT
+      "unclear"  (weak/uncertain candidate)        -> AMBIGUOUS
+    """
     path = _album_item_abs_path(item.get("path", ""))
     if not path or not Path(path).exists():
-        return {"status": "missing", "path": path}
+        return {"status": AcoustIDStatus.UNAVAILABLE.value, "path": path}
     cands = _acoustid_lookup_cached(path)
     if not cands:
-        return {"status": "none"}
+        return {"status": AcoustIDStatus.NO_RESULT.value}
 
     mb_ids = {t.get("mb_trackid") for t in mb_tracks if t.get("mb_trackid")}
     for cand in cands:
         cand_id = _s(cand.get("mb_trackid", "")).strip().lower()
         if cand_id and cand_id in mb_ids:
-            return {"status": "match", "candidate": cand}
+            return {"status": AcoustIDStatus.CONFIRMED.value, "candidate": cand}
 
     from difflib import SequenceMatcher
     best_cand = cands[0]
@@ -31053,12 +30981,12 @@ def _album_track_fingerprint_check(item: Dict[str, Any],
     )
     if int(best_cand.get("score") or 0) >= 70 and best_title_score < 0.72:
         return {
-            "status": "mismatch",
+            "status": AcoustIDStatus.CONFLICT.value,
             "candidate": best_cand,
             "best_title_score": round(best_title_score, 3),
         }
     return {
-        "status": "unclear",
+        "status": AcoustIDStatus.AMBIGUOUS.value,
         "candidate": best_cand,
         "best_title_score": round(best_title_score, 3),
     }
@@ -31374,12 +31302,12 @@ def _scan_album_track_integrity(album_row: Dict[str, Any], *,
 
         if do_fingerprint:
             fp = _album_track_fingerprint_check(item, mb_tracks)
-            if fp.get("status") == "mismatch":
+            if fp.get("status") == AcoustIDStatus.CONFLICT:
                 decision = "remove"
                 cand = fp.get("candidate") or {}
                 reason = ("Audio fingerprint points to "
                           f"{cand.get('artist','')} - {cand.get('title','')}".strip(" -"))
-            elif fp.get("status") == "unclear" and decision == "keep" and score < 0.96:
+            elif fp.get("status") == AcoustIDStatus.AMBIGUOUS and decision == "keep" and score < 0.96:
                 decision = "review"
                 reason = "Fingerprint did not confirm the MusicBrainz recording"
 
@@ -31412,7 +31340,7 @@ def _scan_album_track_integrity(album_row: Dict[str, Any], *,
         if len(group) <= 1:
             continue
         group.sort(key=lambda r: (
-            0 if (r.get("fingerprint") or {}).get("status") == "match" else 1,
+            0 if (r.get("fingerprint") or {}).get("status") == AcoustIDStatus.CONFIRMED else 1,
             0 if r.get("exact_mbid") else 1,
             -float(r.get("score") or 0),
             _collision_rank(r.get("path", "")),
@@ -31534,9 +31462,9 @@ def _album_mb_match_plan(album_id: int, mb_albumid: str,
         best = _best_album_track_match(item, tracks)
         if int(best.get("idx", -1)) >= 0:
             fp = _album_track_fingerprint_check(item, tracks)
-            if fp.get("status") == "match":
+            if fp.get("status") == AcoustIDStatus.CONFIRMED:
                 return best
-            if fp.get("status") == "mismatch":
+            if fp.get("status") == AcoustIDStatus.CONFLICT:
                 return {
                     "idx": -1,
                     "track": {},
@@ -46670,14 +46598,52 @@ def _playlist_duration_seconds(value: Any) -> float:
         return 0.0
 
 
-def _playlist_auto_placement_allowed(confidence: float,
-                                     mb_releasegroupid: str) -> bool:
-    """Only auto-place a track when confidence and release-group identity are safe."""
-    try:
-        score = float(confidence)
-    except Exception:
-        score = 0.0
-    return score >= 0.70 and bool(_MB_UUID_RE.match(_s(mb_releasegroupid).strip().lower()))
+def _playlist_canonical_placement_evidence(
+    local_track_probe: Dict[str, Any],
+    target_track: Dict[str, Any],
+    mb_releasegroupid: str,
+    *,
+    acoustid_hits: Optional[List[Dict[str, Any]]] = None,
+):
+    """Evaluate whether one playlist track may be auto-placed under one
+    candidate MusicBrainz recording, using the canonical ARCH-002 evidence
+    engine (`backend.matching.evaluate_release_group_candidate`) instead of
+    a bare text/MB-search confidence threshold.
+
+    ARCH-002 finding: the previous `_playlist_auto_placement_allowed()`
+    authorized a real, unattended tag-write + file-move (via the engine's
+    `/playlists/place-imported`) whenever a weighted text confidence score
+    crossed 0.70, with no identity-evidence requirement at all -- exactly
+    the anti-pattern ARCH-002 exists to eliminate, on a genuinely
+    destructive path (`beet write` + `beet move` against the real library).
+
+    This treats the local file being placed and the one specific target
+    recording as a single-track "album" for the canonical evaluator:
+    passing only that one target track (never the candidate release's
+    whole tracklist) makes `complete_alignment` mean exactly what this
+    workflow can honestly claim -- "this one recording is confirmed" -- not
+    a false claim of full-album coverage a single-track placement has no
+    way to prove. `local_track_probe` should carry `acoustid_hits` when a
+    fingerprint lookup was performed, so the canonical AcoustID states
+    (confirmed/conflict/no_result/unavailable/ambiguous) drive the result
+    instead of an ad hoc `_source == "acoustid"` proxy.
+
+    Returns the full `ReleaseGroupMatchResult` so callers can log/report
+    the real reason (conflict / insufficient evidence / confirmed) instead
+    of a bare bool, per ARCH-002 Part 19.
+    """
+    probe = dict(local_track_probe or {})
+    probe["acoustid_hits"] = list(acoustid_hits or probe.get("acoustid_hits") or [])
+    candidate = {
+        "release_group_id": _s(mb_releasegroupid).strip().lower(),
+        "tracks": [target_track] if target_track else [],
+    }
+    return evaluate_release_group_candidate(
+        {},
+        candidate,
+        local_tracks=[probe],
+        trust_model="existing_library",
+    )
 
 
 def _playlist_log(log: Optional[List[str]], message: str) -> None:
@@ -47168,17 +47134,38 @@ def _playlist_album_tag_release_placement(candidate: Dict[str, Any],
             if not _MB_UUID_RE.match(mb_releasegroupid):
                 _playlist_log(log, f"  [playlist-place] Skip release {mb_albumid}: no release-group ID")
                 continue
-            if not _playlist_auto_placement_allowed(confidence, mb_releasegroupid):
+            # ARCH-002: text/MB-search confidence is reported for logging
+            # only -- it is not what authorizes this unattended write. A
+            # real INSERT/UPDATE + `beet write`/`beet move` happens on the
+            # engine side once this placement is accepted (see
+            # backend/beets_control_agent.py's /playlists/place-imported),
+            # so the same canonical evidence gate every other production
+            # mutation flows through applies here too: no fingerprint
+            # confirmation of this specific recording means no unattended
+            # write, no matter how high the text score is.
+            acoustid_hits = None
+            try:
+                audio_path_probe = _playlist_resolve_item_path(path_text)
+                if audio_path_probe.exists():
+                    acoustid_hits = _acoustid_lookup_cached(str(audio_path_probe))
+            except Exception as ex:
+                _playlist_log(log, f"  [playlist-place] AcoustID lookup skipped: {ex}")
+            canonical = _playlist_canonical_placement_evidence(
+                item_probe, best_track, mb_releasegroupid, acoustid_hits=acoustid_hits,
+            )
+            if not canonical.can_auto_accept():
                 _playlist_log(
                     log,
                     f"  [playlist-place] Review required for release group {mb_releasegroupid}: "
-                    f"confidence {confidence:.0%}",
+                    f"confidence {confidence:.0%}, canonical state {canonical.state.value}"
+                    + (f", conflicts {canonical.conflicts}" if canonical.conflicts else "")
+                    + (f", missing evidence {canonical.missing_evidence}" if canonical.missing_evidence else ""),
                 )
                 continue
             _playlist_log(
                 log,
                 f"  [playlist-place] Album-tag release match: {artist} - {title} "
-                f"-> {albumartist} - {album}",
+                f"-> {albumartist} - {album} (canonical state {canonical.state.value})",
             )
             return {
                 "ok": True,
@@ -47206,6 +47193,8 @@ def _playlist_album_tag_release_placement(candidate: Dict[str, Any],
                     "album_score": round(album_score, 3),
                     "artist_score": round(artist_score, 3),
                     "release_track_score": round(best_score, 3),
+                    "canonical_state": canonical.state.value,
+                    "canonical_positive_evidence": list(canonical.positive_evidence),
                 },
             }
     return {}
@@ -47425,11 +47414,29 @@ def _playlist_resolve_album_placement(candidate: Dict[str, Any],
         if not _MB_UUID_RE.match(mb_releasegroupid):
             _playlist_log(log, f"  [playlist-place] Skip release {mb_albumid}: no release-group ID")
             continue
-        if not _playlist_auto_placement_allowed(confidence, mb_releasegroupid):
+        # ARCH-002: as in _playlist_album_tag_release_placement above, the
+        # text/MB-search confidence is reported for logging only. This loop
+        # already tries AcoustID-sourced recording candidates first (see
+        # `_recording_rank`'s `source_rank`), but previously never actually
+        # required that evidence to authorize the write -- a plain MB-search
+        # hit with a high enough blended score could still win. Feed every
+        # AcoustID-sourced candidate actually gathered this call into the
+        # canonical evaluator so real confirmed/conflict/ambiguous status
+        # (not a bare "_source == acoustid" proxy) decides.
+        acoustid_hits_for_probe = [
+            rc for rc in recording_candidates
+            if _s(rc.get("_source") or rc.get("source") or "").lower() == "acoustid"
+        ]
+        canonical = _playlist_canonical_placement_evidence(
+            item_probe, best_track, mb_releasegroupid, acoustid_hits=acoustid_hits_for_probe,
+        )
+        if not canonical.can_auto_accept():
             _playlist_log(
                 log,
                 f"  [playlist-place] Review required for release group {mb_releasegroupid}: "
-                f"confidence {confidence:.0%}",
+                f"confidence {confidence:.0%}, canonical state {canonical.state.value}"
+                + (f", conflicts {canonical.conflicts}" if canonical.conflicts else "")
+                + (f", missing evidence {canonical.missing_evidence}" if canonical.missing_evidence else ""),
             )
             continue
         return {
@@ -47458,11 +47465,13 @@ def _playlist_resolve_album_placement(candidate: Dict[str, Any],
                 "title_score": round(title_score, 3),
                 "artist_score": round(artist_score, 3),
                 "release_track_score": round(best_score, 3),
+                "canonical_state": canonical.state.value,
+                "canonical_positive_evidence": list(canonical.positive_evidence),
             },
         }
     return {
         "ok": False,
-        "reason": "review required: no MusicBrainz release-group match reached 70% confidence",
+        "reason": "review required: no MusicBrainz release-group match reached canonical auto-accept evidence",
         "review_required": True,
     }
 

@@ -1,5 +1,10 @@
 from typing import Any, Callable, Dict, List
 
+try:
+    from matching import align_tracks_global
+except ImportError:
+    from backend.matching import align_tracks_global
+
 
 MatchFn = Callable[[Dict[str, Any], List[Dict[str, Any]]], Dict[str, Any]]
 ExistsFn = Callable[[Dict[str, Any]], bool]
@@ -367,70 +372,40 @@ def greedy_album_track_alignment(
     file_exists_fn: "ExistsFn | None" = None,
     threshold: float = 0.72,
 ) -> Dict[str, Any]:
-    """Greedy, item-order-driven track alignment.
+    """Compatibility wrapper around the ARCH-002 global one-to-one aligner.
 
-    SEC-002 / ARCH-003 Wave 33 continuation: this is app.py's own
-    _match_tracks_from_mb_shared() matching loop, ported here VERBATIM (not
-    approximated) rather than reusing summarize_mb_track_alignment's
-    different rank-based-displacement conflict resolution, so the engine
-    and app.py can never again risk silently disagreeing on which specific
-    track a file gets permanently relabeled as in an ambiguous case
-    (duplicate/near-duplicate titles, multiple candidate files competing
-    for one track). album_track_score() (the per-pair scoring function)
-    was already shared/identical between the two call sites before this
-    change -- only the overall alignment/conflict-resolution shape
-    differed, and that is what this replaces.
-
-    For each local item, in the exact order the caller supplies `items`
-    (app.py's caller sorts its DB read `ORDER BY disc, track, title, id`;
-    callers here must supply that same order to be behaviorally
-    identical), claim the single highest-scoring MB track not already
-    claimed by an earlier item in this same call. Once a track is
-    claimed, no later item can ever take it away, even if the later item
-    would have scored higher against it -- this is deliberately NOT
-    summarize_mb_track_alignment's rank-based displacement. A tie
-    (`score` exactly equal between two mb_tracks against the same item)
-    keeps the FIRST mb_track encountered in `mb_tracks` order, matching
-    app.py's own `if score > best_score` (strict greater-than) loop
-    exactly.
-
-    Deliberately does not special-case an item's own existing
-    mb_trackid (no "exact_mbid" score boost) -- app.py's own loop never
-    did either; `score_fn` (album_track_score) only ever looks at title/
-    position/duration. An item's pre-existing recording ID is still
-    honored downstream, by the (unchanged, and deliberately NOT ported --
-    a real engine safety improvement over app.py's older code, not a
-    behavioral approximation of it) caller-side check that keeps a
-    conflicting non-blank existing recording ID out of automatic repair
-    and routes it to manual review instead.
+    The historical implementation was item-order greedy. ARCH-002 makes the
+    global assignment the single production policy: every local item maps to at
+    most one MusicBrainz track, every MusicBrainz track maps to at most one
+    local item, and a later higher-quality assignment may displace a weaker
+    local choice when that improves the album-wide evidence.
     """
     exists = file_exists_fn or (lambda _item: True)
-    used_indices: set[int] = set()
-    matched_by_idx: Dict[int, Dict[str, Any]] = {}
-    matched_item_ids: set[int] = set()
+    candidate_items: List[Dict[str, Any]] = []
     extra_items: List[Dict[str, Any]] = []
-
     for item in items:
-        if not exists(item):
-            extra_items.append(item)
-            continue
-
-        best_idx = -1
-        best_score = -1.0
-        for idx, mb_trk in enumerate(mb_tracks):
-            if idx in used_indices:
-                continue
-            score = score_fn(item, mb_trk)
-            if score > best_score:
-                best_score = score
-                best_idx = idx
-
-        if best_idx >= 0 and best_score >= threshold:
-            used_indices.add(best_idx)
-            matched_by_idx[best_idx] = {**item, "score": round(best_score, 3)}
-            matched_item_ids.add(int(item.get("id") or 0))
+        if exists(item):
+            candidate_items.append(item)
         else:
             extra_items.append(item)
+
+    alignment = align_tracks_global(
+        candidate_items,
+        mb_tracks,
+        threshold=threshold,
+        trust_model="existing_library",
+    )
+    matched_by_idx: Dict[int, Dict[str, Any]] = {}
+    matched_item_ids: set[int] = set()
+    for row in alignment.assignments:
+        if row.status not in {"matched", "conflict"}:
+            continue
+        item = {**row.local_track, "score": round(row.score, 3)}
+        matched_by_idx[row.target_index] = item
+        matched_item_ids.add(int(row.local_track.get("id") or 0))
+
+    for row in alignment.unmatched_local:
+        extra_items.append(row.local_track)
 
     expected: List[Dict[str, Any]] = []
     missing: List[Dict[str, Any]] = []
@@ -445,7 +420,7 @@ def greedy_album_track_alignment(
             "disc": int(trk.get("disc") or 1),
             "track": int(trk.get("track") or 0),
             "title": trk.get("title", ""),
-            "mb_trackid": trk.get("mb_trackid", ""),
+            "mb_trackid": trk.get("mb_trackid") or trk.get("recording_id") or "",
             "duration_ms": int(trk.get("duration_ms") or 0),
             "ok": bool(matched_item),
             "missing": not bool(matched_item),
@@ -453,8 +428,8 @@ def greedy_album_track_alignment(
         }
         if matched_item:
             in_library += 1
-            current_mbid = _s(matched_item.get("mb_trackid") or "").strip().lower()
-            target_mbid = _s(trk.get("mb_trackid") or "").strip().lower()
+            current_mbid = _s(matched_item.get("mb_trackid") or matched_item.get("recording_id") or "").strip().lower()
+            target_mbid = _s(trk.get("mb_trackid") or trk.get("recording_id") or "").strip().lower()
             if target_mbid and current_mbid != target_mbid:
                 repairable_count += 1
                 if current_mbid:
@@ -486,5 +461,5 @@ def greedy_album_track_alignment(
         "mb_trackid_mismatch_count": mismatched_recording_id_count,
         "mb_duplicate_recording_id_count": duplicate_recording_count,
         "duplicate_recording_groups": duplicate_recording_groups,
+        "alignment_engine": "backend.matching.align_tracks_global",
     }
-

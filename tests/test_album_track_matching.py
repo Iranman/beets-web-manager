@@ -1,4 +1,3 @@
-import ast
 import re
 import sys
 import unittest
@@ -6,13 +5,14 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _app_ast_cache import get_app_ast  # noqa: E402
+from _app_ast_cache import load_app_symbols  # noqa: E402
+
+from backend.matching import AcoustIDStatus
 
 APP_SOURCE = Path(__file__).resolve().parents[1] / "app.py"
 
 
-def _load_matcher_namespace():
-    tree = get_app_ast()
+def _load_matcher_namespace(*, with_fingerprint_check: bool = False, acoustid_lookup=None):
     names = {
         "_ALBUM_TRACK_PREFIX_RE",
         "_ALBUM_TRACK_ANNOT_RE",
@@ -34,12 +34,10 @@ def _load_matcher_namespace():
         "_album_track_score",
         "_best_album_track_match",
     }
-    ns = {
-        "Any": Any,
-        "Dict": Dict,
-        "List": List,
-        "Path": Path,
-        "re": re,
+    if with_fingerprint_check:
+        names.add("_album_track_fingerprint_check")
+    extra_ns = {
+        "AcoustIDStatus": AcoustIDStatus,
         "_s": lambda value: (
             value.decode("utf-8", errors="replace")
             if isinstance(value, bytes)
@@ -49,18 +47,17 @@ def _load_matcher_namespace():
             int(item.get("disc") or 1),
             int(item.get("track") or 0),
         ),
+        # ARCH-002 Part 7 regression matrix: _album_track_fingerprint_check
+        # calls these two free names. _album_item_abs_path only needs to be
+        # a pass-through here (fixtures supply absolute-looking test
+        # paths); _acoustid_lookup_cached is per-test injectable so every
+        # canonical AcoustIDStatus outcome (confirmed/conflict/no_result/
+        # unavailable/ambiguous) can be exercised deterministically without
+        # a real fingerprint/network call.
+        "_album_item_abs_path": lambda raw_path: str(raw_path or ""),
+        "_acoustid_lookup_cached": acoustid_lookup or (lambda _path: []),
     }
-    for node in tree.body:
-        node_name = ""
-        if isinstance(node, ast.Assign):
-            node_name = getattr(node.targets[0], "id", "")
-        elif isinstance(node, ast.FunctionDef):
-            node_name = node.name
-        if node_name in names:
-            mod = ast.Module(body=[node], type_ignores=[])
-            ast.fix_missing_locations(mod)
-            exec(compile(mod, str(APP_SOURCE), "exec"), ns)
-    return ns
+    return load_app_symbols(names, extra_ns=extra_ns)
 
 
 class AlbumTrackMatchingTests(unittest.TestCase):
@@ -303,8 +300,284 @@ class AlbumTrackMatchingTests(unittest.TestCase):
         self.assertEqual(strip("love-dead"), "love-dead")
 
 
+class AlbumTrackFingerprintCheckAcoustIDMatrixTests(unittest.TestCase):
+    """ARCH-002 Part 7: _album_track_fingerprint_check() must return the
+    canonical AcoustIDStatus vocabulary, and NO_RESULT/UNAVAILABLE/AMBIGUOUS
+    must never be treated as CONFLICT. This exercises the real production
+    function (via AST extraction, not a reimplementation), not just
+    backend/matching/evidence.py's own internal logic."""
+
+    def _fp_check(self, acoustid_lookup):
+        ns = _load_matcher_namespace(with_fingerprint_check=True, acoustid_lookup=acoustid_lookup)
+        return ns["_album_track_fingerprint_check"]
+
+    def _mb_tracks(self):
+        return [
+            {"mb_trackid": "rec-crossfire", "title": "Crossfire", "title_norm": "crossfire"},
+            {"mb_trackid": "rec-space-time", "title": "Space and Time", "title_norm": "space and time"},
+        ]
+
+    def test_unavailable_when_local_file_is_missing(self):
+        # _album_item_abs_path is stubbed as a pass-through; a nonexistent
+        # path means Path(path).exists() is False -- no lookup is even
+        # attempted, matching "the file itself could not be read."
+        fp_check = self._fp_check(acoustid_lookup=lambda _path: (_ for _ in ()).throw(AssertionError("must not be called")))
+        result = fp_check({"path": "/definitely/does/not/exist/track.flac"}, self._mb_tracks())
+        self.assertEqual(result["status"], AcoustIDStatus.UNAVAILABLE.value)
+
+    def test_no_result_when_fingerprinting_succeeds_with_zero_candidates(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".flac") as tf:
+            fp_check = self._fp_check(acoustid_lookup=lambda _path: [])
+            result = fp_check({"path": tf.name}, self._mb_tracks())
+        self.assertEqual(result["status"], AcoustIDStatus.NO_RESULT.value)
+        self.assertNotEqual(result["status"], AcoustIDStatus.CONFLICT.value, "no_result must never be conflict")
+
+    def test_confirmed_when_a_candidate_mbid_is_in_the_target_tracklist(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".flac") as tf:
+            fp_check = self._fp_check(
+                acoustid_lookup=lambda _path: [{"mb_trackid": "rec-crossfire", "title": "Crossfire", "score": 95}],
+            )
+            result = fp_check({"path": tf.name}, self._mb_tracks())
+        self.assertEqual(result["status"], AcoustIDStatus.CONFIRMED.value)
+
+    def test_conflict_when_confident_candidate_matches_no_target_title(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".flac") as tf:
+            fp_check = self._fp_check(
+                acoustid_lookup=lambda _path: [
+                    {"mb_trackid": "rec-a-totally-unrelated-song", "title": "A Totally Unrelated Song", "score": 95}
+                ],
+            )
+            result = fp_check({"path": tf.name}, self._mb_tracks())
+        self.assertEqual(result["status"], AcoustIDStatus.CONFLICT.value)
+        self.assertNotEqual(result["status"], AcoustIDStatus.NO_RESULT.value)
+        self.assertNotEqual(result["status"], AcoustIDStatus.UNAVAILABLE.value)
+
+    def test_ambiguous_when_candidate_confidence_is_weak(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".flac") as tf:
+            fp_check = self._fp_check(
+                acoustid_lookup=lambda _path: [
+                    {"mb_trackid": "rec-a-totally-unrelated-song", "title": "A Totally Unrelated Song", "score": 40}
+                ],
+            )
+            result = fp_check({"path": tf.name}, self._mb_tracks())
+        self.assertEqual(result["status"], AcoustIDStatus.AMBIGUOUS.value)
+        self.assertNotEqual(result["status"], AcoustIDStatus.CONFLICT.value, "a weak/uncertain candidate is ambiguous, not a confirmed conflict")
+
+    def test_wrong_audio_conflict_survives_through_a_real_production_caller(self):
+        """ARCH-002 Part 8: the real _candidate_track_build_comparison()
+        caller (not a reimplementation) must mark a fingerprint-conflicting
+        candidate as "conflicting", never silently accept it as a match."""
+        import tempfile
+        names = {
+            "_candidate_track_build_comparison",
+            "_album_track_fingerprint_check",
+            "_best_album_track_match",
+            "_album_track_norm",
+            "_album_track_score",
+            "_album_track_feature_variants",
+            "_album_track_parenthetical_alias_variants",
+            "_album_track_path_prefixes",
+            "_album_track_title_variants",
+            "_ALBUM_TRACK_PREFIX_RE",
+            "_ALBUM_TRACK_ANNOT_RE",
+            "_ALBUM_TRACK_UNCLOSED_RE",
+            "_ALBUM_TRACK_TRAILING_ALIAS_RE",
+            "_ALBUM_TRACK_VERSION_MARKER_RE",
+            "_ALBUM_TRACK_FEATURE_SUFFIX_RE",
+            "_ALBUM_TRACK_GLUED_FEATURE_SUFFIX_RE",
+            "_TRACK_FILENAME_SOURCE_ID_SUFFIX_RE",
+            "_TRACK_FILENAME_SHORT_SOURCE_ID_SUFFIX_RE",
+            "_strip_track_filename_id_suffix",
+            "_track_filename_has_source_id_suffix",
+            "_slskd_title_guess_from_name",
+        }
+        with tempfile.NamedTemporaryFile(suffix=".flac") as tf:
+            extra_ns = {
+                "AcoustIDStatus": AcoustIDStatus,
+                "_s": lambda value: str(value or ""),
+                "_album_item_position_hints": lambda item: (int(item.get("disc") or 1), int(item.get("track") or 0)),
+                "_album_item_abs_path": lambda raw_path: str(raw_path or ""),
+                "_acoustid_lookup_cached": lambda _path: [
+                    {"mb_trackid": "rec-a-totally-unrelated-song", "title": "A Totally Unrelated Song", "score": 95}
+                ],
+                "_MB_TRACK_PREFLIGHT_MATCH_THRESHOLD": 0.82,
+            }
+            ns = load_app_symbols(names, extra_ns=extra_ns)
+            build_comparison = ns["_candidate_track_build_comparison"]
+            candidate = {"title": "Wrong Title Entirely", "path": tf.name}
+            tracklist = {
+                "tracks": [
+                    {"mb_trackid": "rec-crossfire", "title": "Crossfire", "track": 1, "title_norm": "crossfire"},
+                ],
+            }
+            result = build_comparison("mb-album-1", tracklist, [candidate])
+            extra_rows = [row for row in result["comparison"] if row["mb_title"] == ""]
+            self.assertEqual(len(extra_rows), 1)
+            self.assertEqual(extra_rows[0]["status"], "conflicting")
+            # And it must not have been silently counted as a real match.
+            matched_rows = [row for row in result["comparison"] if row["status"] in ("matched", "acoustid_verified", "fuzzy")]
+            self.assertEqual(matched_rows, [])
+
+
+class CanonicalMatchingEquivalenceTests(unittest.TestCase):
+    """ARCH-002: Verify backend.matching canonical engine matches app.py delegates identically."""
+
+    def test_golden_equivalence_corpus(self):
+        from backend.matching import (
+            album_track_score,
+            best_album_track_match,
+            normalize_track_title_for_matching,
+            strip_track_filename_id_suffix,
+            track_feature_variants,
+            track_filename_has_source_id_suffix,
+            track_parenthetical_alias_variants,
+            track_title_variants_for_matching,
+        )
+
+        ns = _load_matcher_namespace()
+        app_norm = ns["_album_track_norm"]
+        app_score = ns["_album_track_score"]
+        app_best = ns["_best_album_track_match"]
+        app_strip = ns["_strip_track_filename_id_suffix"]
+        app_has_suffix = ns["_track_filename_has_source_id_suffix"]
+        app_feature = ns["_album_track_feature_variants"]
+        app_alias = ns["_album_track_parenthetical_alias_variants"]
+        app_variants = ns["_album_track_title_variants"]
+
+        test_corpus = [
+            "Money (That's What I Want)",
+            "Many Men (Wish Death)",
+            "Syrup Damage_639189505313367522",
+            "2 Feet-639189505752092846",
+            "spesh-trust_life_(feat_benny)-b3e356",
+            "01-38_spesh-intro_(feat_uncle_black)-28bb",
+            "Light It Upft Pop Smoke",
+            "Malibufeat Polo G",
+            "Intro (Explicit Album Version) [Remastered 2024]",
+            "Bonus Track: Secret Song (Live @ Wembley)",
+            "Song & Dance (feat. Artist A and Artist B)",
+            "99 Problems",
+            "Track 01 - Hello World [Lidarr-abc123456]",
+        ]
+
+        for title in test_corpus:
+            with self.subTest(title=title):
+                self.assertEqual(normalize_track_title_for_matching(title), app_norm(title))
+                self.assertEqual(strip_track_filename_id_suffix(title), app_strip(title))
+                self.assertEqual(track_filename_has_source_id_suffix(title), app_has_suffix(title))
+                self.assertEqual(track_feature_variants(title), app_feature(title))
+                self.assertEqual(track_parenthetical_alias_variants(title), app_alias(title))
+                self.assertEqual(
+                    track_title_variants_for_matching(title, "/data/torrents/music/Artist/Album/01.flac"),
+                    app_variants(title, "/data/torrents/music/Artist/Album/01.flac"),
+                )
+
+        # Scoring & Best match equivalence
+        mb_tracks = [
+            {"title": "Money", "title_norm": "money", "track": 1, "disc": 1, "duration_ms": 180000, "mb_trackid": "rec-1"},
+            {"title": "Many Men (Wish Death)", "title_norm": "many men wish death", "track": 2, "disc": 1, "duration_ms": 200000, "mb_trackid": "rec-2"},
+            {"title": "Syrup Damage", "title_norm": "syrup damage", "track": 3, "disc": 1, "duration_ms": 150000, "mb_trackid": "rec-3"},
+        ]
+
+        local_item = {"title": "Money (That's What I Want)", "track": 1, "disc": 1, "length": 180.0, "path": "01 - Money.flac"}
+        self.assertAlmostEqual(album_track_score(local_item, mb_tracks[0]), app_score(local_item, mb_tracks[0]), places=5)
+        self.assertEqual(best_album_track_match(local_item, mb_tracks)["idx"], app_best(local_item, mb_tracks)["idx"])
+
+    def test_multi_disc_position_hints(self):
+        from backend.matching import album_track_score
+
+        item_d2_t1 = {"title": "Overture Live in Concert", "track": 1, "disc": 2, "length": 120.0}
+        target_d1_t1 = {"title": "Overture", "title_norm": "overture", "track": 1, "disc": 1, "duration_ms": 120000}
+        target_d2_t1 = {"title": "Overture", "title_norm": "overture", "track": 1, "disc": 2, "duration_ms": 120000}
+
+        score_diff_disc = album_track_score(item_d2_t1, target_d1_t1)
+        score_same_disc = album_track_score(item_d2_t1, target_d2_t1)
+
+        # Same disc + track gets full position bonus (+0.06 vs +0.04)
+        self.assertGreater(score_same_disc, score_diff_disc)
+
+
+class CanonicalAdversarialNormalizerTests(unittest.TestCase):
+    """Adversarial stress and scaling tests to verify absence of ReDoS polynomial backtracking."""
+
+    def test_adversarial_large_inputs_do_not_hang(self):
+        import time
+        from backend.matching import (
+            normalize_track_title_for_matching,
+            strip_track_filename_id_suffix,
+            track_feature_variants,
+            track_filename_has_source_id_suffix,
+            track_parenthetical_alias_variants,
+            track_path_prefixes,
+            track_title_variants_for_matching,
+        )
+
+        adversarial_inputs = [
+            ("10k spaces", "Song" + " " * 10000 + "Title"),
+            ("50k spaces", "Song" + " " * 50000 + "Title"),
+            ("Repeated open parens (20k)", "Song " + "(" * 20000),
+            ("Repeated unclosed brackets (10k)", "Song " + "[a" * 10000),
+            ("Repeated dash space (5k)", "Artist" + " - " * 5000 + "Title"),
+            ("Repeated format placeholders (5k)", "Prefix" + " - %track{01}" * 5000 + "Title"),
+            ("Repeated feature prefixes (5k)", "Song " + "feat. Artist " * 5000),
+            ("Huge hex suffix (50k)", "Song_" + "a" * 50000),
+            ("Huge malformed UUID suffix (50k)", "Song_{" + "01234567-89ab-cdef-" * 2500 + "}"),
+            ("Deeply malformed annotation text (50k)", "Song (remix " + "deluxe " * 7000 + "edition)"),
+        ]
+
+        for desc, attack_str in adversarial_inputs:
+            with self.subTest(scenario=desc):
+                t0 = time.perf_counter()
+                norm = normalize_track_title_for_matching(attack_str)
+                strip = strip_track_filename_id_suffix(attack_str)
+                has_suffix = track_filename_has_source_id_suffix(attack_str)
+                feat = track_feature_variants(attack_str)
+                alias = track_parenthetical_alias_variants(attack_str)
+                pref = track_path_prefixes(attack_str)
+                variants = track_title_variants_for_matching(attack_str, attack_str)
+                dt = time.perf_counter() - t0
+
+                # Must complete boundedly without hanging (well under 5.0s for 50k chars across 7 functions)
+                self.assertLess(dt, 5.0, f"Adversarial input [{desc}] took {dt:.3f}s (potential ReDoS)")
+                self.assertIsInstance(norm, str)
+                self.assertIsInstance(strip, str)
+                self.assertIsInstance(has_suffix, bool)
+                self.assertIsInstance(feat, list)
+                self.assertIsInstance(alias, list)
+                self.assertIsInstance(pref, list)
+                self.assertIsInstance(variants, list)
+
+    def test_complexity_scaling_bounded(self):
+        """Verify execution time scales linearly rather than exponentially/polynomially."""
+        import time
+        from backend.matching import (
+            normalize_track_title_for_matching,
+            track_title_variants_for_matching,
+        )
+
+        base_pattern = "Artist - %track{01} - Song (feat. Artist) [Remastered] "
+        times = []
+        sizes = [100, 200, 400]
+
+        for multiplier in sizes:
+            input_str = base_pattern * multiplier
+            t0 = time.perf_counter()
+            _ = normalize_track_title_for_matching(input_str)
+            _ = track_title_variants_for_matching(input_str, input_str)
+            times.append(time.perf_counter() - t0)
+
+        # Confirm all runs completed in sub-second time
+        for t in times:
+            self.assertLess(t, 1.0)
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

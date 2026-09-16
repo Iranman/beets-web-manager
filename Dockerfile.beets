@@ -45,6 +45,7 @@ COPY backend/beets_startup_guard.py /opt/beets-web-manager-agent/beets_startup_g
 COPY backend/audio_preferences.py /opt/beets-web-manager-agent/audio_preferences.py
 COPY backend/transaction_engine.py /opt/beets-web-manager-agent/transaction_engine.py
 COPY backend/matching_contract.py /opt/beets-web-manager-agent/matching_contract.py
+COPY backend/matching/ /opt/beets-web-manager-agent/matching/
 # track_align.py: reused by transaction_engine.py's confirmed_import_v1
 # family for track alignment/AcoustID promotion (Wave 25 Round 3) -- not a
 # new matcher, the same module already used elsewhere for this purpose.
