@@ -387,6 +387,17 @@ If this project helps your library, please consider supporting its future.
 
 Sponsor links are configured through GitHub's Sponsor button when available.
 
+## Documentation
+
+- [`docs/INSTALLATION.md`](docs/INSTALLATION.md) — detailed installation and deployment.
+- [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) — configuration variables and integrations.
+- [`docs/EXAMPLES.md`](docs/EXAMPLES.md) — embedding into an existing Compose stack.
+- [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) — common problems and fixes.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — current system shape and non-negotiable product rules.
+- [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) — developer setup, validation commands, and engineering constraints.
+- [`docs/TECHNICAL_DEBT.md`](docs/TECHNICAL_DEBT.md) — known open architecture work.
+- [`SECURITY.md`](SECURITY.md) — supported versions and how to report a vulnerability.
+
 ## Contributing
 
 See `CONTRIBUTING.md`. Commit messages should use concise conventional prefixes such as `feat:`, `fix:`, `docs:`, `test:`, `build:`, `ci:`, and `chore:`.

@@ -1,6 +1,6 @@
 """Regression protection: public deployment/example configuration must never
 ship a maintainer's real host paths, LAN defaults, or local dev-machine paths
--- see the "Deployment Configuration" rule in AGENTS.md/CLAUDE.md.
+-- see the "Deployment Files Stay Generic" rule in docs/DEVELOPMENT.md.
 
 Detection is deliberately generic (structural path/address *classes*, not a
 denylist of any specific person's former literal values): a denylist of exact

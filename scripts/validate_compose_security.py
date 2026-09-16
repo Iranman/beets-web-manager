@@ -6,8 +6,8 @@ docker-compose.yml (web-manager only, connects to an existing Beets
 control agent) and docker-compose.full.yml (bundled beets +
 beets-web-manager, built from source). Neither may encode the project
 owner's actual deployment topology, host paths, or credentials; see
-docs/operations/TRUENAS_ROLLOUT.md and the "Deployment architecture rule"
-in AGENTS.md for the policy this enforces. docker-compose.full.yml's
+docs/TRUENAS_ROLLOUT.md and the "Deployment Files Stay Generic" rule
+in docs/DEVELOPMENT.md for the policy this enforces. docker-compose.full.yml's
 `beets` service intentionally does NOT carry the same container-level
 hardening (security_opt/cap_drop/read_only/tmpfs) as a hand-built service
 would: it runs the upstream LinuxServer image as-is, whose own s6-overlay

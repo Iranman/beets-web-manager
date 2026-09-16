@@ -737,8 +737,9 @@ def seed_wave26_ai_import_source(downloads_dir: Path, subdir: str, *,
     satisfy neither, so it can NEVER pass _folder_release_preflight()'s
     action_allowed gate and always routes to human review, regardless of
     AI confidence or tracklist match ratio -- this is correct, intentional
-    fail-closed behavior (see CLAUDE.md's "ambiguous evidence goes to
-    review" rule), not a bug, but it means the auto-import branch of
+    fail-closed behavior (see docs/ARCHITECTURE.md's "Non-Negotiable
+    Rules" -- ambiguous evidence goes to review), not a bug, but it
+    means the auto-import branch of
     _ai_batch_process_decisions() (and therefore _ai_import_folder() /
     confirmed_import_v1) is only reachable for fixtures shaped like this
     one."""

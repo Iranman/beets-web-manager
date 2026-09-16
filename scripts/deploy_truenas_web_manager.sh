@@ -3,7 +3,7 @@
 # Compose stack. Reusable across releases -- pass VERSION (and, once known,
 # EXPECTED_REVISION) rather than editing this file per release.
 #
-# See docs/operations/TRUENAS_ROLLOUT.md for the full writeup.
+# See docs/TRUENAS_ROLLOUT.md for the full writeup.
 #
 # Design goals:
 #   - Never touch the authoritative Beets database (/config/musiclibrary.blb

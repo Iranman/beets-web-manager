@@ -2687,9 +2687,7 @@ def run_confirmed_import_native(source_path: str, mb_albumid: str, *, use_move: 
     # no relaxation is needed. Per the standing instruction not to blindly
     # force Beets matching, the default strong_rec_thresh is left
     # untouched here; --quiet-fallback skip remains the actual safety
-    # backstop for any genuine track-count/identity mismatch. See
-    # docs/operations/wave25_import_reconciliation_design.md's Round 4
-    # section for the full reasoning and the reproduction that proved it.
+    # backstop for any genuine track-count/identity mismatch.
     if preserved_path or use_move:
         config_override = "import:\n  quiet_fallback: skip\n"
     else:
@@ -5739,8 +5737,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
         # Fresh reviewed import of previously-untagged source audio. Distinct
         # trust model from /import/plan+/import/apply (import_folder_v1) and
         # /imports/reimport (reimport_source_atomic) above -- see
-        # transaction_engine.py's confirmed_import_v1 section header and
-        # docs/operations/wave25_import_reconciliation_design.md.
+        # transaction_engine.py's confirmed_import_v1 section header.
 
         if path == "/imports/confirmed/plan":
             music_root_env = _resolved_music_root()
