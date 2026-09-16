@@ -366,6 +366,7 @@ from backend.matching_contract import (
     build_recording_matching_decision,
     compute_decision_version,
 )
+from backend.matching import evaluate_release_group_candidate
 from backend.import_guard import (
     existing_track_can_block_downloaded_replacement as _guard_existing_track_can_block_downloaded_replacement,
     filter_wanted_tracks_against_missing as _guard_filter_wanted_tracks_against_missing,
@@ -47381,14 +47382,52 @@ def _playlist_duration_seconds(value: Any) -> float:
         return 0.0
 
 
-def _playlist_auto_placement_allowed(confidence: float,
-                                     mb_releasegroupid: str) -> bool:
-    """Only auto-place a track when confidence and release-group identity are safe."""
-    try:
-        score = float(confidence)
-    except Exception:
-        score = 0.0
-    return score >= 0.70 and bool(_MB_UUID_RE.match(_s(mb_releasegroupid).strip().lower()))
+def _playlist_canonical_placement_evidence(
+    local_track_probe: Dict[str, Any],
+    target_track: Dict[str, Any],
+    mb_releasegroupid: str,
+    *,
+    acoustid_hits: Optional[List[Dict[str, Any]]] = None,
+):
+    """Evaluate whether one playlist track may be auto-placed under one
+    candidate MusicBrainz recording, using the canonical ARCH-002 evidence
+    engine (`backend.matching.evaluate_release_group_candidate`) instead of
+    a bare text/MB-search confidence threshold.
+
+    ARCH-002 finding: the previous `_playlist_auto_placement_allowed()`
+    authorized a real, unattended tag-write + file-move (via the engine's
+    `/playlists/place-imported`) whenever a weighted text confidence score
+    crossed 0.70, with no identity-evidence requirement at all -- exactly
+    the anti-pattern ARCH-002 exists to eliminate, on a genuinely
+    destructive path (`beet write` + `beet move` against the real library).
+
+    This treats the local file being placed and the one specific target
+    recording as a single-track "album" for the canonical evaluator:
+    passing only that one target track (never the candidate release's
+    whole tracklist) makes `complete_alignment` mean exactly what this
+    workflow can honestly claim -- "this one recording is confirmed" -- not
+    a false claim of full-album coverage a single-track placement has no
+    way to prove. `local_track_probe` should carry `acoustid_hits` when a
+    fingerprint lookup was performed, so the canonical AcoustID states
+    (confirmed/conflict/no_result/unavailable/ambiguous) drive the result
+    instead of an ad hoc `_source == "acoustid"` proxy.
+
+    Returns the full `ReleaseGroupMatchResult` so callers can log/report
+    the real reason (conflict / insufficient evidence / confirmed) instead
+    of a bare bool, per ARCH-002 Part 19.
+    """
+    probe = dict(local_track_probe or {})
+    probe["acoustid_hits"] = list(acoustid_hits or probe.get("acoustid_hits") or [])
+    candidate = {
+        "release_group_id": _s(mb_releasegroupid).strip().lower(),
+        "tracks": [target_track] if target_track else [],
+    }
+    return evaluate_release_group_candidate(
+        {},
+        candidate,
+        local_tracks=[probe],
+        trust_model="existing_library",
+    )
 
 
 def _playlist_log(log: Optional[List[str]], message: str) -> None:
@@ -47879,17 +47918,38 @@ def _playlist_album_tag_release_placement(candidate: Dict[str, Any],
             if not _MB_UUID_RE.match(mb_releasegroupid):
                 _playlist_log(log, f"  [playlist-place] Skip release {mb_albumid}: no release-group ID")
                 continue
-            if not _playlist_auto_placement_allowed(confidence, mb_releasegroupid):
+            # ARCH-002: text/MB-search confidence is reported for logging
+            # only -- it is not what authorizes this unattended write. A
+            # real INSERT/UPDATE + `beet write`/`beet move` happens on the
+            # engine side once this placement is accepted (see
+            # backend/beets_control_agent.py's /playlists/place-imported),
+            # so the same canonical evidence gate every other production
+            # mutation flows through applies here too: no fingerprint
+            # confirmation of this specific recording means no unattended
+            # write, no matter how high the text score is.
+            acoustid_hits = None
+            try:
+                audio_path_probe = _playlist_resolve_item_path(path_text)
+                if audio_path_probe.exists():
+                    acoustid_hits = _acoustid_lookup_cached(str(audio_path_probe))
+            except Exception as ex:
+                _playlist_log(log, f"  [playlist-place] AcoustID lookup skipped: {ex}")
+            canonical = _playlist_canonical_placement_evidence(
+                item_probe, best_track, mb_releasegroupid, acoustid_hits=acoustid_hits,
+            )
+            if not canonical.can_auto_accept():
                 _playlist_log(
                     log,
                     f"  [playlist-place] Review required for release group {mb_releasegroupid}: "
-                    f"confidence {confidence:.0%}",
+                    f"confidence {confidence:.0%}, canonical state {canonical.state.value}"
+                    + (f", conflicts {canonical.conflicts}" if canonical.conflicts else "")
+                    + (f", missing evidence {canonical.missing_evidence}" if canonical.missing_evidence else ""),
                 )
                 continue
             _playlist_log(
                 log,
                 f"  [playlist-place] Album-tag release match: {artist} - {title} "
-                f"-> {albumartist} - {album}",
+                f"-> {albumartist} - {album} (canonical state {canonical.state.value})",
             )
             return {
                 "ok": True,
@@ -47917,6 +47977,8 @@ def _playlist_album_tag_release_placement(candidate: Dict[str, Any],
                     "album_score": round(album_score, 3),
                     "artist_score": round(artist_score, 3),
                     "release_track_score": round(best_score, 3),
+                    "canonical_state": canonical.state.value,
+                    "canonical_positive_evidence": list(canonical.positive_evidence),
                 },
             }
     return {}
@@ -48136,11 +48198,29 @@ def _playlist_resolve_album_placement(candidate: Dict[str, Any],
         if not _MB_UUID_RE.match(mb_releasegroupid):
             _playlist_log(log, f"  [playlist-place] Skip release {mb_albumid}: no release-group ID")
             continue
-        if not _playlist_auto_placement_allowed(confidence, mb_releasegroupid):
+        # ARCH-002: as in _playlist_album_tag_release_placement above, the
+        # text/MB-search confidence is reported for logging only. This loop
+        # already tries AcoustID-sourced recording candidates first (see
+        # `_recording_rank`'s `source_rank`), but previously never actually
+        # required that evidence to authorize the write -- a plain MB-search
+        # hit with a high enough blended score could still win. Feed every
+        # AcoustID-sourced candidate actually gathered this call into the
+        # canonical evaluator so real confirmed/conflict/ambiguous status
+        # (not a bare "_source == acoustid" proxy) decides.
+        acoustid_hits_for_probe = [
+            rc for rc in recording_candidates
+            if _s(rc.get("_source") or rc.get("source") or "").lower() == "acoustid"
+        ]
+        canonical = _playlist_canonical_placement_evidence(
+            item_probe, best_track, mb_releasegroupid, acoustid_hits=acoustid_hits_for_probe,
+        )
+        if not canonical.can_auto_accept():
             _playlist_log(
                 log,
                 f"  [playlist-place] Review required for release group {mb_releasegroupid}: "
-                f"confidence {confidence:.0%}",
+                f"confidence {confidence:.0%}, canonical state {canonical.state.value}"
+                + (f", conflicts {canonical.conflicts}" if canonical.conflicts else "")
+                + (f", missing evidence {canonical.missing_evidence}" if canonical.missing_evidence else ""),
             )
             continue
         return {
@@ -48169,11 +48249,13 @@ def _playlist_resolve_album_placement(candidate: Dict[str, Any],
                 "title_score": round(title_score, 3),
                 "artist_score": round(artist_score, 3),
                 "release_track_score": round(best_score, 3),
+                "canonical_state": canonical.state.value,
+                "canonical_positive_evidence": list(canonical.positive_evidence),
             },
         }
     return {
         "ok": False,
-        "reason": "review required: no MusicBrainz release-group match reached 70% confidence",
+        "reason": "review required: no MusicBrainz release-group match reached canonical auto-accept evidence",
         "review_required": True,
     }
 
