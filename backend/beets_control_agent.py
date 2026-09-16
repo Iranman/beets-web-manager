@@ -5919,15 +5919,17 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             if folder_path is not None and not isinstance(folder_path, str):
                 self._send_json(400, {"ok": False, "error": "folder_path must be a string", "error_code": "INVALID_PARAMS"})
                 return
+            trusted_folder_path: Optional[Path] = None
             if folder_path:
                 try:
                     if "\x00" in folder_path:
                         self._send_json(403, {"ok": False, "error": "Folder path is outside permitted music library path", "error_code": "FORBIDDEN_PATH"})
                         return
-                    resolved_folder = Path(folder_path).resolve()
-                    if not _path_is_within(str(resolved_folder), MUSIC_LIBRARY_PATH):
+                    candidate = Path(folder_path).resolve()
+                    if not _path_is_within(str(candidate), MUSIC_LIBRARY_PATH):
                         self._send_json(403, {"ok": False, "error": "Folder path is outside permitted music library path", "error_code": "FORBIDDEN_PATH"})
                         return
+                    trusted_folder_path = candidate
                 except Exception:
                     self._send_json(403, {"ok": False, "error": "Folder path is outside permitted music library path", "error_code": "FORBIDDEN_PATH"})
                     return
@@ -5945,10 +5947,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 errors = []
 
                 if folder_path and mbid:
-                    target_dir = Path(folder_path).resolve()
-                    if not _path_is_within(str(target_dir), MUSIC_LIBRARY_PATH):
-                        self._send_json(403, {"ok": False, "error": "Folder path is outside permitted music library path", "error_code": "FORBIDDEN_PATH"})
-                        return
+                    target_dir = trusted_folder_path
                     if not dry_run:
                         try:
                             os.makedirs(target_dir, exist_ok=True)

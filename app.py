@@ -12158,9 +12158,10 @@ def unmatched_tracks():
     try:
         review_data = beets_client.get_unmatched_review_items(limit=min(limit, 1000), include_singletons=True)
     except BeetsUnavailableError as ex:
+        app.logger.warning("unmatched_tracks: Beets engine unavailable: %s", ex)
         return jsonify({
             "ok": False,
-            "error": f"Beets engine unavailable: {ex}",
+            "error": "Beets engine unavailable",
             "error_code": "ENGINE_UNAVAILABLE",
         }), 503
 
@@ -16731,28 +16732,31 @@ def import_review_queue():
     try:
         unmatched_data = beets_client.get_unmatched_review_items(limit=limit, offset=0, include_singletons=True)
     except BeetsUnavailableError as ex:
+        app.logger.warning("import_review_queue: Beets engine unavailable: %s", ex)
         return jsonify({
             "ok": False,
-            "error": f"Beets engine unavailable: {ex}",
+            "error": "Beets engine unavailable",
             "error_code": "ENGINE_UNAVAILABLE",
         }), 503
     except BeetsAuthError as ex:
+        app.logger.warning("import_review_queue: Beets engine auth failed: %s", ex)
         return jsonify({
             "ok": False,
-            "error": f"Beets engine auth failed: {ex}",
+            "error": "Beets engine auth failed",
             "error_code": "ENGINE_AUTH_ERROR",
         }), 502
     except BeetsError as ex:
+        app.logger.warning("import_review_queue: Beets engine error: %s", ex)
         return jsonify({
             "ok": False,
-            "error": f"Beets engine error: {ex}",
+            "error": "Beets engine error",
             "error_code": "ENGINE_ERROR",
         }), 502
     except Exception as ex:
         app.logger.error("Unexpected error in import_review_queue: %s", ex)
         return jsonify({
             "ok": False,
-            "error": f"Internal error loading review queue: {ex}",
+            "error": "Internal error loading review queue",
             "error_code": "INTERNAL_ERROR",
         }), 500
 
@@ -36399,6 +36403,13 @@ def _folder_cleanup_is_empty(root: Path) -> bool:
 
 def _folder_cleanup_db_items(folder: Path) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
+    # Every caller already resolves through _folder_cleanup_path()/
+    # _album_cleanup_trusted_path() before reaching here, but this function
+    # touches the filesystem on `folder` directly, so it re-checks
+    # containment itself rather than trusting that every present and future
+    # caller keeps doing so correctly.
+    if not _path_under(folder, MUSIC_ROOT):
+        return rows
     if not folder.exists():
         return rows
     try:

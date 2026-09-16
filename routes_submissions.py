@@ -977,21 +977,21 @@ def submission_target():
         app.logger.warning("submission_target engine unavailable for path=%r: %s", path, ex)
         return jsonify({
             "ok": False,
-            "error": f"Beets engine unavailable: {ex}",
+            "error": "Beets engine unavailable",
             "error_code": "ENGINE_UNAVAILABLE",
         }), 503
     except BeetsAuthError as ex:
         app.logger.warning("submission_target auth failed for path=%r: %s", path, ex)
         return jsonify({
             "ok": False,
-            "error": f"Beets engine auth failed: {ex}",
+            "error": "Beets engine auth failed",
             "error_code": "ENGINE_AUTH_ERROR",
         }), 502
     except BeetsError as ex:
         app.logger.warning("submission_target engine error for path=%r: %s", path, ex)
         return jsonify({
             "ok": False,
-            "error": f"Beets engine error: {ex}",
+            "error": "Beets engine error",
             "error_code": "ENGINE_ERROR",
         }), 502
     except KeyError as ex:
