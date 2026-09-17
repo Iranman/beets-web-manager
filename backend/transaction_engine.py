@@ -6694,19 +6694,38 @@ def create_artist_folder_reconcile_plan(
                             candidate_album_ids.setdefault(idx, set()).add(aid)
                         db_item_updates.append({"candidate_idx": idx, "id": iid, "old_path": p_str, "new_path": new_p})
 
-                    arows = _rows_by_path_prefix(con, "albums", "id, path, artpath", "path", old_prefix)
-                    for r in arows:
-                        aid = int(r["id"])
-                        raw_p = r["path"]
-                        p_str = raw_p.decode("utf-8", "replace") if isinstance(raw_p, bytes) else str(raw_p)
-                        rel = p_str[len(src_p):]
-                        new_p = dst_p + rel
-                        raw_art = r["artpath"]
-                        art_str = raw_art.decode("utf-8", "replace") if isinstance(raw_art, bytes) else (str(raw_art) if raw_art else "")
-                        new_art = (dst_p + art_str[len(src_p):]) if art_str and art_str.startswith(src_p) else art_str
-                        resource_keys.add(f"album:{aid}")
-                        candidate_album_ids.setdefault(idx, set()).add(aid)
-                        db_album_updates.append({"candidate_idx": idx, "id": aid, "old_path": p_str, "new_path": new_p, "old_artpath": art_str, "new_artpath": new_art})
+                    # Hotfix v0.1.17 (found by real two-service Docker
+                    # acceptance testing, not assumed): Beets' `albums`
+                    # table has no `path` column at all -- only `items`
+                    # have one, plus `albums.artpath` for cover art. The
+                    # previous version of this block queried
+                    # `albums` for a nonexistent `path` column, which
+                    # crashed every real Plan call for a pure rename
+                    # (`sqlite3.OperationalError: no such column: path`)
+                    # -- never caught by the existing unit-test coverage
+                    # for this function, whose own synthetic schema
+                    # happened to add a `path` column to `albums` that
+                    # real Beets does not have. Albums affected by this
+                    # move are the ones already found via their child
+                    # items above (candidate_album_ids); only artpath (if
+                    # it was itself under the renamed source) needs
+                    # rewriting -- there is no album-level "path" to
+                    # rewrite.
+                    affected_album_ids = candidate_album_ids.get(idx) or set()
+                    if affected_album_ids:
+                        placeholders = ",".join("?" * len(affected_album_ids))
+                        arows = con.execute(
+                            f"SELECT id, artpath FROM albums WHERE id IN ({placeholders})",
+                            tuple(affected_album_ids),
+                        ).fetchall()
+                        for r in arows:
+                            aid = int(r["id"])
+                            raw_art = r["artpath"]
+                            art_str = raw_art.decode("utf-8", "replace") if isinstance(raw_art, bytes) else (str(raw_art) if raw_art else "")
+                            new_art = (dst_p + art_str[len(src_p):]) if art_str and art_str.startswith(src_p) else art_str
+                            resource_keys.add(f"album:{aid}")
+                            if new_art != art_str:
+                                db_album_updates.append({"candidate_idx": idx, "id": aid, "old_artpath": art_str, "new_artpath": new_art})
                 elif m["type"] in ("move_file", "move_unique"):
                     old_b = src_p.encode("utf-8")
                     rows = con.execute("SELECT id, path, album_id FROM items WHERE path=?", (old_b,)).fetchall()
@@ -6881,6 +6900,20 @@ def execute_artist_folder_reconcile_apply(
 
         if status not in ("Preview", "Failed"):
             return {"ok": False, "error": "Transaction is not in a state Apply can act on.", "code": "artist_reconcile_invalid_state"}
+
+        # Hotfix v0.1.17 (BUG-4): mark this operation as actively running
+        # BEFORE the mutation work below starts, mirroring every other
+        # mutation-family apply function in this module (see the many
+        # `status="Running"` writes elsewhere here). This was previously
+        # missing from this one function -- status stayed "Preview" for
+        # the whole duration of a long apply, so a caller polling
+        # get_transaction() while the HTTP response was lost had no way to
+        # tell "apply is genuinely in progress" from "apply was never
+        # started" (both looked identical). The apply-lock above already
+        # serializes concurrent Apply calls for the same operation_id;
+        # this status write makes that in-progress state externally
+        # observable to a client that lost its own HTTP response.
+        store.update(operation_id, status="Running", metadata={**meta, "apply_started": True})
 
         resource_keys = meta.get("resource_keys") or []
         allowed_roots_raw = music_allowed_roots or tx.get("allowed_roots") or [str(os.environ.get("MUSIC_ROOT", "/music"))]
@@ -7065,14 +7098,16 @@ def execute_artist_folder_reconcile_apply(
                                     con.rollback()
                                     return _fail("Item path rowcount mismatch.", "artist_reconcile_db_failed")
 
+                            # Hotfix v0.1.17: albums have no `path` column
+                            # in real Beets schema -- only artpath is ever
+                            # rewritten here (see the Plan-step fix above
+                            # for why db_album_updates entries now only
+                            # carry old_artpath/new_artpath).
                             for u in db_album_updates:
-                                if u.get("new_artpath"):
-                                    cur.execute("UPDATE albums SET path=?, artpath=? WHERE id=?", (u["new_path"].encode("utf-8"), u["new_artpath"].encode("utf-8"), u["id"]))
-                                else:
-                                    cur.execute("UPDATE albums SET path=? WHERE id=?", (u["new_path"].encode("utf-8"), u["id"]))
+                                cur.execute("UPDATE albums SET artpath=? WHERE id=?", (u["new_artpath"].encode("utf-8") if u["new_artpath"] else None, u["id"]))
                                 if cur.rowcount != 1:
                                     con.rollback()
-                                    return _fail("Album path rowcount mismatch.", "artist_reconcile_db_failed")
+                                    return _fail("Album artpath rowcount mismatch.", "artist_reconcile_db_failed")
 
                             for au in db_artist_updates:
                                 dst_name = au["dst_name"]
@@ -7146,11 +7181,12 @@ def execute_artist_folder_reconcile_apply(
                             if not row or got != u["new_path"]:
                                 return _fail("Post-write verification failed for item path.", "artist_reconcile_verification_failed")
                         for u in db_album_updates:
-                            cur.execute("SELECT path FROM albums WHERE id=?", (u["id"],))
+                            cur.execute("SELECT artpath FROM albums WHERE id=?", (u["id"],))
                             row = cur.fetchone()
-                            got = (row["path"].decode("utf-8", "replace") if row and isinstance(row["path"], bytes) else (row["path"] if row else None))
-                            if not row or got != u["new_path"]:
-                                return _fail("Post-write verification failed for album path.", "artist_reconcile_verification_failed")
+                            got = (row["artpath"].decode("utf-8", "replace") if row and isinstance(row["artpath"], bytes) else (row["artpath"] if row else None))
+                            expected = u["new_artpath"] or None
+                            if not row or got != expected:
+                                return _fail("Post-write verification failed for album artpath.", "artist_reconcile_verification_failed")
                         for au in db_artist_updates:
                             for aid in au["album_ids"]:
                                 cur.execute("SELECT albumartist, mb_albumartistid FROM albums WHERE id=?", (aid,))
@@ -7357,11 +7393,10 @@ def rollback_artist_folder_reconcile(
                             cur.execute("UPDATE items SET path=? WHERE id=?", (u["old_path"].encode("utf-8"), u["id"]))
                             db_restored += 1 if cur.rowcount == 1 else 0
                             db_failed += 0 if cur.rowcount == 1 else 1
+                        # Hotfix v0.1.17: albums have no `path` column in
+                        # real Beets schema -- only artpath is restored.
                         for u in db_album_updates:
-                            if u.get("old_artpath"):
-                                cur.execute("UPDATE albums SET path=?, artpath=? WHERE id=?", (u["old_path"].encode("utf-8"), u["old_artpath"].encode("utf-8"), u["id"]))
-                            else:
-                                cur.execute("UPDATE albums SET path=? WHERE id=?", (u["old_path"].encode("utf-8"), u["id"]))
+                            cur.execute("UPDATE albums SET artpath=? WHERE id=?", (u["old_artpath"].encode("utf-8") if u.get("old_artpath") else None, u["id"]))
                             db_restored += 1 if cur.rowcount == 1 else 0
                             db_failed += 0 if cur.rowcount == 1 else 1
                         for au in db_artist_updates:

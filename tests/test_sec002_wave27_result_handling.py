@@ -592,7 +592,7 @@ class ArtistAliasFolderReconcileTests(unittest.TestCase):
         self.assertEqual(cand["source_path"], str(self.music_root / "Old Name"))
         self.assertEqual(cand["target_path"], str(self.music_root / "New Name"))
         self.assertEqual(cand["source_mbid"], VALID_ARTIST_ID)
-        apply.assert_called_once_with("txn_1")
+        apply.assert_called_once_with("txn_1", acceptance_failpoint=None, timeout=APP.BEETS_ARTIST_RECONCILE_TIMEOUT_SECONDS)
 
     def test_nonexistent_source_folder_is_skipped_without_calling_engine(self):
         with mock.patch.object(APP.beets_client, "plan_artist_folder_reconcile") as plan:

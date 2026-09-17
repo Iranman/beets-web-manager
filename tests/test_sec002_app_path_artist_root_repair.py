@@ -319,7 +319,7 @@ class ArtistFolderMergeIdentityTests(unittest.TestCase):
             )
         self.assertTrue(fp.called)
         plan_mock.assert_called_once()
-        apply_mock.assert_called_once_with("op_1")
+        apply_mock.assert_called_once_with("op_1", acceptance_failpoint=None, timeout=app_module.BEETS_ARTIST_RECONCILE_TIMEOUT_SECONDS)
         sent_candidates = plan_mock.call_args[0][0]["candidates"]
         self.assertEqual(len(sent_candidates), 1)
         sent_paths = {Path(sent_candidates[0]["source_path"]), Path(sent_candidates[0]["target_path"])}
@@ -391,7 +391,7 @@ class ArtistFolderMergeIdentityTests(unittest.TestCase):
             )
         fp.assert_called_once()
         plan_mock.assert_called_once()
-        apply_mock.assert_called_once_with("op_2")
+        apply_mock.assert_called_once_with("op_2", acceptance_failpoint=None, timeout=app_module.BEETS_ARTIST_RECONCILE_TIMEOUT_SECONDS)
         sent_candidates = plan_mock.call_args[0][0]["candidates"]
         self.assertEqual(len(sent_candidates), 1)
         self.assertEqual(sent_candidates[0]["source_mbid"], "9a70dc00-46ed-4b1b-a415-a4fb6dcb4d0f")

@@ -1333,10 +1333,14 @@ class TestAcoustIDChromaCapability(unittest.TestCase):
         # launching a fresh `beet version` subprocess -- reset it before
         # each test so a prior test's mocked subprocess.run() result can
         # never leak into this one via a still-"fresh" cache entry.
+        # Hotfix v0.1.17 (BUG-2): also reset the background-refresh
+        # bookkeeping the cache now uses, for the same reason.
         import backend.beets_control_agent as control_agent_module
+        control_agent_module._BEET_VERSION_REFRESH_DONE_EVENT.set()
         self._cache_patches = [
             mock.patch.object(control_agent_module, "_BEET_VERSION_CACHE", None),
             mock.patch.object(control_agent_module, "_BEET_VERSION_CACHE_TS", 0.0),
+            mock.patch.object(control_agent_module, "_BEET_VERSION_REFRESH_ACTIVE", False),
         ]
         for p in self._cache_patches:
             p.start()
@@ -1488,19 +1492,35 @@ class TestAcoustIDChromaCapability(unittest.TestCase):
         self.assertIn("submit", ALLOWED_COMMANDS)
 
     def _run_status_with_beet_version_stdout(self, stdout: str) -> dict:
-        handler = ControlAgentHandler.__new__(ControlAgentHandler)
-        handler.headers = {"Authorization": "Bearer test-token"}
-        handler._authenticate = lambda: True
-        handler.path = "/status"
-        responses = []
-        handler._send_json = lambda code, data: responses.append((code, data))
+        # Hotfix v0.1.17 (BUG-2): /status no longer runs the probe
+        # synchronously on the calling thread -- a cold cache only
+        # schedules a background refresh and returns a "pending"
+        # placeholder immediately. Call it once to trigger that, wait for
+        # the (mocked, near-instant) background probe to populate the
+        # cache, then call it again to read the now-resolved payload --
+        # equivalent to what the old synchronous behavior returned in one
+        # call, without changing any of this class's assertions.
+        import backend.beets_control_agent as control_agent_module
+
+        def _get():
+            handler = ControlAgentHandler.__new__(ControlAgentHandler)
+            handler.headers = {"Authorization": "Bearer test-token"}
+            handler._authenticate = lambda: True
+            handler.path = "/status"
+            responses = []
+            handler._send_json = lambda code, data: responses.append((code, data))
+            handler.do_GET()
+            self.assertEqual(len(responses), 1)
+            return responses[0]
 
         fake_result = mock.MagicMock(stdout=stdout, stderr="", returncode=0)
         with mock.patch("backend.beets_control_agent.subprocess.run", return_value=fake_result):
-            handler.do_GET()
+            _get()
+            deadline = time.monotonic() + 5.0
+            while control_agent_module._BEET_VERSION_CACHE is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            code, data = _get()
 
-        self.assertEqual(len(responses), 1)
-        code, data = responses[0]
         self.assertEqual(code, 200)
         return data
 
