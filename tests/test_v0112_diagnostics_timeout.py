@@ -38,6 +38,22 @@ import backend.beets_control_agent as control_agent_module
 
 
 def _reset_diagnostics_state():
+    """Reset the module-level diagnostics cache/refresh state between tests.
+
+    Must first WAIT for any background refresh thread still in flight from
+    a previous test (every test in this file that starts one bounds its
+    own mocked subprocess.run to at most a few seconds, specifically so
+    this wait is never unbounded) rather than merely overwriting the
+    bookkeeping variables -- a leaked thread that is still running when
+    this resets the cache to None will later finish and write its own
+    (from that earlier test's mock) result into the freshly-reset cache,
+    corrupting whichever test runs next. This is a real flake observed on
+    CI (not locally): test_completed_run_with_plugin_failures_is_still_cached_directly
+    and test_cold_status_returns_promptly_even_if_probe_would_take_47_seconds
+    both intermittently saw stale data from an earlier test's leaked
+    thread before this fix.
+    """
+    control_agent_module._BEET_VERSION_REFRESH_DONE_EVENT.wait(timeout=12)
     control_agent_module._BEET_VERSION_CACHE = None
     control_agent_module._BEET_VERSION_CACHE_TS = 0.0
     control_agent_module._BEET_VERSION_LAST_REFRESH_ERROR = ""
