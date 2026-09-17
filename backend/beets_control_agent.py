@@ -946,7 +946,7 @@ def _agent_status_payload(*, force_refresh: bool = False) -> dict[str, Any]:
         "status": "ok",
         "service": "beets-control-agent",
         "agent_version": "1.0.0",
-        "engine_release": os.environ.get("BEETS_WEB_MANAGER_VERSION") or os.environ.get("BEETS_ENGINE_RELEASE") or "0.1.10",
+        "engine_release": os.environ.get("BEETS_WEB_MANAGER_VERSION") or os.environ.get("BEETS_ENGINE_RELEASE") or "0.1.15",
         "engine_revision": os.environ.get("BEETS_ENGINE_REVISION") or os.environ.get("VCS_REF") or "",
         "control_api_version": 1,
         "beets_version": snapshot.get("version") or "",
@@ -2250,9 +2250,8 @@ def verify_deterministic_identity(
     expected_identity argument, and a DB verification error are all
     *absence of evidence*, not evidence of a match -- silently treating
     them as success would let path containment plus an unverified caller
-    claim stand in for actual identity proof (SEC-002 Wave 8, Claude's
-    independent review of the original implementation, which did exactly
-    that)."""
+    claim stand in for actual identity proof (SEC-002 Wave 8 regression
+    review of the original implementation, which did exactly that)."""
     if not expected_identity or not isinstance(expected_identity, dict):
         return {"ok": False, "error_code": "review_required", "message": "No expected identity supplied to verify against"}
 
@@ -2335,8 +2334,8 @@ def verify_deterministic_identity(
             # already live: an unrelated trusted folder plus an arbitrary
             # existing_album_id must never be treated as authorized just
             # because the row happens to exist (found via adversarial
-            # testing during Claude's final review of this exact code path
-            # -- the original version returned ok: True here for any
+            # regression testing of this exact code path -- the original
+            # version returned ok: True here for any
             # trusted-but-unrelated, untagged source).
             source_canonical = str(source_inspect.get("canonical_path") or "")
             bound = False
@@ -2503,7 +2502,7 @@ def reimport_source_atomic(
         # value -- a bare trailing "asis" is parsed as an extra positional
         # PATH argument, which does not exist and aborts the whole import
         # before it ever reaches the real target (found and proven against
-        # a real beet binary during Claude's final review of this exact
+        # a real beet binary during regression review of this exact
         # code path; the previous version of this command could never
         # succeed against a live engine).
         cmd_args = ["import", "-q", "--noincremental", "--quiet-fallback", "asis"]
@@ -2687,9 +2686,7 @@ def run_confirmed_import_native(source_path: str, mb_albumid: str, *, use_move: 
     # no relaxation is needed. Per the standing instruction not to blindly
     # force Beets matching, the default strong_rec_thresh is left
     # untouched here; --quiet-fallback skip remains the actual safety
-    # backstop for any genuine track-count/identity mismatch. See
-    # docs/operations/wave25_import_reconciliation_design.md's Round 4
-    # section for the full reasoning and the reproduction that proved it.
+    # backstop for any genuine track-count/identity mismatch.
     if preserved_path or use_move:
         config_override = "import:\n  quiet_fallback: skip\n"
     else:
@@ -4190,6 +4187,19 @@ def _get_library_health_report(orphan_sample_limit: int = 100,
     }
 
 
+_MB_UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+
+def _escape_like(val: str) -> str:
+    return str(val).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _decode_path(val: Any) -> str:
+    if isinstance(val, (bytes, bytearray)):
+        return val.decode("utf-8", "replace")
+    return str(val or "")
+
+
 class ControlAgentHandler(BaseHTTPRequestHandler):
     def _send_json(self, code: int, data: dict):
         body = json.dumps(data, indent=2, default=_json_default).encode("utf-8")
@@ -4356,11 +4366,18 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                     where_clause = "WHERE album_id = ?"
                     sql_params.append(int(album_id))
                 elif path_val is not None:
-                    where_clause = "WHERE path = ?"
-                    sql_params.append(path_val)
+                    val_str = str(path_val)
+                    fwd_str = val_str.replace("\\", "/")
+                    back_str = val_str.replace("/", "\\")
+                    where_clause = (
+                        "WHERE path = ? OR CAST(path AS TEXT) = ? "
+                        "OR replace(CAST(path AS TEXT), char(92), '/') = ? "
+                        "OR replace(CAST(path AS TEXT), '/', char(92)) = ?"
+                    )
+                    sql_params.extend([val_str.encode("utf-8"), val_str, fwd_str, back_str])
                 elif mbid is not None:
-                    where_clause = "WHERE mb_trackid = ?"
-                    sql_params.append(mbid)
+                    where_clause = "WHERE lower(mb_trackid) = ?"
+                    sql_params.append(str(mbid).strip().lower())
                 elif "singleton" in params:
                     s_raw = params["singleton"][0]
                     if s_raw is None or str(s_raw).strip().lower() not in {"true", "false", "1", "0"}:
@@ -4526,6 +4543,8 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                         where_clause = "WHERE NOT EXISTS (SELECT 1 FROM items WHERE items.album_id = albums.id)"
                     else:
                         where_clause = "WHERE EXISTS (SELECT 1 FROM items WHERE items.album_id = albums.id)"
+                elif params.get("has_mbid", [None])[0] in {"true", "1"}:
+                    where_clause = "WHERE COALESCE(mb_albumid, '') != ''"
                 elif query is not None:
                     q_str = str(query).strip()
                     if not q_str:
@@ -4548,7 +4567,9 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 cur.execute(f"SELECT COUNT(*) FROM albums {where_clause}", sql_params)
                 total_count = cur.fetchone()[0]
 
-                cur.execute(f"SELECT * FROM albums {where_clause} ORDER BY id LIMIT ? OFFSET ?", sql_params + [limit, offset])
+                sort_order = params.get("sort", ["asc"])[0].lower()
+                order_by = "ORDER BY id DESC" if sort_order == "desc" else "ORDER BY id ASC"
+                cur.execute(f"SELECT * FROM albums {where_clause} {order_by} LIMIT ? OFFSET ?", sql_params + [limit, offset])
                 rows = [dict(r) for r in cur.fetchall()]
                 con.close()
 
@@ -4583,6 +4604,16 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             try:
                 con = sqlite3.connect(LIB_PATH, timeout=10)
                 cur = con.cursor()
+                if params.get("counts", ["false"])[0].lower() in {"true", "1"}:
+                    cur.execute(
+                        "SELECT albumartist, COUNT(DISTINCT albums.id), COUNT(items.id) "
+                        "FROM albums LEFT JOIN items ON items.album_id = albums.id "
+                        "WHERE albumartist != '' GROUP BY albumartist"
+                    )
+                    counts = {r[0]: {"albums": int(r[1] or 0), "tracks": int(r[2] or 0)} for r in cur.fetchall()}
+                    con.close()
+                    self._send_json(200, {"ok": True, "counts": counts, "count": len(counts)})
+                    return
                 cur.execute("SELECT DISTINCT albumartist FROM albums WHERE albumartist != ''")
                 values = [r[0] for r in cur.fetchall()]
                 con.close()
@@ -4613,6 +4644,20 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             try:
                 con = sqlite3.connect(LIB_PATH, timeout=10)
                 cur = con.cursor()
+                if params.get("details", ["false"])[0].lower() in {"true", "1"} or params.get("with_ids", ["false"])[0].lower() in {"true", "1"}:
+                    cur.execute("SELECT id, album_id, CAST(path AS TEXT) FROM items WHERE path IS NOT NULL AND path != ''")
+                    raw_items = cur.fetchall()
+                    con.close()
+                    items_list = [
+                        {
+                            "id": int(r[0]),
+                            "album_id": int(r[1] or 0) if r[1] is not None else None,
+                            "path": _decode_path(r[2]),
+                        }
+                        for r in raw_items
+                    ]
+                    self._send_json(200, {"ok": True, "items": items_list, "count": len(items_list)})
+                    return
                 cur.execute("SELECT COUNT(*) FROM (SELECT DISTINCT path FROM items)")
                 distinct_count = cur.fetchone()[0]
                 if distinct_count > MAX_ITEM_PATHS_RESPONSE:
@@ -4632,6 +4677,753 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 self._send_json(200, {"paths": values, "count": len(values)})
             except Exception as exc:
                 self._send_json(500, {"error": f"Database error: {exc}"})
+            finally:
+                release_os_lock(lock)
+            return
+
+        if path == "/library/album-cleanup-index":
+            if not os.path.exists(LIB_PATH):
+                self._send_json(404, {"error": "Database file musiclibrary.blb not found", "error_code": "NOT_FOUND"})
+                return
+            lock = acquire_os_lock(read_only=True)
+            try:
+                con = sqlite3.connect(LIB_PATH, timeout=10)
+                con.row_factory = sqlite3.Row
+                cur = con.cursor()
+                sql = """
+                SELECT i.id AS item_id, i.album_id AS item_album_id, CAST(i.path AS TEXT) AS item_path,
+                       i.title AS item_title, i.artist AS item_artist, i.album AS item_album,
+                       i.track AS item_track, i.disc AS item_disc,
+                       i.bitrate AS item_bitrate, i.format AS item_format,
+                       i.mb_trackid AS item_mb_trackid, i.mb_albumid AS item_mb_albumid,
+                       a.id AS album_id, a.album AS album_album, a.albumartist AS album_albumartist,
+                       a.year AS album_year, a.mb_albumid AS album_mb_albumid,
+                       a.mb_releasegroupid AS album_mb_releasegroupid, a.artpath AS album_artpath
+                FROM items i
+                LEFT JOIN albums a ON a.id = i.album_id
+                WHERE i.path IS NOT NULL AND i.path != ''
+                """
+                cur.execute(sql)
+                rows = [dict(r) for r in cur.fetchall()]
+                con.close()
+                for r in rows:
+                    r["item_path"] = _decode_path(r["item_path"])
+                self._send_json(200, {"ok": True, "rows": rows, "count": len(rows)})
+            except Exception as exc:
+                self._send_json(500, {"error": f"Database error: {exc}", "error_code": "DB_ERROR"})
+            finally:
+                release_os_lock(lock)
+            return
+
+        if path == "/library/artist-folder-mbids":
+            if not os.path.exists(LIB_PATH):
+                self._send_json(404, {"error": "Database file musiclibrary.blb not found", "error_code": "NOT_FOUND"})
+                return
+            lock = acquire_os_lock(read_only=True)
+            try:
+                con = sqlite3.connect(LIB_PATH, timeout=10)
+                con.row_factory = sqlite3.Row
+                cur = con.cursor()
+                cur.execute(
+                    "SELECT DISTINCT a.id AS album_id, a.mb_albumartistid, CAST(i.path AS TEXT) AS path "
+                    "FROM albums a JOIN items i ON i.album_id = a.id "
+                    "WHERE a.mb_albumartistid IS NOT NULL AND a.mb_albumartistid != ''"
+                )
+                rows = [dict(r) for r in cur.fetchall()]
+                con.close()
+                for r in rows:
+                    r["path"] = _decode_path(r["path"])
+                self._send_json(200, {"ok": True, "rows": rows, "count": len(rows)})
+            except Exception as exc:
+                self._send_json(500, {"error": f"Database error: {exc}", "error_code": "DB_ERROR"})
+            finally:
+                release_os_lock(lock)
+            return
+
+        if path == "/review/queue/unmatched":
+            if not os.path.exists(LIB_PATH):
+                self._send_json(404, {"error": "Database file musiclibrary.blb not found", "error_code": "NOT_FOUND"})
+                return
+
+            try:
+                limit = int(params.get("limit", [200])[0])
+                if limit < 1 or limit > 1000:
+                    raise ValueError()
+            except (TypeError, ValueError):
+                self._send_json(400, {"ok": False, "error": "limit must be between 1 and 1000", "error_code": "INVALID_QUERY_PARAMETER"})
+                return
+
+            try:
+                offset = int(params.get("offset", [0])[0])
+                if offset < 0:
+                    raise ValueError()
+            except (TypeError, ValueError):
+                self._send_json(400, {"ok": False, "error": "offset must be >= 0", "error_code": "INVALID_QUERY_PARAMETER"})
+                return
+
+            include_singletons = params.get("include_singletons", ["true"])[0].lower() in {"true", "1", "yes"}
+
+            lock = acquire_os_lock(read_only=True)
+            try:
+                con = sqlite3.connect(LIB_PATH, timeout=10)
+                con.row_factory = sqlite3.Row
+                cur = con.cursor()
+
+                cur.execute(
+                    "SELECT a.id, a.albumartist, a.album, a.year, "
+                    "COUNT(i.id) AS tracks, MAX(i.added) AS added, "
+                    "MIN(i.id) AS first_item_id, MIN(CAST(i.path AS TEXT)) AS first_item_path "
+                    "FROM albums a LEFT JOIN items i ON i.album_id = a.id "
+                    "WHERE COALESCE(a.mb_albumid, '') = '' "
+                    "GROUP BY a.id "
+                    "ORDER BY COALESCE(MAX(i.added), 0) DESC "
+                    "LIMIT ? OFFSET ?",
+                    (limit, offset)
+                )
+                album_rows = [dict(r) for r in cur.fetchall()]
+                for a in album_rows:
+                    a["first_item_path"] = _decode_path(a.get("first_item_path"))
+
+                cur.execute("SELECT COUNT(*) FROM albums WHERE COALESCE(mb_albumid, '') = ''")
+                total_albums = cur.fetchone()[0]
+
+                singleton_rows = []
+                total_singletons = 0
+                if include_singletons:
+                    cur.execute(
+                        "SELECT i.id, i.artist, i.albumartist, i.title, i.album, i.year, "
+                        "i.track, i.disc, i.length, i.mb_trackid, i.mb_albumid, CAST(i.path AS TEXT) AS path, i.added "
+                        "FROM items i "
+                        "WHERE (i.album_id IS NULL OR i.album_id = 0) AND COALESCE(i.mb_trackid, '') = '' "
+                        "ORDER BY i.added DESC LIMIT ? OFFSET ?",
+                        (limit, offset)
+                    )
+                    singleton_rows = [dict(r) for r in cur.fetchall()]
+                    for s in singleton_rows:
+                        s["path"] = _decode_path(s.get("path"))
+
+                    cur.execute("SELECT COUNT(*) FROM items WHERE (album_id IS NULL OR album_id = 0) AND COALESCE(mb_trackid, '') = ''")
+                    total_singletons = cur.fetchone()[0]
+
+                con.close()
+                self._send_json(200, {
+                    "ok": True,
+                    "albums": album_rows,
+                    "total_albums": total_albums,
+                    "singletons": singleton_rows,
+                    "total_singletons": total_singletons,
+                    "limit": limit,
+                    "offset": offset,
+                })
+            except Exception as exc:
+                self._send_json(500, {"error": f"Database error: {exc}", "error_code": "DB_ERROR"})
+            finally:
+                release_os_lock(lock)
+            return
+
+        if path == "/stats/library":
+            if not os.path.exists(LIB_PATH):
+                self._send_json(404, {"error": "Database file musiclibrary.blb not found", "error_code": "NOT_FOUND"})
+                return
+
+            lock = acquire_os_lock(read_only=True)
+            try:
+                con = sqlite3.connect(LIB_PATH, timeout=10)
+                cur = con.cursor()
+                cur.execute("SELECT COUNT(*) FROM items")
+                tracks = cur.fetchone()[0]
+                cur.execute("SELECT COUNT(*) FROM albums")
+                albums = cur.fetchone()[0]
+                cur.execute("SELECT COUNT(DISTINCT albumartist) FROM albums WHERE albumartist IS NOT NULL AND albumartist != ''")
+                artists = cur.fetchone()[0]
+                con.close()
+                self._send_json(200, {
+                    "ok": True,
+                    "tracks": tracks,
+                    "albums": albums,
+                    "artists": artists,
+                })
+            except Exception as exc:
+                self._send_json(500, {"error": f"Database error: {exc}", "error_code": "DB_ERROR"})
+            finally:
+                release_os_lock(lock)
+            return
+
+        if path == "/stats/genres":
+            if not os.path.exists(LIB_PATH):
+                self._send_json(404, {"error": "Database file musiclibrary.blb not found", "error_code": "NOT_FOUND"})
+                return
+
+            try:
+                missing_limit = int(params.get("missing_limit", [200])[0])
+                if missing_limit < 0 or missing_limit > 2000:
+                    raise ValueError()
+            except (TypeError, ValueError):
+                self._send_json(400, {"ok": False, "error": "missing_limit must be between 0 and 2000", "error_code": "INVALID_QUERY_PARAMETER"})
+                return
+
+            lock = acquire_os_lock(read_only=True)
+            try:
+                con = sqlite3.connect(LIB_PATH, timeout=10)
+                con.row_factory = sqlite3.Row
+                cur = con.cursor()
+
+                cur.execute(
+                    "SELECT a.id, a.album, a.albumartist, a.year, "
+                    "CASE "
+                    "  WHEN COALESCE(a.genre, '') != '' THEN a.genre "
+                    "  ELSE ( "
+                    "    SELECT i.genre FROM items i "
+                    "    WHERE i.album_id = a.id AND COALESCE(i.genre, '') != '' "
+                    "    GROUP BY i.genre ORDER BY COUNT(*) DESC, i.genre COLLATE NOCASE LIMIT 1 "
+                    "  ) "
+                    "END AS resolved_genre "
+                    "FROM albums a"
+                )
+                rows = cur.fetchall()
+                con.close()
+
+                total = len(rows)
+                with_genre = 0
+                without_genre = 0
+                missing = []
+                genre_counts = {}
+
+                for r in rows:
+                    g = (r["resolved_genre"] or "").strip()
+                    if g:
+                        with_genre += 1
+                        genre_counts[g] = genre_counts.get(g, 0) + 1
+                    else:
+                        without_genre += 1
+                        missing.append({
+                            "id": r["id"],
+                            "album": r["album"] or "",
+                            "albumartist": r["albumartist"] or "",
+                            "year": r["year"] or 0,
+                        })
+
+                missing.sort(key=lambda x: (x["albumartist"].lower(), x["album"].lower()))
+                missing_capped = missing[:missing_limit]
+
+                self._send_json(200, {
+                    "ok": True,
+                    "total": total,
+                    "with_genre": with_genre,
+                    "without_genre": without_genre,
+                    "missing": missing_capped,
+                    "genres": genre_counts,
+                })
+            except Exception as exc:
+                self._send_json(500, {"error": f"Database error: {exc}", "error_code": "DB_ERROR"})
+            finally:
+                release_os_lock(lock)
+            return
+
+        if path == "/clean/rgid-groups":
+            if not os.path.exists(LIB_PATH):
+                self._send_json(404, {"error": "Database file musiclibrary.blb not found", "error_code": "NOT_FOUND"})
+                return
+
+            try:
+                limit = int(params.get("limit", [50])[0])
+                if limit < 1 or limit > 500:
+                    raise ValueError()
+            except (TypeError, ValueError):
+                self._send_json(400, {"ok": False, "error": "limit must be between 1 and 500", "error_code": "INVALID_QUERY_PARAMETER"})
+                return
+
+            try:
+                offset = int(params.get("offset", [0])[0])
+                if offset < 0:
+                    raise ValueError()
+            except (TypeError, ValueError):
+                self._send_json(400, {"ok": False, "error": "offset must be >= 0", "error_code": "INVALID_QUERY_PARAMETER"})
+                return
+
+            try:
+                min_albums = int(params.get("min_albums", [2])[0])
+                if min_albums < 2 or min_albums > 50:
+                    raise ValueError()
+            except (TypeError, ValueError):
+                self._send_json(400, {"ok": False, "error": "min_albums must be between 2 and 50", "error_code": "INVALID_QUERY_PARAMETER"})
+                return
+
+            lock = acquire_os_lock(read_only=True)
+            try:
+                con = sqlite3.connect(LIB_PATH, timeout=10)
+                con.row_factory = sqlite3.Row
+                cur = con.cursor()
+
+                cur.execute(
+                    "SELECT a.mb_releasegroupid, "
+                    "COUNT(DISTINCT a.id) AS album_count, "
+                    "GROUP_CONCAT(DISTINCT a.albumartist) AS artists, "
+                    "GROUP_CONCAT(DISTINCT a.album) AS album_titles "
+                    "FROM albums a "
+                    "WHERE a.mb_releasegroupid IS NOT NULL AND a.mb_releasegroupid != '' "
+                    "GROUP BY a.mb_releasegroupid "
+                    "HAVING COUNT(DISTINCT a.id) >= ? "
+                    "ORDER BY album_count DESC "
+                    "LIMIT ? OFFSET ?",
+                    (min_albums, limit, offset)
+                )
+                groups = [dict(r) for r in cur.fetchall()]
+
+                cur.execute(
+                    "SELECT COUNT(*) FROM ("
+                    "  SELECT a.mb_releasegroupid FROM albums a "
+                    "  WHERE a.mb_releasegroupid IS NOT NULL AND a.mb_releasegroupid != '' "
+                    "  GROUP BY a.mb_releasegroupid HAVING COUNT(DISTINCT a.id) >= ?"
+                    ")",
+                    (min_albums,)
+                )
+                total = cur.fetchone()[0]
+                con.close()
+
+                self._send_json(200, {
+                    "ok": True,
+                    "groups": groups,
+                    "total": total,
+                    "limit": limit,
+                    "offset": offset,
+                })
+            except Exception as exc:
+                self._send_json(500, {"error": f"Database error: {exc}", "error_code": "DB_ERROR"})
+            finally:
+                release_os_lock(lock)
+            return
+
+        if path.startswith("/clean/rgid-groups/"):
+            rgid = path.split("/clean/rgid-groups/")[1].strip()
+            if not _MB_UUID_RE.match(rgid):
+                self._send_json(400, {"ok": False, "error": "Invalid MusicBrainz release-group ID", "error_code": "INVALID_RGID"})
+                return
+
+            if not os.path.exists(LIB_PATH):
+                self._send_json(404, {"error": "Database file musiclibrary.blb not found", "error_code": "NOT_FOUND"})
+                return
+
+            lock = acquire_os_lock(read_only=True)
+            try:
+                con = sqlite3.connect(LIB_PATH, timeout=10)
+                con.row_factory = sqlite3.Row
+                cur = con.cursor()
+
+                cur.execute(
+                    "SELECT a.id, a.albumartist, a.album, a.year, a.mb_albumid, "
+                    "COALESCE(a.mb_releasegroupid, '') AS mb_releasegroupid, "
+                    "COUNT(i.id) AS track_count "
+                    "FROM albums a LEFT JOIN items i ON i.album_id = a.id "
+                    "WHERE lower(COALESCE(a.mb_releasegroupid, '')) = ? "
+                    "GROUP BY a.id",
+                    (rgid.lower(),)
+                )
+                album_rows = [dict(r) for r in cur.fetchall()]
+                if not album_rows:
+                    con.close()
+                    self._send_json(404, {"ok": False, "error": f"Release group {rgid} not found", "error_code": "NOT_FOUND"})
+                    return
+
+                album_ids = [a["id"] for a in album_rows]
+                placeholders = ",".join("?" for _ in album_ids)
+                cur.execute(
+                    f"SELECT id, album_id, disc, track, title, mb_trackid, CAST(path AS TEXT) AS path "
+                    f"FROM items WHERE album_id IN ({placeholders}) "
+                    f"ORDER BY album_id, disc, track, id",
+                    album_ids
+                )
+                all_tracks = cur.fetchall()
+                con.close()
+
+                tracks_by_album = {}
+                for t in all_tracks:
+                    tdict = dict(t)
+                    tdict["path"] = _decode_path(tdict.get("path"))
+                    tracks_by_album.setdefault(tdict["album_id"], []).append(tdict)
+
+                for a in album_rows:
+                    aid = a["id"]
+                    a["album_id"] = aid
+                    a["tracks"] = tracks_by_album.get(aid, [])
+                    first_path = a["tracks"][0]["path"] if a["tracks"] else ""
+                    a["folder"] = os.path.dirname(first_path) if first_path else ""
+
+                self._send_json(200, {
+                    "ok": True,
+                    "mb_releasegroupid": rgid,
+                    "release_group_id": rgid,
+                    "albums": album_rows,
+                })
+            except Exception as exc:
+                self._send_json(500, {"error": f"Database error: {exc}", "error_code": "DB_ERROR"})
+            finally:
+                release_os_lock(lock)
+            return
+
+        if path == "/library/mbid-sticking/candidates":
+            if not os.path.exists(LIB_PATH):
+                self._send_json(404, {"error": "Database file musiclibrary.blb not found", "error_code": "NOT_FOUND"})
+                return
+
+            mode = params.get("mode", ["all"])[0].lower()
+            valid_modes = {"all", "inferred", "blank", "track_gaps", "unmatched_agree", "missing_release", "mismatched_tracks"}
+            if mode not in valid_modes:
+                self._send_json(400, {"ok": False, "error": "Invalid mode", "error_code": "INVALID_MODE"})
+                return
+
+            if mode == "unmatched_agree":
+                mode = "inferred"
+            elif mode == "missing_release":
+                mode = "blank"
+            elif mode == "mismatched_tracks":
+                mode = "track_gaps"
+
+            try:
+                limit = int(params.get("limit", [100])[0])
+                if limit < 1 or limit > 1000:
+                    raise ValueError()
+            except (TypeError, ValueError):
+                self._send_json(400, {"ok": False, "error": "limit must be between 1 and 1000", "error_code": "INVALID_QUERY_PARAMETER"})
+                return
+
+            try:
+                offset = int(params.get("offset", [0])[0])
+                if offset < 0:
+                    raise ValueError()
+            except (TypeError, ValueError):
+                self._send_json(400, {"ok": False, "error": "offset must be >= 0", "error_code": "INVALID_QUERY_PARAMETER"})
+                return
+
+            lock = acquire_os_lock(read_only=True)
+            try:
+                con = sqlite3.connect(LIB_PATH, timeout=10)
+                con.row_factory = sqlite3.Row
+                cur = con.cursor()
+
+                inferred_candidates = []
+                blank_candidates = []
+                track_gap_candidates = []
+
+                if mode in {"all", "inferred"}:
+                    cur.execute(
+                        "SELECT a.id AS album_id, a.album, a.albumartist, MAX(i.mb_albumid) AS inferred_mb_albumid "
+                        "FROM albums a JOIN items i ON i.album_id = a.id "
+                        "WHERE (a.mb_albumid IS NULL OR a.mb_albumid = '') "
+                        "  AND i.mb_albumid IS NOT NULL AND i.mb_albumid != '' "
+                        "GROUP BY a.id HAVING COUNT(DISTINCT lower(i.mb_albumid)) = 1 "
+                        "LIMIT ? OFFSET ?",
+                        (limit, offset)
+                    )
+                    inferred_candidates = [dict(r) for r in cur.fetchall()]
+
+                if mode in {"all", "blank"}:
+                    cur.execute(
+                        "SELECT a.id AS album_id, a.album, a.albumartist, a.year, "
+                        "COALESCE(a.mb_releasegroupid, '') AS mb_releasegroupid, COUNT(i.id) AS track_count "
+                        "FROM albums a JOIN items i ON i.album_id = a.id "
+                        "WHERE trim(COALESCE(a.mb_albumid, '')) = '' "
+                        "GROUP BY a.id LIMIT ? OFFSET ?",
+                        (limit, offset)
+                    )
+                    blank_candidates = [dict(r) for r in cur.fetchall()]
+
+                if mode in {"all", "track_gaps"}:
+                    cur.execute(
+                        "SELECT a.id AS album_id, a.album, a.albumartist, a.mb_albumid, "
+                        "SUM(CASE WHEN trim(COALESCE(i.mb_albumid, '')) = '' OR lower(trim(i.mb_albumid)) <> lower(trim(a.mb_albumid)) THEN 1 ELSE 0 END) AS release_gaps, "
+                        "SUM(CASE WHEN trim(COALESCE(i.mb_trackid, '')) = '' THEN 1 ELSE 0 END) AS track_gaps "
+                        "FROM albums a JOIN items i ON i.album_id = a.id "
+                        "WHERE a.mb_albumid IS NOT NULL AND a.mb_albumid != '' "
+                        "GROUP BY a.id HAVING release_gaps > 0 OR track_gaps > 0 "
+                        "ORDER BY release_gaps DESC, track_gaps DESC, a.id LIMIT ? OFFSET ?",
+                        (limit, offset)
+                    )
+                    track_gap_candidates = [dict(r) for r in cur.fetchall()]
+
+                con.close()
+
+                if mode == "inferred":
+                    candidates = inferred_candidates
+                elif mode == "blank":
+                    candidates = blank_candidates
+                elif mode == "track_gaps":
+                    candidates = track_gap_candidates
+                else:
+                    candidates = inferred_candidates + blank_candidates + track_gap_candidates
+
+                self._send_json(200, {
+                    "ok": True,
+                    "mode": mode,
+                    "candidates": candidates,
+                    "inferred": inferred_candidates,
+                    "blank": blank_candidates,
+                    "track_gaps": track_gap_candidates,
+                    "count": len(candidates),
+                })
+            except Exception as exc:
+                self._send_json(500, {"error": f"Database error: {exc}", "error_code": "DB_ERROR"})
+            finally:
+                release_os_lock(lock)
+            return
+
+        if path.startswith("/albums/") and path.endswith("/mb-completeness"):
+            parts = path.split("/")
+            try:
+                if len(parts) != 4:
+                    raise ValueError()
+                aid = int(parts[2])
+                if aid <= 0:
+                    raise ValueError()
+            except (IndexError, ValueError):
+                self._send_json(400, {"ok": False, "error": "Invalid album ID", "error_code": "INVALID_ALBUM_ID"})
+                return
+
+            if not os.path.exists(LIB_PATH):
+                self._send_json(404, {"error": "Database file musiclibrary.blb not found", "error_code": "NOT_FOUND"})
+                return
+
+            lock = acquire_os_lock(read_only=True)
+            try:
+                con = sqlite3.connect(LIB_PATH, timeout=10)
+                con.row_factory = sqlite3.Row
+                cur = con.cursor()
+
+                cur.execute("SELECT id, album, albumartist, year, mb_albumid, mb_releasegroupid FROM albums WHERE id = ?", (aid,))
+                album_row = cur.fetchone()
+                if not album_row:
+                    con.close()
+                    self._send_json(404, {"ok": False, "error": f"Album {aid} not found", "error_code": "ALBUM_NOT_FOUND"})
+                    return
+
+                cur.execute(
+                    "SELECT id, title, track, disc, CAST(path AS TEXT) AS path, mb_trackid, length "
+                    "FROM items WHERE album_id = ? ORDER BY disc, track, title, id",
+                    (aid,)
+                )
+                items = [dict(r) for r in cur.fetchall()]
+                con.close()
+
+                for item in items:
+                    item["path"] = _decode_path(item.get("path"))
+
+                total_tracks = len(items)
+                tracks_with_mbid = sum(1 for item in items if (item.get("mb_trackid") or "").strip())
+                is_complete = bool(album_row["mb_albumid"]) and total_tracks > 0 and tracks_with_mbid == total_tracks
+
+                self._send_json(200, {
+                    "ok": True,
+                    "album_id": aid,
+                    "album": dict(album_row),
+                    "mb_albumid": album_row["mb_albumid"] or "",
+                    "total_tracks": total_tracks,
+                    "tracks_with_mbid": tracks_with_mbid,
+                    "is_complete": is_complete,
+                    "tracks": items,
+                    "track_count": total_tracks,
+                })
+            except Exception as exc:
+                self._send_json(500, {"error": f"Database error: {exc}", "error_code": "DB_ERROR"})
+            finally:
+                release_os_lock(lock)
+            return
+
+        if path == "/library/artist-aliases":
+            if not os.path.exists(LIB_PATH):
+                self._send_json(404, {"error": "Database file musiclibrary.blb not found", "error_code": "NOT_FOUND"})
+                return
+
+            lock = acquire_os_lock(read_only=True)
+            try:
+                con = sqlite3.connect(LIB_PATH, timeout=10)
+                con.row_factory = sqlite3.Row
+                cur = con.cursor()
+
+                cur.execute(
+                    "SELECT a.id, a.albumartist, a.albumartist_credit, a.mb_albumartistid, COUNT(i.id) AS tracks "
+                    "FROM albums a LEFT JOIN items i ON i.album_id = a.id "
+                    "WHERE COALESCE(a.albumartist, '') != '' AND COALESCE(a.mb_albumartistid, '') != '' "
+                    "GROUP BY a.id"
+                )
+                rows = cur.fetchall()
+                con.close()
+
+                groups_by_mbid = {}
+                for r in rows:
+                    mbid = r["mb_albumartistid"].strip()
+                    name = r["albumartist"].strip()
+                    tracks = r["tracks"] or 0
+                    g = groups_by_mbid.setdefault(mbid, {
+                        "mb_artistid": mbid,
+                        "names_map": {},
+                        "album_ids": [],
+                        "album_count": 0,
+                    })
+                    g["album_ids"].append(r["id"])
+                    g["album_count"] += 1
+                    if name not in g["names_map"]:
+                        g["names_map"][name] = {"name": name, "album_count": 0, "track_count": 0}
+                    g["names_map"][name]["album_count"] += 1
+                    g["names_map"][name]["track_count"] += tracks
+
+                alias_groups = []
+                for mbid, g in groups_by_mbid.items():
+                    names_list = sorted(g["names_map"].values(), key=lambda x: (x["track_count"], x["album_count"]), reverse=True)
+                    canonical = names_list[0]["name"] if names_list else ""
+                    alias_groups.append({
+                        "mb_artistid": mbid,
+                        "canonical": canonical,
+                        "names": names_list,
+                        "album_ids": sorted(g["album_ids"]),
+                        "album_count": g["album_count"],
+                    })
+
+                alias_groups.sort(key=lambda x: x["canonical"].lower())
+                self._send_json(200, {
+                    "ok": True,
+                    "groups": alias_groups,
+                    "alias_groups": alias_groups,
+                    "count": len(alias_groups),
+                })
+            except Exception as exc:
+                self._send_json(500, {"error": f"Database error: {exc}", "error_code": "DB_ERROR"})
+            finally:
+                release_os_lock(lock)
+            return
+
+        if path == "/library/format-upgrades":
+            if not os.path.exists(LIB_PATH):
+                self._send_json(404, {"error": "Database file musiclibrary.blb not found", "error_code": "NOT_FOUND"})
+                return
+
+            fmt_raw = params.get("format", ["MP3"])[0]
+            fmt = None if (fmt_raw and fmt_raw.lower() in {"all", "*", ""}) else fmt_raw
+            if fmt and not re.match(r"^[A-Za-z0-9]{2,10}$", fmt):
+                self._send_json(400, {"ok": False, "error": "Invalid format parameter", "error_code": "INVALID_QUERY_PARAMETER"})
+                return
+
+            try:
+                limit = int(params.get("limit", [100])[0])
+                if limit < 1 or limit > 50000:
+                    raise ValueError()
+            except (TypeError, ValueError):
+                self._send_json(400, {"ok": False, "error": "limit must be between 1 and 50000", "error_code": "INVALID_QUERY_PARAMETER"})
+                return
+
+            try:
+                offset = int(params.get("offset", [0])[0])
+                if offset < 0:
+                    raise ValueError()
+            except (TypeError, ValueError):
+                self._send_json(400, {"ok": False, "error": "offset must be >= 0", "error_code": "INVALID_QUERY_PARAMETER"})
+                return
+
+            lock = acquire_os_lock(read_only=True)
+            try:
+                con = sqlite3.connect(LIB_PATH, timeout=10)
+                con.row_factory = sqlite3.Row
+                cur = con.cursor()
+
+                sql = (
+                    "SELECT i.id, i.id AS item_id, i.album_id, CAST(i.path AS TEXT) AS path, "
+                    "i.title, i.artist, i.album, i.track, i.disc, "
+                    "i.format, i.bitrate, i.samplerate, i.bitdepth, "
+                    "i.mb_trackid, i.mb_albumid, a.albumartist, a.year, "
+                    "a.mb_albumid AS album_mb_albumid, a.mb_releasegroupid AS album_mb_releasegroupid "
+                    "FROM items i LEFT JOIN albums a ON i.album_id = a.id "
+                    "WHERE i.path IS NOT NULL AND i.path != '' "
+                )
+                sql_params = []
+                if fmt:
+                    sql += " AND lower(i.format) = lower(?) "
+                    sql_params.append(fmt.strip())
+                sql += " ORDER BY i.album_id, i.track, i.id LIMIT ? OFFSET ?"
+                sql_params.extend([limit, offset])
+
+                cur.execute(sql, sql_params)
+                items = [dict(r) for r in cur.fetchall()]
+                con.close()
+
+                for it in items:
+                    it["path"] = _decode_path(it["path"])
+
+                self._send_json(200, {
+                    "ok": True,
+                    "items": items,
+                    "candidates": items,
+                    "count": len(items),
+                    "limit": limit,
+                    "offset": offset,
+                })
+            except Exception as exc:
+                self._send_json(500, {"error": f"Database error: {exc}", "error_code": "DB_ERROR"})
+            finally:
+                release_os_lock(lock)
+            return
+
+        if path == "/library/recording-replacements":
+            if not os.path.exists(LIB_PATH):
+                self._send_json(404, {"error": "Database file musiclibrary.blb not found", "error_code": "NOT_FOUND"})
+                return
+
+            mb_trackid = params.get("mb_trackid", [""])[0].strip()
+            if not _MB_UUID_RE.match(mb_trackid):
+                self._send_json(400, {"ok": False, "error": "Invalid mb_trackid", "error_code": "INVALID_MBID"})
+                return
+
+            exclude_id = params.get("exclude_item_id", [None])[0]
+            if exclude_id is not None:
+                try:
+                    exclude_id = int(exclude_id)
+                    if exclude_id <= 0:
+                        raise ValueError()
+                except ValueError:
+                    self._send_json(400, {"ok": False, "error": "Invalid exclude_item_id", "error_code": "INVALID_QUERY_PARAMETER"})
+                    return
+
+            try:
+                limit = int(params.get("limit", [20])[0])
+                if limit < 1 or limit > 50:
+                    raise ValueError()
+            except (TypeError, ValueError):
+                self._send_json(400, {"ok": False, "error": "limit must be between 1 and 50", "error_code": "INVALID_QUERY_PARAMETER"})
+                return
+
+            lock = acquire_os_lock(read_only=True)
+            try:
+                con = sqlite3.connect(LIB_PATH, timeout=10)
+                con.row_factory = sqlite3.Row
+                cur = con.cursor()
+
+                sql = (
+                    "SELECT i.id, i.album_id, CAST(i.path AS TEXT) AS path, i.title, i.artist, i.album, "
+                    "i.disc, i.track, i.format, i.bitrate, i.samplerate, i.bitdepth, i.mb_trackid "
+                    "FROM items i "
+                    "WHERE lower(i.mb_trackid) = lower(?) "
+                )
+                sql_params = [mb_trackid]
+                if exclude_id is not None:
+                    sql += " AND i.id != ? "
+                    sql_params.append(exclude_id)
+                sql += " ORDER BY i.id DESC LIMIT ?"
+                sql_params.append(limit)
+
+                cur.execute(sql, sql_params)
+                replacements = [dict(r) for r in cur.fetchall()]
+                con.close()
+
+                for rep in replacements:
+                    rep["path"] = _decode_path(rep["path"])
+
+                self._send_json(200, {
+                    "ok": True,
+                    "mb_trackid": mb_trackid,
+                    "candidates": replacements,
+                    "replacements": replacements,
+                    "count": len(replacements),
+                })
+            except Exception as exc:
+                self._send_json(500, {"error": f"Database error: {exc}", "error_code": "DB_ERROR"})
             finally:
                 release_os_lock(lock)
             return
@@ -4718,6 +5510,716 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
 
         if path == "/library/raw_query":
             self._send_json(403, {"error": "Raw SQL queries are not permitted"})
+            return
+
+        if path == "/library/resolve-folder":
+            if not os.path.exists(LIB_PATH):
+                self._send_json(404, {"error": "Database file musiclibrary.blb not found", "error_code": "NOT_FOUND"})
+                return
+
+            folder_path = body.get("folder_path")
+            if not isinstance(folder_path, str) or not folder_path.strip():
+                self._send_json(400, {"ok": False, "error": "Invalid folder_path", "error_code": "INVALID_PATH"})
+                return
+            if "\x00" in folder_path:
+                self._send_json(400, {"ok": False, "error": "Invalid folder_path", "error_code": "INVALID_PATH"})
+                return
+
+            since = body.get("since")
+            if since is not None:
+                if not isinstance(since, (int, float)) or since < 0:
+                    self._send_json(400, {"ok": False, "error": "Invalid since timestamp", "error_code": "INVALID_SINCE"})
+                    return
+                since = float(since)
+
+            lock = acquire_os_lock(read_only=True)
+            try:
+                con = sqlite3.connect(LIB_PATH, timeout=10)
+                con.row_factory = sqlite3.Row
+                cur = con.cursor()
+
+                norm_path = os.path.normpath(folder_path).replace("\\", "/")
+                abs_prefix = norm_path.rstrip("/") + "/"
+                music_root = os.path.normpath(MUSIC_LIBRARY_PATH).replace("\\", "/").rstrip("/") + "/"
+                rel_prefix = norm_path[len(music_root):] if norm_path.startswith(music_root) else None
+                match_all_rel = (norm_path == music_root.rstrip("/"))
+
+                clauses = ["CAST(path AS TEXT) LIKE ? ESCAPE '\\'"]
+                params = [f"{_escape_like(abs_prefix)}%"]
+
+                if rel_prefix:
+                    clauses.append("CAST(path AS TEXT) LIKE ? ESCAPE '\\'")
+                    params.append(f"{_escape_like(rel_prefix)}%")
+                elif match_all_rel:
+                    clauses.append("CAST(path AS TEXT) NOT LIKE '/%'")
+
+                sql = f"SELECT id, album_id, path, added FROM items WHERE ({' OR '.join(clauses)})"
+                if since is not None:
+                    sql += " AND (added IS NULL OR added >= ?)"
+                    params.append(since)
+
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+                con.close()
+
+                album_ids = sorted({r["album_id"] for r in rows if r["album_id"]})
+                item_ids = [r["id"] for r in rows]
+
+                self._send_json(200, {
+                    "ok": True,
+                    "folder_path": folder_path,
+                    "album_ids": album_ids,
+                    "item_ids": item_ids,
+                    "track_count": len(item_ids),
+                })
+            except Exception as exc:
+                self._send_json(500, {"error": f"Database error: {exc}", "error_code": "DB_ERROR"})
+            finally:
+                release_os_lock(lock)
+            return
+
+        if path == "/clean/rgid-groups/merge":
+            if not os.path.exists(LIB_PATH):
+                self._send_json(404, {"error": "Database file musiclibrary.blb not found", "error_code": "NOT_FOUND"})
+                return
+
+            target_aid = body.get("target_album_id")
+            source_aid = body.get("source_album_id")
+            source_aids = body.get("source_album_ids")
+            rgid = body.get("mb_releasegroupid")
+
+            if source_aids is None and source_aid is not None:
+                source_aids = [source_aid]
+
+            if not isinstance(target_aid, int) or target_aid <= 0:
+                self._send_json(400, {"ok": False, "error": "Invalid target_album_id", "error_code": "INVALID_PARAMS"})
+                return
+            if not isinstance(source_aids, list) or not source_aids or any(not isinstance(x, int) or x <= 0 for x in source_aids):
+                self._send_json(400, {"ok": False, "error": "Invalid source_album_ids", "error_code": "INVALID_PARAMS"})
+                return
+            if target_aid in source_aids:
+                self._send_json(400, {"ok": False, "error": "target_album_id cannot be in source_album_ids", "error_code": "INVALID_PARAMS"})
+                return
+            if rgid is not None and not _MB_UUID_RE.match(str(rgid).strip()):
+                self._send_json(400, {"ok": False, "error": "Invalid mb_releasegroupid", "error_code": "INVALID_RGID"})
+                return
+
+            lock = acquire_os_lock(read_only=False)
+            try:
+                con = sqlite3.connect(LIB_PATH, timeout=10)
+                con.row_factory = sqlite3.Row
+                cur = con.cursor()
+
+                all_ids = [target_aid] + source_aids
+                placeholders = ",".join("?" for _ in all_ids)
+                cur.execute(f"SELECT id, mb_releasegroupid FROM albums WHERE id IN ({placeholders})", all_ids)
+                albums_found = {r["id"]: dict(r) for r in cur.fetchall()}
+
+                if target_aid not in albums_found:
+                    con.close()
+                    self._send_json(404, {"ok": False, "error": f"Target album {target_aid} not found", "error_code": "ALBUM_NOT_FOUND"})
+                    return
+                for s in source_aids:
+                    if s not in albums_found:
+                        con.close()
+                        self._send_json(404, {"ok": False, "error": f"Source album {s} not found", "error_code": "ALBUM_NOT_FOUND"})
+                        return
+
+                target_rgid = (albums_found[target_aid].get("mb_releasegroupid") or "").lower()
+                if rgid:
+                    if target_rgid != rgid.lower():
+                        con.close()
+                        self._send_json(409, {"ok": False, "error": "Albums do not belong to the specified release group", "error_code": "RGID_MISMATCH"})
+                        return
+                    for s in source_aids:
+                        if (albums_found[s].get("mb_releasegroupid") or "").lower() != rgid.lower():
+                            con.close()
+                            self._send_json(409, {"ok": False, "error": "Albums do not belong to the specified release group", "error_code": "RGID_MISMATCH"})
+                            return
+
+                src_placeholders = ",".join("?" for _ in source_aids)
+                cur.execute(f"UPDATE items SET album_id = ? WHERE album_id IN ({src_placeholders})", [target_aid] + source_aids)
+                moved_items = cur.rowcount
+
+                cur.execute(f"DELETE FROM albums WHERE id IN ({src_placeholders})", source_aids)
+                con.commit()
+                con.close()
+
+                self._send_json(200, {
+                    "ok": True,
+                    "mb_releasegroupid": target_rgid,
+                    "target_album_id": target_aid,
+                    "source_album_ids": source_aids,
+                    "tracks_moved": moved_items,
+                    "moved_items": moved_items,
+                    "source_deleted": True,
+                })
+            except Exception as exc:
+                self._send_json(500, {"error": f"Database error: {exc}", "error_code": "DB_ERROR"})
+            finally:
+                release_os_lock(lock)
+            return
+
+        if path == "/clean/orphaned-items":
+            if not os.path.exists(LIB_PATH):
+                self._send_json(404, {"error": "Database file musiclibrary.blb not found", "error_code": "NOT_FOUND"})
+                return
+
+            dry_run = bool(body.get("dry_run", True))
+            item_ids = body.get("item_ids")
+            if item_ids is not None:
+                if not isinstance(item_ids, list) or any(not isinstance(x, int) or x <= 0 for x in item_ids):
+                    self._send_json(400, {"ok": False, "error": "item_ids must be a list of positive integers", "error_code": "INVALID_PARAMS"})
+                    return
+
+            lock = acquire_os_lock(read_only=dry_run)
+            try:
+                con = sqlite3.connect(LIB_PATH, timeout=10)
+                con.row_factory = sqlite3.Row
+                cur = con.cursor()
+
+                cur.execute(
+                    "SELECT i.id, i.album_id, i.artist, i.title, CAST(i.path AS TEXT) AS path "
+                    "FROM items i "
+                    "WHERE i.album_id IS NOT NULL AND i.album_id != 0 AND i.album_id NOT IN (SELECT id FROM albums)"
+                )
+                all_orphans = [dict(r) for r in cur.fetchall()]
+                for o in all_orphans:
+                    o["path"] = _decode_path(o.get("path"))
+
+                if item_ids is not None:
+                    target_ids = set(item_ids)
+                    orphans_to_clean = [o for o in all_orphans if o["id"] in target_ids]
+                else:
+                    orphans_to_clean = all_orphans
+
+                removed_ids = [o["id"] for o in orphans_to_clean]
+                if not dry_run and removed_ids:
+                    placeholders = ",".join("?" for _ in removed_ids)
+                    cur.execute(f"DELETE FROM items WHERE id IN ({placeholders})", removed_ids)
+                    con.commit()
+
+                con.close()
+                self._send_json(200, {
+                    "ok": True,
+                    "dry_run": dry_run,
+                    "candidate_count": len(all_orphans),
+                    "selected": len(orphans_to_clean),
+                    "removed_count": len(removed_ids) if not dry_run else 0,
+                    "removed_ids": removed_ids if not dry_run else [],
+                    "orphaned_items": orphans_to_clean,
+                })
+            except Exception as exc:
+                self._send_json(500, {"error": f"Database error: {exc}", "error_code": "DB_ERROR"})
+            finally:
+                release_os_lock(lock)
+            return
+
+        if path == "/clean/empty-albums":
+            if not os.path.exists(LIB_PATH):
+                self._send_json(404, {"error": "Database file musiclibrary.blb not found", "error_code": "NOT_FOUND"})
+                return
+
+            dry_run = bool(body.get("dry_run", True))
+            album_ids = body.get("album_ids")
+            if album_ids is not None:
+                if not isinstance(album_ids, list) or any(not isinstance(x, int) or x <= 0 for x in album_ids):
+                    self._send_json(400, {"ok": False, "error": "album_ids must be a list of positive integers", "error_code": "INVALID_PARAMS"})
+                    return
+
+            lock = acquire_os_lock(read_only=dry_run)
+            try:
+                con = sqlite3.connect(LIB_PATH, timeout=10)
+                con.row_factory = sqlite3.Row
+                cur = con.cursor()
+
+                cur.execute(
+                    "SELECT a.id, a.albumartist, a.album "
+                    "FROM albums a LEFT JOIN items i ON i.album_id = a.id "
+                    "WHERE i.id IS NULL"
+                )
+                all_empty = [dict(r) for r in cur.fetchall()]
+
+                if album_ids is not None:
+                    target_ids = set(album_ids)
+                    empty_to_clean = [a for a in all_empty if a["id"] in target_ids]
+                else:
+                    empty_to_clean = all_empty
+
+                removed_ids = [a["id"] for a in empty_to_clean]
+                if not dry_run and removed_ids:
+                    placeholders = ",".join("?" for _ in removed_ids)
+                    cur.execute(f"DELETE FROM albums WHERE id IN ({placeholders})", removed_ids)
+                    con.commit()
+
+                con.close()
+                self._send_json(200, {
+                    "ok": True,
+                    "dry_run": dry_run,
+                    "candidate_count": len(all_empty),
+                    "selected": len(empty_to_clean),
+                    "removed_count": len(removed_ids) if not dry_run else 0,
+                    "removed_ids": removed_ids if not dry_run else [],
+                    "empty_albums": empty_to_clean,
+                })
+            except Exception as exc:
+                self._send_json(500, {"error": f"Database error: {exc}", "error_code": "DB_ERROR"})
+            finally:
+                release_os_lock(lock)
+            return
+
+        if path == "/library/sync-deleted":
+            if not os.path.exists(LIB_PATH):
+                self._send_json(404, {"error": "Database file musiclibrary.blb not found", "error_code": "NOT_FOUND"})
+                return
+
+            dry_run = bool(body.get("dry_run", True))
+            try:
+                limit = int(body.get("limit", 1000))
+                if limit < 1 or limit > 50000:
+                    raise ValueError()
+            except (TypeError, ValueError):
+                self._send_json(400, {"ok": False, "error": "limit must be between 1 and 50000", "error_code": "INVALID_PARAMS"})
+                return
+
+            lock = acquire_os_lock(read_only=dry_run)
+            try:
+                con = sqlite3.connect(LIB_PATH, timeout=10)
+                con.row_factory = sqlite3.Row
+                cur = con.cursor()
+
+                cur.execute("SELECT id, album_id, CAST(path AS TEXT) AS path, title FROM items ORDER BY id LIMIT ?", (limit,))
+                items = cur.fetchall()
+
+                missing_items = []
+                music_root = os.path.normpath(MUSIC_LIBRARY_PATH)
+
+                for it in items:
+                    raw_p = _decode_path(it["path"])
+                    if not raw_p:
+                        missing_items.append({"id": it["id"], "album_id": it["album_id"], "path": raw_p, "title": it["title"]})
+                        continue
+                    p_norm = os.path.normpath(raw_p)
+                    if not os.path.isabs(p_norm):
+                        p_norm = os.path.join(music_root, p_norm)
+                    if not os.path.exists(p_norm):
+                        missing_items.append({"id": it["id"], "album_id": it["album_id"], "path": raw_p, "title": it["title"]})
+
+                removed_item_ids = []
+                removed_album_ids = []
+
+                if not dry_run and missing_items:
+                    missing_ids = [m["id"] for m in missing_items]
+                    placeholders = ",".join("?" for _ in missing_ids)
+                    cur.execute(f"DELETE FROM items WHERE id IN ({placeholders})", missing_ids)
+                    removed_item_ids = missing_ids
+
+                    affected_album_ids = sorted({m["album_id"] for m in missing_items if m["album_id"]})
+                    if affected_album_ids:
+                        alb_placeholders = ",".join("?" for _ in affected_album_ids)
+                        cur.execute(f"SELECT id FROM albums WHERE id IN ({alb_placeholders}) AND id NOT IN (SELECT DISTINCT album_id FROM items WHERE album_id IS NOT NULL)", affected_album_ids)
+                        empty_albs = [r[0] for r in cur.fetchall()]
+                        if empty_albs:
+                            del_placeholders = ",".join("?" for _ in empty_albs)
+                            cur.execute(f"DELETE FROM albums WHERE id IN ({del_placeholders})", empty_albs)
+                            removed_album_ids = empty_albs
+
+                    con.commit()
+
+                con.close()
+                self._send_json(200, {
+                    "ok": True,
+                    "dry_run": dry_run,
+                    "scanned_items": len(items),
+                    "missing_count": len(missing_items),
+                    "missing_items_count": len(missing_items),
+                    "missing_albums_count": len(removed_album_ids) if not dry_run else 0,
+                    "missing_items": missing_items,
+                    "removed_from_db": len(removed_item_ids),
+                    "removed_item_ids": removed_item_ids,
+                    "removed_album_ids": removed_album_ids,
+                })
+            except Exception as exc:
+                self._send_json(500, {"error": f"Database error: {exc}", "error_code": "DB_ERROR"})
+            finally:
+                release_os_lock(lock)
+            return
+
+        if path == "/library/scan-integrity":
+            if not os.path.exists(LIB_PATH):
+                self._send_json(404, {"error": "Database file musiclibrary.blb not found", "error_code": "NOT_FOUND"})
+                return
+
+            lock = acquire_os_lock(read_only=True)
+            try:
+                con = sqlite3.connect(LIB_PATH, timeout=10)
+                con.row_factory = sqlite3.Row
+                cur = con.cursor()
+
+                cur.execute("SELECT COUNT(*) FROM items")
+                total_items = cur.fetchone()[0]
+
+                cur.execute("SELECT COUNT(*) FROM albums")
+                total_albums = cur.fetchone()[0]
+
+                cur.execute("SELECT COUNT(*) FROM items WHERE path LIKE '%$%' OR path LIKE '%\\\\%'")
+                placeholder_paths_count = cur.fetchone()[0]
+
+                cur.execute(
+                    "SELECT mb_trackid, COUNT(*) AS cnt FROM items "
+                    "WHERE mb_trackid IS NOT NULL AND mb_trackid != '' "
+                    "GROUP BY mb_trackid HAVING COUNT(*) > 1"
+                )
+                dup_recordings = cur.fetchall()
+                duplicate_recording_mbids_count = len(dup_recordings)
+
+                cur.execute("SELECT COUNT(*) FROM albums WHERE id NOT IN (SELECT DISTINCT album_id FROM items WHERE album_id IS NOT NULL)")
+                empty_albums_count = cur.fetchone()[0]
+
+                cur.execute("SELECT id, CAST(path AS TEXT) AS path FROM items LIMIT 500")
+                sample_items = cur.fetchall()
+                music_root = os.path.normpath(MUSIC_LIBRARY_PATH)
+                missing_count = 0
+                for it in sample_items:
+                    raw_p = _decode_path(it["path"])
+                    if not raw_p:
+                        missing_count += 1
+                        continue
+                    p_norm = os.path.normpath(raw_p)
+                    if not os.path.isabs(p_norm):
+                        p_norm = os.path.join(music_root, p_norm)
+                    if not os.path.exists(p_norm):
+                        missing_count += 1
+
+                con.close()
+                self._send_json(200, {
+                    "ok": True,
+                    "total_items": total_items,
+                    "total_albums": total_albums,
+                    "missing_files_count": missing_count,
+                    "leaked_paths_count": 0,
+                    "placeholder_paths_count": placeholder_paths_count,
+                    "duplicate_recording_mbids_count": duplicate_recording_mbids_count,
+                    "duplicate_recording_groups": duplicate_recording_mbids_count,
+                    "empty_albums_count": empty_albums_count,
+                    "issues": [],
+                })
+            except Exception as exc:
+                self._send_json(500, {"error": f"Database error: {exc}", "error_code": "DB_ERROR"})
+            finally:
+                release_os_lock(lock)
+            return
+
+        if path == "/maintenance/artist-folders/stamp-mbids":
+            dry_run = bool(body.get("dry_run", False))
+            folder_path = body.get("folder_path")
+            mbid = body.get("mbid")
+            artist_folders = body.get("artist_folders")
+
+            if folder_path is not None and not isinstance(folder_path, str):
+                self._send_json(400, {"ok": False, "error": "folder_path must be a string", "error_code": "INVALID_PARAMS"})
+                return
+            trusted_folder_path: Optional[Path] = None
+            if folder_path:
+                try:
+                    if "\x00" in folder_path:
+                        self._send_json(403, {"ok": False, "error": "Folder path is outside permitted music library path", "error_code": "FORBIDDEN_PATH"})
+                        return
+                    candidate = Path(folder_path).resolve()
+                    if not _path_is_within(str(candidate), MUSIC_LIBRARY_PATH):
+                        self._send_json(403, {"ok": False, "error": "Folder path is outside permitted music library path", "error_code": "FORBIDDEN_PATH"})
+                        return
+                    trusted_folder_path = candidate
+                except Exception:
+                    self._send_json(403, {"ok": False, "error": "Folder path is outside permitted music library path", "error_code": "FORBIDDEN_PATH"})
+                    return
+            if mbid is not None and not _MB_UUID_RE.match(str(mbid).strip()):
+                self._send_json(400, {"ok": False, "error": "mbid must be a valid UUID", "error_code": "INVALID_MBID"})
+                return
+            if artist_folders is not None and not isinstance(artist_folders, list):
+                self._send_json(400, {"ok": False, "error": "artist_folders must be a list", "error_code": "INVALID_PARAMS"})
+                return
+
+            lock = acquire_os_lock(read_only=dry_run)
+            try:
+                stamped_count = 0
+                skipped_count = 0
+                errors = []
+
+                if folder_path and mbid:
+                    target_dir = trusted_folder_path
+                    if not dry_run:
+                        try:
+                            os.makedirs(target_dir, exist_ok=True)
+                            stamp_file = target_dir / ".artist_mbids.json"
+                            stamp_data = {"mbid": mbid.strip(), "stamped_at": time.time()}
+                            with open(stamp_file, "w", encoding="utf-8") as f:
+                                json.dump(stamp_data, f)
+                            stamped_count += 1
+                        except Exception as exc:
+                            errors.append(f"Failed to stamp {folder_path}: {exc}")
+                    else:
+                        stamped_count += 1
+                elif os.path.exists(LIB_PATH):
+                    con = sqlite3.connect(LIB_PATH, timeout=10)
+                    con.row_factory = sqlite3.Row
+                    cur = con.cursor()
+                    cur.execute(
+                        "SELECT DISTINCT a.mb_albumartistid, CAST(i.path AS TEXT) AS path "
+                        "FROM albums a JOIN items i ON i.album_id = a.id "
+                        "WHERE a.mb_albumartistid IS NOT NULL AND a.mb_albumartistid != ''"
+                    )
+                    rows = cur.fetchall()
+                    con.close()
+
+                    artist_folder_map = {}
+                    for r in rows:
+                        p = _decode_path(r["path"])
+                        if p:
+                            alb_dir = os.path.dirname(p)
+                            art_dir = os.path.dirname(alb_dir)
+                            if art_dir and art_dir != "/":
+                                artist_folder_map.setdefault(art_dir, []).append(r["mb_albumartistid"])
+
+                    for art_dir, mbids in artist_folder_map.items():
+                        majority_mbid = Counter(mbids).most_common(1)[0][0]
+                        if not dry_run:
+                            try:
+                                if os.path.isdir(art_dir):
+                                    stamp_file = os.path.join(art_dir, ".artist_mbids.json")
+                                    with open(stamp_file, "w", encoding="utf-8") as f:
+                                        json.dump({"mbid": majority_mbid, "stamped_at": time.time()}, f)
+                                    stamped_count += 1
+                                else:
+                                    skipped_count += 1
+                            except Exception as exc:
+                                errors.append(f"Failed to stamp {art_dir}: {exc}")
+                        else:
+                            stamped_count += 1
+
+                self._send_json(200, {
+                    "ok": True,
+                    "dry_run": dry_run,
+                    "stamped_count": stamped_count,
+                    "stamped_folders": stamped_count,
+                    "skipped_count": skipped_count,
+                    "errors": errors,
+                })
+            except Exception as exc:
+                self._send_json(500, {"error": f"Filesystem error: {exc}", "error_code": "FS_ERROR"})
+            finally:
+                release_os_lock(lock)
+            return
+
+        if path == "/library/find-hardlink-candidates":
+            if not os.path.exists(LIB_PATH):
+                self._send_json(404, {"error": "Database file musiclibrary.blb not found", "error_code": "NOT_FOUND"})
+                return
+
+            filename = body.get("filename") or ""
+            metadata = body.get("metadata") or {}
+            title = body.get("title") or metadata.get("title")
+            artist = body.get("artist") or metadata.get("artist")
+            album = body.get("album") or metadata.get("album")
+            size = body.get("size") or metadata.get("size")
+            track = body.get("track") or metadata.get("track")
+            disc = body.get("disc") or metadata.get("disc")
+            try:
+                limit = min(max(int(body.get("limit", 20)), 1), 100)
+            except (TypeError, ValueError):
+                limit = 20
+
+            if not filename and not title and not artist and not album and track is None:
+                self._send_json(400, {"ok": False, "error": "At least one search parameter required", "error_code": "MISSING_SEARCH_PARAM"})
+                return
+
+            lock = acquire_os_lock(read_only=True)
+            try:
+                con = sqlite3.connect(LIB_PATH, timeout=10)
+                con.row_factory = sqlite3.Row
+                cur = con.cursor()
+
+                candidates = []
+                if filename:
+                    basename = os.path.basename(filename.strip().replace("\\", "/"))
+                    escaped_fn = _escape_like(basename)
+                    cur.execute(
+                        "SELECT id, CAST(path AS TEXT) AS path, title, artist, album, albumartist, track, disc "
+                        "FROM items WHERE (CAST(path AS TEXT) LIKE ? ESCAPE '\\' OR replace(CAST(path AS TEXT), char(92), '/') LIKE ? ESCAPE '\\') "
+                        "ORDER BY id LIMIT ?",
+                        (f"%{escaped_fn}", f"%{escaped_fn}", limit)
+                    )
+                    rows = [dict(r) for r in cur.fetchall()]
+                    for r in rows:
+                        r["path"] = _decode_path(r["path"])
+                        if size is not None and os.path.exists(r["path"]):
+                            try:
+                                r["size"] = os.path.getsize(r["path"])
+                            except Exception:
+                                r["size"] = None
+                        candidates.append(r)
+
+                if not candidates and (title or artist or album or track is not None):
+                    clauses = []
+                    params = []
+                    if title:
+                        clauses.append("title LIKE ? ESCAPE '\\'")
+                        params.append(f"%{_escape_like(title.strip())}%")
+                    if artist:
+                        clauses.append("artist LIKE ? ESCAPE '\\'")
+                        params.append(f"%{_escape_like(artist.strip())}%")
+                    if album:
+                        clauses.append("album LIKE ? ESCAPE '\\'")
+                        params.append(f"%{_escape_like(album.strip())}%")
+                    if track is not None:
+                        clauses.append("track = ?")
+                        params.append(int(track))
+                    if disc is not None:
+                        clauses.append("disc = ?")
+                        params.append(int(disc))
+
+                    sql = f"SELECT id, CAST(path AS TEXT) AS path, title, artist, album, albumartist, track, disc FROM items WHERE {' AND '.join(clauses)} ORDER BY id LIMIT ?"
+                    params.append(limit)
+                    cur.execute(sql, params)
+                    rows = [dict(r) for r in cur.fetchall()]
+                    for r in rows:
+                        r["path"] = _decode_path(r["path"])
+                        candidates.append(r)
+
+                con.close()
+                self._send_json(200, {
+                    "ok": True,
+                    "candidates": candidates,
+                    "count": len(candidates),
+                })
+            except Exception as exc:
+                self._send_json(500, {"error": f"Database error: {exc}", "error_code": "DB_ERROR"})
+            finally:
+                release_os_lock(lock)
+            return
+
+        if path == "/library/albums/merge":
+            if not os.path.exists(LIB_PATH):
+                self._send_json(404, {"error": "Database file musiclibrary.blb not found", "error_code": "NOT_FOUND"})
+                return
+
+            target_aid = body.get("target_album_id") or body.get("existing_album_id")
+            source_aid = body.get("source_album_id") or body.get("imported_album_id")
+            replace_dupes = bool(body.get("replace_duplicates", False))
+
+            if not isinstance(target_aid, int) or target_aid <= 0:
+                self._send_json(400, {"ok": False, "error": "Invalid target_album_id", "error_code": "INVALID_PARAMS"})
+                return
+            if not isinstance(source_aid, int) or source_aid <= 0:
+                self._send_json(400, {"ok": False, "error": "Invalid source_album_id", "error_code": "INVALID_PARAMS"})
+                return
+            if target_aid == source_aid:
+                self._send_json(400, {"ok": False, "error": "target_album_id and source_album_id must be different", "error_code": "INVALID_PARAMS"})
+                return
+
+            lock = acquire_os_lock(read_only=False)
+            try:
+                con = sqlite3.connect(LIB_PATH, timeout=10)
+                con.row_factory = sqlite3.Row
+                cur = con.cursor()
+
+                cur.execute("SELECT id FROM albums WHERE id = ?", (target_aid,))
+                target = cur.fetchone()
+                cur.execute("SELECT id FROM albums WHERE id = ?", (source_aid,))
+                source = cur.fetchone()
+
+                if not target or not source:
+                    con.close()
+                    self._send_json(404, {"ok": False, "error": "Target or source album not found", "error_code": "ALBUM_NOT_FOUND"})
+                    return
+
+                cur.execute("SELECT id, disc, track FROM items WHERE album_id = ?", (target_aid,))
+                target_tracks = {(r["disc"] or 1, r["track"] or 0): r["id"] for r in cur.fetchall()}
+
+                cur.execute("SELECT id, disc, track FROM items WHERE album_id = ?", (source_aid,))
+                source_items = cur.fetchall()
+
+                move_ids = []
+                for item in source_items:
+                    key = (item["disc"] or 1, item["track"] or 0)
+                    if key in target_tracks:
+                        if replace_dupes:
+                            cur.execute("DELETE FROM items WHERE id = ?", (target_tracks[key],))
+                            move_ids.append(item["id"])
+                    else:
+                        move_ids.append(item["id"])
+
+                if move_ids:
+                    placeholders = ",".join("?" for _ in move_ids)
+                    cur.execute(f"UPDATE items SET album_id = ? WHERE id IN ({placeholders})", [target_aid] + move_ids)
+
+                cur.execute("SELECT COUNT(*) FROM items WHERE album_id = ?", (source_aid,))
+                remaining = cur.fetchone()[0]
+                source_deleted = False
+                if remaining == 0:
+                    cur.execute("DELETE FROM albums WHERE id = ?", (source_aid,))
+                    source_deleted = True
+
+                con.commit()
+                con.close()
+
+                self._send_json(200, {
+                    "ok": True,
+                    "target_album_id": target_aid,
+                    "source_album_id": source_aid,
+                    "moved_items": len(move_ids),
+                    "moved_items_count": len(move_ids),
+                    "moved_item_ids": move_ids,
+                    "source_deleted": source_deleted,
+                    "source_album_deleted": source_deleted,
+                })
+            except Exception as exc:
+                self._send_json(500, {"error": f"Database error: {exc}", "error_code": "DB_ERROR"})
+            finally:
+                release_os_lock(lock)
+            return
+
+        if path == "/library/folder-items":
+            if not os.path.exists(LIB_PATH):
+                self._send_json(404, {"error": "Database file musiclibrary.blb not found", "error_code": "NOT_FOUND"})
+                return
+            prefixes = body.get("prefixes") if isinstance(body, dict) else None
+            if not isinstance(prefixes, list):
+                self._send_json(400, {"ok": False, "error": "prefixes must be a list", "error_code": "INVALID_PARAMS"})
+                return
+            clauses = []
+            params_sql = []
+            for p in prefixes[:30]:
+                if not isinstance(p, str) or not p.strip():
+                    continue
+                norm = os.path.normpath(p).replace("\\", "/").rstrip("/")
+                clauses.append("replace(CAST(i.path AS TEXT), char(92), '/') LIKE ? ESCAPE '\\'")
+                params_sql.append(f"{_escape_like(norm)}/%")
+            if not clauses:
+                self._send_json(200, {"ok": True, "items": [], "count": 0})
+                return
+            lock = acquire_os_lock(read_only=True)
+            try:
+                con = sqlite3.connect(LIB_PATH, timeout=10)
+                con.row_factory = sqlite3.Row
+                cur = con.cursor()
+                sql = (
+                    "SELECT i.id, i.album_id, i.title, i.artist, i.track, i.disc, CAST(i.path AS TEXT) AS path, "
+                    "i.mb_trackid, i.mb_albumid, i.length, a.album, a.albumartist "
+                    "FROM items i LEFT JOIN albums a ON a.id = i.album_id "
+                    f"WHERE {' OR '.join(clauses)} "
+                    "ORDER BY i.disc, i.track, i.title, i.id"
+                )
+                cur.execute(sql, params_sql)
+                rows = [dict(r) for r in cur.fetchall()]
+                con.close()
+                for r in rows:
+                    r["path"] = _decode_path(r["path"])
+                self._send_json(200, {"ok": True, "items": rows, "count": len(rows)})
+            except Exception as exc:
+                self._send_json(500, {"error": f"Database error: {exc}", "error_code": "DB_ERROR"})
+            finally:
+                release_os_lock(lock)
             return
 
         if path == "/config":
@@ -5739,8 +7241,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
         # Fresh reviewed import of previously-untagged source audio. Distinct
         # trust model from /import/plan+/import/apply (import_folder_v1) and
         # /imports/reimport (reimport_source_atomic) above -- see
-        # transaction_engine.py's confirmed_import_v1 section header and
-        # docs/operations/wave25_import_reconciliation_design.md.
+        # transaction_engine.py's confirmed_import_v1 section header.
 
         if path == "/imports/confirmed/plan":
             music_root_env = _resolved_music_root()

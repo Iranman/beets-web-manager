@@ -29,10 +29,6 @@ config.yaml
 *.db
 .cache
 .local-archive
-.codex-live-backups
-_codex_backups
-_codex_backup
-.claude
 .playwright-cli
 docs
 *.md

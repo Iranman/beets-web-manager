@@ -1,12 +1,12 @@
 # Contributing
 
-Thanks for contributing to Beets Web Manager.
+Thanks for contributing to Beets Web Manager. See `docs/DEVELOPMENT.md` for project layout, setup, and the full validation command set, and `docs/ARCHITECTURE.md` for current system shape and non-negotiable product rules.
 
 ## Development
 
-1. Create a branch for your change.
-2. Keep changes focused and avoid unrelated refactors.
-3. Run the relevant checks before opening a pull request.
+1. Create a branch for your change; do not commit directly to `main`.
+2. Keep changes focused and avoid unrelated refactors. When a change uncovers a larger design issue, record it in `docs/TECHNICAL_DEBT.md` rather than expanding scope to fix it.
+3. Run the relevant checks before opening a pull request (see `docs/DEVELOPMENT.md` for the complete list):
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
@@ -16,6 +16,8 @@ npm run typecheck
 npm run lint
 npm run build
 ```
+
+4. Use `REVIEW.md` as the review checklist for any change touching matching, jobs, filesystem mutation, or provider integrations.
 
 ## Commit Messages
 

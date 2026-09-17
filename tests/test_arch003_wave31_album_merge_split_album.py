@@ -53,7 +53,34 @@ class AlbumMergeSplitAlbumTests(unittest.TestCase):
         self._invalidate_patch = mock.patch.object(app_module, "_invalidate_lib_cache")
         self._invalidate_patch.start()
 
+        def _mock_get_album(album_id):
+            with sqlite3.connect(self.db_path) as con:
+                con.row_factory = sqlite3.Row
+                row = con.execute("SELECT id, album, albumartist FROM albums WHERE id=?", (album_id,)).fetchone()
+                if not row:
+                    return None
+                return dict(row)
+
+        def _mock_find_all_items(album_id):
+            with sqlite3.connect(self.db_path) as con:
+                con.row_factory = sqlite3.Row
+                rows = con.execute("SELECT id, album_id, path, title, disc, track FROM items WHERE album_id=?", (album_id,)).fetchall()
+                res = []
+                for r in rows:
+                    d = dict(r)
+                    if isinstance(d.get("path"), bytes):
+                        d["path"] = d["path"].decode("utf-8")
+                    res.append(d)
+                return res
+
+        self._get_album_patch = mock.patch.object(app_module.beets_client, "get_album", side_effect=_mock_get_album)
+        self._get_album_patch.start()
+        self._find_items_patch = mock.patch.object(app_module.beets_client, "find_all_items_by_album_id", side_effect=_mock_find_all_items)
+        self._find_items_patch.start()
+
     def tearDown(self):
+        self._find_items_patch.stop()
+        self._get_album_patch.stop()
         self._invalidate_patch.stop()
         self._root_patch.stop()
         self._db_patch.stop()

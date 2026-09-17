@@ -12,7 +12,7 @@ FROM ${BEETS_BASE_IMAGE}
 # image, and a later rebuild with new fixes must never be able to keep
 # an earlier commit's label by omission.
 ARG VCS_REF
-ARG VERSION=0.1.10
+ARG VERSION=0.1.15
 RUN test -n "${VCS_REF}" || (echo "ERROR: VCS_REF build-arg is required and must not be blank" >&2 && exit 1)
 LABEL org.opencontainers.image.title="Beets Engine for Beets Web Manager" \
       org.opencontainers.image.description="Authoritative Beets engine and control agent" \
@@ -45,6 +45,7 @@ COPY backend/beets_startup_guard.py /opt/beets-web-manager-agent/beets_startup_g
 COPY backend/audio_preferences.py /opt/beets-web-manager-agent/audio_preferences.py
 COPY backend/transaction_engine.py /opt/beets-web-manager-agent/transaction_engine.py
 COPY backend/matching_contract.py /opt/beets-web-manager-agent/matching_contract.py
+COPY backend/matching/ /opt/beets-web-manager-agent/matching/
 # track_align.py: reused by transaction_engine.py's confirmed_import_v1
 # family for track alignment/AcoustID promotion (Wave 25 Round 3) -- not a
 # new matcher, the same module already used elsewhere for this purpose.

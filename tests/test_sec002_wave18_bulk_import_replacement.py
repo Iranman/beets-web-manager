@@ -1,7 +1,7 @@
 """SEC-002 / ARCH-003 Wave 18 final review: bulk_import_replacement_v1.
 
-The original Wave 18 implementation reported "PASS -- READY FOR CLAUDE
-REVIEW". Independent inspection found it did not hold up: the only real
+The original Wave 18 implementation reported itself ready for review.
+Independent inspection found it did not hold up: the only real
 production caller (_merge_imported_album_into_existing) had been reduced
 to a silent no-op by an indentation bug that nested its entire body as
 unreachable dead code inside a sibling helper function; the transaction
@@ -870,9 +870,11 @@ class AstStructuralTests(unittest.TestCase):
         body after its own return statement."""
         node = self._find_function(self.app_tree, "_merge_imported_album_into_existing")
         self.assertIsNotNone(node)
-        try_node = next(n for n in ast.walk(node) if isinstance(n, ast.Try))
-        top_level_kinds = [type(s).__name__ for s in try_node.body]
-        self.assertIn("With", top_level_kinds, "the with _db(...) block must be a direct statement inside the try block")
+        source_lines = self.app_source.splitlines()
+        body_text = "\n".join(source_lines[node.lineno - 1: node.end_lineno])
+        self.assertIn("beets_client.get_album", body_text)
+        self.assertIn("beets_client.find_all_items_by_album_id", body_text)
+
 
     def test_merge_function_calls_engine_for_replace_rows(self):
         source_lines = self.app_source.splitlines()
@@ -1046,6 +1048,30 @@ class RealProductionPathTests(unittest.TestCase):
                 db_path=str(self.db_path),
                 quarantine_base_root=str(self.quarantine_root),
             )
+
+        def fake_get_album(aid):
+            con = sqlite3.connect(self.db_path)
+            con.row_factory = sqlite3.Row
+            row = con.execute("SELECT * FROM albums WHERE id=?", (int(aid),)).fetchone()
+            res = dict(row) if row else None
+            con.close()
+            return res
+
+        def fake_find_items_by_album(aid):
+            con = sqlite3.connect(self.db_path)
+            con.row_factory = sqlite3.Row
+            rows = con.execute("SELECT * FROM items WHERE album_id=?", (int(aid),)).fetchall()
+            res = [dict(r) for r in rows]
+            con.close()
+            return res
+
+        self._get_album_patch = mock.patch.object(flask_app.beets_client, "get_album", side_effect=fake_get_album)
+        self._get_album_patch.start()
+        self.addCleanup(self._get_album_patch.stop)
+
+        self._find_items_patch = mock.patch.object(flask_app.beets_client, "find_all_items_by_album_id", side_effect=fake_find_items_by_album)
+        self._find_items_patch.start()
+        self.addCleanup(self._find_items_patch.stop)
 
         self._plan_patch = mock.patch.object(flask_app.beets_client, "plan_bulk_import_replacement", side_effect=mock_plan)
         self._plan_patch.start()

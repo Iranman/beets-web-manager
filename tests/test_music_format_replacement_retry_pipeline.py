@@ -27,16 +27,16 @@ class ReplacementRetryPipelineTests(unittest.TestCase):
         payload_source = function_source("_music_format_replacement_payload")
         verifier_source = function_source("_music_format_find_verified_replacement")
         self.assertIn('if mb_trackid:', verifier_source)
-        self.assertIn('WHERE lower(mb_trackid)=?', verifier_source)
+        self.assertIn('beets_client.find_all_items_by_mbid(mb_trackid)', verifier_source)
         self.assertIn('"replace_existing": True', payload_source)
 
     def test_verifier_checks_imported_rows_outside_original_album(self):
         verifier_source = function_source("_music_format_find_verified_replacement")
-        self.assertIn('candidates: List[sqlite3.Row] = []', verifier_source)
+        self.assertIn('candidates: List[Dict[str, Any]] = []', verifier_source)
         self.assertIn('seen_candidate_ids = set()', verifier_source)
-        self.assertIn('WHERE lower(mb_trackid)=?', verifier_source)
-        self.assertIn('FROM items WHERE album_id=?', verifier_source)
-        self.assertIn('ORDER BY id DESC LIMIT 60', verifier_source)
+        self.assertIn('beets_client.find_all_items_by_mbid(mb_trackid)', verifier_source)
+        self.assertIn('beets_client.find_all_items_by_album_id(album_id)', verifier_source)
+        self.assertIn('beets_client.get_items_page(offset=0, limit=100)', verifier_source)
 
     def test_recording_match_can_ignore_original_track_number(self):
         verifier_source = function_source("_music_format_find_verified_replacement")

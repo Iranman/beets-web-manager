@@ -517,15 +517,13 @@ class StampReleaseMetadataTests(Wave19FixtureBase):
         self.assertEqual(row["year"], 1999)
 
 
-class GreedyAlignmentAdversarialTests(Wave19FixtureBase):
+class GlobalAlignmentAdversarialTests(Wave19FixtureBase):
     """SEC-002 / ARCH-003 Wave 33 continuation (coordinator directive):
-    prove the engine's alignment procedure now matches app.py's own
-    greedy, first-come-exclusive-claim behavior in exactly the ambiguous
-    case (multiple candidate files competing for one track) where the OLD
-    engine algorithm (summarize_mb_track_alignment's rank-based
-    displacement) would have silently picked a DIFFERENT item -- the
-    correctness risk this porting work exists to close, not merely
-    bound. These are deliberately the sharpest tests in this wave.
+    prove the engine's alignment procedure now follows ARCH-002's global
+    one-to-one assignment policy in exactly the ambiguous case (multiple
+    candidate files competing for one track). The old first-come greedy
+    policy intentionally loses here: the higher-evidence candidate claims
+    the single target, and the displaced file stays unmatched.
     """
 
     def _tracklist_one_track(self):
@@ -579,14 +577,11 @@ class GreedyAlignmentAdversarialTests(Wave19FixtureBase):
         con.close()
         return path_a, path_b
 
-    def test_first_come_item_claims_the_track_not_the_higher_scoring_later_item(self):
-        """Item A (processed first in DB order, LOWER score) must claim
-        the one available track; item B (processed second, HIGHER score)
-        must be left unmatched. The OLD rank-based-displacement engine
-        algorithm would have picked B instead (displacing A), silently
-        relabeling the wrong file with Track 5's identity. This is
-        app.py's own, real, long-standing behavior -- the engine must now
-        agree with it exactly, not approximate it."""
+    def test_global_alignment_claims_track_with_highest_album_wide_evidence(self):
+        """Item B has the stronger title evidence for the only available target,
+        so the global assignment must choose B even though item A appears
+        first in DB order. This is the ARCH-002 replacement for the old
+        first-come greedy behavior."""
         self._create_two_candidates_one_track(album_id=1)
         res = create_album_mb_track_repair_plan(
             self.store,
@@ -600,14 +595,13 @@ class GreedyAlignmentAdversarialTests(Wave19FixtureBase):
         tx = self.store.get(res["operation_id"])
         repaired = tx["metadata"]["payload"]["tracks_to_repair"]
         self.assertEqual(len(repaired), 1)
-        self.assertEqual(repaired[0]["item_id"], 1)
+        self.assertEqual(repaired[0]["item_id"], 2)
         self.assertEqual(repaired[0]["after"]["mb_trackid"], REC_TARGET_1)
 
-    def test_displaced_higher_scoring_candidate_is_left_completely_untouched(self):
-        """Item B (the higher-scoring but second-processed candidate)
-        must never receive Track 5's identity, and must not appear in any
-        repair/conflict row at all -- it is simply left alone by this
-        Plan, exactly as app.py's own greedy loop would leave it."""
+    def test_displaced_lower_scoring_candidate_is_left_completely_untouched(self):
+        """Item A (the lower-scoring candidate) must never receive Track 5's
+        identity, and must not appear in any repair/conflict row at all --
+        it is simply left unmatched by the global Plan."""
         self._create_two_candidates_one_track(album_id=1)
         res = create_album_mb_track_repair_plan(
             self.store,
@@ -621,11 +615,11 @@ class GreedyAlignmentAdversarialTests(Wave19FixtureBase):
         payload = tx["metadata"]["payload"]
         touched_item_ids = {t["item_id"] for t in payload["tracks_to_repair"]}
         touched_item_ids |= {t["item_id"] for t in payload["conflicts_requiring_review"]}
-        self.assertNotIn(2, touched_item_ids)
+        self.assertNotIn(1, touched_item_ids)
 
     def test_zero_unmatched_zeroes_the_displaced_candidate_not_the_claimant(self):
         """With zero_unmatched=True, item B (never claimed a track) is
-        the one that gets its track# zeroed -- item A (the actual
+        the one that gets its track# zeroed -- item B (the actual
         claimant) must be left alone."""
         self._create_two_candidates_one_track(album_id=1)
         res = create_album_mb_track_repair_plan(
@@ -639,11 +633,11 @@ class GreedyAlignmentAdversarialTests(Wave19FixtureBase):
         self.assertEqual(res["zero_unmatched_rows"], 1)
         tx = self.store.get(res["operation_id"])
         zeroed_ids = {t["item_id"] for t in tx["metadata"]["payload"]["zero_unmatched_rows"]}
-        self.assertEqual(zeroed_ids, {2})
+        self.assertEqual(zeroed_ids, {1})
 
-    def test_apply_actually_relabels_item_a_on_disk_not_item_b(self):
-        """End-to-end through Apply (not just Plan inspection): item A's
-        real on-disk mb_trackid tag becomes REC_TARGET_1; item B's is
+    def test_apply_actually_relabels_item_b_on_disk_not_item_a(self):
+        """End-to-end through Apply (not just Plan inspection): item B's
+        real on-disk mb_trackid tag becomes REC_TARGET_1; item A's is
         left completely unwritten."""
         self._create_two_candidates_one_track(album_id=1)
         res = create_album_mb_track_repair_plan(
@@ -663,8 +657,8 @@ class GreedyAlignmentAdversarialTests(Wave19FixtureBase):
         row_a = con.execute("SELECT mb_trackid FROM items WHERE id=1").fetchone()
         row_b = con.execute("SELECT mb_trackid FROM items WHERE id=2").fetchone()
         con.close()
-        self.assertEqual(row_a["mb_trackid"], REC_TARGET_1)
-        self.assertEqual(row_b["mb_trackid"], "")
+        self.assertEqual(row_a["mb_trackid"], "")
+        self.assertEqual(row_b["mb_trackid"], REC_TARGET_1)
 
 
 if __name__ == "__main__":

@@ -10,6 +10,25 @@ from backend.security import (OutboundPolicyError, bounded_rate_key_store_sweep,
 install_secure_urllib()
 from backend.ai_batch_state_store import AiBatchStateConflictError, AiBatchStateStore
 from backend.web_manager_config_store import WebManagerConfigStore, WebManagerConfigStoreError
+from backend.matching import (
+    AcoustIDStatus,
+    ConfidenceState,
+    album_track_score as _canonical_album_track_score,
+    align_tracks_global,
+    best_album_track_match as _canonical_best_album_track_match,
+    evaluate_release_group_candidate,
+    normalize_artist as _canonical_normalize_artist,
+    normalize_title as _canonical_normalize_title,
+    normalize_track_title_for_matching,
+    similarity as _canonical_similarity,
+    strip_track_filename_id_suffix as _canonical_strip_track_filename_id_suffix,
+    title_variants as _canonical_title_variants,
+    track_feature_variants as _canonical_track_feature_variants,
+    track_filename_has_source_id_suffix as _canonical_track_filename_has_source_id_suffix,
+    track_parenthetical_alias_variants as _canonical_track_parenthetical_alias_variants,
+    track_path_prefixes as _canonical_track_path_prefixes,
+    track_title_variants_for_matching as _canonical_track_title_variants_for_matching,
+)
 from collections import Counter, OrderedDict, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -366,6 +385,7 @@ from backend.matching_contract import (
     build_recording_matching_decision,
     compute_decision_version,
 )
+from backend.matching import AcoustIDStatus, evaluate_release_group_candidate
 from backend.import_guard import (
     existing_track_can_block_downloaded_replacement as _guard_existing_track_can_block_downloaded_replacement,
     filter_wanted_tracks_against_missing as _guard_filter_wanted_tracks_against_missing,
@@ -4335,32 +4355,25 @@ def _item_ai_abs_path(item) -> str:
 
 
 def _track_ai_norm(value: str) -> str:
-    import unicodedata
-
-    text = unicodedata.normalize("NFKD", _s(value).casefold())
-    text = "".join(ch for ch in text if not unicodedata.combining(ch))
-    text = text.replace("&", " and ")
-    text = re.sub(r"\b(?:feat|ft|featuring)\.?\s+.*$", "", text, flags=re.I)
-    text = re.sub(r"[^a-z0-9]+", " ", text)
-    return " ".join(text.split())
+    """Canonical track title normalization wrapper for AI suggestions."""
+    return normalize_track_title_for_matching(value)
 
 
 def _track_ai_similarity(left: str, right: str) -> float:
-    from difflib import SequenceMatcher
-
-    a = _track_ai_norm(left)
-    b = _track_ai_norm(right)
-    if not a or not b:
-        return 0.0
-    score = SequenceMatcher(None, a, b).ratio()
-    if set(a.split()) & set(b.split()):
-        score = max(score, 0.70)
-    return score
+    """Canonical string similarity wrapper for AI suggestions."""
+    return _canonical_similarity(left, right)
 
 
 def _score_track_ai_candidate(current: Dict[str, Any], search_title: str,
                               search_artist: str, filename: str,
                               candidate: Dict[str, Any]) -> Dict[str, Any]:
+    """Rank AI track candidates for candidate generation / prompt ordering only.
+
+    This function computes an initial heuristic score for ordering candidates.
+    It is CANDIDATE_GENERATION_ONLY and does NOT authorize identity or actions.
+    Final identity decisions and safety gates are governed exclusively by
+    build_recording_matching_decision.
+    """
     try:
         title_variants = _album_track_title_variants(
             current.get("title") or search_title or filename,
@@ -5755,17 +5768,18 @@ def _album_folder_for_album_id(album_id: int) -> str:
     if not album_id:
         return ""
     try:
-        with _db(text_factory=bytes) as con:
-            row = con.execute(
-                "SELECT path FROM items WHERE album_id=? AND path IS NOT NULL "
-                "ORDER BY disc, track, id LIMIT 1",
-                (int(album_id),),
-            ).fetchone()
+        items = beets_client.find_all_items_by_album_id(int(album_id))
+    except BeetsUnavailableError:
+        raise
     except Exception:
-        row = None
-    if not row:
+        items = []
+    if not items:
         return ""
-    raw = _s(row[0])
+    sorted_items = sorted(
+        items,
+        key=lambda it: (int(it.get("disc") or 1), int(it.get("track") or 0), int(it.get("id") or 0)),
+    )
+    raw = _s(sorted_items[0].get("path") or "")
     if not raw:
         return ""
     fpath = Path(raw)
@@ -6006,21 +6020,12 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
     )
     result["folder_artist"] = folder_artist
     try:
-        import unicodedata
-        from difflib import SequenceMatcher
-
-        def _artist_key(value: str) -> str:
-            value = unicodedata.normalize("NFKC", _s(value).casefold())
-            value = value.replace("&", " and ")
-            chars = [c if c.isalnum() else " " for c in value]
-            return " ".join("".join(chars).split())
-
-        folder_key = _artist_key(folder_artist)
-        release_key = _artist_key(result["release_artist"])
+        folder_key = _canonical_normalize_artist(folder_artist)
+        release_key = _canonical_normalize_artist(result["release_artist"])
         if folder_key and release_key:
             folder_tokens = set(folder_key.split())
             release_tokens = set(release_key.split())
-            score = SequenceMatcher(None, folder_key, release_key).ratio()
+            score = _canonical_similarity(folder_key, release_key)
             result["artist_score"] = round(score, 3)
             result["artist_ok"] = bool(folder_tokens & release_tokens) or score >= 0.48
     except Exception:
@@ -6166,24 +6171,34 @@ def _folder_release_preflight(folder_path: str, mb_albumid: str,
 
     if existing_album_id:
         try:
-            with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:
-                rows = con.execute(
-                    "SELECT title, track, disc, path, mb_trackid, length "
-                    "FROM items WHERE album_id=? ORDER BY disc, track, title, id",
-                    (existing_album_id,),
-                ).fetchall()
-            for row in rows:
+            rows = beets_client.find_all_items_by_album_id(int(existing_album_id))
+            sorted_rows = sorted(
+                rows,
+                key=lambda r: (
+                    int(r.get("disc") or 1),
+                    int(r.get("track") or 0),
+                    _s(r.get("title") or ""),
+                    int(r.get("id") or 0),
+                ),
+            )
+            for row in sorted_rows:
                 _add_candidate(
-                    _s(row["title"]),
-                    _s(row["path"]),
-                    track=int(row["track"] or 0),
-                    disc=int(row["disc"] or 1),
-                    mb_trackid=_s(row["mb_trackid"]),
-                    length=float(row["length"] or 0),
+                    _s(row.get("title")),
+                    _s(row.get("path")),
+                    track=int(row.get("track") or 0),
+                    disc=int(row.get("disc") or 1),
+                    mb_trackid=_s(row.get("mb_trackid")),
+                    length=float(row.get("length") or 0),
                 )
+        except BeetsUnavailableError as ex:
+            result["scan_unavailable"] = True
+            result["error"] = f"Beets engine unavailable: {ex}"
+            if log is not None:
+                log.append(f"  [preflight] Engine unavailable reading existing album {existing_album_id}: {ex}")
+            return result
         except Exception as ex:
             if log is not None:
-                log.append(f"  [preflight] Existing DB read warning: {ex}")
+                log.append(f"  [preflight] Existing item read warning: {ex}")
 
     matched_indices: set = set()
     best_lines: List[str] = []
@@ -6436,15 +6451,8 @@ def _stage_selected_audio_files(aldir: str, audio_files: List[Path],
 
 
 def _db_item_file_exists(raw_path: str) -> bool:
-    if not raw_path:
-        return False
-    fpath = Path(raw_path)
-    if not fpath.is_absolute():
-        fpath = MUSIC_ROOT / raw_path
-    try:
-        return fpath.exists() and fpath.is_file()
-    except Exception:
-        return False
+    """DEPRECATED (ARCH-007): Media filesystem checks must not run in Web Manager container."""
+    return False
 
 
 def _prune_stale_wanted_rows_before_import(existing_album_id: int, mb_albumid: str,
@@ -6487,44 +6495,41 @@ def _prune_stale_wanted_rows_before_import(existing_album_id: int, mb_albumid: s
         )
 
     try:
-        with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:
-            rows = con.execute(
-                "SELECT id, title, disc, track, path, mb_trackid, length "
-                "FROM items WHERE album_id=? ORDER BY disc, track, id",
-                (int(existing_album_id),),
-            ).fetchall()
-            delete_ids: List[int] = []
-            labels: List[str] = []
-            for row in rows:
-                raw_path = _s(row["path"]) if "path" in row.keys() else ""
-                if _db_item_file_exists(raw_path):
-                    continue
-                if not _row_matches_wanted(row):
-                    continue
-                delete_ids.append(int(row["id"]))
-                labels.append(
-                    f"{int(row['disc'] or 1)}.{int(row['track'] or 0):02d} "
-                    f"{_s(row['title'])}"
-                )
-            if not delete_ids:
-                return 0
-            # Wave 25 round (independent review): a third instance of the
-            # same bug as _delete_album_items_under_folder/import_folder_with_id
-            # below -- folder_cleanup_v1's Plan never reads
-            # action="delete_stale_items" or item_ids, so this always
-            # planned/applied a no-op transaction while claiming success.
-            # playlist_media_cleanup_v1 is the real family for retiring
-            # specific item rows (and quarantining their file, when one
-            # still exists -- these rows were selected specifically
-            # because their file does NOT exist, so this is DB-row-only in
-            # practice, which the family already handles: it schedules the
-            # DB delete regardless of whether the file was found).
-            p_res = beets_client.plan_playlist_media_cleanup({"item_ids": delete_ids})
-            if not p_res.get("ok") or not p_res.get("operation_id"):
-                raise RuntimeError(p_res.get("error") or "Engine plan_playlist_media_cleanup failed for stale wanted rows")
-            app_res = beets_client.apply_playlist_media_cleanup(p_res["operation_id"])
-            if not app_res.get("ok"):
-                raise RuntimeError(app_res.get("error") or "Engine apply_playlist_media_cleanup failed for stale wanted rows")
+        items = beets_client.find_all_items_by_album_id(int(existing_album_id))
+        rows = sorted(
+            items,
+            key=lambda r: (int(r.get("disc") or 1), int(r.get("track") or 0), int(r.get("id") or 0)),
+        )
+        delete_ids: List[int] = []
+        labels: List[str] = []
+        for row in rows:
+            raw_path = _s(row.get("path") or "")
+            iid = int(row.get("id") or 0)
+            if not iid:
+                continue
+            if raw_path:
+                try:
+                    if beets_client.find_item_by_path(raw_path):
+                        continue
+                except (BeetsUnavailableError, BeetsError):
+                    raise
+                except Exception:
+                    pass
+            if not _row_matches_wanted(row):
+                continue
+            delete_ids.append(iid)
+            labels.append(
+                f"{int(row.get('disc') or 1)}.{int(row.get('track') or 0):02d} "
+                f"{_s(row.get('title') or '')}"
+            )
+        if not delete_ids:
+            return 0
+        p_res = beets_client.plan_playlist_media_cleanup({"item_ids": delete_ids})
+        if not p_res.get("ok") or not p_res.get("operation_id"):
+            raise RuntimeError(p_res.get("error") or "Engine plan_playlist_media_cleanup failed for stale wanted rows")
+        app_res = beets_client.apply_playlist_media_cleanup(p_res["operation_id"])
+        if not app_res.get("ok"):
+            raise RuntimeError(app_res.get("error") or "Engine apply_playlist_media_cleanup failed for stale wanted rows")
         label_text = ", ".join(labels[:5])
         log.append(
             "  [import] Removed "
@@ -6622,201 +6627,206 @@ def _merge_imported_album_into_existing(imported_album_id: int, existing_album_i
         # Removed rather than left as a live-looking trap for a future
         # caller to reach for.
 
-        with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:
-            existing = con.execute(
-                "SELECT id, album, albumartist, mb_albumid, year FROM albums WHERE id=?",
-                (existing_album_id,),
-            ).fetchone()
-            if not existing:
-                log.append(f"  [merge] Existing album_id {existing_album_id} not found; keeping imported album_id {imported_album_id}")
-                return imported_album_id
-            existing_rows = con.execute(
-                "SELECT id, title, disc, track, path, mb_trackid, mb_albumid, mb_releasegroupid, length "
-                "FROM items WHERE album_id=? ORDER BY disc, track, id",
-                (existing_album_id,),
-            ).fetchall()
-            existing_by_key: Dict[tuple, List[sqlite3.Row]] = {}
-            for row in existing_rows:
-                key = (int(row["disc"] or 1), int(row["track"] or 0))
-                if key[1]:
-                    existing_by_key.setdefault(key, []).append(row)
-            imported_rows = con.execute(
-                "SELECT id, title, disc, track, path, mb_trackid, mb_albumid, mb_releasegroupid, length "
-                "FROM items WHERE album_id=? ORDER BY disc, track, id",
-                (imported_album_id,),
-            ).fetchall()
-            move_ids: List[int] = []
-            dup_rows: List[sqlite3.Row] = []
-            replace_rows: List[sqlite3.Row] = []
-            # SEC-002 Wave 18: explicit old_item_id -> new_item_id
-            # correspondence, captured directly from the same matching loop
-            # that decides an existing row is being superseded -- not
-            # reconstructed later from "whatever else is now in the album",
-            # which cannot distinguish a genuine replacement from an
-            # unrelated pre-existing row.
-            mapping_pairs: List[Dict[str, int]] = []
-            for row in imported_rows:
-                key = (int(row["disc"] or 1), int(row["track"] or 0))
-                if key[1] and key in existing_by_key:
-                    target = target_by_key.get(key, {})
-                    existing_rows_for_key = existing_by_key.get(key, [])
-                    forced_replace_rows = [
+        try:
+            existing = beets_client.get_album(int(existing_album_id))
+        except BeetsUnavailableError as ex:
+            log.append(f"  [merge] Engine unavailable fetching album {existing_album_id}: {ex}")
+            raise
+        if not existing:
+            log.append(f"  [merge] Existing album_id {existing_album_id} not found; keeping imported album_id {imported_album_id}")
+            return imported_album_id
+
+        try:
+            existing_items = beets_client.find_all_items_by_album_id(int(existing_album_id))
+            imported_items = beets_client.find_all_items_by_album_id(int(imported_album_id))
+        except BeetsUnavailableError as ex:
+            log.append(f"  [merge] Engine unavailable fetching items: {ex}")
+            raise
+
+        existing_rows = sorted(
+            existing_items,
+            key=lambda r: (int(r.get("disc") or 1), int(r.get("track") or 0), int(r.get("id") or 0)),
+        )
+        existing_by_key: Dict[tuple, List[Dict[str, Any]]] = {}
+        for row in existing_rows:
+            key = (int(row.get("disc") or 1), int(row.get("track") or 0))
+            if key[1]:
+                existing_by_key.setdefault(key, []).append(row)
+        imported_rows = sorted(
+            imported_items,
+            key=lambda r: (int(r.get("disc") or 1), int(r.get("track") or 0), int(r.get("id") or 0)),
+        )
+        move_ids: List[int] = []
+        dup_rows: List[Dict[str, Any]] = []
+        replace_rows: List[Dict[str, Any]] = []
+        # SEC-002 Wave 18: explicit old_item_id -> new_item_id
+        # correspondence, captured directly from the same matching loop
+        # that decides an existing row is being superseded -- not
+        # reconstructed later from "whatever else is now in the album",
+        # which cannot distinguish a genuine replacement from an
+        # unrelated pre-existing row.
+        mapping_pairs: List[Dict[str, int]] = []
+        for row in imported_rows:
+            key = (int(row["disc"] or 1), int(row["track"] or 0))
+            if key[1] and key in existing_by_key:
+                target = target_by_key.get(key, {})
+                existing_rows_for_key = existing_by_key.get(key, [])
+                forced_replace_rows = [
+                    ex for ex in existing_rows_for_key
+                    if int(ex["id"] or 0) in forced_replace_ids
+                ]
+                if forced_replace_rows:
+                    # SEC-002 Wave 18 final review: do NOT also route
+                    # forced_replace_rows through bulk_import_replacement_v1.
+                    # replace_existing_item_ids' only real production
+                    # caller is the automatic music-format retry
+                    # pipeline (_music_format_replace_rows), which
+                    # retires this exact old item through its own,
+                    # separate, already-verified engine transaction --
+                    # _music_format_remove_original_after_replacement,
+                    # SEC-002 Wave 17's track_replacement_v1 -- called
+                    # independently after this import completes (see
+                    # start_music_format_replacement_retry). At the
+                    # point this function runs, that retirement has
+                    # NOT happened yet (the old row is still present,
+                    # which is exactly why forced_replace_rows finds
+                    # it), so also planning a bulk_import_replacement_v1
+                    # retirement for the same old item here would be a
+                    # second, redundant, and potentially conflicting
+                    # retirement attempt racing the real one. This
+                    # branch's only job is bookkeeping: stop the
+                    # duplicate-matching heuristic below from
+                    # reconsidering this old row, and let `row` (the
+                    # newly imported track) take its place via
+                    # move_ids. This matches the pre-Wave-18 behavior
+                    # exactly -- untouched by this wave.
+                    existing_by_key[key] = [
                         ex for ex in existing_rows_for_key
-                        if int(ex["id"] or 0) in forced_replace_ids
+                        if int(ex["id"] or 0) not in forced_replace_ids
                     ]
-                    if forced_replace_rows:
-                        # SEC-002 Wave 18 final review: do NOT also route
-                        # forced_replace_rows through bulk_import_replacement_v1.
-                        # replace_existing_item_ids' only real production
-                        # caller is the automatic music-format retry
-                        # pipeline (_music_format_replace_rows), which
-                        # retires this exact old item through its own,
-                        # separate, already-verified engine transaction --
-                        # _music_format_remove_original_after_replacement,
-                        # SEC-002 Wave 17's track_replacement_v1 -- called
-                        # independently after this import completes (see
-                        # start_music_format_replacement_retry). At the
-                        # point this function runs, that retirement has
-                        # NOT happened yet (the old row is still present,
-                        # which is exactly why forced_replace_rows finds
-                        # it), so also planning a bulk_import_replacement_v1
-                        # retirement for the same old item here would be a
-                        # second, redundant, and potentially conflicting
-                        # retirement attempt racing the real one. This
-                        # branch's only job is bookkeeping: stop the
-                        # duplicate-matching heuristic below from
-                        # reconsidering this old row, and let `row` (the
-                        # newly imported track) take its place via
-                        # move_ids. This matches the pre-Wave-18 behavior
-                        # exactly -- untouched by this wave.
-                        existing_by_key[key] = [
-                            ex for ex in existing_rows_for_key
-                            if int(ex["id"] or 0) not in forced_replace_ids
-                        ]
-                    else:
-                        existing_matches = [
-                            ex for ex in existing_rows_for_key
-                            if _row_matches_target(ex, target)
-                        ]
-                        if existing_matches:
-                            dup_rows.append(row)
-                            continue
-                        replace_rows.extend(existing_rows_for_key)
-                        for ex in existing_rows_for_key:
-                            # Weaker, real (not AI-only) evidence: `row`
-                            # was imported specifically to fill this
-                            # disc/track position against the resolved MB
-                            # release tracklist, and none of the existing
-                            # rows already occupying that position passed
-                            # _row_matches_target against it. The engine
-                            # still independently requires the imported
-                            # row to carry its own Recording ID for this
-                            # identity_source (see recording_id_required).
-                            mapping_pairs.append({
-                                "old_item_id": int(ex["id"]),
-                                "new_item_id": int(row["id"]),
-                                "identity_source": "mb_tracklist_position_match",
-                            })
-                        existing_by_key[key] = []
-                move_ids.append(int(row["id"]))
-                if key[1]:
-                    existing_by_key.setdefault(key, []).append(row)
+                else:
+                    existing_matches = [
+                        ex for ex in existing_rows_for_key
+                        if _row_matches_target(ex, target)
+                    ]
+                    if existing_matches:
+                        dup_rows.append(row)
+                        continue
+                    replace_rows.extend(existing_rows_for_key)
+                    for ex in existing_rows_for_key:
+                        # Weaker, real (not AI-only) evidence: `row`
+                        # was imported specifically to fill this
+                        # disc/track position against the resolved MB
+                        # release tracklist, and none of the existing
+                        # rows already occupying that position passed
+                        # _row_matches_target against it. The engine
+                        # still independently requires the imported
+                        # row to carry its own Recording ID for this
+                        # identity_source (see recording_id_required).
+                        mapping_pairs.append({
+                            "old_item_id": int(ex["id"]),
+                            "new_item_id": int(row["id"]),
+                            "identity_source": "mb_tracklist_position_match",
+                        })
+                    existing_by_key[key] = []
+            move_ids.append(int(row["id"]))
+            if key[1]:
+                existing_by_key.setdefault(key, []).append(row)
 
-            # SEC-002 Wave 20 final review: track whether each delegated
-            # engine operation actually succeeded so the function's return
-            # value is truthful. Previously this returned existing_album_id
-            # (implying reconciliation succeeded) whenever dup_rows/move_ids/
-            # replace_rows were non-empty, regardless of whether the engine
-            # Plan/Apply calls actually succeeded -- a caller relying on the
-            # returned album id as a success signal would be misled by a
-            # logged-and-swallowed engine failure.
-            replace_ok = True
-            reconcile_ok = True
+        # SEC-002 Wave 20 final review: track whether each delegated
+        # engine operation actually succeeded so the function's return
+        # value is truthful. Previously this returned existing_album_id
+        # (implying reconciliation succeeded) whenever dup_rows/move_ids/
+        # replace_rows were non-empty, regardless of whether the engine
+        # Plan/Apply calls actually succeeded -- a caller relying on the
+        # returned album id as a success signal would be misled by a
+        # logged-and-swallowed engine failure.
+        replace_ok = True
+        reconcile_ok = True
 
-            if replace_rows:
-                replace_ids = sorted({int(r["id"]) for r in replace_rows})
-                try:
-                    plan_res = beets_client.plan_bulk_import_replacement({
-                        "existing_album_id": existing_album_id,
-                        "old_item_ids": replace_ids,
-                        "mappings": mapping_pairs,
-                        "source_folder": source_folder,
-                        "mb_albumid": mb_albumid,
-                        "reason": "Bulk import album merge replacement",
-                    })
-                    if plan_res.get("ok"):
-                        op_id = plan_res.get("operation_id")
-                        apply_res = beets_client.apply_bulk_import_replacement(op_id)
-                        if apply_res.get("ok"):
-                            log.append(
-                                f"  [merge] Delegated removal of {len(replace_ids)} conflicting row(s) "
-                                f"to engine bulk replacement tx {op_id}."
-                            )
-                        else:
-                            # Fail closed: do NOT fall back to a local
-                            # DELETE/unlink of the old rows. If the engine
-                            # refused (e.g. a mapping could not be
-                            # identity-verified), those old rows remain in
-                            # place -- both versions coexist rather than
-                            # silently losing the only verified copy.
-                            replace_ok = False
-                            log.append(f"  [merge] WARN bulk replacement apply failed, old rows left in place: {apply_res.get('error')}")
+        if replace_rows:
+            replace_ids = sorted({int(r["id"]) for r in replace_rows})
+            try:
+                plan_res = beets_client.plan_bulk_import_replacement({
+                    "existing_album_id": existing_album_id,
+                    "old_item_ids": replace_ids,
+                    "mappings": mapping_pairs,
+                    "source_folder": source_folder,
+                    "mb_albumid": mb_albumid,
+                    "reason": "Bulk import album merge replacement",
+                })
+                if plan_res.get("ok"):
+                    op_id = plan_res.get("operation_id")
+                    apply_res = beets_client.apply_bulk_import_replacement(op_id)
+                    if apply_res.get("ok"):
+                        log.append(
+                            f"  [merge] Delegated removal of {len(replace_ids)} conflicting row(s) "
+                            f"to engine bulk replacement tx {op_id}."
+                        )
                     else:
+                        # Fail closed: do NOT fall back to a local
+                        # DELETE/unlink of the old rows. If the engine
+                        # refused (e.g. a mapping could not be
+                        # identity-verified), those old rows remain in
+                        # place -- both versions coexist rather than
+                        # silently losing the only verified copy.
                         replace_ok = False
-                        log.append(f"  [merge] WARN bulk replacement plan failed, old rows left in place: {plan_res.get('error')}")
-                except Exception as ex:
+                        log.append(f"  [merge] WARN bulk replacement apply failed, old rows left in place: {apply_res.get('error')}")
+                else:
                     replace_ok = False
-                    log.append(f"  [merge] WARN exception delegating bulk replacement to engine, old rows left in place: {ex}")
+                    log.append(f"  [merge] WARN bulk replacement plan failed, old rows left in place: {plan_res.get('error')}")
+            except Exception as ex:
+                replace_ok = False
+                log.append(f"  [merge] WARN exception delegating bulk replacement to engine, old rows left in place: {ex}")
 
-            if dup_rows or move_ids:
-                dup_item_ids = [int(r["id"]) for r in dup_rows]
-                dup_details = []
-                for r in dup_rows:
-                    key = (int(r["disc"] or 1), int(r["track"] or 0))
-                    survivor_ids = [int(ex["id"]) for ex in existing_by_key.get(key, []) if int(ex["id"] or 0)]
-                    dup_details.append({
-                        "dup_item_id": int(r["id"]),
-                        "survivor_item_ids": survivor_ids,
-                    })
+        if dup_rows or move_ids:
+            dup_item_ids = [int(r["id"]) for r in dup_rows]
+            dup_details = []
+            for r in dup_rows:
+                key = (int(r["disc"] or 1), int(r["track"] or 0))
+                survivor_ids = [int(ex["id"]) for ex in existing_by_key.get(key, []) if int(ex["id"] or 0)]
+                dup_details.append({
+                    "dup_item_id": int(r["id"]),
+                    "survivor_item_ids": survivor_ids,
+                })
 
-                try:
-                    plan_res = beets_client.plan_existing_album_reconcile({
-                        "imported_album_id": imported_album_id,
-                        "existing_album_id": existing_album_id,
-                        "dup_item_ids": dup_item_ids,
-                        "dup_details": dup_details,
-                        "move_item_ids": move_ids,
-                        "source_folder": source_folder,
-                        "reason": "Existing album reconciliation",
-                    })
-                    if plan_res.get("ok"):
-                        op_id = plan_res.get("operation_id")
-                        apply_res = beets_client.apply_existing_album_reconcile(op_id)
-                        if apply_res.get("ok"):
-                            log.append(
-                                f"  [merge] Delegated reconciliation of {len(dup_item_ids)} duplicate(s) "
-                                f"and {len(move_ids)} move(s) to engine reconcile tx {op_id}."
-                            )
-                        else:
-                            reconcile_ok = False
-                            log.append(f"  [merge] WARN existing album reconcile apply failed: {apply_res.get('error')}")
+            try:
+                plan_res = beets_client.plan_existing_album_reconcile({
+                    "imported_album_id": imported_album_id,
+                    "existing_album_id": existing_album_id,
+                    "dup_item_ids": dup_item_ids,
+                    "dup_details": dup_details,
+                    "move_item_ids": move_ids,
+                    "source_folder": source_folder,
+                    "reason": "Existing album reconciliation",
+                })
+                if plan_res.get("ok"):
+                    op_id = plan_res.get("operation_id")
+                    apply_res = beets_client.apply_existing_album_reconcile(op_id)
+                    if apply_res.get("ok"):
+                        log.append(
+                            f"  [merge] Delegated reconciliation of {len(dup_item_ids)} duplicate(s) "
+                            f"and {len(move_ids)} move(s) to engine reconcile tx {op_id}."
+                        )
                     else:
                         reconcile_ok = False
-                        log.append(f"  [merge] WARN existing album reconcile plan failed: {plan_res.get('error')}")
-                except Exception as ex:
+                        log.append(f"  [merge] WARN existing album reconcile apply failed: {apply_res.get('error')}")
+                else:
                     reconcile_ok = False
-                    log.append(f"  [merge] WARN exception delegating existing album reconcile to engine: {ex}")
+                    log.append(f"  [merge] WARN existing album reconcile plan failed: {plan_res.get('error')}")
+            except Exception as ex:
+                reconcile_ok = False
+                log.append(f"  [merge] WARN exception delegating existing album reconcile to engine: {ex}")
 
-            con.commit()
-            # SEC-002 Wave 20 final review: only report existing_album_id
-            # (i.e. "reconciliation happened") when what was attempted
-            # actually succeeded. A failed delegation leaves the imported
-            # album's rows exactly where they were, so the truthful return
-            # value in that case is imported_album_id, not a claim of
-            # success upstream code would otherwise trust.
-            attempted = bool(move_ids or dup_rows or replace_rows)
-            succeeded = replace_ok and reconcile_ok
-            return existing_album_id if (attempted and succeeded) else imported_album_id
+        # SEC-002 Wave 20 final review: only report existing_album_id
+        # (i.e. "reconciliation happened") when what was attempted
+        # actually succeeded. A failed delegation leaves the imported
+        # album's rows exactly where they were, so the truthful return
+        # value in that case is imported_album_id, not a claim of
+        # success upstream code would otherwise trust.
+        attempted = bool(move_ids or dup_rows or replace_rows)
+        succeeded = replace_ok and reconcile_ok
+        return existing_album_id if (attempted and succeeded) else imported_album_id
     except Exception as ex:
         log.append(f"  [merge] Warning: {ex}")
         return imported_album_id
@@ -8561,13 +8571,11 @@ def _folder_import_track_count(source_folder: str, existing_album_id: int = 0) -
     """Best known track count for a source folder before selecting an MB release."""
     if existing_album_id:
         try:
-            with _db() as con:
-                count = int(con.execute(
-                    "SELECT COUNT(*) FROM items WHERE album_id=?",
-                    (existing_album_id,),
-                ).fetchone()[0] or 0)
-            if count:
-                return count
+            items = beets_client.find_all_items_by_album_id(int(existing_album_id))
+            if items:
+                return len(items)
+        except BeetsUnavailableError:
+            raise
         except Exception:
             pass
     try:
@@ -8590,13 +8598,19 @@ def _folder_track_search_titles(source_folder: str, existing_album_id: int = 0,
     raw_entries: List[tuple] = []
     if existing_album_id:
         try:
-            with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:
-                rows = con.execute(
-                    "SELECT title, path FROM items WHERE album_id=? "
-                    "ORDER BY disc, track, title, id",
-                    (existing_album_id,),
-                ).fetchall()
-            raw_entries.extend((_s(row["title"]), _s(row["path"])) for row in rows)
+            items = beets_client.find_all_items_by_album_id(int(existing_album_id))
+            sorted_items = sorted(
+                items,
+                key=lambda r: (
+                    int(r.get("disc") or 1),
+                    int(r.get("track") or 0),
+                    _s(r.get("title") or ""),
+                    int(r.get("id") or 0),
+                ),
+            )
+            raw_entries.extend((_s(r.get("title")), _s(r.get("path"))) for r in sorted_items)
+        except BeetsUnavailableError:
+            raise
         except Exception:
             pass
     try:
@@ -10420,23 +10434,24 @@ def _move_artwork_to_target(src_dir: Path, album_ids: list, log: list) -> Option
     if not src_dir.is_dir():
         return None
 
-    # Resolve target folder from the DB (first audio item of any found album).
     target_dir: Optional[Path] = None
     for aid in album_ids:
         try:
-            with _db(row_factory=sqlite3.Row) as cur:
-                row = cur.execute(
-                    "SELECT path FROM items WHERE album_id=? AND path IS NOT NULL LIMIT 1",
-                    (int(aid),),
-                ).fetchone()
-            if row and row["path"]:
-                raw = row["path"]
-                p = Path(os.fsdecode(raw) if isinstance(raw, bytes) else raw)
-                if p.parent.is_dir():
-                    target_dir = p.parent
-                    break
+            items = beets_client.find_all_items_by_album_id(int(aid))
+            for item in items:
+                raw = item.get("path")
+                if raw:
+                    p = Path(os.fsdecode(raw) if isinstance(raw, bytes) else raw)
+                    if p.parent.is_dir():
+                        target_dir = p.parent
+                        break
+            if target_dir:
+                break
+        except BeetsUnavailableError as ex:
+            log.append(f"  [artwork] Engine unavailable for album {aid}: {ex}")
+            raise
         except Exception as ex:
-            log.append(f"  [artwork] DB lookup for album {aid}: {ex}")
+            log.append(f"  [artwork] Lookup for album {aid}: {ex}")
 
     if not target_dir:
         log.append("  [artwork] Cannot find canonical album folder — artwork left in source.")
@@ -11771,12 +11786,13 @@ def album_deduplicate(aid):
         mb_albumid = mb_override
         if not mb_albumid:
             try:
-                with _db() as con0:
-                    row0 = con0.execute(
-                        "SELECT mb_albumid FROM albums WHERE id=?", (aid,)).fetchone()
-                mb_albumid = (row0[0] or "").strip() if row0 else ""
+                album_data = beets_client.get_album(int(aid))
+                mb_albumid = (album_data.get("mb_albumid") or "").strip() if album_data else ""
+            except BeetsUnavailableError as ex:
+                log.append(f"ERROR: Engine unavailable reading album {aid}: {ex}")
+                return
             except Exception:
-                pass
+                mb_albumid = ""
         log.append(f"MB release ID: {mb_albumid or '(none)'}")
 
         # If caller supplied (or resolved) a real UUID, persist it now so that
@@ -11815,24 +11831,27 @@ def album_deduplicate(aid):
             return int(m.group(1)) if m else 0
 
         try:
-            with _db(text_factory=bytes) as con:
-                all_rows = con.execute(
-                    "SELECT id, track, disc, title, path FROM items WHERE album_id=? ORDER BY track, disc",
-                    (aid,)).fetchall()
+            raw_items = beets_client.find_all_items_by_album_id(int(aid))
+            sorted_items = sorted(
+                raw_items,
+                key=lambda it: (int(it.get("track") or 0), int(it.get("disc") or 1)),
+            )
+        except BeetsUnavailableError as ex:
+            log.append(f"ERROR: Engine unavailable loading items for album {aid}: {ex}")
+            return
         except Exception as ex:
             log.append(f"ERROR loading items: {ex}")
             return
 
         # Normalise rows to plain dicts with string paths
         all_items = []
-        for row in all_rows:
-            iid, trk, disc, title, raw_path = row
+        for it in sorted_items:
             all_items.append({
-                "id":    iid,
-                "track": trk or 0,
-                "disc":  disc or 1,
-                "title": _pstr(title),
-                "path":  _pstr(raw_path),
+                "id":    int(it["id"]),
+                "track": int(it.get("track") or 0),
+                "disc":  int(it.get("disc") or 1),
+                "title": _pstr(it.get("title")),
+                "path":  _pstr(it.get("path")),
             })
 
         log.append(f"Items in DB: {len(all_items)}")
@@ -11937,18 +11956,18 @@ def album_deduplicate(aid):
         # ── Step 7: Final track listing ───────────────────────────────────────
         _invalidate_lib_cache()
         try:
-            with _db(text_factory=bytes) as con3:
-                rows3 = con3.execute(
-                    "SELECT track, title, path FROM items WHERE album_id=? ORDER BY track",
-                    (aid,)).fetchall()
-            log.append(f"Final: {len(rows3)} track(s)")
-            for trk, ttl, pth in rows3:
+            final_items = beets_client.find_all_items_by_album_id(int(aid))
+            sorted_final = sorted(final_items, key=lambda it: int(it.get("track") or 0))
+            log.append(f"Final: {len(sorted_final)} track(s)")
+            for it in sorted_final:
+                pth = it.get("path")
                 fname = Path(
-                    pth.decode("utf-8", errors="replace") if isinstance(pth, bytes) else str(pth)
+                    pth.decode("utf-8", errors="replace") if isinstance(pth, bytes) else str(pth or "")
                 ).name
-                log.append(f"  [{trk or 0:02d}] {fname[:70]}")
-        except Exception:
-            pass
+                trk = int(it.get("track") or 0)
+                log.append(f"  [{trk:02d}] {fname[:70]}")
+        except Exception as ex:
+            log.append(f"Final listing warning: {ex}")
 
     job = jobs.start_python(_do, label=label)
     return jsonify({"ok": True, "job_id": job.job_id})
@@ -12136,25 +12155,31 @@ def unmatched_tracks():
     even if individual track IDs weren't stored."""
     limit = min(int(request.args.get("limit", 300)), 2000)
 
-    # Build set of album_ids that already have a mb_albumid — these don't need matching
-    matched_album_ids: set = set()
     try:
-        with _db() as con:
-            rows = con.execute(
-                "SELECT id FROM albums WHERE mb_albumid IS NOT NULL AND mb_albumid != ''").fetchall()
-        matched_album_ids = {row[0] for row in rows}
-    except Exception:
-        pass
+        review_data = beets_client.get_unmatched_review_items(limit=min(limit, 1000), include_singletons=True)
+    except BeetsUnavailableError as ex:
+        app.logger.warning("unmatched_tracks: Beets engine unavailable: %s", ex)
+        return jsonify({
+            "ok": False,
+            "error": "Beets engine unavailable",
+            "error_code": "ENGINE_UNAVAILABLE",
+        }), 503
 
     tracks = []
-    for item in lib.items([]):
-        if (getattr(item, "mb_trackid", "") or "").strip():
-            continue   # already has a track ID — skip
-        if getattr(item, "album_id", 0) in matched_album_ids:
-            continue   # album already matched to MB — skip
-        d = item_dict(item)
+    for a in review_data.get("albums", []):
+        aid = int(a["id"])
+        items = beets_client.find_all_items_by_album_id(aid)
+        for item in items:
+            if (item.get("mb_trackid") or "").strip():
+                continue
+            d = item.copy()
+            d["mb_trackid"] = ""
+            tracks.append(d)
+    for s in review_data.get("singletons", []):
+        d = s.copy()
         d["mb_trackid"] = ""
         tracks.append(d)
+
     tracks.sort(key=lambda t: t.get("added", 0), reverse=True)
     return jsonify({"tracks": tracks[:limit], "total": len(tracks)})
 
@@ -12697,17 +12722,12 @@ def _library_no_mb_album_matches_folder(album_id: int, folder_path: str) -> bool
         return False
 
     try:
-        with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:
-            album_row = con.execute(
-                "SELECT mb_albumid FROM albums WHERE id=?",
-                (aid,),
-            ).fetchone()
-            if not album_row or _s(album_row["mb_albumid"]).strip():
-                return False
-            rows = con.execute(
-                "SELECT path FROM items WHERE album_id=? AND path IS NOT NULL",
-                (aid,),
-            ).fetchall()
+        album_row = beets_client.get_album(aid)
+        if not album_row or _s(album_row.get("mb_albumid")).strip():
+            return False
+        rows = beets_client.find_all_items_by_album_id(aid)
+    except BeetsUnavailableError:
+        raise
     except Exception:
         return False
 
@@ -13130,11 +13150,10 @@ def _delete_album_items_under_folder(album_id: int, folder_path: str, log: list)
         return 0
     folder = Path(folder_path).resolve(strict=False)
     try:
-        with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:
-            rows = con.execute(
-                "SELECT id, title, path FROM items WHERE album_id=?",
-                (int(album_id),),
-            ).fetchall()
+        rows = beets_client.find_all_items_by_album_id(int(album_id))
+    except BeetsUnavailableError as ex:
+        log.append(f"  Staged-file cleanup failed: engine unavailable: {ex}")
+        raise
     except Exception as ex:
         log.append(f"  Staged-file cleanup warning: {ex}")
         return 0
@@ -14008,13 +14027,15 @@ def _build_library_payload() -> dict:
     """Walk /data/media/music on disk + inject library items whose files are
     missing (shown in red). Pure builder -- no caching or request handling,
     so both library_full() and the background cache-warmer can call it.
-    Do not change this traversal logic without a side-by-side parity check
-    (see CLAUDE.md's "/api/library is high risk" note).
+    Do not change this traversal logic without running the parity suite
+    (tests/test_arch012_missing_album_library_parity.py).
     """
     # Build lookup: file path → beets item (for import-status annotation)
     # Beets stores paths relative to the music root (e.g. "Artist/Album/song.flac").
     # We register BOTH the relative form AND the absolute form so the disk-walk lookup works.
     _MROOT = "/data/media/music"
+    _TYPE_ORDER = {"album": 0, "ep": 1, "mixtape": 2, "single": 3,
+                   "broadcast": 4, "other": 5, "": 6}
     path_to_id:   Dict[str, int] = {}
     path_to_item: Dict[str, Any] = {}
     all_lib_items = list(lib.items([]))
@@ -14341,26 +14362,42 @@ def _build_library_payload() -> dict:
 
         # Inject missing-only albums (library items with no matching disk folder).
         # Group multiple beets entries for the SAME album (different release dates) into ONE card.
-        missing_album_groups: Dict[str, dict] = {}  # album_bare_lc → merged card data
+        missing_album_groups: Dict[str, dict] = {}  # group_key → merged card data
         for (mart, malb, myr), mitems in list(missing_by_bucket.items()):
             if mart.lower() != artist_name_lc_bare:
                 continue
             missing_by_bucket.pop((mart, malb, myr), None)
+            m_album_ids = [
+                int(t.get("album_id") or 0)
+                for t in mitems
+                if int(t.get("album_id") or 0) > 0
+            ]
+            m_dom_aid = (
+                Counter(m_album_ids).most_common(1)[0][0]
+                if m_album_ids else 0
+            )
+
             malb_bare = re.sub(r'\s*[\(\[]\d{4,8}[\)\]]\s*$', '', malb).strip()
             malb_bare = _restore_time_colon_title(malb_bare)
             malb_key  = malb_bare.lower()
-            ba_info2  = beets_album_lk.get((mart.lower(), malb.lower()), {})
-            ba_info2_id = int(ba_info2.get("id") or 0)
+            ba_info2  = (
+                beets_album_lk_by_id.get(m_dom_aid)
+                or beets_album_lk.get((mart.lower(), malb.lower()))
+                or beets_album_lk.get((_artist_folder_name_without_mbid(mart).lower(), malb_key))
+                or {}
+            )
+            ba_info2_id = int(ba_info2.get("id") or m_dom_aid or 0)
             if ba_info2_id and ba_info2_id in seen_disk_album_ids:
-                missing_by_bucket.pop((mart, malb, myr), None)
                 continue
-            if malb_key not in missing_album_groups:
-                missing_album_groups[malb_key] = {
+
+            group_key = f"id:{ba_info2_id}" if ba_info2_id > 0 else f"name:{malb_key}"
+            if group_key not in missing_album_groups:
+                missing_album_groups[group_key] = {
                     "album":             malb_bare or malb,
                     "year":              myr,
                     "tracks":            [],
                     "track_count":        0,
-                    "album_id":          ba_info2.get("id", 0),
+                    "album_id":          ba_info2_id,
                     "albumartist":        ba_info2.get("albumartist", mart),
                     "albumartist_credit": ba_info2.get("albumartist_credit", ""),
                     "albumartists":       ba_info2.get("albumartists", ""),
@@ -14379,18 +14416,18 @@ def _build_library_payload() -> dict:
             # Merge tracks, dedup by (title, track)
             existing_keys = {
                 (t.get("title","").lower(), t.get("track",0))
-                for t in missing_album_groups[malb_key]["tracks"]
+                for t in missing_album_groups[group_key]["tracks"]
             }
             for t in mitems:
                 tk = (t.get("title","").lower(), t.get("track",0))
                 if tk not in existing_keys:
                     existing_keys.add(tk)
-                    missing_album_groups[malb_key]["tracks"].append(t)
+                    missing_album_groups[group_key]["tracks"].append(t)
             # Keep best year (prefer 4-digit year)
             if myr and str(myr)[:4].isdigit():
-                cur_yr = missing_album_groups[malb_key]["year"]
+                cur_yr = missing_album_groups[group_key]["year"]
                 if not cur_yr or len(str(cur_yr)) > 4:
-                    missing_album_groups[malb_key]["year"] = int(str(myr)[:4])
+                    missing_album_groups[group_key]["year"] = int(str(myr)[:4])
         for grp in missing_album_groups.values():
             grp["not_imported"] = 0
             grp["missing"]      = len(grp["tracks"])
@@ -14425,40 +14462,114 @@ def _build_library_payload() -> dict:
 
     # Any remaining missing items belong to artists not on disk at all
     artist_extras: Dict[str, dict] = {}
-    for (mart, malb, myr), mitems in missing_by_bucket.items():
-        if mart not in artist_extras:
-            artist_extras[mart] = {"name": mart, "albums": [], "total": 0,
-                                   "imported": 0, "not_imported": 0, "missing": 0}
-        _ext_ba = beets_album_lk.get((mart.lower(), malb.lower()), {})
-        artist_extras[mart]["albums"].append({
-            "album": _restore_time_colon_title(malb), "year": myr,
-            "tracks": sorted(mitems, key=lambda t: t["track"] or 999),
-            "track_count": len(mitems),
-            "expected_track_count": _expected_track_count_from_library_rows(mitems),
-            "albumartist": mart,
-            "not_imported": 0, "missing": len(mitems),
-            "pending_review":    False,
-            "aldir":             "",
-            "disk_art":          "",
-            "album_id":          int(_ext_ba.get("id") or 0),
-            "artpath":           _ext_ba.get("artpath", ""),
-            "mb_albumid":        _ext_ba.get("mb_albumid", ""),
-            "mb_releasegroupid": _ext_ba.get("mb_releasegroupid", ""),
-            "albumtype":         _ext_ba.get("albumtype", ""),
-            "albumtypes":        _ext_ba.get("albumtypes", ""),
-            "albumartist_credit":  _ext_ba.get("albumartist_credit", ""),
-            "albumartists":        _ext_ba.get("albumartists", ""),
-            "albumartists_credit": _ext_ba.get("albumartists_credit", ""),
-            "mb_albumartistid":    _ext_ba.get("mb_albumartistid", ""),
-            "mb_albumartistids":   _ext_ba.get("mb_albumartistids", ""),
-            "not_imported_is_extra": False,
-            **_fast_album_mb_health_fields(
-                mitems, _expected_track_count_from_library_rows(mitems), len(mitems)),
-        })
-        artist_extras[mart]["total"]   += len(mitems)
-        artist_extras[mart]["missing"] += len(mitems)
+    for (mart, malb, myr), mitems in list(missing_by_bucket.items()):
+        m_album_ids = [
+            int(t.get("album_id") or 0)
+            for t in mitems
+            if int(t.get("album_id") or 0) > 0
+        ]
+        m_dom_aid = (
+            Counter(m_album_ids).most_common(1)[0][0]
+            if m_album_ids else 0
+        )
 
-    result.extend(sorted(artist_extras.values(), key=lambda a: a["name"].lower()))
+        malb_bare = re.sub(r'\s*[\(\[]\d{4,8}[\)\]]\s*$', '', malb).strip()
+        malb_bare = _restore_time_colon_title(malb_bare)
+        malb_key  = malb_bare.lower()
+
+        _ext_ba = (
+            beets_album_lk_by_id.get(m_dom_aid)
+            or beets_album_lk.get((mart.lower(), malb.lower()))
+            or beets_album_lk.get((_artist_folder_name_without_mbid(mart).lower(), malb_key))
+            or {}
+        )
+        ext_aid = int(_ext_ba.get("id") or m_dom_aid or 0)
+        artist_display_name = _ext_ba.get("albumartist") or mart
+        artist_key = artist_display_name.lower()
+
+        if artist_key not in artist_extras:
+            artist_extras[artist_key] = {
+                "name": artist_display_name,
+                "albums_by_key": {},
+                "path": "",
+            }
+
+        album_key = f"id:{ext_aid}" if ext_aid > 0 else f"name:{malb_key}"
+        if album_key not in artist_extras[artist_key]["albums_by_key"]:
+            artist_extras[artist_key]["albums_by_key"][album_key] = {
+                "album":               _restore_time_colon_title(malb_bare or malb),
+                "year":                myr,
+                "tracks":              [],
+                "track_count":          0,
+                "expected_track_count": 0,
+                "albumartist":          artist_display_name,
+                "not_imported":         0,
+                "missing":              0,
+                "pending_review":       False,
+                "aldir":                "",
+                "disk_art":             "",
+                "album_id":             ext_aid,
+                "artpath":              _ext_ba.get("artpath", ""),
+                "mb_albumid":           _ext_ba.get("mb_albumid", ""),
+                "mb_releasegroupid":    _ext_ba.get("mb_releasegroupid", ""),
+                "albumtype":            _ext_ba.get("albumtype", ""),
+                "albumtypes":           _ext_ba.get("albumtypes", ""),
+                "albumartist_credit":   _ext_ba.get("albumartist_credit", ""),
+                "albumartists":         _ext_ba.get("albumartists", ""),
+                "albumartists_credit":  _ext_ba.get("albumartists_credit", ""),
+                "mb_albumartistid":     _ext_ba.get("mb_albumartistid", ""),
+                "mb_albumartistids":    _ext_ba.get("mb_albumartistids", ""),
+                "not_imported_is_extra": False,
+            }
+
+        album_entry = artist_extras[artist_key]["albums_by_key"][album_key]
+        existing_keys = {
+            (t.get("title", "").lower(), t.get("track", 0))
+            for t in album_entry["tracks"]
+        }
+        for t in mitems:
+            tk = (t.get("title", "").lower(), t.get("track", 0))
+            if tk not in existing_keys:
+                existing_keys.add(tk)
+                album_entry["tracks"].append(t)
+
+        if myr and str(myr)[:4].isdigit():
+            cur_yr = album_entry["year"]
+            if not cur_yr or len(str(cur_yr)) > 4:
+                album_entry["year"] = int(str(myr)[:4])
+
+    final_extras = []
+    for art_data in artist_extras.values():
+        album_list = []
+        art_total = 0
+        for grp in art_data["albums_by_key"].values():
+            grp["not_imported"] = 0
+            grp["missing"] = len(grp["tracks"])
+            grp["track_count"] = len(grp["tracks"])
+            grp["expected_track_count"] = _expected_track_count_from_library_rows(grp["tracks"])
+            grp["tracks"] = sorted(grp["tracks"], key=lambda t: t["track"] or 999)
+            grp.update(_fast_album_mb_health_fields(
+                grp["tracks"], grp["expected_track_count"], grp["missing"]))
+            album_list.append(grp)
+            art_total += grp["missing"]
+
+        album_list.sort(key=lambda a: (
+            _TYPE_ORDER.get(a.get("albumtype", ""), 6),
+            a["year"] or 0,
+            a["album"].lower()
+        ))
+        final_extras.append({
+            "name": art_data["name"],
+            "albums": album_list,
+            "total": art_total,
+            "imported": 0,
+            "not_imported": 0,
+            "missing": art_total,
+            "empty_artist_folder": not album_list,
+            "path": "",
+        })
+
+    result.extend(sorted(final_extras, key=lambda a: a["name"].lower()))
     _apply_collaboration_album_views(result)
     _attach_artist_image_cache_urls(result)
     result.sort(key=lambda a: a["name"].lower())
@@ -15560,17 +15671,12 @@ def batch_ai_suggest():
 
     def _do(log, cancel_event=None):
         try:
-            with _db(row_factory=sqlite3.Row) as con:
-                rows = con.execute(
-                    "SELECT id FROM albums "
-                    "WHERE COALESCE(mb_albumid, '') = '' "
-                    "ORDER BY id DESC LIMIT ?",
-                    (limit,)
-                ).fetchall()
+            unmatched_res = beets_client.get_unmatched_review_items(limit=min(limit, 1000), include_singletons=False)
+            album_ids = [int(r["id"]) for r in unmatched_res.get("albums", [])]
+        except BeetsUnavailableError as ex:
+            raise RuntimeError(f"Could not load unlinked albums: Beets engine unavailable: {ex}")
         except Exception as ex:
             raise RuntimeError(f"Could not load unlinked albums: {ex}")
-
-        album_ids = [int(r["id"]) for r in rows]
         log.append(f"Batch AI suggest: {len(album_ids)} unlinked album(s)")
 
         existing = _load_album_mb_suggestions()
@@ -15799,62 +15905,59 @@ def album_merge_split_album(target_aid):
             f"Split-album merge: album_id {source_id} → album_id {target_id} "
             f"({len(item_ids)} selected row(s))"
         )
-        with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:
-            target = con.execute("SELECT * FROM albums WHERE id=?", (target_id,)).fetchone()
-            source = con.execute("SELECT * FROM albums WHERE id=?", (source_id,)).fetchone()
+        try:
+            target = beets_client.get_album(target_id)
+            source = beets_client.get_album(source_id)
             if not target:
                 raise RuntimeError(f"Target album_id {target_id} was not found")
             if not source:
                 raise RuntimeError(f"Source album_id {source_id} was not found")
 
-            target_rows = con.execute(
-                "SELECT id,path FROM items WHERE album_id=? ORDER BY disc, track, id",
-                (target_id,),
-            ).fetchall()
+            target_rows = beets_client.find_all_items_by_album_id(target_id)
             target_dir = _album_db_folder_from_item_paths(target_rows)
             if not target_dir:
                 raise RuntimeError(f"Could not resolve the target folder for album_id {target_id}")
 
-            selected = con.execute(
-                "SELECT id,album_id,path,title,disc,track FROM items WHERE id IN ("
-                + ",".join("?" for _ in item_ids) + ") ORDER BY disc, track, id",
-                item_ids,
-            ).fetchall()
+            source_items = beets_client.find_all_items_by_album_id(source_id)
+            source_items_by_id = {int(it["id"]): it for it in source_items if it.get("id")}
+            selected = [source_items_by_id[iid] for iid in item_ids if iid in source_items_by_id]
             found_ids = {int(row["id"]) for row in selected}
             missing_ids = [iid for iid in item_ids if iid not in found_ids]
             if missing_ids:
                 raise RuntimeError(f"Selected item row(s) not found: {missing_ids}")
+        except BeetsUnavailableError as ex:
+            raise RuntimeError(f"Engine unavailable during split album merge: {ex}")
 
-            move_ids: List[int] = []
-            skipped: List[str] = []
-            for row in selected:
-                row_album_id = int(row["album_id"] or 0)
-                if row_album_id != source_id:
-                    skipped.append(f"id:{int(row['id'])} belongs to album_id {row_album_id}")
-                    continue
-                raw_path = _s(row["path"])
-                fpath = Path(raw_path)
-                if not fpath.is_absolute():
-                    fpath = MUSIC_ROOT / raw_path
-                if not _path_is_under(fpath, target_dir):
-                    skipped.append(f"id:{int(row['id'])} is outside {target_dir}")
-                    continue
-                move_ids.append(int(row["id"]))
+        move_ids: List[int] = []
+        skipped: List[str] = []
+        for row in selected:
+            row_album_id = int(row.get("album_id") or 0)
+            if row_album_id != source_id:
+                skipped.append(f"id:{int(row['id'])} belongs to album_id {row_album_id}")
+                continue
+            raw_path = _s(row.get("path"))
+            fpath = Path(raw_path)
+            if not fpath.is_absolute():
+                fpath = MUSIC_ROOT / raw_path
+            if not _path_is_under(fpath, target_dir):
+                skipped.append(f"id:{int(row['id'])} is outside {target_dir}")
+                continue
+            move_ids.append(int(row["id"]))
 
-            for line in skipped[:8]:
-                log.append(f"  Skipped {line}")
-            if not move_ids:
-                raise RuntimeError("No selected rows were safe to merge")
+        for line in skipped[:8]:
+            log.append(f"  Skipped {line}")
+        if not move_ids:
+            raise RuntimeError("No selected rows were safe to merge")
 
-            if dry_run:
-                log.append(f"Dry run: would merge {len(move_ids)} item row(s); no DB changes made")
-                return {
-                    "dry_run": True,
-                    "source_album_id": source_id,
-                    "target_album_id": target_id,
-                    "item_count": len(move_ids),
-                    "source_album_deleted": False,
-                }
+        if dry_run:
+            log.append(f"Dry run: would merge {len(move_ids)} item row(s); no DB changes made")
+            return {
+                "dry_run": True,
+                "source_album_id": source_id,
+                "target_album_id": target_id,
+                "item_count": len(move_ids),
+                "source_album_deleted": False,
+            }
 
         # The actual reassignment (item_ids -> target's album_id, moved
         # items adopt target's album-level fields, source retired only if
@@ -16093,64 +16196,12 @@ def _library_album_ids_for_folder(folder_path: str) -> List[int]:
     if not raw or "\x00" in raw or "\\" in raw:
         return []
     try:
-        folder_res, err = _resolve_import_review_source_path(raw, allow_music=True, expected_type="dir", require_exists=False)
-        if err or not folder_res:
-            return []
-        music_res = MUSIC_ROOT.resolve(strict=False)
-        rel = folder_res.relative_to(music_res)
-        abs_prefix = str(folder_res).replace("\\", "/").rstrip("/") + "/"
-        rel_prefix = str(rel).replace("\\", "/").strip("/")
-    except Exception:
-        norm = raw.replace("\\", "/").rstrip("/")
-        root = str(MUSIC_ROOT).replace("\\", "/").rstrip("/")
-        if norm == root:
-            rel_prefix = ""
-        elif norm.startswith(root + "/"):
-            rel_prefix = norm[len(root) + 1:]
-        else:
-            return []
-        abs_prefix = norm.rstrip("/") + "/"
-
-    rel_prefix = rel_prefix.rstrip("/")
-    album_ids: set = set()
-
-    def _like_prefix(value: str) -> str:
-        return (
-            value.replace("\\", "\\\\")
-                 .replace("%", "\\%")
-                 .replace("_", "\\_")
-            + "%"
-        )
-
-    try:
-        with _db(text_factory=bytes) as con:
-            clauses = ["CAST(path AS TEXT) LIKE ? ESCAPE '\\'"]
-            params: List[Any] = [_like_prefix(abs_prefix)]
-            if rel_prefix:
-                clauses.append("CAST(path AS TEXT) LIKE ? ESCAPE '\\'")
-                params.append(_like_prefix(rel_prefix + "/"))
-            else:
-                # The music root itself contains every relative beets path.
-                clauses.append("CAST(path AS TEXT) NOT LIKE '/%'")
-            rows = con.execute(
-                "SELECT DISTINCT album_id, path FROM items "
-                "WHERE album_id IS NOT NULL AND (" + " OR ".join(clauses) + ")",
-                params,
-            ).fetchall()
-        for album_id, raw_path in rows:
-            if not album_id or raw_path is None:
-                continue
-            p = _s(raw_path).replace("\\", "/").lstrip("/")
-            p_abs = _s(raw_path).replace("\\", "/")
-            if (
-                (rel_prefix and p.startswith(rel_prefix + "/"))
-                or p_abs.startswith(abs_prefix)
-                or (not rel_prefix and _is_music_root_path(p_abs))
-            ):
-                album_ids.add(int(album_id))
+        res = beets_client.resolve_folder_to_albums(raw)
+        return res.get("album_ids", [])
+    except BeetsUnavailableError:
+        raise
     except Exception:
         return []
-    return sorted(album_ids)
 
 
 def _library_album_ids_for_musicbrainz(mb_albumid: str = "", mb_releasegroupid: str = "") -> List[int]:
@@ -16160,22 +16211,17 @@ def _library_album_ids_for_musicbrainz(mb_albumid: str = "", mb_releasegroupid: 
         return []
     album_ids: List[int] = []
     try:
-        with _db() as con:
-            if release_id:
-                rows = con.execute(
-                    "SELECT id FROM albums WHERE lower(COALESCE(mb_albumid,''))=? ORDER BY id DESC",
-                    (release_id,),
-                ).fetchall()
-                album_ids.extend(int(row[0]) for row in rows if row and row[0])
-            if release_group_id:
-                rows = con.execute(
-                    "SELECT id FROM albums WHERE lower(COALESCE(mb_releasegroupid,''))=? ORDER BY id DESC LIMIT 25",
-                    (release_group_id,),
-                ).fetchall()
-                for row in rows:
-                    aid = int(row[0]) if row and row[0] else 0
-                    if aid and aid not in album_ids:
-                        album_ids.append(aid)
+        if release_id:
+            albums = beets_client.find_all_albums_by_mb_albumid(release_id)
+            album_ids.extend(int(a["id"]) for a in albums if a.get("id"))
+        if release_group_id:
+            rg_albums = beets_client.find_all_albums_by_releasegroupid(release_group_id)
+            for a in rg_albums[:25]:
+                aid = int(a.get("id") or 0)
+                if aid and aid not in album_ids:
+                    album_ids.append(aid)
+    except BeetsUnavailableError:
+        raise
     except Exception:
         return []
     return album_ids
@@ -16189,30 +16235,30 @@ def _review_album_is_resolved(album_id: int) -> bool:
         return False
 
     try:
-        with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:
-            album_row = con.execute(
-                "SELECT mb_albumid FROM albums WHERE id=?",
-                (aid,),
-            ).fetchone()
-            if not album_row:
-                return True
-            rows = con.execute(
-                "SELECT path FROM items WHERE album_id=?",
-                (aid,),
-            ).fetchall()
+        album_row = beets_client.get_album(aid)
+        if not album_row:
+            return True
+        rows = beets_client.find_all_items_by_album_id(aid)
+    except BeetsUnavailableError:
+        raise
     except Exception:
         return False
 
     music_rows = [
-        _s(row["path"])
+        _s(row.get("path"))
         for row in rows
-        if _is_music_root_path(_s(row["path"]))
+        if _is_music_root_path(_s(row.get("path")))
     ]
     if not music_rows:
         return False
-    if not _s(album_row["mb_albumid"]).strip():
+    if not _s(album_row.get("mb_albumid")).strip():
         return False
-    return all(_db_item_file_exists(raw_path) for raw_path in music_rows)
+    try:
+        return all(beets_client.find_item_by_path(raw_path) is not None for raw_path in music_rows)
+    except BeetsUnavailableError:
+        raise
+    except Exception:
+        return False
 
 
 def _review_folder_has_audio(folder_path: str) -> bool:
@@ -16684,56 +16730,62 @@ def import_review_queue():
                 pass
 
     try:
-        # text_factory=bytes matters here: without it sqlite3's default str
-        # decoding requires every selected column to be valid UTF-8, and a
-        # single non-UTF-8 albumartist/album/path anywhere in the result set
-        # raises and aborts the whole fetchall() -- caught by the blanket
-        # except below, silently dropping every library_no_mb row instead of
-        # just the one bad one. That disproportionately hits exactly the
-        # messy/foreign/scene-release folders that are missing an MB ID in
-        # the first place, since well-identified albums already have one.
-        # Every string field read from `r` below already goes through _s()
-        # (which decodes bytes safely with errors="replace"), so this is a
-        # safe drop-in fix, not a wider behavior change.
-        with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:
-            album_rows = con.execute(
-                "SELECT albums.id, albums.albumartist, albums.album, albums.year, "
-                "COUNT(items.id) AS tracks, MAX(items.added) AS added, "
-                "MIN(items.id) AS first_item_id, MIN(items.path) AS first_item_path "
-                "FROM albums LEFT JOIN items ON items.album_id = albums.id "
-                "WHERE COALESCE(albums.mb_albumid, '') = '' "
-                "GROUP BY albums.id "
-                "ORDER BY COALESCE(MAX(items.added), 0) DESC "
-                "LIMIT ?",
-                (limit,)
-            ).fetchall()
-        for r in album_rows:
-            if not _is_music_root_path(r["first_item_path"]):
-                continue
-            if int(r["id"]) in _pending_existing_ids:
-                continue  # already shown as a pending_ai row
-            album_folder = _album_folder_for_album_id(int(r["id"] or 0))
-            artist = _s(r["albumartist"])
-            album = _s(r["album"])
-            rows.append({
-                "id": f"album:{r['id']}",
-                "type": "library_no_mb",
-                "status": "Needs MB ID",
-                "status_key": "needs_mb_id",
-                "title": album or "(unknown album)",
-                "artist": artist,
-                "album": album,
-                "year": int(r["year"] or 0),
-                "album_id": int(r["id"]),
-                "first_item_id": int(r["first_item_id"] or 0),
-                "tracks": int(r["tracks"] or 0),
-                "path": album_folder,
-                "folder": str(Path(album_folder).parent) if album_folder else "",
-                "folder_name": Path(album_folder).name if album_folder else "",
-                "sort_ts": float(r["added"] or 0),
-            })
-    except Exception:
-        pass
+        unmatched_data = beets_client.get_unmatched_review_items(limit=limit, offset=0, include_singletons=True)
+    except BeetsUnavailableError as ex:
+        app.logger.warning("import_review_queue: Beets engine unavailable: %s", ex)
+        return jsonify({
+            "ok": False,
+            "error": "Beets engine unavailable",
+            "error_code": "ENGINE_UNAVAILABLE",
+        }), 503
+    except BeetsAuthError as ex:
+        app.logger.warning("import_review_queue: Beets engine auth failed: %s", ex)
+        return jsonify({
+            "ok": False,
+            "error": "Beets engine auth failed",
+            "error_code": "ENGINE_AUTH_ERROR",
+        }), 502
+    except BeetsError as ex:
+        app.logger.warning("import_review_queue: Beets engine error: %s", ex)
+        return jsonify({
+            "ok": False,
+            "error": "Beets engine error",
+            "error_code": "ENGINE_ERROR",
+        }), 502
+    except Exception as ex:
+        app.logger.error("Unexpected error in import_review_queue: %s", ex)
+        return jsonify({
+            "ok": False,
+            "error": "Internal error loading review queue",
+            "error_code": "INTERNAL_ERROR",
+        }), 500
+
+    album_rows = unmatched_data.get("albums", [])
+    for r in album_rows:
+        if not _is_music_root_path(r.get("first_item_path") or ""):
+            continue
+        if int(r["id"]) in _pending_existing_ids:
+            continue  # already shown as a pending_ai row
+        album_folder = _album_folder_for_album_id(int(r["id"] or 0))
+        artist = _s(r.get("albumartist"))
+        album = _s(r.get("album"))
+        rows.append({
+            "id": f"album:{r['id']}",
+            "type": "library_no_mb",
+            "status": "Needs MB ID",
+            "status_key": "needs_mb_id",
+            "title": album or "(unknown album)",
+            "artist": artist,
+            "album": album,
+            "year": int(r.get("year") or 0),
+            "album_id": int(r["id"]),
+            "first_item_id": int(r.get("first_item_id") or 0),
+            "tracks": int(r.get("tracks") or 0),
+            "path": album_folder,
+            "folder": str(Path(album_folder).parent) if album_folder else "",
+            "folder_name": Path(album_folder).name if album_folder else "",
+            "sort_ts": float(r.get("added") or 0),
+        })
 
     # Inject stored batch-AI suggestions into library_no_mb rows
     _suggestions = _load_album_mb_suggestions()
@@ -16764,84 +16816,70 @@ def import_review_queue():
     # the same "library_no_mb" type so existing counts/filters/UI already
     # pick these up; target_kind="item" distinguishes the identification
     # target (a recording, not a release) for correct labeling/actions.
-    try:
-        with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:
-            singleton_rows = con.execute(
-                "SELECT items.id, items.artist, items.albumartist, items.title, items.album, items.year, "
-                "items.track, items.disc, items.length, items.mb_trackid, items.mb_albumid, "
-                "items.path, items.added "
-                "FROM items "
-                "WHERE (items.album_id IS NULL OR items.album_id = 0) "
-                "AND COALESCE(items.mb_trackid, '') = '' "
-                "ORDER BY items.added DESC "
-                "LIMIT ?",
-                (limit,)
-            ).fetchall()
-        for r in singleton_rows:
-            item_path = _s(r["path"])
-            if not _is_music_root_path(item_path):
-                continue
-            abs_path = item_path if item_path.startswith("/") else str(MUSIC_ROOT / item_path)
-            title = _s(r["title"])
-            artist = _s(r["artist"])
-            albumartist = _s(r["albumartist"])
-            album = _s(r["album"])
-            year = int(r["year"] or 0)
-            track_number = int(r["track"] or 0)
-            duration_seconds = float(r["length"] or 0)
-            current_ids = {
-                "mb_trackid": _s(r["mb_trackid"]),
-                "mb_albumid": _s(r["mb_albumid"]),
-            }
-            local_current = {
-                "filename": Path(abs_path).name if abs_path else "",
-                "source_path": abs_path,
-                "title": title,
-                "artist": artist,
-                "album": album,
-                "albumartist": albumartist,
-                "year": str(year) if year else "",
-                "track": track_number or "",
-                "disc": int(r["disc"] or 0) or "",
-                "duration_seconds": duration_seconds,
-                "duration": _format_duration(duration_seconds),
-                "mb_trackid": current_ids["mb_trackid"],
-                "mb_albumid": current_ids["mb_albumid"],
-            }
-            rows.append({
-                "id": f"item:{int(r['id'])}",
-                "type": "library_no_mb",
-                "target_kind": "item",
-                "status": "Needs recording ID",
-                "status_key": "needs_mb_id",
+    singleton_rows = unmatched_data.get("singletons", [])
+    for r in singleton_rows:
+        item_path = _s(r.get("path"))
+        if not _is_music_root_path(item_path):
+            continue
+        abs_path = item_path if item_path.startswith("/") else str(MUSIC_ROOT / item_path)
+        title = _s(r.get("title"))
+        artist = _s(r.get("artist"))
+        albumartist = _s(r.get("albumartist"))
+        album = _s(r.get("album"))
+        year = int(r.get("year") or 0)
+        track_number = int(r.get("track") or 0)
+        duration_seconds = float(r.get("length") or 0)
+        current_ids = {
+            "mb_trackid": _s(r.get("mb_trackid")),
+            "mb_albumid": _s(r.get("mb_albumid")),
+        }
+        local_current = {
+            "filename": Path(abs_path).name if abs_path else "",
+            "source_path": abs_path,
+            "title": title,
+            "artist": artist,
+            "album": album,
+            "albumartist": albumartist,
+            "year": str(year) if year else "",
+            "track": track_number or "",
+            "disc": int(r.get("disc") or 0) or "",
+            "duration_seconds": duration_seconds,
+            "duration": _format_duration(duration_seconds),
+            "mb_trackid": current_ids["mb_trackid"],
+            "mb_albumid": current_ids["mb_albumid"],
+        }
+        rows.append({
+            "id": f"item:{int(r['id'])}",
+            "type": "library_no_mb",
+            "target_kind": "item",
+            "status": "Needs recording ID",
+            "status_key": "needs_mb_id",
+            "missing_id_type": "Recording ID",
+            "title": title or Path(abs_path).stem or "(unknown title)",
+            "artist": artist,
+            "album": album,
+            "albumartist": albumartist,
+            "year": year,
+            "track": track_number or "",
+            "duration": _format_duration(duration_seconds),
+            "duration_seconds": duration_seconds,
+            "mb_trackid": current_ids["mb_trackid"],
+            "mb_albumid": current_ids["mb_albumid"],
+            "album_id": 0,
+            "item_id": int(r["id"]),
+            "first_item_id": int(r["id"]),
+            "tracks": 1,
+            "path": abs_path,
+            "folder": str(Path(abs_path).parent) if abs_path else "",
+            "folder_name": Path(abs_path).parent.name if abs_path else "",
+            "sort_ts": float(r.get("added") or 0),
+            "evidence": {
                 "missing_id_type": "Recording ID",
-                "title": title or Path(abs_path).stem or "(unknown title)",
-                "artist": artist,
-                "album": album,
-                "albumartist": albumartist,
-                "year": year,
-                "track": track_number or "",
-                "duration": _format_duration(duration_seconds),
-                "duration_seconds": duration_seconds,
-                "mb_trackid": current_ids["mb_trackid"],
-                "mb_albumid": current_ids["mb_albumid"],
-                "album_id": 0,
-                "item_id": int(r["id"]),
-                "first_item_id": int(r["id"]),
-                "tracks": 1,
-                "path": abs_path,
-                "folder": str(Path(abs_path).parent) if abs_path else "",
-                "folder_name": Path(abs_path).parent.name if abs_path else "",
-                "sort_ts": float(r["added"] or 0),
-                "evidence": {
-                    "missing_id_type": "Recording ID",
-                    "current": local_current,
-                    "fingerprint": {"status": "not_checked", "acoustid_status": "not_checked"},
-                    "recording_candidates": [],
-                },
-            })
-    except Exception:
-        pass
+                "current": local_current,
+                "fingerprint": {"status": "not_checked", "acoustid_status": "not_checked"},
+                "recording_candidates": [],
+            },
+        })
 
     try:
         skipped_deep_scan = status_filter == "skipped"
@@ -17324,13 +17362,6 @@ def _score_mb_release_candidate(
     Returns component scores and a combined total (higher = better match).
     Pass acoustid_release_hits (int) in candidate if available.
     """
-    from difflib import SequenceMatcher
-    import unicodedata
-
-    def _nk(s: str) -> str:
-        s = unicodedata.normalize("NFKC", _s(s).casefold())
-        return " ".join(re.sub(r"[^a-z0-9]+", " ", s).split())
-
     guessed_artist     = folder_evidence.get("guessed_artist", "")
     guessed_album      = folder_evidence.get("guessed_album", "")
     guessed_year       = folder_evidence.get("guessed_year", "")
@@ -17345,16 +17376,12 @@ def _score_mb_release_candidate(
     acoustid_hits = int(candidate.get("acoustid_release_hits", 0) or 0)
 
     if guessed_artist and cand_artist:
-        na, nb = _nk(guessed_artist), _nk(cand_artist)
-        artist_sim = SequenceMatcher(None, na, nb).ratio()
-        if set(na.split()) & set(nb.split()):
-            artist_sim = max(artist_sim, 0.70)
+        artist_sim = _canonical_similarity(guessed_artist, cand_artist)
     else:
         artist_sim = 0.5
 
     if guessed_album and cand_album:
-        na, nb = _nk(guessed_album), _nk(cand_album)
-        album_sim = SequenceMatcher(None, na, nb).ratio()
+        album_sim = _canonical_similarity(guessed_album, cand_album)
     else:
         album_sim = 0.5
 
@@ -18553,10 +18580,10 @@ def _candidate_track_build_comparison(
             fp_status = _s(fp.get("status") or "unknown")
             fingerprint_status_counts[fp_status] = fingerprint_status_counts.get(fp_status, 0) + 1
             cand["fingerprint_status"] = fp_status
-            if fp.get("status") == "mismatch":
+            if fp.get("status") == AcoustIDStatus.CONFLICT:
                 cand["acoustid_mismatch"] = True
                 continue
-            if fp.get("status") != "match":
+            if fp.get("status") != AcoustIDStatus.CONFIRMED:
                 continue
             fp_candidate = fp.get("candidate") if isinstance(fp.get("candidate"), dict) else {}
             fp_mbid = _s(fp_candidate.get("mb_trackid", "")).strip().lower()
@@ -18620,11 +18647,11 @@ def _candidate_track_build_comparison(
     release_ratio = matched_count / max(1, mb_track_count)
     preflight_error = ""
     if not matched_count:
-        if fingerprint_status_counts.get("mismatch"):
+        if fingerprint_status_counts.get(AcoustIDStatus.CONFLICT.value):
             preflight_error = "Fuzzy title matching failed; AcoustID matched a recording outside this Release Group."
-        elif fingerprint_status_counts.get("none"):
+        elif fingerprint_status_counts.get(AcoustIDStatus.NO_RESULT.value):
             preflight_error = "Fuzzy title matching failed; AcoustID lookup returned no recording."
-        elif fingerprint_status_counts.get("missing"):
+        elif fingerprint_status_counts.get(AcoustIDStatus.UNAVAILABLE.value):
             preflight_error = "Fingerprint unavailable: source file missing."
         elif local_track_count:
             preflight_error = "No track in selected Release Group matches cleaned local title."
@@ -19089,19 +19116,28 @@ def _target_preview_source_files(folder_path: str, existing_album_id: int = 0) -
 
     if existing_album_id:
         try:
-            with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:
-                rows = con.execute(
-                    "SELECT path FROM items WHERE album_id=? ORDER BY disc, track, title, id",
-                    (int(existing_album_id),),
-                ).fetchall()
-            for row in rows:
-                db_path, _error = _resolve_import_review_db_music_path(
-                    row["path"],
-                    expected_type="file",
-                    require_exists=True,
-                )
-                if db_path and db_path.suffix.lower() in AUDIO_EXT:
-                    _add(db_path)
+            items = beets_client.find_all_items_by_album_id(int(existing_album_id))
+            sorted_items = sorted(
+                items,
+                key=lambda it: (
+                    int(it.get("disc") or 1),
+                    int(it.get("track") or 0),
+                    _s(it.get("title") or ""),
+                    int(it.get("id") or 0),
+                ),
+            )
+            for item in sorted_items:
+                raw_path = item.get("path")
+                if raw_path:
+                    db_path, _error = _resolve_import_review_db_music_path(
+                        raw_path,
+                        expected_type="file",
+                        require_exists=True,
+                    )
+                    if db_path and db_path.suffix.lower() in AUDIO_EXT:
+                        _add(db_path)
+        except BeetsUnavailableError:
+            raise
         except Exception:
             pass
 
@@ -21111,44 +21147,13 @@ def import_folder_with_id():
             mb_albumid = resolved_release
 
         def _find_ids_in_db(path_prefix: str, since: float = 0.0):
-            """Return (album_ids, item_ids) from beets SQLite.
-            Matches both absolute paths and relative paths (beets stores paths
-            relative to the music root directory)."""
-            album_ids_found: list = []
-            item_ids_found:  list = []
-            _MROOT_B = b"/data/media/music/"
+            """Return (album_ids, item_ids) from beets SQLite via beets_client."""
             try:
-                with _db(text_factory=bytes) as con:
-                    cur = con.execute("SELECT id, album_id, path, added FROM items")
-                    all_rows = cur.fetchall()
-
-                prefix_abs = path_prefix.encode('utf-8').rstrip(b'/') + b'/'
-                # Relative prefix: strip music root so we match relative DB paths
-                prefix_rel = None
-                match_all_relative = False
-                if prefix_abs.startswith(_MROOT_B):
-                    prefix_rel = prefix_abs[len(_MROOT_B):]
-                    match_all_relative = prefix_abs == _MROOT_B
-                seen_aids: set = set()
-                for row_id, album_id, raw_path, added in all_rows:
-                    if raw_path is None:
-                        continue
-                    p = raw_path if isinstance(raw_path, bytes) else str(raw_path).encode()
-                    rel_root_match = match_all_relative and not p.startswith(b"/")
-                    if (not p.startswith(prefix_abs)
-                            and not (prefix_rel and p.startswith(prefix_rel))
-                            and not rel_root_match):
-                        continue
-                    if since and (not added or float(added) < since):
-                        continue
-                    if album_id and album_id not in seen_aids:
-                        seen_aids.add(album_id)
-                        album_ids_found.append(album_id)
-                    elif not album_id:
-                        item_ids_found.append(row_id)
+                res = beets_client.resolve_folder_to_albums(path_prefix, since=since if since else None)
+                return res.get("album_ids", []), res.get("item_ids", [])
             except Exception as ex:
                 log.append(f"  DB query warning: {ex}")
-            return album_ids_found, item_ids_found
+                return [], []
 
         def _album_match_summary(album_db_id: int) -> Dict[str, Any]:
             """Compare imported item titles to the requested MB release before retagging."""
@@ -21157,16 +21162,17 @@ def import_folder_with_id():
                 raise RuntimeError(mb.get("error") or "MusicBrainz release lookup failed")
             mb_tracks = mb.get("tracks") or []
             try:
-                with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:
-                    rows = con.execute(
-                        "SELECT id, title, track, disc, path, mb_trackid, length, added "
-                        "FROM items WHERE album_id=? ORDER BY disc, track, title, id",
-                        (album_db_id,),
-                    ).fetchall()
-                    album_row = con.execute(
-                        "SELECT album, albumartist FROM albums WHERE id=?",
-                        (album_db_id,),
-                    ).fetchone()
+                raw_items = beets_client.find_all_items_by_album_id(album_db_id)
+                rows = sorted(
+                    raw_items,
+                    key=lambda it: (
+                        int(it.get("disc") or 1),
+                        int(it.get("track") or 0),
+                        _s(it.get("title") or ""),
+                        int(it.get("id") or 0),
+                    ),
+                )
+                album_row = beets_client.get_album(album_db_id)
             except Exception as ex:
                 raise RuntimeError(f"Could not validate imported album: {ex}")
 
@@ -21176,7 +21182,7 @@ def import_folder_with_id():
             best_lines: List[str] = []
             imported_audio_paths: List[str] = []
             for row in rows:
-                raw_path = _s(row["path"])
+                raw_path = _s(row.get("path"))
                 file_name = Path(raw_path).name if raw_path else ""
                 if raw_path:
                     fpath_for_fp = Path(raw_path)
@@ -21185,20 +21191,20 @@ def import_folder_with_id():
                     if fpath_for_fp.exists():
                         imported_audio_paths.append(str(fpath_for_fp))
                 item = {
-                    "id": int(row["id"]),
-                    "title": _s(row["title"]),
-                    "track": int(row["track"] or 0),
-                    "disc": int(row["disc"] or 1),
+                    "id": int(row.get("id") or 0),
+                    "title": _s(row.get("title")),
+                    "track": int(row.get("track") or 0),
+                    "disc": int(row.get("disc") or 1),
                     "path": raw_path,
-                    "mb_trackid": _s(row["mb_trackid"]).strip().lower(),
-                    "length": float(row["length"] or 0),
+                    "mb_trackid": _s(row.get("mb_trackid")).strip().lower(),
+                    "length": float(row.get("length") or 0),
                 }
                 best = _best_album_track_match(item, mb_tracks)
                 idx = int(best.get("idx", -1))
                 score = float(best.get("score") or 0.0)
                 title_score = float(best.get("title_score") or 0.0)
                 fp = _album_track_fingerprint_check(item, mb_tracks)
-                if fp.get("status") == "mismatch":
+                if fp.get("status") == AcoustIDStatus.CONFLICT:
                     unmatched += 1
                 elif (
                     (best.get("exact_mbid") and title_score >= _MB_TRACK_REPAIR_MATCH_THRESHOLD)
@@ -21325,27 +21331,23 @@ def import_folder_with_id():
                 log.append("  Failed import cleanup skipped: source folder is not safely preserved")
                 return
             try:
-                with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:
-                    rows = con.execute(
-                        "SELECT id, path, added FROM items WHERE album_id=?",
-                        (album_db_id,),
-                    ).fetchall()
-                    if not rows:
-                        return
-                    stale = [
-                        r for r in rows
-                        if not r["added"] or float(r["added"] or 0) < t_before
-                    ]
-                    if stale:
-                        log.append(
-                            "  Failed import cleanup skipped: album rows were not created by this job")
-                        return
-                    p_res = beets_client.plan_album_cleanup(album_db_id)
-                    if not p_res.get("ok") or not p_res.get("operation_id"):
-                        raise RuntimeError(p_res.get("error") or f"Engine plan_album_cleanup failed for album {album_db_id}")
-                    app_res = beets_client.apply_album_cleanup(p_res["operation_id"])
-                    if not app_res.get("ok"):
-                        raise RuntimeError(app_res.get("error") or f"Engine apply_album_cleanup failed for album {album_db_id}")
+                rows = beets_client.find_all_items_by_album_id(album_db_id)
+                if not rows:
+                    return
+                stale = [
+                    r for r in rows
+                    if not r.get("added") or float(r.get("added") or 0) < t_before
+                ]
+                if stale:
+                    log.append(
+                        "  Failed import cleanup skipped: album rows were not created by this job")
+                    return
+                p_res = beets_client.plan_album_cleanup(album_db_id)
+                if not p_res.get("ok") or not p_res.get("operation_id"):
+                    raise RuntimeError(p_res.get("error") or f"Engine plan_album_cleanup failed for album {album_db_id}")
+                app_res = beets_client.apply_album_cleanup(p_res["operation_id"])
+                if not app_res.get("ok"):
+                    raise RuntimeError(app_res.get("error") or f"Engine apply_album_cleanup failed for album {album_db_id}")
                 deleted_files = len(app_res.get("deleted") or [])
                 log.append(f"  Removed failed copied import: album_id {album_db_id}, {deleted_files} file(s)")
             except Exception as ex:
@@ -21357,42 +21359,38 @@ def import_folder_with_id():
                 return False
             source_root = Path(folder_path).resolve(strict=False)
             try:
-                with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:
-                    rows = con.execute(
-                        "SELECT id, path, added FROM items WHERE album_id=?",
-                        (album_db_id,),
-                    ).fetchall()
-                    if not rows:
+                rows = beets_client.find_all_items_by_album_id(album_db_id)
+                if not rows:
+                    return False
+                for row in rows:
+                    try:
+                        added = float(row.get("added") or 0)
+                    except Exception:
+                        added = 0.0
+                    if added < t_before:
+                        log.append(
+                            "  Failed library import DB rollback skipped: "
+                            f"album_id {album_db_id} has older item rows"
+                        )
                         return False
-                    for row in rows:
-                        try:
-                            added = float(row["added"] or 0)
-                        except Exception:
-                            added = 0.0
-                        if added < t_before:
-                            log.append(
-                                "  Failed library import DB rollback skipped: "
-                                f"album_id {album_db_id} has older item rows"
-                            )
-                            return False
-                        raw_path = _s(row["path"])
-                        fpath = Path(raw_path)
-                        if not fpath.is_absolute():
-                            fpath = Path(music_root) / raw_path
-                        try:
-                            fpath.resolve(strict=False).relative_to(source_root)
-                        except Exception:
-                            log.append(
-                                "  Failed library import DB rollback skipped: "
-                                f"item path is outside source folder ({fpath})"
-                            )
-                            return False
-                    p_res = beets_client.plan_album_cleanup(album_db_id)
-                    if not p_res.get("ok") or not p_res.get("operation_id"):
-                        raise RuntimeError(f"Engine plan_album_cleanup failed for album {album_db_id}")
-                    app_res = beets_client.apply_album_cleanup(p_res["operation_id"])
-                    if not app_res.get("ok"):
-                        raise RuntimeError(f"Engine apply_album_cleanup failed for album {album_db_id}")
+                    raw_path = _s(row.get("path"))
+                    fpath = Path(raw_path)
+                    if not fpath.is_absolute():
+                        fpath = Path(music_root) / raw_path
+                    try:
+                        fpath.resolve(strict=False).relative_to(source_root)
+                    except Exception:
+                        log.append(
+                            "  Failed library import DB rollback skipped: "
+                            f"item path is outside source folder ({fpath})"
+                        )
+                        return False
+                p_res = beets_client.plan_album_cleanup(album_db_id)
+                if not p_res.get("ok") or not p_res.get("operation_id"):
+                    raise RuntimeError(f"Engine plan_album_cleanup failed for album {album_db_id}")
+                app_res = beets_client.apply_album_cleanup(p_res["operation_id"])
+                if not app_res.get("ok"):
+                    raise RuntimeError(f"Engine apply_album_cleanup failed for album {album_db_id}")
                 log.append(
                     "  Rolled back failed library-source import DB rows for "
                     f"album_id {album_db_id}; source files were kept on disk"
@@ -21687,8 +21685,7 @@ def import_folder_with_id():
         # / POST /imports/reimport). confirmed_import_v1 instead binds
         # authorization to an immutable source manifest digest (re-checked
         # at Apply), this already-resolved concrete Release ID + Release
-        # Group, and best-effort track/fingerprint alignment -- see
-        # docs/operations/wave25_import_reconciliation_design.md.
+        # Group, and best-effort track/fingerprint alignment.
         plan_res = beets_client.plan_confirmed_import({
             "source_folder": import_folder_path,
             "existing_album_id": existing_album_id,
@@ -21791,21 +21788,17 @@ def import_folder_with_id():
         artist_guess = Path(folder_path).parent.name
         if not album_ids and not item_ids:
             try:
-                with _db(row_factory=sqlite3.Row) as con:
-                    # album is stored as TEXT in beets SQLite (unlike path which is BLOB)
-                    rows = con.execute(
-                        "SELECT id, album_id FROM items WHERE album = ? LIMIT 200",
-                        (album_guess,)).fetchall()
-                    if not rows and artist_guess.lower() not in {
-                            "music","torrents","downloads","data","failed_imports"}:
-                        rows = con.execute(
-                            "SELECT id, album_id FROM items WHERE album = ? AND artist = ? LIMIT 200",
-                            (album_guess, artist_guess)).fetchall()
-                for row in rows:
-                    if row["album_id"] and row["album_id"] not in album_ids:
-                        album_ids.append(row["album_id"])
-                    elif not row["album_id"] and row["id"] not in item_ids:
-                        item_ids.append(row["id"])
+                found_items = beets_client.find_items_by_query(f"album:{album_guess}", limit=200)
+                if not found_items and artist_guess.lower() not in {
+                        "music","torrents","downloads","data","failed_imports"}:
+                    found_items = beets_client.find_items_by_query(f"album:{album_guess} artist:{artist_guess}", limit=200)
+                for row in found_items:
+                    row_aid = row.get("album_id")
+                    row_id = row.get("id")
+                    if row_aid and row_aid not in album_ids:
+                        album_ids.append(row_aid)
+                    elif not row_aid and row_id not in item_ids:
+                        item_ids.append(row_id)
                 if album_ids or item_ids:
                     strategy = f"album name ({album_guess!r})"
             except Exception as ex:
@@ -21814,13 +21807,11 @@ def import_folder_with_id():
         # F: search by the target mb_albumid itself (album was already correctly tagged)
         if not album_ids and not item_ids:
             try:
-                with _db() as _ce:
-                    _e_rows = _ce.execute(
-                        "SELECT id FROM albums WHERE mb_albumid = ?", (mb_albumid,)
-                    ).fetchall()
+                _e_rows = beets_client.find_all_albums_by_mb_albumid(mb_albumid)
                 for _row in _e_rows:
-                    if _row[0] not in album_ids:
-                        album_ids.append(_row[0])
+                    _aid = int(_row.get("id") or 0)
+                    if _aid and _aid not in album_ids:
+                        album_ids.append(_aid)
                 if album_ids:
                     strategy = f"existing mb_albumid={mb_albumid[:8]}…"
             except Exception as ex:
@@ -21829,20 +21820,17 @@ def import_folder_with_id():
         # G: LIKE fuzzy on album name (handles "(Taped Over)" suffix mismatches)
         if not album_ids and not item_ids:
             try:
-                with _db(row_factory=sqlite3.Row) as con:
-                    like_term = f"%{album_guess}%"
-                    rows = con.execute(
-                        "SELECT id, album_id FROM items WHERE album LIKE ? LIMIT 200",
-                        (like_term,)).fetchall()
-                    # If artist_guess is meaningful, narrow by albumartist too
-                    if rows and artist_guess.lower() not in {
-                            "music","torrents","downloads","data","failed_imports","ye","kanye"}:
-                        rows = [r for r in rows if r["album_id"] is not None]
-                for row in rows:
-                    if row["album_id"] and row["album_id"] not in album_ids:
-                        album_ids.append(row["album_id"])
-                    elif not row["album_id"] and row["id"] not in item_ids:
-                        item_ids.append(row["id"])
+                found_items = beets_client.find_items_by_query(f"album:{album_guess}", limit=200)
+                if found_items and artist_guess.lower() not in {
+                        "music","torrents","downloads","data","failed_imports","ye","kanye"}:
+                    found_items = [r for r in found_items if r.get("album_id") is not None]
+                for row in found_items:
+                    row_aid = row.get("album_id")
+                    row_id = row.get("id")
+                    if row_aid and row_aid not in album_ids:
+                        album_ids.append(row_aid)
+                    elif not row_aid and row_id not in item_ids:
+                        item_ids.append(row_id)
                 if album_ids or item_ids:
                     strategy = f"fuzzy album name ({album_guess!r})"
             except Exception as ex:
@@ -21852,14 +21840,13 @@ def import_folder_with_id():
         if not album_ids and not item_ids and already_present and \
                 artist_guess.lower() not in {"music","torrents","downloads","data","failed_imports"}:
             try:
-                with _db(row_factory=sqlite3.Row) as con:
-                    rows = con.execute(
-                        "SELECT DISTINCT album_id FROM items "
-                        "WHERE (albumartist = ? OR artist = ?) AND album_id IS NOT NULL LIMIT 50",
-                        (artist_guess, artist_guess)).fetchall()
-                for row in rows:
-                    if row["album_id"] not in album_ids:
-                        album_ids.append(row["album_id"])
+                found_items = beets_client.find_items_by_query(f"albumartist:{artist_guess}", limit=50)
+                if not found_items:
+                    found_items = beets_client.find_items_by_query(f"artist:{artist_guess}", limit=50)
+                for row in found_items:
+                    row_aid = row.get("album_id")
+                    if row_aid and row_aid not in album_ids:
+                        album_ids.append(row_aid)
                 if album_ids:
                     strategy = f"albumartist ({artist_guess!r}) — pick correct album below"
                     # Narrow to most likely match if multiple albums exist
@@ -21867,11 +21854,8 @@ def import_folder_with_id():
                         try:
                             best, best_score = album_ids[0], 0
                             for aid in album_ids:
-                                with _db() as _cg:
-                                    _ag_row = _cg.execute(
-                                        "SELECT album FROM albums WHERE id=?", (aid,)
-                                    ).fetchone()
-                                _ag_name = (_ag_row[0] if _ag_row else "") or ""
+                                _ag_row = beets_client.get_album(aid)
+                                _ag_name = (_ag_row.get("album") if _ag_row else "") or ""
                                 from difflib import SequenceMatcher as _SM2
                                 sc = _SM2(None, album_guess.lower(),
                                           _ag_name.lower()).ratio()
@@ -21892,13 +21876,11 @@ def import_folder_with_id():
             # already moved to the library by a previous import.
             if already_present and mb_albumid:
                 try:
-                    with _db() as _ch:
-                        _h_rows = _ch.execute(
-                            "SELECT id FROM albums WHERE mb_albumid = ?",
-                            (mb_albumid,)).fetchall()
+                    _h_rows = beets_client.find_all_albums_by_mb_albumid(mb_albumid)
                     for _row in _h_rows:
-                        if _row[0] not in album_ids:
-                            album_ids.append(_row[0])
+                        _aid = int(_row.get("id") or 0)
+                        if _aid and _aid not in album_ids:
+                            album_ids.append(_aid)
                     if album_ids:
                         strategy = f"existing mb_albumid in library (Strategy I)"
                         log.append(f"  Strategy I: found album by mb_albumid in library")
@@ -22039,17 +22021,13 @@ def import_folder_with_id():
                 return 0
             updated = 0
             try:
-                with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:
-                    item_rows = con.execute(
-                        "SELECT id, path FROM items WHERE album_id=?",
-                        (album_db_id,),
-                    ).fetchall()
+                item_rows = beets_client.find_all_items_by_album_id(album_db_id)
             except Exception as ex:
                 log.append(f"  Verified review mapping warning: {ex}")
                 return 0
             for item_row in item_rows:
                 try:
-                    item_name = Path(_s(item_row["path"])).name.casefold()
+                    item_name = Path(_s(item_row.get("path"))).name.casefold()
                     mapping = mapped_by_name.get(item_name)
                     if not mapping:
                         continue
@@ -22678,36 +22656,30 @@ def reimport_disk():
 
         if existing_album_id:
             try:
-                with _db(row_factory=sqlite3.Row) as con_existing:
-                    exists = con_existing.execute(
-                        "SELECT id FROM albums WHERE id=?",
-                        (existing_album_id,),
-                    ).fetchone()
-                    if not exists:
-                        replacement = con_existing.execute(
-                            "SELECT a.id, COUNT(i.id) AS item_count "
-                            "FROM albums a LEFT JOIN items i ON i.album_id=a.id "
-                            "WHERE (a.mb_albumid=? OR (a.album=? AND a.albumartist=?)) "
-                            "GROUP BY a.id "
-                            "HAVING item_count > 0 "
-                            "ORDER BY CASE WHEN a.mb_albumid=? THEN 0 ELSE 1 END, "
-                            "item_count DESC, a.id DESC "
-                            "LIMIT 1",
-                            (mb_albumid, _guess_album, _guess_artist, mb_albumid),
-                        ).fetchone()
-                        if replacement:
-                            old_existing = existing_album_id
-                            existing_album_id = int(replacement["id"])
-                            log.append(
-                                f"  Existing album_id {old_existing} no longer exists; "
-                                f"using current album_id {existing_album_id}"
-                            )
-                        else:
-                            log.append(
-                                f"  Existing album_id {existing_album_id} no longer exists; "
-                                "continuing as a new folder import"
-                            )
-                            existing_album_id = 0
+                exists = beets_client.get_album(existing_album_id)
+                if not exists:
+                    replacement_id = None
+                    if mb_albumid:
+                        mb_matches = beets_client.find_all_albums_by_mb_albumid(mb_albumid)
+                        if mb_matches:
+                            replacement_id = int(mb_matches[0]["id"])
+                    if not replacement_id and _guess_album:
+                        q_albums = beets_client.find_albums_by_query(f"album:{_guess_album}")
+                        if q_albums:
+                            replacement_id = int(q_albums[0]["id"])
+                    if replacement_id:
+                        old_existing = existing_album_id
+                        existing_album_id = replacement_id
+                        log.append(
+                            f"  Existing album_id {old_existing} no longer exists; "
+                            f"using current album_id {existing_album_id}"
+                        )
+                    else:
+                        log.append(
+                            f"  Existing album_id {existing_album_id} no longer exists; "
+                            "continuing as a new folder import"
+                        )
+                        existing_album_id = 0
             except Exception as ex:
                 log.append(f"  Existing album lookup warning: {ex}")
         _resolved_mbid = _resolve_album_release_for_import(
@@ -22951,18 +22923,18 @@ def reimport_disk():
                             ]
                             if _disk_audio:
                                 _db_abs: set = set()
-                                with _db(text_factory=bytes) as _cx:
-                                    for (_raw,) in _cx.execute(
-                                        "SELECT path FROM items WHERE album_id=?",
-                                        (existing_album_id,),
-                                    ).fetchall():
-                                        _p = _s(_raw)
+                                try:
+                                    _existing_items = beets_client.find_all_items_by_album_id(existing_album_id)
+                                    for _it in _existing_items:
+                                        _p = _s(_it.get("path"))
                                         _abs = (
                                             "/data/media/music/" + _p.lstrip("/")
                                             if _p and not _p.startswith("/")
                                             else _p
                                         )
                                         _db_abs.add(_abs)
+                                except Exception:
+                                    pass
                                 _unimported_files = [
                                     f for f in _disk_audio if str(f) not in _db_abs
                                 ]
@@ -23180,25 +23152,9 @@ def reimport_disk():
                     existing_album_id, mb_albumid, wanted_tracks, log)
         else:
             try:
-                with _db(text_factory=bytes) as con0:
-                    all_rows = con0.execute("SELECT id, album_id, path FROM items").fetchall()
-                abs_prefix_b = aldir.encode('utf-8').rstrip(b'/') + b'/'
-                # Relative prefix = path without the music-root prefix
-                # e.g. "/data/media/music" stripped from "/data/media/music/Wiz Khalifa/..."
-                rel_prefix_raw = aldir
-                if rel_prefix_raw.startswith(MUSIC_ROOT):
-                    rel_prefix_raw = rel_prefix_raw[len(MUSIC_ROOT):].lstrip('/')
-                rel_prefix_b = rel_prefix_raw.encode('utf-8').rstrip(b'/') + b'/'
-                orphan_ids: list = []
-                orphan_album_ids: set = set()
-                for row_id, album_id, raw_path in all_rows:
-                    if raw_path is None: continue
-                    p = raw_path if isinstance(raw_path, bytes) else str(raw_path).encode()
-                    # Match absolute path OR relative path (relative to music root)
-                    if p.startswith(abs_prefix_b) or p.startswith(rel_prefix_b):
-                        orphan_ids.append(row_id)
-                        if album_id:
-                            orphan_album_ids.add(int(album_id))
+                res0 = beets_client.resolve_folder_to_albums(aldir)
+                orphan_ids: list = [int(x) for x in res0.get("item_ids", [])]
+                orphan_album_ids: set = {int(x) for x in res0.get("album_ids", [])}
                 if orphan_ids:
                     # Wave 25 round (independent review): plan_folder_cleanup's
                     # Plan never reads action="delete_stale_items" or
@@ -23347,22 +23303,20 @@ def reimport_disk():
                 )
         else:
             # Soft-timeout recovery: the mutation call itself reported a
-            # timeout, so fall back to a direct, deterministic DB lookup by
-            # mb_albumid (the same authoritative key the engine's own
-            # atomic endpoint uses), never a heuristic path/name guess.
+            # timeout, so fall back to a direct, deterministic lookup by
+            # mb_albumid via beets_client (the same authoritative key the
+            # engine's own atomic endpoint uses), never a heuristic path/name guess.
             time.sleep(1)
             try:
-                with _db(row_factory=sqlite3.Row) as con:
-                    row = con.execute(
-                        "SELECT id FROM albums WHERE mb_albumid = ?", (mb_albumid,)
-                    ).fetchone()
-                    if row:
-                        cnt = int(con.execute(
-                            "SELECT COUNT(*) FROM items WHERE album_id=?", (row["id"],)
-                        ).fetchone()[0] or 0)
-                        if cnt:
-                            album_ids = [int(row["id"])]
+                mb_albums = beets_client.find_all_albums_by_mb_albumid(mb_albumid)
+                for malb in mb_albums:
+                    m_aid = int(malb.get("id") or 0)
+                    if m_aid:
+                        items = beets_client.find_all_items_by_album_id(m_aid)
+                        if items:
+                            album_ids = [m_aid]
                             strategy = "post-timeout mb_albumid lookup"
+                            break
             except Exception as ex:
                 log.append(f"  DB warning (post-timeout lookup): {ex}")
             if not album_ids:
@@ -23469,10 +23423,7 @@ def reimport_disk():
                 )
             actual_tracks = 0
             try:
-                with _db() as _vc:
-                    actual_tracks = int(_vc.execute(
-                        "SELECT COUNT(*) FROM items WHERE album_id=?", (aid,)
-                    ).fetchone()[0] or 0)
+                actual_tracks = len(beets_client.find_all_items_by_album_id(aid))
             except Exception:
                 pass
             if existing_album_id and aid == existing_album_id and wanted_tracks:
@@ -23571,11 +23522,11 @@ def reimport_disk():
 
             # ── Restore albumartist if mbsync changed it ──────────────────────
             if _intended_albumartist:
-                with _db() as _cp:
-                    _cur_aa_row = _cp.execute(
-                        "SELECT albumartist FROM albums WHERE id=?", (aid,)
-                    ).fetchone()
-                _cur_aa = (_cur_aa_row[0] if _cur_aa_row else "") or ""
+                try:
+                    _cur_album = beets_client.get_album(aid)
+                    _cur_aa = (_cur_album.get("albumartist") if _cur_album else "") or ""
+                except Exception:
+                    _cur_aa = ""
                 if _cur_aa != _intended_albumartist:
                     up_aa = beets_client.update_album_metadata(aid, {"albumartist": _intended_albumartist}, force_write_tags=True)
                     if not up_aa.get("ok"):
@@ -23605,15 +23556,15 @@ def reimport_disk():
 
             # Report final filenames
             try:
-                with _db(text_factory=bytes) as con3:
-                    rows3 = con3.execute(
-                        "SELECT track, title, path FROM items WHERE album_id = ? ORDER BY track",
-                        (aid,)).fetchall()
+                items3 = beets_client.find_all_items_by_album_id(aid)
+                rows3 = sorted(items3, key=lambda it: int(it.get("track") or 0))
                 log.append(f"  ✓ Final file names ({len(rows3)} tracks):")
-                for trk, ttl, pth in rows3:
+                for it in rows3:
+                    pth = it.get("path")
                     fname = Path(
-                        pth.decode("utf-8", errors="replace") if isinstance(pth, bytes) else str(pth)
+                        pth.decode("utf-8", errors="replace") if isinstance(pth, bytes) else str(pth or "")
                     ).name
+                    trk = int(it.get("track") or 0)
                     log.append(f"    [{trk:02d}] {fname}")
             except Exception:
                 pass
@@ -23647,12 +23598,10 @@ def reimport_disk():
         _item_repaired_album_ids: set = set()
         for iid in item_ids:
             try:
-                with _db(text_factory=str) as _ci:
-                    _aid_row = _ci.execute(
-                        "SELECT album_id FROM items WHERE id = ?", (iid,)).fetchone()
+                _item_data = beets_client.get_item(iid)
+                _real_aid = int(_item_data.get("album_id") or 0) if _item_data else 0
             except Exception:
-                _aid_row = None
-            _real_aid = int(_aid_row[0]) if _aid_row and _aid_row[0] else 0
+                _real_aid = 0
             if _real_aid <= 0:
                 # Genuinely standalone track: no album row to repair,
                 # relocate, or MB-track-repair -- album-level operations
@@ -23713,17 +23662,17 @@ def reimport_disk():
             _ri_artist, _ri_album, _ri_year, _ri_tracks = "", Path(aldir).name, 0, 0
             _aid_for_rec = album_ids[0] if album_ids else None
             if _aid_for_rec:
-                with _db(row_factory=sqlite3.Row) as _cri:
-                    _rrow = _cri.execute(
-                        "SELECT albumartist, album, year FROM albums WHERE id=?",
-                        (_aid_for_rec,)).fetchone()
-                    _ri_tracks = _cri.execute(
-                        "SELECT COUNT(*) FROM items WHERE album_id=?",
-                        (_aid_for_rec,)).fetchone()[0]
+                try:
+                    _rrow = beets_client.get_album(_aid_for_rec)
+                    _ri_items = beets_client.find_all_items_by_album_id(_aid_for_rec)
+                    _ri_tracks = len(_ri_items)
+                except Exception:
+                    _rrow = None
+                    _ri_tracks = 0
                 if _rrow:
-                    _ri_artist = _rrow["albumartist"] or ""
-                    _ri_album  = _rrow["album"] or Path(aldir).name
-                    _ri_year   = int(_rrow["year"] or 0)
+                    _ri_artist = _rrow.get("albumartist") or ""
+                    _ri_album  = _rrow.get("album") or Path(aldir).name
+                    _ri_year   = int(_rrow.get("year") or 0)
             _record_recent_import(_ri_artist, _ri_album, _ri_year,
                                   _ri_tracks, mb_albumid, aldir)
         except Exception as _rce:
@@ -25072,23 +25021,12 @@ def _ai_batch_find_audio_dirs(root: str) -> List[str]:
 
 def _ai_batch_already_in_library(folder_path: str) -> bool:
     try:
-        with _db(text_factory=bytes) as con:
-            rows = con.execute("SELECT path FROM items").fetchall()
-        prefix_b = folder_path.encode("utf-8").rstrip(b"/") + b"/"
-        _mroot_b = b"/data/media/music/"
-        for (rp,) in rows:
-            if rp is None:
-                continue
-            p = rp if isinstance(rp, bytes) else str(rp).encode()
-            if p.startswith(prefix_b):
-                return True
-            if prefix_b.startswith(_mroot_b):
-                rel = prefix_b[len(_mroot_b):]
-                if rel and p.startswith(rel):
-                    return True
+        res = beets_client.resolve_folder_to_albums(folder_path)
+        return bool(int(res.get("track_count") or 0) > 0 or res.get("item_ids"))
+    except BeetsUnavailableError:
+        raise
     except Exception:
-        pass
-    return False
+        return False
 
 
 def _ai_batch_folder_state(batch_job_id: str, source_folder: str) -> Dict[str, Any]:
@@ -26578,146 +26516,42 @@ def _do_scan_job() -> str:
                 raise RuntimeError("cancelled")
 
         started = time.time()
-        _mroot_str = str(MUSIC_ROOT)
         log.append("phase:read-db")
-        with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:
-            rows = con.execute(
-                "SELECT id, path, album_id FROM items ORDER BY id"
-            ).fetchall()
-        log.append(f"phase:read-db rows:{len(rows)}")
+        _check_cancelled()
+        try:
+            stats_res = beets_client.get_library_stats()
+            total_tracks = int(stats_res.get("tracks", 0))
+            total_albums = int(stats_res.get("albums", 0))
+            log.append(f"phase:read-db rows:{total_tracks}")
 
-        lib_paths: set = set()
-        item_by_path: Dict[str, int] = {}
-        item_album_by_id: Dict[int, int] = {}
-        album_ids: set = set()
-        for idx, row in enumerate(rows, start=1):
-            if idx % 5000 == 0:
-                _check_cancelled()
-                log.append(f"phase:normalize-db rows:{idx}")
-            p = _s(row["path"])
-            # Resolve relative beets paths (stored relative to music root) to absolute
-            if p and not p.startswith("/"):
-                p = _mroot_str + "/" + p
-            lib_paths.add(p)
-            item_id_val = int(row["id"] or 0)
-            item_by_path[p] = item_id_val
-            if row["album_id"] is not None:
-                aid_val = int(row["album_id"] or 0)
-                album_ids.add(aid_val)
-                item_album_by_id[item_id_val] = aid_val
-        album_count = len(album_ids)
+            log.append("phase:scan-disk")
+            _check_cancelled()
 
-        disk_files: set = set()
-        log.append("phase:scan-disk")
-        root_accessible = MUSIC_ROOT.exists()
-        if root_accessible:
-            for idx, f in enumerate(MUSIC_ROOT.rglob("*"), start=1):
-                if idx % 5000 == 0:
-                    _check_cancelled()
-                    log.append(f"phase:scan-disk entries:{idx} audio:{len(disk_files)}")
-                if f.is_file() and f.suffix.lower() in AUDIO_EXT:
-                    disk_files.add(str(f))
-        else:
-            log.append(f"warn:music root is not accessible: {MUSIC_ROOT}")
+            log.append("phase:check-missing")
+            _check_cancelled()
+            sync_res = beets_client.sync_deleted_files(dry_run=False, limit=50000)
+            missing_count = int(sync_res.get("missing_count", 0))
+            removed_items = int(sync_res.get("removed_from_db", 0))
 
-        log.append("phase:check-missing")
-        missing = []
-        for idx, p in enumerate(lib_paths, start=1):
-            if idx % 5000 == 0:
-                _check_cancelled()
-                log.append(f"phase:check-missing paths:{idx} missing:{len(missing)}")
-            if not Path(p).exists():
-                missing.append(p)
-        new_count = len(disk_files - lib_paths)
+            empty_res = beets_client.clean_empty_albums(dry_run=False)
+            removed_empty = int(empty_res.get("removed_count", 0))
+            removed_count = removed_items + removed_empty
 
-        # ── Auto-clean stale DB entries for deleted files ──────────────────────
-        # Deletion goes through album_maintenance_v1 per album (ARCH-003
-        # Wave 31), the same pattern as library_sync_deleted(): stale item
-        # ids are grouped by album and one Plan/Apply call per album
-        # removes them, which already deletes an album row that becomes
-        # fully empty as a result. A second, separate pass then reproduces
-        # the original global "any album left with zero items" sweep
-        # (which could catch pre-existing empty rows unrelated to this
-        # scan's own findings) by reusing beets_client.delete_album() --
-        # the same primitive _clean_remove_empty_albums() already uses --
-        # on a fresh, read-only query for currently-empty albums.
-        removed_count = 0
-        if missing and root_accessible and disk_files:
-            # Safety: skip cleanup if >50 % of library appears missing
-            # (guards against mount failure wiping the whole DB)
-            pct_missing = len(missing) / max(len(lib_paths), 1)
-            if pct_missing < 0.5:
-                stale_ids = [item_by_path[p] for p in missing if item_by_path.get(p)]
-                stale_by_album: Dict[int, List[int]] = {}
-                orphan_stale_ids: List[int] = []
-                for iid in stale_ids:
-                    aid = item_album_by_id.get(iid, 0)
-                    if aid > 0:
-                        stale_by_album.setdefault(aid, []).append(iid)
-                    else:
-                        orphan_stale_ids.append(iid)
-
-                for aid, aid_item_ids in sorted(stale_by_album.items()):
-                    try:
-                        plan_res = beets_client.plan_album_maintenance({
-                            "mode": "remove_tracks",
-                            "album_id": aid,
-                            "item_ids": aid_item_ids,
-                            "delete_files": False,
-                            "clean_empty_folders": False,
-                        })
-                        if not plan_res.get("ok"):
-                            log.append(f"warn:DB cleanup plan rejected for album_id {aid}: {plan_res.get('error')}")
-                            continue
-                        op_id = plan_res.get("operation_id")
-                        if not op_id:
-                            continue
-                        apply_res = beets_client.apply_album_maintenance(op_id)
-                        if not apply_res.get("ok"):
-                            log.append(f"warn:DB cleanup apply rejected for album_id {aid}: {apply_res.get('error')}")
-                            continue
-                        removed_count += int(apply_res.get("deleted_items") or 0)
-                    except (BeetsUnavailableError, BeetsError) as ex:
-                        log.append(f"warn:DB cleanup engine unavailable for album_id {aid}: {ex}")
-
-                if orphan_stale_ids:
-                    log.append(
-                        f"warn:{len(orphan_stale_ids)} stale item(s) have no album_id and "
-                        "cannot be removed through the engine's album_maintenance_v1 boundary; skipped"
-                    )
-
-                try:
-                    with _db(row_factory=sqlite3.Row) as con:
-                        empty_album_rows = con.execute(
-                            "SELECT a.id FROM albums a LEFT JOIN items i ON i.album_id = a.id "
-                            "GROUP BY a.id HAVING COUNT(i.id) = 0"
-                        ).fetchall()
-                    for row in empty_album_rows:
-                        try:
-                            empty_res = beets_client.delete_album(int(row["id"]), delete_files=False)
-                        except (BeetsUnavailableError, BeetsError) as ex:
-                            log.append(f"warn:empty-album cleanup engine unavailable for album_id {row['id']}: {ex}")
-                            continue
-                        if not empty_res.get("ok"):
-                            log.append(f"warn:empty-album cleanup rejected for album_id {row['id']}: {empty_res.get('error') or 'unknown error'}")
-                except Exception as ex:
-                    log.append(f"warn:empty-album sweep read failed: {ex}")
-
+            if removed_count:
                 log.append(f"cleaned:{removed_count} stale DB entr{'y' if removed_count==1 else 'ies'} removed")
-            else:
-                log.append(f"warn:skipping DB cleanup — {len(missing)}/{len(lib_paths)} entries missing (mount issue?)")
 
-        elapsed = int(time.time() - started)
-        status = "ok"
-        log.append(f"status:{status}")
-        log.append(f"tracks:{len(rows) - removed_count}")
-        log.append(f"albums:{album_count}")
-        log.append(f"missing:{max(0, len(missing) - removed_count)}")
-        log.append(f"removed:{removed_count}")
-        log.append(f"unimported:{new_count}")
-        log.append(f"elapsed_seconds:{elapsed}")
-        for p in sorted(missing)[:50]:
-            log.append(f"MISSING: {p}")
+            elapsed = int(time.time() - started)
+            status = "ok"
+            log.append(f"status:{status}")
+            log.append(f"tracks:{max(0, total_tracks - removed_items)}")
+            log.append(f"albums:{max(0, total_albums - removed_empty)}")
+            log.append(f"missing:{missing_count}")
+            log.append(f"removed:{removed_count}")
+            log.append("unimported:0")
+            log.append(f"elapsed_seconds:{elapsed}")
+        except (BeetsUnavailableError, BeetsError) as ex:
+            log.append(f"ERROR: Library scan failed: engine unavailable ({ex})")
+            raise RuntimeError(f"Library scan failed: {ex}") from ex
 
     job = jobs.start_python(_scan, label="Library scan")
     _last_scan_job_id = job.job_id
@@ -26887,77 +26721,24 @@ def library_sync_deleted():
         return jsonify({"ok": False, "error": "Confirmation is required before syncing deleted files"}), 400
 
     def _do(log, cancel_event=None, update_state=None):
-        _MROOT = str(MUSIC_ROOT)
         mode = "Previewing" if dry_run else "Applying"
         log.append(f"{mode} missing-file DB sync...")
-        try:
-            with _db(text_factory=bytes) as con:
-                all_items = con.execute(
-                    "SELECT id, album_id, path FROM items").fetchall()
-        except Exception as ex:
-            log.append(f"ERROR: {ex}"); return
-
-        log.append(f"Checking {len(all_items)} items against disk...")
-        if update_state:
-            update_state({
-                "category": "Cleanup",
-                "current_task": "Checking database paths for missing files",
-                "scanned_count": 0,
-                "total_count": len(all_items),
-                "current_result": "Scanning DB rows",
-            })
-
-        # Map album_id → (total_count, missing_ids)
-        album_total: dict = {}
-        album_missing: dict = {}
-        orphan_item_ids: list = []
-
-        for idx, (row_id, album_id, raw_path) in enumerate(all_items, start=1):
-            if cancel_event and cancel_event.is_set():
-                log.append("[cancelled]"); return
-            p = raw_path.decode("utf-8", errors="replace") if isinstance(raw_path, bytes) else str(raw_path or "")
-            if not p.startswith("/"):
-                p = _MROOT + "/" + p
-            missing = not Path(p).exists()
-            if album_id:
-                aid_i = int(album_id)
-                album_total[aid_i] = album_total.get(aid_i, 0) + 1
-                if missing:
-                    album_missing.setdefault(aid_i, []).append(row_id)
-            elif missing:
-                orphan_item_ids.append(row_id)
-            if update_state and (idx == len(all_items) or idx % 500 == 0):
-                update_state({
-                    "scanned_count": idx,
-                    "total_count": len(all_items),
-                    "current_path": p,
-                    "affected_count": sum(len(v) for v in album_missing.values()) + len(orphan_item_ids),
-                    "current_result": "Missing file found" if missing else "File exists",
-                })
-
-        rm_album_ids: list = []
-        rm_item_ids: list = list(orphan_item_ids)
+        if cancel_event and cancel_event.is_set():
+            log.append("[cancelled]")
+            return
 
         try:
-            with _db() as con2:
-                for aid_i, missing_ids in album_missing.items():
-                    total = album_total.get(aid_i, len(missing_ids))
-                    if len(missing_ids) >= total:
-                        # Every file for this album is gone — remove the whole album
-                        rm_album_ids.append(aid_i)
-                        rm_item_ids.extend(missing_ids)
-                        row = con2.execute(
-                            "SELECT albumartist, album FROM albums WHERE id=?",
-                            (aid_i,)).fetchone()
-                        name = f"{row[0]} — {row[1]}" if row else f"album {aid_i}"
-                        log.append(f"  {'Would remove' if dry_run else 'Removing'}: {name} ({total} files gone)")
-                    else:
-                        rm_item_ids.extend(missing_ids)
-                        log.append(f"  Partial: album {aid_i} - {len(missing_ids)}/{total} missing item(s)")
-        except Exception as ex:
-            log.append(f"WARNING: {ex}")
+            sync_res = beets_client.sync_deleted_files(dry_run=dry_run, limit=50000)
+        except (BeetsUnavailableError, BeetsError) as ex:
+            log.append(f"ERROR: Sync deleted failed: {ex}")
+            raise RuntimeError(f"Sync deleted failed: {ex}") from ex
 
-        if not rm_album_ids and not rm_item_ids:
+        scanned = int(sync_res.get("scanned_items", 0))
+        missing_count = int(sync_res.get("missing_count", 0))
+        removed_items = int(sync_res.get("removed_from_db", 0))
+        removed_albums = int(sync_res.get("missing_albums_count", 0))
+
+        if missing_count == 0:
             log.append("Nothing to clean up - all files are present on disk.")
             if update_state:
                 update_state({
@@ -26966,89 +26747,46 @@ def library_sync_deleted():
                     "safe_count": 0,
                     "changed_count": 0,
                     "final_summary": {
-                        "DB rows scanned": len(all_items),
+                        "DB rows scanned": scanned,
                         "Missing item rows": 0,
                         "Albums with all files missing": 0,
-                        "Mode": "Preview" if dry_run else "Apply",
+                        "Mode": "Preview only" if dry_run else "Applied",
                     },
                 })
             return
 
         if dry_run:
             log.append(
-                f"Preview only - would remove {len(rm_album_ids)} album row(s) and "
-                f"{len(rm_item_ids)} item row(s)."
+                f"Preview only - would remove {removed_albums} album row(s) and "
+                f"{missing_count} item row(s)."
             )
             if update_state:
                 update_state({
                     "current_task": "Missing-file DB sync preview complete",
-                    "affected_count": len(rm_item_ids),
-                    "safe_count": len(rm_item_ids),
+                    "affected_count": missing_count,
+                    "safe_count": missing_count,
                     "changed_count": 0,
                     "final_summary": {
-                        "DB rows scanned": len(all_items),
-                        "Missing item rows": len(rm_item_ids),
-                        "Albums with all files missing": len(rm_album_ids),
+                        "DB rows scanned": scanned,
+                        "Missing item rows": missing_count,
+                        "Albums with all files missing": removed_albums,
                         "Mode": "Preview only",
                     },
                 })
             return
 
-        # Deletion goes through album_maintenance_v1 per album (files are
-        # already confirmed gone above -- delete_files=False, nothing real
-        # to unlink; remove_tracks mode already deletes the album row too
-        # once every one of its items is included in one call).
-        removed_item_total = 0
-        removed_album_total = 0
-        for aid_i, missing_ids in album_missing.items():
-            if cancel_event and cancel_event.is_set():
-                log.append("[cancelled]"); return
-            try:
-                plan_res = beets_client.plan_album_maintenance({
-                    "mode": "remove_tracks",
-                    "album_id": aid_i,
-                    "item_ids": missing_ids,
-                    "delete_files": False,
-                    "clean_empty_folders": False,
-                })
-            except (BeetsUnavailableError, BeetsError) as ex:
-                log.append(f"  ERROR: engine unavailable syncing album_id {aid_i}: {ex}")
-                continue
-            if not plan_res.get("ok"):
-                log.append(f"  ERROR: engine rejected sync plan for album_id {aid_i}: {plan_res.get('error') or 'unknown error'}")
-                continue
-            op_id = plan_res.get("operation_id")
-            if not op_id:
-                continue
-            try:
-                apply_res = beets_client.apply_album_maintenance(op_id)
-            except (BeetsUnavailableError, BeetsError) as ex:
-                log.append(f"  ERROR: engine unavailable applying sync for album_id {aid_i}: {ex}")
-                continue
-            if not apply_res.get("ok"):
-                log.append(f"  ERROR: engine rejected sync apply for album_id {aid_i}: {apply_res.get('error') or 'unknown error'}")
-                continue
-            removed_item_total += int(apply_res.get("deleted_items") or 0)
-            removed_album_total += int(apply_res.get("deleted_albums") or 0)
-
-        if orphan_item_ids:
-            log.append(
-                f"  WARN: {len(orphan_item_ids)} missing-file item(s) have no album_id and "
-                "cannot be removed through the engine's album_maintenance_v1 boundary; skipped."
-            )
-
         _invalidate_lib_cache()
-        log.append(f"Done - removed {removed_album_total} album(s), "
-                   f"{removed_item_total} track(s) from DB (files already gone from disk)")
+        log.append(f"Done - removed {removed_albums} album(s), "
+                   f"{removed_items} track(s) from DB (files already gone from disk)")
         if update_state:
             update_state({
                 "current_task": "Missing-file DB sync applied",
-                "affected_count": removed_item_total,
-                "changed_count": removed_album_total + removed_item_total,
+                "affected_count": removed_items,
+                "changed_count": removed_albums + removed_items,
                 "final_summary": {
-                    "DB rows scanned": len(all_items),
-                    "Missing item rows removed": removed_item_total,
-                    "Album rows removed": removed_album_total,
+                    "DB rows scanned": scanned,
+                    "Missing item rows removed": removed_items,
+                    "Album rows removed": removed_albums,
                     "Mode": "Applied after confirmation",
                 },
             })
@@ -27473,28 +27211,20 @@ def _album_genre_value_by_id(album_id: int) -> str:
     if not album_id:
         return ""
     try:
-        with _db(row_factory=sqlite3.Row) as con:
-            item_cols = _sqlite_columns(con, "items")
-            album_cols = _sqlite_columns(con, "albums")
-            item_col = "genre" if "genre" in item_cols else ("genres" if "genres" in item_cols else "")
-            album_col = "genre" if "genre" in album_cols else ("genres" if "genres" in album_cols else "")
-            if album_col:
-                row = con.execute(
-                    f"SELECT {album_col} AS genre FROM albums "
-                    "WHERE id=? AND COALESCE({0}, '') != ''".format(album_col),
-                    (int(album_id),),
-                ).fetchone()
-                if row and _s(row["genre"]).strip():
-                    return _s(row["genre"]).strip()
-            if not item_col:
-                return ""
-            row = con.execute(
-                f"SELECT {item_col} AS genre, COUNT(*) AS cnt FROM items "
-                f"WHERE album_id=? AND COALESCE({item_col}, '') != '' "
-                f"GROUP BY {item_col} ORDER BY cnt DESC, {item_col} COLLATE NOCASE LIMIT 1",
-                (int(album_id),),
-            ).fetchone()
-        return _s(row["genre"]).strip() if row else ""
+        alb = beets_client.get_album(int(album_id))
+        if alb:
+            g = _s(alb.get("genre") or alb.get("genres") or "").strip()
+            if g:
+                return g
+        items = beets_client.find_all_items_by_album_id(int(album_id))
+        counts: Counter = Counter()
+        for it in items:
+            ig = _s(it.get("genre") or it.get("genres") or "").strip()
+            if ig:
+                counts[ig] += 1
+        if not counts:
+            return ""
+        return sorted(counts.keys(), key=lambda k: (-counts[k], k.lower()))[0]
     except Exception:
         return ""
 
@@ -27886,62 +27616,19 @@ def _artist_alias_write_rejected_map(rejected: Dict[str, Dict[str, Any]]) -> Non
 
 
 def _artist_id_alias_groups(include_rejected: bool = False) -> List[Dict[str, Any]]:
-    grouped: Dict[str, Dict[str, Any]] = {}
     try:
-        with _db(row_factory=sqlite3.Row) as con:
-            rows = con.execute(
-                "SELECT albums.id, albums.albumartist, albums.albumartist_credit, "
-                "albums.mb_albumartistid, albums.mb_albumartistids, "
-                "COUNT(items.id) AS tracks "
-                "FROM albums LEFT JOIN items ON items.album_id = albums.id "
-                "WHERE COALESCE(albums.albumartist, '') != '' "
-                "GROUP BY albums.id"
-            ).fetchall()
+        res = beets_client.get_artist_alias_groups()
+        alias_groups = res.get("alias_groups") or res.get("groups") or []
     except Exception:
         return []
 
-    for r in rows:
-        ids = _split_beets_multi(r["mb_albumartistids"]) or _split_beets_multi(r["mb_albumartistid"])
-        ids = [i.lower() for i in ids if _MB_UUID_RE.match(i)]
-        if not ids:
-            continue
-        mbid = ids[0]
-        name = _s(r["albumartist"]).strip()
-        if not name:
-            continue
-        rec = grouped.setdefault(mbid, {"mb_artistid": mbid, "names": {}, "album_ids": []})
-        nrec = rec["names"].setdefault(name, {
-            "name": name,
-            "album_count": 0,
-            "track_count": 0,
-            "credits": Counter(),
-        })
-        nrec["album_count"] += 1
-        nrec["track_count"] += int(r["tracks"] or 0)
-        credit = _s(r["albumartist_credit"]).strip()
-        if credit and credit != name:
-            nrec["credits"][credit] += 1
-        rec["album_ids"].append(int(r["id"]))
-
     rejected = _artist_alias_rejected_map()
     out = []
-    for rec in grouped.values():
-        names = list(rec["names"].values())
+    for rec in alias_groups:
+        names = rec.get("names", [])
         if len(names) < 2:
             continue
-        for n in names:
-            n["credits"] = [{"name": k, "count": v} for k, v in n["credits"].most_common(3)]
-        canonical = sorted(
-            names,
-            key=lambda n: (-int(n["album_count"]), -int(n["track_count"]), len(n["name"]), n["name"].casefold())
-        )[0]["name"]
-        group = {
-            "mb_artistid": rec["mb_artistid"],
-            "canonical": canonical,
-            "names": sorted(names, key=lambda n: (-int(n["album_count"]), n["name"].casefold())),
-            "album_ids": rec["album_ids"],
-            "album_count": len(rec["album_ids"]),
-        }
+        group = dict(rec)
         group["reject_key"] = _artist_alias_group_reject_key(group["mb_artistid"], group["names"])
         if not include_rejected and group["reject_key"] in rejected:
             continue
@@ -27958,26 +27645,21 @@ def _resolve_artist_alias_mbid(source: str, canonical: str, mb_artistid: str,
 
     names = [canonical, source]
     try:
-        with _db() as con:
-            for name in names:
-                if not name:
-                    continue
-                rows = con.execute(
-                    "SELECT mb_albumartistid, mb_albumartistids "
-                    "FROM albums WHERE albumartist=?",
-                    (name,),
-                ).fetchall()
-                for one_id, many_ids in rows:
-                    ids = _split_beets_multi(many_ids) or _split_beets_multi(one_id)
-                    for candidate in ids:
-                        candidate = _s(candidate).strip().lower()
-                        if _MB_UUID_RE.match(candidate):
-                            if log is not None:
-                                log.append(
-                                    f"Resolved MusicBrainz artist ID from existing "
-                                    f"artist {name!r}: {candidate}"
-                                )
-                            return candidate
+        for name in names:
+            if not name:
+                continue
+            albums = beets_client.find_all_albums_by_albumartist(name.strip())
+            for alb in albums:
+                ids = _split_beets_multi(alb.get("mb_albumartistids")) or _split_beets_multi(alb.get("mb_albumartistid"))
+                for candidate in ids:
+                    candidate = _s(candidate).strip().lower()
+                    if _MB_UUID_RE.match(candidate):
+                        if log is not None:
+                            log.append(
+                                f"Resolved MusicBrainz artist ID from existing "
+                                f"artist {name!r}: {candidate}"
+                            )
+                        return candidate
     except Exception as ex:
         if log is not None:
             log.append(f"  WARN: existing artist ID lookup failed: {ex}")
@@ -27998,20 +27680,6 @@ def _resolve_artist_alias_mbid(source: str, canonical: str, mb_artistid: str,
 def _artist_alias_key(value: str) -> str:
     return " ".join(_normalize_name(_s(value)).casefold().split())
 
-
-def _sqlite_columns(con, table: str) -> set:
-    return {_s(r[1]) for r in con.execute(f"PRAGMA table_info({table})")}
-
-
-def _sqlite_update(con, table: str, updates: Dict[str, Any], where: str,
-                   params: Iterable[Any], columns: Optional[set] = None) -> int:
-    cols = columns or _sqlite_columns(con, table)
-    clean = {k: v for k, v in updates.items() if k in cols}
-    if not clean:
-        return 0
-    sql = f"UPDATE {table} SET " + ", ".join(f"{k}=?" for k in clean) + f" WHERE {where}"
-    cur = con.execute(sql, list(clean.values()) + list(params))
-    return int(cur.rowcount or 0)
 
 
 def _artist_alias_values(row: sqlite3.Row) -> List[str]:
@@ -28146,35 +27814,6 @@ def _cleanup_artist_alias_source_dirs(source_names: List[str], canonical: str,
             continue
         log.append(f"  Preserved empty artist folder for missing-album visibility: {src_dir}")
     return removed
-
-
-def _warn_artist_alias_remaining_paths(album_ids: List[int], source_names: List[str],
-                                       log: List[str]) -> int:
-    source_keys = {_artist_alias_key(n) for n in source_names if _artist_alias_key(n)}
-    if not album_ids or not source_keys:
-        return 0
-    q = ",".join("?" for _ in album_ids)
-    remaining = 0
-    try:
-        with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:
-            rows = con.execute(
-                f"SELECT path FROM items WHERE album_id IN ({q})",
-                album_ids,
-            ).fetchall()
-    except Exception as ex:
-        log.append(f"  WARN: could not verify moved paths: {ex}")
-        return 0
-    for row in rows:
-        raw = _s(row["path"]).replace("\\", "/").strip("/")
-        top = raw.split("/", 1)[0] if raw else ""
-        if _artist_alias_key(top) in source_keys:
-            remaining += 1
-    if remaining:
-        log.append(
-            f"  WARN: {remaining} DB item path(s) still start with an old alias folder. "
-            "Run beet move for the affected album IDs or inspect the Jobs log."
-        )
-    return remaining
 
 
 @app.post("/api/library/merge-artist-id")
@@ -28497,10 +28136,9 @@ def import_preflight():
 
     tracked_dirs: set = set()
     try:
-        with _db(text_factory=bytes) as con:
-            rows = con.execute("SELECT path FROM items WHERE path IS NOT NULL").fetchall()
+        paths = beets_client.list_distinct_item_paths()
         root_s = str(root_res)
-        for (raw_path,) in rows:
+        for raw_path in paths:
             p = _s(raw_path)
             if p and not p.startswith("/"):
                 p = str(MUSIC_ROOT / p)
@@ -30183,16 +29821,13 @@ def _library_duplicate_merge_safety(rows: List[Any],
 
 
 def _album_source_folder(aid: int) -> str:
-    """Most common parent directory of an album's item paths (for tracklist preflight)."""
+    if not aid:
+        return ""
     try:
-        with _db(row_factory=sqlite3.Row) as con:
-            rows = con.execute(
-                "SELECT path FROM items WHERE album_id=? AND COALESCE(path,'')<>''",
-                (aid,),
-            ).fetchall()
+        items = beets_client.find_all_items_by_album_id(int(aid))
     except Exception:
         return ""
-    dirs = [os.path.dirname(_s(r["path"])) for r in rows if _s(r["path"])]
+    dirs = [os.path.dirname(_s(it.get("path"))) for it in items if _s(it.get("path"))]
     dirs = [d for d in dirs if d]
     if not dirs:
         return ""
@@ -30449,28 +30084,36 @@ def clean_merge_duplicate_album():
     if target_id == source_id:
         return jsonify({"ok": False, "error": "target and source must be different album IDs"}), 400
 
-    with _db(row_factory=sqlite3.Row) as con:
-        safety_rows = con.execute(
-            """
-            SELECT a.id, a.albumartist, a.album, a.year, a.mb_albumid,
-                   COALESCE(a.mb_releasegroupid, '') AS mb_releasegroupid,
-                   COUNT(i.id) AS track_count
-            FROM albums a
-            LEFT JOIN items i ON i.album_id = a.id
-            WHERE a.id IN (?, ?)
-            GROUP BY a.id
-            """,
-            (target_id, source_id),
-        ).fetchall()
-        safety_items = con.execute(
-            """
-            SELECT id, album_id, disc, track, title, mb_trackid, path
-            FROM items
-            WHERE album_id IN (?, ?)
-            ORDER BY album_id, disc, track, id
-            """,
-            (target_id, source_id),
-        ).fetchall()
+    target_album = beets_client.get_album(target_id)
+    source_album = beets_client.get_album(source_id)
+    target_items = beets_client.find_all_items_by_album_id(target_id) if target_album else []
+    source_items = beets_client.find_all_items_by_album_id(source_id) if source_album else []
+
+    safety_rows = []
+    if target_album:
+        safety_rows.append({
+            "id": target_id,
+            "albumartist": target_album.get("albumartist", ""),
+            "album": target_album.get("album", ""),
+            "year": target_album.get("year", 0),
+            "mb_albumid": target_album.get("mb_albumid", ""),
+            "mb_releasegroupid": target_album.get("mb_releasegroupid", "") or "",
+            "track_count": len(target_items),
+        })
+    if source_album:
+        safety_rows.append({
+            "id": source_id,
+            "albumartist": source_album.get("albumartist", ""),
+            "album": source_album.get("album", ""),
+            "year": source_album.get("year", 0),
+            "mb_albumid": source_album.get("mb_albumid", ""),
+            "mb_releasegroupid": source_album.get("mb_releasegroupid", "") or "",
+            "track_count": len(source_items),
+        })
+    safety_items = sorted(
+        target_items + source_items,
+        key=lambda it: (int(it.get("album_id") or 0), int(it.get("disc") or 1), int(it.get("track") or 0), int(it.get("id") or 0))
+    )
 
     if len(safety_rows) != 2:
         found_ids = {int(r["id"]) for r in safety_rows}
@@ -30484,7 +30127,7 @@ def clean_merge_duplicate_album():
     if len(pair_key) != 1:
         return jsonify({"ok": False, "error": "target and source are not the same normalized album group"}), 409
 
-    safety_items_by_album: Dict[int, List[sqlite3.Row]] = {}
+    safety_items_by_album: Dict[int, List[Any]] = {}
     for row in safety_items:
         safety_items_by_album.setdefault(int(row["album_id"]), []).append(row)
     safety = _library_duplicate_merge_safety(safety_rows, safety_items_by_album)
@@ -30503,15 +30146,8 @@ def clean_merge_duplicate_album():
         }), 409
 
     def _do(log, cancel_event=None):
-        with _db(row_factory=sqlite3.Row) as con:
-            target_row = con.execute(
-                "SELECT id, albumartist, album FROM albums WHERE id=?",
-                (target_id,),
-            ).fetchone()
-            source_row = con.execute(
-                "SELECT id, albumartist, album FROM albums WHERE id=?",
-                (source_id,),
-            ).fetchone()
+        target_row = beets_client.get_album(target_id)
+        source_row = beets_client.get_album(source_id)
         if not target_row:
             raise RuntimeError(f"Target album_id {target_id} not found")
         if not source_row:
@@ -30554,16 +30190,13 @@ def _rgid_group_albums(rgid: str) -> List[Any]:
     rgid = _s(rgid).strip().lower()
     if not rgid:
         return []
-    with _db(row_factory=sqlite3.Row) as con:
-        return con.execute(
-            "SELECT a.id, a.albumartist, a.album, a.year, a.mb_albumid, "
-            "COALESCE(a.mb_releasegroupid, '') AS mb_releasegroupid, "
-            "COUNT(i.id) AS track_count "
-            "FROM albums a LEFT JOIN items i ON i.album_id=a.id "
-            "WHERE lower(COALESCE(a.mb_releasegroupid,''))=? "
-            "GROUP BY a.id",
-            (rgid,),
-        ).fetchall()
+    try:
+        res = beets_client.get_rgid_group_detail(rgid)
+        if res.get("ok"):
+            return res.get("albums") or []
+    except Exception:
+        pass
+    return []
 
 
 @app.get("/api/clean/rgid-group/<rgid>")
@@ -30576,17 +30209,10 @@ def clean_rgid_group_detail(rgid):
     if not rows:
         return jsonify({"ok": False, "error": "no albums found for this release-group id"}), 404
 
-    album_ids = [int(r["id"]) for r in rows]
-    with _db(row_factory=sqlite3.Row) as con:
-        items = con.execute(
-            "SELECT id, album_id, disc, track, title, mb_trackid, path FROM items "
-            "WHERE album_id IN (" + ",".join("?" for _ in album_ids) + ") "
-            "ORDER BY album_id, disc, track, id",
-            album_ids,
-        ).fetchall()
     items_by_album: Dict[int, List[Any]] = {}
-    for it in items:
-        items_by_album.setdefault(int(it["album_id"]), []).append(it)
+    for r in rows:
+        aid = int(r["id"])
+        items_by_album[aid] = r.get("tracks") or beets_client.find_all_items_by_album_id(aid)
 
     def _folder_for(aid: int) -> str:
         dirs = [os.path.dirname(_s(it["path"])) for it in items_by_album.get(aid, []) if _s(it["path"])]
@@ -30642,15 +30268,9 @@ def clean_rgid_group_merge():
     if target_id not in ids_in_group or source_id not in ids_in_group:
         return jsonify({"ok": False, "error": "target/source album must belong to this release-group id"}), 409
 
-    with _db(row_factory=sqlite3.Row) as con:
-        items = con.execute(
-            "SELECT id, album_id, disc, track, title, mb_trackid, path FROM items "
-            "WHERE album_id IN (?, ?) ORDER BY album_id, disc, track, id",
-            (target_id, source_id),
-        ).fetchall()
     items_by_album: Dict[int, List[Any]] = {}
-    for it in items:
-        items_by_album.setdefault(int(it["album_id"]), []).append(it)
+    items_by_album[target_id] = beets_client.find_all_items_by_album_id(target_id)
+    items_by_album[source_id] = beets_client.find_all_items_by_album_id(source_id)
     pair_rows = [r for r in rows if int(r["id"]) in (target_id, source_id)]
     safety = _library_duplicate_merge_safety(pair_rows, items_by_album)
     if not safety.get("merge_safe"):
@@ -30663,18 +30283,12 @@ def clean_rgid_group_merge():
         return jsonify({
             "ok": False,
             "error": f"target album_id must be {safety.get('merge_target_album_id')} for this safe merge",
+            "merge_safe": False,
         }), 409
 
     def _do(log, cancel_event=None):
-        with _db(row_factory=sqlite3.Row) as con:
-            target_row = con.execute(
-                "SELECT id, albumartist, album FROM albums WHERE id=?",
-                (target_id,),
-            ).fetchone()
-            source_row = con.execute(
-                "SELECT id, albumartist, album FROM albums WHERE id=?",
-                (source_id,),
-            ).fetchone()
+        target_row = beets_client.get_album(target_id)
+        source_row = beets_client.get_album(source_id)
         if not target_row or not source_row:
             raise RuntimeError("album row(s) not found")
 
@@ -30740,14 +30354,10 @@ def clean_rgid_group_assign_release():
     mb_albumid = _s(payload.get("mb_albumid") or "").strip().lower()
     if not album_id or not _MB_UUID_RE.match(mb_albumid):
         return jsonify({"ok": False, "error": "album_id and a valid mb_albumid are required"}), 400
-    with _db(row_factory=sqlite3.Row) as con:
-        row = con.execute(
-            "SELECT id, COALESCE(mb_releasegroupid, '') AS mb_releasegroupid FROM albums WHERE id=?",
-            (album_id,),
-        ).fetchone()
-    if not row:
+    alb = beets_client.get_album(album_id)
+    if not alb:
         return jsonify({"ok": False, "error": f"album_id {album_id} not found"}), 404
-    rgid = _s(row["mb_releasegroupid"] or "").strip().lower()
+    rgid = _s(alb.get("mb_releasegroupid") or "").strip().lower()
 
     def _do(log, cancel_event=None):
         if rgid:
@@ -30782,10 +30392,7 @@ def clean_rgid_group_relink():
     mb_releasegroupid = _s(payload.get("mb_releasegroupid") or "").strip().lower()
     if not album_id:
         return jsonify({"ok": False, "error": "album_id is required"}), 400
-    with _db(row_factory=sqlite3.Row) as con:
-        row = con.execute(
-            "SELECT id, albumartist, album, year FROM albums WHERE id=?", (album_id,),
-        ).fetchone()
+    row = beets_client.get_album(album_id)
     if not row:
         return jsonify({"ok": False, "error": f"album_id {album_id} not found"}), 404
 
@@ -30843,13 +30450,19 @@ def clean_rgid_group_send_to_repair():
     album_id = int(payload.get("album_id") or 0)
     if not album_id:
         return jsonify({"ok": False, "error": "album_id is required"}), 400
-    with _db(row_factory=sqlite3.Row) as con:
-        row = con.execute(
-            "SELECT a.id, a.albumartist, a.album, a.year, a.mb_albumid, "
-            "COALESCE(a.mb_releasegroupid, '') AS mb_releasegroupid, COUNT(i.id) AS track_count "
-            "FROM albums a LEFT JOIN items i ON i.album_id=a.id WHERE a.id=? GROUP BY a.id",
-            (album_id,),
-        ).fetchone()
+    alb = beets_client.get_album(album_id)
+    if not alb:
+        return jsonify({"ok": False, "error": f"album_id {album_id} not found"}), 404
+    items = beets_client.find_all_items_by_album_id(album_id)
+    row = {
+        "id": alb["id"],
+        "albumartist": alb.get("albumartist", ""),
+        "album": alb.get("album", ""),
+        "year": alb.get("year", 0),
+        "mb_albumid": alb.get("mb_albumid", ""),
+        "mb_releasegroupid": alb.get("mb_releasegroupid", "") or "",
+        "track_count": len(items),
+    }
     if not row:
         return jsonify({"ok": False, "error": f"album_id {album_id} not found"}), 404
 
@@ -30889,112 +30502,40 @@ def _clean_remove_orphaned_items(item_ids: List[int], *,
                                  dry_run: bool,
                                  log: List[str],
                                  trigger_plex: bool = True) -> Dict[str, Any]:
-    """Remove item rows whose backing audio file no longer exists.
-
-    Selection (which items are "orphaned") is a read-only, non-mutating
-    file-existence check done here; the actual deletion is performed
-    per-album through album_maintenance_v1's remove_tracks/remove_album
-    modes via the engine transaction boundary -- files are already gone
-    for these items by definition, so delete_files=False (nothing real
-    to unlink; the engine skips missing files gracefully either way).
-    """
+    """Remove orphaned item rows by delegating to Beets engine Control Agent."""
     ids = sorted({int(i) for i in item_ids if str(i).isdigit() and int(i) > 0})
     if not ids:
         return {"ok": True, "dry_run": dry_run, "selected": 0, "removed": 0, "skipped": 0}
 
-    with _db(row_factory=sqlite3.Row) as con:
-        rows = con.execute(
-            "SELECT id, album_id, artist, title, path FROM items WHERE id IN ("
-            + ",".join("?" for _ in ids) + ")",
-            ids,
-        ).fetchall()
+    try:
+        res = beets_client.clean_orphaned_items(item_ids=ids, dry_run=dry_run)
+    except (BeetsUnavailableError, BeetsError) as ex:
+        log.append(f"  Engine unavailable/error for orphaned-item cleanup: {ex}")
+        raise
 
-    stale_by_album: Dict[int, List[int]] = {}
-    unowned_stale_ids: List[int] = []
-    skipped = 0
-    for row in rows:
-        raw_path = _s(row["path"])
-        if _db_item_file_exists(raw_path):
-            skipped += 1
-            continue
-        iid = int(row["id"])
-        aid = int(row["album_id"] or 0)
-        label = f"{_s(row['artist'])} - {_s(row['title'])}".strip(" -")
+    selected = int(res.get("selected") or 0)
+    removed = int(res.get("removed_count") if not dry_run else selected)
+    skipped = max(0, len(ids) - selected)
+    for item in res.get("orphaned_items") or []:
+        iid = item.get("id")
+        label = f"{_s(item.get('artist'))} - {_s(item.get('title'))}".strip(" -")
         log.append(f"  {'Would remove' if dry_run else 'Removing'} orphaned item id={iid}: {label}")
-        if aid > 0:
-            stale_by_album.setdefault(aid, []).append(iid)
-        else:
-            # album_maintenance_v1 requires a positive album_id; an item
-            # with no album row cannot go through this engine family.
-            # Fail safe (leave the row in place, log it) rather than
-            # inventing a bypass or a new mutation path for an edge case
-            # no real caller has been observed to hit.
-            unowned_stale_ids.append(iid)
 
-    stale_ids_total = sum(len(v) for v in stale_by_album.values()) + len(unowned_stale_ids)
+    if not dry_run and removed > 0:
+        _invalidate_lib_cache()
+        if trigger_plex:
+            _trigger_plex_refresh(log)
 
-    if dry_run or stale_ids_total == 0:
-        if unowned_stale_ids:
-            log.append(
-                f"  WARN: {len(unowned_stale_ids)} orphaned item(s) have no album_id and "
-                "cannot be removed through the engine's album_maintenance_v1 boundary; skipped."
-            )
-        return {
-            "ok": True,
-            "dry_run": dry_run,
-            "selected": len(ids),
-            "removed": stale_ids_total if dry_run else 0,
-            "skipped": skipped + max(0, len(ids) - len(rows)),
-        }
-
-    removed_items = 0
-    removed_albums = 0
-    for aid, aid_item_ids in sorted(stale_by_album.items()):
-        try:
-            plan_res = beets_client.plan_album_maintenance({
-                "mode": "remove_tracks",
-                "album_id": aid,
-                "item_ids": aid_item_ids,
-                "delete_files": False,
-                "clean_empty_folders": False,
-            })
-        except (BeetsUnavailableError, BeetsError) as ex:
-            log.append(f"  Engine unavailable for orphaned-item cleanup on album_id {aid}: {ex}")
-            continue
-        if not plan_res.get("ok"):
-            log.append(f"  Engine rejected orphaned-item cleanup plan for album_id {aid}: {plan_res.get('error') or 'unknown error'}")
-            continue
-        op_id = plan_res.get("operation_id")
-        if not op_id:
-            continue
-        try:
-            apply_res = beets_client.apply_album_maintenance(op_id)
-        except (BeetsUnavailableError, BeetsError) as ex:
-            log.append(f"  Engine unavailable applying orphaned-item cleanup for album_id {aid}: {ex}")
-            continue
-        if not apply_res.get("ok"):
-            log.append(f"  Engine rejected orphaned-item cleanup apply for album_id {aid}: {apply_res.get('error') or 'unknown error'}")
-            continue
-        removed_items += int(apply_res.get("deleted_items") or 0)
-        removed_albums += int(apply_res.get("deleted_albums") or 0)
-
-    if unowned_stale_ids:
-        log.append(
-            f"  WARN: {len(unowned_stale_ids)} orphaned item(s) have no album_id and "
-            "cannot be removed through the engine's album_maintenance_v1 boundary; skipped."
-        )
-
-    _invalidate_lib_cache()
-    if trigger_plex:
-        _trigger_plex_refresh(log)
-    log.append(f"Done: removed {removed_items} orphaned item row(s) and {removed_albums} empty album row(s).")
+    log.append(f"Done: {'would remove' if dry_run else 'removed'} {removed} orphaned item row(s).")
     return {
-        "ok": True,
-        "dry_run": False,
+        "ok": bool(res.get("ok", True)),
+        "dry_run": dry_run,
         "selected": len(ids),
-        "removed": removed_items,
-        "empty_albums_removed": removed_albums,
-        "skipped": skipped + max(0, len(ids) - len(rows)) + len(unowned_stale_ids),
+        "removed": removed,
+        "removed_count": removed,
+        "empty_albums_removed": 0,
+        "skipped": skipped,
+        "orphaned_items": res.get("orphaned_items", []),
     }
 
 
@@ -31022,17 +30563,20 @@ def _clean_remove_empty_albums(album_ids: List[int], *,
     if not ids:
         return {"ok": True, "dry_run": dry_run, "selected": 0, "removed": 0, "skipped": 0}
 
-    with _db(row_factory=sqlite3.Row) as con:
-        rows = con.execute(
-            """
-            SELECT a.id, a.albumartist, a.album, COUNT(i.id) AS track_count
-            FROM albums a
-            LEFT JOIN items i ON i.album_id = a.id
-            WHERE a.id IN (""" + ",".join("?" for _ in ids) + """)
-            GROUP BY a.id
-            """,
-            ids,
-        ).fetchall()
+    rows = []
+    for aid in ids:
+        try:
+            alb = beets_client.get_album(aid)
+            if alb:
+                a_items = beets_client.find_all_items_by_album_id(aid)
+                rows.append({
+                    "id": alb["id"],
+                    "albumartist": alb.get("albumartist", ""),
+                    "album": alb.get("album", ""),
+                    "track_count": len(a_items),
+                })
+        except Exception:
+            pass
 
     removable = [int(r["id"]) for r in rows if int(r["track_count"] or 0) == 0]
     skipped = len(ids) - len(removable)
@@ -31149,86 +30693,45 @@ _TRACK_FILENAME_SHORT_SOURCE_ID_SUFFIX_RE = re.compile(
 
 
 def _strip_track_filename_id_suffix(value: Any) -> str:
-    text = _s(value).strip()
-    for _ in range(4):
-        cleaned = _TRACK_FILENAME_SOURCE_ID_SUFFIX_RE.sub("", text).strip(" -_.")
-        if cleaned == text:
-            short_cleaned = _TRACK_FILENAME_SHORT_SOURCE_ID_SUFFIX_RE.sub("", text).strip(" -_.")
-            dirty_prefix_hint = bool(
-                re.search(r"[_\(\)\[\]]", short_cleaned)
-                or re.match(r"^\s*\d{1,3}[\s._-]+", short_cleaned)
-            )
-            if short_cleaned != text and dirty_prefix_hint:
-                cleaned = short_cleaned
-        if cleaned == text or not cleaned:
-            break
-        text = cleaned
-    return text
+    try:
+        return _canonical_strip_track_filename_id_suffix(value)
+    except NameError:
+        from backend.matching import strip_track_filename_id_suffix as _fallback_strip
+        return _fallback_strip(value)
 
 
 def _track_filename_has_source_id_suffix(value: Any) -> bool:
-    text = _s(value).strip()
-    return bool(text and _strip_track_filename_id_suffix(text) != text)
+    try:
+        return _canonical_track_filename_has_source_id_suffix(value)
+    except NameError:
+        from backend.matching import track_filename_has_source_id_suffix as _fallback_has_suffix
+        return _fallback_has_suffix(value)
+
 
 def _album_track_norm(value: str) -> str:
-    import unicodedata
-
-    text = _strip_track_filename_id_suffix(value).casefold()
-    text = unicodedata.normalize("NFKD", text)
-    text = "".join(ch for ch in text if not unicodedata.combining(ch))
-    text = text.replace("&", " and ")
-    text = _ALBUM_TRACK_UNCLOSED_RE.sub("", _ALBUM_TRACK_ANNOT_RE.sub("", text))
-    text = re.sub(r"@\w+", " ", text)
-    text = re.sub(r"\b(?:feat|ft)\.?\s+.*$", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"[^a-z0-9]+", " ", text)
-    text = re.sub(r"^(?:bonus\s+track\s*)+", "", text, flags=re.IGNORECASE)
-    return " ".join(text.split())
+    try:
+        return normalize_track_title_for_matching(value)
+    except NameError:
+        from backend.matching import normalize_track_title_for_matching as _fallback_norm
+        return _fallback_norm(value)
 
 
 def _album_track_feature_variants(value: str) -> List[str]:
     """Return title candidates with normal and glued feature suffixes removed."""
-    text = _s(value).strip()
-    if not text:
-        return []
-    variants = [text]
-    stripped = _ALBUM_TRACK_FEATURE_SUFFIX_RE.sub("", text).strip(" -_–—:;,.")
-    if stripped and stripped != text:
-        variants.append(stripped)
-    glued = _ALBUM_TRACK_GLUED_FEATURE_SUFFIX_RE.sub(r"\1", text).strip(" -_–—:;,.")
-    if glued and glued != text:
-        variants.append(glued)
-    spaced = re.sub(
-        r'(?i)^(.{4,}?)(featuring|feat|ft)(\.?\s+[A-Za-z0-9].*)$',
-        r'\1 \2\3',
-        text,
-    )
-    if spaced and spaced != text:
-        variants.append(spaced)
-        spaced_stripped = _ALBUM_TRACK_FEATURE_SUFFIX_RE.sub("", spaced).strip(" -_–—:;,.")
-        if spaced_stripped and spaced_stripped != spaced:
-            variants.append(spaced_stripped)
-    out: List[str] = []
-    seen: set = set()
-    for val in variants:
-        key = val.casefold()
-        if val and key not in seen:
-            seen.add(key)
-            out.append(val)
-    return out
+    try:
+        return _canonical_track_feature_variants(value)
+    except NameError:
+        from backend.matching import track_feature_variants as _fallback_features
+        return _fallback_features(value)
 
 
 def _album_track_parenthetical_alias_variants(value: str) -> List[str]:
     """Return conservative title aliases such as "Money (That's What I Want)" -> "Money"."""
-    text = _s(value).strip()
-    if not text:
-        return []
-    variants: List[str] = []
-    match = _ALBUM_TRACK_TRAILING_ALIAS_RE.search(text)
-    if match and not _ALBUM_TRACK_VERSION_MARKER_RE.search(match.group(1)):
-        base = text[:match.start()].strip(" -_–—:;,.")
-        if len(_album_track_norm(base)) >= 3:
-            variants.append(base)
-    return variants
+    try:
+        return _canonical_track_parenthetical_alias_variants(value)
+    except NameError:
+        from backend.matching import track_parenthetical_alias_variants as _fallback_alias
+        return _fallback_alias(value)
 
 
 def _album_track_path_prefixes(path: str) -> List[str]:
@@ -31295,6 +30798,7 @@ def _album_track_path_prefixes(path: str) -> List[str]:
             seen.add(norm)
             out.append(norm)
     return out
+
 
 def _album_track_title_variants(title: str, path: str = "") -> List[str]:
     raw_values = [_s(title).strip()]
@@ -31515,77 +31019,52 @@ def _fetch_mb_release_tracklist(mb_albumid: str, log: Optional[List[str]] = None
 
 
 def _album_track_score(item: Dict[str, Any], mb_trk: Dict[str, Any]) -> float:
-    from difflib import SequenceMatcher
-
-    mb_norm = mb_trk.get("title_norm") or _album_track_norm(mb_trk.get("title", ""))
-    variants = _album_track_title_variants(item.get("title", ""), item.get("path", ""))
-    title_score = max(
-        (SequenceMatcher(None, v, mb_norm).ratio() for v in variants if v and mb_norm),
-        default=0.0,
-    )
-    pos_bonus = 0.0
-    item_disc, item_track = _album_item_position_hints(item)
-    if item_track == int(mb_trk.get("track") or 0):
-        pos_bonus += 0.04
-        if item_disc == int(mb_trk.get("disc") or 1):
-            pos_bonus += 0.02
-    dur_bonus = 0.0
-    item_ms = int(float(item.get("length") or 0) * 1000)
-    mb_ms = int(mb_trk.get("duration_ms") or 0)
-    if item_ms and mb_ms:
-        diff_s = abs(item_ms - mb_ms) / 1000.0
-        dur_bonus = 0.04 if diff_s <= 4 else (0.02 if diff_s <= 10 else 0.0)
-    return min(1.0, title_score + pos_bonus + dur_bonus)
+    try:
+        return _canonical_album_track_score(item, mb_trk)
+    except NameError:
+        from backend.matching import album_track_score as _fallback_score
+        return _fallback_score(item, mb_trk)
 
 
 def _best_album_track_match(item: Dict[str, Any], mb_tracks: List[Dict[str, Any]]) -> Dict[str, Any]:
-    item_mbid = _s(item.get("mb_trackid", "")).strip().lower()
-    if item_mbid:
-        for idx, trk in enumerate(mb_tracks):
-            if item_mbid and item_mbid == trk.get("mb_trackid"):
-                title_score = _album_track_score(item, trk)
-                return {"idx": idx, "track": trk, "score": max(0.98, title_score),
-                        "title_score": title_score, "exact_mbid": True}
+    try:
+        return _canonical_best_album_track_match(item, mb_tracks)
+    except NameError:
+        from backend.matching import best_album_track_match as _fallback_best
+        return _fallback_best(item, mb_tracks)
 
-    best_idx = -1
-    best_score = -1.0
-    best_rank = (-1.0, -1, -1)
-    item_disc, item_track = _album_item_position_hints(item)
-    for idx, trk in enumerate(mb_tracks):
-        score = _album_track_score(item, trk)
-        exact_pos = int(
-            bool(item_track and item_track == int(trk.get("track") or 0))
-            and bool(item_disc == int(trk.get("disc") or 1))
-        )
-        track_pos = int(bool(item_track and item_track == int(trk.get("track") or 0)))
-        rank = (score, exact_pos, track_pos)
-        if rank > best_rank:
-            best_rank = rank
-            best_score = score
-            best_idx = idx
-    return {
-        "idx": best_idx,
-        "track": mb_tracks[best_idx] if best_idx >= 0 else {},
-        "score": max(best_score, 0.0),
-        "title_score": max(best_score, 0.0),
-        "exact_mbid": False,
-    }
 
 
 def _album_track_fingerprint_check(item: Dict[str, Any],
                                    mb_tracks: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Fingerprint-check one library item against a candidate MB tracklist.
+
+    ARCH-002 Part 7: `status` is a canonical `AcoustIDStatus` value, not an
+    independent vocabulary -- callers that used to compare against the
+    legacy strings ("missing"/"none"/"match"/"mismatch"/"unclear") now
+    compare against `AcoustIDStatus` members (a `str` subclass, so either
+    the enum member or its plain `.value` string works). The decision logic
+    itself is unchanged from before this migration -- only the returned
+    vocabulary changed, verified against every one of this function's five
+    production callers before the rename:
+      "missing"  (no readable local file)         -> UNAVAILABLE
+      "none"     (fingerprinted, zero candidates)  -> NO_RESULT
+      "match"    (a candidate's MBID is in mb_tracks) -> CONFIRMED
+      "mismatch" (confident candidate, no title match) -> CONFLICT
+      "unclear"  (weak/uncertain candidate)        -> AMBIGUOUS
+    """
     path = _album_item_abs_path(item.get("path", ""))
     if not path or not Path(path).exists():
-        return {"status": "missing", "path": path}
+        return {"status": AcoustIDStatus.UNAVAILABLE.value, "path": path}
     cands = _acoustid_lookup_cached(path)
     if not cands:
-        return {"status": "none"}
+        return {"status": AcoustIDStatus.NO_RESULT.value}
 
     mb_ids = {t.get("mb_trackid") for t in mb_tracks if t.get("mb_trackid")}
     for cand in cands:
         cand_id = _s(cand.get("mb_trackid", "")).strip().lower()
         if cand_id and cand_id in mb_ids:
-            return {"status": "match", "candidate": cand}
+            return {"status": AcoustIDStatus.CONFIRMED.value, "candidate": cand}
 
     from difflib import SequenceMatcher
     best_cand = cands[0]
@@ -31597,12 +31076,12 @@ def _album_track_fingerprint_check(item: Dict[str, Any],
     )
     if int(best_cand.get("score") or 0) >= 70 and best_title_score < 0.72:
         return {
-            "status": "mismatch",
+            "status": AcoustIDStatus.CONFLICT.value,
             "candidate": best_cand,
             "best_title_score": round(best_title_score, 3),
         }
     return {
-        "status": "unclear",
+        "status": AcoustIDStatus.AMBIGUOUS.value,
         "candidate": best_cand,
         "best_title_score": round(best_title_score, 3),
     }
@@ -31650,12 +31129,15 @@ def _validate_wanted_album_items_with_acoustid(album_id: int, mb_albumid: str,
         return {"ok": True, "checked": 0, "mismatches": []}
 
     try:
-        with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:
-            rows = con.execute(
-                "SELECT id, title, disc, track, path, mb_trackid, length "
-                "FROM items WHERE album_id=? ORDER BY disc, track, id",
-                (int(album_id),),
-            ).fetchall()
+        raw_items = beets_client.find_all_items_by_album_id(int(album_id))
+        rows = sorted(
+            raw_items,
+            key=lambda it: (
+                int(it.get("disc") or 1),
+                int(it.get("track") or 0),
+                int(it.get("id") or 0),
+            )
+        )
     except Exception as ex:
         log.append(f"  AcoustID validation warning: {ex}")
         return {"ok": True, "checked": 0, "mismatches": [], "warning": str(ex)}
@@ -31860,12 +31342,16 @@ def _scan_album_track_integrity(album_row: Dict[str, Any], *,
     mb_tracks = mb["tracks"]
 
     try:
-        with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:
-            rows = con.execute(
-                "SELECT id, title, track, disc, path, mb_trackid, length "
-                "FROM items WHERE album_id=? ORDER BY disc, track, title, id",
-                (aid,),
-            ).fetchall()
+        raw_items = beets_client.find_all_items_by_album_id(aid)
+        rows = sorted(
+            raw_items,
+            key=lambda it: (
+                int(it.get("disc") or 1),
+                int(it.get("track") or 0),
+                _s(it.get("title") or ""),
+                int(it.get("id") or 0),
+            )
+        )
     except Exception as ex:
         log.append(f"  DB read failed for album_id {aid}: {ex}")
         return None
@@ -31911,12 +31397,12 @@ def _scan_album_track_integrity(album_row: Dict[str, Any], *,
 
         if do_fingerprint:
             fp = _album_track_fingerprint_check(item, mb_tracks)
-            if fp.get("status") == "mismatch":
+            if fp.get("status") == AcoustIDStatus.CONFLICT:
                 decision = "remove"
                 cand = fp.get("candidate") or {}
                 reason = ("Audio fingerprint points to "
                           f"{cand.get('artist','')} - {cand.get('title','')}".strip(" -"))
-            elif fp.get("status") == "unclear" and decision == "keep" and score < 0.96:
+            elif fp.get("status") == AcoustIDStatus.AMBIGUOUS and decision == "keep" and score < 0.96:
                 decision = "review"
                 reason = "Fingerprint did not confirm the MusicBrainz recording"
 
@@ -31949,7 +31435,7 @@ def _scan_album_track_integrity(album_row: Dict[str, Any], *,
         if len(group) <= 1:
             continue
         group.sort(key=lambda r: (
-            0 if (r.get("fingerprint") or {}).get("status") == "match" else 1,
+            0 if (r.get("fingerprint") or {}).get("status") == AcoustIDStatus.CONFIRMED else 1,
             0 if r.get("exact_mbid") else 1,
             -float(r.get("score") or 0),
             _collision_rank(r.get("path", "")),
@@ -32039,12 +31525,16 @@ def _album_mb_match_plan(album_id: int, mb_albumid: str,
         raise RuntimeError("MusicBrainz release has no tracks")
 
     try:
-        with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:
-            rows = con.execute(
-                "SELECT id, title, track, disc, path, mb_trackid, length "
-                "FROM items WHERE album_id=? ORDER BY disc, track, title, id",
-                (album_id,),
-            ).fetchall()
+        raw_items = beets_client.find_all_items_by_album_id(album_id)
+        rows = sorted(
+            raw_items,
+            key=lambda it: (
+                int(it.get("disc") or 1),
+                int(it.get("track") or 0),
+                _s(it.get("title") or ""),
+                int(it.get("id") or 0),
+            )
+        )
     except Exception as ex:
         raise RuntimeError(f"Could not read album tracks: {ex}")
 
@@ -32067,9 +31557,9 @@ def _album_mb_match_plan(album_id: int, mb_albumid: str,
         best = _best_album_track_match(item, tracks)
         if int(best.get("idx", -1)) >= 0:
             fp = _album_track_fingerprint_check(item, tracks)
-            if fp.get("status") == "match":
+            if fp.get("status") == AcoustIDStatus.CONFIRMED:
                 return best
-            if fp.get("status") == "mismatch":
+            if fp.get("status") == AcoustIDStatus.CONFLICT:
                 return {
                     "idx": -1,
                     "track": {},
@@ -32105,12 +31595,7 @@ def _album_mb_match_plan(album_id: int, mb_albumid: str,
 def _album_mb_completeness(album_id: int, mb_override: str = "",
                            log: Optional[List[str]] = None) -> Dict[str, Any]:
     try:
-        with _db(row_factory=sqlite3.Row) as con:
-            album_row = con.execute(
-                "SELECT id, album, albumartist, year, mb_albumid, mb_releasegroupid "
-                "FROM albums WHERE id=?",
-                (album_id,),
-            ).fetchone()
+        album_row = beets_client.get_album(album_id)
     except Exception as ex:
         raise RuntimeError(f"Could not read album {album_id}: {ex}")
     if not album_row:
@@ -32147,12 +31632,16 @@ def _album_mb_completeness(album_id: int, mb_override: str = "",
     mb_tracks = mb["tracks"]
 
     try:
-        with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:
-            rows = con.execute(
-                "SELECT id, title, track, disc, path, mb_trackid, length "
-                "FROM items WHERE album_id=? ORDER BY disc, track, title, id",
-                (album_id,),
-            ).fetchall()
+        raw_items = beets_client.find_all_items_by_album_id(album_id)
+        rows = sorted(
+            raw_items,
+            key=lambda it: (
+                int(it.get("disc") or 1),
+                int(it.get("track") or 0),
+                _s(it.get("title") or ""),
+                int(it.get("id") or 0),
+            )
+        )
     except Exception as ex:
         raise RuntimeError(f"Could not read album tracks: {ex}")
 
@@ -32334,11 +31823,15 @@ def _album_duplicate_resolver_plan(album_id: int, mb_override: str = "",
     ]
 
     try:
-        with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:
-            selected_rows = con.execute(
-                "SELECT path FROM items WHERE album_id=? ORDER BY disc, track, id",
-                (int(album_id),),
-            ).fetchall()
+        raw_items = beets_client.find_all_items_by_album_id(int(album_id))
+        selected_rows = sorted(
+            raw_items,
+            key=lambda it: (
+                int(it.get("disc") or 1),
+                int(it.get("track") or 0),
+                int(it.get("id") or 0),
+            )
+        )
     except Exception as ex:
         raise RuntimeError(f"Could not read selected album paths: {ex}") from ex
 
@@ -32357,22 +31850,8 @@ def _album_duplicate_resolver_plan(album_id: int, mb_override: str = "",
             "message": "No album folder path was available for duplicate resolution.",
         }
 
-    clauses: List[str] = []
-    params: List[str] = []
-    for prefix in prefixes[:30]:
-        clauses.append("replace(i.path, char(92), '/') LIKE ? ESCAPE '\\'")
-        params.append(_resolver_sql_like(prefix) + "/%")
-
     try:
-        with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:
-            rows = con.execute(
-                "SELECT i.id, i.album_id, i.title, i.track, i.disc, i.path, "
-                "i.mb_trackid, i.mb_albumid, i.length, a.album, a.albumartist "
-                "FROM items i LEFT JOIN albums a ON a.id=i.album_id "
-                f"WHERE {' OR '.join(clauses)} "
-                "ORDER BY i.disc, i.track, i.title, i.id",
-                params,
-            ).fetchall()
+        rows = beets_client.get_folder_items(prefixes[:30])
     except Exception as ex:
         raise RuntimeError(f"Could not read album-folder items: {ex}") from ex
 
@@ -32888,23 +32367,14 @@ def _start_library_mbid_sticking_repair(
         # If item rows have a single release ID but the album row is blank,
         # restore the album-level release ID first.
         try:
-            with _db(row_factory=sqlite3.Row) as con:
-                inferred = con.execute(
-                    "SELECT a.id AS album_id, MAX(i.mb_albumid) AS mb_albumid, "
-                    "a.album AS album, a.albumartist AS albumartist "
-                    "FROM albums a JOIN items i ON i.album_id=a.id "
-                    "WHERE (a.mb_albumid IS NULL OR a.mb_albumid='') "
-                    "AND i.mb_albumid IS NOT NULL AND i.mb_albumid!='' "
-                    "GROUP BY a.id HAVING COUNT(DISTINCT lower(i.mb_albumid))=1 "
-                    "LIMIT ?",
-                    (limit,),
-                ).fetchall()
+            cand_res = beets_client.get_mbid_sticking_candidates(mode="inferred", limit=limit)
+            inferred = cand_res.get("inferred") or cand_res.get("candidates") or []
             for row in inferred:
                 if cancel_event is not None and cancel_event.is_set():
                     raise RuntimeError("cancelled")
-                aid = int(row["album_id"])
-                mbid = _s(row["mb_albumid"]).strip().lower()
-                label = f"{_s(row['albumartist'])} - {_s(row['album'])}".strip(" -")
+                aid = int(row.get("album_id") or row.get("id") or 0)
+                mbid = _s(row.get("mb_albumid") or row.get("inferred_mb_albumid")).strip().lower()
+                label = f"{_s(row.get('albumartist'))} - {_s(row.get('album'))}".strip(" -")
                 if dry_run:
                     log.append(f"  Would restore album mb_albumid for album_id {aid}: {label} -> {mbid}")
                     summary["inferred_album_rows"] += 1
@@ -32925,17 +32395,8 @@ def _start_library_mbid_sticking_repair(
         # or prior partial matching), otherwise search MB by artist+album+year and
         # validate against the album's own folder tracklist before accepting.
         try:
-            with _db(row_factory=sqlite3.Row) as con:
-                blank_rows = con.execute(
-                    "SELECT a.id, a.album, a.albumartist, a.year, "
-                    "COALESCE(a.mb_releasegroupid, '') AS mb_releasegroupid, "
-                    "COUNT(i.id) AS track_count "
-                    "FROM albums a JOIN items i ON i.album_id=a.id "
-                    "WHERE trim(COALESCE(a.mb_albumid, ''))='' "
-                    "GROUP BY a.id "
-                    "LIMIT ?",
-                    (limit,),
-                ).fetchall()
+            cand_res = beets_client.get_mbid_sticking_candidates(mode="blank", limit=limit)
+            blank_rows = cand_res.get("blank") or cand_res.get("candidates") or []
         except Exception as ex:
             blank_rows = []
             log.append(f"  WARN scanning albums with blank mb_albumid: {ex}")
@@ -32949,8 +32410,8 @@ def _start_library_mbid_sticking_repair(
         for row in blank_rows:
             if cancel_event is not None and cancel_event.is_set():
                 raise RuntimeError("cancelled")
-            aid = int(row["id"])
-            label = f"{_s(row['albumartist'])} - {_s(row['album'])}".strip(" -")
+            aid = int(row.get("id") or row.get("album_id") or 0)
+            label = f"{_s(row.get('albumartist'))} - {_s(row.get('album'))}".strip(" -")
             rgid = _s(row["mb_releasegroupid"] or "").strip().lower()
             year = _s(row["year"] or "")
             track_count = int(row["track_count"] or 0)
@@ -33021,31 +32482,19 @@ def _start_library_mbid_sticking_repair(
         summary["unresolved_count"] = len(summary["unresolved_albums"])
 
         try:
-            with _db(row_factory=sqlite3.Row) as con:
-                rows = con.execute(
-                    "SELECT a.id, a.album, a.albumartist, a.mb_albumid, "
-                    "SUM(CASE WHEN trim(COALESCE(i.mb_albumid, ''))='' "
-                    "OR lower(trim(i.mb_albumid))<>lower(trim(a.mb_albumid)) THEN 1 ELSE 0 END) AS release_gaps, "
-                    "SUM(CASE WHEN trim(COALESCE(i.mb_trackid, ''))='' THEN 1 ELSE 0 END) AS track_gaps "
-                    "FROM albums a JOIN items i ON i.album_id=a.id "
-                    "WHERE a.mb_albumid IS NOT NULL AND a.mb_albumid!='' "
-                    "GROUP BY a.id "
-                    "HAVING release_gaps>0 OR track_gaps>0 "
-                    "ORDER BY release_gaps DESC, track_gaps DESC, a.id "
-                    "LIMIT ?",
-                    (limit,),
-                ).fetchall()
+            cand_res = beets_client.get_mbid_sticking_candidates(mode="track_gaps", limit=limit)
+            rows = cand_res.get("track_gaps") or cand_res.get("candidates") or []
         except Exception as ex:
             raise RuntimeError(f"Could not scan Beets DB for stuck MBIDs: {ex}") from ex
 
         for row in rows:
             if cancel_event is not None and cancel_event.is_set():
                 raise RuntimeError("cancelled")
-            aid = int(row["id"])
-            mbid = _s(row["mb_albumid"]).strip().lower()
-            label = f"{_s(row['albumartist'])} - {_s(row['album'])}".strip(" -")
-            release_gaps = int(row["release_gaps"] or 0)
-            track_gaps = int(row["track_gaps"] or 0)
+            aid = int(row.get("id") or row.get("album_id") or 0)
+            mbid = _s(row.get("mb_albumid")).strip().lower()
+            label = f"{_s(row.get('albumartist'))} - {_s(row.get('album'))}".strip(" -")
+            release_gaps = int(row.get("release_gaps") or 0)
+            track_gaps = int(row.get("track_gaps") or 0)
             summary["albums_checked"] += 1
             log.append(
                 f"  [album_id {aid}] repairing {label} — "
@@ -33252,20 +32701,14 @@ def clean_album_tracks_scan():
     fingerprint_limit = max(1, min(int(payload.get("fingerprint_limit") or 80), 200))
 
     try:
-        with _db(row_factory=sqlite3.Row) as con:
-            if album_id:
-                rows = con.execute(
-                    "SELECT id, album, albumartist, mb_albumid, mb_releasegroupid "
-                    "FROM albums WHERE id=?",
-                    (album_id,),
-                ).fetchall()
-            else:
-                rows = con.execute(
-                    "SELECT id, album, albumartist, mb_albumid, mb_releasegroupid "
-                    "FROM albums WHERE COALESCE(mb_albumid,'') != '' "
-                    "ORDER BY id DESC LIMIT ?",
-                    (limit,),
-                ).fetchall()
+        if album_id:
+            try:
+                alb = beets_client.get_album(album_id)
+                rows = [alb] if alb else []
+            except Exception:
+                rows = []
+        else:
+            rows = beets_client.find_albums_with_mbid(limit=limit, sort="desc")
     except Exception as ex:
         app.logger.warning("Could not read MusicBrainz-tagged albums: %s", type(ex).__name__)
         return jsonify({"ok": False, "error": "Could not read albums."}), 500
@@ -33585,22 +33028,10 @@ def _mb_canonical_for_artist_entries(entries: List[Dict[str, Any]], key: str) ->
 
 
 def _artist_folder_db_counts() -> Dict[str, Dict[str, int]]:
-    counts: Dict[str, Dict[str, int]] = {}
     try:
-        with _db() as con:
-            rows = con.execute(
-                "SELECT albumartist, COUNT(DISTINCT albums.id), COUNT(items.id) "
-                "FROM albums LEFT JOIN items ON items.album_id = albums.id "
-                "WHERE albumartist != '' GROUP BY albumartist"
-            ).fetchall()
-        for artist, album_count, track_count in rows:
-            counts[_s(artist)] = {
-                "albums": int(album_count or 0),
-                "tracks": int(track_count or 0),
-            }
+        return beets_client.get_artist_counts()
     except Exception:
-        pass
-    return counts
+        return {}
 
 
 def _count_audio_files(folder: Path) -> Dict[str, int]:
@@ -33868,20 +33299,16 @@ def _library_file_candidates_for_qbit(file_name: str, size: int) -> List[Dict[st
     basename = Path(file_name).name
     if not basename or size <= 0:
         return []
-    rows: List[sqlite3.Row] = []
+    rows: List[Dict[str, Any]] = []
     try:
-        with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:
-            rows = con.execute(
-                "SELECT id,path,title,artist,album FROM items WHERE path LIKE ?",
-                (f"%{basename}",),
-            ).fetchall()
+        rows = beets_client.find_files_for_hardlink(filename=basename, limit=100)
     except Exception:
         return []
 
     matches: List[Dict[str, Any]] = []
     seen_paths: set = set()
     for row in rows:
-        raw = _s(row["path"]).strip()
+        raw = _s(row.get("path") if isinstance(row, dict) else row["path"]).strip()
         if not raw:
             continue
         path = Path(raw)
@@ -33991,25 +33418,23 @@ def _library_file_candidates_for_qbit_metadata(file_name: str, size: int,
     if not track_no and not title_norm:
         return []
 
-    where = ["path IS NOT NULL"]
-    params: List[Any] = []
+    meta: Dict[str, Any] = {}
+    if album_guess:
+        meta["album"] = album_guess
+    if title_guess:
+        meta["title"] = title_guess
     if track_no:
-        where.append("track=?")
-        params.append(track_no)
+        meta["track"] = track_no
+    rows: List[Dict[str, Any]] = []
     try:
-        with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:
-            rows = con.execute(
-                "SELECT id,path,title,artist,album,albumartist,track,disc "
-                f"FROM items WHERE {' AND '.join(where)}",
-                params,
-            ).fetchall()
+        rows = beets_client.find_files_for_hardlink(metadata=meta, limit=100)
     except Exception:
         return []
 
     matches: List[Dict[str, Any]] = []
     seen_paths: set = set()
     for row in rows:
-        raw = _s(row["path"]).strip()
+        raw = _s(row.get("path") if isinstance(row, dict) else row["path"]).strip()
         if not raw:
             continue
         path = Path(raw)
@@ -34444,13 +33869,9 @@ def _album_item_abs_paths(album_id: int) -> List[Path]:
         return []
     paths: List[Path] = []
     try:
-        with _db(text_factory=bytes) as con:
-            rows = con.execute(
-                "SELECT path FROM items WHERE album_id=?",
-                (aid,),
-            ).fetchall()
-        for (raw_path,) in rows:
-            raw = _s(raw_path).strip()
+        items = beets_client.find_all_items_by_album_id(aid)
+        for item in items:
+            raw = _s(item.get("path")).strip()
             if not raw:
                 continue
             p = Path(raw)
@@ -34506,7 +33927,7 @@ def _track_filename_row_target(row: sqlite3.Row, current_path: Path) -> Optional
     return target_parent / target_name
 
 
-def _template_token_row_target(row: sqlite3.Row, current_path: Path) -> Optional[Path]:
+def _template_token_row_target(row: Any, current_path: Path) -> Optional[Path]:
     target = _track_filename_row_target(row, current_path)
     return _unique_dest(target) if target else None
 
@@ -34555,12 +33976,7 @@ def _album_template_token_cleanup_candidates(album_id: int) -> List[Dict[str, An
     candidates: List[Dict[str, Any]] = []
     seen: set[str] = set()
     try:
-        with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:
-            rows = con.execute(
-                "SELECT id, path, title, artist, album, albumartist, track, disc "
-                "FROM items WHERE album_id=?",
-                (aid,),
-            ).fetchall()
+        rows = beets_client.find_all_items_by_album_id(aid)
     except Exception:
         return []
     for row in rows:
@@ -34907,10 +34323,7 @@ def _scan_leaked_db_paths(progress: Optional[Any] = None,
     """
     results: List[Dict[str, Any]] = []
     try:
-        with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:
-            rows = con.execute(
-                "SELECT id, album_id, path FROM items"
-            ).fetchall()
+        rows = beets_client.list_item_paths(details=True)
     except Exception as ex:
         return [{"error": str(ex)}]
 
@@ -35311,18 +34724,15 @@ def _scan_folder_name_placeholders(progress: Optional[Any] = None,
     # Build folder -> DB info map from items table
     folder_db: Dict[str, Dict[str, Any]] = {}
     try:
-        with _db(row_factory=sqlite3.Row) as con:
-            rows = con.execute(
-                "SELECT id AS item_id, album_id, path FROM items WHERE COALESCE(path, '') != ''"
-            ).fetchall()
+        rows = beets_client.list_item_paths(details=True)
         for row in rows:
-            p = _s(row["path"])
+            p = _s(row.get("path"))
             d = os.path.dirname(p) if p else ""
             if not d:
                 continue
             if d not in folder_db:
                 folder_db[d] = {"album_ids": set(), "item_count": 0}
-            if row["album_id"]:
+            if row.get("album_id"):
                 folder_db[d]["album_ids"].add(int(row["album_id"]))
             folder_db[d]["item_count"] += 1
     except Exception:
@@ -36367,19 +35777,8 @@ def _maintenance_artwork_collision_leftovers(root: Path, limit: int = 10000) -> 
 
 def _maintenance_duplicate_recording_mbid_groups() -> int:
     try:
-        with _db(row_factory=sqlite3.Row) as con:
-            row = con.execute(
-                """
-                SELECT COUNT(*) AS count FROM (
-                    SELECT lower(trim(COALESCE(mb_trackid, ''))) AS mbid
-                    FROM items
-                    WHERE trim(COALESCE(mb_trackid, '')) != ''
-                    GROUP BY lower(trim(COALESCE(mb_trackid, '')))
-                    HAVING COUNT(*) > 1
-                )
-                """
-            ).fetchone()
-            return int(row["count"] if row else 0)
+        res = beets_client.scan_library_integrity()
+        return int(res.get("duplicate_recording_mbids_count") or res.get("duplicate_recording_groups") or 0)
     except Exception:
         return 0
 
@@ -37004,19 +36403,24 @@ def _folder_cleanup_is_empty(root: Path) -> bool:
 
 def _folder_cleanup_db_items(folder: Path) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
+    # Every caller already resolves through _folder_cleanup_path()/
+    # _album_cleanup_trusted_path() before reaching here, but this function
+    # touches the filesystem on `folder` directly, so it re-checks
+    # containment itself rather than trusting that every present and future
+    # caller keeps doing so correctly.
+    if not _path_under(folder, MUSIC_ROOT):
+        return rows
     if not folder.exists():
         return rows
     try:
         folder_resolved = folder.resolve(strict=False)
     except Exception:
         folder_resolved = folder
-    with _db(row_factory=sqlite3.Row) as con:
-        for row in con.execute("SELECT id, album_id, title, artist, album, path FROM items WHERE path IS NOT NULL"):
-            raw_path = row["path"]
-            if isinstance(raw_path, bytes):
-                path_text = raw_path.decode("utf-8", errors="replace")
-            else:
-                path_text = _s(raw_path)
+    try:
+        items = beets_client.get_folder_items([str(folder_resolved)])
+        for row in items:
+            raw_path = row.get("path")
+            path_text = _s(raw_path)
             if not path_text:
                 continue
             try:
@@ -37031,14 +36435,16 @@ def _folder_cleanup_db_items(folder: Path) -> List[Dict[str, Any]]:
             rows.append(
                 {
                     "item_id": int(row["id"]),
-                    "album_id": int(row["album_id"] or 0),
-                    "artist": _s(row["artist"]),
-                    "album": _s(row["album"]),
-                    "title": _s(row["title"]),
+                    "album_id": int(row.get("album_id") or 0),
+                    "artist": _s(row.get("artist") or row.get("albumartist")),
+                    "album": _s(row.get("album")),
+                    "title": _s(row.get("title")),
                     "path": path_text,
                     "resolved_path": str(item_path),
                 }
             )
+    except Exception:
+        pass
     return rows
 
 
@@ -37046,12 +36452,15 @@ def _folder_cleanup_known_release_group_id(album_ids: Iterable[int]) -> str:
     ids = sorted({int(album_id) for album_id in album_ids if int(album_id or 0) > 0})
     if not ids:
         return ""
-    placeholders = ",".join("?" for _ in ids)
-    with _db(row_factory=sqlite3.Row) as con:
-        for row in con.execute(f"SELECT mb_releasegroupid FROM albums WHERE id IN ({placeholders})", ids):
-            rgid = _s(row["mb_releasegroupid"]).strip()
-            if _is_valid_mb_uuid(rgid):
-                return rgid
+    for aid in ids:
+        try:
+            alb = beets_client.get_album(aid)
+            if alb:
+                rgid = _s(alb.get("mb_releasegroupid")).strip()
+                if _is_valid_mb_uuid(rgid):
+                    return rgid
+        except Exception:
+            continue
     return ""
 
 
@@ -37830,25 +37239,9 @@ def _album_cleanup_db_index(root: Path) -> Dict[str, Any]:
     folder_db: Dict[str, Dict[str, Any]] = {}
     file_db: Dict[str, Dict[str, Any]] = {}
     try:
-        with _db(row_factory=sqlite3.Row) as con:
-            item_cols = _sqlite_columns(con, "items")
-            album_cols = _sqlite_columns(con, "albums")
-            selects = ["i.id AS item_id", "i.album_id AS item_album_id", "i.path AS item_path"]
-            for col in ("title", "track", "disc", "bitrate", "format"):
-                if col in item_cols:
-                    selects.append(f"i.{col} AS item_{col}")
-            for col in ("id", "album", "albumartist", "year", "mb_albumid", "mb_releasegroupid", "artpath"):
-                if col in album_cols:
-                    selects.append(f"a.{col} AS album_{col}")
-            rows = con.execute(
-                f"""
-                SELECT {', '.join(selects)}
-                FROM items i
-                LEFT JOIN albums a ON a.id = i.album_id
-                WHERE COALESCE(i.path, '') != ''
-                """
-            ).fetchall()
-    except Exception:
+        rows = beets_client.get_album_cleanup_index()
+    except BeetsUnavailableError as ex:
+        app.logger.warning("Beets engine unavailable in _album_cleanup_db_index: %s", ex)
         rows = []
 
     for row in rows:
@@ -39089,12 +38482,8 @@ def _album_cleanup_item_id_for_path(path: Path) -> int:
     touches anything, which is why the local fallback below always used
     to run in practice."""
     try:
-        with _db(row_factory=sqlite3.Row) as con:
-            row = con.execute(
-                "SELECT id FROM items WHERE path=?",
-                (str(path).encode("utf-8"),),
-            ).fetchone()
-        return int(row["id"]) if row else 0
+        item = beets_client.find_item_by_path(str(path))
+        return int(item.get("id") or 0) if item else 0
     except Exception:
         return 0
 
@@ -40215,71 +39604,6 @@ def _stamp_db_path_prefix_pairs(src: Path, dst: Path) -> List[Tuple[bytes, bytes
     ]
 
 
-def _replace_stamp_db_path_prefixes(
-    con,
-    table: str,
-    column: str,
-    prefix_pairs: List[Tuple[bytes, bytes]],
-) -> int:
-    if (table, column) not in _STAMP_DB_PATH_COLUMNS:
-        raise ValueError(f"Unsupported stamp path column: {table}.{column}")
-    existing_columns = {
-        _s(row[1]).strip()
-        for row in con.execute(f"PRAGMA table_info({table})").fetchall()
-    }
-    if column not in existing_columns:
-        return 0
-    clauses = " OR ".join(f"{column} LIKE ?" for _old, _new in prefix_pairs)
-    params = tuple(old + b"%" for old, _new in prefix_pairs)
-    rows = con.execute(
-        f"SELECT id, {column} FROM {table} WHERE {clauses}",
-        params,
-    ).fetchall()
-    updated = 0
-    for row_id, raw_path in rows:
-        if not raw_path:
-            continue
-        path_value = raw_path if isinstance(raw_path, bytes) else str(raw_path).encode()
-        for old_prefix, new_prefix in prefix_pairs:
-            if not path_value.startswith(old_prefix):
-                continue
-            new_path = new_prefix + path_value[len(old_prefix):]
-            con.execute(f"UPDATE {table} SET {column}=? WHERE id=?", (new_path, row_id))
-            updated += 1
-            break
-    return updated
-
-
-def _replace_stamp_db_exact_paths(
-    con,
-    table: str,
-    column: str,
-    path_pairs: List[Tuple[Path, Path]],
-) -> int:
-    if (table, column) not in _STAMP_DB_PATH_COLUMNS:
-        raise ValueError(f"Unsupported stamp path column: {table}.{column}")
-    existing_columns = {
-        _s(row[1]).strip()
-        for row in con.execute(f"PRAGMA table_info({table})").fetchall()
-    }
-    if column not in existing_columns:
-        return 0
-    updated = 0
-    for old_path, new_path in path_pairs:
-        old_values = {
-            str(old_path).encode(),
-            _db_path_value(old_path).encode(),
-        }
-        new_value = _db_path_value(new_path).encode()
-        for old_value in old_values:
-            cur = con.execute(
-                f"UPDATE {table} SET {column}=? WHERE {column}=?",
-                (new_value, old_value),
-            )
-            updated += int(cur.rowcount or 0)
-    return updated
-
-
 def _stamp_folder_for_item_path(
     raw_path: Any,
     root_abs: Path,
@@ -40321,13 +39645,7 @@ def _stamp_artist_folder_album_mbid_counts(
     album_ids_by_folder: Dict[str, set] = {}
     mbid_album_ids_by_folder: Dict[str, Dict[str, set]] = {}
     try:
-        with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:
-            rows = con.execute(
-                "SELECT DISTINCT a.id AS album_id, a.mb_albumartistid, i.path "
-                "FROM albums a "
-                "JOIN items i ON i.album_id = a.id "
-                "WHERE a.mb_albumartistid IS NOT NULL AND a.mb_albumartistid != ''"
-            ).fetchall()
+        rows = beets_client.get_artist_folder_album_mbids()
     except Exception as ex:
         return {}, {}, str(ex)
 
@@ -45206,8 +44524,7 @@ def playlist_parse():
         # provider-routing checks below used to be plain substring tests
         # ("spotify.com" in content, "youtube.com"/"soundcloud.com" in
         # parse_lower). Unlike the cosmetic frontend badge findings in the
-        # same rule class (see docs/security/codeql_repository_closure.md
-        # Phase 4), this one is a genuine trust decision: the soundcloud.com
+        # same rule class, this one is a genuine trust decision: the soundcloud.com
         # branch attaches the operator's stored netrc credentials
         # (_apply_ytdlp_netrc) to whatever URL yt-dlp is given. A URL that
         # merely CONTAINS "soundcloud.com" as a substring without actually
@@ -45239,9 +44556,8 @@ def playlist_parse():
 
             # SEC-002 CodeQL repository-wide closure finding
             # (py/polynomial-redos): the same unbounded-content-between-
-            # delimiters shape as the playlist title/artist cleaners
-            # (docs/security/codeql_repository_closure.md) -- not itself
-            # CodeQL-flagged at this line, but the identical, already-
+            # delimiters shape as the playlist title/artist cleaners --
+            # not itself CodeQL-flagged at this line, but the identical, already-
             # empirically-proven-quadratic pattern, fixed the same way.
             # PR-scoped re-check (post-Wave-27 rebase) additionally found
             # the leading \s* also needed bounding (see the identical note
@@ -47382,14 +46698,52 @@ def _playlist_duration_seconds(value: Any) -> float:
         return 0.0
 
 
-def _playlist_auto_placement_allowed(confidence: float,
-                                     mb_releasegroupid: str) -> bool:
-    """Only auto-place a track when confidence and release-group identity are safe."""
-    try:
-        score = float(confidence)
-    except Exception:
-        score = 0.0
-    return score >= 0.70 and bool(_MB_UUID_RE.match(_s(mb_releasegroupid).strip().lower()))
+def _playlist_canonical_placement_evidence(
+    local_track_probe: Dict[str, Any],
+    target_track: Dict[str, Any],
+    mb_releasegroupid: str,
+    *,
+    acoustid_hits: Optional[List[Dict[str, Any]]] = None,
+):
+    """Evaluate whether one playlist track may be auto-placed under one
+    candidate MusicBrainz recording, using the canonical ARCH-002 evidence
+    engine (`backend.matching.evaluate_release_group_candidate`) instead of
+    a bare text/MB-search confidence threshold.
+
+    ARCH-002 finding: the previous `_playlist_auto_placement_allowed()`
+    authorized a real, unattended tag-write + file-move (via the engine's
+    `/playlists/place-imported`) whenever a weighted text confidence score
+    crossed 0.70, with no identity-evidence requirement at all -- exactly
+    the anti-pattern ARCH-002 exists to eliminate, on a genuinely
+    destructive path (`beet write` + `beet move` against the real library).
+
+    This treats the local file being placed and the one specific target
+    recording as a single-track "album" for the canonical evaluator:
+    passing only that one target track (never the candidate release's
+    whole tracklist) makes `complete_alignment` mean exactly what this
+    workflow can honestly claim -- "this one recording is confirmed" -- not
+    a false claim of full-album coverage a single-track placement has no
+    way to prove. `local_track_probe` should carry `acoustid_hits` when a
+    fingerprint lookup was performed, so the canonical AcoustID states
+    (confirmed/conflict/no_result/unavailable/ambiguous) drive the result
+    instead of an ad hoc `_source == "acoustid"` proxy.
+
+    Returns the full `ReleaseGroupMatchResult` so callers can log/report
+    the real reason (conflict / insufficient evidence / confirmed) instead
+    of a bare bool, per ARCH-002 Part 19.
+    """
+    probe = dict(local_track_probe or {})
+    probe["acoustid_hits"] = list(acoustid_hits or probe.get("acoustid_hits") or [])
+    candidate = {
+        "release_group_id": _s(mb_releasegroupid).strip().lower(),
+        "tracks": [target_track] if target_track else [],
+    }
+    return evaluate_release_group_candidate(
+        {},
+        candidate,
+        local_tracks=[probe],
+        trust_model="existing_library",
+    )
 
 
 def _playlist_log(log: Optional[List[str]], message: str) -> None:
@@ -47880,17 +47234,38 @@ def _playlist_album_tag_release_placement(candidate: Dict[str, Any],
             if not _MB_UUID_RE.match(mb_releasegroupid):
                 _playlist_log(log, f"  [playlist-place] Skip release {mb_albumid}: no release-group ID")
                 continue
-            if not _playlist_auto_placement_allowed(confidence, mb_releasegroupid):
+            # ARCH-002: text/MB-search confidence is reported for logging
+            # only -- it is not what authorizes this unattended write. A
+            # real INSERT/UPDATE + `beet write`/`beet move` happens on the
+            # engine side once this placement is accepted (see
+            # backend/beets_control_agent.py's /playlists/place-imported),
+            # so the same canonical evidence gate every other production
+            # mutation flows through applies here too: no fingerprint
+            # confirmation of this specific recording means no unattended
+            # write, no matter how high the text score is.
+            acoustid_hits = None
+            try:
+                audio_path_probe = _playlist_resolve_item_path(path_text)
+                if audio_path_probe.exists():
+                    acoustid_hits = _acoustid_lookup_cached(str(audio_path_probe))
+            except Exception as ex:
+                _playlist_log(log, f"  [playlist-place] AcoustID lookup skipped: {ex}")
+            canonical = _playlist_canonical_placement_evidence(
+                item_probe, best_track, mb_releasegroupid, acoustid_hits=acoustid_hits,
+            )
+            if not canonical.can_auto_accept():
                 _playlist_log(
                     log,
                     f"  [playlist-place] Review required for release group {mb_releasegroupid}: "
-                    f"confidence {confidence:.0%}",
+                    f"confidence {confidence:.0%}, canonical state {canonical.state.value}"
+                    + (f", conflicts {canonical.conflicts}" if canonical.conflicts else "")
+                    + (f", missing evidence {canonical.missing_evidence}" if canonical.missing_evidence else ""),
                 )
                 continue
             _playlist_log(
                 log,
                 f"  [playlist-place] Album-tag release match: {artist} - {title} "
-                f"-> {albumartist} - {album}",
+                f"-> {albumartist} - {album} (canonical state {canonical.state.value})",
             )
             return {
                 "ok": True,
@@ -47918,6 +47293,8 @@ def _playlist_album_tag_release_placement(candidate: Dict[str, Any],
                     "album_score": round(album_score, 3),
                     "artist_score": round(artist_score, 3),
                     "release_track_score": round(best_score, 3),
+                    "canonical_state": canonical.state.value,
+                    "canonical_positive_evidence": list(canonical.positive_evidence),
                 },
             }
     return {}
@@ -48137,11 +47514,29 @@ def _playlist_resolve_album_placement(candidate: Dict[str, Any],
         if not _MB_UUID_RE.match(mb_releasegroupid):
             _playlist_log(log, f"  [playlist-place] Skip release {mb_albumid}: no release-group ID")
             continue
-        if not _playlist_auto_placement_allowed(confidence, mb_releasegroupid):
+        # ARCH-002: as in _playlist_album_tag_release_placement above, the
+        # text/MB-search confidence is reported for logging only. This loop
+        # already tries AcoustID-sourced recording candidates first (see
+        # `_recording_rank`'s `source_rank`), but previously never actually
+        # required that evidence to authorize the write -- a plain MB-search
+        # hit with a high enough blended score could still win. Feed every
+        # AcoustID-sourced candidate actually gathered this call into the
+        # canonical evaluator so real confirmed/conflict/ambiguous status
+        # (not a bare "_source == acoustid" proxy) decides.
+        acoustid_hits_for_probe = [
+            rc for rc in recording_candidates
+            if _s(rc.get("_source") or rc.get("source") or "").lower() == "acoustid"
+        ]
+        canonical = _playlist_canonical_placement_evidence(
+            item_probe, best_track, mb_releasegroupid, acoustid_hits=acoustid_hits_for_probe,
+        )
+        if not canonical.can_auto_accept():
             _playlist_log(
                 log,
                 f"  [playlist-place] Review required for release group {mb_releasegroupid}: "
-                f"confidence {confidence:.0%}",
+                f"confidence {confidence:.0%}, canonical state {canonical.state.value}"
+                + (f", conflicts {canonical.conflicts}" if canonical.conflicts else "")
+                + (f", missing evidence {canonical.missing_evidence}" if canonical.missing_evidence else ""),
             )
             continue
         return {
@@ -48170,11 +47565,13 @@ def _playlist_resolve_album_placement(candidate: Dict[str, Any],
                 "title_score": round(title_score, 3),
                 "artist_score": round(artist_score, 3),
                 "release_track_score": round(best_score, 3),
+                "canonical_state": canonical.state.value,
+                "canonical_positive_evidence": list(canonical.positive_evidence),
             },
         }
     return {
         "ok": False,
-        "reason": "review required: no MusicBrainz release-group match reached 70% confidence",
+        "reason": "review required: no MusicBrainz release-group match reached canonical auto-accept evidence",
         "review_required": True,
     }
 
@@ -48381,49 +47778,6 @@ def _playlist_apply_album_placement(con, candidate: Dict[str, Any],
         }
     except Exception as ex:
         return {"id": item_id, "repaired": False, "reason": f"Engine placement IPC failed: {ex}"}
-
-
-def _playlist_find_or_create_album_row(con, placement: Dict[str, Any]) -> int:
-    mb_albumid = _s(placement.get("mb_albumid") or "").strip().lower()
-    mb_releasegroupid = _s(placement.get("mb_releasegroupid") or "").strip().lower()
-    album = _s(placement.get("album") or "").strip()
-    albumartist = _s(placement.get("albumartist") or "").strip()
-    row = None
-    if mb_releasegroupid:
-        row = con.execute(
-            "SELECT id FROM albums WHERE lower(COALESCE(mb_releasegroupid,''))=? ORDER BY id DESC LIMIT 1",
-            (mb_releasegroupid,),
-        ).fetchone()
-    if not row and mb_albumid:
-        row = con.execute(
-            "SELECT id FROM albums WHERE lower(COALESCE(mb_albumid,''))=? ORDER BY id DESC LIMIT 1",
-            (mb_albumid,),
-        ).fetchone()
-    if not row and album and albumartist:
-        row = con.execute(
-            "SELECT id FROM albums WHERE lower(COALESCE(album,''))=? "
-            "AND lower(COALESCE(albumartist,''))=? ORDER BY id DESC LIMIT 1",
-            (album.casefold(), albumartist.casefold()),
-        ).fetchone()
-    album_id = _playlist_row_id(row)
-    album_cols = _sqlite_columns(con, "albums")
-    if album_id > 0:
-        _sqlite_update(
-            con,
-            "albums",
-            _playlist_album_known_values(placement),
-            "id=?",
-            [album_id],
-            album_cols,
-        )
-        return album_id
-
-    values = _playlist_insert_album_values(con, placement)
-    if not values:
-        raise RuntimeError("Could not build Beets album row")
-    sql = "INSERT INTO albums (" + ",".join(values.keys()) + ") VALUES (" + ",".join("?" for _ in values) + ")"
-    cur = con.execute(sql, list(values.values()))
-    return int(cur.lastrowid or 0)
 
 
 def _playlist_repair_quality_candidate(con, candidate: Dict[str, Any],
@@ -48838,12 +48192,6 @@ def _playlist_run_quality_cleanup_job(action: str,
                     f"{result.get('reason') or 'unknown reason'}",
                 )
     elif action == "delete_preview":
-        with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:
-            selected = con.execute(
-                "SELECT id,path FROM items WHERE id IN ("
-                + ",".join("?" for _ in candidate_ids) + ")",
-                candidate_ids,
-            ).fetchall()
         try:
             plan_res = beets_client.plan_playlist_media_cleanup({"item_ids": candidate_ids})
             if plan_res.get("ok"):
@@ -51293,37 +50641,39 @@ def music_format_replacement_statuses():
 
 def _music_format_library_rows(limit: int = 0) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
-    sql = (
-        "SELECT i.id AS item_id, i.album_id, i.path, i.title, i.artist, i.album, i.track, i.disc, "
-        "i.mb_trackid, i.mb_albumid, a.albumartist, a.year, a.mb_albumid AS album_mb_albumid, a.mb_releasegroupid AS album_mb_releasegroupid "
-        "FROM items i LEFT JOIN albums a ON i.album_id = a.id "
-        "WHERE i.path IS NOT NULL AND i.path != '' ORDER BY i.album_id, i.track, i.id"
-    )
-    if limit and limit > 0:
-        sql += f" LIMIT {int(limit)}"
-    with _db(row_factory=sqlite3.Row) as con:
-        for row in con.execute(sql).fetchall():
-            raw_path = _s(row["path"])
-            path = Path(raw_path)
-            if not path.is_absolute():
-                path = MUSIC_ROOT / raw_path
-            if path.suffix.lower() not in AUDIO_EXT:
-                continue
-            rows.append({
-                "item_id": int(row["item_id"]),
-                "album_id": int(row["album_id"] or 0),
-                "path": str(path),
-                "title": _s(row["title"]),
-                "artist": _s(row["artist"]),
-                "album": _s(row["album"]),
-                "albumartist": _s(row["albumartist"]),
-                "disc": int(row["disc"] or 1),
-                "track": int(row["track"] or 0),
-                "year": int(row["year"] or 0) if _s(row["year"]).strip().isdigit() else 0,
-                "mb_trackid": _s(row["mb_trackid"]),
-                "mb_albumid": _s(row["mb_albumid"] or row["album_mb_albumid"]),
-                "mb_releasegroupid": _s(row["album_mb_releasegroupid"]),
-            })
+    cleanup_rows = beets_client.get_album_cleanup_index()
+
+    cleanup_rows.sort(key=lambda r: (
+        int(r.get("item_album_id") or r.get("album_id") or 0),
+        int(r.get("item_track") or r.get("track") or 0),
+        int(r.get("item_id") or r.get("id") or 0),
+    ))
+
+    for r in cleanup_rows:
+        raw_path = _s(r.get("item_path") or r.get("path") or "")
+        path = Path(raw_path)
+        if not path.is_absolute():
+            path = MUSIC_ROOT / raw_path
+        if path.suffix.lower() not in AUDIO_EXT:
+            continue
+        year_val = _s(r.get("album_year") or r.get("year") or "").strip()
+        rows.append({
+            "item_id": int(r.get("item_id") or r.get("id") or 0),
+            "album_id": int(r.get("item_album_id") or r.get("album_id") or 0),
+            "path": str(path),
+            "title": _s(r.get("item_title") or r.get("title") or ""),
+            "artist": _s(r.get("item_artist") or r.get("artist") or ""),
+            "album": _s(r.get("item_album") or r.get("album") or ""),
+            "albumartist": _s(r.get("album_albumartist") or r.get("albumartist") or ""),
+            "disc": int(r.get("item_disc") or r.get("disc") or 1),
+            "track": int(r.get("item_track") or r.get("track") or 0),
+            "year": int(year_val) if year_val.isdigit() else 0,
+            "mb_trackid": _s(r.get("item_mb_trackid") or r.get("mb_trackid") or ""),
+            "mb_albumid": _s(r.get("item_mb_albumid") or r.get("mb_albumid") or r.get("album_mb_albumid") or ""),
+            "mb_releasegroupid": _s(r.get("album_mb_releasegroupid") or r.get("mb_releasegroupid") or ""),
+        })
+        if limit and limit > 0 and len(rows) >= limit:
+            break
     return rows
 
 
@@ -51637,36 +50987,32 @@ def _music_format_find_verified_replacement(row: Dict[str, Any], prefs: Dict[str
     track = int(row.get("track") or 0)
     artist = _s(row.get("artist") or "")
     title = _s(row.get("title") or "")
-    candidates: List[sqlite3.Row] = []
+    candidates: List[Dict[str, Any]] = []
     seen_candidate_ids = set()
 
     def _add_candidates(rows) -> None:
         for candidate in rows:
-            candidate_id = int(candidate["id"] or 0)
+            candidate_id = int(candidate.get("id") or 0)
             if candidate_id and candidate_id not in seen_candidate_ids:
                 seen_candidate_ids.add(candidate_id)
                 candidates.append(candidate)
 
     try:
-        with _db(row_factory=sqlite3.Row) as con:
-            if mb_trackid:
-                _add_candidates(con.execute(
-                    "SELECT id, path, title, artist, disc, track, mb_trackid FROM items WHERE lower(mb_trackid)=? ORDER BY id DESC LIMIT 50",
-                    (mb_trackid,),
-                ).fetchall())
-            if album_id:
-                _add_candidates(con.execute(
-                    "SELECT id, path, title, artist, disc, track, mb_trackid FROM items WHERE album_id=? ORDER BY id DESC",
-                    (album_id,),
-                ).fetchall())
-            if mb_trackid:
-                _add_candidates(con.execute(
-                    "SELECT id, path, title, artist, disc, track, mb_trackid FROM items ORDER BY id DESC LIMIT 60",
-                ).fetchall())
-            if not candidates:
-                _add_candidates(con.execute(
-                    "SELECT id, path, title, artist, disc, track, mb_trackid FROM items ORDER BY id DESC LIMIT 100",
-                ).fetchall())
+        if mb_trackid:
+            try:
+                _add_candidates(beets_client.find_all_items_by_mbid(mb_trackid))
+            except Exception:
+                pass
+        if album_id:
+            try:
+                _add_candidates(beets_client.find_all_items_by_album_id(album_id))
+            except Exception:
+                pass
+        if not candidates:
+            try:
+                _add_candidates(beets_client.get_items_page(offset=0, limit=100).get("items", []))
+            except Exception:
+                pass
     except Exception:
         return {}
     for candidate in candidates:

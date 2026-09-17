@@ -26,7 +26,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _app_ast_cache import get_app_ast, get_app_source, parse_count  # noqa: E402
+from _app_ast_cache import get_app_ast, get_app_source, load_app_symbols, parse_count  # noqa: E402
 
 
 class AppAstCacheTests(unittest.TestCase):
@@ -62,6 +62,18 @@ class AppAstCacheTests(unittest.TestCase):
         # out any accidental re-parsing regression by a wide margin.
         self.assertLess(elapsed, 2.0)
 
+    def test_load_app_symbols_extracts_and_provides_typing_baseline(self):
+        ns = load_app_symbols(
+            ["_ALBUM_TRACK_PREFIX_RE", "_strip_track_filename_id_suffix"],
+            extra_ns={"_s": str},
+        )
+        self.assertIn("_ALBUM_TRACK_PREFIX_RE", ns)
+        self.assertIn("_strip_track_filename_id_suffix", ns)
+        self.assertTrue(callable(ns["_strip_track_filename_id_suffix"]))
+        self.assertIn("Optional", ns)
+        self.assertIn("Dict", ns)
+
 
 if __name__ == "__main__":
     unittest.main()
+

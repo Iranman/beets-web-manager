@@ -352,7 +352,17 @@ class AlbumFolderCleanupApplyBoundaryTests(Wave4PathTestCase):
             Path(payload["source"]).rmdir()
             return {"ok": True}
 
-        with mock.patch.object(app_module.beets_client, "plan_album_maintenance", side_effect=fake_plan), \
+        def fake_find_item_by_path(path_str):
+            with closing(sqlite3.connect(self.db_path)) as con:
+                row = con.execute("SELECT id, path FROM items WHERE path=?", (str(path_str).encode("utf-8"),)).fetchone()
+                if not row:
+                    row = con.execute("SELECT id, path FROM items WHERE path=?", (str(path_str),)).fetchone()
+                if row:
+                    return {"id": row[0], "path": row[1]}
+            return None
+
+        with mock.patch.object(app_module.beets_client, "find_item_by_path", side_effect=fake_find_item_by_path), \
+             mock.patch.object(app_module.beets_client, "plan_album_maintenance", side_effect=fake_plan), \
              mock.patch.object(app_module.beets_client, "apply_album_maintenance", side_effect=fake_apply), \
              mock.patch.object(app_module.beets_client, "plan_folder_cleanup", side_effect=fake_folder_plan), \
              mock.patch.object(app_module.beets_client, "apply_folder_cleanup", side_effect=fake_folder_apply):

@@ -44,7 +44,7 @@ from app import (  # noqa: E402
     jobs,
     lib,
 )
-from backend.beets_client import beets_client, BeetsError, BeetsUnavailableError
+from backend.beets_client import beets_client, BeetsError, BeetsUnavailableError, BeetsAuthError
 from backend.security import OutboundPolicyError, validate_outbound_url
 
 _SUBMISSION_ALLOWED_ROOTS = (MUSIC_ROOT, DOWNLOADS_ROOT)
@@ -419,6 +419,34 @@ def _abs_resolved(path_str: str) -> Path:
 
 def _find_beets_album_for_folder(folder: Path):
     target = str(folder)
+    try:
+        from backend.beets_client import beets_client, BeetsUnavailableError, BeetsError
+        has_client = True
+    except Exception:
+        has_client = False
+
+    if has_client and hasattr(lib, "get_album"):
+        try:
+            res = beets_client.resolve_folder_to_albums(target)
+            album_ids = res.get("album_ids", []) if isinstance(res, dict) else []
+        except (BeetsUnavailableError, BeetsError):
+            raise
+        except Exception:
+            album_ids = []
+
+        for aid in album_ids:
+            album = lib.get_album(aid)
+            if album is None:
+                continue
+            try:
+                album_dir = str(Path(_get_album_item_dir(album)).resolve(strict=False))
+            except Exception:
+                continue
+            if album_dir == target:
+                return album
+        return None
+
+    # Fallback for mock test harnesses that only supply a fake lib without client binding
     for album in lib.albums():
         try:
             album_dir = str(Path(_get_album_item_dir(album)).resolve(strict=False))
@@ -431,6 +459,37 @@ def _find_beets_album_for_folder(folder: Path):
 
 def _find_beets_items_for_folder(folder: Path) -> List[Any]:
     target = str(folder)
+    try:
+        from backend.beets_client import beets_client, BeetsUnavailableError, BeetsError
+        has_client = True
+    except Exception:
+        has_client = False
+
+    if has_client and hasattr(lib, "get_item"):
+        try:
+            res = beets_client.resolve_folder_to_albums(target)
+            item_ids = res.get("item_ids", []) if isinstance(res, dict) else []
+        except (BeetsUnavailableError, BeetsError):
+            raise
+        except Exception:
+            item_ids = []
+
+        matches = []
+        for iid in item_ids:
+            item = lib.get_item(iid)
+            if item is None:
+                continue
+            try:
+                item_path = _item_abs_path(item)
+                if not item_path:
+                    continue
+                if str(Path(item_path).parent.resolve(strict=False)) == target:
+                    matches.append(item)
+            except Exception:
+                continue
+        return matches
+
+    # Fallback for mock test harnesses that only supply a fake lib without client binding
     matches = []
     for item in lib.items():
         try:
@@ -914,6 +973,27 @@ def submission_target():
         path = _s(request.args.get("path") or "").strip()
         singleton = str(request.args.get("singleton") or "").strip().lower() in {"1", "true", "yes"}
         target_type, target_id, summary, tracks = _resolve_submission_target(album_id=album_id, item_id=item_id, path=path, singleton=singleton)
+    except BeetsUnavailableError as ex:
+        app.logger.warning("submission_target engine unavailable for path=%r: %s", path, ex)
+        return jsonify({
+            "ok": False,
+            "error": "Beets engine unavailable",
+            "error_code": "ENGINE_UNAVAILABLE",
+        }), 503
+    except BeetsAuthError as ex:
+        app.logger.warning("submission_target auth failed for path=%r: %s", path, ex)
+        return jsonify({
+            "ok": False,
+            "error": "Beets engine auth failed",
+            "error_code": "ENGINE_AUTH_ERROR",
+        }), 502
+    except BeetsError as ex:
+        app.logger.warning("submission_target engine error for path=%r: %s", path, ex)
+        return jsonify({
+            "ok": False,
+            "error": "Beets engine error",
+            "error_code": "ENGINE_ERROR",
+        }), 502
     except KeyError as ex:
         return jsonify({"ok": False, "error": str(ex)}), 404
     except ValueError as ex:

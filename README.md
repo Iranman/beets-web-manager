@@ -1,9 +1,10 @@
-# Beets Web Manager-BROKEN DO NOT DOWNLOAD!!
+# Beets Web Manager
 
 Beets Web Manager is a self-hosted web application for managing a Beets music library, import review, playlist repair, acquisition queues, cleanup jobs, metadata verification, and media-server synchronization from one operator-focused interface.
 
 The app is designed for local or self-hosted deployments where the music library, download staging folders, Beets database, Plex, downloader services, MusicBrainz, AcoustID, and optional AI providers are controlled by the administrator.
-I made this because the beets web plugin just wasn't cutting it. Not only does this web app have a UI but it can do everything I need to manage my music libary. Yes this was vibe-coded and if that bothers you please dont waste your time. But for everyone else I tried my best to cover all vunerbilities and make sure all features work correctly. Please feel free to point out issues or how to make it better.
+
+This project exists because the Beets web plugin didn't cover enough on its own: a full UI, import review, playlist repair, acquisition queues, cleanup jobs, and metadata verification on top of Beets. Issues and improvement suggestions are welcome.
 
 ## Features
 
@@ -301,12 +302,6 @@ Passwords must be at least 16 characters by default (`BEETS_WEB_PASSWORD_MIN_LEN
 **Where do I check whether MusicBrainz, AcoustID, AI, and Plex are actually reachable right now?**
 `GET /api/setup/status` queries the internal Beets control agent for readiness. Use `POST /api/setup/test/{ai,musicbrainz,acoustid,plex}` or the System page connection tests for live provider connectivity.
 
-## Documentation
-
-- [Installation Guide](docs/INSTALLATION.md) — per-platform path-mapping examples (Linux, TrueNAS, Unraid, Synology, Windows) and local dev setup.
-- [Configuration Reference](docs/CONFIGURATION.md) — every environment variable and `config.yaml` setting.
-- [Troubleshooting](docs/TROUBLESHOOTING.md) — common failure modes and fixes.
-
 ## Demo Mode
 
 Try the app without your own music library or paid AI credentials:
@@ -386,6 +381,17 @@ If this project helps your library, please consider supporting its future.
 - Donate to support future development, AI licenses, homelab infrastructure, and ongoing maintenance.
 
 Sponsor links are configured through GitHub's Sponsor button when available.
+
+## Documentation
+
+- [`docs/INSTALLATION.md`](docs/INSTALLATION.md) — detailed installation and deployment.
+- [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) — configuration variables and integrations.
+- [`docs/EXAMPLES.md`](docs/EXAMPLES.md) — embedding into an existing Compose stack.
+- [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) — common problems and fixes.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — current system shape and non-negotiable product rules.
+- [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) — developer setup, validation commands, and engineering constraints.
+- [`docs/TECHNICAL_DEBT.md`](docs/TECHNICAL_DEBT.md) — known open architecture work.
+- [`SECURITY.md`](SECURITY.md) — supported versions and how to report a vulnerability.
 
 ## Contributing
 

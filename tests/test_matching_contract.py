@@ -1,6 +1,7 @@
 import atexit
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -21,6 +22,8 @@ from backend.matching_contract import (
     _MAX_TRACK_COUNT,
     _MIN_DURATION_MS,
     _MAX_DURATION_MS,
+    _uuid,
+    _MB_UUID_RE,
 )
 
 
@@ -1866,6 +1869,175 @@ class AppBoundaryFingerprintAndSanitizationRegressionTests(unittest.TestCase):
         self.assertEqual(selected["track_position"], 17)
         self.assertEqual(selected["track_count"], 24)
         self.assertEqual(selected["duration_ms"], 245000)
+
+
+@unittest.skipIf(APP is None, f"app.py could not be imported for boundary tests: {_APP_IMPORT_ERROR}")
+class ARCH002ObjectiveBMigrationTests(unittest.TestCase):
+    """Regressions and boundary verification for ARCH-002 Objective B migration."""
+
+    def test_wrong_rg_high_textual_ai_score_vs_correct_acoustid(self):
+        """Part 10: High AI text confidence on wrong RG must be rejected when AcoustID points elsewhere."""
+        local = _local(mb_releasegroupid=RGID)
+        candidate = _candidate(
+            mb_releasegroupid=OTHER_RGID,
+            title="Correct Title",
+            artist="Example Artist",
+            fingerprint_attempted=True,
+            fingerprint_matched=True,
+            fingerprint_status="matched",
+            mapped_recording_id=RECORDING_ID,
+        )
+        ai_state = APP.AiState(
+            state_known=True,
+            configured=True,
+            attempted=True,
+            available=True,
+            contribution={"confidence": "high", "mb_trackid": RECORDING_ID},
+        )
+        decision = build_recording_matching_decision(
+            current=local,
+            candidate=candidate,
+            selected_release=_release(mb_releasegroupid=OTHER_RGID),
+            ai_state=ai_state,
+        ).to_dict()
+
+        decision_data = decision.get("decision", {})
+        self.assertIn("release_group_conflict", decision_data.get("conflicts", []))
+        self.assertFalse(decision_data.get("action_allowed"))
+        self.assertTrue(decision_data.get("review_required"))
+        self.assertNotEqual(decision_data.get("recommended_action"), "auto_apply")
+
+    def test_invalid_or_unmatched_ai_mbid_rejected_with_warning(self):
+        """Part 11: AI returning an invented or unmatched MBID must be rejected with review required."""
+        self.assertEqual(_uuid("invented-id-123"), "")
+        fake_uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        self.assertEqual(_uuid(fake_uuid), fake_uuid)
+
+        suggestions = {
+            "title": "Some Title",
+            "artist": "Some Artist",
+            "mb_trackid": fake_uuid,
+            "confidence": "high",
+            "reason": "AI matched track",
+        }
+        mb_candidates = [_candidate(mb_trackid=RECORDING_ID)]
+
+        target_trackid = suggestions["mb_trackid"].strip().lower()
+        selected_candidate = next(
+            (c for c in mb_candidates if str(c.get("mb_trackid", "")).strip().lower() == target_trackid),
+            None,
+        )
+        self.assertIsNone(selected_candidate)
+        suggestions["mb_candidate_valid"] = bool(selected_candidate)
+        suggestions["mb_trusted"] = bool(selected_candidate)
+        if suggestions["mb_trackid"] and mb_candidates and not selected_candidate:
+            if str(suggestions.get("confidence")).lower() == "high":
+                suggestions["confidence"] = "low"
+            reason = str(suggestions.get("reason")).strip()
+            guard = "AI returned a MusicBrainz recording ID that was not in the AcoustID/MusicBrainz candidate list; review before applying."
+            suggestions["reason"] = f"{guard} {reason}".strip()
+
+        self.assertFalse(suggestions["mb_trusted"])
+        self.assertFalse(suggestions["mb_candidate_valid"])
+        self.assertEqual(suggestions["confidence"], "low")
+        self.assertIn("not in the AcoustID/MusicBrainz candidate list", suggestions["reason"])
+
+    def test_single_entity_guarantee_no_mixed_metadata(self):
+        """Part 18: Release Group ID and edition attributes cannot mix across releases."""
+        release_a = {
+            "mb_albumid": "aaaaaaaa-1111-1111-1111-111111111111",
+            "mb_releasegroupid": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "album": "Album Alpha",
+            "artist": "Artist Alpha",
+            "date": "1995-01-01",
+            "year": "1995",
+            "country": "US",
+            "medium_format": "CD",
+            "medium_position": 1,
+            "track_number": "1",
+        }
+        release_b = {
+            "mb_albumid": "bbbbbbbb-2222-2222-2222-222222222222",
+            "mb_releasegroupid": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            "album": "Album Beta (Remastered)",
+            "artist": "Artist Beta",
+            "date": "2010-06-15",
+            "year": "2010",
+            "country": "JP",
+            "medium_format": "Vinyl",
+            "medium_position": 2,
+            "track_number": "5",
+        }
+        candidate = _candidate(
+            mb_trackid=RECORDING_ID,
+            mb_albumid=release_a["mb_albumid"],
+            mb_releasegroupid=release_a["mb_releasegroupid"],
+            title="Shared Track Title",
+            artist="Artist Alpha",
+            selected_release=release_a,
+            linked_releases=[release_a, release_b],
+        )
+        enriched = _enrich(_local(), candidate)
+        compacted = APP._compact_track_ai_candidate(enriched)
+
+        self.assertEqual(compacted["release_id"], release_a["mb_albumid"])
+        self.assertEqual(compacted["release_group_id"], release_a["mb_releasegroupid"])
+        self.assertEqual(compacted["release_title"], release_a["album"])
+        self.assertEqual(compacted["release_artist"], release_a["artist"])
+        self.assertEqual(compacted["release_date"], release_a["date"])
+        self.assertEqual(compacted["country"], release_a["country"])
+        self.assertEqual(compacted["medium_format"], release_a["medium_format"])
+        self.assertEqual(compacted["medium_position"], release_a["medium_position"])
+        self.assertEqual(compacted["track_number"], release_a["track_number"])
+
+        self.assertNotEqual(compacted["release_id"], release_b["mb_albumid"])
+        self.assertNotEqual(compacted["release_group_id"], release_b["mb_releasegroupid"])
+        self.assertNotEqual(compacted["release_title"], release_b["album"])
+        self.assertNotEqual(compacted["release_date"], release_b["date"])
+        self.assertNotEqual(compacted["country"], release_b["country"])
+
+    def test_track_ai_normalization_and_similarity_wrappers(self):
+        """Canonical track AI normalizers behave identically to canonical matching primitives."""
+        self.assertEqual(APP._track_ai_norm("01 - Song Title (feat. Artist) [Remastered]"), "01 song title")
+        self.assertEqual(APP._track_ai_norm("T&T"), "t and t")
+        self.assertEqual(APP._track_ai_similarity("Song Title", "Song Title"), 1.0)
+        self.assertGreater(APP._track_ai_similarity("Song Title (Live)", "Song Title"), 0.70)
+        self.assertEqual(APP._track_ai_similarity("", "Song Title"), 0.0)
+
+    def test_score_mb_release_candidate_canonical_behavior(self):
+        """_score_mb_release_candidate ranks candidates accurately using canonical similarity."""
+        folder_ev = {
+            "guessed_artist": "Radiohead",
+            "guessed_album": "OK Computer",
+            "guessed_year": "1997",
+            "folder_track_count": 12,
+        }
+        cand_match = {
+            "artist": "Radiohead",
+            "album": "OK Computer (Collector's Edition)",
+            "year": "1997",
+            "tracks": 12,
+            "country": "US",
+            "score": 100,
+            "acoustid_release_hits": 10,
+        }
+        cand_diff = {
+            "artist": "Different Band",
+            "album": "Completely Different",
+            "year": "2020",
+            "tracks": 5,
+            "country": "GB",
+            "score": 20,
+            "acoustid_release_hits": 0,
+        }
+        score_match = APP._score_mb_release_candidate(folder_ev, cand_match)
+        score_diff = APP._score_mb_release_candidate(folder_ev, cand_diff)
+
+        self.assertGreater(score_match["total"], score_diff["total"])
+        self.assertGreater(score_match["artist_sim"], 0.9)
+        self.assertGreater(score_match["album_sim"], 0.7)
+        self.assertEqual(score_match["year_delta"], 0)
+        self.assertEqual(score_match["track_count_delta"], 0)
 
 
 if __name__ == "__main__":

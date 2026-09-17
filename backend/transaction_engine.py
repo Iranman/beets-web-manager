@@ -4065,15 +4065,11 @@ def create_album_mb_track_repair_plan(
     items_by_id: Dict[int, Dict[str, Any]] = {it["id"]: it for it in items_list}
 
     try:
-        # SEC-002 / ARCH-003 Wave 33 continuation: this family's alignment
-        # procedure IS app.py's own _match_tracks_from_mb_shared() matching
-        # loop (greedy_album_track_alignment, ported verbatim), not an
-        # independently-written approximation of it -- eliminates the
-        # correctness risk of the two ever silently disagreeing on which
-        # specific track a file gets permanently relabeled as, rather than
-        # merely bounding it. items_list is already read in the same
-        # `ORDER BY disc, track, title, id` app.py's own DB query used, so
-        # the greedy, order-dependent claim order is identical.
+        # ARCH-002: album_mb_track_repair_v1 now uses the canonical global
+        # one-to-one alignment wrapper. The historical function name is kept
+        # for compatibility, but its implementation delegates to
+        # backend.matching.align_tracks_global so duplicate candidates cannot
+        # win the same MusicBrainz track by local greedy order.
         try:
             from mb_alignment import greedy_album_track_alignment, album_track_score
         except ImportError:
@@ -10732,9 +10728,8 @@ def execute_album_artwork_fetch_apply(
 # previously-untagged source audio, deliberately separate from
 # reimport_source_atomic()/verify_deterministic_identity() (which remain
 # unchanged and continue to gate genuine *re*-imports of already-tagged
-# library content). See docs/operations/wave25_import_reconciliation_design.md
-# for the full security-model writeup ("REIMPORT TRUST MODEL" vs "FRESH
-# REVIEWED IMPORT TRUST MODEL").
+# library content) -- the "REIMPORT TRUST MODEL" vs "FRESH REVIEWED IMPORT
+# TRUST MODEL" distinction.
 #
 # Trust model: missing embedded MusicBrainz tags are the EXPECTED case for a
 # fresh download and are never treated as identity evidence one way or the

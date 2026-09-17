@@ -154,12 +154,6 @@ def _text_looks_path_like(text: str) -> bool:
     return bool(_PATH_LIKE_NAME_RE.search(text)) or bool(_PATH_LIKE_SHORT_NAME_RE.match(text.strip()))
 
 
-_APP_FUNCTION_CLASSIFICATION = {
-    "_cleanup_broken_managed_runtime": ("NON_MEDIA_FILESYSTEM", "infra_v1", "reviewed-library-cleanup-closure-runtime-cleanup"),
-    "_cleanup_initial_browser_password_if_replaced": ("CONFIG_STATE", "config_v1", "reviewed-library-cleanup-closure-initial-browser-password"),
-    "_playlist_stamp_download_tags": ("STAGING_ONLY", "playlist_staging_v1", "reviewed-library-cleanup-closure-playlist-download-tags"),
-    "_enrich_playlist_file_tags": ("STAGING_ONLY", "playlist_staging_v1", "reviewed-library-cleanup-closure-playlist-download-tags"),
-}
 
 _REVIEWED_RULE_DETAILS = {
     "reviewed-wave27-beetsclient-item-metadata-repair": {
@@ -266,7 +260,7 @@ _EXPLICIT_FUNCTION_CLASSIFICATION = {
     # run_native_import_fn (same dependency-injection pattern as
     # run_beet_command_fn/beets_import_runner elsewhere). Deliberately does
     # NOT call reimport_source_atomic/verify_deterministic_identity -- see
-    # its own docstring and docs/operations/wave25_import_reconciliation_design.md.
+    # its own docstring.
     # Like reimport_source_atomic, this function itself has no
     # TransactionStore/mutation_family/operation_id awareness (that lives in
     # the caller, execute_confirmed_import_apply), so it is truthfully
@@ -291,7 +285,10 @@ _EXPLICIT_FUNCTION_CLASSIFICATION = {
     "_revert_agent_config_file": ("ENGINE_CONFIG_STATE", "config_v1", "reviewed-wave27-control-agent-config-state"),
     "_playlist_import_write_state": ("ENGINE_CONFIG_STATE", "config_v1", "playlist-import-job-state"),
     "_beet_version_snapshot": ("ENGINE_NATIVE_READ_ONLY", "infra_v1", "beet-version-diagnostic"),
-    "_cleanup_broken_managed_runtime": ("NON_MEDIA_FILESYSTEM", "infra_v1", "control-agent-runtime-cleanup"),
+    "_cleanup_broken_managed_runtime": ("NON_MEDIA_FILESYSTEM", "infra_v1", "reviewed-library-cleanup-closure-runtime-cleanup"),
+    "_cleanup_initial_browser_password_if_replaced": ("CONFIG_STATE", "config_v1", "reviewed-library-cleanup-closure-initial-browser-password"),
+    "_playlist_stamp_download_tags": ("STAGING_ONLY", "playlist_staging_v1", "reviewed-library-cleanup-closure-playlist-download-tags"),
+    "_enrich_playlist_file_tags": ("STAGING_ONLY", "playlist_staging_v1", "reviewed-library-cleanup-closure-playlist-download-tags"),
     "_engine_acoustid_lookup": ("ENGINE_NATIVE_READ_ONLY", "acoustid_v1", "acoustid-lookup-no-local-mutation"),
     "AgentJob._run": ("ENGINE_NATIVE_BEETS", "agent_job_v1", "agent-job-runner"),
     # Wave 25 Docker acceptance round: extracted from /commands/execute's
@@ -451,7 +448,7 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
     if "beets_client.relocate_album" in text or "beets_client.plan_album_relocation" in text or "beets_client.apply_album_relocation" in text or "beets_client.rollback_album_relocation" in text:
         return "CONTROLLED_MEDIA_MUTATION", "album_relocation_v1", "reviewed-wave27-beetsclient-album-relocation"
 
-    mapped = _APP_FUNCTION_CLASSIFICATION.get(func)
+    mapped = _EXPLICIT_FUNCTION_CLASSIFICATION.get(func)
     if mapped:
         classification, family, rule = mapped
         return classification, family, rule

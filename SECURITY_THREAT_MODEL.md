@@ -1,6 +1,6 @@
 # Security Threat Model
 
-Reviewed local staged tree: 2026-07-16. This model covers the Beets Web Control Flask app, React frontend, local Beets library database, mounted music/download storage, AI integrations, Plex/downloader integrations, background jobs, and Docker deployment recipe.
+This model covers Beets Web Manager: the Flask API, React frontend, Beets engine/control-agent boundary, mounted music/download storage, AI integrations, Plex/downloader integrations, background jobs, and Docker deployment recipes.
 
 ## Trust Boundaries
 

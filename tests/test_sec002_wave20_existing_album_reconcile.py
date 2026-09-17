@@ -122,6 +122,23 @@ class Wave20FixtureBase(unittest.TestCase):
         self._db_patch = mock.patch.object(app_module, "_db", side_effect=_mock_db_cm)
         self._db_patch.start()
 
+        def fake_get_album(aid):
+            with sqlite3.connect(self.db_path) as con:
+                con.row_factory = sqlite3.Row
+                row = con.execute("SELECT * FROM albums WHERE id=?", (int(aid),)).fetchone()
+                return dict(row) if row else None
+
+        def fake_find_items_by_album(aid):
+            with sqlite3.connect(self.db_path) as con:
+                con.row_factory = sqlite3.Row
+                rows = con.execute("SELECT * FROM items WHERE album_id=?", (int(aid),)).fetchall()
+                return [dict(r) for r in rows]
+
+        self._get_album_patch = mock.patch.object(app_module.beets_client, "get_album", side_effect=fake_get_album)
+        self._get_album_patch.start()
+        self._find_items_patch = mock.patch.object(app_module.beets_client, "find_all_items_by_album_id", side_effect=fake_find_items_by_album)
+        self._find_items_patch.start()
+
         self._env_patch = mock.patch.dict(os.environ, {
             "BEETS_WEB_AUTH_DISABLED": "1",
             "RECONCILE_QUARANTINE_DIR": str(self.quarantine_root),
@@ -129,6 +146,8 @@ class Wave20FixtureBase(unittest.TestCase):
         self._env_patch.start()
 
     def tearDown(self):
+        self._find_items_patch.stop()
+        self._get_album_patch.stop()
         self._env_patch.stop()
         self._db_patch.stop()
         try:

@@ -687,7 +687,7 @@ class TestSEC002Wave14ProductionCallerWiring(unittest.TestCase):
         RGID-consistency guard: a caller-supplied mb_albumid override whose
         release group disagrees with the album's already-established RGID
         must be refused outright, not used as the basis for track repair."""
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import patch
         import app as app_module
 
         album_row = {
@@ -699,16 +699,8 @@ class TestSEC002Wave14ProductionCallerWiring(unittest.TestCase):
             "mb_releasegroupid": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
         }
 
-        class _Row(dict):
-            def __getitem__(self, key):
-                return dict.get(self, key)
-
-        mock_con = MagicMock()
-        mock_con.execute.return_value.fetchone.return_value = _Row(album_row)
-        mock_con.__enter__.return_value = mock_con
-        mock_con.__exit__.return_value = False
-
-        with patch.object(app_module, "_db", return_value=mock_con), \
+        with patch.object(app_module.beets_client, "get_album", return_value=album_row), \
+             patch.object(app_module.beets_client, "find_all_items_by_album_id", return_value=[]), \
              patch.object(app_module, "_fetch_mb_release_tracklist", return_value={
                  "ok": True,
                  "tracks": [{"title": "Track One", "track": 1}],
@@ -721,3 +713,4 @@ class TestSEC002Wave14ProductionCallerWiring(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

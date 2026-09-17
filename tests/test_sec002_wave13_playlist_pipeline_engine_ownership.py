@@ -280,8 +280,8 @@ class TestWave13PlaylistEngineOwnership(unittest.TestCase):
 
 
 class TestWave13FinalReviewFixes(unittest.TestCase):
-    """Regression coverage for the Claude final-review corrections made on
-    top of the initial Wave 13 (AGY) implementation: crash-level
+    """Regression coverage for final-review corrections made on top of
+    the initial Wave 13 implementation: crash-level
     regressions, playlist_id/playlist_key confusion, fabricated candidacy,
     local-fallback removal, and engine-side authorization/backup/schema
     fixes for /playlists/place-imported and related endpoints."""

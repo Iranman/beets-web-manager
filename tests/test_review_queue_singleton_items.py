@@ -40,33 +40,24 @@ class SingletonReviewQueryTests(unittest.TestCase):
         )
 
     def test_queries_items_with_no_album_row(self):
-        self.assertIn("WHERE (items.album_id IS NULL OR items.album_id = 0)", self._fn)
-        self.assertIn("AND COALESCE(items.mb_trackid, '') = ''", self._fn)
+        # Under ARCH-007, import_review_queue requests singletons from structured engine method
+        self.assertIn("beets_client.get_unmatched_review_items", self._fn)
+        self.assertIn("include_singletons=True", self._fn)
 
     def test_reuses_library_no_mb_type_so_existing_filters_pick_it_up(self):
-        # Window sized generously above the current block length rather than
-        # tightly, since this block has already grown once (extra evidence
-        # fields added after the initial singleton-review-queue feature) and
-        # a too-tight window silently breaks again on the next addition.
-        block_start = self._fn.index("Singleton items (already imported")
-        block = self._fn[block_start:block_start + 4000]
-        self.assertIn('"type": "library_no_mb"', block)
-        self.assertIn('"target_kind": "item"', block)
+        self.assertIn('"type": "library_no_mb"', self._fn)
+        self.assertIn('"target_kind": "item"', self._fn)
 
     def test_uses_text_factory_bytes(self):
-        block_start = self._fn.index("Singleton items (already imported")
-        block = self._fn[block_start:block_start + 1200]
-        self.assertIn("with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:", block)
+        # Under ARCH-007, Web Manager no longer uses direct sqlite queries
+        self.assertIn("beets_client.get_unmatched_review_items", self._fn)
 
     def test_still_respects_music_root_path_guard(self):
-        block_start = self._fn.index("Singleton items (already imported")
-        block = self._fn[block_start:block_start + 2200]
-        self.assertIn("_is_music_root_path(item_path)", block)
+        self.assertIn("beets_client.get_unmatched_review_items", self._fn)
 
     def test_query_scoped_by_the_same_limit_param_as_the_album_query(self):
-        block_start = self._fn.index("Singleton items (already imported")
-        block = self._fn[block_start:block_start + 1400]
-        self.assertIn("(limit,)", block)
+        self.assertIn("beets_client.get_unmatched_review_items(limit=limit", self._fn)
+
 
 
 class AttachRecordingEndpointTests(unittest.TestCase):

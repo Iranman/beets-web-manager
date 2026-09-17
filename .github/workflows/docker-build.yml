@@ -181,11 +181,11 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to GitHub Container Registry
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -193,7 +193,7 @@ jobs:
 
       - name: Extract Docker metadata for Web Manager
         id: meta_webmanager
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ghcr.io/iranman/beets-web-manager
           # Wave 24 round 4 (CodeQL/provenance closure): metadata-action's
@@ -216,7 +216,7 @@ jobs:
 
       - name: Extract Docker metadata for Beets Engine
         id: meta_engine
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ghcr.io/iranman/beets-engine
           # See the identical note on the Web Manager metadata step above.
@@ -234,7 +234,7 @@ jobs:
         run: echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
       - name: Build and push Beets Web Manager image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: Dockerfile
@@ -249,7 +249,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Build and push Beets Engine image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: Dockerfile.beets

@@ -3,6 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
+try:
+    from matching import align_tracks_global
+except ImportError:
+    from backend.matching import align_tracks_global
+
 
 SimilarityFn = Callable[[str, str], float]
 AcoustidLookupFn = Callable[[str], List[Dict[str, Any]]]
@@ -32,38 +37,50 @@ def _mb_norm(track: Dict[str, Any]) -> str:
 
 
 def align_tracks(local_files: List[str], mb_tracks: List[Dict[str, Any]], similarity_fn: SimilarityFn) -> List[Dict[str, Any]]:
-    """Align local files to MusicBrainz tracks by best title similarity.
+    """Align local files to MusicBrainz tracks by global one-to-one evidence.
 
     This intentionally avoids positional matching so a missing first track does
-    not shift every subsequent local file onto the wrong MusicBrainz row.
+    not shift every subsequent local file onto the wrong MusicBrainz row. The
+    public row shape is retained for confirmed_import_v1 callers.
     """
+    local_tracks = [
+        {
+            "path": _s(file_path),
+            "title": _local_title(file_path),
+            "track": idx + 1,
+        }
+        for idx, file_path in enumerate(local_files or [])
+    ]
+    canonical = align_tracks_global(
+        local_tracks,
+        list(mb_tracks or []),
+        threshold=0.72,
+        trust_model="fresh_reviewed_import",
+    )
+    by_target_index = {
+        row.target_index: row
+        for row in canonical.assignments
+        if row.status == "matched"
+    }
     used_files: set[int] = set()
     rows: List[Dict[str, Any]] = []
-    for track in mb_tracks:
-        best_idx = -1
-        best_score = 0.0
-        for idx, file_path in enumerate(local_files or []):
-            if idx in used_files:
-                continue
-            try:
-                score = float(similarity_fn(file_path, _mb_norm(track)) or 0.0)
-            except Exception:
-                score = 0.0
-            if score > best_score:
-                best_idx = idx
-                best_score = score
-        status = "missing"
-        file_path = ""
-        local_title = ""
-        if best_idx >= 0 and best_score >= 0.82:
-            used_files.add(best_idx)
-            file_path = _s(local_files[best_idx])
+    for target_index, track in enumerate(mb_tracks or []):
+        assignment = by_target_index.get(target_index)
+        if assignment:
+            used_files.add(assignment.local_index)
+            file_path = _s(assignment.local_track.get("path") or "")
             local_title = _local_title(file_path)
-            status = "matched" if best_score >= 0.96 else "fuzzy"
+            status = "matched" if assignment.title_similarity >= 0.96 else "fuzzy"
+            best_score = assignment.title_similarity
+        else:
+            status = "missing"
+            file_path = ""
+            local_title = ""
+            best_score = 0.0
         rows.append({
             "num": _track_num(track),
             "mb_title": _mb_title(track),
-            "mb_trackid": _s(track.get("mb_trackid") or ""),
+            "mb_trackid": _s(track.get("mb_trackid") or track.get("recording_id") or ""),
             "duration_ms": int(track.get("duration_ms") or 0),
             "local_title": local_title,
             "file_path": file_path,
@@ -83,7 +100,6 @@ def align_tracks(local_files: List[str], mb_tracks: List[Dict[str, Any]], simila
             "sim_score": 0.0,
         })
     return rows
-
 
 def resolve_unmatched_via_acoustid(comparison: List[Dict[str, Any]], acoustid_lookup_fn: AcoustidLookupFn,
                                    *, fpcalc_available: bool = True, min_score: int = 80) -> None:

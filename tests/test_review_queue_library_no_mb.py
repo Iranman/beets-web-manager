@@ -111,10 +111,10 @@ class LibraryNoMbQueryTextFactoryTests(unittest.TestCase):
 
 class LibraryNoMbQuerySourceFixTests(unittest.TestCase):
     def test_query_now_uses_text_factory_bytes(self):
-        start = APP_SOURCE.index("MIN(items.path) AS first_item_path")
-        block = APP_SOURCE[max(0, start - 400):start]
-        self.assertIn("with _db(text_factory=bytes, row_factory=sqlite3.Row) as con:", block)
+        # Under ARCH-007, import_review_queue uses structured BeetsClient calls
+        self.assertIn("beets_client.get_unmatched_review_items", APP_SOURCE)
 
 
 if __name__ == "__main__":
     unittest.main()
+
