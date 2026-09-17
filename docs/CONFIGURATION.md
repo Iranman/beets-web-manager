@@ -51,7 +51,7 @@ If this ambiguity trips you up, that's expected -- treat "Deployment setting" (C
 
 | Variable | Service | Required | Meaning |
 |---|---|---:|---|
-| `BEETS_WEB_MANAGER_VERSION` | compose | no | Published image tag to deploy: `stable` (recommended default), `latest`, exact version `0.1.15`, or `edge`. |
+| `BEETS_WEB_MANAGER_VERSION` | compose | no | Published image tag to deploy: `stable` (recommended default), `latest`, exact version `0.1.16`, or `edge`. |
 | `BEETS_BASE_IMAGE` | dev/full compose only | no | Upstream LinuxServer Beets base image for the locally built engine (default: `lscr.io/linuxserver/beets:2.13.1`, the tested production candidate). See "Beets engine version" below. |
 | `WEBCONTROL_PORT` | web | no | Web port inside the container, default `8337`. |
 | `BEETS_WEB_BIND_ADDRESS` | compose | no | Host bind IP address for web UI access (default: `127.0.0.1`, local-only; set to `0.0.0.0` only after configuring authentication, TLS, and a reverse proxy). |
