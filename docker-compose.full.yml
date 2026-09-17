@@ -33,6 +33,13 @@ services:
       - BEETSDIR=/config
       - BEETS_API_TOKEN=${BEETS_API_TOKEN:?set BEETS_API_TOKEN in .env}
       - BEETS_AGENT_PORT=8338
+      # Hotfix v0.1.17: background-only `beet version` probe timeout and
+      # the short bounded wait a capability check may spend joining an
+      # already-in-flight probe. Neither is ever waited on by /health,
+      # /version, or a normal /status request -- see
+      # backend/beets_control_agent.py's _cached_beet_version_snapshot().
+      - BEETS_VERSION_PROBE_TIMEOUT_SECONDS=${BEETS_VERSION_PROBE_TIMEOUT_SECONDS:-90}
+      - BEETS_VERSION_CAPABILITY_WAIT_SECONDS=${BEETS_VERSION_CAPABILITY_WAIT_SECONDS:-3}
       # The image defaults this to 1 (refuse to start against a missing/empty
       # database) -- see Dockerfile.beets. A genuine first run on a brand new
       # /config must override it: set BEETS_EXPECT_EXISTING_LIBRARY=0 in .env.
@@ -93,6 +100,14 @@ services:
       BEETS_WEB_AUTH_DISABLED: ${BEETS_WEB_AUTH_DISABLED:-0}
       BEETS_TRUSTED_PROXIES: ${BEETS_TRUSTED_PROXIES:-}
       BEETS_OUTBOUND_ALLOWLIST: ${BEETS_OUTBOUND_ALLOWLIST:-beets:8338}
+
+      # Hotfix v0.1.17 (BUG-4): operation-specific timeout/poll bounds for
+      # the artist-folder-reconcile long controlled mutation only -- not a
+      # global Beets API timeout. See
+      # app.py's _apply_artist_folder_reconcile_resilient().
+      BEETS_ARTIST_RECONCILE_TIMEOUT_SECONDS: ${BEETS_ARTIST_RECONCILE_TIMEOUT_SECONDS:-120}
+      BEETS_LONG_OPERATION_POLL_SECONDS: ${BEETS_LONG_OPERATION_POLL_SECONDS:-5}
+      BEETS_LONG_OPERATION_MAX_SECONDS: ${BEETS_LONG_OPERATION_MAX_SECONDS:-600}
 
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}

@@ -34,6 +34,14 @@ services:
       BEETS_TRUSTED_PROXIES: ${BEETS_TRUSTED_PROXIES:-}
       BEETS_OUTBOUND_ALLOWLIST: ${BEETS_OUTBOUND_ALLOWLIST:-}
 
+      # Hotfix v0.1.17 (BUG-4): operation-specific timeout/poll bounds for
+      # the artist-folder-reconcile long controlled mutation only -- not a
+      # global Beets API timeout. See
+      # app.py's _apply_artist_folder_reconcile_resilient().
+      BEETS_ARTIST_RECONCILE_TIMEOUT_SECONDS: ${BEETS_ARTIST_RECONCILE_TIMEOUT_SECONDS:-120}
+      BEETS_LONG_OPERATION_POLL_SECONDS: ${BEETS_LONG_OPERATION_POLL_SECONDS:-5}
+      BEETS_LONG_OPERATION_MAX_SECONDS: ${BEETS_LONG_OPERATION_MAX_SECONDS:-600}
+
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       AI_API_KEY: ${AI_API_KEY:-}

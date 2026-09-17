@@ -27736,6 +27736,125 @@ def _item_artist_matches_alias(row: sqlite3.Row, source_keys: set) -> bool:
     return any(_artist_alias_key(v) in source_keys for v in values if _s(v).strip())
 
 
+# Hotfix v0.1.17 (BUG-4): long-controlled-mutation configuration for the
+# artist_folder_reconcile_v1 apply step specifically -- not a global Beets
+# API timeout change. Production evidence (a real TrueNAS v0.1.16
+# deployment): `beet version` alone took 47.06s under real host load, and
+# the previous flat 60s client timeout for this specific apply call fired
+# while the engine was still genuinely executing the mutation (proven by
+# inspection: it kept moving from file to file after the Web Manager
+# reported "engine unavailable"). Only this operation-specific timeout is
+# widened; /health, /version, and normal /status remain fast for
+# unrelated reasons (see backend/beets_control_agent.py BUG-1/BUG-2) and
+# do not need a larger timeout at all.
+BEETS_ARTIST_RECONCILE_TIMEOUT_SECONDS = max(1.0, float(os.environ.get("BEETS_ARTIST_RECONCILE_TIMEOUT_SECONDS", "120") or "120"))
+# How often to re-check the engine's authoritative transaction state after
+# the initial Apply call's own HTTP response is lost, and the maximum total
+# time to keep monitoring before giving up (still without ever calling
+# Apply a second time). The Web Manager's job system is already
+# asynchronous to the UI, so it is fine for a background job to monitor an
+# engine operation for several minutes; it is not fine to declare the
+# engine unavailable while the operation is still executing normally.
+BEETS_LONG_OPERATION_POLL_SECONDS = max(0.5, float(os.environ.get("BEETS_LONG_OPERATION_POLL_SECONDS", "5") or "5"))
+BEETS_LONG_OPERATION_MAX_SECONDS = max(1.0, float(os.environ.get("BEETS_LONG_OPERATION_MAX_SECONDS", "600") or "600"))
+
+# Transaction statuses (backend/transaction_engine.py's TransactionStore)
+# that mean the artist-folder-reconcile apply has reached a definitive
+# outcome. Anything else (Preview/Pending/Approved/Running) means the
+# engine has not finished yet -- keep polling, never re-Apply.
+_ARTIST_RECONCILE_TERMINAL_SUCCESS_STATUSES = {"Completed"}
+_ARTIST_RECONCILE_TERMINAL_FAILURE_STATUSES = {"Failed", "Rolled Back", "Partially Rolled Back", "Cancelled", "Recovery Required"}
+
+
+def _apply_artist_folder_reconcile_resilient(
+    op_id: str, log: List[str], *, cancel_event: Any = None, log_prefix: str = "Artist folder reconcile",
+    _acceptance_failpoint: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Apply an already-planned artist_folder_reconcile_v1 operation and
+    survive a lost HTTP response without ever calling Apply a second time
+    for the same operation_id (hotfix v0.1.17, BUG-4).
+
+    Production incident this fixes: the Web Manager's own client-side
+    timeout fired on the Apply call while the Beets Engine kept executing
+    the controlled mutation normally; the Web Manager logged "engine
+    unavailable" and gave up, even though the operation went on to
+    complete successfully on the engine side (confirmed by direct
+    inspection: it kept moving from file to file after the Web Manager had
+    already given up) and then failed to write its now-orphaned response
+    back over the closed socket (BrokenPipeError -- see BUG-6).
+
+    Once operation_id has been accepted for Apply, a client-side timeout
+    or transport failure must never be interpreted as "the mutation did
+    not happen": this function calls Apply at most once, and on any
+    failure to receive that response, polls the engine's own authoritative
+    transaction record (the exact same store execute_artist_folder_reconcile_apply()
+    writes "Running"/"Completed"/"Failed" to) until it reaches a terminal
+    status, bounded by BEETS_LONG_OPERATION_MAX_SECONDS. It never re-calls
+    apply_artist_folder_reconcile() itself under any circumstance.
+
+    _acceptance_failpoint is test-only infrastructure passed straight
+    through to beets_client.apply_artist_folder_reconcile() -- the engine
+    ignores it entirely unless booted with BEETS_ACCEPTANCE_MODE=1, which
+    no real deployment ever sets. Always None in real production calls.
+    """
+    try:
+        return beets_client.apply_artist_folder_reconcile(
+            op_id, acceptance_failpoint=_acceptance_failpoint, timeout=BEETS_ARTIST_RECONCILE_TIMEOUT_SECONDS,
+        )
+    except (BeetsUnavailableError, BeetsError) as ex:
+        log.append(
+            f"{log_prefix}: Apply response was lost ({ex}). The engine operation may still be "
+            f"running -- monitoring its transaction state instead of retrying Apply."
+        )
+        app.logger.warning("%s: apply transport failure for op_id=%s, switching to transaction polling: %s", log_prefix, op_id, ex)
+    except Exception as ex:
+        log.append(
+            f"{log_prefix}: Apply response was lost (unexpected error: {ex}). The engine operation may "
+            f"still be running -- monitoring its transaction state instead of retrying Apply."
+        )
+        app.logger.warning("%s: unexpected apply transport failure for op_id=%s, switching to transaction polling: %s", log_prefix, op_id, ex)
+
+    deadline = time.monotonic() + BEETS_LONG_OPERATION_MAX_SECONDS
+    last_status = ""
+    while True:
+        if cancel_event is not None and cancel_event.is_set():
+            log.append(
+                f"{log_prefix}: monitoring cancelled locally for op_id={op_id}; the engine operation itself "
+                f"is not stopped by this and will be reconciled on the next run."
+            )
+            return {"ok": False, "operation_id": op_id, "status": last_status or "unknown",
+                    "error": "Monitoring cancelled locally; engine operation may still be running.", "still_running": True}
+        try:
+            tx_res = beets_client.get_transaction(op_id)
+            tx = tx_res.get("transaction") or {}
+            last_status = str(tx.get("status") or "")
+        except (BeetsUnavailableError, BeetsError, Exception) as ex:
+            log.append(f"{log_prefix}: transaction status check for op_id={op_id} failed ({ex}); retrying.")
+            tx = None
+
+        if tx is not None:
+            if last_status in _ARTIST_RECONCILE_TERMINAL_SUCCESS_STATUSES:
+                log.append(f"{log_prefix}: op_id={op_id} confirmed Completed via transaction status poll.")
+                result = dict(tx)
+                result.update({"ok": True, "operation_id": op_id, "status": last_status, "recovered_via_poll": True})
+                return result
+            if last_status in _ARTIST_RECONCILE_TERMINAL_FAILURE_STATUSES:
+                log.append(f"{log_prefix}: op_id={op_id} confirmed {last_status} via transaction status poll.")
+                return {"ok": False, "operation_id": op_id, "status": last_status,
+                        "error": f"Engine reported {last_status}.", "recovered_via_poll": True}
+            # Preview/Pending/Approved/Running: still genuinely in progress.
+
+        if time.monotonic() >= deadline:
+            log.append(
+                f"{log_prefix}: op_id={op_id} is still running after "
+                f"{BEETS_LONG_OPERATION_MAX_SECONDS:.0f}s of monitoring; it was NOT re-applied and "
+                f"will be reconciled on the next run."
+            )
+            return {"ok": False, "operation_id": op_id, "status": last_status or "unknown",
+                    "error": "Engine operation is still running; not re-applied.", "still_running": True}
+        time.sleep(BEETS_LONG_OPERATION_POLL_SECONDS)
+
+
 def _run_artist_folder_reconcile_for_alias_merge(
     source_folders: List[str], canonical: str, mb_artistid: str, log: List[str],
     *, fingerprint_confirmed: bool = False,
@@ -27778,10 +27897,7 @@ def _run_artist_folder_reconcile_for_alias_merge(
     if not op_id:
         log.append(f"  {plan_res.get('message') or 'No artist folder move was required.'}")
         return {"ok": True, "moved_files": 0, "quarantined_files": 0, "removed_dirs": 0}
-    try:
-        apply_res = beets_client.apply_artist_folder_reconcile(op_id)
-    except (BeetsUnavailableError, BeetsError) as ex:
-        raise RuntimeError(f"Engine unavailable during artist folder move apply: {ex}") from ex
+    apply_res = _apply_artist_folder_reconcile_resilient(op_id, log, log_prefix="Artist folder move")
     if not apply_res.get("ok"):
         raise RuntimeError(f"Engine artist folder reconcile apply failed: {apply_res.get('error')}")
     log.append(
@@ -39424,16 +39540,7 @@ def _apply_artist_folder_groups(root: str, keys: Optional[List[str]],
         return summary
 
     op_id = plan_res["operation_id"]
-    try:
-        apply_res = beets_client.apply_artist_folder_reconcile(op_id)
-    except (BeetsUnavailableError, BeetsError) as ex:
-        log.append("Engine unavailable during Apply; artist folder merge was not completed.")
-        app.logger.error("Artist folder merge: engine unavailable during apply: %s", ex)
-        return summary
-    except Exception as ex:
-        log.append("Engine communication failed during Apply; artist folder merge was not completed.")
-        app.logger.error("Artist folder merge: unexpected engine communication failure during apply: %s", ex)
-        return summary
+    apply_res = _apply_artist_folder_reconcile_resilient(op_id, log, log_prefix="Artist folder merge")
 
     if not apply_res.get("ok"):
         log.append(f"Engine artist folder merge failed: {apply_res.get('error')}")
@@ -40044,16 +40151,7 @@ def clean_artist_folders_stamp_mbid():
             return {"renamed": 0, "merged": 0, "skipped": len(skipped)}
 
         op_id = plan_res["operation_id"]
-        try:
-            apply_res = beets_client.apply_artist_folder_reconcile(op_id)
-        except (BeetsUnavailableError, BeetsError) as ex:
-            log.append("Engine unavailable during Apply; MBID stamping was not completed.")
-            app.logger.error("MBID stamping: engine unavailable during apply: %s", ex)
-            return {"renamed": 0, "merged": 0, "skipped": len(skipped)}
-        except Exception as ex:
-            log.append("Engine communication failed during Apply; MBID stamping was not completed.")
-            app.logger.error("MBID stamping: unexpected engine communication failure during apply: %s", ex)
-            return {"renamed": 0, "merged": 0, "skipped": len(skipped)}
+        apply_res = _apply_artist_folder_reconcile_resilient(op_id, log, cancel_event=cancel_event, log_prefix="MBID stamping")
 
         if not apply_res.get("ok"):
             log.append(f"Engine MBID stamping failed: {apply_res.get('error')}")

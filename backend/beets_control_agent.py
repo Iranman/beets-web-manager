@@ -15,6 +15,7 @@ import binascii
 import hashlib
 import io
 import hmac
+import importlib.metadata
 import json
 import logging
 import os
@@ -668,6 +669,22 @@ def _parse_beets_config_summary() -> dict[str, Any]:
     return summary
 
 
+def _installed_beets_package_version() -> str:
+    """Lightweight Beets version lookup for /version (BUG-1, hotfix v0.1.17):
+    reads the installed package's own metadata directly in-process --
+    no subprocess, no Beets CLI startup, no plugin/config initialization.
+
+    Production TrueNAS evidence: `beet version` took 47s under real host
+    load (21.6s even with every plugin disabled) vs. ~0.03-0.1s for
+    /health and /capabilities, which never launch `beet` at all. A
+    package-version endpoint has no reason to pay that cost.
+    """
+    try:
+        return importlib.metadata.version("beets")
+    except Exception:
+        return ""
+
+
 def _beet_version_snapshot(timeout: int = 5) -> dict[str, Any]:
     snapshot: dict[str, Any] = {
         "available": False,
@@ -720,91 +737,203 @@ def _beet_version_snapshot(timeout: int = 5) -> dict[str, Any]:
 _BEET_VERSION_CACHE_LOCK = threading.Lock()
 _BEET_VERSION_CACHE: Optional[dict[str, Any]] = None
 _BEET_VERSION_CACHE_TS: float = 0.0
+_BEET_VERSION_LAST_REFRESH_ERROR: str = ""
 _BEET_VERSION_CACHE_TTL_SECONDS = float(os.environ.get("BEETS_VERSION_CACHE_TTL_SECONDS", "30"))
 # How long a previously-good snapshot may still be served (diagnostics_fresh
 # =False) after a refresh attempt times out/fails, e.g. transient host load.
 # Bounded so a genuinely, permanently broken `beet` binary is eventually
 # correctly reported as failed rather than "good" forever.
 _BEET_VERSION_CACHE_MAX_STALE_SECONDS = float(os.environ.get("BEETS_VERSION_CACHE_MAX_STALE_SECONDS", "300"))
-# Per-probe subprocess timeout. Was hardcoded to 5s; production evidence
-# (v0.1.11 TrueNAS rollout) showed `beet version` taking up to ~29s under
-# real host memory pressure vs. ~0.5s warm. Widened modestly -- caching
-# below is what actually bounds how often this cost is paid, not a larger
-# timeout alone -- to reduce false-timeout probes without letting one
-# uncached cold request block for the full production worst case.
-_BEET_VERSION_PROBE_TIMEOUT_SECONDS = int(os.environ.get("BEETS_VERSION_PROBE_TIMEOUT_SECONDS", "12"))
+# Background-probe subprocess timeout only (BUG-2, hotfix v0.1.17) -- this
+# NEVER blocks a request thread anymore; only the background refresh worker
+# thread waits on it. Production TrueNAS evidence: `beet version` took
+# 47.06s under real host load (21.6s even with every plugin disabled), far
+# past the old 12s default that a request thread used to wait on directly.
+# Widened default reflects that reality; still bounded so a genuinely,
+# permanently hung `beet` process is eventually reaped rather than leaking
+# forever. Raising this alone is explicitly NOT the fix -- see
+# _cached_beet_version_snapshot()'s docstring.
+_BEET_VERSION_PROBE_TIMEOUT_SECONDS = float(os.environ.get("BEETS_VERSION_PROBE_TIMEOUT_SECONDS", "90"))
+# Bounded best-effort wait for callers that need a definitive answer for a
+# security-relevant decision (BUG-3's capability gate) rather than an
+# instant "pending" placeholder -- deliberately short: even this full wait
+# is far shorter than a cold 47s probe, so a still-initializing agent
+# reports "diagnostics pending, retry" (503) rather than blocking the
+# caller for tens of seconds or, worse, silently treating "unknown" as
+# "plugin not loaded" (which could wrongly reject a valid command).
+_BEET_VERSION_CAPABILITY_WAIT_SECONDS = float(os.environ.get("BEETS_VERSION_CAPABILITY_WAIT_SECONDS", "3"))
+
+# Single-flight bookkeeping for the background refresh (BUG-2). Separate
+# lock from the cache lock above so the cache lock is only ever held for
+# the brief read/write of the cache dict itself, never across the actual
+# subprocess call.
+_BEET_VERSION_REFRESH_LOCK = threading.Lock()
+_BEET_VERSION_REFRESH_ACTIVE: bool = False
+_BEET_VERSION_REFRESH_DONE_EVENT = threading.Event()
+_BEET_VERSION_REFRESH_DONE_EVENT.set()  # set == no refresh currently in flight
 
 
-def _cached_beet_version_snapshot(*, force: bool = False) -> dict[str, Any]:
-    """Single-flight cached wrapper around _beet_version_snapshot() (BUG-3,
-    v0.1.12).
+def _beet_version_background_refresh_worker(timeout: float) -> None:
+    """Runs the actual `beet version` probe on a background daemon thread
+    (BUG-2, hotfix v0.1.17) -- never on a request-handling thread. Updates
+    the shared cache atomically when done; a probe failure never discards
+    already-known-good data (same invariant BUG-3/v0.1.12 established for
+    the old synchronous version of this cache)."""
+    global _BEET_VERSION_CACHE, _BEET_VERSION_CACHE_TS, _BEET_VERSION_LAST_REFRESH_ERROR, _BEET_VERSION_REFRESH_ACTIVE
+    try:
+        fresh = _beet_version_snapshot(timeout=timeout)
+        probe_failed = bool(fresh.get("timed_out")) or not fresh.get("available")
+        with _BEET_VERSION_CACHE_LOCK:
+            now = time.monotonic()
+            if not probe_failed:
+                _BEET_VERSION_CACHE = fresh
+                _BEET_VERSION_CACHE_TS = now
+                _BEET_VERSION_LAST_REFRESH_ERROR = ""
+            else:
+                _BEET_VERSION_LAST_REFRESH_ERROR = fresh.get("error") or (
+                    "Beets version probe timed out." if fresh.get("timed_out") else "Beets version probe failed."
+                )
+                if _BEET_VERSION_CACHE is None:
+                    # True cold start with no known-good data to protect --
+                    # the failed snapshot itself is the honest current
+                    # state (matches the pre-existing "cold start timeout
+                    # reports a real failure" contract). Backdated past the
+                    # TTL so the freshness check below correctly reports
+                    # diagnostics_fresh=False for it -- a failure is never
+                    # "fresh", even though it was, in wall-clock terms,
+                    # just produced.
+                    _BEET_VERSION_CACHE = fresh
+                    _BEET_VERSION_CACHE_TS = now - _BEET_VERSION_CACHE_TTL_SECONDS - 1
+                # else: leave the existing cache untouched -- a transient
+                # refresh failure must never erase known-good plugin data.
+    finally:
+        with _BEET_VERSION_REFRESH_LOCK:
+            _BEET_VERSION_REFRESH_ACTIVE = False
+        _BEET_VERSION_REFRESH_DONE_EVENT.set()
 
-    `beet version` used to run fresh on *every* /status request and every
-    capability-gated /commands/execute or /jobs/create call
-    (get_loaded_beet_plugins() -> require_command_capability()). Combined
-    with the control agent's previous single-threaded HTTPServer, a single
-    slow probe blocked every other request behind it, including Docker's
-    own cheap /health liveness check -- see run_agent()'s
-    ThreadingHTTPServer comment for that half of BUG-3's fix. This wrapper
-    caches the last snapshot for _BEET_VERSION_CACHE_TTL_SECONDS and
-    single-flights concurrent refreshes under one lock (the whole
-    check-build-store sequence runs under the same lock, mirroring
-    routes_setup.py's /api/setup/status cache design) so N simultaneous
-    callers past the TTL trigger exactly one subprocess launch, not N.
 
-    Only a genuine probe failure (subprocess timeout, or `beet` not
-    launchable at all) is treated as "the probe failed" -- a completed run
-    that reports plugin_failures or a non-zero returncode is still real,
-    current ground truth and is always cached/returned directly, never
-    discarded in favor of stale data. On an actual failure, a still-recent
-    known-good cached snapshot is returned again (annotated
-    diagnostics_fresh=False) instead of being replaced by an empty/failed
-    result -- this was BUG-3's actual observed symptom: plugin_loader_ok
-    =false and "0 plugins loaded" reported during a transient slow probe,
-    despite ~20/20 plugins genuinely loading against a warm probe moments
-    later. Adds diagnostics_fresh / diagnostics_cache_age_seconds /
-    diagnostics_refresh_error to the snapshot dict; callers that only read
-    the pre-existing keys (available/version/loaded_plugins/...) are
-    unaffected.
+def _start_background_beet_version_refresh() -> None:
+    """Single-flight scheduler: starts exactly one background probe if none
+    is currently running. Safe to call from any number of concurrent
+    request threads -- only the first one past the post actually starts a
+    thread; the rest just observe _BEET_VERSION_REFRESH_ACTIVE=True."""
+    global _BEET_VERSION_REFRESH_ACTIVE
+    with _BEET_VERSION_REFRESH_LOCK:
+        if _BEET_VERSION_REFRESH_ACTIVE:
+            return
+        _BEET_VERSION_REFRESH_ACTIVE = True
+        _BEET_VERSION_REFRESH_DONE_EVENT.clear()
+    thread = threading.Thread(
+        target=_beet_version_background_refresh_worker,
+        args=(_BEET_VERSION_PROBE_TIMEOUT_SECONDS,),
+        daemon=True,
+        name="beet-version-refresh",
+    )
+    thread.start()
+
+
+def _beet_diagnostics_pending() -> bool:
+    """Read-only, side-effect-free: true only while a background refresh is
+    actively in flight AND there is no cached snapshot (not even a stale
+    one) to fall back on -- i.e. we genuinely do not yet know the answer,
+    as opposed to "diagnostics are merely due for a refresh." Never starts
+    a probe itself, so it is safe to call from a hot path (BUG-3's
+    capability gate) without side effects."""
+    with _BEET_VERSION_REFRESH_LOCK:
+        refresh_active = _BEET_VERSION_REFRESH_ACTIVE
+    if not refresh_active:
+        return False
+    with _BEET_VERSION_CACHE_LOCK:
+        return _BEET_VERSION_CACHE is None
+
+
+def _cached_beet_version_snapshot(*, force: bool = False, max_wait_seconds: float = 0.0) -> dict[str, Any]:
+    """Non-blocking by default (BUG-2/BUG-3, hotfix v0.1.17): returns the
+    best currently-available snapshot -- fresh, still-usable-but-stale, or
+    an honest "pending" placeholder if no probe has ever completed -- and
+    ensures a single background refresh is scheduled whenever the cache is
+    missing/stale/force-requested. The actual `beet version` subprocess
+    call NEVER runs on the calling thread.
+
+    Production incident (v0.1.16 TrueNAS): `beet version` took 47.06s
+    under real host load (21.6s even with every plugin disabled). The
+    previous design (BUG-3/v0.1.12) ran that probe synchronously, under
+    this same lock, on whichever request thread happened to miss the
+    cache -- meaning /status (and any capability-gated command) could
+    block for the full probe duration. Raising the probe timeout alone
+    would only make a blocked request wait longer, not fix the blocking
+    itself; this rewrite is what actually decouples "serve a request"
+    from "refresh the diagnostics cache."
+
+    `max_wait_seconds` lets a caller that genuinely needs a definitive
+    answer (not /status or /version -- see BUG-3's capability-gate
+    callers) block briefly for an in-flight refresh to finish, bounded far
+    below the probe's own timeout, before falling back to the pending
+    placeholder.
     """
-    global _BEET_VERSION_CACHE, _BEET_VERSION_CACHE_TS
+    global _BEET_VERSION_REFRESH_ACTIVE
     with _BEET_VERSION_CACHE_LOCK:
         now = time.monotonic()
-        if not force and _BEET_VERSION_CACHE is not None and (now - _BEET_VERSION_CACHE_TS) < _BEET_VERSION_CACHE_TTL_SECONDS:
-            result = dict(_BEET_VERSION_CACHE)
-            result["diagnostics_fresh"] = True
-            result["diagnostics_cache_age_seconds"] = round(now - _BEET_VERSION_CACHE_TS, 2)
-            result["diagnostics_refresh_error"] = ""
-            return result
+        cache = _BEET_VERSION_CACHE
+        cache_ts = _BEET_VERSION_CACHE_TS
+        last_error = _BEET_VERSION_LAST_REFRESH_ERROR
 
-        fresh = _beet_version_snapshot(timeout=_BEET_VERSION_PROBE_TIMEOUT_SECONDS)
-        probe_failed = bool(fresh.get("timed_out")) or not fresh.get("available")
+    fresh_enough = cache is not None and (now - cache_ts) < _BEET_VERSION_CACHE_TTL_SECONDS
+    needs_refresh = force or not fresh_enough
+    if needs_refresh:
+        _start_background_beet_version_refresh()
 
-        if not probe_failed:
-            _BEET_VERSION_CACHE = fresh
-            _BEET_VERSION_CACHE_TS = now
-            result = dict(fresh)
-            result["diagnostics_fresh"] = True
-            result["diagnostics_cache_age_seconds"] = 0.0
-            result["diagnostics_refresh_error"] = ""
-            return result
+    if needs_refresh and max_wait_seconds > 0:
+        _BEET_VERSION_REFRESH_DONE_EVENT.wait(timeout=max_wait_seconds)
+        with _BEET_VERSION_CACHE_LOCK:
+            now = time.monotonic()
+            cache = _BEET_VERSION_CACHE
+            cache_ts = _BEET_VERSION_CACHE_TS
+            last_error = _BEET_VERSION_LAST_REFRESH_ERROR
+        fresh_enough = cache is not None and (now - cache_ts) < _BEET_VERSION_CACHE_TTL_SECONDS
 
-        refresh_error = fresh.get("error") or ("Beets version probe timed out." if fresh.get("timed_out") else "Beets version probe failed.")
-        if _BEET_VERSION_CACHE is not None and (now - _BEET_VERSION_CACHE_TS) < _BEET_VERSION_CACHE_MAX_STALE_SECONDS:
-            result = dict(_BEET_VERSION_CACHE)
-            result["diagnostics_fresh"] = False
-            result["diagnostics_cache_age_seconds"] = round(now - _BEET_VERSION_CACHE_TS, 2)
-            result["diagnostics_refresh_error"] = refresh_error
-            return result
+    with _BEET_VERSION_REFRESH_LOCK:
+        refresh_active = _BEET_VERSION_REFRESH_ACTIVE
 
-        result = dict(fresh)
-        result["diagnostics_fresh"] = False
-        result["diagnostics_cache_age_seconds"] = None
-        result["diagnostics_refresh_error"] = refresh_error
+    if cache is not None and (now - cache_ts) < _BEET_VERSION_CACHE_MAX_STALE_SECONDS:
+        result = dict(cache)
+        result["diagnostics_fresh"] = bool(fresh_enough and not refresh_active)
+        result["diagnostics_pending"] = refresh_active
+        result["diagnostics_cache_age_seconds"] = round(now - cache_ts, 2)
+        result["diagnostics_refresh_error"] = "" if fresh_enough else last_error
         return result
 
+    # No usable cache at all -- true cold start, or a permanently broken
+    # `beet` past the max-stale window. Report the honest current state
+    # rather than fabricating "0 plugins" as if it were confirmed ground
+    # truth (BUG-3): diagnostics_pending distinguishes "still initializing"
+    # from "confirmed unavailable" (refresh_active False + no cache).
+    result: dict[str, Any] = {
+        "available": False,
+        "version": "",
+        "loaded_plugins": [],
+        "plugin_failures": [],
+        "returncode": None,
+        "timed_out": False,
+        "error": "",
+        "diagnostics_fresh": False,
+        "diagnostics_pending": refresh_active,
+        "diagnostics_cache_age_seconds": None,
+        "diagnostics_refresh_error": last_error,
+    }
+    return result
 
-def get_loaded_beet_plugins() -> set:
+
+def prewarm_beet_version_cache() -> None:
+    """Kick off one background diagnostics refresh at agent startup (BUG-2)
+    so the plugin snapshot is likely warm before the UI needs it. Must
+    never delay /health or starting the HTTP server -- this only schedules
+    a daemon thread and returns immediately, exactly like any other
+    _start_background_beet_version_refresh() caller."""
+    _start_background_beet_version_refresh()
+
+
+def get_loaded_beet_plugins(*, max_wait_seconds: Optional[float] = None) -> set:
     """Return the set of plugins Beets actually finished loading, parsed from
     `beet version`'s own "plugins: a, b, c" line.
 
@@ -812,12 +941,22 @@ def get_loaded_beet_plugins() -> set:
     includes plugins that survived Beets' own load() step, so a plugin that is
     importable on disk but silently fails to initialize (as beetsplug.chroma
     can, even with fpcalc/pyacoustid present) is correctly excluded. Reads
-    the cached snapshot (BUG-3) rather than launching its own subprocess --
-    this is called on every capability-gated /commands/execute and
-    /jobs/create request, which used to mean a fresh `beet version` launch
-    per command dispatch.
+    the cached snapshot (BUG-3, extended in hotfix v0.1.17) rather than
+    launching its own subprocess -- this is called on every capability-gated
+    /commands/execute and /jobs/create request, which used to mean a fresh
+    `beet version` launch per command dispatch.
+
+    `max_wait_seconds` (default: _BEET_VERSION_CAPABILITY_WAIT_SECONDS) is a
+    short, bounded best-effort wait for an already-in-flight background
+    refresh to finish -- long enough to resolve most warm/near-warm cases
+    without falsely reporting "no plugins loaded", but far short of the
+    47s+ a cold probe can take. A caller still mid-refresh past that bound
+    gets back whatever is currently known (possibly empty); pair this with
+    require_command_capability()'s diagnostics-pending check rather than
+    treating an empty result here as confirmed unavailability.
     """
-    return set(_cached_beet_version_snapshot().get("loaded_plugins") or [])
+    wait = _BEET_VERSION_CAPABILITY_WAIT_SECONDS if max_wait_seconds is None else max_wait_seconds
+    return set(_cached_beet_version_snapshot(max_wait_seconds=wait).get("loaded_plugins") or [])
 
 
 def _agent_status_payload(*, force_refresh: bool = False) -> dict[str, Any]:
@@ -973,6 +1112,14 @@ def _agent_status_payload(*, force_refresh: bool = False) -> dict[str, Any]:
         # served because the most recent refresh attempt itself failed/timed
         # out -- never because the cache degrades known-good data on its own.
         "diagnostics_fresh": bool(snapshot.get("diagnostics_fresh", True)),
+        # Hotfix v0.1.17 (BUG-2/BUG-3): true only while a background probe
+        # is actively running AND there is no cached snapshot at all yet to
+        # fall back on -- i.e. the fields above (plugins/plugin_loader_ok/
+        # etc.) are genuinely unknown, not a confirmed "unavailable"/
+        # "disabled" result. A caller/UI should show "diagnostics pending"
+        # rather than treating a False plugin flag as ground truth while
+        # this is true.
+        "diagnostics_pending": bool(snapshot.get("diagnostics_pending", False)),
         "diagnostics_cache_age_seconds": snapshot.get("diagnostics_cache_age_seconds"),
         "diagnostics_refresh_error": _redact_agent_status_text(str(snapshot.get("diagnostics_refresh_error") or "")),
         "capabilities": capabilities,
@@ -993,6 +1140,21 @@ def require_command_capability(command: str) -> Optional[dict]:
     This is deliberately independent of the web-manager's own readiness check:
     a caller hitting this agent's endpoints directly (bypassing the web-manager
     route) must still be blocked before any subprocess or job is created.
+
+    BUG-3 (hotfix v0.1.17): get_loaded_beet_plugins() no longer blocks for a
+    full cold probe -- it waits only a short bounded window for an in-flight
+    refresh before falling back to whatever is currently known (possibly
+    empty). An empty result during that window is "we don't know yet", not
+    "confirmed not loaded" -- treating it as the latter would incorrectly
+    reject a genuinely valid command purely because diagnostics hadn't
+    finished warming up. _beet_diagnostics_pending() distinguishes the two:
+    only when it is False (a real probe has completed, or none is
+    in-flight) does an unmet requirement mean the capability is genuinely
+    unavailable. The pending case returns a distinct, retryable response
+    (status_code 503) instead of the normal 409 -- callers should pop
+    "status_code" before sending the response (defaulting to 409 when
+    absent) so the on-the-wire body shape for a genuine capability miss is
+    unchanged.
     """
     requirement = _COMMAND_CAPABILITY_REQUIREMENTS.get(command)
     if requirement is None:
@@ -1000,6 +1162,12 @@ def require_command_capability(command: str) -> Optional[dict]:
     required_plugin, error_msg, reason = requirement
     if required_plugin in get_loaded_beet_plugins():
         return None
+    if _beet_diagnostics_pending():
+        return {
+            "error": "Beets diagnostics are still starting up; retry shortly.",
+            "reason": "diagnostics_pending",
+            "status_code": 503,
+        }
     return {"error": error_msg, "reason": reason}
 
 
@@ -4203,11 +4371,23 @@ def _decode_path(val: Any) -> str:
 class ControlAgentHandler(BaseHTTPRequestHandler):
     def _send_json(self, code: int, data: dict):
         body = json.dumps(data, indent=2, default=_json_default).encode("utf-8")
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError) as exc:
+            # BUG-6 (hotfix v0.1.17): the client (Web Manager) disconnected
+            # -- most commonly because its own HTTP client timeout fired
+            # while this handler was still writing the response for a
+            # long-running operation (e.g. artist-folder reconcile apply)
+            # that went on to complete normally. Production evidence: this
+            # produced a full BrokenPipeError traceback for an entirely
+            # expected race, not a server bug. Log one concise line instead
+            # and let the request thread end normally -- do not re-raise,
+            # and do not widen this to swallow any other exception type.
+            print(f"[BeetsControlAgent] INFO: client disconnected before response could be sent ({type(exc).__name__})")
 
     def _authenticate(self) -> bool:
         if not beets_api_token_is_usable(BEETS_API_TOKEN):
@@ -4280,13 +4460,30 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/status":
+            # BUG-2 (hotfix v0.1.17): force_refresh only SCHEDULES a
+            # background refresh now (see _cached_beet_version_snapshot) --
+            # it never makes this request wait for it. A cold/expired cache
+            # is served as an honest "pending" snapshot instead of blocking
+            # for up to a 90s probe.
             force_refresh = params.get("refresh", ["0"])[0] == "1" or params.get("force", ["0"])[0] == "1"
             self._send_json(200, _agent_status_payload(force_refresh=force_refresh))
             return
 
         if path == "/version":
-            status = _agent_status_payload()
-            self._send_json(200, {"agent_version": "1.0.0", "beets_version": status.get("beets_version") or ""})
+            # BUG-1 (hotfix v0.1.17): must NEVER launch `beet version`.
+            # Production evidence: `beet version` took 47.06s under real
+            # host load -- a package-version lookup has no reason to pay
+            # Beets CLI startup, plugin initialization, or config loading.
+            # importlib.metadata reads the installed package's own
+            # metadata directly; engine_release/engine_revision are plain
+            # env var reads, same source _agent_status_payload uses for
+            # them -- neither costs a subprocess.
+            self._send_json(200, {
+                "agent_version": "1.0.0",
+                "beets_version": _installed_beets_package_version(),
+                "engine_release": os.environ.get("BEETS_WEB_MANAGER_VERSION") or os.environ.get("BEETS_ENGINE_RELEASE") or "0.1.16",
+                "engine_revision": os.environ.get("BEETS_ENGINE_REVISION") or os.environ.get("VCS_REF") or "",
+            })
             return
 
         if path == "/capabilities":
@@ -6796,6 +6993,20 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             if not op_id:
                 self._send_json(400, {"ok": False, "error": "operation_id required"})
                 return
+            # Hotfix v0.1.17 acceptance scenario (BUG-4/5/6): deterministic
+            # test-only delay, gated exactly like the existing
+            # ACCEPTANCE_MODE/_acceptance_failpoint infrastructure used
+            # elsewhere in this file (never active outside a container
+            # booted with BEETS_ACCEPTANCE_MODE=1). Real production
+            # evidence for this bug was a genuinely SLOW engine outrunning
+            # a normal client timeout; this reproduces the same race
+            # deterministically -- the client's timeout fires while this
+            # sleeps, then the mutation below proceeds and completes
+            # normally, exactly like the real incident -- rather than
+            # relying on an arbitrarily small client timeout racing
+            # against however fast a real local move happens to be.
+            if ACCEPTANCE_MODE and str(body.get("_acceptance_failpoint") or "") == "artist_reconcile_slow_apply":
+                time.sleep(2.0)
             music_root_env = _resolved_music_root()
             quarantine_root = os.environ.get("RECONCILE_QUARANTINE_DIR", "/config/reconcile_quarantine")
             res = transaction_engine.execute_artist_folder_reconcile_apply(
@@ -6970,7 +7181,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                     return
                 _cap_err = require_command_capability(_fetch_cmd)
                 if _cap_err is not None:
-                    self._send_json(409, _cap_err)
+                    self._send_json(_cap_err.pop("status_code", 409), _cap_err)
                     return
 
             def _run_beet_command(command: str, args: list) -> dict:
@@ -7795,7 +8006,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
 
             capability_error = require_command_capability("submit")
             if capability_error is not None:
-                self._send_json(409, capability_error)
+                self._send_json(capability_error.pop("status_code", 409), capability_error)
                 return
 
             raw_query = body.get("query", "")
@@ -7876,7 +8087,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
 
             capability_error = require_command_capability(command)
             if capability_error is not None:
-                self._send_json(409, capability_error)
+                self._send_json(capability_error.pop("status_code", 409), capability_error)
                 return
 
             safe_source_path = None
@@ -7925,7 +8136,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
 
             capability_error = require_command_capability(command)
             if capability_error is not None:
-                self._send_json(409, capability_error)
+                self._send_json(capability_error.pop("status_code", 409), capability_error)
                 return
 
             safe_source_path = None
@@ -9778,6 +9989,13 @@ def run_agent():
     # in-flight request threads don't block process shutdown.
     httpd = ThreadingHTTPServer(server_address, ControlAgentHandler)
     httpd.daemon_threads = True
+    # Hotfix v0.1.17 (BUG-2 startup prewarm): kick off one background
+    # diagnostics refresh now so the plugin snapshot is likely warm before
+    # the UI's first /status call, instead of that first caller being the
+    # one to discover a cold cache. This only schedules a daemon thread and
+    # returns immediately -- it must never (and does not) delay accepting
+    # connections or serving /health below.
+    prewarm_beet_version_cache()
     print(f"[BeetsControlAgent] Listening on 0.0.0.0:{PORT} (LOCK={LOCK_PATH})")
     try:
         httpd.serve_forever()

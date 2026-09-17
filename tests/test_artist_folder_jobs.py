@@ -61,7 +61,18 @@ class ArtistFolderJobsTests(unittest.TestCase):
         self.assertIn("Example: 'Celia Cruz' -> 'Celia Cruz (7b8e1188-...)'", stamp_route)
         self.assertIn('compact_log = bool(payload.get("compact_log", False))', stamp_route)
         self.assertIn('beets_client.plan_artist_folder_reconcile', stamp_route)
-        self.assertIn('beets_client.apply_artist_folder_reconcile', stamp_route)
+        # Hotfix v0.1.17 (BUG-4): the apply step is now routed through the
+        # shared resilient helper (poll-on-lost-response instead of a bare
+        # apply call) rather than calling beets_client.apply_artist_folder_reconcile
+        # directly here -- confirm the route delegates to it, and
+        # separately confirm that helper itself still reaches the engine
+        # via beets_client (no local fallback introduced).
+        self.assertIn('_apply_artist_folder_reconcile_resilient', stamp_route)
+        helper_source = app_source[
+            app_source.index("def _apply_artist_folder_reconcile_resilient("):
+            app_source.index("def _run_artist_folder_reconcile_for_alias_merge(")
+        ]
+        self.assertIn('beets_client.apply_artist_folder_reconcile', helper_source)
         self.assertNotIn("Skip (target exists)", stamp_route)
 
         self.assertIn("Promise<JobStartResponse>", client_scan)

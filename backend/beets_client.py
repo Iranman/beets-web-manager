@@ -503,9 +503,33 @@ class BeetsClient:
         body.update(kwargs)
         return self._request("POST", "/artists/reconcile/plan", body, timeout=timeout)
 
-    def apply_artist_folder_reconcile(self, operation_id: str, *, timeout: float = 60.0) -> Dict[str, Any]:
-        """Engine-side artist-folder merge & MBID stamping application (SEC-002 Wave 21)."""
-        return self._request("POST", "/artists/reconcile/apply", {"operation_id": operation_id}, timeout=timeout)
+    def apply_artist_folder_reconcile(self, operation_id: str, *, acceptance_failpoint: Optional[str] = None,
+                                       timeout: float = 120.0) -> Dict[str, Any]:
+        """Engine-side artist-folder merge & MBID stamping application (SEC-002 Wave 21).
+
+        Default raised from 60.0 to 120.0 (hotfix v0.1.17, BUG-4): production
+        evidence showed this operation-class of Beets-engine call running
+        past 60s under real host load. All current callers go through
+        app.py's _apply_artist_folder_reconcile_resilient(), which passes
+        BEETS_ARTIST_RECONCILE_TIMEOUT_SECONDS explicitly and, on any
+        failure to receive this response, polls the operation's own
+        transaction state rather than re-calling this method -- this
+        default is a defense-in-depth backstop for this one specific
+        method, not a global timeout change; no other BeetsClient method's
+        default was touched.
+
+        acceptance_failpoint (hotfix v0.1.17) is test-only infrastructure
+        for the dedicated Docker acceptance scenario proving lost-response
+        resilience, following the same established pattern as
+        apply_confirmed_import()'s acceptance_failpoint -- the engine
+        ignores this field entirely unless that specific container was
+        booted with BEETS_ACCEPTANCE_MODE=1, which no real deployment
+        topology ever sets. Always None/omitted in real production calls.
+        """
+        body: Dict[str, Any] = {"operation_id": operation_id}
+        if acceptance_failpoint:
+            body["_acceptance_failpoint"] = acceptance_failpoint
+        return self._request("POST", "/artists/reconcile/apply", body, timeout=timeout)
 
     def rollback_artist_folder_reconcile(self, operation_id: str, *, timeout: float = 60.0) -> Dict[str, Any]:
         """Engine-side artist-folder merge & MBID stamping rollback (SEC-002 Wave 21)."""

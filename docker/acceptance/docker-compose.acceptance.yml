@@ -33,6 +33,21 @@ services:
     image: beets-web-manager:acceptance
     ports:
       - "127.0.0.1:${ACCEPTANCE_WEB_PORT:-18337}:8337"
+    environment:
+      # Hotfix v0.1.17 acceptance scenario (BUG-4/5/6): app.py clamps this
+      # to a 1.0s floor (max(1.0, ...)) regardless of what is set here, so
+      # this value is set to exactly that floor for clarity, not because a
+      # smaller number would take effect. A 1.0s client timeout racing a
+      # real move that (on this small fixture, on a fast local Docker
+      # network) can complete in well under 1s is not a reliable
+      # reproduction on its own -- see the deterministic
+      # `_acceptance_failpoint="artist_reconcile_slow_apply"` (2s
+      # server-side sleep, gated on BEETS_ACCEPTANCE_MODE=1 below) the
+      # scenario passes, which is what actually guarantees the client's
+      # timeout fires while the engine keeps working.
+      - BEETS_ARTIST_RECONCILE_TIMEOUT_SECONDS=1
+      - BEETS_LONG_OPERATION_POLL_SECONDS=0.2
+      - BEETS_LONG_OPERATION_MAX_SECONDS=60
 
   beets:
     build:

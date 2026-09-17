@@ -709,5 +709,210 @@ class WebManagerMutationProhibitionTests(unittest.TestCase):
                         self.assertFalse(leaked, f"{node.name} imports engine mutation functions directly: {leaked}")
 
 
+class ResilientApplyAgainstLostResponseTests(unittest.TestCase):
+    """Hotfix v0.1.17 (BUG-4/BUG-5): a real TrueNAS v0.1.16 production
+    incident. Web Manager's own client-side timeout fired on
+    apply_artist_folder_reconcile() while the Beets Engine kept executing
+    the controlled mutation normally; Web Manager logged "engine
+    unavailable" and gave up, then the engine's own attempt to write back
+    its now-orphaned response produced a BrokenPipeError. Production
+    inspection proved the mutation continued moving from file to file
+    after Web Manager had already reported failure.
+
+    These tests exercise app._apply_artist_folder_reconcile_resilient()
+    directly (the shared helper all three real apply_artist_folder_reconcile
+    call sites in app.py now go through) against a mocked beets_client,
+    with poll/max-wait configuration patched to small values so the tests
+    run in well under a second rather than actually waiting minutes.
+    """
+
+    def setUp(self):
+        self.patchers = []
+        self._patch(mock.patch.object(app_module, "BEETS_LONG_OPERATION_POLL_SECONDS", 0.01))
+        self._patch(mock.patch.object(app_module, "BEETS_LONG_OPERATION_MAX_SECONDS", 0.2))
+
+    def tearDown(self):
+        for patcher in reversed(self.patchers):
+            patcher.stop()
+
+    def _patch(self, patcher):
+        self.patchers.append(patcher)
+        return patcher.start()
+
+    def test_apply_success_on_the_first_call_never_polls(self):
+        apply_mock = self._patch(mock.patch.object(
+            app_module.beets_client, "apply_artist_folder_reconcile",
+            return_value={"ok": True, "operation_id": "op-1", "status": "Completed"},
+        ))
+        get_tx_mock = self._patch(mock.patch.object(app_module.beets_client, "get_transaction"))
+
+        log = []
+        result = app_module._apply_artist_folder_reconcile_resilient("op-1", log)
+
+        self.assertTrue(result.get("ok"))
+        apply_mock.assert_called_once()
+        get_tx_mock.assert_not_called()
+
+    def test_lost_apply_response_polls_and_reports_the_real_completed_outcome(self):
+        """The exact production incident: apply's own HTTP response is
+        lost (client-side timeout), but the engine actually completed the
+        mutation. Apply must be called exactly once; the real outcome must
+        come from polling the transaction, not from a second apply call."""
+        apply_mock = self._patch(mock.patch.object(
+            app_module.beets_client, "apply_artist_folder_reconcile",
+            side_effect=app_module.BeetsUnavailableError("Timed out communicating with Beets Control Agent"),
+        ))
+        statuses = iter(["Running", "Running", "Completed"])
+        get_tx_mock = self._patch(mock.patch.object(
+            app_module.beets_client, "get_transaction",
+            side_effect=lambda op_id: {"ok": True, "transaction": {"status": next(statuses), "operation_id": op_id}},
+        ))
+
+        log = []
+        result = app_module._apply_artist_folder_reconcile_resilient("op-2", log)
+
+        self.assertTrue(result.get("ok"), result)
+        self.assertEqual(result.get("status"), "Completed")
+        self.assertTrue(result.get("recovered_via_poll"))
+        apply_mock.assert_called_once()
+        self.assertGreaterEqual(get_tx_mock.call_count, 3, "must have polled through both Running states to Completed")
+        self.assertFalse(any("ENGINE_OFFLINE" in line for line in log), "must not report ENGINE_OFFLINE while the engine is genuinely still working")
+        joined_log = "\n".join(log)
+        self.assertIn("op-2", joined_log)
+
+    def test_lost_apply_response_then_confirmed_failed_is_reported_as_failed(self):
+        self._patch(mock.patch.object(
+            app_module.beets_client, "apply_artist_folder_reconcile",
+            side_effect=app_module.BeetsUnavailableError("Timed out communicating with Beets Control Agent"),
+        ))
+        self._patch(mock.patch.object(
+            app_module.beets_client, "get_transaction",
+            return_value={"ok": True, "transaction": {"status": "Failed", "operation_id": "op-3"}},
+        ))
+
+        log = []
+        result = app_module._apply_artist_folder_reconcile_resilient("op-3", log)
+
+        self.assertFalse(result.get("ok"))
+        self.assertEqual(result.get("status"), "Failed")
+        self.assertTrue(result.get("recovered_via_poll"))
+
+    def test_apply_never_called_a_second_time_even_across_many_poll_iterations(self):
+        apply_mock = self._patch(mock.patch.object(
+            app_module.beets_client, "apply_artist_folder_reconcile",
+            side_effect=app_module.BeetsUnavailableError("Timed out communicating with Beets Control Agent"),
+        ))
+        self._patch(mock.patch.object(
+            app_module.beets_client, "get_transaction",
+            return_value={"ok": True, "transaction": {"status": "Running", "operation_id": "op-4"}},
+        ))
+
+        log = []
+        result = app_module._apply_artist_folder_reconcile_resilient("op-4", log)
+
+        # Max-wait exceeded while still "Running" -- must report "still
+        # running", never fabricate success, and never call Apply again.
+        self.assertFalse(result.get("ok"))
+        self.assertTrue(result.get("still_running"))
+        apply_mock.assert_called_once()
+
+    def test_transient_transaction_lookup_failures_are_retried_not_fatal(self):
+        """A poll that itself fails to reach the engine (still recovering)
+        must be retried within the bound, not treated as a final failure."""
+        self._patch(mock.patch.object(
+            app_module.beets_client, "apply_artist_folder_reconcile",
+            side_effect=app_module.BeetsUnavailableError("Timed out communicating with Beets Control Agent"),
+        ))
+        responses = iter([
+            app_module.BeetsUnavailableError("engine still recovering"),
+            app_module.BeetsUnavailableError("engine still recovering"),
+            {"ok": True, "transaction": {"status": "Completed", "operation_id": "op-5"}},
+        ])
+
+        def _get_transaction(op_id):
+            item = next(responses)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        self._patch(mock.patch.object(app_module.beets_client, "get_transaction", side_effect=_get_transaction))
+
+        log = []
+        result = app_module._apply_artist_folder_reconcile_resilient("op-5", log)
+
+        self.assertTrue(result.get("ok"), result)
+        self.assertEqual(result.get("status"), "Completed")
+
+    def test_cancellation_stops_polling_without_reporting_false_success_or_failure(self):
+        cancel_event = mock.MagicMock()
+        cancel_event.is_set.return_value = True
+        self._patch(mock.patch.object(
+            app_module.beets_client, "apply_artist_folder_reconcile",
+            side_effect=app_module.BeetsUnavailableError("Timed out communicating with Beets Control Agent"),
+        ))
+        get_tx_mock = self._patch(mock.patch.object(app_module.beets_client, "get_transaction"))
+
+        log = []
+        result = app_module._apply_artist_folder_reconcile_resilient("op-6", log, cancel_event=cancel_event)
+
+        self.assertFalse(result.get("ok"))
+        self.assertTrue(result.get("still_running"))
+        get_tx_mock.assert_not_called()
+
+    def test_clean_artist_folders_stamp_mbid_job_does_not_reapply_on_lost_response(self):
+        """End-to-end through the real production call site: clean_artist_folders_stamp_mbid()'s
+        background job must call apply_artist_folder_reconcile at most
+        once even when its own client-side call fails, and must recover
+        the real outcome via transaction polling."""
+        with mock.patch.object(app_module, "MUSIC_ROOT", Path(tempfile.mkdtemp())), \
+             mock.patch.object(app_module, "_security_auth_disabled", return_value=True):
+            with mock.patch.object(
+                app_module, "_stamp_artist_folder_scan",
+                return_value={"candidates": [{"source": "x"}], "skipped": []},
+            ), mock.patch.object(
+                app_module.beets_client, "plan_artist_folder_reconcile",
+                return_value={"ok": True, "operation_id": "op-7"},
+            ), mock.patch.object(
+                app_module.beets_client, "apply_artist_folder_reconcile",
+                side_effect=app_module.BeetsUnavailableError("Timed out communicating with Beets Control Agent"),
+            ) as apply_mock, mock.patch.object(
+                app_module.beets_client, "get_transaction",
+                return_value={"ok": True, "transaction": {"status": "Completed", "operation_id": "op-7", "renamed": 2, "merged": 1}},
+            ):
+                with app_module.app.test_request_context(
+                    "/api/clean/artist-folders/stamp-mbid",
+                    method="POST",
+                    json={"root": str(app_module.MUSIC_ROOT), "dry_run": True},
+                ):
+                    payload = app_module.request.get_json(silent=True) or {}
+                root_path, _err = app_module._artist_folder_repair_root(payload.get("root") or str(app_module.MUSIC_ROOT))
+
+                # Reach into the real, unexported `_do` closure the same way
+                # the maintenance job does: call the route in non-dry-run
+                # mode via test_request_context, but capture the job body
+                # directly rather than going through the async job store.
+                with app_module.app.test_request_context(
+                    "/api/clean/artist-folders/stamp-mbid",
+                    method="POST",
+                    json={"root": str(root_path), "dry_run": False},
+                ):
+                    captured = {}
+                    real_start_python = app_module.jobs.start_python
+
+                    def _capture_and_run(fn, label="", metadata=None):
+                        log = []
+                        fn(log)
+                        captured["log"] = log
+                        return mock.MagicMock(job_id="job-7")
+
+                    with mock.patch.object(app_module.jobs, "start_python", side_effect=_capture_and_run):
+                        app_module.clean_artist_folders_stamp_mbid()
+
+                apply_mock.assert_called_once()
+                joined_log = "\n".join(captured.get("log") or [])
+                self.assertNotIn("ENGINE_OFFLINE", joined_log)
+                self.assertIn("op-7", joined_log)
+
+
 if __name__ == "__main__":
     unittest.main()
