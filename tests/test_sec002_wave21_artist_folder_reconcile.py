@@ -1086,5 +1086,119 @@ class ListArtistFolderInventoryTests(unittest.TestCase):
         self.assertFalse(res.get("ok"))
 
 
+class StampArtistFolderScanFailClosedTests(unittest.TestCase):
+    """Independent review follow-up: an engine inventory failure must never
+    be indistinguishable from a genuine successful scan that found zero
+    eligible folders. _stamp_artist_folder_scan() must report ok=False with
+    the real error/error_code, not the same empty
+    {"candidates": [], "skipped": []} shape a real empty scan returns."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.root = Path(self._tmpdir.name) / "music"
+        self.root.mkdir()
+
+    def test_beets_unavailable_reports_ok_false_not_empty_success(self):
+        with mock.patch.object(
+            app_module.beets_client, "get_artist_folder_inventory",
+            side_effect=app_module.BeetsUnavailableError("Timed out communicating with Beets Control Agent"),
+        ):
+            result = app_module._stamp_artist_folder_scan(self.root)
+        self.assertFalse(result.get("ok"))
+        self.assertEqual(result["candidates"], [])
+        self.assertIn("Timed out", result.get("error", ""))
+
+    def test_beets_auth_error_reports_ok_false_with_error_code(self):
+        with mock.patch.object(
+            app_module.beets_client, "get_artist_folder_inventory",
+            side_effect=app_module.BeetsAuthError(
+                "Authentication with Beets Control Agent failed: HTTP 401",
+                error_code="ENGINE_AUTH_FAILED", status_code=401,
+            ),
+        ):
+            result = app_module._stamp_artist_folder_scan(self.root)
+        self.assertFalse(result.get("ok"))
+        self.assertEqual(result.get("error_code"), "ENGINE_AUTH_FAILED")
+        self.assertEqual(result.get("status_code"), 401)
+
+    def test_genuine_empty_inventory_reports_ok_true(self):
+        with mock.patch.object(app_module.beets_client, "get_artist_folder_inventory", return_value=[]), \
+             mock.patch.object(app_module.beets_client, "get_artist_folder_album_mbids", return_value=[]):
+            result = app_module._stamp_artist_folder_scan(self.root)
+        self.assertTrue(result.get("ok"))
+        self.assertEqual(result["candidates"], [])
+        self.assertEqual(result["skipped"], [])
+
+    def test_mbid_counts_engine_failure_reports_ok_false(self):
+        artist_dir = self.root / "Some Artist"
+        artist_dir.mkdir()
+        with mock.patch.object(
+            app_module.beets_client, "get_artist_folder_inventory",
+            return_value=[{"name": "Some Artist", "path": str(artist_dir), "audio_files": 1, "subfolders": 0}],
+        ), mock.patch.object(
+            app_module, "_stamp_artist_folder_album_mbid_counts",
+            return_value=({}, {}, "engine unavailable"),
+        ):
+            result = app_module._stamp_artist_folder_scan(self.root)
+        self.assertFalse(result.get("ok"))
+        self.assertIn("engine unavailable", result.get("error", ""))
+
+    def test_only_genuine_success_produces_no_folders_need_stamping_message(self):
+        """End-to-end through the real production call sites: only a
+        genuinely successful, empty scan may produce the "No artist folders
+        need MB ID stamping" outcome -- an engine failure must be reported
+        as a failure instead."""
+        with mock.patch.object(app_module, "MUSIC_ROOT", self.root), \
+             mock.patch.object(app_module, "_security_auth_disabled", return_value=True):
+            # Failure case: the real job must raise (fail closed), not
+            # report "no artist folders need MB ID stamping".
+            with mock.patch.object(
+                app_module.beets_client, "get_artist_folder_inventory",
+                side_effect=app_module.BeetsUnavailableError("engine unreachable"),
+            ):
+                with app_module.app.test_request_context(
+                    "/api/clean/artist-folders/stamp-mbid", method="POST",
+                    json={"root": str(self.root), "dry_run": False},
+                ):
+                    captured = {}
+
+                    def _capture_and_run(fn, label="", metadata=None):
+                        log = []
+                        try:
+                            fn(log)
+                            captured["raised"] = None
+                        except Exception as ex:
+                            captured["raised"] = ex
+                        captured["log"] = log
+                        return mock.MagicMock(job_id="job-fail")
+
+                    with mock.patch.object(app_module.jobs, "start_python", side_effect=_capture_and_run):
+                        app_module.clean_artist_folders_stamp_mbid()
+                self.assertIsNotNone(captured["raised"], "an engine inventory failure must raise, not silently succeed")
+                joined = "\n".join(captured["log"])
+                self.assertNotIn("No artist folders need MB ID stamping", joined)
+
+            # Genuine success case: an empty inventory legitimately produces
+            # the "no folders need stamping" outcome.
+            with mock.patch.object(app_module.beets_client, "get_artist_folder_inventory", return_value=[]), \
+                 mock.patch.object(app_module.beets_client, "get_artist_folder_album_mbids", return_value=[]):
+                with app_module.app.test_request_context(
+                    "/api/clean/artist-folders/stamp-mbid", method="POST",
+                    json={"root": str(self.root), "dry_run": False},
+                ):
+                    captured2 = {}
+
+                    def _capture_and_run2(fn, label="", metadata=None):
+                        log = []
+                        fn(log)
+                        captured2["log"] = log
+                        return mock.MagicMock(job_id="job-ok")
+
+                    with mock.patch.object(app_module.jobs, "start_python", side_effect=_capture_and_run2):
+                        app_module.clean_artist_folders_stamp_mbid()
+                self.assertIn("No artist folders need MB ID stamping", "\n".join(captured2["log"]))
+
+
 if __name__ == "__main__":
     unittest.main()

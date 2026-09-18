@@ -2690,6 +2690,44 @@ def run_v0117_hotfix_scenarios(client: "HttpClient", engine_container: str, engi
             f"log tail: {log_lines[-3:] if log_lines else 'n/a'})"
         )
 
+    # ARCH-020 route-level coverage (independent review follow-up): the
+    # stamp-mbid scenario above is the one destructive, full end-to-end
+    # proof. These two are deliberately lightweight -- no new fixture, no
+    # Apply, no failpoint -- they only need to prove that
+    # /api/clean/artist-folders/scan and /api/clean/artist-folders/merge
+    # can obtain their candidate-discovery inventory via the engine instead
+    # of failing because /data/media/music is absent inside the
+    # beets-web-manager container (which has no media mount in this real
+    # shipped topology, same as proven above).
+    print("==> [ARCH-020] /api/clean/artist-folders/scan obtains engine-side inventory with no Web Manager media mount...")
+    status, body = client.request("POST", "/api/clean/artist-folders/scan", json_body={"root": "/data/media/music"}, timeout=15)
+    if status != 200 or not body.get("ok") or not body.get("job_id"):
+        scenario_fail("v0117-arch020-scan-route-no-media-mount", f"scan request rejected: {status} {body}")
+    else:
+        try:
+            scan_job_result = client.wait_job(body["job_id"], timeout=30)
+        except TimeoutError as ex:
+            scenario_fail("v0117-arch020-scan-route-no-media-mount", f"scan job did not complete: {ex}")
+            scan_job_result = None
+        if scan_job_result is not None:
+            scan_log = scan_job_result.get("log") or []
+            joined_scan_log = "\n".join(scan_log)
+            if scan_job_result.get("status") != "success":
+                scenario_fail("v0117-arch020-scan-route-no-media-mount", f"scan job did not succeed: {scan_job_result.get('status')}; log={scan_log}")
+            elif "does not exist" in joined_scan_log.lower() or "no such file" in joined_scan_log.lower():
+                scenario_fail("v0117-arch020-scan-route-no-media-mount", f"scan appears to have tried a local filesystem walk: log={scan_log}")
+            else:
+                scenario_pass("v0117-arch020-scan-route-no-media-mount (real /api/clean/artist-folders/scan route completed via engine-side inventory)")
+
+    print("==> [ARCH-020] /api/clean/artist-folders/merge (dry run) obtains engine-side inventory with no Web Manager media mount...")
+    status, body = client.request(
+        "POST", "/api/clean/artist-folders/merge", json_body={"root": "/data/media/music", "dry_run": True}, timeout=15,
+    )
+    if status != 200 or not body.get("ok"):
+        scenario_fail("v0117-arch020-merge-route-no-media-mount", f"merge dry-run request rejected: {status} {body}")
+    else:
+        scenario_pass("v0117-arch020-merge-route-no-media-mount (real /api/clean/artist-folders/merge dry run completed via engine-side inventory)")
+
 
 def run_wave34_scenarios(client: "HttpClient", db_path: str, fixture: dict) -> None:
     """ARCH-007 (Wave 34): library_mbsync_all() and library_move_all() were

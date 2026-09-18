@@ -211,10 +211,11 @@ class ArtistFolderRepairRootBoundaryTests(unittest.TestCase):
         self.assertFalse(data["ok"])
 
     def test_stamp_mbid_dry_run_accepts_music_root(self):
-        resp = self._post(
-            "/api/clean/artist-folders/stamp-mbid",
-            {"root": str(self.music), "dry_run": True},
-        )
+        with mock.patch.object(app_module.beets_client, "get_artist_folder_album_mbids", return_value=[]):
+            resp = self._post(
+                "/api/clean/artist-folders/stamp-mbid",
+                {"root": str(self.music), "dry_run": True},
+            )
         data = resp.get_json()
         self.assertEqual(resp.status_code, 200, data)
         self.assertTrue(data["ok"])

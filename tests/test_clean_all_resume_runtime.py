@@ -406,6 +406,114 @@ class CleanAllResumeRuntimeTests(unittest.TestCase):
         self.assertGreaterEqual(get_tx_mock.call_count, 2, "resume must have polled op-123's authoritative status")
         self.assertEqual(self.call_order[:3], ["release_group_merge", "duplicates", "folder_scan"])
 
+    def test_saved_operation_survives_a_transaction_lookup_failure_on_resume(self):
+        """Independent review follow-up: a saved Clean All operation must
+        never be discarded just because a resume's own status lookup
+        failed.
+
+        1. First execution persists op-123 (Plan succeeds, Apply's response
+           is lost, engine transaction is Running).
+        2. Process is interrupted (first run ends "partial", running).
+        3. Second execution resumes with op-123 -- but
+           beets_client.get_transaction(op-123) itself raises
+           BeetsUnavailableError (a transport failure, not a definitive
+           answer).
+        4. Assert: Plan call count remains 1, Apply call count remains 1 --
+           the lookup failure must NOT be treated as "the operation is gone,
+           start fresh".
+        5. Assert: the checkpoint still contains op-123, and the task
+           remains running/unresolved (not complete, not failed, not
+           silently dropped).
+        6. Third execution resumes again; this time get_transaction(op-123)
+           succeeds and reports Completed.
+        7. Assert: the task completes, still without a second Plan or a
+           second Apply call across all three executions.
+        """
+        _checkpoint_with_first_four_complete(self.checkpoint)
+        self._patch(mock.patch.object(app_module, "_library_health_payload", side_effect=AssertionError("library health reran")))
+        self._patch(mock.patch.object(app_module, "_maintenance_remove_missing_file_rows", side_effect=AssertionError("missing files reran")))
+        self._patch(mock.patch.object(app_module, "_maintenance_root_folder_repair", side_effect=AssertionError("root repair reran")))
+        self._patch(mock.patch.object(app_module, "_artist_id_alias_groups", side_effect=AssertionError("artist alias reran")))
+        self._patch(mock.patch.object(app_module, "BEETS_LONG_OPERATION_POLL_SECONDS", 0.01))
+        self._patch(mock.patch.object(app_module, "BEETS_LONG_OPERATION_MAX_SECONDS", 0.05))
+        self._patch(mock.patch.object(
+            app_module, "_stamp_artist_folder_scan",
+            return_value={"ok": True, "candidates": [{"source_path": "/x", "target_path": "/y"}], "skipped": []},
+        ))
+        plan_mock = self._patch(mock.patch.object(
+            app_module.beets_client, "plan_artist_folder_reconcile",
+            return_value={"ok": True, "operation_id": "op-123"},
+        ))
+        apply_mock = self._patch(mock.patch.object(
+            app_module.beets_client, "apply_artist_folder_reconcile",
+            side_effect=app_module.BeetsUnavailableError("Timed out communicating with Beets Control Agent"),
+        ))
+
+        # Execution 1: Plan -> op-123, Apply's response lost, engine stays
+        # Running until the bounded poll deadline -- ends "partial".
+        get_tx_patcher = mock.patch.object(
+            app_module.beets_client, "get_transaction",
+            return_value={"ok": True, "transaction": {"status": "Running", "operation_id": "op-123"}},
+        )
+        get_tx_patcher.start()
+        first_parent, _first_data = self._post_clean_all()
+        first_last_run = _last_run(self.checkpoint)
+        self.assertEqual(first_parent.returncode, 0, first_parent.log)
+        self.assertTrue(first_parent.result.get("partial"), first_parent.result)
+        first_tasks = {task["id"]: task for task in first_last_run["tasks"]}
+        self.assertEqual(first_tasks["artist_folder_merge"]["status"], "running")
+        self.assertEqual(first_tasks["artist_folder_merge"].get("operation_id"), "op-123")
+        plan_mock.assert_called_once()
+        apply_mock.assert_called_once()
+        get_tx_patcher.stop()
+
+        # Execution 2: resume finds op-123, but the status lookup itself
+        # fails (transport uncertainty, not a definitive answer). Must NOT
+        # create a new Plan or call Apply again; must NOT drop op-123.
+        get_tx_patcher = mock.patch.object(
+            app_module.beets_client, "get_transaction",
+            side_effect=app_module.BeetsUnavailableError("Timed out communicating with Beets Control Agent"),
+        )
+        get_tx_patcher.start()
+        second_parent, second_data = self._post_clean_all()
+        second_last_run = _last_run(self.checkpoint)
+
+        self.assertEqual(second_parent.returncode, 0, second_parent.log)
+        self.assertTrue(second_data.get("resumed"), second_data)
+        self.assertEqual(second_last_run["status"], "partial")
+        second_tasks = {task["id"]: task for task in second_last_run["tasks"]}
+        self.assertEqual(
+            second_tasks["artist_folder_merge"]["status"], "running",
+            "a failed status lookup must leave the task running/unresolved, not failed or complete",
+        )
+        self.assertEqual(
+            second_tasks["artist_folder_merge"].get("operation_id"), "op-123",
+            "a failed status lookup must never discard the saved operation_id",
+        )
+        self.assertEqual(plan_mock.call_count, 1, "a lookup failure must never trigger a second Plan")
+        self.assertEqual(apply_mock.call_count, 1, "a lookup failure must never trigger a second Apply")
+        get_tx_patcher.stop()
+
+        # Execution 3: resume finds op-123 again, and this time the status
+        # lookup succeeds and reports Completed.
+        get_tx_completed = self._patch(mock.patch.object(
+            app_module.beets_client, "get_transaction",
+            return_value={"ok": True, "transaction": {"status": "Completed", "operation_id": "op-123"}},
+        ))
+        self.call_order.clear()
+        third_parent, third_data = self._post_clean_all()
+        third_last_run = _last_run(self.checkpoint)
+
+        self.assertEqual(third_parent.returncode, 0, third_parent.log)
+        self.assertTrue(third_data.get("resumed"), third_data)
+        self.assertEqual(third_last_run["status"], "complete")
+        third_tasks = {task["id"]: task for task in third_last_run["tasks"]}
+        self.assertEqual(third_tasks["artist_folder_merge"]["status"], "complete")
+        self.assertNotIn("operation_id", third_tasks["artist_folder_merge"])
+        self.assertEqual(plan_mock.call_count, 1, "Plan must still have been called exactly once across all three executions")
+        self.assertEqual(apply_mock.call_count, 1, "Apply must still have been called exactly once across all three executions")
+        get_tx_completed.assert_called()
+
 
 if __name__ == "__main__":
     unittest.main()

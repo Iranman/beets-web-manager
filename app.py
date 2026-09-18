@@ -35443,11 +35443,29 @@ def _maintenance_artist_folder_merge_step(
             tx = tx_res.get("transaction") or {}
             status = str(tx.get("status") or "")
         except Exception as ex:
+            # Independent review finding: a lookup failure (timeout,
+            # connection reset, malformed response, transient 503, ...)
+            # does NOT prove the saved operation is gone -- it means its
+            # status is currently unknown. Falling through to a fresh scan
+            # here would recreate the exact duplicate-operation risk this
+            # hotfix exists to eliminate (a second Plan/Apply for the same
+            # folders while the original operation may still be genuinely
+            # in progress on the engine). Preserve the operation_id and
+            # report "still unresolved" instead: the caller keeps the task
+            # "running" with this same operation_id in the checkpoint, and
+            # the next resume checks it again -- never re-Applies, never
+            # re-Plans, until the engine's own authoritative status
+            # conclusively says otherwise.
             log.append(
                 f"Artist folder merge: could not check saved operation {resume_operation_id} ({ex}); "
-                f"treating it as needing a fresh scan."
+                f"its status is unknown -- not creating a new plan or re-applying, will retry on the next run."
             )
-            tx, status = None, ""
+            return {
+                "ok": False, "operation_id": resume_operation_id,
+                "renamed": 0, "merged": 0, "skipped": 0,
+                "error": f"Could not confirm saved operation status: {ex}",
+                "still_running": True,
+            }
 
         if tx is not None and status in _ARTIST_RECONCILE_TERMINAL_SUCCESS_STATUSES:
             log.append(f"Artist folder merge: resumed operation {resume_operation_id} was already Completed.")
@@ -35491,6 +35509,20 @@ def _maintenance_artist_folder_merge_step(
 
     root_path = Path(root)
     scan = _stamp_artist_folder_scan(root_path)
+    if not scan.get("ok", True):
+        # Independent review finding: an engine inventory failure must never
+        # be reported as "no work to do" -- that would let Clean All mark
+        # this phase complete while the engine was never actually reached.
+        # No operation_id exists yet at this point (no Plan was ever
+        # created), so this is a genuine "failed" outcome -- not
+        # "still_running" -- meaning the next resume correctly retries the
+        # scan from scratch rather than treating a nonexistent operation as
+        # still in flight.
+        log.append(f"Artist folder merge: engine inventory scan failed ({scan.get('error')}); MBID stamping was not performed.")
+        return {
+            "ok": False, "renamed": 0, "merged": 0, "skipped": 0,
+            "error": scan.get("error"), "error_code": scan.get("error_code", ""),
+        }
     candidates = scan["candidates"]
     skipped = scan["skipped"]
     if not candidates:
@@ -40096,13 +40128,32 @@ def _stamp_artist_folder_scan(root: Path) -> Dict[str, Any]:
              if _s(entry.get("name")) and not _s(entry.get("name")).startswith(".")),
             key=lambda p: p.name.casefold(),
         )
-    except Exception:
-        return {"candidates": [], "skipped": []}
+    except (BeetsUnavailableError, BeetsAuthError, BeetsBadRequestError, BeetsNotFoundError, BeetsError) as ex:
+        # Independent review finding: an engine inventory failure (timeout,
+        # auth, 4xx/5xx) must never be indistinguishable from a genuine
+        # successful scan that found zero eligible folders -- callers used
+        # to see the same empty {"candidates": [], "skipped": []} shape for
+        # both and would report "No artist folders need MB ID stamping" /
+        # mark the phase complete even though the engine was never actually
+        # reached. ok=False plus the structured error fields let every
+        # caller fail closed instead.
+        return {
+            "ok": False, "candidates": [], "skipped": [],
+            "error": str(ex),
+            "error_code": getattr(ex, "error_code", "") or "",
+            "status_code": getattr(ex, "status_code", 0) or 0,
+        }
+    except Exception as ex:
+        return {"ok": False, "candidates": [], "skipped": [], "error": str(ex), "error_code": "", "status_code": 0}
     existing_names = {f.name for f in folders}
 
     folder_id_album_sets, folder_album_totals, scan_error = _stamp_artist_folder_album_mbid_counts(root, folders)
     if scan_error:
         return {
+            "ok": False,
+            "error": scan_error,
+            "error_code": "",
+            "status_code": 0,
             "candidates": [],
             "skipped": [
                 {
@@ -40303,7 +40354,7 @@ def _stamp_artist_folder_scan(root: Path) -> Dict[str, Any]:
             entry for entry in skipped
             if str(Path(entry["path"]).resolve(strict=False)) not in candidate_paths
         ]
-    return {"candidates": candidates, "skipped": skipped}
+    return {"ok": True, "candidates": candidates, "skipped": skipped}
 
 
 def _stamp_artist_folder_candidates(root: Path) -> List[Dict[str, Any]]:
@@ -40372,6 +40423,14 @@ def clean_artist_folders_stamp_mbid():
     if dry_run:
         log: List[str] = []
         scan = _stamp_artist_folder_scan(root_path)
+        if not scan.get("ok", True):
+            # Independent review finding: an engine inventory failure must
+            # never be reported as a successful dry run with zero
+            # candidates -- fail closed with the real error instead.
+            status_code = int(scan.get("status_code") or 0) or 502
+            return jsonify({
+                "ok": False, "error": scan.get("error"), "error_code": scan.get("error_code", ""),
+            }), status_code
         candidates = scan["candidates"]
         skipped = scan["skipped"]
         _append_stamp_candidate_log(log, candidates)
@@ -40382,6 +40441,14 @@ def clean_artist_folders_stamp_mbid():
 
     def _do(log, cancel_event=None):
         scan = _stamp_artist_folder_scan(root_path)
+        if not scan.get("ok", True):
+            # Independent review finding: an engine inventory failure must
+            # never be reported as "No artist folders need MB ID stamping" --
+            # that message asserts a genuine, successful zero-candidate scan.
+            # Raise so the job is reported failed (fail closed, resumable on
+            # retry) instead of silently succeeding with nothing done.
+            log.append(f"Artist folder MBID stamping: engine inventory scan failed ({scan.get('error')}); nothing was performed.")
+            raise RuntimeError(f"Engine inventory scan failed: {scan.get('error')}")
         candidates = scan["candidates"]
         skipped = scan["skipped"]
         if not candidates:
