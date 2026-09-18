@@ -4,7 +4,7 @@ Beets Web Manager is packaged as a matched two-container release pair published 
 - **`beets`** (`ghcr.io/iranman/beets-engine:${BEETS_WEB_MANAGER_VERSION:-stable}`): Authoritative Beets engine, plugins, SQLite library, and control agent.
 - **`beets-web-manager`** (`ghcr.io/iranman/beets-web-manager:${BEETS_WEB_MANAGER_VERSION:-stable}`): Web UI, API backend, import queue, and job engine.
 
-Leaving `BEETS_WEB_MANAGER_VERSION=stable` in `.env` pulls the matched stable release images for both containers automatically. Pin an exact release such as `0.1.16` when you need predictable rollback to a known image pair.
+Leaving `BEETS_WEB_MANAGER_VERSION=stable` in `.env` pulls the matched stable release images for both containers automatically. Pin an exact release such as `0.1.17` when you need predictable rollback to a known image pair.
 
 ---
 
@@ -115,13 +115,13 @@ BEETS_WEB_MANAGER_VERSION=stable
 BEETS_WEB_MANAGER_VERSION=latest
 
 # Exact version for predictable deployment and rollback
-BEETS_WEB_MANAGER_VERSION=0.1.16
+BEETS_WEB_MANAGER_VERSION=0.1.17
 
 # Development builds from main; not recommended for production
 BEETS_WEB_MANAGER_VERSION=edge
 ```
 
-`stable` is the recommended default for production deployments. Using an exact version tag (e.g. `0.1.16`) is recommended for predictable deployments and rollbacks. Prerelease tags (such as `v0.2.0-rc.1`) publish exact prerelease image tags for testing, but never touch `stable` or `latest`.
+`stable` is the recommended default for production deployments. Using an exact version tag (e.g. `0.1.17`) is recommended for predictable deployments and rollbacks. Prerelease tags (such as `v0.2.0-rc.1`) publish exact prerelease image tags for testing, but never touch `stable` or `latest`.
 
 ---
 
@@ -144,7 +144,7 @@ To roll back to a specific previous release:
 
 1. Pin the exact release version in `.env`:
    ```env
-   BEETS_WEB_MANAGER_VERSION=0.1.16
+   BEETS_WEB_MANAGER_VERSION=0.1.17
    ```
 2. Recreate the service:
    ```bash

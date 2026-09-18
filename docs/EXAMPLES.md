@@ -125,13 +125,13 @@ BEETS_WEB_MANAGER_VERSION=stable
 BEETS_WEB_MANAGER_VERSION=latest
 
 # Exact version for predictable deployment and rollback
-BEETS_WEB_MANAGER_VERSION=0.1.16
+BEETS_WEB_MANAGER_VERSION=0.1.17
 
 # Development builds from main; not recommended for production
 BEETS_WEB_MANAGER_VERSION=edge
 ```
 
-`stable` is the recommended default channel for production deployments. Specifying an exact version (e.g., `0.1.16`) is the safest choice for environments requiring fully pinned, predictable upgrades and rollbacks.
+`stable` is the recommended default channel for production deployments. Specifying an exact version (e.g., `0.1.17`) is the safest choice for environments requiring fully pinned, predictable upgrades and rollbacks.
 
 > [!NOTE]
 > Prerelease tags (e.g., `v0.2.0-rc.1`) publish exact prerelease image tags for testing, but never update the production `stable` or `latest` channels.
