@@ -474,6 +474,18 @@ class BeetsClient:
         """Engine-side existing-album duplicate & move reconciliation rollback (SEC-002 Wave 20)."""
         return self._request("POST", "/albums/existing-reconcile/rollback", {"operation_id": operation_id}, timeout=timeout)
 
+    def get_artist_folder_inventory(self, root: str, *, timeout: float = 30.0) -> List[Dict[str, Any]]:
+        """Engine-side read-only listing of immediate subfolders under root (ARCH-020).
+
+        Returns each folder's name, path, audio file count, and subfolder
+        count -- computed engine-side, since Web Manager has no local media
+        mount in the supported two-service deployment. Raises the normal
+        BeetsClient exception hierarchy on transport failure or a rejected
+        root (outside allowed roots, symlink, missing).
+        """
+        res = self._request("POST", "/artists/folders/inventory", {"root": root}, timeout=timeout)
+        return res.get("folders", [])
+
     def plan_artist_folder_reconcile(
         self,
         payload_or_root: Any = None,

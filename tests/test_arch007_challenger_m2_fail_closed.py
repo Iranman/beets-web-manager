@@ -195,7 +195,14 @@ class TestArch007M2FailClosedAdversarial(unittest.TestCase):
 
             self.assertEqual(id_sets, {})
             self.assertEqual(totals, {})
-            self.assertIn("Engine offline", err)
+            # CodeQL follow-up (information exposure through an exception):
+            # the raw exception text is no longer returned as-is -- err is
+            # now a sanitized, safe message, not "Engine offline" itself.
+            # What this test actually protects (no local SQLite fallback on
+            # engine failure) is the truthy/non-empty err plus the two
+            # spies below.
+            self.assertTrue(err)
+            self.assertNotIn("Engine offline", err)
             self.sqlite_connect_spy.assert_not_called()
             self.db_spy.assert_not_called()
 

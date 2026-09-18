@@ -99,6 +99,14 @@ _ENGINE_INFRA_FUNCTIONS = {
     "TransactionStore.save_settings": "TRANSACTION_STATE",
     "TransactionStore.create": "TRANSACTION_STATE",
     "TransactionStore.update": "TRANSACTION_STATE",
+    # ARCH-020 follow-up: os.sep -> "/" separator normalization on an
+    # in-memory relative-path STRING (relpath comparison for the
+    # Beets-sometimes-stores-a-relative-items.path fallback), not a
+    # filesystem write -- same false-positive pattern as the .replace()
+    # rule already used for other files (e.g. control-agent-admin-command
+    # handlers above).
+    "_derive_artist_folder_identity": "READ_ONLY_FALSE_POSITIVE",
+    "_extract_recording_mbids": "READ_ONLY_FALSE_POSITIVE",
 }
 
 _APP_STATE_HINTS = {

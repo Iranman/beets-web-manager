@@ -312,6 +312,38 @@ class CapabilityGateDiagnosticsPendingTests(unittest.TestCase):
         finally:
             release.set()
 
+    def test_capability_check_reports_pending_not_unavailable_for_stale_cache_with_stuck_refresh(self):
+        """hotfix v0.1.17 follow-up (requirement #4): a cache OBJECT
+        existing is not the same as a TRUSTWORTHY cache. If the last known
+        snapshot has aged past _BEET_VERSION_CACHE_MAX_STALE_SECONDS and a
+        refresh trying to replace it is actively stuck/in-flight, the
+        capability gate must still report "diagnostics_pending"/503 -- not
+        silently fall through to treating the stale snapshot's (now
+        untrustworthy) plugin list as confirmed ground truth and reporting
+        a false "capability unavailable"."""
+        with mock.patch.object(control_agent_module.subprocess, "run",
+                                return_value=_fake_run(stdout="beets version 2.13.1\nplugins: chroma\n")):
+            control_agent_module._cached_beet_version_snapshot(max_wait_seconds=2.0)
+        self.assertIn("chroma", control_agent_module._BEET_VERSION_CACHE.get("loaded_plugins") or [])
+
+        control_agent_module._BEET_VERSION_CACHE_TS -= (control_agent_module._BEET_VERSION_CACHE_MAX_STALE_SECONDS + 1)
+
+        release = threading.Event()
+
+        def blocking_run(*args, **kwargs):
+            release.wait(timeout=5)
+            return _fake_run(stdout="beets version 2.13.1\nplugins: chroma\n")
+
+        try:
+            with mock.patch.object(control_agent_module, "_BEET_VERSION_CAPABILITY_WAIT_SECONDS", 0.05), \
+                 mock.patch.object(control_agent_module.subprocess, "run", side_effect=blocking_run):
+                error = control_agent_module.require_command_capability("submit")
+                self.assertIsNotNone(error, "a stale-past-max-stale cache with a stuck refresh must not silently pass as available")
+                self.assertEqual(error.get("reason"), "diagnostics_pending")
+                self.assertEqual(error.get("status_code"), 503)
+        finally:
+            release.set()
+
     def test_capability_check_reports_genuinely_unavailable_once_diagnostics_resolve(self):
         """Once a real probe has completed and the plugin truly is not in
         the loaded list, the original 409-style "capability unavailable"

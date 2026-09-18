@@ -17,6 +17,27 @@ from unittest import mock
 import app as app_module
 
 
+def _fake_folder_inventory(root):
+    """ARCH-020: _scan_artist_folder_groups()/_stamp_artist_folder_scan()
+    now ask the engine (via beets_client.get_artist_folder_inventory())
+    for the folder listing instead of walking MUSIC_ROOT themselves. This
+    test double stands in for that engine call by doing the equivalent
+    real-filesystem walk against each test's own tempdir fixture."""
+    root_path = Path(root)
+    out = []
+    for child in sorted(root_path.iterdir(), key=lambda p: p.name.casefold()):
+        if not child.is_dir() or child.name.startswith("."):
+            continue
+        audio, subfolders = 0, 0
+        for p in child.rglob("*"):
+            if p.is_dir():
+                subfolders += 1
+            elif p.is_file():
+                audio += 1
+        out.append({"name": child.name, "path": str(child), "audio_files": audio, "subfolders": subfolders})
+    return out
+
+
 class ArtistFolderRepairRootBoundaryTests(unittest.TestCase):
     """Every /api/clean/artist-folders/* route accepted a `root` request
     value with only an exists()/is_dir() check -- no containment against
@@ -35,6 +56,7 @@ class ArtistFolderRepairRootBoundaryTests(unittest.TestCase):
             mock.patch.dict(os.environ, {"BEETS_WEB_AUTH_DISABLED": "1"}),
             mock.patch.object(app_module, "MUSIC_ROOT", self.music),
             mock.patch.object(app_module, "_MUSIC_LIBRARY_ROOT", str(self.music)),
+            mock.patch.object(app_module.beets_client, "get_artist_folder_inventory", side_effect=_fake_folder_inventory),
         ]
         for patch in self.patches:
             patch.start()
@@ -189,10 +211,11 @@ class ArtistFolderRepairRootBoundaryTests(unittest.TestCase):
         self.assertFalse(data["ok"])
 
     def test_stamp_mbid_dry_run_accepts_music_root(self):
-        resp = self._post(
-            "/api/clean/artist-folders/stamp-mbid",
-            {"root": str(self.music), "dry_run": True},
-        )
+        with mock.patch.object(app_module.beets_client, "get_artist_folder_album_mbids", return_value=[]):
+            resp = self._post(
+                "/api/clean/artist-folders/stamp-mbid",
+                {"root": str(self.music), "dry_run": True},
+            )
         data = resp.get_json()
         self.assertEqual(resp.status_code, 200, data)
         self.assertTrue(data["ok"])
@@ -262,6 +285,7 @@ class ArtistFolderMergeIdentityTests(unittest.TestCase):
         self.patches = [
             mock.patch.object(app_module, "MUSIC_ROOT", self.music),
             mock.patch.object(app_module, "_MUSIC_LIBRARY_ROOT", str(self.music)),
+            mock.patch.object(app_module.beets_client, "get_artist_folder_inventory", side_effect=_fake_folder_inventory),
         ]
         for patch in self.patches:
             patch.start()
@@ -467,6 +491,7 @@ class StampMbidPlainNameDuplicateFingerprintTests(unittest.TestCase):
         self.patches = [
             mock.patch.object(app_module, "MUSIC_ROOT", self.music),
             mock.patch.object(app_module, "_MUSIC_LIBRARY_ROOT", str(self.music)),
+            mock.patch.object(app_module.beets_client, "get_artist_folder_inventory", side_effect=_fake_folder_inventory),
         ]
         for patch in self.patches:
             patch.start()

@@ -98,8 +98,13 @@ class MaintenanceRunnerTests(unittest.TestCase):
         self.assertIn("_library_health_payload", self.runner_source)
         self.assertIn("_artist_id_alias_groups()", self.runner_source)
         self.assertNotIn("clean_artist_folders_scan()", self.runner_source)
-        self.assertIn("clean_artist_folders_stamp_mbid()", self.runner_source)
-        self.assertIn('json={"root": str(MUSIC_ROOT), "dry_run": False, "compact_log": True}', self.runner_source)
+        # ARCH-020 / Clean All resume reattachment follow-up: the artist
+        # folder merge step now calls the shared step helper directly (so
+        # it can persist/detect an engine operation_id across a process
+        # restart) instead of invoking the stamp-mbid route via a
+        # synthetic Flask request context.
+        self.assertIn("_maintenance_artist_folder_merge_step(", self.runner_source)
+        self.assertIn("resume_operation_id=resume_op_id", self.runner_source)
         self.assertIn('"stamp-mbid-folders"', self.runner_source)
         self.assertIn("_maintenance_final_verification", self.app_source)
         self.assertIn("_maintenance_final_verification(", self.runner_source)

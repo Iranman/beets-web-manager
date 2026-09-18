@@ -15,6 +15,31 @@ ROOT = Path(__file__).resolve().parents[1]
 APP_SOURCE = ROOT / "app.py"
 
 
+class _FakeBeetsClientForFolderInventory:
+    """ARCH-020: _scan_artist_folder_groups() now asks the engine (via
+    beets_client.get_artist_folder_inventory()) for the folder listing
+    instead of walking MUSIC_ROOT itself. This test double stands in for
+    that engine call by doing the equivalent real-filesystem walk against
+    the test's own tempdir fixture -- it is a test-only substitute for
+    what the real engine would report, not a change to what's under test
+    (folder grouping/key logic)."""
+
+    def get_artist_folder_inventory(self, root):
+        root_path = Path(root)
+        out = []
+        for child in sorted(root_path.iterdir(), key=lambda p: p.name.casefold()):
+            if not child.is_dir() or child.name.startswith("."):
+                continue
+            audio, subfolders = 0, 0
+            for p in child.rglob("*"):
+                if p.is_dir():
+                    subfolders += 1
+                elif p.is_file():
+                    audio += 1
+            out.append({"name": child.name, "path": str(child), "audio_files": audio, "subfolders": subfolders})
+        return out
+
+
 def _load_namespace(apply_stub=None):
     tree = get_app_ast()
     names = {
@@ -28,7 +53,7 @@ def _load_namespace(apply_stub=None):
         "Any": Any, "Dict": Dict, "List": List, "Optional": Optional,
         "Path": Path, "re": re, "unicodedata": unicodedata, "defaultdict": defaultdict,
         "_s": lambda value: (value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value or "")),
-        "_count_audio_files": lambda folder: {"audio": 0, "folders": 0},
+        "beets_client": _FakeBeetsClientForFolderInventory(),
         "_artist_folder_db_counts": lambda: {},
         "_mb_canonical_for_artist_entries": lambda entries, key: {},
     }

@@ -832,19 +832,41 @@ def _start_background_beet_version_refresh() -> None:
     thread.start()
 
 
+def _beet_diagnostics_snapshot_usable(now: Optional[float] = None) -> bool:
+    """Centralizes "usable diagnostics snapshot": a cache object exists AND
+    is still within _BEET_VERSION_CACHE_MAX_STALE_SECONDS. A cache object
+    that merely exists but has aged past the max-stale window is not
+    trustworthy ground truth -- it may reflect a `beet` that broke long
+    ago -- and must be treated the same as no cache at all by every caller
+    that decides whether the current diagnostics answer can be trusted.
+    Shared by _cached_beet_version_snapshot() (which fabricates a pending
+    placeholder instead of returning an untrustworthy snapshot) and
+    _beet_diagnostics_pending() (the capability gate's pending check)."""
+    if now is None:
+        now = time.monotonic()
+    with _BEET_VERSION_CACHE_LOCK:
+        cache = _BEET_VERSION_CACHE
+        cache_ts = _BEET_VERSION_CACHE_TS
+    return cache is not None and (now - cache_ts) < _BEET_VERSION_CACHE_MAX_STALE_SECONDS
+
+
 def _beet_diagnostics_pending() -> bool:
     """Read-only, side-effect-free: true only while a background refresh is
-    actively in flight AND there is no cached snapshot (not even a stale
-    one) to fall back on -- i.e. we genuinely do not yet know the answer,
-    as opposed to "diagnostics are merely due for a refresh." Never starts
-    a probe itself, so it is safe to call from a hot path (BUG-3's
-    capability gate) without side effects."""
+    actively in flight AND there is no currently-usable cached snapshot
+    (see _beet_diagnostics_snapshot_usable()) to fall back on -- i.e. we
+    genuinely do not yet know the answer, as opposed to "diagnostics are
+    merely due for a refresh." A cache object existing but past the
+    max-stale window does NOT count as usable here: a refresh actively
+    trying to replace stale/unknown diagnostics must still report
+    "pending" rather than let the capability gate trust that stale
+    snapshot as settled truth. Never starts a probe itself, so it is safe
+    to call from a hot path (BUG-3's capability gate) without side
+    effects."""
     with _BEET_VERSION_REFRESH_LOCK:
         refresh_active = _BEET_VERSION_REFRESH_ACTIVE
     if not refresh_active:
         return False
-    with _BEET_VERSION_CACHE_LOCK:
-        return _BEET_VERSION_CACHE is None
+    return not _beet_diagnostics_snapshot_usable()
 
 
 def _cached_beet_version_snapshot(*, force: bool = False, max_wait_seconds: float = 0.0) -> dict[str, Any]:
@@ -6969,6 +6991,16 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             res = transaction_engine.rollback_existing_album_reconcile(
                 _txn_store, op_id,
                 db_path=LIB_PATH,
+                music_allowed_roots=[music_root_env],
+            )
+            code = 200 if res.get("ok") else 400
+            self._send_json(code, res)
+            return
+
+        if path == "/artists/folders/inventory":
+            music_root_env = _resolved_music_root()
+            res = transaction_engine.list_artist_folder_inventory(
+                body,
                 music_allowed_roots=[music_root_env],
             )
             code = 200 if res.get("ok") else 400

@@ -326,32 +326,6 @@ def seed_disposable_library(config_dir: Path, music_dir: Path) -> dict:
     )
     orphan_album.add(lib)
 
-    # Hotfix v0.1.17 (BUG-4/5/6): one album with a single, consistent,
-    # non-blank mb_albumartistid whose folder name does not yet carry that
-    # MBID suffix, so _engine_stamp_artist_folder_scan() produces a real
-    # MBID-stamping candidate (a folder rename/move) for
-    # /api/clean/artist-folders/stamp-mbid to act on -- the exact
-    # production incident's own workflow.
-    stamp_mbid = "88888888-8888-8888-8888-888888888888"
-    stamp_dir = music_dir / "V0117 Stamp Artist" / "V0117 Stamp Album"
-    stamp_dir.mkdir(parents=True, exist_ok=True)
-    stamp_track_path = stamp_dir / "01 - Stamp Track.wav"
-    stamp_track_path.write_bytes(_real_wav_bytes(freq=475))
-    stamp_album = bl.Album(
-        lib, albumartist="V0117 Stamp Artist", album="V0117 Stamp Album", year=2024,
-        mb_albumartistid=stamp_mbid,
-    )
-    stamp_album.add(lib)
-    stamp_item = bl.Item(
-        albumartist="V0117 Stamp Artist", album="V0117 Stamp Album",
-        artist="V0117 Stamp Artist", title="Stamp Track",
-        track=1, disc=1, year=2024, album_id=stamp_album.id,
-        path=str(stamp_track_path).encode("utf-8"),
-        mb_albumartistid=stamp_mbid,
-        length=1.0,
-    )
-    stamp_item.add(lib)
-
     lib._close()
 
     return {
@@ -372,10 +346,6 @@ def seed_disposable_library(config_dir: Path, music_dir: Path) -> dict:
         "normalize_album_id": int(normalize_album.id),
         "normalize_item_id": int(normalize_item.id),
         "orphan_album_id": int(orphan_album.id),
-        "stamp_album_id": int(stamp_album.id),
-        "stamp_item_id": int(stamp_item.id),
-        "stamp_source_dir": str(stamp_dir.parent),
-        "stamp_mbid": stamp_mbid,
     }
 
 
@@ -2554,17 +2524,22 @@ def run_v0117_hotfix_scenarios(client: "HttpClient", engine_container: str, engi
        request at all -- a regression back to the old synchronous design
        would still show up as a measurably slower, subprocess-shaped
        response even against a warm/fast `beet`.
-    2. (BUG-4/BUG-5/BUG-6) A long artist-folder-reconcile apply whose
-       client-side HTTP response is lost must still complete exactly once
-       on the real engine, with the real Web Manager job recovering the
-       true outcome via transaction polling instead of reporting a false
-       failure or re-applying. main() sets
+    2. (BUG-4/BUG-5/BUG-6 + ARCH-020) A long artist-folder-reconcile apply
+       whose client-side HTTP response is lost must still complete exactly
+       once on the real engine, with the real Web Manager job recovering
+       the true outcome via transaction polling instead of reporting a
+       false failure or re-applying -- exercised through the REAL
+       operator-facing /api/clean/artist-folders/stamp-mbid route (not a
+       bypass), with beets-web-manager carrying no local media mount in
+       this topology, proving ARCH-020's engine-side candidate-discovery
+       fix actually works end-to-end. main() sets
        BEETS_ARTIST_RECONCILE_TIMEOUT_SECONDS to an artificially tiny
-       value for this entire acceptance run so the Web Manager's own
+       value for this entire acceptance run, and the request also sets the
+       artist_reconcile_slow_apply acceptance failpoint (a deterministic
+       ACCEPTANCE_MODE-gated server-side delay), so the Web Manager's own
        client-side call always times out locally well before the real
-       (fast, in this fixture) engine-side move finishes -- the same code
-       path production hit with a slow engine and a normal timeout,
-       exercised here with a normal engine and a tiny timeout.
+       engine-side move finishes -- the same code path production hit with
+       a slow engine and a normal timeout, exercised here deterministically.
     """
 
     def scenario_pass(name: str) -> None:
@@ -2594,102 +2569,186 @@ def run_v0117_hotfix_scenarios(client: "HttpClient", engine_container: str, engi
         else:
             scenario_pass(f"v0117-status-fast ({status_probe['elapsed']*1000:.0f}ms, diagnostics_pending={status_probe['body'].get('diagnostics_pending')})")
 
-    print("==> [Hotfix v0.1.17] Artist-folder reconcile Apply survives a lost response (BUG-4/5/6)...")
-    source_name = "V0117 Reconcile Source"
-    target_name = "V0117 Reconcile Target"
-    stamp_source_dir = music_dir / source_name
-
+    print("==> [Hotfix v0.1.17 + ARCH-020] Artist-folder MBID stamping via the REAL /api/clean/artist-folders/stamp-mbid route, Apply surviving a lost response (BUG-4/5/6)...")
+    # ARCH-020 fix proof: this now goes through the actual operator-facing
+    # HTTP route -- beets-web-manager has NO media mount in this real
+    # two-service topology (verified by web_manager_isolation_check() /
+    # verify_web_manager_isolation() elsewhere in this script), so candidate
+    # discovery for this request can only have happened engine-side, via
+    # the new /artists/folders/inventory + stamp_mbid Plan discovery path.
+    #
     # Created fresh, immediately before use, directly on the real engine
-    # container's own filesystem view rather than relying on a fixture
-    # seeded minutes earlier at acceptance-run startup -- this scenario
-    # runs after many other real scenarios that legitimately scan/clean
-    # the same shared disposable library, so a folder seeded that early
-    # is not guaranteed to still be exactly where it started by the time
-    # this runs. No Beets DB row backs this folder, and the candidate
-    # below makes no MBID identity claim at all: with no pre-existing
-    # target directory (a pure rename, not a merge) and no caller-supplied
-    # MBID, _artist_folder_identity_decision()'s policy (SEC-002 Wave 27)
-    # allows it unconditionally -- an MBID claim with no real MusicBrainz
-    # recording-credit evidence behind it would correctly be sent to
-    # review instead, which this scenario is not testing.
-    create_source_script = (
+    # container's own filesystem/DB via beets.library -- the same
+    # established reason _every_ other fixture this exact scenario used to
+    # build ad hoc followed (see the removed BUG-4/5/6 predecessor of this
+    # scenario): this runs after run_wave34_scenarios(), whose real `beet
+    # update`/`beet move` subprocess calls reorganize every album in the
+    # ENTIRE shared disposable library according to Beets' own path
+    # templates -- empirically confirmed (via a bisection of diagnostic
+    # checkpoints across this file's full scenario list) to silently move
+    # or remove an early-seeded artist folder like this one before this
+    # scenario ever got to use it. A single mb_albumartistid with no
+    # existing folder rename applied is what makes the real route's own
+    # candidate discovery find it deterministically, without any
+    # fingerprint evidence needed (>=75% majority-MBID match is enough).
+    stamp_mbid = "88888888-8888-8888-8888-888888888888"
+    source_name = "V0117 Stamp Artist"
+    stamp_source_dir = music_dir / source_name
+    expected_target_name = f"{source_name} ({stamp_mbid})"
+    expected_target_dir = music_dir / expected_target_name
+    create_fixture_script = (
         "import pathlib\n"
-        f"p = pathlib.Path('/data/media/music/{source_name}')\n"
+        "import beets.library as bl\n"
+        f"p = pathlib.Path('/data/media/music/{source_name}/V0117 Stamp Album')\n"
         "p.mkdir(parents=True, exist_ok=True)\n"
-        "(p / 'placeholder.txt').write_text('v0117 acceptance fixture')\n"
+        "track = p / '01 - Stamp Track.wav'\n"
+        "track.write_bytes(b'RIFF....WAVEfmt acceptance-fixture-not-real-audio')\n"
+        "lib = bl.Library('/config/musiclibrary.blb', '/data/media/music')\n"
+        f"album = bl.Album(lib, albumartist='{source_name}', album='V0117 Stamp Album', year=2024, mb_albumartistid='{stamp_mbid}')\n"
+        "album.add(lib)\n"
+        "item = bl.Item(\n"
+        f"    albumartist='{source_name}', album='V0117 Stamp Album', artist='{source_name}', title='Stamp Track',\n"
+        "    track=1, disc=1, year=2024, album_id=album.id, path=str(track).encode('utf-8'),\n"
+        f"    mb_albumartistid='{stamp_mbid}', length=1.0,\n"
+        ")\n"
+        "item.add(lib)\n"
+        "lib._close()\n"
+        "print('ok')\n"
     )
-    create_res = run(["docker", "exec", "-i", engine_container, "python3", "-"], input=create_source_script)
-    if create_res.returncode != 0:
-        scenario_fail("v0117-artist-reconcile-resilient-apply", f"could not create source fixture on the real engine filesystem: {create_res.stderr or create_res.stdout}")
+    create_res = run(["docker", "exec", "-i", engine_container, "python3", "-"], input=create_fixture_script)
+    if create_res.returncode != 0 or "ok" not in create_res.stdout:
+        scenario_fail("v0117-artist-reconcile-resilient-apply", f"could not create the stamp fixture on the real engine filesystem/DB: {create_res.stderr or create_res.stdout}")
         return
 
-    # Deliberately does NOT go through /api/clean/artist-folders/stamp-mbid:
-    # that route's candidate discovery (_stamp_artist_folder_scan()) walks
-    # the local filesystem from inside beets-web-manager, which has no
-    # media mount in the real shipped topology (see docs/TECHNICAL_DEBT.md
-    # ARCH-020 -- a separate, pre-existing gap this hotfix does not fix).
-    # This calls app.py's real plan_artist_folder_reconcile()/
-    # _apply_artist_folder_reconcile_resilient() directly, in-process,
-    # inside the real running beets-web-manager container -- exercising
-    # the exact resilience mechanism this hotfix adds, via the same real
-    # beets_client -> engine IPC production code uses, with an explicit
-    # candidate (the same shape _run_artist_folder_reconcile_for_alias_merge()
-    # already uses in production) instead of a locally-scanned one.
-    plan_apply_script = (
-        "import json, sys\n"
-        "import app as app_module\n"
-        "candidate = {\n"
-        "    'source_path': '/data/media/music/" + source_name + "',\n"
-        "    'target_path': '/data/media/music/" + target_name + "',\n"
-        "    'source_name': '" + source_name + "',\n"
-        "    'target_name': '" + target_name + "',\n"
-        "}\n"
-        "plan_res = app_module.beets_client.plan_artist_folder_reconcile(\n"
-        "    {'root': '/data/media/music', 'mode': 'scan_merge', 'candidates': [candidate]}\n"
-        ")\n"
-        "if not plan_res.get('ok') or not plan_res.get('operation_id'):\n"
-        "    print(json.dumps({'plan': plan_res, 'apply': None, 'log': []}))\n"
-        "    sys.exit(0)\n"
-        "log = []\n"
-        "apply_res = app_module._apply_artist_folder_reconcile_resilient(\n"
-        "    plan_res['operation_id'], log, _acceptance_failpoint='artist_reconcile_slow_apply',\n"
-        ")\n"
-        "print(json.dumps({'plan': plan_res, 'apply': apply_res, 'log': log}))\n"
+    status, body = client.request(
+        "POST", "/api/clean/artist-folders/stamp-mbid",
+        json_body={
+            "root": "/data/media/music",
+            "dry_run": False,
+            # Test-only deterministic delay hook (ACCEPTANCE_MODE-gated,
+            # never active in a real deployment) -- forces the exact same
+            # "Web Manager's own client-side timeout fires while the
+            # engine keeps executing normally" race this hotfix fixes,
+            # instead of relying on a real host-load-dependent slow engine.
+            "_acceptance_failpoint": "artist_reconcile_slow_apply",
+        },
+        timeout=15,
     )
-    res = run(["docker", "exec", "-i", web_container, "python3", "-"], input=plan_apply_script)
-    if res.returncode != 0:
-        scenario_fail("v0117-artist-reconcile-resilient-apply", f"in-container plan/apply script failed: {res.stderr or res.stdout}")
-    else:
+    if status != 200 or not body.get("ok") or not body.get("job_id"):
+        scenario_fail("v0117-artist-reconcile-resilient-apply", f"stamp-mbid request rejected by the real route: {status} {body}")
+        return
+
+    try:
+        job_result = client.wait_job(body["job_id"], timeout=60)
+    except TimeoutError as ex:
+        scenario_fail("v0117-artist-reconcile-resilient-apply", f"job did not complete: {ex}")
+        return
+
+    log_lines = job_result.get("log") or []
+    joined_log = "\n".join(log_lines)
+    renamed_once = not stamp_source_dir.exists() and expected_target_dir.exists() and expected_target_dir.is_dir()
+    lost_response_evidence = "Apply response was lost" in joined_log or "Apply was already accepted" in joined_log
+    recovered_evidence = "confirmed Completed via transaction status poll" in joined_log or "recovered_via_poll" in joined_log
+    apply_call_count = joined_log.count("Apply response was lost")
+
+    if job_result.get("status") != "success":
+        scenario_fail("v0117-artist-reconcile-resilient-apply", f"job did not report success: {job_result.get('status')}; log={log_lines}")
+    elif "No artist folders need MB ID stamping" in joined_log:
+        scenario_fail(
+            "v0117-artist-reconcile-resilient-apply",
+            "candidate discovery found nothing -- the real engine-backed scan "
+            f"(ARCH-020) did not find the seeded stamp fixture: log={log_lines}",
+        )
+    elif not lost_response_evidence:
+        scenario_fail(
+            "v0117-artist-reconcile-resilient-apply",
+            f"expected the lost-response path to have been exercised (BEETS_ARTIST_RECONCILE_TIMEOUT_SECONDS=1 "
+            f"for this run, plus the artist_reconcile_slow_apply failpoint): log={log_lines}",
+        )
+    elif not recovered_evidence:
+        scenario_fail("v0117-artist-reconcile-resilient-apply", f"expected recovery via authoritative transaction poll: log={log_lines}")
+    elif apply_call_count > 1:
+        scenario_fail("v0117-artist-reconcile-resilient-apply", f"Apply's lost-response path was logged {apply_call_count} times -- expected exactly once: log={log_lines}")
+    elif not renamed_once:
         try:
-            outcome = json.loads(res.stdout.strip().splitlines()[-1])
+            actual_siblings = sorted(p.name for p in stamp_source_dir.parent.iterdir())
         except Exception as ex:
-            scenario_fail("v0117-artist-reconcile-resilient-apply", f"could not parse script output: {ex}: {res.stdout!r}")
-            outcome = None
-        if outcome is not None:
-            plan_res = outcome.get("plan") or {}
-            apply_res = outcome.get("apply") or {}
-            log_lines = outcome.get("log") or []
-            joined_log = "\n".join(log_lines)
-            if not plan_res.get("ok") or not plan_res.get("operation_id"):
-                scenario_fail("v0117-artist-reconcile-resilient-apply", f"plan did not produce an operation_id: {plan_res}")
-            else:
-                renamed_dir = music_dir / target_name
-                renamed_once = not stamp_source_dir.exists() and renamed_dir.exists() and renamed_dir.is_dir()
-                gave_up_falsely = not apply_res.get("ok") and not apply_res.get("recovered_via_poll") and "still_running" not in apply_res
-                if gave_up_falsely:
-                    scenario_fail("v0117-artist-reconcile-resilient-apply", f"apply failed without ever recovering via transaction polling: {apply_res}; log={joined_log}")
-                elif not apply_res.get("ok"):
-                    scenario_fail("v0117-artist-reconcile-resilient-apply", f"apply did not report success: {apply_res}; log={joined_log}")
-                elif not renamed_once:
-                    scenario_fail("v0117-artist-reconcile-resilient-apply", f"folder was not moved exactly once on disk: source_exists={stamp_source_dir.exists()} target_exists={renamed_dir.exists()}")
-                elif "recovered_via_poll" not in apply_res:
-                    scenario_fail("v0117-artist-reconcile-resilient-apply", f"expected the lost-response/poll-recovery path to have been exercised (BEETS_ARTIST_RECONCILE_TIMEOUT_SECONDS=0.01 for this run): {apply_res}")
+            actual_siblings = [f"<could not list {stamp_source_dir.parent}: {ex}>"]
+        scenario_fail(
+            "v0117-artist-reconcile-resilient-apply",
+            f"expected folder change not found on the real engine filesystem exactly once: "
+            f"source_exists={stamp_source_dir.exists()} target_exists={expected_target_dir.exists()} "
+            f"(target={expected_target_dir}); actual entries under {stamp_source_dir.parent}: {actual_siblings}; "
+            f"log={log_lines}",
+        )
+    else:
+        scenario_pass(
+            f"v0117-artist-reconcile-resilient-apply (real /api/clean/artist-folders/stamp-mbid route: Web "
+            f"Manager received the request with no local media mount, candidate discovery + Plan happened "
+            f"engine-side (ARCH-020), Apply's own response was lost exactly once, recovered via authoritative "
+            f"transaction poll, folder renamed exactly once on the engine filesystem to {expected_target_name!r}; "
+            f"log tail: {log_lines[-3:] if log_lines else 'n/a'})"
+        )
+
+    # ARCH-020 route-level coverage (independent review follow-up): the
+    # stamp-mbid scenario above is the one destructive, full end-to-end
+    # proof. These two are deliberately lightweight -- no new fixture, no
+    # Apply, no failpoint -- they only need to prove that
+    # /api/clean/artist-folders/scan and /api/clean/artist-folders/merge
+    # can obtain their candidate-discovery inventory via the engine instead
+    # of failing because /data/media/music is absent inside the
+    # beets-web-manager container (which has no media mount in this real
+    # shipped topology, same as proven above). Both real routes call
+    # _scan_artist_folder_groups(..., use_musicbrainz=True), which does a
+    # real synchronous MusicBrainz network lookup per discovered candidate
+    # group -- and by this point in the run, the shared disposable library
+    # already has many real artist folders from every earlier scenario, so
+    # a generous timeout (not the usual few seconds) is genuinely needed
+    # here; this is real MB API latency, not a hang. Both calls are also
+    # wrapped defensively so a slow/unavailable MusicBrainz API reports a
+    # normal [FAIL] for these two non-critical checks instead of crashing
+    # the entire acceptance run via an uncaught socket TimeoutError.
+    print("==> [ARCH-020] /api/clean/artist-folders/scan obtains engine-side inventory with no Web Manager media mount...")
+    try:
+        status, body = client.request("POST", "/api/clean/artist-folders/scan", json_body={"root": "/data/media/music"}, timeout=30)
+    except Exception as ex:
+        scenario_fail("v0117-arch020-scan-route-no-media-mount", f"scan request failed: {ex}")
+        status, body = None, {}
+    if status is not None:
+        if status != 200 or not body.get("ok") or not body.get("job_id"):
+            scenario_fail("v0117-arch020-scan-route-no-media-mount", f"scan request rejected: {status} {body}")
+        else:
+            try:
+                scan_job_result = client.wait_job(body["job_id"], timeout=180)
+            except TimeoutError as ex:
+                scenario_fail("v0117-arch020-scan-route-no-media-mount", f"scan job did not complete: {ex}")
+                scan_job_result = None
+            if scan_job_result is not None:
+                scan_log = scan_job_result.get("log") or []
+                joined_scan_log = "\n".join(scan_log)
+                if scan_job_result.get("status") != "success":
+                    scenario_fail("v0117-arch020-scan-route-no-media-mount", f"scan job did not succeed: {scan_job_result.get('status')}; log={scan_log}")
+                elif "does not exist" in joined_scan_log.lower() or "no such file" in joined_scan_log.lower():
+                    scenario_fail("v0117-arch020-scan-route-no-media-mount", f"scan appears to have tried a local filesystem walk: log={scan_log}")
                 else:
-                    scenario_pass(
-                        f"v0117-artist-reconcile-resilient-apply (Apply's own response was lost as expected, "
-                        f"recovered via transaction poll, folder moved exactly once to {target_name!r}; "
-                        f"log tail: {log_lines[-3:] if log_lines else 'n/a'})"
-                    )
+                    scenario_pass("v0117-arch020-scan-route-no-media-mount (real /api/clean/artist-folders/scan route completed via engine-side inventory)")
+
+    print("==> [ARCH-020] /api/clean/artist-folders/merge (dry run) obtains engine-side inventory with no Web Manager media mount...")
+    try:
+        # dry_run=True still runs the real (synchronous, in-request)
+        # _apply_artist_folder_groups()/_scan_artist_folder_groups() scan --
+        # same real-MusicBrainz-lookup cost as the scan route above.
+        status, body = client.request(
+            "POST", "/api/clean/artist-folders/merge", json_body={"root": "/data/media/music", "dry_run": True}, timeout=180,
+        )
+    except Exception as ex:
+        scenario_fail("v0117-arch020-merge-route-no-media-mount", f"merge dry-run request failed: {ex}")
+        status, body = None, {}
+    if status is not None:
+        if status != 200 or not body.get("ok"):
+            scenario_fail("v0117-arch020-merge-route-no-media-mount", f"merge dry-run request rejected: {status} {body}")
+        else:
+            scenario_pass("v0117-arch020-merge-route-no-media-mount (real /api/clean/artist-folders/merge dry run completed via engine-side inventory)")
 
 
 def run_wave34_scenarios(client: "HttpClient", db_path: str, fixture: dict) -> None:
