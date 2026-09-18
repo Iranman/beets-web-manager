@@ -20,6 +20,7 @@ from backend.transaction_engine import (
     execute_artist_folder_reconcile_apply,
     rollback_artist_folder_reconcile,
     _engine_stamp_artist_folder_scan,
+    list_artist_folder_inventory,
 )
 
 ITEMS_SCHEMA = """
@@ -1022,6 +1023,67 @@ class ResilientApplyAgainstLostResponseTests(unittest.TestCase):
         self.assertTrue(result.get("recovered_via_poll"))
         apply_mock.assert_called_once()
         get_tx_mock.assert_called()
+
+
+class ListArtistFolderInventoryTests(unittest.TestCase):
+    """ARCH-020: the read-only Control Agent endpoint backing engine-side
+    artist-folder candidate discovery for Web Manager (which has no local
+    media mount in the supported two-service deployment)."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.root = Path(self._tmpdir.name) / "music"
+        self.root.mkdir()
+
+    def test_lists_immediate_subfolders_with_audio_counts(self):
+        artist = self.root / "Artist A"
+        artist.mkdir()
+        (artist / "track1.mp3").write_bytes(b"x")
+        (artist / "track2.mp3").write_bytes(b"x")
+        (artist / "subdir").mkdir()
+        (self.root / ".hidden").mkdir()
+        (self.root / "not-a-folder.txt").write_bytes(b"x")
+
+        res = list_artist_folder_inventory({"root": str(self.root)}, music_allowed_roots=[str(self.root)])
+
+        self.assertTrue(res.get("ok"), res)
+        names = {f["name"] for f in res["folders"]}
+        self.assertEqual(names, {"Artist A"})
+        entry = res["folders"][0]
+        self.assertEqual(entry["audio_files"], 2)
+        self.assertEqual(entry["subfolders"], 1)
+        self.assertEqual(entry["path"], str(artist))
+
+    def test_rejects_root_outside_allowed_roots(self):
+        outside = Path(self._tmpdir.name) / "outside"
+        outside.mkdir()
+        res = list_artist_folder_inventory({"root": str(outside)}, music_allowed_roots=[str(self.root)])
+        self.assertFalse(res.get("ok"))
+        self.assertEqual(res.get("code"), "artist_reconcile_path_out_of_root")
+
+    def test_rejects_nonexistent_root(self):
+        res = list_artist_folder_inventory(
+            {"root": str(self.root / "does-not-exist")}, music_allowed_roots=[str(self.root)],
+        )
+        self.assertFalse(res.get("ok"))
+        self.assertEqual(res.get("code"), "artist_reconcile_invalid_root")
+
+    def test_requires_root(self):
+        res = list_artist_folder_inventory({}, music_allowed_roots=[str(self.root)])
+        self.assertFalse(res.get("ok"))
+        self.assertEqual(res.get("code"), "artist_reconcile_invalid_root")
+
+    def test_rejects_symlink_component(self):
+        real_dir = Path(self._tmpdir.name) / "real"
+        real_dir.mkdir()
+        link = self.root / "linked"
+        try:
+            link.symlink_to(real_dir, target_is_directory=True)
+        except (OSError, NotImplementedError) as ex:
+            self.skipTest(f"symlink creation unavailable: {ex}")
+        res = list_artist_folder_inventory({"root": str(link)}, music_allowed_roots=[str(self.root)])
+        self.assertFalse(res.get("ok"))
 
 
 if __name__ == "__main__":

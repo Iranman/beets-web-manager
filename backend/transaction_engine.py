@@ -8142,15 +8142,17 @@ def list_artist_folder_inventory(
     if not raw_root:
         return {"ok": False, "error": "root is required", "code": "artist_reconcile_invalid_root"}
 
-    root_role = _resolve_path_role(raw_root, allowed_roots)
-    if root_role is None:
-        return {"ok": False, "error": "root is outside allowed music library roots", "code": "artist_reconcile_path_out_of_root"}
+    # Textual normpath+prefix containment check, in addition to the
+    # resolve()-based one inside validate_path_under_allowed_roots() below
+    # -- the idiom CodeQL's py/path-injection query recognizes as a
+    # sanitizing barrier for every filesystem call on root_path below (see
+    # the identical rationale on create_artist_folder_reconcile_plan()).
     if not _normpath_within_roots(raw_root, allowed_roots):
         return {"ok": False, "error": "root is outside allowed music library roots", "code": "artist_reconcile_path_out_of_root"}
 
-    root_path = Path(raw_root)
-    if _path_has_symlink_under(root_path, Path(allowed_roots[0])):
-        return {"ok": False, "error": "root contains symlink components", "code": "artist_reconcile_symlink_rejected"}
+    root_path = validate_path_under_allowed_roots(raw_root, allowed_roots, reject_symlinks=True)
+    if root_path is None:
+        return {"ok": False, "error": "root is outside allowed music library roots or contains symlink components", "code": "artist_reconcile_path_out_of_root"}
     if not root_path.exists() or not root_path.is_dir():
         return {"ok": False, "error": "root directory does not exist", "code": "artist_reconcile_invalid_root"}
 
