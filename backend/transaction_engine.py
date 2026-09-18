@@ -8142,20 +8142,29 @@ def list_artist_folder_inventory(
     if not raw_root:
         return {"ok": False, "error": "root is required", "code": "artist_reconcile_invalid_root"}
 
-    # Textual normpath+prefix containment check, in addition to the
-    # resolve()-based one inside validate_path_under_allowed_roots() below
-    # -- the idiom CodeQL's py/path-injection query recognizes as a
-    # sanitizing barrier for every filesystem call on root_path below (see
-    # the identical rationale on create_artist_folder_reconcile_plan()).
-    if not _normpath_within_roots(raw_root, allowed_roots):
+    # Mirrors _derive_artist_folder_identity()'s containment proof exactly
+    # (see its docstring re: CodeQL #1016-#1019): the containment check
+    # (os.path.normpath + startswith) and every filesystem call below must
+    # run against the SAME string variable (root_norm), not a Path object
+    # separately converted from it -- CodeQL's py/path-injection dataflow
+    # does not reliably carry a proven-safe state across that conversion.
+    root_norm = os.path.normpath(raw_root)
+    contained = False
+    matched_root = ""
+    for root in allowed_roots:
+        root_root_norm = os.path.normpath(str(root))
+        if root_norm == root_root_norm or root_norm.startswith(root_root_norm + os.sep):
+            contained = True
+            matched_root = root_root_norm
+            break
+    if not contained:
         return {"ok": False, "error": "root is outside allowed music library roots", "code": "artist_reconcile_path_out_of_root"}
-
-    root_path = validate_path_under_allowed_roots(raw_root, allowed_roots, reject_symlinks=True)
-    if root_path is None:
-        return {"ok": False, "error": "root is outside allowed music library roots or contains symlink components", "code": "artist_reconcile_path_out_of_root"}
-    if not root_path.exists() or not root_path.is_dir():
+    if _path_has_symlink_under(Path(root_norm), Path(matched_root)):
+        return {"ok": False, "error": "root contains symlink components", "code": "artist_reconcile_symlink_rejected"}
+    if not os.path.exists(root_norm) or not os.path.isdir(root_norm):
         return {"ok": False, "error": "root directory does not exist", "code": "artist_reconcile_invalid_root"}
 
+    root_path = Path(root_norm)
     folders = _engine_list_artist_folders(root_path)
     return {"ok": True, "root": str(root_path), "folders": folders}
 
