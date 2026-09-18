@@ -33,9 +33,15 @@ CREATE TABLE IF NOT EXISTS albums (
     mb_albumid TEXT,
     mb_releasegroupid TEXT,
     year INTEGER,
-    path BLOB,
     artpath BLOB
 );
+-- Real Beets schema (verified against actual `beets` package output, hotfix
+-- v0.1.17 follow-up) has NO `albums.path` column -- only `items.path` and
+-- `albums.artpath`. A prior version of this fixture synthetically added one,
+-- which masked a real production bug: create_artist_folder_reconcile_plan()
+-- querying a nonexistent `albums.path` column, raising
+-- sqlite3.OperationalError against every real Beets library. Do not add it
+-- back.
 
 CREATE TABLE IF NOT EXISTS items (
     id INTEGER PRIMARY KEY,
@@ -112,12 +118,14 @@ class Wave21BaseTest(unittest.TestCase):
         con.close()
 
     def _insert_album(self, album_id: int, name: str, artist: str, rel_folder: str, mbid: str = ""):
-        p = self.music_root / rel_folder
+        # Real Beets schema has no albums.path column -- rel_folder is only
+        # used to build the item path(s) inserted separately via
+        # _insert_item(); the album row itself carries no path of its own.
         con = sqlite3.connect(self.db_path)
         con.execute(
-            "INSERT INTO albums (id, album, albumartist, albumartists, mb_albumartistid, mb_albumartistids, path) "
-            "VALUES (?,?,?,?,?,?,?)",
-            (album_id, name, artist, artist, mbid, mbid, str(p).encode("utf-8"))
+            "INSERT INTO albums (id, album, albumartist, albumartists, mb_albumartistid, mb_albumartistids) "
+            "VALUES (?,?,?,?,?,?)",
+            (album_id, name, artist, artist, mbid, mbid)
         )
         con.commit()
         con.close()
@@ -912,6 +920,108 @@ class ResilientApplyAgainstLostResponseTests(unittest.TestCase):
                 joined_log = "\n".join(captured.get("log") or [])
                 self.assertNotIn("ENGINE_OFFLINE", joined_log)
                 self.assertIn("op-7", joined_log)
+
+    def test_bad_request_fails_immediately_without_polling(self):
+        """A definite HTTP 400 means the engine already answered "no" (bad
+        operation_id/payload) -- not that the response was lost. Must never
+        enter the transaction poll loop, and must never call Apply again."""
+        apply_mock = self._patch(mock.patch.object(
+            app_module.beets_client, "apply_artist_folder_reconcile",
+            side_effect=app_module.BeetsBadRequestError(
+                "Beets API bad request: operation not in Pending/Approved state",
+                error_code="INVALID_STATE", status_code=400,
+            ),
+        ))
+        get_tx_mock = self._patch(mock.patch.object(app_module.beets_client, "get_transaction"))
+
+        log = []
+        result = app_module._apply_artist_folder_reconcile_resilient("op-400", log)
+
+        self.assertFalse(result.get("ok"))
+        self.assertEqual(result.get("error_code"), "INVALID_STATE")
+        self.assertEqual(result.get("status_code"), 400)
+        apply_mock.assert_called_once()
+        get_tx_mock.assert_not_called()
+        self.assertFalse(any("polling" in line.lower() and "response was lost" in line.lower() for line in log))
+
+    def test_auth_error_fails_immediately_without_polling(self):
+        apply_mock = self._patch(mock.patch.object(
+            app_module.beets_client, "apply_artist_folder_reconcile",
+            side_effect=app_module.BeetsAuthError(
+                "Authentication with Beets Control Agent failed: HTTP 401",
+                error_code="ENGINE_AUTH_FAILED", status_code=401,
+            ),
+        ))
+        get_tx_mock = self._patch(mock.patch.object(app_module.beets_client, "get_transaction"))
+
+        log = []
+        result = app_module._apply_artist_folder_reconcile_resilient("op-401", log)
+
+        self.assertFalse(result.get("ok"))
+        self.assertEqual(result.get("status_code"), 401)
+        apply_mock.assert_called_once()
+        get_tx_mock.assert_not_called()
+
+    def test_not_found_fails_immediately_without_polling(self):
+        apply_mock = self._patch(mock.patch.object(
+            app_module.beets_client, "apply_artist_folder_reconcile",
+            side_effect=app_module.BeetsNotFoundError(
+                "Beets API resource not found: operation_id unknown",
+                error_code="NOT_FOUND", status_code=404,
+            ),
+        ))
+        get_tx_mock = self._patch(mock.patch.object(app_module.beets_client, "get_transaction"))
+
+        log = []
+        result = app_module._apply_artist_folder_reconcile_resilient("op-404", log)
+
+        self.assertFalse(result.get("ok"))
+        self.assertEqual(result.get("status_code"), 404)
+        apply_mock.assert_called_once()
+        get_tx_mock.assert_not_called()
+
+    def test_forbidden_403_fails_immediately_without_polling(self):
+        apply_mock = self._patch(mock.patch.object(
+            app_module.beets_client, "apply_artist_folder_reconcile",
+            side_effect=app_module.BeetsAuthError(
+                "Access to Beets Control Agent forbidden: HTTP 403",
+                error_code="FORBIDDEN", status_code=403,
+            ),
+        ))
+        get_tx_mock = self._patch(mock.patch.object(app_module.beets_client, "get_transaction"))
+
+        log = []
+        result = app_module._apply_artist_folder_reconcile_resilient("op-403", log)
+
+        self.assertFalse(result.get("ok"))
+        self.assertEqual(result.get("status_code"), 403)
+        apply_mock.assert_called_once()
+        get_tx_mock.assert_not_called()
+
+    def test_ambiguous_5xx_still_polls_unlike_definite_4xx(self):
+        """A generic 5xx (not one of the specific 4xx rejection types) means
+        the engine may have started mutating before failing to answer --
+        this is transport/execution uncertainty, not a definite rejection,
+        and must still recover via the transaction poll like a
+        BeetsUnavailableError does."""
+        apply_mock = self._patch(mock.patch.object(
+            app_module.beets_client, "apply_artist_folder_reconcile",
+            side_effect=app_module.BeetsError(
+                "Beets Control Agent server error: HTTP 500", error_code="ENGINE_SERVER_ERROR", status_code=500,
+            ),
+        ))
+        get_tx_mock = self._patch(mock.patch.object(
+            app_module.beets_client, "get_transaction",
+            return_value={"ok": True, "transaction": {"status": "Completed", "operation_id": "op-500"}},
+        ))
+
+        log = []
+        result = app_module._apply_artist_folder_reconcile_resilient("op-500", log)
+
+        self.assertTrue(result.get("ok"), result)
+        self.assertTrue(result.get("recovered_via_poll"))
+        apply_mock.assert_called_once()
+        get_tx_mock.assert_called()
 
 
 if __name__ == "__main__":

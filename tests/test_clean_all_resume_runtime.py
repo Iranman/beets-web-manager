@@ -239,9 +239,17 @@ class CleanAllResumeRuntimeTests(unittest.TestCase):
         self.assertEqual(artist_alias.call_count, 0)
         self.assertEqual(self.call_order[:4], ["artist_folder_merge", "release_group_merge", "duplicates", "folder_scan"])
         self.assertIn("final_verification", self.call_order)
+        # hotfix v0.1.17 follow-up (ARCH-020 / Clean All resume reattachment):
+        # the artist_folder_merge step now calls
+        # _maintenance_artist_folder_merge_step() directly instead of
+        # spawning a child "stamp-mbid-folders" job via the HTTP route, so
+        # it can persist the engine operation_id to the Clean All checkpoint
+        # itself and detect/reattach to it on a later resume. No child job
+        # of that type is expected anymore; _stamp_artist_folder_scan() (the
+        # mocked call this test asserts on) is still invoked exactly once,
+        # confirmed by self.call_order above.
         stamp_jobs = [job for job in self.store.started if job.metadata.get("type") == "stamp-mbid-folders"]
-        self.assertEqual(len(stamp_jobs), 1)
-        self.assertEqual(stamp_jobs[0].metadata.get("path"), str(app_module.MUSIC_ROOT))
+        self.assertEqual(len(stamp_jobs), 0)
 
     def test_fresh_clean_all_still_runs_all_phases(self):
         self._patch(mock.patch.object(app_module, "_library_health_payload", return_value=_task_results()["library_health"]))
@@ -310,6 +318,93 @@ class CleanAllResumeRuntimeTests(unittest.TestCase):
 
     def _completed_ids(self, tasks):
         return {task["id"] for task in tasks if task.get("status") == "complete"}
+
+    def test_artist_folder_merge_survives_interrupted_apply_and_resumes_via_operation_id(self):
+        """hotfix v0.1.17 follow-up (requirement #3, exact 13-step spec):
+
+        1. Clean All starts.
+        2. Artist-folder Plan produces op-123.
+        3. Apply starts.
+        4. Web Manager loses the Apply HTTP response.
+        5. Engine transaction remains Running.
+        6. First job exits/is interrupted (Web Manager's own bounded poll
+           gives up locally while the engine is still Running).
+        7. Resume Clean All from persisted checkpoint.
+        8. Resume finds op-123.
+        9. Resume polls op-123.
+        10. It does NOT create another Apply.
+        11. op-123 becomes Completed.
+        12. Clean All marks the task complete and proceeds.
+        13. Apply call count == 1 across BOTH executions.
+
+        This is distinct from test_resume_from_artist_folder_merge_checkpoint_does_not_reference_undefined_root_str
+        above (PR #118's `root_str` regression, a different bug: an
+        undefined-variable crash on resume) -- that test proves the
+        interrupted run's SECOND invocation of the step doesn't crash. This
+        test proves it doesn't create a REDUNDANT engine operation/Apply
+        call for work a prior, interrupted run already started.
+        """
+        _checkpoint_with_first_four_complete(self.checkpoint)
+        self._patch(mock.patch.object(app_module, "_library_health_payload", side_effect=AssertionError("library health reran")))
+        self._patch(mock.patch.object(app_module, "_maintenance_remove_missing_file_rows", side_effect=AssertionError("missing files reran")))
+        self._patch(mock.patch.object(app_module, "_maintenance_root_folder_repair", side_effect=AssertionError("root repair reran")))
+        self._patch(mock.patch.object(app_module, "_artist_id_alias_groups", side_effect=AssertionError("artist alias reran")))
+        self._patch(mock.patch.object(app_module, "BEETS_LONG_OPERATION_POLL_SECONDS", 0.01))
+        self._patch(mock.patch.object(app_module, "BEETS_LONG_OPERATION_MAX_SECONDS", 0.05))
+        self._patch(mock.patch.object(
+            app_module, "_stamp_artist_folder_scan",
+            return_value={"candidates": [{"source_path": "/x", "target_path": "/y"}], "skipped": []},
+        ))
+        plan_mock = self._patch(mock.patch.object(
+            app_module.beets_client, "plan_artist_folder_reconcile",
+            return_value={"ok": True, "operation_id": "op-123"},
+        ))
+        apply_mock = self._patch(mock.patch.object(
+            app_module.beets_client, "apply_artist_folder_reconcile",
+            side_effect=app_module.BeetsUnavailableError("Timed out communicating with Beets Control Agent"),
+        ))
+        tx_status = {"value": "Running"}
+        get_tx_mock = self._patch(mock.patch.object(
+            app_module.beets_client, "get_transaction",
+            side_effect=lambda op_id: {"ok": True, "transaction": {"status": tx_status["value"], "operation_id": op_id}},
+        ))
+
+        # Steps 1-6: Plan produces op-123, Apply's response is lost, the
+        # engine transaction stays Running, and the bounded poll deadline
+        # is reached while it is still Running -- this run gives up locally
+        # (does not fabricate success or failure) and ends "partial".
+        first_parent, _first_data = self._post_clean_all()
+        first_last_run = _last_run(self.checkpoint)
+
+        self.assertEqual(first_parent.returncode, 0, first_parent.log)
+        self.assertTrue(first_parent.result.get("partial"), first_parent.result)
+        self.assertEqual(first_last_run["status"], "partial")
+        first_tasks = {task["id"]: task for task in first_last_run["tasks"]}
+        self.assertEqual(first_tasks["artist_folder_merge"]["status"], "running")
+        self.assertEqual(first_tasks["artist_folder_merge"].get("operation_id"), "op-123")
+        plan_mock.assert_called_once()
+        apply_mock.assert_called_once()
+
+        # Steps 7-11: resume finds op-123 (from the persisted checkpoint)
+        # and polls its authoritative status instead of creating a new Plan
+        # or calling Apply again. This time the engine reports Completed.
+        tx_status["value"] = "Completed"
+        self.call_order.clear()
+        second_parent, second_data = self._post_clean_all()
+        second_last_run = _last_run(self.checkpoint)
+
+        # Steps 12-13: the task is marked complete and Clean All proceeds;
+        # Apply (and Plan) were called exactly once across BOTH executions.
+        self.assertEqual(second_parent.returncode, 0, second_parent.log)
+        self.assertTrue(second_data.get("resumed"), second_data)
+        self.assertEqual(second_last_run["status"], "complete")
+        second_tasks = {task["id"]: task for task in second_last_run["tasks"]}
+        self.assertEqual(second_tasks["artist_folder_merge"]["status"], "complete")
+        self.assertNotIn("operation_id", second_tasks["artist_folder_merge"])
+        self.assertEqual(plan_mock.call_count, 1, "Plan must not be re-created for an already-planned operation")
+        self.assertEqual(apply_mock.call_count, 1, "Apply must never be called a second time for op-123")
+        self.assertGreaterEqual(get_tx_mock.call_count, 2, "resume must have polled op-123's authoritative status")
+        self.assertEqual(self.call_order[:3], ["release_group_merge", "duplicates", "folder_scan"])
 
 
 if __name__ == "__main__":

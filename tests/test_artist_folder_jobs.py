@@ -50,7 +50,13 @@ class ArtistFolderJobsTests(unittest.TestCase):
         self.assertIn('def _append_stamp_skipped_log', app_source)
         self.assertIn('_STAMP_DB_PATH_COLUMNS', app_source)
         self.assertIn('already stamped with the canonical MB artist folder name', app_source)
-        self.assertIn('"target_exists": new_path.exists()', app_source)
+        # ARCH-020 follow-up: existence is now checked against the engine's
+        # own folder inventory (existing_names, populated via
+        # beets_client.get_artist_folder_inventory()) rather than a local
+        # Path.exists() call -- Web Manager has no media mount in the
+        # supported two-service deployment.
+        self.assertIn('"target_exists": new_path.name in existing_names', app_source)
+        self.assertIn('beets_client.get_artist_folder_inventory', app_source)
         self.assertIn('action = "merge into" if c.get("target_exists") else "rename to"', app_source)
         self.assertIn('"skipped_total": len(skipped)', stamp_route)
         self.assertIn('_append_stamp_candidate_log(log, candidates)', stamp_route)

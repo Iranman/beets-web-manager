@@ -7626,15 +7626,44 @@ def _derive_artist_folder_identity(
     if not valid_db.exists():
         return result
     prefix = str(folder_path).encode("utf-8") + os.sep.encode("utf-8")
+    # Beets' own Item.add() does not always store an absolute items.path --
+    # under some library configurations it stores the path relative to the
+    # library's configured directory instead (confirmed by a real two-service
+    # Docker acceptance run against a freshly-created library item). A
+    # prefix match against only the absolute folder path then silently finds
+    # zero rows, and this function's caller correctly-but-incorrectly treats
+    # that as "no established identity" -- requires_review for a folder that
+    # actually has a clear, single established Artist ID. The sibling
+    # discovery function _stamp_artist_folder_album_mbid_counts() already
+    # defends against this same relative-path case; mirror it here.
+    # Use matched_root (the allowed root just proven, above, to actually
+    # contain this folder) rather than re-deriving a root from MUSIC_ROOT
+    # alone -- the real allowed root can arrive via BEETS_MUSIC_ROOT or the
+    # engine's own MUSIC_LIBRARY_PATH default too (see
+    # _resolved_music_root()), and guessing wrong here would silently
+    # disable this fallback rather than fixing anything.
+    rel_prefix: Optional[bytes] = None
+    try:
+        rel_folder = os.path.relpath(folder_norm, matched_root)
+        if rel_folder and rel_folder != "." and not rel_folder.startswith(".."):
+            rel_prefix = rel_folder.replace(os.sep, "/").encode("utf-8") + b"/"
+    except Exception:
+        rel_prefix = None
     try:
         con = sqlite3.connect(str(valid_db), timeout=10)
         con.row_factory = sqlite3.Row
         try:
-            rows = _rows_by_path_prefix(
+            rows = list(_rows_by_path_prefix(
                 con, "items JOIN albums ON items.album_id = albums.id",
                 "DISTINCT albums.id AS album_id, albums.mb_albumartistid, items.path AS item_path",
                 "items.path", prefix, path_result_col="item_path",
-            )
+            ))
+            if rel_prefix and rel_prefix != prefix:
+                rows.extend(_rows_by_path_prefix(
+                    con, "items JOIN albums ON items.album_id = albums.id",
+                    "DISTINCT albums.id AS album_id, albums.mb_albumartistid, items.path AS item_path",
+                    "items.path", rel_prefix, path_result_col="item_path",
+                ))
         finally:
             con.close()
     except sqlite3.Error as ex:
@@ -7707,10 +7736,31 @@ def _extract_recording_mbids(
         con = sqlite3.connect(str(valid_db), timeout=5)
         con.row_factory = sqlite3.Row
         try:
-            prefix = str(src_path) + os.sep
-            rows = _rows_by_path_prefix(
+            # SEC-002/ARCH-020 follow-up: prefix must be bytes (matching
+            # _rows_by_path_prefix's contract and how items.path is stored)
+            # -- a str prefix raised inside the try/except below and was
+            # silently swallowed, meaning this function never actually
+            # returned any established recording MBIDs. Also mirrors
+            # _derive_artist_folder_identity's relative-path fallback: Beets'
+            # own Item.add() does not always store items.path as absolute.
+            prefix = str(src_path).encode("utf-8") + os.sep.encode("utf-8")
+            rows = list(_rows_by_path_prefix(
                 con, "items", "DISTINCT mb_trackid, path", "path", prefix, path_result_col="path"
-            )
+            ))
+            try:
+                # matched_root: the allowed root already proven, above, to
+                # contain src_path -- see _derive_artist_folder_identity's
+                # identical fallback for why this must not be re-derived
+                # from MUSIC_ROOT alone.
+                rel_src = os.path.relpath(src_norm, matched_root)
+                if rel_src and rel_src != "." and not rel_src.startswith(".."):
+                    rel_prefix = rel_src.replace(os.sep, "/").encode("utf-8") + b"/"
+                    if rel_prefix != prefix:
+                        rows.extend(_rows_by_path_prefix(
+                            con, "items", "DISTINCT mb_trackid, path", "path", rel_prefix, path_result_col="path"
+                        ))
+            except Exception:
+                pass
             for r in rows:
                 mb_tid = str(r["mb_trackid"] or "").strip().lower()
                 if _MB_UUID_RE.match(mb_tid):
@@ -8040,6 +8090,72 @@ def _stamp_artist_folder_album_mbid_counts(
 
     album_totals = {folder_key: len(album_ids) for folder_key, album_ids in album_ids_by_folder.items()}
     return mbid_album_ids_by_folder, album_totals, ""
+
+
+def _engine_list_artist_folders(root_path: Path) -> List[Dict[str, Any]]:
+    """Engine helper: read-only inventory of immediate subfolders under root.
+
+    ARCH-020: candidate discovery for artist-folder scan/merge/stamp-mbid
+    must happen engine-side, since Web Manager has no local media mount in
+    the supported two-service deployment. This is the narrow, read-only
+    primitive that lets Web Manager rebuild its richer UI preview (name
+    grouping, MusicBrainz canonical-name suggestions, DB album/track
+    counts) without ever walking the filesystem itself -- it returns raw
+    per-folder facts only; all identity/eligibility decisions remain the
+    exclusive authority of create_artist_folder_reconcile_plan().
+    """
+    out: List[Dict[str, Any]] = []
+    folders = sorted(
+        [p for p in root_path.iterdir() if p.is_dir() and not p.name.startswith(".")],
+        key=lambda p: p.name.casefold(),
+    )
+    for f in folders:
+        audio = 0
+        subfolders = 0
+        for p in f.rglob("*"):
+            if p.is_dir():
+                subfolders += 1
+            elif p.is_file() and p.suffix.lower() in _LIBRARY_CLEANUP_AUDIO_EXTS:
+                audio += 1
+        out.append({
+            "name": f.name,
+            "path": str(f),
+            "audio_files": audio,
+            "subfolders": subfolders,
+        })
+    return out
+
+
+def list_artist_folder_inventory(
+    payload: Dict[str, Any],
+    *,
+    music_allowed_roots: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Read-only Control Agent entry point backing ARCH-020's fix.
+
+    Validates `root` against the same allowed-roots/symlink-rejection
+    primitives as create_artist_folder_reconcile_plan(), then returns the
+    engine-side folder inventory. Never mutates anything.
+    """
+    raw_root = str(payload.get("root") or "").strip()
+    allowed_roots = music_allowed_roots or [str(os.environ.get("MUSIC_ROOT", "/music"))]
+    if not raw_root:
+        return {"ok": False, "error": "root is required", "code": "artist_reconcile_invalid_root"}
+
+    root_role = _resolve_path_role(raw_root, allowed_roots)
+    if root_role is None:
+        return {"ok": False, "error": "root is outside allowed music library roots", "code": "artist_reconcile_path_out_of_root"}
+    if not _normpath_within_roots(raw_root, allowed_roots):
+        return {"ok": False, "error": "root is outside allowed music library roots", "code": "artist_reconcile_path_out_of_root"}
+
+    root_path = Path(raw_root)
+    if _path_has_symlink_under(root_path, Path(allowed_roots[0])):
+        return {"ok": False, "error": "root contains symlink components", "code": "artist_reconcile_symlink_rejected"}
+    if not root_path.exists() or not root_path.is_dir():
+        return {"ok": False, "error": "root directory does not exist", "code": "artist_reconcile_invalid_root"}
+
+    folders = _engine_list_artist_folders(root_path)
+    return {"ok": True, "root": str(root_path), "folders": folders}
 
 
 def _engine_scan_artist_folder_groups(

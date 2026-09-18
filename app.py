@@ -410,7 +410,10 @@ from helpers_mb import (
     _resolve_mb_release_id, _JUNK_TITLE_RE, _fetch_mb_release_candidate,
     _mb_release_group_candidates,
 )
-from backend.beets_client import beets_client, get_db_connection, lib, BeetsError, BeetsUnavailableError, BeetsAuthError
+from backend.beets_client import (
+    beets_client, get_db_connection, lib, BeetsError, BeetsUnavailableError, BeetsAuthError,
+    BeetsBadRequestError, BeetsNotFoundError,
+)
 
 
 def _read_file_media_tags(path: Any) -> Dict[str, Any]:
@@ -27768,11 +27771,20 @@ _ARTIST_RECONCILE_TERMINAL_FAILURE_STATUSES = {"Failed", "Rolled Back", "Partial
 
 def _apply_artist_folder_reconcile_resilient(
     op_id: str, log: List[str], *, cancel_event: Any = None, log_prefix: str = "Artist folder reconcile",
-    _acceptance_failpoint: Optional[str] = None,
+    _acceptance_failpoint: Optional[str] = None, skip_initial_apply: bool = False,
 ) -> Dict[str, Any]:
     """Apply an already-planned artist_folder_reconcile_v1 operation and
     survive a lost HTTP response without ever calling Apply a second time
     for the same operation_id (hotfix v0.1.17, BUG-4).
+
+    skip_initial_apply=True skips the Apply call entirely and goes straight
+    to the transaction-status poll loop below. Use this when the caller
+    already knows -- from a prior, authoritative transaction status check,
+    not merely from an assumption -- that Apply was already accepted by the
+    engine for this operation_id (e.g. Clean All resuming after a process
+    restart found the transaction status already "Running"): calling Apply
+    again in that case would violate the same "never re-Apply" guarantee
+    this function exists to uphold, just via a different code path.
 
     Production incident this fixes: the Web Manager's own client-side
     timeout fired on the Apply call while the Beets Engine kept executing
@@ -27796,23 +27808,60 @@ def _apply_artist_folder_reconcile_resilient(
     through to beets_client.apply_artist_folder_reconcile() -- the engine
     ignores it entirely unless booted with BEETS_ACCEPTANCE_MODE=1, which
     no real deployment ever sets. Always None in real production calls.
+
+    Error classification matters here: a definite HTTP/application
+    rejection (400/401/403/404) means the request WAS answered -- the
+    engine explicitly refused it (bad operation_id, bad auth, operation not
+    found/not in an applyable state). That is not "response was lost"; the
+    response was received and it was "no". Treating it as lost and falling
+    into the up-to-600s transaction poll below would misreport a definite,
+    already-known rejection as a mystery, and (worse) risks a caller
+    reacting to a stale/matching-by-coincidence transaction. Only genuine
+    transport uncertainty -- BeetsUnavailableError (connection refused/
+    reset, DNS failure, timeout, malformed response, 502/503/504) or an
+    ambiguous 5xx BeetsError where the engine may have started mutating
+    before failing to answer -- means the execution outcome is genuinely
+    unknown and must be recovered via the authoritative transaction poll.
     """
-    try:
-        return beets_client.apply_artist_folder_reconcile(
-            op_id, acceptance_failpoint=_acceptance_failpoint, timeout=BEETS_ARTIST_RECONCILE_TIMEOUT_SECONDS,
-        )
-    except (BeetsUnavailableError, BeetsError) as ex:
+    def _do_apply() -> Optional[Dict[str, Any]]:
+        try:
+            return beets_client.apply_artist_folder_reconcile(
+                op_id, acceptance_failpoint=_acceptance_failpoint, timeout=BEETS_ARTIST_RECONCILE_TIMEOUT_SECONDS,
+            )
+        except (BeetsBadRequestError, BeetsAuthError, BeetsNotFoundError) as ex:
+            log.append(f"{log_prefix}: Apply was rejected ({ex}). Not retried and not polled.")
+            app.logger.error("%s: apply definitively rejected for op_id=%s: %s", log_prefix, op_id, ex)
+            return {
+                "ok": False,
+                "operation_id": op_id,
+                "error": str(ex),
+                "error_code": getattr(ex, "error_code", "") or "",
+                "status_code": getattr(ex, "status_code", 0) or 0,
+                "diagnostics": getattr(ex, "diagnostics", None),
+            }
+        except (BeetsUnavailableError, BeetsError) as ex:
+            log.append(
+                f"{log_prefix}: Apply response was lost ({ex}). The engine operation may still be "
+                f"running -- monitoring its transaction state instead of retrying Apply."
+            )
+            app.logger.warning("%s: apply transport failure for op_id=%s, switching to transaction polling: %s", log_prefix, op_id, ex)
+        except Exception as ex:
+            log.append(
+                f"{log_prefix}: Apply response was lost (unexpected error: {ex}). The engine operation may "
+                f"still be running -- monitoring its transaction state instead of retrying Apply."
+            )
+            app.logger.warning("%s: unexpected apply transport failure for op_id=%s, switching to transaction polling: %s", log_prefix, op_id, ex)
+        return None
+
+    if skip_initial_apply:
         log.append(
-            f"{log_prefix}: Apply response was lost ({ex}). The engine operation may still be "
-            f"running -- monitoring its transaction state instead of retrying Apply."
+            f"{log_prefix}: op_id={op_id} Apply was already accepted by the engine (confirmed via prior "
+            f"transaction status check); monitoring its transaction state instead of calling Apply again."
         )
-        app.logger.warning("%s: apply transport failure for op_id=%s, switching to transaction polling: %s", log_prefix, op_id, ex)
-    except Exception as ex:
-        log.append(
-            f"{log_prefix}: Apply response was lost (unexpected error: {ex}). The engine operation may "
-            f"still be running -- monitoring its transaction state instead of retrying Apply."
-        )
-        app.logger.warning("%s: unexpected apply transport failure for op_id=%s, switching to transaction polling: %s", log_prefix, op_id, ex)
+    else:
+        apply_outcome = _do_apply()
+        if apply_outcome is not None:
+            return apply_outcome
 
     deadline = time.monotonic() + BEETS_LONG_OPERATION_MAX_SECONDS
     last_status = ""
@@ -27828,7 +27877,7 @@ def _apply_artist_folder_reconcile_resilient(
             tx_res = beets_client.get_transaction(op_id)
             tx = tx_res.get("transaction") or {}
             last_status = str(tx.get("status") or "")
-        except (BeetsUnavailableError, BeetsError, Exception) as ex:
+        except Exception as ex:
             log.append(f"{log_prefix}: transaction status check for op_id={op_id} failed ({ex}); retrying.")
             tx = None
 
@@ -33150,18 +33199,6 @@ def _artist_folder_db_counts() -> Dict[str, Dict[str, int]]:
         return {}
 
 
-def _count_audio_files(folder: Path) -> Dict[str, int]:
-    audio = 0
-    folders = 0
-    try:
-        for p in folder.rglob("*"):
-            if p.is_dir():
-                folders += 1
-            elif p.is_file() and p.suffix.lower() in AUDIO_EXTS:
-                audio += 1
-    except Exception:
-        pass
-    return {"audio": audio, "folders": folders}
 
 
 def _scan_artist_folder_groups(root: str, *, use_musicbrainz: bool = False,
@@ -33170,21 +33207,28 @@ def _scan_artist_folder_groups(root: str, *, use_musicbrainz: bool = False,
     db_counts = _artist_folder_db_counts()
     grouped: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     wanted = set(only_keys or [])
-    for child in sorted(root_path.iterdir(), key=lambda p: p.name.casefold()):
-        if not child.is_dir() or child.name.startswith("."):
+    # ARCH-020: folder listing and audio-file counts are engine-side facts --
+    # Web Manager has no local media mount in the supported two-service
+    # deployment and must never walk MUSIC_ROOT itself.
+    entries = sorted(
+        beets_client.get_artist_folder_inventory(str(root_path)),
+        key=lambda f: _s(f.get("name")).casefold(),
+    )
+    for entry in entries:
+        name = _s(entry.get("name"))
+        if not name or name.startswith("."):
             continue
-        key = _artist_folder_key(child.name)
+        key = _artist_folder_key(name)
         if not key:
             continue
         if wanted and key not in wanted:
             continue
-        counts = _count_audio_files(child)
-        dbc = db_counts.get(child.name, {})
+        dbc = db_counts.get(name, {})
         grouped[key].append({
-            "name": child.name,
-            "path": str(child),
-            "audio_files": counts["audio"],
-            "subfolders": counts["folders"],
+            "name": name,
+            "path": _s(entry.get("path")) or str(root_path / name),
+            "audio_files": int(entry.get("audio_files") or 0),
+            "subfolders": int(entry.get("subfolders") or 0),
             "db_albums": dbc.get("albums", 0),
             "db_tracks": dbc.get("tracks", 0),
         })
@@ -35288,11 +35332,28 @@ def _maintenance_resume_from_report(report: Dict[str, Any]) -> Dict[str, Any]:
         task_id = _s(task.get("id")).strip()
         previous = previous_by_id.get(task_id) or {}
         status = _s(previous.get("status")).strip().lower()
+        saved_operation_id = _s(previous.get("operation_id")).strip()
         if status == "running":
             if task_id in {"library_health", "missing_files", "artist_alias"} and task_id in results:
                 status = "complete"
+            elif task_id == "artist_folder_merge" and saved_operation_id:
+                # A saved operation_id means real engine-side work (a
+                # Beets Engine artist_folder_reconcile_v1 transaction) may
+                # still be in flight -- or may already have completed --
+                # even though THIS process was interrupted mid-run. Stay
+                # "running" and carry the operation_id forward so the
+                # resumed run checks that operation's own authoritative
+                # transaction status before creating any new Plan, instead
+                # of discarding it and starting a redundant duplicate
+                # operation for the same folders.
+                task["operation_id"] = saved_operation_id
             else:
                 status = "pending"
+        if status == "running":
+            task["status"] = "running"
+            if _s(previous.get("detail")).strip():
+                task["detail"] = _s(previous.get("detail")).strip()
+            continue
         if status not in {"complete", "skipped"}:
             task["status"] = "pending"
             task.pop("detail", None)
@@ -35347,6 +35408,140 @@ def _maintenance_resume_summary(report: Dict[str, Any]) -> Dict[str, Any]:
         "next_task_label": resume.get("next_task_label"),
         "updated_at": resume.get("updated_at"),
     }
+
+def _maintenance_artist_folder_merge_step(
+    log: List[str],
+    cancel_event: Any,
+    root: str,
+    *,
+    resume_operation_id: str = "",
+    on_operation_planned: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Run (or resume) the artist-folder MBID-stamping/merge step, shared by
+    the /api/clean/artist-folders/stamp-mbid route and Clean All's
+    "Artist Folder Merge" task.
+
+    Clean All resume (hotfix v0.1.17 follow-up): if resume_operation_id is
+    given, its transaction status is checked FIRST, before any new Plan is
+    created. This is what lets Clean All survive a process restart mid-Apply
+    without blindly re-Applying or creating a second, redundant operation
+    for the same folders -- the exact gap the previous implementation had:
+    only an *in-process* running job was checked (_running_job_of_type),
+    which finds nothing at all after a real process restart, so a resumed
+    run used to always start a brand new Plan+Apply regardless of whether
+    the interrupted operation was still running or had already completed on
+    the engine.
+
+    on_operation_planned(op_id), when given, is invoked the moment a NEW
+    Plan succeeds (before Apply is ever called) so the caller can persist
+    that operation_id to its own checkpoint immediately -- surviving a
+    crash between Plan and Apply, not just during Apply.
+    """
+    if resume_operation_id:
+        try:
+            tx_res = beets_client.get_transaction(resume_operation_id)
+            tx = tx_res.get("transaction") or {}
+            status = str(tx.get("status") or "")
+        except Exception as ex:
+            log.append(
+                f"Artist folder merge: could not check saved operation {resume_operation_id} ({ex}); "
+                f"treating it as needing a fresh scan."
+            )
+            tx, status = None, ""
+
+        if tx is not None and status in _ARTIST_RECONCILE_TERMINAL_SUCCESS_STATUSES:
+            log.append(f"Artist folder merge: resumed operation {resume_operation_id} was already Completed.")
+            return {
+                "ok": True, "operation_id": resume_operation_id,
+                "renamed": int(tx.get("moved_files") or 0), "merged": int(tx.get("quarantined_files") or 0),
+                "skipped": 0,
+            }
+        if tx is not None and status in _ARTIST_RECONCILE_TERMINAL_FAILURE_STATUSES:
+            log.append(
+                f"Artist folder merge: resumed operation {resume_operation_id} ended {status}; it will not "
+                f"be retried. Re-scanning for anything still remaining."
+            )
+            # Falls through to the fresh-scan path below -- a terminally
+            # failed/rolled-back/cancelled operation is conclusively not
+            # recoverable, so this is the one case where starting a new
+            # Plan is correct rather than a violation of "never re-Apply".
+        elif tx is not None and status:
+            # Preview/Pending/Approved/Running: genuinely still in progress
+            # on the engine. skip_initial_apply=True is only safe -- and
+            # only used -- for "Running", where Apply is already known (via
+            # this authoritative status check, not an assumption) to have
+            # been accepted by the engine; Preview/Pending/Approved mean
+            # Apply itself was never confirmed sent, so it still needs to
+            # be called exactly once, same as a fresh operation.
+            apply_res = _apply_artist_folder_reconcile_resilient(
+                resume_operation_id, log, cancel_event=cancel_event, log_prefix="Artist folder merge",
+                skip_initial_apply=(status == "Running"),
+            )
+            if not apply_res.get("ok"):
+                return {
+                    "ok": False, "operation_id": resume_operation_id,
+                    "renamed": 0, "merged": 0, "skipped": 0, "error": apply_res.get("error"),
+                    "still_running": bool(apply_res.get("still_running")),
+                }
+            return {
+                "ok": True, "operation_id": resume_operation_id,
+                "renamed": int(apply_res.get("moved_files") or 0), "merged": int(apply_res.get("quarantined_files") or 0),
+                "skipped": 0,
+            }
+
+    root_path = Path(root)
+    scan = _stamp_artist_folder_scan(root_path)
+    candidates = scan["candidates"]
+    skipped = scan["skipped"]
+    if not candidates:
+        log.append("No artist folders need MB ID stamping.")
+        _append_stamp_skipped_log(log, skipped, include_examples=False)
+        return {"ok": True, "renamed": 0, "merged": 0, "skipped": 0}
+
+    log.append(f"Stamping MB IDs on {len(candidates)} artist folder(s)…")
+    payload = {"root": str(root_path), "mode": "stamp_mbid"}
+    # SEC-002 Wave 21 final review: no local in-process fallback.
+    try:
+        plan_res = beets_client.plan_artist_folder_reconcile(payload)
+    except (BeetsUnavailableError, BeetsError) as ex:
+        log.append("Engine unavailable; MBID stamping was not performed.")
+        app.logger.error("MBID stamping: engine unavailable: %s", ex)
+        return {"ok": False, "renamed": 0, "merged": 0, "skipped": len(skipped), "error": str(ex)}
+    except Exception as ex:
+        log.append("Engine communication failed; MBID stamping was not performed.")
+        app.logger.error("MBID stamping: unexpected engine communication failure: %s", ex)
+        return {"ok": False, "renamed": 0, "merged": 0, "skipped": len(skipped), "error": str(ex)}
+
+    if not plan_res.get("ok"):
+        log.append(f"Refusing to operate: {plan_res.get('error')}")
+        return {"ok": False, "renamed": 0, "merged": 0, "skipped": len(skipped), "error": plan_res.get("error")}
+
+    op_id = plan_res.get("operation_id")
+    if not op_id:
+        log.append(_s(plan_res.get("message")) or "No artist folder move was required.")
+        return {"ok": True, "renamed": 0, "merged": 0, "skipped": len(skipped)}
+
+    if on_operation_planned is not None:
+        on_operation_planned(op_id)
+
+    apply_res = _apply_artist_folder_reconcile_resilient(op_id, log, cancel_event=cancel_event, log_prefix="MBID stamping")
+    if not apply_res.get("ok"):
+        log.append(f"Engine MBID stamping failed: {apply_res.get('error')}")
+        return {
+            "ok": False, "renamed": 0, "merged": 0, "skipped": len(skipped), "error": apply_res.get("error"),
+            "operation_id": op_id, "still_running": bool(apply_res.get("still_running")),
+        }
+
+    _invalidate_lib_cache()
+    log.append(f"  [stamp] Delegated MBID stamping to engine (op_id={op_id})")
+    return {
+        "ok": True,
+        "operation_id": op_id,
+        "renamed": apply_res.get("moved_files", 0),
+        "merged": apply_res.get("quarantined_files", 0),
+        "skipped": len(skipped),
+    }
+
 
 def _maintenance_running_job() -> Optional[Any]:
     for job in jobs.all():
@@ -36237,32 +36432,62 @@ def start_maintenance_runner():
             if skip_completed_task("artist_folder_merge"):
                 pass
             else:
+                resume_op_id = _s(tasks[task_index["artist_folder_merge"]].get("operation_id")).strip()
                 set_task("artist_folder_merge", "running", "Merging safe MusicBrainz artist folder variants")
-                if _running_job_of_type({"artist-folder-merge", "stamp-mbid-folders"}):
+                if not resume_op_id and _running_job_of_type({"artist-folder-merge", "stamp-mbid-folders"}):
                     set_task("artist_folder_merge", "skipped", "Artist folder merge already running")
                 else:
-                    with app.test_request_context(
-                        "/api/clean/artist-folders/stamp-mbid",
-                        method="POST",
-                        json={"root": str(MUSIC_ROOT), "dry_run": False, "compact_log": True},
-                    ):
-                        child_id = _maintenance_extract_child_job_id(clean_artist_folders_stamp_mbid())
-                    result = _wait_for_child_job(
-                        child_id,
-                        log,
-                        cancel_event,
-                        prefix="artist-folder-merge",
-                        timeout=3600,
+                    if resume_op_id:
+                        log.append(
+                            f"[Clean All Resume] Artist folder merge: found a saved engine operation "
+                            f"({resume_op_id}) from before this run was interrupted; checking its status "
+                            f"before creating any new plan."
+                        )
+
+                    def _persist_artist_folder_merge_operation_id(op_id: str) -> None:
+                        idx = task_index["artist_folder_merge"]
+                        tasks[idx] = {**tasks[idx], "operation_id": op_id}
+                        persist_checkpoint("running")
+
+                    result = _maintenance_artist_folder_merge_step(
+                        log, cancel_event, str(MUSIC_ROOT),
+                        resume_operation_id=resume_op_id,
+                        on_operation_planned=_persist_artist_folder_merge_operation_id,
                     )
                     renamed = int((result or {}).get("renamed") or 0) if isinstance(result, dict) else 0
                     merged = int((result or {}).get("merged") or 0) if isinstance(result, dict) else 0
                     _maintenance_save_last_report({"artist_folder_merge": result}, log)
-                    set_task(
-                        "artist_folder_merge",
-                        "complete",
-                        f"Artist folder merge complete: {renamed} renamed, {merged} merged",
-                        result,
-                    )
+                    if (result or {}).get("ok", True):
+                        tasks[task_index["artist_folder_merge"]].pop("operation_id", None)
+                        set_task(
+                            "artist_folder_merge", "complete",
+                            f"Artist folder merge complete: {renamed} renamed, {merged} merged", result,
+                        )
+                    elif (result or {}).get("still_running"):
+                        # The engine operation's outcome is still genuinely
+                        # unresolved (Apply's response was lost and the poll
+                        # deadline was reached while status was still
+                        # "Running") -- this is not a failure of the merge
+                        # itself, just of Web Manager's ability to keep
+                        # watching it in this run. Raise into the existing
+                        # partial-run handling below rather than marking it
+                        # "failed": the task stays "running" with its
+                        # operation_id intact (see the except block's
+                        # special-case guard for this task id), so a later
+                        # resume checks that same operation's authoritative
+                        # status instead of discarding it and creating a
+                        # duplicate one.
+                        raise RuntimeError(
+                            f"Artist folder merge: engine operation "
+                            f"{(result or {}).get('operation_id', '')} is still in progress; will be "
+                            f"reconciled on the next run."
+                        )
+                    else:
+                        tasks[task_index["artist_folder_merge"]].pop("operation_id", None)
+                        set_task(
+                            "artist_folder_merge", "failed",
+                            f"Artist folder merge failed: {(result or {}).get('error', '')}", result,
+                        )
 
             # 5. Release Group ID drives album-folder consolidation.
             ensure_not_cancelled()
@@ -36410,7 +36635,16 @@ def start_maintenance_runner():
             failed_message = _s(exc) or "maintenance failed"
             completed_before_failure = sum(1 for task in tasks if task["status"] in {"complete", "skipped"})
             running_task = next((task for task in tasks if task["status"] == "running"), None)
-            if running_task:
+            # Clean All resume reattachment: a running_task carrying a saved
+            # artist-folder-merge operation_id is not a crash -- it is a
+            # real engine operation whose outcome is still genuinely
+            # unresolved (see the "still_running" raise above). Forcing it
+            # to "failed" here would make the next resume treat a
+            # possibly-still-active or already-completed engine operation
+            # as conclusively dead and start a duplicate one; leave it
+            # "running" (with operation_id intact) so resume checks its
+            # authoritative transaction status first.
+            if running_task and not (running_task.get("id") == "artist_folder_merge" and running_task.get("operation_id")):
                 set_task(running_task["id"], "failed", failed_message)
             if completed_before_failure > 0:
                 return finish_partial(failed_message)
@@ -39418,8 +39652,11 @@ def _artist_folder_repair_root(raw: Any) -> Tuple[Optional[Path], Optional[str]]
         return None, "Music library root is not available"
     if candidate != music_root:
         return None, "root must be the configured music library"
-    if not candidate.exists() or not candidate.is_dir():
-        return None, "Music library root does not exist"
+    # ARCH-020: no local existence/is_dir() check here -- Web Manager has no
+    # local media mount in the supported two-service deployment. Whether the
+    # root actually exists is an engine-side fact; the engine's own
+    # candidate-discovery and Plan endpoints fail closed with a clear error
+    # when it does not, and callers already surface that error to the user.
     try:
         resolved = candidate.resolve(strict=False)
     except Exception:
@@ -39467,6 +39704,17 @@ def _apply_artist_folder_groups(root: str, keys: Optional[List[str]],
             if not _path_under(src, root_path) or src.parent != root_path:
                 log.append(f"  Skipping unsafe source path: {src}")
                 continue
+            # NOTE (ARCH-020 investigation): group["musicbrainz"]["id"] here
+            # comes from a MusicBrainz TEXT SEARCH on the folder NAME
+            # (_mb_canonical_for_artist_entries -> _mb_artist_search_one),
+            # not from per-album Beets DB mb_albumartistid evidence like the
+            # engine's own CASE A/C/D identity authority uses -- two
+            # different real artists with similar names can produce a
+            # matching mb_artistid here. This fingerprint check is therefore
+            # NOT redundant with the engine's DB-derived identity re-check
+            # and must run unconditionally, regardless of whether mb_artistid
+            # is set -- do not bypass it (see
+            # ArtistFolderMergeIdentityTests.test_group_with_musicbrainz_artist_id_still_requires_fingerprint_confirmation).
             fp_result = _artist_folder_fingerprint_confirms(src, canonical_name)
             if fp_result is not True:
                 reason = (
@@ -39659,7 +39907,6 @@ def clean_artist_folders_merge():
 
 _STAMP_DB_PATH_COLUMNS = {
     ("items", "path"),
-    ("albums", "path"),
     ("albums", "artpath"),
 }
 
@@ -39837,12 +40084,21 @@ def _stamp_artist_folder_scan(root: Path) -> Dict[str, Any]:
     candidates = []
     skipped = []
     try:
+        # ARCH-020: folder listing is an engine-side fact -- Web Manager has
+        # no local media mount in the supported two-service deployment and
+        # must never walk MUSIC_ROOT itself. The engine's raw path strings
+        # are turned back into Path objects purely for string manipulation
+        # (.name/.parent/.resolve(strict=False)) below; none of that requires
+        # the path to actually exist locally.
         folders = sorted(
-            (p for p in root.iterdir() if p.is_dir() and not p.name.startswith(".")),
+            (Path(_s(entry.get("path")) or str(root / _s(entry.get("name"))))
+             for entry in beets_client.get_artist_folder_inventory(str(root))
+             if _s(entry.get("name")) and not _s(entry.get("name")).startswith(".")),
             key=lambda p: p.name.casefold(),
         )
     except Exception:
         return {"candidates": [], "skipped": []}
+    existing_names = {f.name for f in folders}
 
     folder_id_album_sets, folder_album_totals, scan_error = _stamp_artist_folder_album_mbid_counts(root, folders)
     if scan_error:
@@ -39911,7 +40167,7 @@ def _stamp_artist_folder_scan(root: Path) -> Dict[str, Any]:
             "new_path": str(new_path),
             "mb_albumartistid": best_id,
             "canonical_artist": canonical_name,
-            "target_exists": new_path.exists(),
+            "target_exists": new_path.name in existing_names,
             "album_count": album_total,
             "match_ratio": round(match_ratio, 3),
         })
@@ -39952,7 +40208,7 @@ def _stamp_artist_folder_scan(root: Path) -> Dict[str, Any]:
                 "new_path": str(new_path),
                 "mb_albumartistid": stamped_mbid,
                 "canonical_artist": canonical_name,
-                "target_exists": new_path.exists(),
+                "target_exists": new_path.name in existing_names,
                 "album_count": album_total,
                 "match_ratio": 1.0,
                 "same_mbid_duplicate": True,
@@ -40107,6 +40363,11 @@ def clean_artist_folders_stamp_mbid():
     root_str = str(root_path)
     dry_run = bool(payload.get("dry_run", True))
     compact_log = bool(payload.get("compact_log", False))
+    # Test-only acceptance failpoint passthrough (hotfix v0.1.17 pattern,
+    # see beets_client.apply_artist_folder_reconcile()'s docstring): a
+    # no-op in real deployments, since the engine only honors it when that
+    # container was booted with BEETS_ACCEPTANCE_MODE=1.
+    acceptance_failpoint = _s(payload.get("_acceptance_failpoint")) or None
 
     if dry_run:
         log: List[str] = []
@@ -40151,7 +40412,10 @@ def clean_artist_folders_stamp_mbid():
             return {"renamed": 0, "merged": 0, "skipped": len(skipped)}
 
         op_id = plan_res["operation_id"]
-        apply_res = _apply_artist_folder_reconcile_resilient(op_id, log, cancel_event=cancel_event, log_prefix="MBID stamping")
+        apply_res = _apply_artist_folder_reconcile_resilient(
+            op_id, log, cancel_event=cancel_event, log_prefix="MBID stamping",
+            _acceptance_failpoint=acceptance_failpoint,
+        )
 
         if not apply_res.get("ok"):
             log.append(f"Engine MBID stamping failed: {apply_res.get('error')}")
