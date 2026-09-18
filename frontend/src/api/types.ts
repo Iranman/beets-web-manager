@@ -2460,6 +2460,15 @@ export interface PreflightResponse extends ApiOkResponse {
   folders: PreflightFolder[];
 }
 
+export interface ImportRootsResponse extends ApiOkResponse {
+  music_root: string;
+  staging_roots: string[];
+  recommended_source: string;
+  recommended_import_roots: string[];
+  failed_imports_root: string;
+  last_saved_source?: string | null;
+}
+
 // ── Import history ────────────────────────────────────────────────────────────
 
 export interface RecentImport {

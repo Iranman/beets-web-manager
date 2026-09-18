@@ -53,6 +53,16 @@ This guide covers common errors and resolution steps for Beets Web Manager.
 
 ---
 
+### 5. `Import path is outside approved roots` or `Import path not found`
+* **Cause**: The import source path is outside configured intake directories (`BEETS_IMPORT_SOURCE_ROOTS`), is a root directory itself, contains relative traversal segments (`..`), or does not exist on the Beets engine filesystem.
+* **Fix**:
+  1. Confirm the directory exists inside the `beets` engine container: `docker compose exec beets ls -la <path>`.
+  2. Make sure you provide the container-internal path where your downloads/media are mounted in the `beets` container (e.g. `/data/torrents/music` or `/data/downloads`), not the host filesystem path.
+  3. If your media is mounted at a custom directory in the `beets` container, add it to `BEETS_IMPORT_SOURCE_ROOTS` in `.env` (e.g. `BEETS_IMPORT_SOURCE_ROOTS=/srv/intake,/data/downloads`).
+  4. Use the **Approved Intake Roots** dropdown in the Import UI to pick an approved root directory.
+
+---
+
 ## Operational Diagnostics
 
 ### Check Container Health

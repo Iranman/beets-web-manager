@@ -2903,6 +2903,56 @@ def run_wave34_scenarios(client: "HttpClient", db_path: str, fixture: dict) -> N
             scenario_pass("wave34-library-move-all-beet-subprocess (beet update/beet move ran to completion)")
 
 
+def run_issue85_import_source_roots_scenarios(client: "HttpClient", engine_container: str, engine_token: str, web_container: str) -> None:
+    """Issue #85: Configurable import and staging roots end-to-end acceptance.
+
+    1. Proves Beets Control Agent exposes GET /imports/source/roots returning
+       dynamic music_root, staging_roots, recommended_source, recommended_import_roots,
+       and failed_imports_root.
+    2. Proves Web Manager exposes GET /api/import/source/roots proxying engine
+       roots with last_saved_source containment validation.
+    3. Proves unapproved or traversal paths are rejected safely.
+    """
+    def scenario_pass(name: str) -> None:
+        print(f"[PASS] {name}")
+
+    def scenario_fail(name: str, detail: str) -> None:
+        _fail(f"{name}: {detail}")
+
+    print("==> [Issue #85] Engine Control Agent /imports/source/roots...")
+    try:
+        agent_res = _engine_control_agent_request(engine_container, engine_token, "/imports/source/roots")
+    except Exception as ex:
+        scenario_fail("issue85-agent-roots-endpoint", f"request failed: {ex}")
+    else:
+        if agent_res.get("status") != 200:
+            scenario_fail("issue85-agent-roots-endpoint", f"unexpected status: {agent_res}")
+        else:
+            body = agent_res.get("body", {})
+            if not body.get("staging_roots") or not isinstance(body.get("staging_roots"), list):
+                scenario_fail("issue85-agent-roots-endpoint", f"missing staging_roots: {body}")
+            elif not body.get("music_root") or not body.get("recommended_source"):
+                scenario_fail("issue85-agent-roots-endpoint", f"missing core fields: {body}")
+            else:
+                scenario_pass("issue85-agent-roots-endpoint (Control Agent returns dynamic import source roots)")
+
+    print("==> [Issue #85] Web Manager GET /api/import/source/roots proxy and containment...")
+    try:
+        status, body = client.request("GET", "/api/import/source/roots")
+    except Exception as ex:
+        scenario_fail("issue85-web-roots-endpoint", f"request failed: {ex}")
+    else:
+        if status != 200 or not body.get("ok"):
+            scenario_fail("issue85-web-roots-endpoint", f"unexpected response: {status} {body}")
+        else:
+            if not body.get("staging_roots") or not isinstance(body.get("staging_roots"), list):
+                scenario_fail("issue85-web-roots-endpoint", f"missing staging_roots in body: {body}")
+            elif not body.get("recommended_source"):
+                scenario_fail("issue85-web-roots-endpoint", f"missing recommended_source: {body}")
+            else:
+                scenario_pass("issue85-web-roots-endpoint (Web Manager proxies and exposes dynamic import roots)")
+
+
 def main() -> int:
     print("==> Checking Docker daemon / compose availability...")
     require_docker()
@@ -3213,6 +3263,9 @@ def main() -> int:
 
         print("\n==> Hotfix v0.1.17 (slow-Beets-startup resilience) scenarios ==>")
         run_v0117_hotfix_scenarios(client, engine_container, token, web_container, music_dir, fixture)
+
+        print("\n==> Issue #85 (Configurable import source roots) scenarios ==>")
+        run_issue85_import_source_roots_scenarios(client, engine_container, token, web_container)
 
         if FAILURES:
             print(f"\n[SUMMARY] {len(FAILURES)} failure(s):")

@@ -8,14 +8,29 @@ import LinearProgress from '@mui/material/LinearProgress';
 import TextField from '@mui/material/TextField';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router';
-import { fetchAlbumArt, getAiBatchStatus, pauseAiBatch, reconcileArtwork, recoverAiBatch, retryLibraryImportAllFailed, runPreflight, skipAiBatch, startAiBatchImport, stopAiBatch } from '../../api/client';
-import type { AiBatchFolderState, AiBatchState, PreflightFolder, PreflightResponse } from '../../api/types';
+import { fetchAlbumArt, getAiBatchStatus, getImportRoots, pauseAiBatch, reconcileArtwork, recoverAiBatch, retryLibraryImportAllFailed, runPreflight, skipAiBatch, startAiBatchImport, stopAiBatch } from '../../api/client';
+import type { AiBatchFolderState, AiBatchState, ImportRootsResponse, PreflightFolder, PreflightResponse } from '../../api/types';
 import { LogViewer } from '../../components/LogViewer';
 import { useJobPoll } from '../../lib/hooks';
 
-const DEFAULT_PATH = '/data/torrents/music';
-const FAILED_IMPORTS_PATH = '/data/torrents/music/failed_imports';
 const AI_BATCH_JOB_STORAGE_KEY = 'beets:ai-batch-import-job-id';
+
+function formatImportError(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err || '');
+  if (raw.includes('root_self_rejected') || raw.includes('Refusing to operate on an approved root')) {
+    return 'Importing the root directory itself is not permitted. Please select or specify an album subfolder.';
+  }
+  if (raw.includes('outside the allowed') || raw.includes('outside every allowed root')) {
+    return 'The specified path is outside the allowed import source roots configured for this system.';
+  }
+  if (raw.includes('Path not found') || raw.includes('does not exist')) {
+    return 'The specified path does not exist on the Beets engine filesystem.';
+  }
+  if (raw.includes('invalid_path') || raw.includes('Invalid path') || raw.includes('null byte') || raw.includes('traversal')) {
+    return 'The specified path is invalid or contains prohibited characters/traversal segments.';
+  }
+  return raw;
+}
 
 function cx(...classes: Array<string | false | null | undefined>) {
   return classes.filter(Boolean).join(' ');
@@ -649,7 +664,8 @@ type IntakePanelProps = {
 };
 
 export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
-  const [path, setPath] = useState(DEFAULT_PATH);
+  const [rootsInfo, setRootsInfo] = useState<ImportRootsResponse | null>(null);
+  const [path, setPath] = useState('');
   const [scanning, setScanning] = useState(false);
   const [preflight, setPreflight] = useState<PreflightResponse | null>(null);
   const [preflightError, setPreflightError] = useState('');
@@ -667,6 +683,18 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
     }
   });
 
+  const defaultSourcePath = useMemo(() => {
+    return (
+      rootsInfo?.recommended_source ||
+      (rootsInfo?.staging_roots && rootsInfo.staging_roots[0]) ||
+      '/data/torrents/music'
+    );
+  }, [rootsInfo]);
+
+  const failedImportsPath = useMemo(() => {
+    return rootsInfo?.failed_imports_root || `${defaultSourcePath.replace(/\/+$/, '')}/failed_imports`;
+  }, [rootsInfo, defaultSourcePath]);
+
   const rememberJobId = useCallback((nextJobId: string | null) => {
     setJobId(nextJobId);
     try {
@@ -675,6 +703,25 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
     } catch {
       // localStorage can be unavailable in hardened browser contexts.
     }
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    getImportRoots()
+      .then((res) => {
+        if (!active) return;
+        setRootsInfo(res);
+        setPath((curr) => {
+          if (!curr) {
+            return res.last_saved_source || res.recommended_source || (res.staging_roots && res.staging_roots[0]) || '';
+          }
+          return curr;
+        });
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
   }, []);
 
   useEffect(() => {
@@ -692,8 +739,9 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
       active = false;
     };
   }, [jobId, rememberJobId]);
+
   const scan = useCallback(async () => {
-    const nextPath = path.trim() || DEFAULT_PATH;
+    const nextPath = path.trim() || defaultSourcePath;
     setScanning(true);
     setPreflightError('');
     setImportError('');
@@ -703,11 +751,11 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
       setPreflight(result);
       setPath(result.path || nextPath);
     } catch (err) {
-      setPreflightError(err instanceof Error ? err.message : String(err));
+      setPreflightError(formatImportError(err));
     } finally {
       setScanning(false);
     }
-  }, [path]);
+  }, [path, defaultSourcePath]);
 
   // A cold scan of a large downloads folder can genuinely take 40-60+
   // seconds (confirmed live: 2217 folders / 14461 files took ~41s server-side)
@@ -764,13 +812,13 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
       setRetryNotice('Failed import folders were queued for retry.');
       await onJobStarted?.();
     } catch (err) {
-      setRetryError(err instanceof Error ? err.message : String(err));
+      setRetryError(formatImportError(err));
     } finally {
       setRetryingFailed(false);
     }
   };
   const startImport = async () => {
-    const nextPath = path.trim() || DEFAULT_PATH;
+    const nextPath = path.trim() || defaultSourcePath;
     setImporting(true);
     setImportError('');
     try {
@@ -778,7 +826,7 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
       rememberJobId(result.state?.job_id || result.job_id);
       setConfirmOpen(false);
     } catch (err) {
-      setImportError(err instanceof Error ? err.message : String(err));
+      setImportError(formatImportError(err));
     } finally {
       setImporting(false);
     }
@@ -788,6 +836,8 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
     rememberJobId(null);
     void scan();
   };
+
+  const currentDisplayPath = path.trim() || defaultSourcePath;
 
   return (
     <div className="space-y-5">
@@ -828,7 +878,7 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
                 disabled={scanning || Boolean(jobId)}
                 variant="outlined"
                 onClick={() => {
-                  setPath(DEFAULT_PATH);
+                  setPath(defaultSourcePath);
                   setPreflight(null);
                 }}
               >
@@ -838,7 +888,7 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
                 disabled={scanning || Boolean(jobId)}
                 variant="outlined"
                 onClick={() => {
-                  setPath(FAILED_IMPORTS_PATH);
+                  setPath(failedImportsPath);
                   setPreflight(null);
                 }}
               >
@@ -855,8 +905,32 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
             </div>
           </div>
 
+          {rootsInfo?.staging_roots && rootsInfo.staging_roots.length > 1 ? (
+            <div className="flex flex-wrap items-center gap-1.5 text-xs text-zinc-400">
+              <span className="text-[0.72rem] text-zinc-500">Approved roots:</span>
+              {rootsInfo.staging_roots.map((root) => (
+                <button
+                  key={root}
+                  type="button"
+                  className={cx(
+                    'rounded px-2 py-0.5 font-mono text-[0.7rem] border transition cursor-pointer',
+                    path.startsWith(root)
+                      ? 'border-indigo-500/50 bg-indigo-950/40 text-indigo-200'
+                      : 'border-graphite-800 bg-graphite-900/60 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700',
+                  )}
+                  onClick={() => {
+                    setPath(root);
+                    setPreflight(null);
+                  }}
+                >
+                  {root}
+                </button>
+              ))}
+            </div>
+          ) : null}
+
           <div className="flex flex-wrap gap-2">
-            <Chip label="/data/torrents/music source" size="small" variant="outlined" />
+            <Chip label={`${currentDisplayPath} source`} size="small" variant="outlined" />
             <Chip label="Preview is read-only" size="small" color="info" variant="outlined" />
             <Chip label="Eligible matches import" size="small" color="success" variant="outlined" />
             <Chip label="Unsafe matches stay in Review" size="small" color="warning" variant="outlined" />
@@ -934,7 +1008,7 @@ export function IntakePanel({ onJobStarted }: IntakePanelProps = {}) {
         fileCount={preflight?.audio_files ?? 0}
         folderCount={newFolderCount}
         open={confirmOpen}
-        path={path.trim() || DEFAULT_PATH}
+        path={currentDisplayPath}
         onClose={() => setConfirmOpen(false)}
         onConfirm={() => void startImport()}
       />

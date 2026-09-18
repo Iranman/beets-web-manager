@@ -1320,9 +1320,11 @@ def _build_setup_status_payload() -> Dict[str, Any]:
             "ok": False,
         }
 
+    default_music = os.environ.get("MUSIC_ROOT") or os.environ.get("BEETS_MUSIC_ROOT") or "/data/media/music"
+    default_downloads = os.environ.get("DOWNLOADS_ROOT") or os.environ.get("DOWNLOAD_PATH") or os.environ.get("STAGING_ROOT") or "/data/torrents"
     config_check = _remote_path("config", "/config", require_writable=True)
-    music_check = _remote_path("music_library", "/data/media/music")
-    downloads_check = _remote_path("downloads", "/data/torrents", require_writable=True)
+    music_check = _remote_path("music_library", default_music)
+    downloads_check = _remote_path("downloads", default_downloads, require_writable=True)
     remote_config_file = remote_paths.get("beets_config") if isinstance(remote_paths.get("beets_config"), dict) else {}
     beets_config_exists = bool(remote_config_file.get("exists"))
     beets_config_report_path = str(remote_config_file.get("path") or beets_config_path)
