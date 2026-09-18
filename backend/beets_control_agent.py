@@ -145,9 +145,40 @@ def _resolved_staging_root() -> str:
 _DEFAULT_TORRENT_SOURCE_ROOTS = "/data/torrents/music,/data/torrents,/data/downloads"
 
 
-def _resolved_torrent_source_roots() -> list:
-    raw = os.environ.get("TORRENT_SOURCE_ROOTS", _DEFAULT_TORRENT_SOURCE_ROOTS)
-    return [part.strip() for part in raw.split(",") if part.strip()]
+def _resolved_torrent_source_roots() -> list[str]:
+    raw = os.environ.get("BEETS_IMPORT_SOURCE_ROOTS") or os.environ.get("TORRENT_SOURCE_ROOTS", _DEFAULT_TORRENT_SOURCE_ROOTS)
+    return [p.strip() for p in raw.split(",") if p.strip()]
+
+
+def _resolved_import_source_roots() -> list[str]:
+    roots: list[str] = []
+    custom = os.environ.get("BEETS_IMPORT_SOURCE_ROOTS") or os.environ.get("TORRENT_SOURCE_ROOTS")
+    if custom:
+        for p in custom.split(","):
+            p = p.strip()
+            if p and p not in roots:
+                roots.append(p)
+    else:
+        for r in [_resolved_staging_root(), _resolved_downloads_root(), "/data/torrents/music", "/data/torrents", "/data/downloads"]:
+            if r and r not in roots:
+                roots.append(r)
+    return roots
+
+
+def _recommended_import_source() -> str:
+    custom = os.environ.get("BEETS_IMPORT_SOURCE_DEFAULT") or os.environ.get("BEETS_IMPORT_SOURCE", "")
+    if custom.strip():
+        return custom.strip()
+    roots = _resolved_import_source_roots()
+    return roots[0] if roots else "/data/torrents/music"
+
+
+def _resolved_failed_imports_root() -> str:
+    custom = os.environ.get("BEETS_FAILED_IMPORTS_ROOT") or os.environ.get("FAILED_IMPORTS_ROOT", "")
+    if custom.strip():
+        return custom.strip()
+    rec = _recommended_import_source()
+    return f"{rec.rstrip('/')}/failed_imports"
 
 
 PLAYLIST_DIR = Path(os.environ.get("PLAYLIST_DIR", "/data/media/music/playlists"))
@@ -1207,10 +1238,14 @@ def _decode_untrusted_path(raw_path: str) -> Optional[str]:
 
 
 def _allowed_root_paths(allowed_types: list = None) -> list[str]:
+    staging_candidates = [_resolved_staging_root(), _resolved_downloads_root()]
+    custom = os.environ.get("BEETS_IMPORT_SOURCE_ROOTS") or os.environ.get("TORRENT_SOURCE_ROOTS")
+    if custom:
+        staging_candidates.extend(_resolved_torrent_source_roots())
     all_roots = {
         "config": [str(_agent_config_raw_root().resolve(strict=False))],
         "music": [_resolved_music_root()],
-        "staging": [_resolved_downloads_root(), _resolved_staging_root()],
+        "staging": staging_candidates,
         "tmp": ["/tmp", tempfile.gettempdir()],
     }
     roots_to_check: list[str] = []
@@ -4514,6 +4549,17 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
                 "os_locking": True,
                 "strict_path_validation": True,
                 "read_only_raw_query": False,
+            })
+            return
+
+        if path == "/imports/source/roots":
+            self._send_json(200, {
+                "ok": True,
+                "music_root": _resolved_music_root(),
+                "staging_roots": _resolved_import_source_roots(),
+                "recommended_source": _recommended_import_source(),
+                "recommended_import_roots": _resolved_import_source_roots(),
+                "failed_imports_root": _resolved_failed_imports_root(),
             })
             return
 

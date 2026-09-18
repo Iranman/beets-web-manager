@@ -270,6 +270,10 @@ class BeetsClient:
         """Raw SQL is intentionally unavailable; use structured query helpers."""
         raise BeetsError("Raw SQLite queries are not permitted; use structured library query helpers")
 
+    def get_import_source_roots(self, *, timeout: float = 10.0) -> Dict[str, Any]:
+        """Fetch engine-authoritative approved roots for import/staging sources."""
+        return self._request("GET", "/imports/source/roots", timeout=timeout)
+
     def inspect_import_source(self, source_path: str, operation: str, *, timeout: float = 60.0) -> Dict[str, Any]:
         """Engine-authoritative validation + bounded audio inventory for an
         import/reimport source (SEC-002 Wave 8 ARCH-003).

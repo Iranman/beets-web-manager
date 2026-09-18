@@ -66,6 +66,9 @@ If this ambiguity trips you up, that's expected -- treat "Deployment setting" (C
 | `BEETS_TRUSTED_PROXIES` | web | optional | Proxy CIDRs whose forwarded client IP headers may be trusted. |
 | `BEETS_ENABLE_LEGACY_LOCAL_SCAN` | web | optional | Opt-in guard for the old local `/api/library/scan` filesystem walk. Keep `0`. |
 | `BEETS_SCAN_STATE_FILE` | web | optional | State file for the legacy local scan guard, default `/web-manager-data/last_scan.txt`. |
+| `BEETS_IMPORT_SOURCE_ROOTS` | both | optional | Comma-separated list of approved container paths where import intake is permitted (default: `/data/torrents/music,/data/torrents,/data/downloads`). |
+| `BEETS_IMPORT_SOURCE_DEFAULT` | both | optional | Preferred default staging path selected on first load in the Import UI (default: first existing path in `BEETS_IMPORT_SOURCE_ROOTS`). |
+| `BEETS_FAILED_IMPORTS_ROOT` | both | optional | Directory for quarantined/failed imports (default: `<recommended_root>/failed_imports`). |
 
 ## Optional integrations
 
@@ -120,3 +123,19 @@ MusicBrainz autotagging is built into Beets itself -- there is no `musicbrainz` 
 The Beets engine version is independent of the Beets Web Manager image version -- upgrading one does not require upgrading the other.
 
 Beets 2.4.0 was previously pinned because of a narrow plugin-resolution defect (`beetbox/beets#6033`), fixed upstream in Beets 2.5.0 (`beetbox/beets#6039`). `docker/beets/apply_patches.py` applies the local backport patch only when the installed Beets version is exactly 2.4.0, skips it (and instead verifies the upstream fix directly) on Beets >= 2.5.0, and fails the build for any other, unsupported version -- it is never applied outside 2.4.0. Beets 2.4.0 remains explicitly supported and tested (see the `beets-engine-verification` CI matrix) for deployments that have not yet migrated. Upgrading the Beets engine version on a deployment with an existing library requires the backup/migration/rollback procedure in `docs/BEETS_ENGINE_MIGRATION.md` -- newer Beets releases can perform an automatic, one-time, non-reversible database schema migration on first open.
+
+## Import & Staging Roots
+
+Import intake locations are fully configurable and resolved dynamically by the Beets Engine (the authoritative filesystem owner):
+
+- **`BEETS_IMPORT_SOURCE_ROOTS`**: A comma-separated list of container directory paths where media files may be staged and imported from (e.g. `/srv/intake,/data/downloads,/mnt/music-inbox`). When unset, defaults to `/data/torrents/music,/data/torrents,/data/downloads` (or `DOWNLOAD_PATH`).
+- **`BEETS_IMPORT_SOURCE_DEFAULT`**: Sets the initial import path selected in the Web UI on first load. If unset, the UI defaults to the first available root from the engine's resolved staging roots.
+- **`BEETS_FAILED_IMPORTS_ROOT`**: Dedicated directory where failed or quarantined imports are moved. Defaults to `<recommended_root>/failed_imports`.
+
+### Frontend Experience & Persistence
+- The Import UI dynamically queries `GET /api/import/source/roots` on load to fetch approved intake roots, recommended default paths, and the failed imports directory.
+- There are no hard-coded frontend defaults.
+- When multiple approved roots exist, an **Approved Intake Roots** dropdown lets operators select their staging folder with one click.
+- The UI remembers the operator's last successful import source path (persisted in `/web-manager-data/app_settings.json` under `last_import_source`). When returning to the Import view, this saved source is pre-selected as long as it remains within an approved staging root.
+- Security containment is strictly enforced: imports from paths outside the approved roots, path traversals (`..`), or targeting root directories directly are rejected with clear error explanations.
+

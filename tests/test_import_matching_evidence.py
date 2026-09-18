@@ -50,6 +50,7 @@ def _load_evidence_namespace():
         "PLAYLIST_DOWNLOAD_ROOT": Path("/data/playlists"),
         "_DOWNLOADS_ROOTS": ["/data/torrents", "/data/downloads", "/tmp", tempfile.gettempdir()],
         "TORRENT_SOURCE_ROOTS": [],
+        "_IMPORT_SOURCE_ALLOWED_ROOTS": (),
         "QBIT_REPAIR_ALLOWED_ROOTS": [],
         "MUSIC_ROOT": Path("/music"),
         "_s": lambda value: (

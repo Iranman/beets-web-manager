@@ -135,6 +135,9 @@ Important variables include:
 - `SLSKD_SLSK_USERNAME` and `SLSKD_SLSK_PASSWORD`: Soulseek client credentials (optional, required only for SLSKD-based acquisition).
 - `BEETS_OUTBOUND_ALLOWLIST`: exact host:port or CIDR:port entries for local services the backend may call; defaults to the internal Beets control agent (`beets:8338`).
 - `BEETS_TRUSTED_PROXIES`: direct proxy CIDRs whose forwarded client IP headers may be trusted.
+- `BEETS_IMPORT_SOURCE_ROOTS`: optional comma-separated list of approved staging directories inside the Beets engine container (default: `/data/torrents/music,/data/torrents,/data/downloads`).
+- `BEETS_IMPORT_SOURCE_DEFAULT`: optional default staging directory selected on first load in the Import UI.
+- `BEETS_FAILED_IMPORTS_ROOT`: optional quarantine folder for failed imports (default: `<default_root>/failed_imports`).
 
 MusicBrainz needs no key or account — it is a public API used for every release/recording lookup regardless of what else is configured.
 
@@ -190,8 +193,15 @@ Browser passwords must satisfy these rules (enforced server-side when saving, an
 Set `BEETS_WEB_AUTH_DISABLED=1` only for isolated local development with no network exposure.
 
 ## How Imports Work
-
+ 
 Downloaded or staged files enter an import-review flow. The backend compares filenames, tags, MusicBrainz release evidence, track counts, durations, and fingerprints where available before importing into Beets. Failed or ambiguous imports remain visible for review instead of being silently deleted.
+
+### Choosing Your Import Folder
+
+- **Dynamic Root Discovery**: Import staging paths are dynamically resolved through the Beets Engine without requiring hardcoded container defaults.
+- **Approved Roots & Containment**: Import intake is restricted to approved staging roots (`BEETS_IMPORT_SOURCE_ROOTS`, default `/data/torrents/music,/data/torrents,/data/downloads`), ensuring safety and containment while keeping the Web Manager decoupled from direct media mounts.
+- **Quick Selection & Persistence**: When multiple staging locations are configured, the UI provides an **Approved Intake Roots** selector to switch paths quickly. The web application remembers your last used import source across sessions, pre-populating it on subsequent visits as long as it remains within an approved staging directory.
+- **Quarantine / Failed Imports**: Failed or quarantined imports are moved to the configured quarantine location (`BEETS_FAILED_IMPORTS_ROOT`), preventing failed files from polluting the active intake folder.
 
 ## How AI Matching Works
 

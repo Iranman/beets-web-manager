@@ -29,6 +29,7 @@ import type {
   DeleteReviewFolderResponse,
   ImportReviewFileCleanupPayload,
   ImportReviewFileCleanupResponse,
+  ImportRootsResponse,
   DiscographyResponse,
   GenreStatsResponse,
   HealthResponse,
@@ -509,6 +510,10 @@ export function startQbitHardlinkRepair(opts: {
 
 export function restartApp(): Promise<ApiOkResponse> {
   return apiJson<ApiOkResponse>('/api/restart', { method: 'POST' });
+}
+
+export function getImportRoots(): Promise<ImportRootsResponse> {
+  return apiJson<ImportRootsResponse>('/api/import/source/roots');
 }
 
 export function runPreflight(path: string): Promise<PreflightResponse> {

@@ -591,13 +591,26 @@ PLAYLIST_PIPELINE_STATES = {
 }
 SLSKD_URL     = os.environ.get("SLSKD_URL",     "http://slskd:5030")
 SLSKD_API_KEY = os.environ.get("SLSKD_API_KEY", "").strip() or _slskd_api_key_from_file()
-DOWNLOADS_ROOT = Path("/data/torrents/music")
-DEFAULT_TORRENT_SOURCE_ROOTS = "/data/torrents/music,/data/torrents,/data/downloads"
+DOWNLOADS_ROOT = Path(
+    os.environ.get("DOWNLOADS_ROOT")
+    or os.environ.get("DOWNLOAD_PATH")
+    or os.environ.get("STAGING_ROOT")
+    or "/data/torrents/music"
+)
+DEFAULT_TORRENT_SOURCE_ROOTS = (
+    os.environ.get("BEETS_IMPORT_SOURCE_ROOTS")
+    or "/data/torrents/music,/data/torrents,/data/downloads"
+)
 TORRENT_SOURCE_ROOTS = tuple(
     Path(value.strip())
-    for value in os.environ.get("TORRENT_SOURCE_ROOTS", DEFAULT_TORRENT_SOURCE_ROOTS).split(",")
+    for value in (
+        os.environ.get("BEETS_IMPORT_SOURCE_ROOTS")
+        or os.environ.get("TORRENT_SOURCE_ROOTS")
+        or DEFAULT_TORRENT_SOURCE_ROOTS
+    ).split(",")
     if value.strip()
 )
+_IMPORT_SOURCE_ALLOWED_ROOTS: Tuple[Path, ...] = ()
 TORRENT_SOURCE_MOVE_ALLOWED = _env_flag("ALLOW_TORRENT_SOURCE_MOVE", False)
 QBIT_URL = (
     os.environ.get("QBITTORRENT_URL", "").strip()
@@ -12496,9 +12509,16 @@ def _import_review_cleanup_roots(*, allow_music: bool = False) -> List[Path]:
     # feature (qBittorrent hardlink-repair destinations, SEC-002 Wave 6).
     # Reusing it here would couple two unrelated features' authorization --
     # reconfiguring one would silently widen or narrow the other. Import
-    # review's own TORRENT_SOURCE_ROOTS already covers the same download-area
-    # territory for this feature's own purposes, independently configurable.
-    roots = [DOWNLOADS_ROOT, PLAYLIST_DOWNLOAD_ROOT] + [Path(root) for root in _DOWNLOADS_ROOTS] + list(TORRENT_SOURCE_ROOTS)
+    roots = [DOWNLOADS_ROOT, PLAYLIST_DOWNLOAD_ROOT] + [Path(root) for root in _DOWNLOADS_ROOTS] + [Path(root) for root in TORRENT_SOURCE_ROOTS]
+    raw = os.environ.get("BEETS_IMPORT_SOURCE_ROOTS", "")
+    if raw.strip():
+        for part in raw.split(","):
+            part = part.strip()
+            if part:
+                roots.append(Path(part))
+    allowed_roots = globals().get("_IMPORT_SOURCE_ALLOWED_ROOTS")
+    if allowed_roots:
+        roots.extend(Path(r) for r in allowed_roots)
     if allow_music:
         roots.append(MUSIC_ROOT)
     trusted: List[Path] = []
@@ -28179,7 +28199,34 @@ if _legacy_local_scan_enabled():
 
 # ── Import ────────────────────────────────────────────────────────────────────
 
-_IMPORT_SOURCE_ALLOWED_ROOTS = tuple(TORRENT_SOURCE_ROOTS) + (MUSIC_ROOT,)
+def _import_source_allowed_roots() -> Tuple[Path, ...]:
+    if _IMPORT_SOURCE_ALLOWED_ROOTS:
+        return tuple(Path(r) for r in _IMPORT_SOURCE_ALLOWED_ROOTS)
+    roots = list(TORRENT_SOURCE_ROOTS)
+    raw = os.environ.get("BEETS_IMPORT_SOURCE_ROOTS", "")
+    if raw.strip():
+        for part in raw.split(","):
+            part = part.strip()
+            if part:
+                roots.append(Path(part))
+    if DOWNLOADS_ROOT not in roots:
+        roots.append(DOWNLOADS_ROOT)
+    if PLAYLIST_DOWNLOAD_ROOT not in roots:
+        roots.append(PLAYLIST_DOWNLOAD_ROOT)
+    if MUSIC_ROOT not in roots:
+        roots.append(MUSIC_ROOT)
+    unique: List[Path] = []
+    seen: set = set()
+    for r in roots:
+        try:
+            res = r.resolve(strict=False)
+        except Exception:
+            res = r
+        key = str(res).replace("\\", "/").rstrip("/").casefold()
+        if key and key not in seen:
+            seen.add(key)
+            unique.append(res)
+    return tuple(unique)
 
 
 def _resolve_import_source_path(raw: Any) -> Tuple[Optional[Path], Optional[str]]:
@@ -28206,27 +28253,87 @@ def _resolve_import_source_path(raw: Any) -> Tuple[Optional[Path], Optional[str]
         return None, "Path is required"
     try:
         candidate = Path(text)
-        if not candidate.is_absolute():
+        if not candidate.is_absolute() and not text.startswith("/"):
             return None, "Path must be absolute"
         resolved = candidate.resolve(strict=False)
     except Exception:
         return None, "Invalid path."
+    allowed_roots = _import_source_allowed_roots()
     if not any(
         _path_is_under(resolved, root) or resolved == root.resolve(strict=False)
-        for root in _IMPORT_SOURCE_ALLOWED_ROOTS
+        for root in allowed_roots
     ):
         return None, "Path is outside the allowed import source roots"
     return resolved, None
 
 
+def _persist_last_import_source(path: str) -> None:
+    try:
+        from routes_setup import _load_settings, _save_settings
+        settings = _load_settings()
+        if settings.get("last_import_source") != path:
+            settings["last_import_source"] = path
+            _save_settings(settings)
+    except Exception as ex:
+        app.logger.warning("Could not persist last import source: %s", type(ex).__name__)
+
+
+@app.get("/api/import/source/roots")
+def get_import_source_roots():
+    try:
+        roots_info = beets_client.get_import_source_roots()
+    except Exception as ex:
+        app.logger.warning("Could not fetch import roots from engine: %s", type(ex).__name__)
+        staging_roots = [str(r) for r in _import_review_cleanup_roots(allow_music=False)]
+        roots_info = {
+            "ok": True,
+            "music_root": str(MUSIC_ROOT),
+            "staging_roots": staging_roots,
+            "recommended_source": staging_roots[0] if staging_roots else str(DOWNLOADS_ROOT),
+            "recommended_import_roots": staging_roots,
+            "failed_imports_root": f"{(staging_roots[0] if staging_roots else str(DOWNLOADS_ROOT)).rstrip('/')}/failed_imports",
+        }
+
+    last_saved_source: Optional[str] = None
+    try:
+        from routes_setup import _load_settings
+        settings = _load_settings()
+        candidate = settings.get("last_import_source")
+        if candidate and isinstance(candidate, str):
+            vpath, err = _resolve_import_source_path(candidate)
+            if not err and vpath is not None:
+                last_saved_source = str(vpath)
+    except Exception:
+        last_saved_source = None
+
+    rec_source = (
+        roots_info.get("recommended_source")
+        or (roots_info.get("staging_roots", [""])[0] if roots_info.get("staging_roots") else str(DOWNLOADS_ROOT))
+    )
+    st_roots = roots_info.get("staging_roots") or roots_info.get("recommended_import_roots") or [str(DOWNLOADS_ROOT)]
+    rec_roots = roots_info.get("recommended_import_roots") or st_roots
+    failed_root = roots_info.get("failed_imports_root") or f"{rec_source.rstrip('/')}/failed_imports"
+
+    return jsonify({
+        "ok": True,
+        "music_root": roots_info.get("music_root") or str(MUSIC_ROOT),
+        "staging_roots": st_roots,
+        "recommended_source": rec_source,
+        "recommended_import_roots": rec_roots,
+        "failed_imports_root": failed_root,
+        "last_saved_source": last_saved_source,
+    })
+
+
 @app.post("/api/import")
 def start_import():
     payload  = request.get_json(silent=True) or {}
-    path_raw = payload.get("path", "/data/torrents/music")
+    path_raw = payload.get("path") or str(DOWNLOADS_ROOT)
     validated_path, path_error = _resolve_import_source_path(path_raw)
     if path_error:
         return jsonify({"ok": False, "error": path_error}), 400
     path     = str(validated_path)
+    _persist_last_import_source(path)
     fallback = payload.get("fallback", "asis")   # asis | skip
     write    = payload.get("write", True)
     move     = payload.get("move", False)
@@ -28272,12 +28379,13 @@ def start_import():
 @app.post("/api/import/preflight")
 def import_preflight():
     payload = request.get_json(silent=True) or {}
-    path_raw = (payload.get("path") or "/data/torrents/music").strip()
+    path_raw = (payload.get("path") or str(DOWNLOADS_ROOT)).strip()
     scan_path, path_error = _resolve_import_source_path(path_raw)
     if path_error:
         return jsonify({"ok": False, "error": path_error}), 400
     if not scan_path.exists() or not scan_path.is_dir():
         return jsonify({"ok": False, "error": f"Path not found: {scan_path}"})
+    _persist_last_import_source(str(scan_path))
 
     root_res = scan_path
     folder_rows: List[Dict[str, Any]] = []

@@ -30,6 +30,9 @@ services:
       # backend/beets_control_agent.py's _cached_beet_version_snapshot().
       - BEETS_VERSION_PROBE_TIMEOUT_SECONDS=${BEETS_VERSION_PROBE_TIMEOUT_SECONDS:-90}
       - BEETS_VERSION_CAPABILITY_WAIT_SECONDS=${BEETS_VERSION_CAPABILITY_WAIT_SECONDS:-3}
+      - BEETS_IMPORT_SOURCE_ROOTS=${BEETS_IMPORT_SOURCE_ROOTS:-}
+      - BEETS_IMPORT_SOURCE_DEFAULT=${BEETS_IMPORT_SOURCE_DEFAULT:-}
+      - BEETS_FAILED_IMPORTS_ROOT=${BEETS_FAILED_IMPORTS_ROOT:-}
     volumes:
       - ${BEETS_CONFIG_PATH:-./config}:/config
       - ${MUSIC_LIBRARY_PATH:-./data/music}:/data/media/music
@@ -77,6 +80,9 @@ services:
       BEETS_WEB_AUTH_DISABLED: ${BEETS_WEB_AUTH_DISABLED:-0}
       BEETS_TRUSTED_PROXIES: ${BEETS_TRUSTED_PROXIES:-}
       BEETS_OUTBOUND_ALLOWLIST: ${BEETS_OUTBOUND_ALLOWLIST:-beets:8338}
+      BEETS_IMPORT_SOURCE_ROOTS: ${BEETS_IMPORT_SOURCE_ROOTS:-}
+      BEETS_IMPORT_SOURCE_DEFAULT: ${BEETS_IMPORT_SOURCE_DEFAULT:-}
+      BEETS_FAILED_IMPORTS_ROOT: ${BEETS_FAILED_IMPORTS_ROOT:-}
 
       # Hotfix v0.1.17 (BUG-4): operation-specific timeout/poll bounds for
       # the artist-folder-reconcile long controlled mutation only -- not a

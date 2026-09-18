@@ -7,6 +7,7 @@ import TextField from '@mui/material/TextField';
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import {
+  getImportRoots,
   runDedupCleanup,
   startDedupAiReview,
   startDedupScan,
@@ -16,9 +17,8 @@ import { LogViewer } from '../../components/LogViewer';
 import type { DedupDuplicate } from '../../api/types';
 import { useDedupScan } from '../../lib/hooks';
 
-const MUSIC_ROOT    = '/data/media/music';
-const DOWNLOADS_ROOT = '/data/torrents/music';
-const DEFAULT_PATH  = MUSIC_ROOT;
+const DEFAULT_MUSIC_ROOT = '/data/media/music';
+const DEFAULT_DOWNLOADS_ROOT = '/data/torrents/music';
 type DedupScanKind = 'standard' | 'ai';
 
 function shortScanId(scanId: string | null) {
@@ -99,7 +99,11 @@ function ScanProgress({ scanned, total }: { scanned: number; total: number }) {
 
 export function DedupPanel() {
   const navigate = useNavigate();
-  const [path, setPath] = useState(DEFAULT_PATH);
+  const [roots, setRoots] = useState<{ music: string; downloads: string }>({
+    music: DEFAULT_MUSIC_ROOT,
+    downloads: DEFAULT_DOWNLOADS_ROOT,
+  });
+  const [path, setPath] = useState(DEFAULT_MUSIC_ROOT);
   const [starting, setStarting] = useState(false);
   const [scanJid, setScanJid] = useState<string | null>(null);
   const [scanKind, setScanKind] = useState<DedupScanKind>('standard');
@@ -109,6 +113,22 @@ export function DedupPanel() {
   const [cleanupResult, setCleanupResult] = useState<string>('');
   const [error, setError] = useState('');
   const [showRawScanLog, setShowRawScanLog] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    getImportRoots()
+      .then((res) => {
+        if (!active) return;
+        const music = res.music_root || DEFAULT_MUSIC_ROOT;
+        const downloads = res.recommended_source || (res.staging_roots && res.staging_roots[0]) || DEFAULT_DOWNLOADS_ROOT;
+        setRoots({ music, downloads });
+        setPath((curr) => (curr === DEFAULT_MUSIC_ROOT ? music : curr));
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const { scan, error: scanError } = useDedupScan(scanJid);
   const duplicates = scan?.duplicates ?? [];
@@ -135,7 +155,7 @@ export function DedupPanel() {
     setSelected(new Set());
     setCleanupResult('');
     try {
-      const r = await startDedupScan(path.trim() || DEFAULT_PATH);
+      const r = await startDedupScan(path.trim() || roots.music);
       setScanJid(r.job_id);
       setScanKind('standard');
       window.dispatchEvent(new Event('beets:jobs-changed'));
@@ -150,7 +170,7 @@ export function DedupPanel() {
     if (!scanJid) return;
     setError('');
     try {
-      const r = await startDedupAiReview(scanJid, path.trim() || DEFAULT_PATH);
+      const r = await startDedupAiReview(scanJid, path.trim() || roots.music);
       setScanJid(r.job_id);
       setScanKind('ai');
       setSelected(new Set());
@@ -175,7 +195,7 @@ export function DedupPanel() {
     try {
       const r = await runDedupCleanup(
         Array.from(selected),
-        path.trim() || DEFAULT_PATH,
+        path.trim() || roots.music,
         dryRun,
       );
       setCleanupResult(
@@ -194,10 +214,10 @@ export function DedupPanel() {
     }
   };
 
-  const isLibrary = path.trim().startsWith(MUSIC_ROOT);
-  const scanScope = path.trim().startsWith(MUSIC_ROOT)
+  const isLibrary = path.trim().startsWith(roots.music);
+  const scanScope = path.trim().startsWith(roots.music)
     ? 'Music Library'
-    : path.trim().startsWith(DOWNLOADS_ROOT)
+    : path.trim().startsWith(roots.downloads)
       ? 'Downloads'
       : 'Custom path';
 
@@ -211,7 +231,7 @@ export function DedupPanel() {
         meta={scan ? (
           <>
             <span>Scope: {scanScope}</span>
-            <span className="font-mono">{path.trim() || DEFAULT_PATH}</span>
+            <span className="font-mono">{path.trim() || roots.music}</span>
             <span>{scan.scanned} scanned</span>
             <span>{done ? (scanFailed ? 'Job failed' : `${duplicates.length} duplicate(s)`) : `${scanKindLabel(scanKind)} running`}</span>
             <span>Scan {shortScanId(scanJid)}</span>
@@ -223,7 +243,7 @@ export function DedupPanel() {
             color={isLibrary ? 'primary' : 'inherit'}
             size="small"
             variant={isLibrary ? 'contained' : 'outlined'}
-            onClick={() => setPath(MUSIC_ROOT)}
+            onClick={() => setPath(roots.music)}
           >
             Music Library
           </Button>
@@ -231,7 +251,7 @@ export function DedupPanel() {
             color={!isLibrary ? 'primary' : 'inherit'}
             size="small"
             variant={!isLibrary ? 'contained' : 'outlined'}
-            onClick={() => setPath(DOWNLOADS_ROOT)}
+            onClick={() => setPath(roots.downloads)}
           >
             Downloads
           </Button>

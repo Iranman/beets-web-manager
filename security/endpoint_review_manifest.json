@@ -2958,6 +2958,24 @@
       ]
     },
     {
+      "method": "GET",
+      "endpoint": "get_import_source_roots",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Return configured and recommended import source roots and last saved source path for the import UI.",
+      "required_role_or_privilege": "owner/admin shared application secret",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": true,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_security_hardening.py::test_flask_auth_boundary_is_global_and_exact_allowlist",
+        "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced"
+      ]
+    },
+    {
       "method": "POST",
       "endpoint": "import_preflight",
       "security_classification": "ADMIN_ONLY",
