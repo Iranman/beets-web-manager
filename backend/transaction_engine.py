@@ -8142,12 +8142,14 @@ def list_artist_folder_inventory(
     if not raw_root:
         return {"ok": False, "error": "root is required", "code": "artist_reconcile_invalid_root"}
 
-    # Mirrors _derive_artist_folder_identity()'s containment proof exactly
-    # (see its docstring re: CodeQL #1016-#1019): the containment check
-    # (os.path.normpath + startswith) and every filesystem call below must
-    # run against the SAME string variable (root_norm), not a Path object
-    # separately converted from it -- CodeQL's py/path-injection dataflow
-    # does not reliably carry a proven-safe state across that conversion.
+    # Mirrors _derive_artist_folder_identity()'s containment proof (see its
+    # docstring re: CodeQL #1016-#1019): normalize with os.path.normpath and
+    # require a normalized-root prefix match on that same string, proven
+    # again inline here rather than delegated to another function. No
+    # explicit os.path.exists()/os.path.isdir() call on this value either --
+    # _engine_list_artist_folders() below naturally raises
+    # FileNotFoundError/NotADirectoryError via Path.iterdir() for a missing
+    # or non-directory root, which is caught and reported the same way.
     root_norm = os.path.normpath(raw_root)
     contained = False
     matched_root = ""
@@ -8161,11 +8163,12 @@ def list_artist_folder_inventory(
         return {"ok": False, "error": "root is outside allowed music library roots", "code": "artist_reconcile_path_out_of_root"}
     if _path_has_symlink_under(Path(root_norm), Path(matched_root)):
         return {"ok": False, "error": "root contains symlink components", "code": "artist_reconcile_symlink_rejected"}
-    if not os.path.exists(root_norm) or not os.path.isdir(root_norm):
-        return {"ok": False, "error": "root directory does not exist", "code": "artist_reconcile_invalid_root"}
 
     root_path = Path(root_norm)
-    folders = _engine_list_artist_folders(root_path)
+    try:
+        folders = _engine_list_artist_folders(root_path)
+    except (FileNotFoundError, NotADirectoryError):
+        return {"ok": False, "error": "root directory does not exist", "code": "artist_reconcile_invalid_root"}
     return {"ok": True, "root": str(root_path), "folders": folders}
 
 
