@@ -27824,33 +27824,39 @@ def _apply_artist_folder_reconcile_resilient(
     unknown and must be recovered via the authoritative transaction poll.
     """
     def _do_apply() -> Optional[Dict[str, Any]]:
+        # CodeQL: information exposure through an exception -- {ex} can
+        # carry internal URLs, paths, or transport details, and every log
+        # line/"error" field below is job-visible (Clean All log, standalone
+        # route job log/result). Log the real exception server-side only;
+        # error_code/status_code/diagnostics are agent-controlled structured
+        # fields, not exception text, and remain safe to expose.
         try:
             return beets_client.apply_artist_folder_reconcile(
                 op_id, acceptance_failpoint=_acceptance_failpoint, timeout=BEETS_ARTIST_RECONCILE_TIMEOUT_SECONDS,
             )
         except (BeetsBadRequestError, BeetsAuthError, BeetsNotFoundError) as ex:
-            log.append(f"{log_prefix}: Apply was rejected ({ex}). Not retried and not polled.")
-            app.logger.error("%s: apply definitively rejected for op_id=%s: %s", log_prefix, op_id, ex)
+            app.logger.error("%s: apply definitively rejected for op_id=%s: %s", log_prefix, op_id, ex, exc_info=True)
+            safe_reason = _safe_apply_error_message(ex)
+            log.append(f"{log_prefix}: Apply was rejected ({safe_reason}). Not retried and not polled.")
             return {
                 "ok": False,
                 "operation_id": op_id,
-                "error": str(ex),
+                "error": safe_reason,
                 "error_code": getattr(ex, "error_code", "") or "",
                 "status_code": getattr(ex, "status_code", 0) or 0,
-                "diagnostics": getattr(ex, "diagnostics", None),
             }
         except (BeetsUnavailableError, BeetsError) as ex:
+            app.logger.warning("%s: apply transport failure for op_id=%s, switching to transaction polling: %s", log_prefix, op_id, ex, exc_info=True)
             log.append(
-                f"{log_prefix}: Apply response was lost ({ex}). The engine operation may still be "
-                f"running -- monitoring its transaction state instead of retrying Apply."
+                f"{log_prefix}: Apply response was lost ({_safe_apply_error_message(ex)}). The engine "
+                f"operation may still be running -- monitoring its transaction state instead of retrying Apply."
             )
-            app.logger.warning("%s: apply transport failure for op_id=%s, switching to transaction polling: %s", log_prefix, op_id, ex)
         except Exception as ex:
+            app.logger.warning("%s: unexpected apply transport failure for op_id=%s, switching to transaction polling: %s", log_prefix, op_id, ex, exc_info=True)
             log.append(
-                f"{log_prefix}: Apply response was lost (unexpected error: {ex}). The engine operation may "
+                f"{log_prefix}: Apply response was lost (unexpected error). The engine operation may "
                 f"still be running -- monitoring its transaction state instead of retrying Apply."
             )
-            app.logger.warning("%s: unexpected apply transport failure for op_id=%s, switching to transaction polling: %s", log_prefix, op_id, ex)
         return None
 
     if skip_initial_apply:
@@ -27878,7 +27884,11 @@ def _apply_artist_folder_reconcile_resilient(
             tx = tx_res.get("transaction") or {}
             last_status = str(tx.get("status") or "")
         except Exception as ex:
-            log.append(f"{log_prefix}: transaction status check for op_id={op_id} failed ({ex}); retrying.")
+            # CodeQL: information exposure through an exception -- log the
+            # real exception server-side only; the job-visible log line
+            # gets a sanitized reason.
+            app.logger.warning("%s: transaction status check for op_id=%s failed, retrying: %s", log_prefix, op_id, ex, exc_info=True)
+            log.append(f"{log_prefix}: transaction status check for op_id={op_id} failed ({_safe_apply_error_message(ex)}); retrying.")
             tx = None
 
         if tx is not None:
@@ -35456,14 +35466,23 @@ def _maintenance_artist_folder_merge_step(
             # the next resume checks it again -- never re-Applies, never
             # re-Plans, until the engine's own authoritative status
             # conclusively says otherwise.
+            # CodeQL: information exposure through an exception -- {ex} can
+            # carry internal URLs, paths, or transport details, and this
+            # message flows into a job-visible log line and an "error"
+            # field. Log the real exception server-side only.
+            app.logger.error(
+                "Artist folder merge: status check for saved operation %s failed: %s",
+                resume_operation_id, ex, exc_info=True,
+            )
+            safe_reason = _safe_operation_status_error_message(ex)
             log.append(
-                f"Artist folder merge: could not check saved operation {resume_operation_id} ({ex}); "
+                f"Artist folder merge: could not check saved operation {resume_operation_id} ({safe_reason}); "
                 f"its status is unknown -- not creating a new plan or re-applying, will retry on the next run."
             )
             return {
                 "ok": False, "operation_id": resume_operation_id,
                 "renamed": 0, "merged": 0, "skipped": 0,
-                "error": f"Could not confirm saved operation status: {ex}",
+                "error": safe_reason,
                 "still_running": True,
             }
 
@@ -35536,13 +35555,16 @@ def _maintenance_artist_folder_merge_step(
     try:
         plan_res = beets_client.plan_artist_folder_reconcile(payload)
     except (BeetsUnavailableError, BeetsError) as ex:
+        # CodeQL: information exposure through an exception -- str(ex) must
+        # not flow into this "error" field (job-visible result). Log the
+        # real exception server-side only.
         log.append("Engine unavailable; MBID stamping was not performed.")
-        app.logger.error("MBID stamping: engine unavailable: %s", ex)
-        return {"ok": False, "renamed": 0, "merged": 0, "skipped": len(skipped), "error": str(ex)}
+        app.logger.error("MBID stamping: engine unavailable: %s", ex, exc_info=True)
+        return {"ok": False, "renamed": 0, "merged": 0, "skipped": len(skipped), "error": _safe_inventory_error_message(ex)}
     except Exception as ex:
         log.append("Engine communication failed; MBID stamping was not performed.")
-        app.logger.error("MBID stamping: unexpected engine communication failure: %s", ex)
-        return {"ok": False, "renamed": 0, "merged": 0, "skipped": len(skipped), "error": str(ex)}
+        app.logger.error("MBID stamping: unexpected engine communication failure: %s", ex, exc_info=True)
+        return {"ok": False, "renamed": 0, "merged": 0, "skipped": len(skipped), "error": _safe_inventory_error_message(ex)}
 
     if not plan_res.get("ok"):
         log.append(f"Refusing to operate: {plan_res.get('error')}")
@@ -40020,6 +40042,65 @@ def _stamp_folder_for_item_path(
     return None
 
 
+def _safe_beets_error_message(
+    ex: Exception, *, bad_request: str, not_found: str, generic: str, unexpected: str,
+) -> str:
+    """Map a Beets client exception to a short, safe, user-facing message --
+    never str(ex), which can carry internal URLs, paths, or transport
+    internals (CodeQL: information exposure through an exception). The real
+    exception must still be logged server-side by the caller (e.g.
+    app.logger.error(..., exc_info=True)); this is only what may reach an
+    HTTP response, a job result field, or a job-visible log line."""
+    if isinstance(ex, BeetsAuthError):
+        return "Authentication with Beets Control Agent failed."
+    if isinstance(ex, BeetsBadRequestError):
+        return bad_request
+    if isinstance(ex, BeetsNotFoundError):
+        return not_found
+    if isinstance(ex, BeetsUnavailableError):
+        return "Beets Control Agent is unavailable."
+    if isinstance(ex, BeetsError):
+        return generic
+    return unexpected
+
+
+def _safe_inventory_error_message(ex: Exception) -> str:
+    """Sanitized message for an artist-folder engine inventory failure --
+    see _safe_beets_error_message()."""
+    return _safe_beets_error_message(
+        ex,
+        bad_request="Beets Control Agent rejected the inventory request.",
+        not_found="The configured music library was not found by the Beets Engine.",
+        generic="Beets Control Agent could not provide the artist-folder inventory.",
+        unexpected="Artist-folder inventory failed.",
+    )
+
+
+def _safe_operation_status_error_message(ex: Exception) -> str:
+    """Sanitized message for a failed saved-operation transaction status
+    lookup (Clean All resume) -- see _safe_beets_error_message()."""
+    return _safe_beets_error_message(
+        ex,
+        bad_request="Beets Control Agent rejected the status request.",
+        not_found="Beets Control Agent no longer recognizes the saved operation.",
+        generic="Beets Control Agent could not confirm the saved operation's status.",
+        unexpected="Could not confirm the saved operation's status.",
+    )
+
+
+def _safe_apply_error_message(ex: Exception) -> str:
+    """Sanitized message for a failed/rejected artist-folder reconcile
+    Apply call, or a failed status poll following one -- see
+    _safe_beets_error_message()."""
+    return _safe_beets_error_message(
+        ex,
+        bad_request="Beets Control Agent rejected the apply request.",
+        not_found="Beets Control Agent no longer recognizes this operation.",
+        generic="Beets Control Agent could not complete the apply request.",
+        unexpected="The apply request failed.",
+    )
+
+
 def _stamp_artist_folder_album_mbid_counts(
     root: Path,
     folders: List[Path],
@@ -40033,7 +40114,8 @@ def _stamp_artist_folder_album_mbid_counts(
     try:
         rows = beets_client.get_artist_folder_album_mbids()
     except Exception as ex:
-        return {}, {}, str(ex)
+        app.logger.error("Artist folder MBID counts: engine call failed: %s", ex, exc_info=True)
+        return {}, {}, _safe_inventory_error_message(ex)
 
     for row in rows:
         folder = _stamp_folder_for_item_path(
@@ -40137,14 +40219,24 @@ def _stamp_artist_folder_scan(root: Path) -> Dict[str, Any]:
         # mark the phase complete even though the engine was never actually
         # reached. ok=False plus the structured error fields let every
         # caller fail closed instead.
+        #
+        # Independent review follow-up (CodeQL: information exposure
+        # through an exception): str(ex) can carry internal URLs, paths, or
+        # transport details, and this "error" field flows into HTTP JSON
+        # responses and job-visible logs. Log the real exception
+        # server-side only; return a sanitized message plus the structured
+        # error_code/status_code fields (which are agent-controlled,
+        # stable, and safe to expose).
+        app.logger.error("Artist folder inventory scan failed: %s", ex, exc_info=True)
         return {
             "ok": False, "candidates": [], "skipped": [],
-            "error": str(ex),
+            "error": _safe_inventory_error_message(ex),
             "error_code": getattr(ex, "error_code", "") or "",
             "status_code": getattr(ex, "status_code", 0) or 0,
         }
     except Exception as ex:
-        return {"ok": False, "candidates": [], "skipped": [], "error": str(ex), "error_code": "", "status_code": 0}
+        app.logger.error("Artist folder inventory scan failed with an unexpected error: %s", ex, exc_info=True)
+        return {"ok": False, "candidates": [], "skipped": [], "error": _safe_inventory_error_message(ex), "error_code": "", "status_code": 0}
     existing_names = {f.name for f in folders}
 
     folder_id_album_sets, folder_album_totals, scan_error = _stamp_artist_folder_album_mbid_counts(root, folders)
