@@ -27,14 +27,16 @@ LABEL org.opencontainers.image.title="Beets Web Manager" \
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     tini \
+    gosu \
     ffmpeg \
     libchromaprint-tools \
     && rm -rf /var/lib/apt/lists/*
 
-ARG PUID=1000
-ARG PGID=1000
-RUN groupadd -g "${PGID}" beets \
-    && useradd -u "${PUID}" -g "${PGID}" -m -d /home/beets -s /usr/sbin/nologin beets
+# Baked-in default identity. The entrypoint remaps this to the runtime
+# PUID/PGID (default unchanged, 1000/1000) before dropping privileges --
+# see docker/web-manager-entrypoint.sh.
+RUN groupadd -g 1000 beets \
+    && useradd -u 1000 -g 1000 -m -d /home/beets -s /usr/sbin/nologin beets
 
 WORKDIR /app
 
@@ -64,7 +66,11 @@ EXPOSE 8337
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD python -c "import urllib.request,sys,os; urllib.request.urlopen(f'http://127.0.0.1:{os.environ.get(\"WEBCONTROL_PORT\",\"8337\")}/api/health', timeout=4).read(); sys.exit(0)" || exit 1
 
-USER beets
+COPY docker/web-manager-entrypoint.sh /usr/local/bin/web-manager-entrypoint.sh
+RUN chmod +x /usr/local/bin/web-manager-entrypoint.sh
 
-ENTRYPOINT ["/usr/bin/tini", "--"]
+# Starts as root (required to remap PUID/PGID and fix bind-mount ownership
+# below) then execs the application as the unprivileged `beets` user via
+# gosu -- the application process itself never runs as root.
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/web-manager-entrypoint.sh"]
 CMD ["python", "app.py"]

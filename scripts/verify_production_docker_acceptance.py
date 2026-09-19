@@ -3,19 +3,30 @@
 Validates the standard, production-ready deployment architecture:
 1. Stock Beets container (lscr.io/linuxserver/beets:2.13.1)
 2. Beets Web Manager container (beets-web-manager:ci built from local Dockerfile)
-3. Shared volumes:
-   - ./beets -> /config (containing config.yaml and musiclibrary.blb)
+3. Shared volumes, all genuinely fresh host directories, no pre-seeded state:
+   - ./beets -> /config (config.yaml and musiclibrary.blb, both created by the
+     real system on first boot -- this script never pre-writes a config.yaml
+     itself, which would be exactly the "magical configuration a real user
+     would never get" this test must not create)
    - ./music -> /music
    - ./downloads -> /downloads
    - ./web-manager -> /data
 4. Zero initial tokens required in .env / clean-room startup.
-5. Embedded Control Agent running strictly on loopback (127.0.0.1:8338) inside Web Manager.
-6. First-run browser setup authentication wizard.
-7. Basic Auth and auto-generated bearer token authentication.
-8. Shared SQLite database mutation & visibility between Beets Web Manager and stock Beets CLI.
-9. Real media import and verification across container boundaries.
-10. Full persistence across `docker compose down && docker compose up -d` and `--force-recreate`.
-11. Clean teardown in `finally` block.
+5. Web Manager can persist .auth_token AND .flask_secret_key to a fresh /data
+   bind mount (a UID mismatch between a freshly-created host directory and
+   the container's identity broke this independently of any PUID/PGID
+   customization).
+6. Embedded Control Agent running strictly on loopback (127.0.0.1:8338) inside Web Manager.
+7. First-run browser setup authentication wizard, through explicit completion.
+8. Basic Auth and auto-generated bearer token authentication.
+9. Stock Beets container stays in a stable "running" state with no
+   "unknown command" restart-loop errors in its logs (its own default
+   service is `beet web`, which requires the `web` plugin actually enabled).
+10. Shared SQLite database mutation & visibility between Beets Web Manager
+    and stock Beets CLI, proven via matching inode, not just matching path.
+11. Real media import and verification across container boundaries.
+12. Full persistence across `docker compose down && docker compose up -d` and `--force-recreate`.
+13. Clean teardown in `finally` block.
 
 Usage:
     python scripts/verify_production_docker_acceptance.py
@@ -133,17 +144,19 @@ class ProductionAcceptanceStack:
         self.base_url = f"http://127.0.0.1:{self.port}"
         self.override_file = self.tmp_dir / "docker-compose.override.yml"
 
-        # Initialize config.yaml in beets directory
-        (self.beets_dir / "config.yaml").write_text(
-            "directory: /music\n"
-            "library: /config/musiclibrary.blb\n"
-            "import:\n"
-            "    write: yes\n"
-            "    copy: yes\n"
-            "    move: no\n"
-            "plugins: fetchart musicbrainz\n",
-            encoding="utf-8",
-        )
+        # Deliberately does NOT pre-seed beets/config.yaml. A real user
+        # following the documented `docker compose up -d` path never
+        # creates one either -- the stock lscr.io/linuxserver/beets image
+        # populates its own bundled default on first boot (which already
+        # enables the `web` plugin its own default service needs), and
+        # this repo's app.py only ever patches that file narrowly
+        # (_repair_legacy_beets_config), never replaces it. A test-only
+        # config here would be exactly the "magical configuration a real
+        # user would never get" this acceptance test must not create --
+        # and concretely, a minimal test config missing the `web` plugin
+        # is what silently caused the stock container's default `beet
+        # web` service to restart-loop with "unknown command 'web'" in
+        # earlier runs of this script.
 
         # Write override to target beets-web-manager:ci and uniquely name containers per project
         override_content = f"""
@@ -360,6 +373,25 @@ def run_acceptance() -> None:
         _ok(f"Verified auto-generated .auth_token in {stack.web_manager_dir} (length={len(auth_token)})")
         bearer_header = {"Authorization": f"Bearer {auth_token}"}
 
+        # A fresh /data bind mount not being writable by the container's
+        # user (a UID mismatch between the host directory and the
+        # container's fixed identity, independent of whether PUID/PGID
+        # were ever customized) previously made the app fail closed with
+        # "no BEETS_WEB_AUTH_TOKEN is configured, and a newly generated
+        # token could not be persisted" -- reaching this point at all
+        # already proves .auth_token persisted, but .flask_secret_key is
+        # a second, independently-created file under the same mount and
+        # is checked explicitly so a partial-persistence regression (one
+        # file's directory fixed, another missed) cannot slip through.
+        secret_key_file = stack.web_manager_dir / ".flask_secret_key"
+        if not secret_key_file.exists():
+            _fail(f".flask_secret_key file was not created in {stack.web_manager_dir}")
+            return
+        if len(secret_key_file.read_text(encoding="utf-8").strip()) < 32:
+            _fail(".flask_secret_key exists but is unexpectedly short")
+            return
+        _ok(f"Verified .flask_secret_key persisted in {stack.web_manager_dir}")
+
         # Claim admin credentials via first-run endpoint
         admin_user = "admin"
         admin_pass = "AcceptancePass123!Secure"
@@ -420,6 +452,25 @@ def run_acceptance() -> None:
             return
         _ok(f"Stock Beets container executed beet version successfully: {beet_exec.stdout.strip().splitlines()[0]}")
 
+        # The stock image's own default long-running service is `beet
+        # web` (it can optionally double as a standalone Beets web UI).
+        # If the config it ends up with doesn't enable that plugin, s6
+        # restart-loops it forever, spamming "error: unknown command
+        # 'web'" -- `docker compose exec` succeeding above only proves
+        # the container can still run a one-shot command, not that its
+        # own supervised service isn't crash-looping in the background.
+        ps_res = stack.compose("ps", "beets", "--format", "{{.State}}")
+        beets_state = ps_res.stdout.strip().lower()
+        if "running" not in beets_state:
+            _fail(f"Stock Beets container is not in a stable 'running' state: {beets_state!r}")
+            return
+        beets_logs = stack.logs("beets")
+        unknown_command_count = beets_logs.lower().count("unknown command")
+        if unknown_command_count > 0:
+            _fail(f"Stock Beets container logs contain {unknown_command_count} \"unknown command\" errors (its default service is restart-looping): {beets_logs[-2000:]}")
+            return
+        _ok("Stock Beets container is running stably with no \"unknown command\" restart-loop errors")
+
         # 6. Seed Synthetic Audio and Perform Import
         print("==> Step 10: Seeding synthetic audio in downloads directory and importing...")
         album_dir = stack.downloads_dir / "Acceptance Artist" / "Acceptance Album"
@@ -462,6 +513,16 @@ def run_acceptance() -> None:
         item = items[0]
         _ok(f"Found imported item in SQLite db: id={item['id']} title='{item['title']}' album='{item['album']}'")
         con.close()
+
+        # Prove there is exactly one physical database, not just one path
+        # string that happens to resolve the same way from the host --
+        # both containers must see the identical inode.
+        inode_beets = stack.compose("exec", "-T", "beets", "stat", "-c", "%i", "/config/musiclibrary.blb").stdout.strip()
+        inode_web_manager = stack.compose("exec", "-T", "beets-web-manager", "stat", "-c", "%i", "/config/musiclibrary.blb").stdout.strip()
+        if not inode_beets or not inode_web_manager or inode_beets != inode_web_manager:
+            _fail(f"musiclibrary.blb inode mismatch between containers: beets={inode_beets!r} web-manager={inode_web_manager!r} (a second, separate database may exist)")
+            return
+        _ok(f"Confirmed a single physical /config/musiclibrary.blb (inode {inode_beets}) shared by both containers")
 
         # Check stock container sees it with `beet ls`
         ls_exec = stack.compose("exec", "-T", "beets", "/lsiopy/bin/beet", "-l", "/config/musiclibrary.blb", "ls")
