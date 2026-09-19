@@ -248,10 +248,10 @@ Compose is attempting to use a local-only image name instead of the published re
 A development Compose file or `build: .` block is being run outside the repository root directory. Production Compose files use published images and do not require a local Dockerfile. See [docs/EXAMPLES.md](docs/EXAMPLES.md) for existing stack snippets.
 
 **`cannot connect to Beets API`**
-Verify that `BEETS_API_URL` and `BEETS_API_TOKEN` are set correctly in `.env` and that the Beets control agent service is healthy and reachable over the network.
+In the standard unified deployment (the production `docker-compose.yml` above), Beets Web Manager talks to its own embedded control agent over an internal loopback address and there is nothing to configure. This error normally only applies to the advanced [external Beets](examples/docker-compose.external-beets.yml) deployment — verify `BEETS_API_URL` and `BEETS_API_TOKEN` are set correctly there and that the remote Beets control agent service is healthy and reachable over the network.
 
 **The app returns 503 "Authentication is required" and I can't reach the UI at all.**
-This means neither `BEETS_WEB_AUTH_TOKEN` nor `BEETS_WEB_PASSWORD` resolved to a usable value when the process started. On a fresh install, read the auto-generated API token from the file it was persisted to (it is never printed to logs): `docker exec <container> cat /web-manager-data/.auth_token`. The provided Compose files persist that generated token to `/web-manager-data/.auth_token` (via `BEETS_WEB_AUTH_TOKEN_FILE`) so it survives a restart — make sure the mounted `web-manager-data` host directory is writable, or startup will fail closed rather than run with an unrecoverable, unpersisted token.
+This means neither `BEETS_WEB_AUTH_TOKEN` nor `BEETS_WEB_PASSWORD` resolved to a usable value when the process started. On a fresh install, read the auto-generated API token from the file it was persisted to (it is never printed to logs): `docker exec <container> cat /data/.auth_token`. The provided Compose files persist that generated token to `/data/.auth_token` (via `BEETS_WEB_AUTH_TOKEN_FILE`) so it survives a restart — make sure the mounted `./web-manager` host directory (mounted at `/data`) is writable, or startup will fail closed rather than run with an unrecoverable, unpersisted token.
 
 **"AI authentication failed" / no OpenAI key configured — will my imports still work?**
 Yes. AI is optional everywhere it's used for matching. A missing/invalid AI key, an HTTP 401/403 from the provider, a timeout, or a rate limit never stops MusicBrainz or AcoustID matching — those run unconditionally and are what actually identify releases and recordings.
@@ -283,20 +283,21 @@ Back up `/config/config.yaml`, `/config/musiclibrary.blb`, plugin configuration,
 
 ## Manual Beets CLI and Shared Locking
 
-All manual CLI operations run inside the `beets` container. Mutating manual CLI operations should use the `beet-locked` wrapper to automatically acquire the shared database file lock (`/config/.beet_db.lock`):
+The standard `docker-compose.yml` above runs the **stock, unmodified** `lscr.io/linuxserver/beets` image as the `beets` service — it does not include the `beet-locked` wrapper (that only exists in the custom-built `beets-engine` image used by `docker-compose.full.yml`/`examples/docker-compose.external-beets.yml`). `docker compose exec beets beet-locked ...` will fail with "command not found" on the standard stack.
+
+Beets Web Manager owns `/config/musiclibrary.blb` through its own embedded engine, and every mutation it performs (imports, cleanup, tag writes, moves) serializes on `/config/.beet_db.lock`. Plain `beet` commands run manually inside the `beets` container do **not** acquire that lock — SQLite's own file-level locking prevents literal database corruption from two processes writing at once, but it does not coordinate with Web Manager's own multi-step operations (for example, a manual `beet import` racing a Web Manager cleanup job that is mid-way through renaming the same files).
+
+Recommended safe usage:
 
 ```bash
-# Run manual read-only Beets CLI query
-docker compose exec beets /lsiopy/bin/beet ls artist:311
-
-# Verify the Beets version and loaded plugin line
-docker compose exec beets /lsiopy/bin/beet version
-
-# Run manual mutating import inside the Beets container (locked)
-docker compose exec beets beet-locked import /data/torrents/music
+# Read-only inspection is always safe, any time
+docker compose exec beets beet ls artist:311
+docker compose exec beets beet version
 ```
 
-No second Beets database is created. `Dockerfile.beets` applies its Chroma plugin-resolution compatibility patch (`docker/beets/apply_patches.py`) only against exactly Beets 2.4.0; it is skipped (with the upstream fix verified directly) on Beets >= 2.5.0. See `docs/CONFIGURATION.md` ("Beets engine version") and `docs/BEETS_ENGINE_MIGRATION.md` for the version policy and upgrade/rollback procedure.
+For mutating operations (`beet import`, `beet move`, `beet write`, etc.), prefer doing them through Beets Web Manager's own UI/API. If you do need to run a manual mutating `beet` command in the `beets` container, do it while Beets Web Manager has no import/cleanup job actively running.
+
+No second Beets database is created — both containers open the exact same `/config/musiclibrary.blb`, and both are pinned to Beets 2.13.1 so there is no schema-version skew between them.
 
 ## Architecture Migration & Upgrades
 

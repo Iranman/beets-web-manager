@@ -20,7 +20,12 @@ class BeetsFreshInstallPackagingTests(unittest.TestCase):
         self.assertIn("pylast==7.1.0", REQ)
         self.assertNotIn("beets==2.2.0", REQ)
         self.assertNotIn("python3-discogs-client==", REQ)
-        self.assertNotIn("pyacoustid==", REQ)
+        # The unified single-compose architecture bundles a full beets==
+        # runtime (with its chroma plugin) directly inside Web Manager, so
+        # pyacoustid -- the package providing the `acoustid` module chroma
+        # imports -- is now a real, required runtime dependency here too,
+        # not something only the separate Beets engine needs.
+        self.assertIn("pyacoustid==", REQ)
 
     def test_default_plugin_list_is_importable_model(self):
         first_line = CONFIG.splitlines()[0]

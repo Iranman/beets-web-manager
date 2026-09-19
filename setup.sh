@@ -25,15 +25,18 @@ if ! docker info >/dev/null 2>&1; then
 fi
 
 echo "==> Creating persistent data directories..."
-mkdir -p config data/music data/downloads web-manager-data
-chmod 777 web-manager-data 2>/dev/null || true
-chmod 777 config 2>/dev/null || true
-chmod 777 data/music 2>/dev/null || true
-chmod 777 data/downloads 2>/dev/null || true
+mkdir -p beets music downloads web-manager config data/music data/downloads web-manager-data
+chmod 777 web-manager web-manager-data 2>/dev/null || true
+chmod 777 beets config 2>/dev/null || true
+chmod 777 music data/music 2>/dev/null || true
+chmod 777 downloads data/downloads 2>/dev/null || true
 
+if [ ! -f "beets/config.yaml" ] && [ -f "config.yaml.example" ]; then
+  cp config.yaml.example beets/config.yaml
+  echo "    Initialized default beets/config.yaml from template."
+fi
 if [ ! -f "config/config.yaml" ] && [ -f "config.yaml.example" ]; then
   cp config.yaml.example config/config.yaml
-  echo "    Initialized default config/config.yaml from template."
 fi
 
 # Set/replace KEY=VALUE in .env safely
@@ -69,9 +72,9 @@ else
   FRESH_ENV=1
   TOKEN="$(openssl rand -hex 32 2>/dev/null || head -c32 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n' || python3 -c 'import secrets; print(secrets.token_hex(32))' 2>/dev/null || python -c 'import secrets; print(secrets.token_hex(32))' 2>/dev/null)"
   API_TOKEN="$(openssl rand -hex 32 2>/dev/null || head -c32 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n' || python3 -c 'import secrets; print(secrets.token_hex(32))' 2>/dev/null || python -c 'import secrets; print(secrets.token_hex(32))' 2>/dev/null)"
-  sed -i.bak "s/^BEETS_WEB_AUTH_TOKEN=.*/BEETS_WEB_AUTH_TOKEN=${TOKEN}/" .env && rm -f .env.bak
-  sed -i.bak "s/^BEETS_API_TOKEN=.*/BEETS_API_TOKEN=${API_TOKEN}/" .env && rm -f .env.bak
-  if [ ! -f "config/musiclibrary.blb" ]; then
+  set_env_value "BEETS_WEB_AUTH_TOKEN" "${TOKEN}"
+  set_env_value "BEETS_API_TOKEN" "${API_TOKEN}"
+  if [ ! -f "beets/musiclibrary.blb" ] && [ ! -f "config/musiclibrary.blb" ]; then
     set_env_value "BEETS_EXPECT_EXISTING_LIBRARY" "0"
   else
     set_env_value "BEETS_EXPECT_EXISTING_LIBRARY" "1"

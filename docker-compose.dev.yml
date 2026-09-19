@@ -1,46 +1,23 @@
-# Full Source Development Docker Compose file.
-# Requires a complete repository checkout to build both services locally:
-#   docker compose -f docker-compose.dev.yml up -d --build
+# Source Development Docker Compose file for Beets Web Manager stack.
+# Builds the Web Manager service locally from the current source tree,
+# running alongside the stock LinuxServer Beets container.
 #
-# This file is for local development and contributor builds ONLY.
-# It is NOT the standard production installation method.
+# Usage:
+#   docker compose -f docker-compose.dev.yml up -d --build
 
 services:
   beets:
-    build:
-      context: .
-      dockerfile: Dockerfile.beets
-      args:
-        BEETS_BASE_IMAGE: ${BEETS_BASE_IMAGE:-lscr.io/linuxserver/beets:2.13.1}
-        VCS_REF: ${VCS_REF:-local-development}
-    image: beets-engine:dev
+    image: ${BEETS_BASE_IMAGE:-lscr.io/linuxserver/beets:2.13.1}
     container_name: beets-dev
     restart: unless-stopped
     environment:
       - PUID=${PUID:-1000}
       - PGID=${PGID:-1000}
       - TZ=${TZ:-UTC}
-      - BEETSDIR=/config
-      - BEETS_API_TOKEN=${BEETS_API_TOKEN:?set BEETS_API_TOKEN in .env}
-      - BEETS_AGENT_PORT=8338
-      # Hotfix v0.1.17: background-only `beet version` probe timeout and
-      # the short bounded wait a capability check may spend joining an
-      # already-in-flight probe. Neither is ever waited on by /health,
-      # /version, or a normal /status request -- see
-      # backend/beets_control_agent.py's _cached_beet_version_snapshot().
-      - BEETS_VERSION_PROBE_TIMEOUT_SECONDS=${BEETS_VERSION_PROBE_TIMEOUT_SECONDS:-90}
-      - BEETS_VERSION_CAPABILITY_WAIT_SECONDS=${BEETS_VERSION_CAPABILITY_WAIT_SECONDS:-3}
     volumes:
-      - ${BEETS_CONFIG_PATH:-./config}:/config
-      - ${MUSIC_LIBRARY_PATH:-./data/music}:/data/media/music
-      - ${DOWNLOAD_PATH:-./data/downloads}:/data/torrents
-    expose:
-      - "8338"
-    healthcheck:
-      test: ["CMD", "/lsiopy/bin/python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8338/health', timeout=4)"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
+      - ${BEETS_CONFIG_PATH:-./beets}:/config
+      - ${MUSIC_PATH:-./music}:/music
+      - ${DOWNLOADS_PATH:-./downloads}:/downloads
 
   beets-web-manager:
     build:
@@ -53,86 +30,18 @@ services:
     image: beets-web-manager:dev
     container_name: beets-web-manager-dev
     restart: unless-stopped
-
     ports:
       - "${BEETS_WEB_BIND_ADDRESS:-127.0.0.1}:${WEBCONTROL_PORT:-8337}:8337"
-
     environment:
-      TZ: ${TZ:-UTC}
-      WEBCONTROL_PORT: 8337
-
-      BEETS_API_URL: ${BEETS_API_URL:-http://beets:8338}
-      BEETS_API_TOKEN: ${BEETS_API_TOKEN:?set BEETS_API_TOKEN in .env}
-
-      BEETS_WEB_AUTH_TOKEN: ${BEETS_WEB_AUTH_TOKEN:-}
-      BEETS_WEB_AUTH_TOKEN_FILE: /web-manager-data/.auth_token
-      # Wave 24 final review round 3, section 21-24: same gap as the other
-      # two compose files -- app.py's module-level `transactions =
-      # TransactionStore()` otherwise defaults to /config/transactions,
-      # not writable under this service's read_only:true +
-      # /web-manager-data-only filesystem.
-      BEETS_TRANSACTION_DIR: /web-manager-data/transactions
-      BEETS_WEB_USERNAME: ${BEETS_WEB_USERNAME:-admin}
-      BEETS_WEB_PASSWORD: ${BEETS_WEB_PASSWORD:-}
-      BEETS_WEB_AUTH_DISABLED: ${BEETS_WEB_AUTH_DISABLED:-0}
-      BEETS_TRUSTED_PROXIES: ${BEETS_TRUSTED_PROXIES:-}
-      BEETS_OUTBOUND_ALLOWLIST: ${BEETS_OUTBOUND_ALLOWLIST:-beets:8338}
-
-      # Hotfix v0.1.17 (BUG-4): operation-specific timeout/poll bounds for
-      # the artist-folder-reconcile long controlled mutation only -- not a
-      # global Beets API timeout. See
-      # app.py's _apply_artist_folder_reconcile_resilient().
-      BEETS_ARTIST_RECONCILE_TIMEOUT_SECONDS: ${BEETS_ARTIST_RECONCILE_TIMEOUT_SECONDS:-120}
-      BEETS_LONG_OPERATION_POLL_SECONDS: ${BEETS_LONG_OPERATION_POLL_SECONDS:-5}
-      BEETS_LONG_OPERATION_MAX_SECONDS: ${BEETS_LONG_OPERATION_MAX_SECONDS:-600}
-
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
-      AI_API_KEY: ${AI_API_KEY:-}
-      AI_BASE_URL: ${AI_BASE_URL:-}
-      AI_MODEL: ${AI_MODEL:-}
-      ACOUSTID_API_KEY: ${ACOUSTID_API_KEY:-}
-      PLEX_URL: ${PLEX_URL:-}
-      PLEX_TOKEN: ${PLEX_TOKEN:-}
-      LIDARR_URL: ${LIDARR_URL:-}
-      LIDARR_API_KEY: ${LIDARR_API_KEY:-}
-      SLSKD_URL: ${SLSKD_URL:-}
-      SLSKD_API_KEY: ${SLSKD_API_KEY:-}
-      DISCOGS_TOKEN: ${DISCOGS_TOKEN:-}
-      LISTENBRAINZ_TOKEN: ${LISTENBRAINZ_TOKEN:-}
-      SPOTIFY_CLIENT_ID: ${SPOTIFY_CLIENT_ID:-}
-      SPOTIFY_CLIENT_SECRET: ${SPOTIFY_CLIENT_SECRET:-}
-      YTDLP_PO_PROVIDER_URL: ${YTDLP_PO_PROVIDER_URL:-}
-      DEMO_MODE: ${DEMO_MODE:-0}
       PUID: ${PUID:-1000}
       PGID: ${PGID:-1000}
-
+      TZ: ${TZ:-UTC}
+      WEBCONTROL_PORT: 8337
+      DEMO_MODE: ${DEMO_MODE:-0}
     volumes:
-      - ${BEETS_WEB_MANAGER_DATA_PATH:-./web-manager-data}:/web-manager-data
-
-    security_opt:
-      - no-new-privileges:true
-
-    cap_drop:
-      - ALL
-
-    read_only: true
-
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,nodev,size=512m
-      - /run:rw,nosuid,nodev,size=64m
-
+      - ${BEETS_CONFIG_PATH:-./beets}:/config
+      - ${MUSIC_PATH:-./music}:/music
+      - ${DOWNLOADS_PATH:-./downloads}:/downloads
+      - ${WEB_MANAGER_DATA_PATH:-./web-manager}:/data
     depends_on:
-      beets:
-        condition: service_healthy
-
-    healthcheck:
-      test:
-        - CMD
-        - python
-        - -c
-        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8337/api/health', timeout=5)"
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 20s
+      - beets

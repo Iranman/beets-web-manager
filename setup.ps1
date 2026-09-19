@@ -21,11 +21,14 @@ try { docker info | Out-Null } catch {
 }
 
 Write-Host "==> Creating persistent data directories..."
-New-Item -ItemType Directory -Force -Path "config", "data\music", "data\downloads", "web-manager-data" | Out-Null
+New-Item -ItemType Directory -Force -Path "beets", "music", "downloads", "web-manager", "config", "data\music", "data\downloads", "web-manager-data" | Out-Null
 
+if (-not (Test-Path "beets\config.yaml") -and (Test-Path "config.yaml.example")) {
+    Copy-Item "config.yaml.example" "beets\config.yaml"
+    Write-Host "    Initialized default beets\config.yaml from template."
+}
 if (-not (Test-Path "config\config.yaml") -and (Test-Path "config.yaml.example")) {
     Copy-Item "config.yaml.example" "config\config.yaml"
-    Write-Host "    Initialized default config\config.yaml from template."
 }
 
 function Set-EnvValue {
@@ -51,10 +54,10 @@ if (Test-Path ".env") {
     $apiBytes = New-Object byte[] 32
     [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($apiBytes)
     $apiToken = -join ($apiBytes | ForEach-Object { $_.ToString("x2") })
-    (Get-Content ".env") -replace '^BEETS_WEB_AUTH_TOKEN=.*', "BEETS_WEB_AUTH_TOKEN=$token" | Set-Content ".env"
-    (Get-Content ".env") -replace '^BEETS_API_TOKEN=.*', "BEETS_API_TOKEN=$apiToken" | Set-Content ".env"
+    Set-EnvValue -Key "BEETS_WEB_AUTH_TOKEN" -Value $token
+    Set-EnvValue -Key "BEETS_API_TOKEN" -Value $apiToken
 
-    if (-not (Test-Path "config\musiclibrary.blb")) {
+    if (-not (Test-Path "beets\musiclibrary.blb") -and -not (Test-Path "config\musiclibrary.blb")) {
         Set-EnvValue -Key "BEETS_EXPECT_EXISTING_LIBRARY" -Value "0"
     } else {
         Set-EnvValue -Key "BEETS_EXPECT_EXISTING_LIBRARY" -Value "1"

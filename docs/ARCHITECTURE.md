@@ -16,54 +16,56 @@ These are standing product/architecture invariants, not aspirations. Each is bac
 
 ## Current Main Components
 
-- `beets` (Beets Engine Container): authoritative Beets installation built from `Dockerfile.beets`, whose `ARG BEETS_BASE_IMAGE` selects the upstream LinuxServer Beets image at build time (default: the tested production candidate, currently `lscr.io/linuxserver/beets:2.13.1`; see `docs/BEETS_ENGINE_MIGRATION.md` for the version policy and `docker/beets/apply_patches.py` for the version-aware plugin-resolution compatibility patch). Contains the Beets CLI, `/config/config.yaml`, `/config/musiclibrary.blb`, bundled plugins (`/opt/beets-web-manager-agent/beetsplug/discpath.py`), and the HTTP control agent (`backend/beets_control_agent.py`) supervised under S6 (`/custom-services.d/beets-control-agent`). Port 8338 is internal-only.
-- `beets-web-manager` (Web Manager Container): lightweight Flask + React/Next application built from `Dockerfile`. Contains zero Beets binaries, zero Beets Python packages, and zero local SQLite database files. Communicates with the Beets engine strictly over internal HTTP using `BeetsClient` and `RemoteLibrary` (`backend/beets_client.py`).
-- `app.py`: primary Flask application serving the web interface, operator routes, import workflows, matching adjudication, job tracking, and proxying requests to the remote Beets control agent.
+- `beets` (Stock Beets Engine Container): Standard upstream LinuxServer Beets container (`lscr.io/linuxserver/beets:2.13.1` or `:latest`). Provides the operator-accessible Beets CLI environment, `/config/config.yaml`, and the authoritative `/config/musiclibrary.blb` database file. Does not require port exposure or custom services.
+- `beets-web-manager` (Web Manager Container): Production web application built from `Dockerfile`. Bundles `beets==2.13.1`, `ffmpeg`, `libchromaprint-tools` (`fpcalc`), and an embedded `beets_control_agent` running strictly on loopback (`127.0.0.1:8338`). Serves the web UI on port 8337, executes background jobs, orchestrates Beets commands, and validates metadata.
+- `app.py`: primary Flask application serving the web interface, operator routes, import workflows, matching adjudication, job tracking, and communicating with the embedded control agent on loopback (or a remote agent if configured).
 - `routes_jobs.py`: split route module for `/api/jobs/*` job listing, lookup, and cancellation.
 - `routes_lidarr.py`: split route module for Lidarr/wanted endpoints.
 - `routes_setup.py`: split route module for setup, authentication, and configuration checks.
 - `routes_submissions.py`: split route module for MusicBrainz/AcoustID submission workflow and MBID attachment.
-- `job_engine.py`: in-memory `Job`, `PythonJob`, `JobStore`, structured state support, cooperative cancellation, log retention, and remote control agent task integration.
+- `job_engine.py`: in-memory `Job`, `PythonJob`, `JobStore`, structured state support, cooperative cancellation, log retention, and control agent task integration.
 - `helpers_mb.py`: MusicBrainz and AcoustID helper functions. It has no `app.py` dependency and is the strongest current provider boundary.
-- `backend/`: helper package containing `beets_client.py` (remote Beets API client), `beets_control_agent.py` (Beets container control agent), `album_match.py`, `audio_preferences.py`, `import_guard.py`, `mb_alignment.py`, `security.py`, `slskd.py`, `title_normalize.py`, `track_align.py`, and `transaction_engine.py`.
-- `frontend/src/`: React/Next/TypeScript frontend. `frontend/src/api/client.ts` centralizes API calls, `frontend/src/api/types.ts` centralizes many response shapes, and views/features are split under `views/` and `features/`.
-- `.github/workflows/`: CI covers Python syntax/unit tests, frontend typecheck/build, lint, Docker build, dependency audit, compose/security checks, and secret scan.
+- `backend/`: helper package containing `beets_client.py` (Beets API client), `beets_control_agent.py` (embedded/remote control agent), `album_match.py`, `audio_preferences.py`, `import_guard.py`, `mb_alignment.py`, `security.py`, `slskd.py`, `title_normalize.py`, `track_align.py`, and `transaction_engine.py`.
+- `frontend/src/`: React/Next/TypeScript frontend. `frontend/src/api/client.ts` centralizes API calls, `frontend/src/api/types.ts` centralizes response shapes, and views/features are split under `views/` and `features/`.
+- `.github/workflows/`: CI covers Python syntax/unit tests, frontend typecheck/build, lint, Docker build, dependency audit, compose/security checks, and production Docker acceptance.
 
 ## Intended Dependency Direction
 
 ```text
-Frontend
-  -> Web Manager Routes (app.py, routes_*.py)
-  -> Remote Beets API Client (backend/beets_client.py)
-  -- HTTP (internal port 8338 with Bearer token) -->
-  -> Beets Control Agent (backend/beets_control_agent.py in beets container)
-  -> Beets CLI, SQLite DB (/config/musiclibrary.blb), & Media Filesystem
+Frontend (Browser)
+  -> Web Manager Routes (app.py, routes_*.py on port 8337)
+  -> Beets Client (backend/beets_client.py)
+  -- HTTP (internal loopback 127.0.0.1:8338 with auto-token) -->
+  -> Embedded Control Agent (backend/beets_control_agent.py in web-manager)
+  -> Beets CLI, SQLite DB (/config/musiclibrary.blb), & Shared Media Filesystem
 ```
 
-Current migration status: the service split is complete and every production Beets/media mutation runs behind the control-agent boundary. The web manager service has zero direct Beets imports and no local SQLite file handles; `backend.beets_client.RemoteLibrary` and `RemoteSQLiteConnection` translate legacy library/SQL call shapes into authenticated internal HTTP requests — a legacy raw-SQL-shaped *read* attempted over that compatibility layer is a hard, unconditional failure by design (`raw_sqlite_query()` always raises), not a silent fallback, so a route still expressing a read that way is non-functional rather than degraded. Remaining work is replacing the routes that still express reads as raw-SQL-shaped compatibility calls with explicit, narrow `BeetsClient` repository methods (see `docs/TECHNICAL_DEBT.md`, ARCH-007) — route/service migration toward thin routes calling explicit services is otherwise still in progress (ARCH-001).
+In the standard unified deployment, both containers share the exact same filesystem mounts:
+- `/config` (Beets configuration and authoritative SQLite library)
+- `/music` (Target music library collection)
+- `/downloads` (Incoming download staging folder)
+- `/data` (Web Manager durable application state: settings, wizard completion, audit logs)
 
-## External Boundaries
+## External Boundaries & Locking Model
 
-- Beets Engine & CLI: All library mutations, database queries, tag writes, and Beets commands run inside the `beets` container under control-agent supervision or manual CLI execution (`docker compose exec beets /lsiopy/bin/beet ...` for read-only, `docker compose exec beets beet-locked ...` for mutating commands).
-- Control Agent Supervision: LinuxServer S6 supervises `/opt/beets-web-manager-agent/beets_control_agent.py` at `/custom-services.d/beets-control-agent`. If the agent crashes, S6 restarts it automatically without terminating the container.
-- Database & Lock Ownership: The single authoritative database `/config/musiclibrary.blb` lives exclusively in the `beets` container. Mutating operations acquire the shared file lock `/config/.beet_db.lock`. Manual CLI commands (via `beet-locked`) and control agent jobs serialize on this lock.
-- Port Exposure: Control agent port 8338 is exposed internally to the Docker bridge network only (`expose: ["8338"]`). It is never published to host interfaces. Web manager port 8337 (`WEBCONTROL_PORT`) is published to localhost (`127.0.0.1:8337`) or behind a reverse proxy.
-- Health and readiness: `/api/health` is web-manager liveness only. `/health/ready` and `/api/setup/status` query the authenticated remote control agent for authoritative Beets readiness, loaded-plugin state, command capabilities, and engine path health.
-- MusicBrainz and AcoustID: `helpers_mb.py` performs release, release-group, recording, and AcoustID lookup work. `routes_submissions.py` also performs MusicBrainz validation and AcoustID submission orchestration.
-- Submission command capability: the `submit` (AcoustID, via the `chroma` plugin) and `mbsubmit` (MusicBrainz) remote commands are gated by whether Beets actually finished loading the required plugin, not merely whether the plugin module is importable on disk -- a plugin can be present and importable (`beetsplug.chroma`) and still fail to initialize inside Beets (e.g. `chroma` silently failing to load even with `fpcalc`/`pyacoustid` present), so `backend/beets_control_agent.py`'s `get_loaded_beet_plugins()` parses the actual "plugins: ..." line from `beet version`'s own output rather than using `importlib.util.find_spec()`. Capability is enforced in two independent places: `routes_submissions._submission_readiness()` on the web-manager side (fails closed -- any remote connection failure, authentication failure, or malformed `/status` response reports every capability unavailable, never a local `find_spec()`/`shutil.which()` fallback), and `backend/beets_control_agent.py`'s `require_command_capability()` inside `/commands/execute` and `/jobs/create` themselves, so a caller that reaches the control agent directly (bypassing the web-manager route) is still blocked before any subprocess or job object is created.
-- AI provider: `app.py` includes OpenAI-key checks and AI suggestion calls. AI availability is already modeled in some paths, but matching still needs one shared contract.
-- Download providers: SLSKD extraction exists in `backend/slskd.py`, while orchestration remains heavily in `app.py`.
-- Plex: Plex endpoints and playlist sync logic are still in `app.py`.
-- Filesystem: canonical roots include `MUSIC_ROOT` (`/data/media/music`) and `DOWNLOADS_ROOT` (`/data/torrents/music`). Root-validation helpers exist in several areas, but mutations are not yet funneled through one boundary.
+- **Authoritative Database**: The single authoritative database `/config/musiclibrary.blb` is shared directly between containers. Both the Web Manager (via its embedded Beets runtime) and the stock Beets container open the same database file.
+- **Database-Level Locking**: SQLite provides cross-process ACID file locking on `/config/musiclibrary.blb`, ensuring database integrity across concurrent reads and transactions.
+- **Application-Level Locking**: Web Manager operations acquire a higher-level file lock (`/config/.beet_db.lock`) during multi-step controlled mutations (Clean All, batch move/rename, metadata repair, deduplication).
+- **Manual CLI Mutation Safety**: Manual CLI commands run in the stock Beets container (`docker compose exec beets beet ...`) acquire SQLite file locks, but do *not* acquire Web Manager's higher-level `.beet_db.lock`.
+  - **Read-only CLI queries** (`beet ls`, `beet version`, `beet stats`) are completely safe to run anytime.
+  - **Mutating CLI commands** (`beet import`, `beet modify`, `beet rm`) should **not** be run concurrently while Web Manager is actively executing multi-step mutation jobs.
+- **Port Exposure**: In the standard stack, port 8338 is internal loopback only (`127.0.0.1:8338`) inside the Web Manager container and is never published to the host or Docker bridge. Web manager port 8337 (`WEBCONTROL_PORT`) is published to `0.0.0.0:8337` (or `127.0.0.1:8337`) for browser access.
+- **Health and Readiness**: `/api/health` validates Web Manager liveness; `/health/ready` and `/api/setup/status` query the embedded Beets control agent for Beets readiness, loaded plugins (`chroma`, `musicbrainz`), and filesystem health.
+- **MusicBrainz and AcoustID**: `helpers_mb.py` performs release, release-group, recording, and AcoustID lookup work. `routes_submissions.py` performs MusicBrainz validation and AcoustID submission orchestration.
+- **Submission Command Capability**: `submit` (AcoustID) and `mbsubmit` (MusicBrainz) commands verify that required plugins are actually initialized inside Beets before execution.
 
 ## State Ownership
 
-- Beets is the library source of truth.
-- Beets SQLite data is stored and directly opened only inside the `beets` container. The control agent still uses direct `sqlite3.connect(LIB_PATH)` for several compatibility endpoints. The web manager reaches those paths through `backend.beets_client.RemoteSQLiteConnection`, not a local file handle.
-- Job state lives in `JobStore` in memory; selected workflows also persist checkpoints or last-run JSON under `/config` or metadata cache paths.
-- Transaction/audit state lives in `backend.transaction_engine.TransactionStore`, file-backed under `BEETS_TRANSACTION_DIR` or `/config/transactions`.
-- Import review state is composed from Beets library data plus JSON review files and computed evidence.
-- Frontend server state is fetched through `frontend/src/api/client.ts`; some shared polling uses TanStack Query, while larger feature pages still use local React state and effects.
+- **Library State**: `/config/musiclibrary.blb` is the authoritative Beets library.
+- **Web Manager Durable State**: `/data` (`WEB_MANAGER_DATA_DIR`, mounted to `./web-manager`) holds `app_settings.json`, `.setup_complete`, `.auth_token`, and session encryption keys.
+- **Job State**: Lives in `JobStore` in memory; structured progress and logs are exposed via `/api/jobs/*`.
+- **Audit & Transaction State**: Stored in `backend.transaction_engine.TransactionStore` under `/data/transactions`.
+- **Import Review State**: Staged under `/downloads` and tracked in `/data/unmatched_drafts`.
 
 ## Job Lifecycle
 

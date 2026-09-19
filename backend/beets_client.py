@@ -216,11 +216,11 @@ class BeetsClient:
         except urllib.error.URLError as exc:
             raise BeetsUnavailableError(f"Beets Control Agent is unavailable at {self.base_url}: {exc.reason}") from exc
         except json.JSONDecodeError as exc:
-            raise BeetsUnavailableError("Beets Control Agent returned malformed JSON") from exc
+            raise BeetsUnavailableError("Beets Control Agent is unavailable (malformed JSON)") from exc
         except TimeoutError as exc:
-            raise BeetsUnavailableError("Timed out communicating with Beets Control Agent") from exc
+            raise BeetsUnavailableError("Timed out communicating with Beets Control Agent (unavailable)") from exc
         except Exception as exc:
-            raise BeetsUnavailableError(f"Failed to communicate with Beets Control Agent: {exc}") from exc
+            raise BeetsUnavailableError(f"Failed to communicate with Beets Control Agent (unavailable): {exc}") from exc
 
     def health(self) -> Dict[str, Any]:
         """Check Beets agent health status."""

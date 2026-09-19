@@ -631,7 +631,7 @@ class PlexClientIdentifierFileDefaultTests(unittest.TestCase):
             os.environ.pop("PLEX_CLIENT_IDENTIFIER_FILE", None)
             self.assertEqual(
                 app_module._plex_client_identifier_file(),
-                Path("/web-manager-data/.plex_client_identifier"),
+                app_module.WEB_MANAGER_DATA_DIR / ".plex_client_identifier",
             )
 
     def test_honors_override_env_var(self):

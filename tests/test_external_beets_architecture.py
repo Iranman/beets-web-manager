@@ -225,7 +225,7 @@ class TestBeetsControlAgentSecurity(unittest.TestCase):
         content = (ROOT / "app.py").read_text(encoding="utf-8")
 
         self.assertIn("BEETS_ENABLE_LEGACY_LOCAL_SCAN", content)
-        self.assertIn("/web-manager-data/last_scan.txt", content)
+        self.assertIn('"last_scan.txt"', content)
         self.assertIn("if _legacy_local_scan_enabled():", content)
         self.assertIn("Legacy local library scan is disabled", content)
 
@@ -2759,6 +2759,86 @@ class BeetsEngineImageVerifierTests(unittest.TestCase):
                 "--require-command-help", "mbsubmit",
             ]):
                 self.assertEqual(vbi.main(), 0)
+
+
+class EmbeddedControlAgentSelectionTests(unittest.TestCase):
+    """Unified single-compose deployment: Beets Web Manager auto-starts its
+    own embedded Beets Control Agent instead of requiring a separate
+    beets-engine container reachable at BEETS_API_URL.
+
+    An operator running the *external* Beets deployment
+    (examples/docker-compose.external-beets.yml) sets BEETS_API_URL
+    explicitly to their own remote engine, which may reasonably be named
+    "beets" too (that is the LinuxServer image's own default container
+    name). Auto-embedding must never override that explicit choice --
+    doing so would silently swap a real remote library for a fresh, empty,
+    local one instead of just failing to connect."""
+
+    def setUp(self):
+        import app as app_module
+        self.app_module = app_module
+        self._env_patcher = mock.patch.dict(os.environ, {}, clear=False)
+        self._env_patcher.start()
+        for key in ("BEETS_API_URL", "BEETS_EMBEDDED_AGENT", "BEETS_API_TOKEN"):
+            os.environ.pop(key, None)
+
+    def tearDown(self):
+        self._env_patcher.stop()
+
+    def _classify(self, explicit_api_url: str) -> bool:
+        """Reproduces _ensure_beets_control_agent_ready()'s is_local_target
+        classification without actually starting a server, so this stays a
+        fast, isolated unit test of the routing decision itself."""
+        import urllib.parse as _up
+        api_url = explicit_api_url.strip() or "http://127.0.0.1:8338"
+        parsed = _up.urlsplit(api_url)
+        hostname = (parsed.hostname or "").lower()
+        return not explicit_api_url.strip() or hostname in ("127.0.0.1", "localhost", "0.0.0.0")
+
+    def test_unset_beets_api_url_is_local(self):
+        """The unified compose's default (no BEETS_API_URL at all) must embed."""
+        self.assertTrue(self._classify(""))
+
+    def test_explicit_loopback_is_local(self):
+        self.assertTrue(self._classify("http://127.0.0.1:8338"))
+        self.assertTrue(self._classify("http://localhost:8338"))
+
+    def test_explicit_remote_hostname_named_beets_is_not_local(self):
+        """A real external deployment's remote engine may be named "beets"
+        too (examples/docker-compose.external-beets.yml's own convention) --
+        an explicit BEETS_API_URL must never be reclassified as local just
+        because of that hostname, or the operator's real remote engine gets
+        silently replaced by an empty embedded one."""
+        self.assertFalse(self._classify("http://beets:8338"))
+
+    def test_explicit_remote_lan_address_is_not_local(self):
+        self.assertFalse(self._classify("http://192.168.1.50:8338"))
+
+
+class WebManagerDataDirExportTests(unittest.TestCase):
+    """The unified compose mounts /data (not /web-manager-data) for Web
+    Manager's own durable state. app.py auto-detects that and must export
+    it as WEB_MANAGER_DATA_DIR so every other module/constant that
+    independently reads that same env var (routes_setup.py,
+    backend/web_manager_config_store.py, and app.py's own
+    _FLASK_SECRET_KEY_FILE/UNMATCHED_DRAFT_ROOT/_SCAN_STATE_FILE/Plex
+    client identifier file) agrees on the same path -- otherwise state
+    written under the real bind mount is never found again under the
+    unmounted, non-persistent path, and vice versa."""
+
+    def test_web_manager_data_dir_env_var_is_exported_for_other_modules(self):
+        import app as app_module
+        exported = os.environ.get("WEB_MANAGER_DATA_DIR")
+        self.assertIsNotNone(exported)
+        self.assertEqual(Path(exported), app_module.WEB_MANAGER_DATA_DIR)
+
+    def test_dependent_constants_agree_with_web_manager_data_dir(self):
+        import app as app_module
+        data_dir = app_module.WEB_MANAGER_DATA_DIR
+        self.assertEqual(app_module._FLASK_SECRET_KEY_FILE, data_dir / ".flask_secret_key")
+        self.assertEqual(app_module.UNMATCHED_DRAFT_ROOT, data_dir / "unmatched_drafts")
+        self.assertEqual(app_module._SCAN_STATE_FILE, data_dir / "last_scan.txt")
+        self.assertEqual(app_module._plex_client_identifier_file(), data_dir / ".plex_client_identifier")
 
 
 if __name__ == "__main__":

@@ -47,6 +47,22 @@ else:
 _ur = urllib.request
 _up = urllib.parse
 
+# Single source of truth for where Web Manager's own durable state lives.
+# Set (not just read) as early as possible, before any other module in this
+# process reads WEB_MANAGER_DATA_DIR: routes_setup.py and
+# backend/web_manager_config_store.py each independently default to
+# "/web-manager-data" when the env var is unset, so unless the unified
+# single-compose layout's actual mount ("/data") is exported here first,
+# every one of app.py's own /web-manager-data-prefixed constants below,
+# plus every other module's fallback, silently disagrees with each other
+# and with WEB_MANAGER_DATA_DIR -- state written under one path (the real
+# bind mount, /data) can never be found again at the other (the container's
+# un-mounted, non-persistent built-in /web-manager-data directory).
+os.environ.setdefault(
+    "WEB_MANAGER_DATA_DIR",
+    "/data" if os.path.exists("/data") else "/web-manager-data",
+)
+
 def _s(v: Any) -> str:
     return str(v or "") if v is not None else ""
 
@@ -72,7 +88,7 @@ def _decode_boot_env_value(raw: str) -> str:
 
 def _load_persisted_setup_env_at_boot() -> None:
     """Load setup-managed persisted environment before clients read os.environ."""
-    env_file = Path(os.environ.get("SETUP_ENV_FILE", "/web-manager-data/.env"))
+    env_file = Path(os.environ.get("SETUP_ENV_FILE", os.path.join(os.environ["WEB_MANAGER_DATA_DIR"], ".env")))
     try:
         text = env_file.read_text(encoding="utf-8")
     except Exception:
@@ -558,7 +574,7 @@ DISCOGS_TOKEN = (
     or os.environ.get("DISCOGS_USER_TOKEN", "").strip()
     or _beets_config_discogs_token()
 )
-WEB_MANAGER_DATA_DIR = Path(os.environ.get("WEB_MANAGER_DATA_DIR", "/data" if os.path.exists("/data") else "/web-manager-data"))
+WEB_MANAGER_DATA_DIR = Path(os.environ["WEB_MANAGER_DATA_DIR"])
 PLAYLIST_STATE_ROOT = WEB_MANAGER_DATA_DIR / "playlists"
 PLAYLIST_MANIFESTS_DIR = PLAYLIST_STATE_ROOT / "manifests"
 PLAYLIST_JOB_STATE_DIR = Path(os.environ.get("PLAYLIST_JOB_STATE_DIR", "")) or (PLAYLIST_STATE_ROOT / "jobs")
@@ -1354,7 +1370,7 @@ CONFIG_FILE  = "/config/config.yaml"        # main beets config
 # shipped Compose topology) has mounted at all. /web-manager-data is the
 # one path volume every shipped Compose file actually gives this container
 # (SEC-002 Wave 8 architecture review).
-UNMATCHED_DRAFT_ROOT = Path(os.environ.get("UNMATCHED_DRAFT_DIR", "/web-manager-data/unmatched_drafts"))
+UNMATCHED_DRAFT_ROOT = Path(os.environ["UNMATCHED_DRAFT_DIR"]) if os.environ.get("UNMATCHED_DRAFT_DIR", "").strip() else (WEB_MANAGER_DATA_DIR / "unmatched_drafts")
 METADATA_CACHE_ROOT = Path(os.environ.get("METADATA_CACHE_DIR", "/config/.cache/metadata"))
 ARTIST_IMAGE_CACHE_DIR = METADATA_CACHE_ROOT / "artist-images"
 RELEASE_ART_CACHE_DIR = METADATA_CACHE_ROOT / "release-art"
@@ -1733,7 +1749,7 @@ REACT_DIST_DIR = APP_ROOT / "frontend" / "dist"
 LEGACY_STATIC_DIR = APP_ROOT / "static"
 _DEFAULT_MAX_CONTENT_LENGTH = 64 * 1024 * 1024
 
-_FLASK_SECRET_KEY_FILE = Path(os.environ.get("BEETS_WEB_SECRET_KEY_FILE", "/web-manager-data/.flask_secret_key"))
+_FLASK_SECRET_KEY_FILE = Path(os.environ["BEETS_WEB_SECRET_KEY_FILE"]) if os.environ.get("BEETS_WEB_SECRET_KEY_FILE", "").strip() else (WEB_MANAGER_DATA_DIR / ".flask_secret_key")
 
 
 def _app_config_store_for_target(target_file: Path) -> Tuple[WebManagerConfigStore, str]:
@@ -26475,7 +26491,7 @@ def start_ai_batch_import():
 
 # ── Library scan ──────────────────────────────────────────────────────────────
 
-_SCAN_STATE_FILE     = Path(os.environ.get("BEETS_SCAN_STATE_FILE", "/web-manager-data/last_scan.txt"))
+_SCAN_STATE_FILE     = Path(os.environ["BEETS_SCAN_STATE_FILE"]) if os.environ.get("BEETS_SCAN_STATE_FILE", "").strip() else (WEB_MANAGER_DATA_DIR / "last_scan.txt")
 _FULL_SCAN_INTERVAL  = 1800   # 30 min — full DB reconciliation + cleanup
 _QUICK_SCAN_INTERVAL = 120    # 2 min  — invalidate lib cache so next /api/library is fresh
 _AUTO_SCAN_INTERVAL  = _FULL_SCAN_INTERVAL   # kept for API compat
@@ -42407,7 +42423,9 @@ _plex_client_identifier_cache: str = ""
 
 
 def _plex_client_identifier_file() -> Path:
-    return Path(os.environ.get("PLEX_CLIENT_IDENTIFIER_FILE", "/web-manager-data/.plex_client_identifier"))
+    if os.environ.get("PLEX_CLIENT_IDENTIFIER_FILE", "").strip():
+        return Path(os.environ["PLEX_CLIENT_IDENTIFIER_FILE"])
+    return WEB_MANAGER_DATA_DIR / ".plex_client_identifier"
 
 
 def _plex_client_identifier() -> str:
@@ -52580,12 +52598,21 @@ def _ensure_beets_control_agent_ready() -> None:
     from backend import beets_control_agent
     from backend.beets_client import beets_client
 
-    api_url = (os.environ.get("BEETS_API_URL") or "http://127.0.0.1:8338").strip()
+    explicit_api_url = os.environ.get("BEETS_API_URL", "").strip()
+    api_url = explicit_api_url or "http://127.0.0.1:8338"
     is_remote_mode = os.environ.get("BEETS_EMBEDDED_AGENT", "").strip() == "0"
 
+    # Only treat this as "embed locally" when the operator left BEETS_API_URL
+    # unset (the unified single-compose default) or pointed it at an
+    # unambiguous loopback address. Deliberately excludes bare hostnames
+    # such as "beets" -- an external/standalone deployment (see
+    # examples/docker-compose.external-beets.yml) is free to name its own
+    # remote engine container "beets" too, and silently substituting a
+    # fresh, empty embedded engine for that real remote target would be a
+    # much worse failure than just not auto-starting one.
     parsed = urllib.parse.urlsplit(api_url)
     hostname = (parsed.hostname or "").lower()
-    is_local_target = hostname in ("127.0.0.1", "localhost", "0.0.0.0", "beets") or not api_url
+    is_local_target = not explicit_api_url or hostname in ("127.0.0.1", "localhost", "0.0.0.0")
 
     if not is_remote_mode and is_local_target:
         token = os.environ.get("BEETS_API_TOKEN", "").strip()
