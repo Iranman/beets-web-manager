@@ -27,6 +27,8 @@ LABEL org.opencontainers.image.title="Beets Web Manager" \
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     tini \
+    ffmpeg \
+    libchromaprint-tools \
     && rm -rf /var/lib/apt/lists/*
 
 ARG PUID=1000
@@ -41,17 +43,20 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app.py helpers_mb.py job_engine.py routes_jobs.py routes_lidarr.py routes_setup.py routes_submissions.py ./
 COPY backend/ ./backend/
+COPY beetsplug/ ./beetsplug/
 COPY tests/ ./tests/
 COPY config.yaml.example .env.example VERSION ./
 COPY --from=frontend /src/frontend/dist ./frontend/dist
 
-RUN mkdir -p /web-manager-data \
-    && chown -R beets:beets /app /web-manager-data
+RUN mkdir -p /web-manager-data /data /config /music /downloads \
+    && chown -R beets:beets /app /web-manager-data /data /config /music /downloads
 
-VOLUME ["/web-manager-data"]
+VOLUME ["/data", "/web-manager-data"]
 
 ENV WEBCONTROL_PORT=8337 \
-    BEETS_API_URL=http://beets:8338 \
+    BEETSDIR=/config \
+    MUSIC_LIBRARY_PATH=/music \
+    DOWNLOAD_PATH=/downloads \
     PYTHONUNBUFFERED=1
 
 EXPOSE 8337

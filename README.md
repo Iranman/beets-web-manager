@@ -27,71 +27,85 @@ See [SCREENSHOTS.md](SCREENSHOTS.md) for a tour of the app (Library, Import, Pla
 
 ## Installation & Deployment
 
-Beets Web Manager consists of two coordinated, pre-built containers published to GitHub Container Registry:
-- **`beets`** (`ghcr.io/iranman/beets-engine`): Authoritative Beets engine, plugins, database, and control agent.
-- **`beets-web-manager`** (`ghcr.io/iranman/beets-web-manager`): Web UI, API, import workflows, and background job engine.
-
-End users do not need Node.js, Python, or build tools on the host system.
+> [!IMPORTANT]
+> **Beets Web Manager requires Beets.** Both services run together in the same Docker Compose stack sharing your library volumes. You do **not** need to install Python, Beets, `pip`, or `uv` on your host machine.
 
 ### Quick Start (Production)
 
-Clone the repository and run the setup script:
+Deploying Beets Web Manager takes just 4 steps:
 
+#### 1. Create a project directory
 ```bash
-git clone https://github.com/Iranman/beets-web-manager.git
-cd beets-web-manager
-./setup.sh          # Linux / macOS
-.\setup.ps1         # Windows PowerShell
+mkdir beets-stack && cd beets-stack
 ```
 
-The setup script automatically creates data directories, configures `.env` with strong internal API tokens, pulls published GHCR images, starts both `beets` and `beets-web-manager`, and verifies container health and IPC connectivity.
+#### 2. Create `docker-compose.yml`
+```yaml
+services:
+  beets:
+    image: lscr.io/linuxserver/beets:2.13.1
+    container_name: beets
+    restart: unless-stopped
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+    volumes:
+      - ./beets:/config
+      - /path/to/music:/music
+      - /path/to/downloads:/downloads
 
-Alternatively, to start manually with Docker Compose:
+  beets-web-manager:
+    image: ghcr.io/iranman/beets-web-manager:stable
+    container_name: beets-web-manager
+    restart: unless-stopped
+    ports:
+      - "8337:8337"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+    volumes:
+      - ./beets:/config
+      - /path/to/music:/music
+      - /path/to/downloads:/downloads
+      - ./web-manager:/data
+    depends_on:
+      - beets
+```
 
+*(Adjust `/path/to/music` and `/path/to/downloads` to match your media storage folders).*
+
+#### 3. Start the stack
 ```bash
-cp .env.example .env
-docker compose pull
 docker compose up -d
-docker compose ps
 ```
 
+#### 4. Open Beets Web Manager
+Open **`http://<server-ip>:8337`** in your browser. On your first visit, you will be guided through a simple setup wizard to create your administrator username and password.
 
-### First-Run Setup & Web Sign-In
+---
 
-1. Open `http://localhost:8337` in your browser.
-2. If deploying for the first time, you will automatically be guided through the multi-step **First-Run Setup Wizard**:
-   - **Step 1: Welcome & Architecture**: Overview of `Browser → beets-web-manager → Beets` architecture.
-   - **Step 2: Administrator Account**: Set your primary username and secure password (stored with `scrypt` hashing).
-   - **Step 3: Beets Engine Connection**: Verify live connectivity to the background Beets engine container.
-   - **Step 4: Library Paths**: Check configuration, database, music library, and import staging directory permissions.
-   - **Step 5: MusicBrainz Metadata**: Test connection to MusicBrainz (authoritative metadata source, no AI required).
-   - **Step 6: AcoustID Fingerprinting** *(Optional)*: Test AcoustID API key and `fpcalc`.
-   - **Step 7: AI Supplemental Provider** *(Optional)*: Test OpenAI / OpenRouter / Custom provider credentials.
-   - **Step 8: Beets Plugins**: View installed and enabled plugins.
-   - **Step 9: Plex Synchronization** *(Optional)*: Test Plex Media Server integration.
-   - **Step 10: Review & Complete**: Finalize setup and launch the dashboard.
-3. On subsequent visits, sign in securely via the **Sign-In Page** (`/login`).
+### Running Beets CLI Commands
+You can run any standard Beets command anytime directly inside the `beets` container:
 
-### Existing Stack Integration (TrueNAS / Portainer / Multi-App Stacks)
+```bash
+docker compose exec beets beet version
+docker compose exec beets beet ls
+docker compose exec beets beet import /downloads/new-album
+```
 
-To add `beets-web-manager` to an existing Docker Compose stack (e.g., `/srv/media-stack/docker-compose.yml`), copy the service block from [docs/EXAMPLES.md](docs/EXAMPLES.md).
+Both Beets Web Manager and the Beets CLI share the exact same library and configuration files atomically.
 
-It uses the published image (`ghcr.io/iranman/beets-web-manager:${BEETS_WEB_MANAGER_VERSION:-stable}`), requires no local `build:` directive, and persists state to a host path (e.g., `/srv/media-stack/beets-web-manager:/web-manager-data`).
+---
+
+### Advanced: Standalone / External Beets (e.g. TrueNAS)
+If you already run a standalone Beets container on a separate server or stack, see [examples/docker-compose.external-beets.yml](examples/docker-compose.external-beets.yml) to connect Beets Web Manager over the network.
 
 ### Development Installation (Source Builds)
-
-To build both `beets-web-manager` and the `beets` engine from local source code:
-
+To build both services from local source code:
 ```bash
 docker compose -f docker-compose.dev.yml up -d --build
-```
-
-### Optional Bundled Beets Stack (Advanced Users)
-
-To deploy the published Beets Web Manager alongside a locally built custom Beets engine (`Dockerfile.beets`):
-
-```bash
-docker compose -f docker-compose.full.yml up -d --build
 ```
 
 For backend tests:
@@ -112,70 +126,44 @@ npm run build
 
 ## Configuration
 
-Most runtime configuration comes from environment variables and `/config/config.yaml` inside the container. Secrets must be provided through `.env`, Docker secrets, or mounted secret files. Do not commit real credentials.
+Most runtime configuration comes from environment variables and `/config/config.yaml` inside the container. Secrets can be provided through `.env`, Docker Compose environment variables, or configured directly in the web UI.
 
-Beets and Beets plugins are installed only in the `beets` engine image built from `Dockerfile.beets`. The web-manager image built from `Dockerfile` does not include Beets and must communicate with the engine through `BEETS_API_URL` plus `BEETS_API_TOKEN`. The engine image includes the bundled `discpath` plugin under `/opt/beets-web-manager-agent/beetsplug`; user plugins may be mounted at `/config/beetsplug`, and `pluginpath` searches `/config/beetsplug` before the bundled path. Do not install Python packages manually inside running containers; rebuild images from source.
-
-See `.env.example` for the required and optional variables.
+The standard Compose stack shares `/config`, `/music`, `/downloads`, and `/data` volumes between Beets and Beets Web Manager.
 
 ## Environment Variables
 
-Important variables include:
+Key variables include:
 
-- `BEETS_API_TOKEN`: strong shared secret between `beets-web-manager` and the internal Beets control agent. **Required**; blank, weak, and placeholder values are rejected by the engine.
-- `BEETS_API_URL`: internal URL for the Beets control agent, normally `http://beets:8338`.
-- `BEETS_WEB_AUTH_TOKEN`: bearer token for API/script clients. **Required**, but not something you have to invent yourself - see [Authentication](#authentication) below.
-- `BEETS_WEB_PASSWORD` / `BEETS_WEB_USERNAME`: Basic Auth credentials for browser access. See [Authentication](#authentication) for the password requirements.
+- `PUID` / `PGID`: user and group IDs for file permissions (defaults to `1000`).
+- `TZ`: time zone (defaults to `Etc/UTC`).
+- `WEBCONTROL_PORT`: web UI port (defaults to `8337`).
+- `BEETS_WEB_PASSWORD` / `BEETS_WEB_USERNAME`: administrator credentials for browser access (created via the browser setup wizard on first visit).
 - `OPENAI_API_KEY` or compatible provider key: **optional** AI metadata features — see [How AI Matching Works](#how-ai-matching-works).
 - `PLEX_URL` and `PLEX_TOKEN`: Plex sync and refresh integration (optional).
 - `LIDARR_URL` and `LIDARR_API_KEY`: wanted-music and Arr integration (optional).
 - `ACOUSTID_API_KEY` / `ACOUSTID_KEY`: optional — AcoustID lookups work without a key via a shared, rate-limited test key.
 - `SLSKD_SLSK_USERNAME` and `SLSKD_SLSK_PASSWORD`: Soulseek client credentials (optional, required only for SLSKD-based acquisition).
-- `BEETS_OUTBOUND_ALLOWLIST`: exact host:port or CIDR:port entries for local services the backend may call; defaults to the internal Beets control agent (`beets:8338`).
-- `BEETS_TRUSTED_PROXIES`: direct proxy CIDRs whose forwarded client IP headers may be trusted.
-
-MusicBrainz needs no key or account — it is a public API used for every release/recording lookup regardless of what else is configured.
 
 ### Required vs. optional integrations
 
-| Integration | Required? | What breaks if missing |
-|---|---|---|
-| Authentication (token or password) | **Required** | The app refuses every request until one is configured — see [Authentication](#authentication). An unconfigured install now auto-generates a token instead of locking itself out. |
-| MusicBrainz | **Required** (no setup needed) | N/A — public API, always available. |
-| AcoustID | Optional | Fingerprint-based matching falls back to a shared, rate-limited test key; add your own key for higher-volume use. |
-| AI (OpenAI-compatible) | Optional | AI-assisted ranking/adjudication is skipped. Matching continues on MusicBrainz + AcoustID evidence alone, at a lower confidence tier — see below. |
-| Plex | Optional | Plex sync/refresh actions are unavailable; everything else works normally. |
-| Lidarr, SLSKD, Discogs, ListenBrainz, Spotify | Optional | Each feature they back (wanted-album import, Soulseek acquisition, discography/art lookups, scrobble history, playlist parsing) is disabled on its own; nothing else is affected. |
+| Integration | Requirement | Notes |
+| ----------- | ----------- | ----- |
+| Beets | Required | Core music library engine; runs in the same Compose stack |
+| MusicBrainz | Built-in | Public metadata API used for release and recording matching |
+| AcoustID | Optional | Audio fingerprint matching and safety verification |
+| Plex | Optional | Media server sync and playlist synchronization |
+| SLSKD | Optional | Missing-track acquisition via Soulseek |
+| AI (OpenAI / OpenRouter) | Optional | Enhancement for candidate metadata ranking |
 
 ## Authentication
 
-The app provides separate authentication boundaries for human browser operators and API/script clients.
+The app provides separate authentication for human browser operators and API/script clients.
 
-### Quick Reference: Login Credentials & Tokens
+### 1. Web Browser Login
+On your first visit to `http://<server-ip>:8337`, the setup wizard will guide you to choose your administrator username and password.
 
-| Purpose | Credential | Where to find / set | Details |
-|---|---|---|---|
-| **Browser Login** | Username: `admin` (or `BEETS_WEB_USERNAME`) <br>Password: Created in browser or set in `.env` | Created at `http://<server-ip>:8337` on first run, or prompted during `setup.sh`/`setup.ps1` | Web browser setup & Basic Auth prompt (`http://<server-ip>:8337`) |
-| **API / Scripts** | `BEETS_WEB_AUTH_TOKEN` (Bearer token) | Persisted to `/web-manager-data/.auth_token` | Used via header `Authorization: Bearer <token>`. **NOT** your browser password! |
-| **Beets Engine** | `BEETS_API_TOKEN` | Configured in `.env` | Internal service token between Web Manager and Beets control agent |
-
-> [!IMPORTANT]
-> `BEETS_WEB_AUTH_TOKEN` is an API bearer token for scripts and tools. It is **NOT** your browser password. Use your browser username and browser password when prompted by your web browser.
-
-**You never have to invent `BEETS_WEB_AUTH_TOKEN` yourself.** Same as the browser password, if it's left blank the app generates a cryptographically secure 256-bit token on first boot and persists it to `/web-manager-data/.auth_token` (`0600` permissions) — the two are generated and persisted independently of each other.
-
-### First-Run Browser Setup
-
-1. **Browser First-Run Setup (Default):**  
-   Start Beets Web Manager (`docker compose up -d`) and open `http://<server-ip>:8337` in your browser. You will see the **Finish Beets Web Manager Setup** page where you can create your administrator username and password directly. Once setup completes, sign in with your credentials.
-
-2. **Guided Interactive CLI Setup (`setup.sh` / `setup.ps1`):**  
-   Prompts you to create your administrator username and password in your terminal before starting the containers.
-
-> [!NOTE]
-> No password is auto-generated for a fresh install — you always choose it, via the browser or the CLI setup script. This is intentional: once an installation is claimed (or migrated from an existing v0.1.8 install), the app fails closed if its credential file is ever lost or corrupted rather than silently minting a new one. If that happens, restore the credential file from backup or set `BEETS_WEB_PASSWORD` explicitly — there is no automatic recovery password.
-3. **Changing Your Browser Password:**  
-   Sign in to the web UI, go to **System → Environment Variables**, enter a new password for `BEETS_WEB_PASSWORD`, and click **Save environment**. Once the new password is verified, `.initial_admin_password` is automatically removed.
+### 2. API / Scripts (`BEETS_WEB_AUTH_TOKEN`)
+For automated scripts or API clients, use `Authorization: Bearer <token>`. An API token is automatically generated on first boot and persisted to `./web-manager/.auth_token`. You never have to invent `BEETS_WEB_AUTH_TOKEN` yourself.
 
 ### Password Requirements
 
@@ -238,41 +226,15 @@ Long-running operations are represented as jobs with status, logs, cancellation,
 - Continue narrowing service credentials and mounts for multi-service stacks.
 - Improve release automation and signed provenance.
 
-## First-Run Setup
+## Network Access
 
-For the simplest possible start:
-
-```bash
-./setup.sh          # or .\setup.ps1 on Windows
-```
-
-This creates `.env`/`config.yaml` from the example templates, generates a random `BEETS_WEB_AUTH_TOKEN`, and starts the two-service stack via `docker-compose.yml`. You must set a strong `BEETS_API_TOKEN` before the Beets engine will accept internal control-agent requests. Readiness and per-integration connectivity checks are available at `GET /api/setup/status` and `POST /api/setup/test/{ai,musicbrainz,acoustid,plex}`, and standard health probes at `/health`, `/health/live`, `/health/ready`.
-
-On a fresh `.env`, the setup script also asks how the web UI should be reachable:
-
-```text
-=== Web Access ===
-1. This computer only (127.0.0.1)
-2. Other devices on my local network (0.0.0.0)
-
-Choose [2 for most NAS/server installs]:
-```
-
-This sets `BEETS_WEB_BIND_ADDRESS` in `.env`. **`docker-compose.yml` defaults to `127.0.0.1`** (published as `127.0.0.1:8337->8337`) — secure by default, but if Beets Web Manager runs on a NAS/server (TrueNAS, Portainer, Unraid, a headless Linux box, etc.) and you access it from another computer, the UI will be unreachable until you set:
-
-```env
-BEETS_WEB_BIND_ADDRESS=0.0.0.0
-```
-
-**`BEETS_WEB_BIND_ADDRESS` is the container's *listening* address, not a browser URL** — setting it to `0.0.0.0` does not mean browsing to `http://0.0.0.0:8337`. From another device on your network, browse to:
+By default, `docker-compose.yml` publishes port `8337` on all interfaces (`0.0.0.0:8337`). You can access Beets Web Manager from any browser on your network at:
 
 ```text
 http://<server-ip>:8337
 ```
 
-using that server's actual LAN IP (find it with `ip addr` / `hostname -I` on Linux, `ipconfig` on Windows, or your NAS's network settings page — this README does not assume or print one for you). `0.0.0.0` widens *which network interfaces* the container listens on; authentication (see below) still gates every request regardless of bind address.
-
-Packaging status: passing tests on a local or CI branch do not authorize production deployment. Rebuild and validate both services in disposable storage before migrating an existing library.
+To restrict access to the local machine only, set `WEBCONTROL_PORT=127.0.0.1:8337` or adjust the ports mapping in `docker-compose.yml`.
 
 ## Troubleshooting
 

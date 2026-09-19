@@ -558,14 +558,14 @@ DISCOGS_TOKEN = (
     or os.environ.get("DISCOGS_USER_TOKEN", "").strip()
     or _beets_config_discogs_token()
 )
-WEB_MANAGER_DATA_DIR = Path(os.environ.get("WEB_MANAGER_DATA_DIR", "/web-manager-data"))
+WEB_MANAGER_DATA_DIR = Path(os.environ.get("WEB_MANAGER_DATA_DIR", "/data" if os.path.exists("/data") else "/web-manager-data"))
 PLAYLIST_STATE_ROOT = WEB_MANAGER_DATA_DIR / "playlists"
 PLAYLIST_MANIFESTS_DIR = PLAYLIST_STATE_ROOT / "manifests"
 PLAYLIST_JOB_STATE_DIR = Path(os.environ.get("PLAYLIST_JOB_STATE_DIR", "")) or (PLAYLIST_STATE_ROOT / "jobs")
 PLAYLIST_EXPORTS_DIR = PLAYLIST_STATE_ROOT / "exports"
 PLAYLIST_MEMBERSHIP_DIR = PLAYLIST_STATE_ROOT / "membership"
 PLAYLIST_INDEX_PATH = PLAYLIST_STATE_ROOT / "index.json"
-PLAYLIST_DIR  = Path(os.environ.get("PLAYLIST_DIR", "/data/media/music/playlists"))
+PLAYLIST_DIR  = Path(os.environ.get("PLAYLIST_DIR", "/music/playlists" if os.path.exists("/music") else "/data/media/music/playlists"))
 PLAYLIST_PATH_ROOT_ALIASES = [
     value.strip().replace("\\", "/").rstrip("/")
     for value in (
@@ -582,7 +582,7 @@ PLAYLIST_DOWNLOAD_BATCH_SIZE = _env_int("PLAYLIST_DOWNLOAD_BATCH_SIZE", 0, minim
 PLAYLIST_DOWNLOAD_METHODS = os.environ.get("PLAYLIST_DOWNLOAD_METHODS", "slskd,spotiflac,ytdlp,soundcloud")
 PLAYLIST_DOWNLOAD_ROOT = Path(os.environ.get(
     "PLAYLIST_DOWNLOAD_ROOT",
-    "/data/torrents/music/Playlist Downloads",
+    "/downloads/music/Playlist Downloads" if os.path.exists("/downloads") else "/data/torrents/music/Playlist Downloads",
 ))
 PLAYLIST_PIPELINE_STATES = {
     "pending", "available", "searching", "downloaded", "waiting_import",
@@ -2068,23 +2068,23 @@ def _security_auth_token() -> str:
 
 
 _GENERATED_AUTH_TOKEN_FILE = Path(
-    os.environ.get("BEETS_WEB_AUTH_TOKEN_FILE", "/web-manager-data/.auth_token")
+    os.environ.get("BEETS_WEB_AUTH_TOKEN_FILE", str(WEB_MANAGER_DATA_DIR / ".auth_token"))
 )
 
 _PERSISTED_BROWSER_PASSWORD_FILE = Path(
-    os.environ.get("BEETS_WEB_PERSISTED_PASSWORD_FILE", "/web-manager-data/.browser_password")
+    os.environ.get("BEETS_WEB_PERSISTED_PASSWORD_FILE", str(WEB_MANAGER_DATA_DIR / ".browser_password"))
 )
 
 _INITIAL_BROWSER_PASSWORD_FILE = Path(
-    os.environ.get("BEETS_WEB_INITIAL_PASSWORD_FILE", "/web-manager-data/.initial_admin_password")
+    os.environ.get("BEETS_WEB_INITIAL_PASSWORD_FILE", str(WEB_MANAGER_DATA_DIR / ".initial_admin_password"))
 )
 
 _PERSISTED_BROWSER_USERNAME_FILE = Path(
-    os.environ.get("BEETS_WEB_PERSISTED_USERNAME_FILE", "/web-manager-data/.browser_username")
+    os.environ.get("BEETS_WEB_PERSISTED_USERNAME_FILE", str(WEB_MANAGER_DATA_DIR / ".browser_username"))
 )
 
 _BROWSER_SETUP_STATE_FILE = Path(
-    os.environ.get("BEETS_WEB_SETUP_STATE_FILE", "/web-manager-data/.browser_setup_state")
+    os.environ.get("BEETS_WEB_SETUP_STATE_FILE", str(WEB_MANAGER_DATA_DIR / ".browser_setup_state"))
 )
 
 
@@ -52575,7 +52575,47 @@ import routes_setup    # noqa: F401, E402
 import routes_submissions  # noqa: F401, E402
 
 
+def _ensure_beets_control_agent_ready() -> None:
+    """Ensure the Beets Control Agent is reachable, auto-starting the embedded agent if in unified mode."""
+    from backend import beets_control_agent
+    from backend.beets_client import beets_client
+
+    api_url = (os.environ.get("BEETS_API_URL") or "http://127.0.0.1:8338").strip()
+    is_remote_mode = os.environ.get("BEETS_EMBEDDED_AGENT", "").strip() == "0"
+
+    parsed = urllib.parse.urlsplit(api_url)
+    hostname = (parsed.hostname or "").lower()
+    is_local_target = hostname in ("127.0.0.1", "localhost", "0.0.0.0", "beets") or not api_url
+
+    if not is_remote_mode and is_local_target:
+        token = os.environ.get("BEETS_API_TOKEN", "").strip()
+        if not beets_control_agent.beets_api_token_is_usable(token):
+            token_file = WEB_MANAGER_DATA_DIR / ".auth_token"
+            if token_file.exists():
+                try:
+                    token = token_file.read_text(encoding="utf-8").strip()
+                except Exception:
+                    token = ""
+        if not beets_control_agent.beets_api_token_is_usable(token):
+            token = secrets.token_hex(24)
+
+        os.environ["BEETS_API_TOKEN"] = token
+        beets_control_agent.BEETS_API_TOKEN = token
+
+        port = parsed.port or 8338
+        started = beets_control_agent.start_embedded_control_agent(host="127.0.0.1", port=port, token=token)
+        if started:
+            local_url = f"http://127.0.0.1:{port}"
+            os.environ["BEETS_API_URL"] = local_url
+            beets_client.base_url = local_url
+            beets_client.token = token
+            allowlist = os.environ.get("BEETS_OUTBOUND_ALLOWLIST", "")
+            if f"127.0.0.1:{port}" not in allowlist:
+                os.environ["BEETS_OUTBOUND_ALLOWLIST"] = f"{allowlist},127.0.0.1:{port},localhost:{port},beets:{port}".strip(",")
+
+
 if __name__ == "__main__":
+    _ensure_beets_control_agent_ready()
     _start_playlist_auto_sync_worker()
     if os.environ.get("PLAYLIST_WARM_INDEX", "0") not in ("0", "", "false", "False", "no"):
         _start_playlist_index_warm_worker()

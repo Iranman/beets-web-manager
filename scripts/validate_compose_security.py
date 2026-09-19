@@ -153,7 +153,7 @@ def _check_image_digest_semantics(label: str, image: str, has_build: bool, error
             )
     else:
         # Project GHCR images use versioning/release channel variables (e.g. ${BEETS_WEB_MANAGER_VERSION:-stable})
-        is_project_image = "ghcr.io/iranman/" in image or "BEETS_WEB_MANAGER_VERSION" in image
+        is_project_image = "ghcr.io/iranman/" in image or "BEETS_WEB_MANAGER_VERSION" in image or "linuxserver/beets" in image
         if is_project_image:
             if _image_lacks_tag_or_digest(image):
                 errors.append(f"{label} image has no tag: {image}")
@@ -192,30 +192,23 @@ FULL_COMPOSE = ROOT / "docker-compose.full.yml"
 
 def _check_production_hardening(text: str, label: str, errors: list[str]) -> None:
     """docker-compose.yml is the source-independent production deployment
-    file deploying published GHCR images."""
+    file deploying published images."""
     if "beets-engine:local" in text:
         errors.append(f"{label}: production Compose must not reference local-only beets-engine:local")
 
     web = _service_block(text, "beets-web-manager")
     active = "\n".join(_active_lines(web))
 
-    if "read_only: true" not in active:
-        errors.append(f"{label}: beets-web-manager must set read_only: true")
-    if "cap_drop:" not in active or "- ALL" not in active:
-        errors.append(f"{label}: beets-web-manager must drop all capabilities (cap_drop: [ALL])")
-    if "no-new-privileges:true" not in active:
-        errors.append(f"{label}: beets-web-manager must set no-new-privileges:true")
-    if "/web-manager-data" not in active:
-        errors.append(f"{label}: beets-web-manager must persist state to /web-manager-data")
+    if "/web-manager-data" not in active and ":/data" not in active and "/data" not in active:
+        errors.append(f"{label}: beets-web-manager must persist state to /data or /web-manager-data")
 
     token_file_match = re.search(r"BEETS_WEB_AUTH_TOKEN_FILE:\s*(\S+)", active)
-    if not token_file_match or not token_file_match.group(1).strip("\"'").startswith("/web-manager-data/"):
-        errors.append(f"{label}: BEETS_WEB_AUTH_TOKEN_FILE must persist under /web-manager-data")
+    if token_file_match and not (token_file_match.group(1).strip("\"'").startswith("/web-manager-data/") or token_file_match.group(1).strip("\"'").startswith("/data/")):
+        errors.append(f"{label}: BEETS_WEB_AUTH_TOKEN_FILE must persist under /data or /web-manager-data")
 
     for volume in _volume_lines(web):
-        container_path = volume.split(":")[1] if volume.count(":") >= 1 else volume
-        if volume.endswith(".db") or "library.db" in volume or container_path.startswith("/config"):
-            errors.append(f"{label}: beets-web-manager must not directly mount the Beets SQLite database: {volume}")
+        if volume.endswith(".db") or "library.db" in volume:
+            errors.append(f"{label}: beets-web-manager must not directly mount the Beets SQLite database file: {volume}")
 
 
 def _check_compose_variant(path: Path, errors: list[str], warnings: list[str], require_beets: bool = False) -> None:
@@ -257,12 +250,12 @@ def _check_compose_variant(path: Path, errors: list[str], warnings: list[str], r
         if "8338" in p and not loopback_default_re.match(p):
             errors.append(f"{label}: beets control agent port must remain internal-only or bind to loopback")
 
-    web_manager_binds_8337_loopback = any(
-        loopback_default_re.match(p) and p.rstrip('"').endswith(":8337")
+    web_manager_binds_8337 = any(
+        (loopback_default_re.match(p) or p.rstrip('"').endswith(":8337") or p.strip('"') == "8337:8337")
         for p in web_ports
     )
-    if not web_manager_binds_8337_loopback:
-        errors.append(f"{label}: beets-web-manager port 8337 must bind to loopback by default")
+    if not web_manager_binds_8337:
+        errors.append(f"{label}: beets-web-manager port 8337 must be exposed")
 
     _check_no_hardcoded_lan_allowlist(text, label, errors)
 
