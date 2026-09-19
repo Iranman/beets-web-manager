@@ -52,20 +52,14 @@ If this ambiguity trips you up, that's expected -- treat "Deployment setting" (C
 | Variable | Service | Required | Meaning |
 |---|---|---:|---|
 | `BEETS_WEB_MANAGER_VERSION` | compose | no | Published image tag to deploy: `stable` (recommended default), `latest`, exact version `0.1.17`, or `edge`. |
-| `BEETS_BASE_IMAGE` | dev/full compose only | no | Upstream LinuxServer Beets base image for the locally built engine (default: `lscr.io/linuxserver/beets:2.13.1`, the tested production candidate). See "Beets engine version" below. |
 | `WEBCONTROL_PORT` | web | no | Web port inside the container, default `8337`. |
-| `BEETS_WEB_BIND_ADDRESS` | compose | no | Host bind IP address for web UI access (default: `127.0.0.1`, local-only; set to `0.0.0.0` only after configuring authentication, TLS, and a reverse proxy). |
-| `BEETS_WEB_MANAGER_DATA_PATH` | compose | no | Host directory for persistent application state (default: `./web-manager-data`). |
-| `BEETS_API_TOKEN` | both | yes | Strong shared secret for authenticated internal HTTP from `beets-web-manager` to `beets`. Blank, weak, and placeholder values are rejected by the control agent. |
-| `BEETS_API_URL` | web | yes | Control agent endpoint URL. Same stack: `http://beets:8338`, external LAN: `http://192.168.1.50:8338`. |
-| `BEETS_WEB_AUTH_TOKEN` | web | yes | Owner API/script bearer token, for scripted/API clients. The app auto-generates a secure token when no credential is set (min length governed by `BEETS_WEB_AUTH_MIN_LENGTH`, default 32). Never used for the browser login form. |
-| `BEETS_WEB_PASSWORD` | web | optional | Administrator browser login password (session cookie or HTTP Basic). Passphrase-friendly policy: at least `BEETS_WEB_PASSWORD_MIN_LENGTH` characters (default 16, floor 12), no forced uppercase/lowercase/digit/special composition, just a placeholder-string check (`admin`, `changeme`, ...). Prefer setting this via the first-run browser setup wizard, which hashes it (Werkzeug scrypt) before persisting -- an explicit env var is compared in plaintext at login time since the web manager does not own its lifecycle. |
-| `BEETS_WEB_PASSWORD_MIN_LENGTH` | web | optional | Minimum browser password length, default `16`, hard floor `12`. Independent of `BEETS_WEB_AUTH_MIN_LENGTH` (the bearer-token floor) -- the two credentials have different threat models and are validated separately. |
+| `BEETS_API_TOKEN` | both | optional | Shared secret for internal Beets control agent. Auto-generated and managed internally in standard unified deployments. |
+| `BEETS_API_URL` | web | optional | Control agent endpoint URL. In standard unified deployment, defaults to internal loopback `http://127.0.0.1:8338`. For external deployments, set to external URL (e.g. `http://192.168.1.50:8338`). |
+| `BEETS_WEB_AUTH_TOKEN` | web | optional | Owner API/script bearer token. The app auto-generates a secure token if none is set. |
+| `BEETS_WEB_PASSWORD` | web | optional | Administrator browser login password. Prefer setting this via the first-run browser setup wizard. |
 | `BEETS_WEB_USERNAME` | web | optional | Browser login username, default `admin`. |
-| `BEETS_OUTBOUND_ALLOWLIST` | web | optional | Comma-separated host:port or CIDR:port entries for private services the web manager may contact. Defaults to `beets:8338`. |
+| `BEETS_OUTBOUND_ALLOWLIST` | web | optional | Comma-separated host:port or CIDR:port entries for private services the web manager may contact. |
 | `BEETS_TRUSTED_PROXIES` | web | optional | Proxy CIDRs whose forwarded client IP headers may be trusted. |
-| `BEETS_ENABLE_LEGACY_LOCAL_SCAN` | web | optional | Opt-in guard for the old local `/api/library/scan` filesystem walk. Keep `0`. |
-| `BEETS_SCAN_STATE_FILE` | web | optional | State file for the legacy local scan guard, default `/web-manager-data/last_scan.txt`. |
 
 ## Optional integrations
 

@@ -57,8 +57,8 @@ jobs:
             -e BEETS_WEB_AUTH_TOKEN=ci-smoke-test-token-not-a-real-secret \
             -e WEBCONTROL_PORT=8337 \
             -v /tmp/beets-ci-config:/config \
-            -v /tmp/beets-ci-music:/data/media/music \
-            -v /tmp/beets-ci-downloads:/data/torrents \
+            -v /tmp/beets-ci-music:/music \
+            -v /tmp/beets-ci-downloads:/downloads \
             beets-web-manager:ci
           alive=0
           for i in $(seq 1 30); do
@@ -119,58 +119,24 @@ jobs:
             --check-bpsync \
             --check-s6-supervision
 
-  two-service-acceptance:
-    name: two-service-docker-acceptance
+  production-docker-acceptance:
+    name: production-docker-acceptance
     runs-on: ubuntu-latest
     steps:
       - name: Checkout at exact PR head
         uses: actions/checkout@v7
         with:
-          # Wave 24 final review round 3, section 25-27: the acceptance
-          # script derives VCS_REF from `git rev-parse HEAD` (so the
-          # image's OCI revision label is provably the commit that was
-          # actually built, not asserted separately) -- for a
-          # pull_request event, actions/checkout's default ref resolves
-          # to the ephemeral PR *merge* commit, not the PR head SHA.
-          # Checking out the real head explicitly makes `git rev-parse
-          # HEAD` inside the script equal
-          # github.event.pull_request.head.sha, matching what every
-          # other job in this workflow passes as VCS_REF via build-arg.
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
       - run: pip install -r requirements.txt
-      - name: Install ffmpeg for realistic Wave 25 fixture tagging
-        # Wave 25 round 4: the confirmed_import_v1 acceptance fixture is
-        # converted from synthetic WAV PCM to FLAC (see
-        # seed_wave25_import_source in
-        # scripts/verify_two_service_docker_acceptance.py) so that basic
-        # title/artist/album/track tags are read back reliably by the
-        # engine container's Beets/mediafile install -- WAV has no single
-        # universally-agreed tag scheme. Do not rely on ffmpeg being
-        # present on the runner image implicitly; install it explicitly
-        # so this step is deterministic regardless of what any given
-        # ubuntu-latest image happens to ship.
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
-      - name: Install real Beets for disposable-library seeding
-        # Wave 24 final review round 3, section 21-24: this is genuine
-        # two-service acceptance -- both images built from local source
-        # at this exact checkout, booted together via `docker compose`,
-        # and exercised over real HTTP against the Web Manager's actual
-        # production routes (which then reach the engine container only
-        # over the Docker network, exactly like production) -- not an
-        # image-build-only smoke test and not a direct
-        # transaction_engine/Control Agent in-process call mislabeled as
-        # IPC. See scripts/verify_two_service_docker_acceptance.py's
-        # module docstring for the full step-by-step contract.
-        run: pip install beets==2.13.1
-      - name: Run two-service Docker acceptance
-        run: python scripts/verify_two_service_docker_acceptance.py
+      - name: Run production Docker acceptance
+        run: python scripts/verify_production_docker_acceptance.py
 
   publish-ghcr:
     name: Build & Publish GHCR Image
-    needs: [compose-verification, beets-engine-verification, two-service-acceptance]
+    needs: [compose-verification, beets-engine-verification, production-docker-acceptance]
     runs-on: ubuntu-latest
     permissions:
       contents: read

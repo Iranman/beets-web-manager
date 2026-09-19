@@ -1,92 +1,70 @@
-# Production Docker Compose file for Beets Web Manager.
-# Connects to an existing Beets control agent endpoint via BEETS_API_URL and BEETS_API_TOKEN.
-# Uses the published GHCR container image -- no local source or Dockerfile required.
+# Production Docker Compose file for Beets Web Manager stack.
+# Deploys both Beets and Beets Web Manager using published images.
+#
+# Usage:
+#   docker compose up -d
 
 services:
+  beets:
+    image: lscr.io/linuxserver/beets:2.13.1
+    container_name: beets
+    restart: unless-stopped
+    environment:
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
+      - TZ=${TZ:-UTC}
+    volumes:
+      - ${BEETS_CONFIG_PATH:-./beets}:/config
+      - ${MUSIC_PATH:-./music}:/music
+      - ${DOWNLOADS_PATH:-./downloads}:/downloads
+
   beets-web-manager:
-    image: ghcr.io/iranman/beets-web-manager:${BEETS_WEB_MANAGER_VERSION:-stable}
+    image: ghcr.io/iranman/beets-web-manager:stable
     container_name: beets-web-manager
     restart: unless-stopped
-
     ports:
-      - "${BEETS_WEB_BIND_ADDRESS:-127.0.0.1}:${WEBCONTROL_PORT:-8337}:8337"
-
+      - "${WEBCONTROL_PORT:-8337}:8337"
     environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
       TZ: ${TZ:-UTC}
       WEBCONTROL_PORT: 8337
 
-      BEETS_API_URL: ${BEETS_API_URL:?set BEETS_API_URL in .env}
-      BEETS_API_TOKEN: ${BEETS_API_TOKEN:?set BEETS_API_TOKEN in .env}
-
-      BEETS_WEB_AUTH_TOKEN: ${BEETS_WEB_AUTH_TOKEN:-}
-      BEETS_WEB_AUTH_TOKEN_FILE: /web-manager-data/.auth_token
-      # Wave 24 final review round 3, section 21-24 (found only by actually
-      # booting docker-compose.full.yml's two-container stack and
-      # exercising real HTTP routes -- this file shares the identical gap:
-      # app.py's module-level `transactions = TransactionStore()`
-      # otherwise defaults to /config/transactions, which does not exist
-      # and is not writable under this service's read_only:true +
-      # /web-manager-data-only filesystem).
-      BEETS_TRANSACTION_DIR: /web-manager-data/transactions
+      # All of the following are optional -- .env.example documents them,
+      # and every one is blank/inert by default. None is required to reach
+      # the browser setup wizard.
       BEETS_WEB_USERNAME: ${BEETS_WEB_USERNAME:-}
       BEETS_WEB_PASSWORD: ${BEETS_WEB_PASSWORD:-}
+      BEETS_WEB_AUTH_TOKEN: ${BEETS_WEB_AUTH_TOKEN:-}
       BEETS_WEB_AUTH_DISABLED: ${BEETS_WEB_AUTH_DISABLED:-0}
       BEETS_TRUSTED_PROXIES: ${BEETS_TRUSTED_PROXIES:-}
-      BEETS_OUTBOUND_ALLOWLIST: ${BEETS_OUTBOUND_ALLOWLIST:-}
-
-      # Hotfix v0.1.17 (BUG-4): operation-specific timeout/poll bounds for
-      # the artist-folder-reconcile long controlled mutation only -- not a
-      # global Beets API timeout. See
-      # app.py's _apply_artist_folder_reconcile_resilient().
-      BEETS_ARTIST_RECONCILE_TIMEOUT_SECONDS: ${BEETS_ARTIST_RECONCILE_TIMEOUT_SECONDS:-120}
-      BEETS_LONG_OPERATION_POLL_SECONDS: ${BEETS_LONG_OPERATION_POLL_SECONDS:-5}
-      BEETS_LONG_OPERATION_MAX_SECONDS: ${BEETS_LONG_OPERATION_MAX_SECONDS:-600}
 
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       AI_API_KEY: ${AI_API_KEY:-}
       AI_BASE_URL: ${AI_BASE_URL:-}
       AI_MODEL: ${AI_MODEL:-}
+
       ACOUSTID_API_KEY: ${ACOUSTID_API_KEY:-}
-      ACOUSTID_KEY: ${ACOUSTID_KEY:-}
+      DISCOGS_TOKEN: ${DISCOGS_TOKEN:-}
+      LISTENBRAINZ_TOKEN: ${LISTENBRAINZ_TOKEN:-}
+
       PLEX_URL: ${PLEX_URL:-}
       PLEX_TOKEN: ${PLEX_TOKEN:-}
       LIDARR_URL: ${LIDARR_URL:-}
       LIDARR_API_KEY: ${LIDARR_API_KEY:-}
+
       SLSKD_URL: ${SLSKD_URL:-}
       SLSKD_API_KEY: ${SLSKD_API_KEY:-}
-      DISCOGS_TOKEN: ${DISCOGS_TOKEN:-}
-      DISCOGS_USER_TOKEN: ${DISCOGS_USER_TOKEN:-}
-      LISTENBRAINZ_TOKEN: ${LISTENBRAINZ_TOKEN:-}
+
       SPOTIFY_CLIENT_ID: ${SPOTIFY_CLIENT_ID:-}
       SPOTIFY_CLIENT_SECRET: ${SPOTIFY_CLIENT_SECRET:-}
-      YTDLP_PO_PROVIDER_URL: ${YTDLP_PO_PROVIDER_URL:-}
+
       DEMO_MODE: ${DEMO_MODE:-0}
-      PUID: ${PUID:-1000}
-      PGID: ${PGID:-1000}
-
     volumes:
-      - ${BEETS_WEB_MANAGER_DATA_PATH:-./web-manager-data}:/web-manager-data
-
-    security_opt:
-      - no-new-privileges:true
-
-    cap_drop:
-      - ALL
-
-    read_only: true
-
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,nodev,size=512m
-      - /run:rw,nosuid,nodev,size=64m
-
-    healthcheck:
-      test:
-        - CMD
-        - python
-        - -c
-        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8337/api/health', timeout=5)"
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 20s
+      - ${BEETS_CONFIG_PATH:-./beets}:/config
+      - ${MUSIC_PATH:-./music}:/music
+      - ${DOWNLOADS_PATH:-./downloads}:/downloads
+      - ${WEB_MANAGER_DATA_PATH:-./web-manager}:/data
+    depends_on:
+      - beets

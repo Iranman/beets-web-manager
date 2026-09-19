@@ -56,9 +56,10 @@ from backend.web_manager_config_store import (  # noqa: E402
 # closed with a 500 in the actual shipped configuration. /web-manager-data
 # is the one mount this service is guaranteed to own and can write to
 # (already used for .auth_token/.browser_password/.initial_admin_password).
-_SETTINGS_FILE = Path(os.environ.get("SETUP_SETTINGS_FILE", "/web-manager-data/app_settings.json"))
-_SETUP_COMPLETE_MARKER = Path(os.environ.get("SETUP_COMPLETE_FILE", "/web-manager-data/.setup_complete"))
-_SETUP_ENV_FILE = Path(os.environ.get("SETUP_ENV_FILE", "/web-manager-data/.env"))
+_default_data_dir = os.environ.get("WEB_MANAGER_DATA_DIR", "/web-manager-data")
+_SETTINGS_FILE = Path(os.environ.get("SETUP_SETTINGS_FILE", f"{_default_data_dir}/app_settings.json"))
+_SETUP_COMPLETE_MARKER = Path(os.environ.get("SETUP_COMPLETE_FILE", f"{_default_data_dir}/.setup_complete"))
+_SETUP_ENV_FILE = Path(os.environ.get("SETUP_ENV_FILE", f"{_default_data_dir}/.env"))
 _ENV_EXAMPLE_FILE = Path(os.environ.get("SETUP_ENV_EXAMPLE_FILE", str(Path(__file__).parent / ".env.example")))
 _ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 _BLOCKED_ENV_NAMES = {"SETUP_ENV_FILE", "SETUP_ENV_EXAMPLE_FILE", "SETUP_SETTINGS_FILE", "SETUP_COMPLETE_FILE"}

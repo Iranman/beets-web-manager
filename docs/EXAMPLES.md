@@ -1,71 +1,77 @@
 # Beets Web Manager - Deployment Examples
 
-This document provides deployment examples for embedding **Beets Web Manager** into existing Compose stacks (such as TrueNAS, Unraid, Portainer, or existing Arrs stacks).
+This document provides deployment examples for **Beets Web Manager**.
 
 ---
 
-## 1. Existing Compose Stack Example (e.g., TrueNAS / Arrs Stack)
+## 1. Standard Unified Stack (Recommended)
 
-When adding `beets-web-manager` to an existing Compose file (such as `/srv/media-stack/docker-compose.yml`), copy only the service definition below.
-
-> [!IMPORTANT]
-> - Use the published GHCR image.
-> - Do **NOT** copy `build: .` or use local-only image names.
-> - Do **NOT** mount source code directories.
-> - Ensure `BEETS_API_URL` points to your Beets control agent endpoint.
+Run both Beets and Beets Web Manager together in the same Compose file sharing your library volumes:
 
 ```yaml
 services:
+  beets:
+    image: lscr.io/linuxserver/beets:2.13.1
+    container_name: beets
+    restart: unless-stopped
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+    volumes:
+      - ./beets:/config
+      - /path/to/music:/music
+      - /path/to/downloads:/downloads
+
   beets-web-manager:
-    image: ghcr.io/iranman/beets-web-manager:${BEETS_WEB_MANAGER_VERSION:-stable}
+    image: ghcr.io/iranman/beets-web-manager:stable
     container_name: beets-web-manager
     restart: unless-stopped
-
     ports:
-      - "${BEETS_WEB_BIND_ADDRESS:-127.0.0.1}:8337:8337"
-
+      - "8337:8337"
     environment:
-      TZ: UTC
-      BEETS_API_URL: http://beets:8338
-      BEETS_API_TOKEN: "${BEETS_API_TOKEN:?set in .env}"
-      BEETS_WEB_AUTH_TOKEN: "${BEETS_WEB_AUTH_TOKEN:-}"
-      BEETS_WEB_AUTH_TOKEN_FILE: /web-manager-data/.auth_token
-
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
     volumes:
-      - ${BEETS_WEB_MANAGER_DATA_PATH:-./web-manager-data}:/web-manager-data
-
-    security_opt:
-      - no-new-privileges:true
-
-    cap_drop:
-      - ALL
-
-    read_only: true
-
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,nodev,size=512m
-      - /run:rw,nosuid,nodev,size=64m
-
-    healthcheck:
-      test:
-        - CMD
-        - python
-        - -c
-        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8337/api/health', timeout=5)"
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 20s
+      - ./beets:/config
+      - /path/to/music:/music
+      - /path/to/downloads:/downloads
+      - ./web-manager:/data
+    depends_on:
+      - beets
 ```
 
 ---
 
-## 2. Beets Connection Modes
+## 2. External / Standalone Beets Example (e.g. TrueNAS)
 
-Beets Web Manager communicates with the Beets engine solely through HTTP API calls using `BEETS_API_URL` and `BEETS_API_TOKEN`.
+When connecting Beets Web Manager to an existing remote Beets instance (see [examples/docker-compose.external-beets.yml](../examples/docker-compose.external-beets.yml)):
 
-### Mode A: Beets in the same Compose project
-If the Beets control agent runs as a service named `beets` inside the same `docker-compose.yml`:
+```yaml
+services:
+  beets-web-manager:
+    image: ghcr.io/iranman/beets-web-manager:stable
+    container_name: beets-web-manager
+    restart: unless-stopped
+    ports:
+      - "8337:8337"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+      - BEETS_API_URL=http://192.168.1.50:8338
+      - BEETS_API_TOKEN=your-strong-token-here
+    volumes:
+      - ./web-manager:/data
+```
+
+### Connection Modes (Advanced / External deployments only)
+
+These only apply when running Beets Web Manager against a separately-managed Beets control agent, as above — the standard stack in section 1 needs no `BEETS_API_URL`/`BEETS_API_TOKEN` configuration at all; it uses its own embedded control agent automatically.
+
+#### Mode A: A remote control agent that happens to share a Compose project
+If a separately-managed Beets control agent runs as a service named `beets` inside the same `docker-compose.yml` (not the standard stock `lscr.io/linuxserver/beets` image, which has no control agent of its own):
 
 ```yaml
 BEETS_API_URL: http://beets:8338
@@ -78,7 +84,7 @@ depends_on:
     condition: service_healthy
 ```
 
-### Mode B: Beets on a separate host or separate Compose stack
+#### Mode B: Beets on a separate host or separate Compose stack
 If the Beets control agent runs on another host or in a separate Compose project:
 
 ```yaml

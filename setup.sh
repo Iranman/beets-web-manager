@@ -25,32 +25,15 @@ if ! docker info >/dev/null 2>&1; then
 fi
 
 echo "==> Creating persistent data directories..."
-mkdir -p web-manager-data
-# Wave 24 final review round 3, section 21-24 (found only by actually
-# booting the real container against a freshly-created host directory,
-# not by unit tests, which never run inside the read_only container at
-# all): the published image runs as a fixed non-root `beets` user (build-
-# time UID/GID, default 1000 -- the runtime PUID/PGID in .env only affect
-# a locally-built image, never the published ghcr.io one), and a host
-# bind mount's on-disk permissions come entirely from THIS directory as
-# just created, not from anything baked into the image. Left at the
-# default mkdir mode, a container UID that doesn't happen to match
-# whoever ran this script cannot write its own state here (the auth-
-# token bootstrap file, the transaction audit ledger, and more) --
-# world-writable is the simplest correct fix for a directory that holds
-# no data yet and exists solely to become this one container's own
-# volume.
-chmod 777 web-manager-data
-if [ "$DEV_MODE" -eq 1 ]; then
-  mkdir -p config data/music data/downloads
+mkdir -p beets music downloads web-manager
+chmod 777 beets music downloads web-manager 2>/dev/null || true
+
+if [ ! -f "beets/config.yaml" ] && [ -f "config.yaml.example" ]; then
+  cp config.yaml.example beets/config.yaml
+  echo "    Initialized default beets/config.yaml from template."
 fi
 
-# Set/replace KEY=VALUE in .env without going anywhere near sed replacement-
-# text escaping: a value containing '&', '/', or '\' (all valid, common
-# password characters) corrupts a naive `sed s/.../${value}/` substitution
-# (e.g. '&' expands to the whole matched line) rather than being written as
-# typed. Deleting the old line and appending the new one sidesteps that
-# class of bug entirely -- printf '%s' never reinterprets its argument.
+# Set/replace KEY=VALUE in .env safely
 set_env_value() {
   key="$1"; value="$2"
   if grep -q "^${key}=" .env 2>/dev/null; then
@@ -60,6 +43,20 @@ set_env_value() {
   printf '%s=%s\n' "$key" "$value" >> .env
 }
 
+get_lan_ip() {
+  local ip=""
+  if command -v hostname >/dev/null 2>&1; then
+    ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+  fi
+  if [ -z "$ip" ] && command -v ip >/dev/null 2>&1; then
+    ip="$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'src \K\S+' || true)"
+  fi
+  if [ -z "$ip" ] && command -v ifconfig >/dev/null 2>&1; then
+    ip="$(ifconfig 2>/dev/null | grep -Eo 'inet (addr:)?([0-9]*\.){3}[0-9]*' | grep -Eo '([0-9]*\.){3}[0-9]*' | grep -v '127.0.0.1' | head -n1 || true)"
+  fi
+  echo "${ip:-<LAN-IP>}"
+}
+
 FRESH_ENV=0
 if [ -f .env ]; then
   echo "==> .env already exists, leaving existing secrets untouched."
@@ -67,18 +64,19 @@ else
   echo "==> Creating .env from .env.example..."
   cp .env.example .env
   FRESH_ENV=1
-  TOKEN="$(openssl rand -hex 32 2>/dev/null || head -c32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-  API_TOKEN="$(openssl rand -hex 32 2>/dev/null || head -c32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-  sed -i.bak "s/^BEETS_WEB_AUTH_TOKEN=.*/BEETS_WEB_AUTH_TOKEN=${TOKEN}/" .env && rm -f .env.bak
-  sed -i.bak "s/^BEETS_API_TOKEN=.*/BEETS_API_TOKEN=${API_TOKEN}/" .env && rm -f .env.bak
+  TOKEN="$(openssl rand -hex 32 2>/dev/null || head -c32 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n' || python3 -c 'import secrets; print(secrets.token_hex(32))' 2>/dev/null || python -c 'import secrets; print(secrets.token_hex(32))' 2>/dev/null)"
+  API_TOKEN="$(openssl rand -hex 32 2>/dev/null || head -c32 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n' || python3 -c 'import secrets; print(secrets.token_hex(32))' 2>/dev/null || python -c 'import secrets; print(secrets.token_hex(32))' 2>/dev/null)"
+  set_env_value "BEETS_WEB_AUTH_TOKEN" "${TOKEN}"
+  set_env_value "BEETS_API_TOKEN" "${API_TOKEN}"
+  if [ ! -f "beets/musiclibrary.blb" ]; then
+    set_env_value "BEETS_EXPECT_EXISTING_LIBRARY" "0"
+  else
+    set_env_value "BEETS_EXPECT_EXISTING_LIBRARY" "1"
+  fi
   echo "    Generated random BEETS_WEB_AUTH_TOKEN and BEETS_API_TOKEN in .env."
 fi
 
-# Interactive Web Access prompt -- only on a genuinely fresh .env, so
-# re-running setup.sh on an existing install never silently changes an
-# already-configured bind address. .env.example ships BEETS_WEB_BIND_ADDRESS
-# with a non-empty default (127.0.0.1), so "is it empty" can't gate this the
-# way it gates the password prompt below.
+# Interactive Web Access prompt -- only on a genuinely fresh .env
 if [ "$FRESH_ENV" -eq 1 ] && [ -t 0 ]; then
   echo ""
   echo "=== Web Access ==="
@@ -95,93 +93,32 @@ if [ "$FRESH_ENV" -eq 1 ] && [ -t 0 ]; then
   if [ "$BIND_ADDR" = "0.0.0.0" ]; then
     echo "    Set BEETS_WEB_BIND_ADDRESS=0.0.0.0 in .env."
     echo "    This is the LISTENING address, not a browser URL -- from another device on your network, browse to:"
-    echo "      http://<this-machine's-LAN-IP>:8337"
-    echo "    Find this machine's LAN IP with 'ip addr' / 'ifconfig' / 'hostname -I', or your NAS's network settings page."
+    echo "      http://$(get_lan_ip):8337"
   else
     echo "    Set BEETS_WEB_BIND_ADDRESS=127.0.0.1 in .env -- only reachable from this computer, at http://localhost:8337"
   fi
 fi
 
-# Interactive Browser Login Prompt if BEETS_WEB_PASSWORD is not configured
-WEB_PASS_VAL="$(grep -E '^BEETS_WEB_PASSWORD=' .env | cut -d= -f2- | tr -d '\r" ' || true)"
-if [ -z "$WEB_PASS_VAL" ] && [ -t 0 ]; then
-  echo ""
-  echo "=== Browser Login Setup ==="
-  echo "This is the username and password you will use to open Beets Web Manager in your browser."
-  echo "Note: BEETS_WEB_AUTH_TOKEN (API bearer token) and BEETS_API_TOKEN (engine token) are separate internal tokens."
-  echo ""
-  read -r -p "Browser username [admin]: " INPUT_USER
-  USER_VAL="${INPUT_USER:-admin}"
-  USER_VAL="$(echo "$USER_VAL" | tr -d '\r\n')"
-
-  while true; do
-    read -r -s -p "Browser password (min 32 chars, upper, lower, number, special): " PASS_VAL
-    echo ""
-    PASS_VAL="$(echo "$PASS_VAL" | tr -d '\r\n')"
-    if [ -z "$PASS_VAL" ]; then
-      echo "Password cannot be empty." >&2
-      continue
-    fi
-    ERRS=""
-    if [ "${#PASS_VAL}" -lt 32 ]; then
-      ERRS="${ERRS} at least 32 characters;"
-    fi
-    if ! echo "$PASS_VAL" | grep -q '[A-Z]'; then
-      ERRS="${ERRS} an uppercase letter;"
-    fi
-    if ! echo "$PASS_VAL" | grep -q '[a-z]'; then
-      ERRS="${ERRS} a lowercase letter;"
-    fi
-    if ! echo "$PASS_VAL" | grep -q '[0-9]'; then
-      ERRS="${ERRS} a number;"
-    fi
-    if ! echo "$PASS_VAL" | grep -q '[^a-zA-Z0-9]'; then
-      ERRS="${ERRS} a special character;"
-    fi
-    if [ -z "$ERRS" ]; then
-      break
-    else
-      echo "Password does not meet requirements:${ERRS}" >&2
-    fi
-  done
-
-  set_env_value BEETS_WEB_USERNAME "$USER_VAL"
-  set_env_value BEETS_WEB_PASSWORD "$PASS_VAL"
-  echo "    Configured browser username ($USER_VAL) and password in .env."
-fi
-
-# Validation
-API_TOKEN_VAL="$(grep -E '^BEETS_API_TOKEN=' .env | cut -d= -f2- | tr -d '\r" ' || true)"
-if [ -z "$API_TOKEN_VAL" ] || [ "$API_TOKEN_VAL" = "changeme" ]; then
-  echo "WARNING: BEETS_API_TOKEN is unconfigured or set to 'changeme' placeholder." >&2
-  echo "Please set BEETS_API_TOKEN in .env to match your Beets control agent." >&2
-fi
-
-API_URL_VAL="$(grep -E '^BEETS_API_URL=' .env | cut -d= -f2- | tr -d '\r" ' || true)"
-if [ -z "$API_URL_VAL" ]; then
-  if [ "$DEV_MODE" -eq 1 ]; then
-    echo "WARNING: BEETS_API_URL is empty in .env. Defaulting to http://beets:8338 (docker-compose.dev.yml)." >&2
-  else
-    echo "WARNING: BEETS_API_URL is empty in .env. docker-compose.yml requires BEETS_API_URL to be set -- the container will fail to start without it." >&2
-  fi
-fi
-
 if [ "$DEV_MODE" -eq 1 ]; then
-  echo "==> Starting Beets Web Manager in DEVELOPMENT mode (source build)..."
+  echo "==> Starting Beets stack in DEVELOPMENT mode (source build)..."
   docker compose -f docker-compose.dev.yml up -d --build
   COMPOSE_FILE="docker-compose.dev.yml"
 else
-  echo "==> Pulling published image from GitHub Container Registry..."
-  docker compose pull beets-web-manager
-  echo "==> Starting Beets Web Manager..."
-  docker compose up -d beets-web-manager
+  echo "==> Pulling published images from GitHub Container Registry..."
+  docker compose pull
+  echo "==> Starting Beets stack (beets engine + beets-web-manager)..."
+  docker compose up -d
   COMPOSE_FILE="docker-compose.yml"
 fi
 
-echo "==> Waiting for Beets Web Manager to become healthy..."
+echo "==> Waiting for services to become healthy..."
 HEALTHY=0
-for i in $(seq 1 30); do
-  if docker compose -f "$COMPOSE_FILE" ps --format '{{.Health}}' 2>/dev/null | grep -q healthy; then
+for i in $(seq 1 45); do
+  PS_OUTPUT="$(docker compose -f "$COMPOSE_FILE" ps --format '{{.Health}}' 2>/dev/null || true)"
+  if [ -z "$PS_OUTPUT" ]; then
+    PS_OUTPUT="$(docker compose -f "$COMPOSE_FILE" ps 2>/dev/null || true)"
+  fi
+  if echo "$PS_OUTPUT" | grep -q healthy; then
     HEALTHY=1
     break
   fi
@@ -191,19 +128,29 @@ done
 PORT="$(grep -E '^WEBCONTROL_PORT=' .env | cut -d= -f2 | tr -d '\r" ' || true)"
 PORT="${PORT:-8337}"
 BIND_ADDR_FINAL="$(grep -E '^BEETS_WEB_BIND_ADDRESS=' .env | cut -d= -f2 | tr -d '\r" ' || true)"
+LAN_IP="$(get_lan_ip)"
 
 if [ "$HEALTHY" -eq 1 ]; then
   echo ""
-  echo "SUCCESS: Beets Web Manager is running and healthy."
-  echo "Access the UI at: http://localhost:${PORT}"
+  echo "======================================================================"
+  echo "SUCCESS: Beets and Beets Web Manager are running and healthy!"
+  echo ""
+  echo "Open the Web UI in your browser:"
+  echo "  Local:   http://localhost:${PORT}"
   if [ "$BIND_ADDR_FINAL" = "0.0.0.0" ]; then
-    echo "It is also reachable from other devices on your network at:"
-    echo "  http://<this-machine's-LAN-IP>:${PORT}"
-    echo "(find this machine's LAN IP with 'ip addr' / 'ifconfig' / 'hostname -I')"
+    echo "  Network: http://${LAN_IP}:${PORT}"
   fi
+  echo ""
+  echo "Complete initial setup and configure your admin login in the browser."
+  echo ""
+  echo "Management commands:"
+  echo "  View logs:   docker compose -f $COMPOSE_FILE logs -f"
+  echo "  Stop stack:  docker compose -f $COMPOSE_FILE down"
+  echo "  Restart:     docker compose -f $COMPOSE_FILE restart"
+  echo "======================================================================"
 else
   echo ""
-  echo "ERROR: Beets Web Manager did not reach healthy state within 60 seconds." >&2
-  echo "Check container logs with: docker compose -f $COMPOSE_FILE logs beets-web-manager" >&2
+  echo "ERROR: Services did not reach healthy state within 90 seconds." >&2
+  echo "Check container logs with: docker compose -f $COMPOSE_FILE logs" >&2
   exit 1
 fi

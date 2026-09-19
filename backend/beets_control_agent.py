@@ -98,8 +98,8 @@ _PLACEHOLDER_API_TOKENS = {
     "your-token-here", "your_token_here",
 }
 BEETSDIR = os.environ.get("BEETSDIR", "/config" if os.path.exists("/config") or os.name == "nt" else tempfile.gettempdir())
-MUSIC_LIBRARY_PATH = os.environ.get("MUSIC_LIBRARY_PATH", "/data/media/music")
-DOWNLOAD_PATH = os.environ.get("DOWNLOAD_PATH", "/data/torrents")
+MUSIC_LIBRARY_PATH = os.environ.get("MUSIC_LIBRARY_PATH", "/music" if os.path.exists("/music") else "/data/media/music")
+DOWNLOAD_PATH = os.environ.get("DOWNLOAD_PATH", "/downloads" if os.path.exists("/downloads") else "/data/torrents")
 # Path objects for the playlist-specific engine endpoints below
 # (/playlists/staging/ensure, /playlists/staging/delete-track,
 # /playlists/export_m3u), which do their own narrow per-playlist
@@ -142,7 +142,7 @@ def _resolved_staging_root() -> str:
 # first from consideration, and the "/torrents" fallback did not match this
 # container's real mount point (/data/torrents, from DOWNLOAD_PATH) --
 # Wave 32 root-default audit.
-_DEFAULT_TORRENT_SOURCE_ROOTS = "/data/torrents/music,/data/torrents,/data/downloads"
+_DEFAULT_TORRENT_SOURCE_ROOTS = "/downloads,/downloads/music,/music,/data/torrents/music,/data/torrents,/data/downloads"
 
 
 def _resolved_torrent_source_roots() -> list:
@@ -150,10 +150,10 @@ def _resolved_torrent_source_roots() -> list:
     return [part.strip() for part in raw.split(",") if part.strip()]
 
 
-PLAYLIST_DIR = Path(os.environ.get("PLAYLIST_DIR", "/data/media/music/playlists"))
+PLAYLIST_DIR = Path(os.environ.get("PLAYLIST_DIR", "/music/playlists" if os.path.exists("/music") else "/data/media/music/playlists"))
 PLAYLIST_DOWNLOAD_ROOT = Path(os.environ.get(
     "PLAYLIST_DOWNLOAD_ROOT",
-    "/data/torrents/music/Playlist Downloads",
+    "/downloads/music/Playlist Downloads" if os.path.exists("/downloads") else "/data/torrents/music/Playlist Downloads",
 ))
 LOCK_PATH = os.environ.get("BEETS_LOCK_PATH", os.path.join(BEETSDIR, ".beet_db.lock"))
 LIB_PATH = os.path.join(BEETSDIR, "musiclibrary.blb")
@@ -4412,7 +4412,8 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             print(f"[BeetsControlAgent] INFO: client disconnected before response could be sent ({type(exc).__name__})")
 
     def _authenticate(self) -> bool:
-        if not beets_api_token_is_usable(BEETS_API_TOKEN):
+        current_token = os.environ.get("BEETS_API_TOKEN", "") or BEETS_API_TOKEN
+        if not beets_api_token_is_usable(current_token):
             self._send_json(500, {"error": "Control Agent misconfigured: BEETS_API_TOKEN is missing or too weak"})
             return False
 
@@ -4422,7 +4423,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             if auth_header.startswith("Bearer "):
                 header_token = auth_header[7:]
 
-        if not hmac.compare_digest(header_token.strip(), BEETS_API_TOKEN.strip()):
+        if not hmac.compare_digest(header_token.strip(), current_token.strip()):
             try:
                 cl = int(self.headers.get("Content-Length", 0))
                 if 0 < cl < 65536:
@@ -9998,6 +9999,59 @@ def beets_api_token_is_usable(value: str) -> bool:
     return True
 
 
+_embedded_server: Optional[ThreadingHTTPServer] = None
+_embedded_thread: Optional[threading.Thread] = None
+_embedded_lock = threading.Lock()
+
+
+def start_embedded_control_agent(
+    host: str = "127.0.0.1",
+    port: int = 8338,
+    token: Optional[str] = None,
+) -> bool:
+    """Start the Beets Control Agent in a background daemon thread for embedded mode."""
+    global _embedded_server, _embedded_thread, BEETS_API_TOKEN
+    with _embedded_lock:
+        if _embedded_server is not None:
+            return True
+        effective_token = token or os.environ.get("BEETS_API_TOKEN", "") or BEETS_API_TOKEN
+        if not beets_api_token_is_usable(effective_token):
+            import secrets
+            effective_token = secrets.token_hex(24)
+            os.environ["BEETS_API_TOKEN"] = effective_token
+        BEETS_API_TOKEN = effective_token
+
+        server_address = (host, port)
+        try:
+            httpd = ThreadingHTTPServer(server_address, ControlAgentHandler)
+            httpd.daemon_threads = True
+            _embedded_server = httpd
+        except OSError as exc:
+            logger.warning("[BeetsControlAgent] Embedded agent could not bind to %s:%s: %s", host, port, exc)
+            return False
+
+        t = threading.Thread(target=httpd.serve_forever, daemon=True, name="BeetsControlAgentEmbedded")
+        t.start()
+        _embedded_thread = t
+        prewarm_beet_version_cache()
+        print(f"[BeetsControlAgent] Embedded agent listening on {host}:{port} (LOCK={LOCK_PATH})")
+        return True
+
+
+def stop_embedded_control_agent() -> None:
+    """Stop the embedded Beets Control Agent if running."""
+    global _embedded_server, _embedded_thread
+    with _embedded_lock:
+        if _embedded_server is not None:
+            try:
+                _embedded_server.shutdown()
+                _embedded_server.server_close()
+            except Exception:
+                pass
+            _embedded_server = None
+            _embedded_thread = None
+
+
 def run_agent():
     if not beets_api_token_is_usable(BEETS_API_TOKEN):
         raise RuntimeError(
@@ -10005,28 +10059,8 @@ def run_agent():
             f"non-placeholder value of at least {BEETS_API_TOKEN_MIN_LENGTH} characters"
         )
     server_address = ("0.0.0.0", PORT)
-    # ThreadingHTTPServer, not the plain single-threaded HTTPServer (BUG-3,
-    # v0.1.12): the previous plain HTTPServer handles exactly one request at
-    # a time, so a slow /status call (launching `beet version`, which can
-    # take up to ~29s under real host load -- confirmed on the v0.1.11
-    # TrueNAS production rollout) blocked EVERY other request behind it,
-    # including Docker's own /health liveness check (already cheap -- a
-    # hardcoded dict, no subprocess) and even a concurrent /health call from
-    # a different client -- both were observed timing out with
-    # BrokenPipeError in production logs purely from queuing behind an
-    # in-flight /status call, not from their own cost. This is the root
-    # cause the rest of BUG-3's fix (caching, below) reduces the *frequency*
-    # of, but threading is what stops one slow request from starving every
-    # other endpoint regardless of frequency. daemon_threads=True so
-    # in-flight request threads don't block process shutdown.
     httpd = ThreadingHTTPServer(server_address, ControlAgentHandler)
     httpd.daemon_threads = True
-    # Hotfix v0.1.17 (BUG-2 startup prewarm): kick off one background
-    # diagnostics refresh now so the plugin snapshot is likely warm before
-    # the UI's first /status call, instead of that first caller being the
-    # one to discover a cold cache. This only schedules a daemon thread and
-    # returns immediately -- it must never (and does not) delay accepting
-    # connections or serving /health below.
     prewarm_beet_version_cache()
     print(f"[BeetsControlAgent] Listening on 0.0.0.0:{PORT} (LOCK={LOCK_PATH})")
     try:
