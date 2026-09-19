@@ -12,47 +12,49 @@ Leaving `BEETS_WEB_MANAGER_VERSION=stable` in `.env` pulls the matched stable re
 
 Production deployment does **not** require Node.js, Python, or build tools on the host system.
 
-### 1. Obtain deployment files
+### 1. Automated Setup (Recommended)
+
+Run the setup script for automated zero-friction deployment:
+
 ```bash
 git clone https://github.com/Iranman/beets-web-manager.git
 cd beets-web-manager
-cp .env.example .env
-```
-*(Git clone is used only to obtain `docker-compose.yml`, `.env.example`, and setup scripts. No source code compilation is performed.)*
-
-### 2. Configure environment
-Edit `.env` to configure your settings. Ensure `BEETS_API_URL` and `BEETS_API_TOKEN` match your Beets control agent instance:
-
-```env
-BEETS_API_URL=http://beets:8338
-BEETS_API_TOKEN=your-secure-beets-token
-```
-
-`docker-compose.yml` defaults `BEETS_WEB_BIND_ADDRESS` to `127.0.0.1` (published as `127.0.0.1:8337->8337`) — the UI is reachable only from the machine running Docker. If Beets Web Manager runs on a NAS/server and you access it from another computer, set:
-
-```env
-BEETS_WEB_BIND_ADDRESS=0.0.0.0
-```
-
-This is the container's *listening* address, not a browser URL. From another device, browse to `http://<server-ip>:8337` using that server's actual LAN IP (`ip addr` / `hostname -I` / `ipconfig`, or your NAS's network settings) — not `0.0.0.0`.
-
-Alternatively, run the automated setup script, which asks this as a first-run question:
-```bash
 ./setup.sh          # Linux / macOS
 .\setup.ps1         # Windows PowerShell
 ```
 
-### 3. Deploy
+The setup script automatically:
+1. Creates persistent directories (`config`, `data/music`, `data/downloads`, `web-manager-data`).
+2. Copies `config.yaml.example` to `config/config.yaml` if no configuration exists.
+3. Generates strong, random cryptographic tokens for `BEETS_API_TOKEN` and `BEETS_WEB_AUTH_TOKEN`.
+4. Pulls official published GHCR images (`ghcr.io/iranman/beets-engine:stable` and `ghcr.io/iranman/beets-web-manager:stable`).
+5. Starts the two-container stack and verifies health and internal IPC connectivity.
+6. Prompts for local vs. LAN network access and displays the ready URL.
+
+### 2. Manual Docker Compose Deployment
+
+If you prefer deploying manually:
+
+```bash
+git clone https://github.com/Iranman/beets-web-manager.git
+cd beets-web-manager
+mkdir -p config data/music data/downloads web-manager-data
+cp config.yaml.example config/config.yaml
+cp .env.example .env
+```
+
+Edit `.env` to set your generated `BEETS_API_TOKEN` and network bind address, then start:
+
 ```bash
 docker compose pull
 docker compose up -d
 docker compose ps
 ```
 
-### 4. First-Run Setup
-Open `http://<server-ip>:8337` in your browser. On a fresh installation with no configured browser password:
-1. You will see the **Finish Beets Web Manager Setup** page.
-2. Enter your preferred administrator username (default: `admin`) and password.
+### 3. First-Run Browser Setup
+Open `http://<server-ip>:8337` in your browser. On a fresh installation:
+1. You will see the **Finish Beets Web Manager Setup** wizard.
+2. Enter your preferred administrator username (default: `admin`) and secure password.
 3. Click **Create Login & Complete Setup**.
 4. Sign in with your created login when prompted.
 

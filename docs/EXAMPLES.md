@@ -22,7 +22,7 @@ services:
     restart: unless-stopped
 
     ports:
-      - "${BEETS_WEB_BIND_ADDRESS:-127.0.0.1}:8337:8337"
+      - "${BEETS_WEB_BIND_ADDRESS:-127.0.0.1}:${WEBCONTROL_PORT:-8337}:8337"
 
     environment:
       TZ: UTC

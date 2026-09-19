@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 """Validate Beets-specific Docker Compose security invariants.
 
-This repository ships only generic, reusable Compose configurations --
-docker-compose.yml (web-manager only, connects to an existing Beets
-control agent) and docker-compose.full.yml (bundled beets +
-beets-web-manager, built from source). Neither may encode the project
-owner's actual deployment topology, host paths, or credentials; see
-docs/TRUENAS_ROLLOUT.md and the "Deployment Files Stay Generic" rule
-in docs/DEVELOPMENT.md for the policy this enforces. docker-compose.full.yml's
-`beets` service intentionally does NOT carry the same container-level
-hardening (security_opt/cap_drop/read_only/tmpfs) as a hand-built service
-would: it runs the upstream LinuxServer image as-is, whose own s6-overlay
-init requires starting as root and self-dropping privileges via PUID/PGID
--- only the UID/GID/mount checks below are safe to enforce there.
+This repository ships generic, reusable Compose configurations:
+- docker-compose.yml (primary production stack with bundled beets + beets-web-manager
+  using published GHCR images)
+- docker-compose.full.yml (developer stack building from source)
+- examples/docker-compose.external-beets.yml (standalone web-manager connecting to an
+  existing external Beets control agent)
+
+None may encode the project owner's actual deployment topology, host paths, or
+credentials; see docs/TRUENAS_ROLLOUT.md and the "Deployment Files Stay Generic" rule
+in docs/DEVELOPMENT.md for the policy this enforces. docker-compose.full.yml's and
+docker-compose.yml's `beets` service intentionally does NOT carry the same
+container-level hardening (security_opt/cap_drop/read_only/tmpfs) as a hand-built
+service would: it runs the LinuxServer image, whose own s6-overlay init requires
+starting as root and self-dropping privileges via PUID/PGID -- only the UID/GID/mount
+checks below are safe to enforce there.
 """
 from __future__ import annotations
 
@@ -122,6 +125,7 @@ def _image_lacks_tag_or_digest(image: str) -> bool:
     last_component = ref.rsplit("/", 1)[-1]
     return ":" not in last_component
 
+
 def _check_image_digest_semantics(label: str, image: str, has_build: bool, errors: list[str]) -> None:
     if not image:
         errors.append(f"{label} image is missing")
@@ -148,10 +152,16 @@ def _check_image_digest_semantics(label: str, image: str, has_build: bool, error
                 "unpinned, or set to a moving `latest` tag"
             )
     else:
-        if "@sha256:" not in image:
-            errors.append(f"{label} image is not digest-pinned: {image}")
-        if _image_lacks_tag_or_digest(image):
-            errors.append(f"{label} image has no tag or digest: {image}")
+        # Project GHCR images use versioning/release channel variables (e.g. ${BEETS_WEB_MANAGER_VERSION:-stable})
+        is_project_image = "ghcr.io/iranman/" in image or "BEETS_WEB_MANAGER_VERSION" in image
+        if is_project_image:
+            if _image_lacks_tag_or_digest(image):
+                errors.append(f"{label} image has no tag: {image}")
+        else:
+            if "@sha256:" not in image:
+                errors.append(f"{label} image is not digest-pinned: {image}")
+            if _image_lacks_tag_or_digest(image):
+                errors.append(f"{label} image has no tag or digest: {image}")
 
 
 def _check_no_hardcoded_lan_allowlist(text: str, source_label: str, errors: list[str]) -> None:
@@ -182,12 +192,9 @@ FULL_COMPOSE = ROOT / "docker-compose.full.yml"
 
 def _check_production_hardening(text: str, label: str, errors: list[str]) -> None:
     """docker-compose.yml is the source-independent production deployment
-    file. Unlike docker-compose.full.yml's beets-service hardening block
-    (checked separately below), these invariants must hold for the generic
-    template shipped to every user, so they are enforced unconditionally
-    rather than folded into the same opt-in required_snippets table."""
-    if "beets-engine" in text:
-        errors.append(f"{label}: production Compose must not reference beets-engine")
+    file deploying published GHCR images."""
+    if "beets-engine:local" in text:
+        errors.append(f"{label}: production Compose must not reference local-only beets-engine:local")
 
     web = _service_block(text, "beets-web-manager")
     active = "\n".join(_active_lines(web))
@@ -326,16 +333,18 @@ def main() -> int:
     errors: list[str] = []
     warnings: list[str] = []
 
-    # Primary production compose must have NO build directives and NO local beets service
+    # Primary production compose must have NO build directives and must include both services
     if STANDALONE_COMPOSE.exists():
         standalone_text = _read(STANDALONE_COMPOSE)
         if "build:" in standalone_text:
             errors.append("docker-compose.yml: production Compose file must contain no build: directives")
-        if _service_block(standalone_text, "beets"):
-            errors.append("docker-compose.yml: production Compose file must not include local beets engine service")
+        if not _service_block(standalone_text, "beets"):
+            errors.append("docker-compose.yml: production Compose file must include beets service")
+        if not _service_block(standalone_text, "beets-web-manager"):
+            errors.append("docker-compose.yml: production Compose file must include beets-web-manager service")
         _check_production_hardening(standalone_text, "docker-compose.yml", errors)
 
-    _check_compose_variant(STANDALONE_COMPOSE, errors, warnings, require_beets=False)
+    _check_compose_variant(STANDALONE_COMPOSE, errors, warnings, require_beets=True)
     if FULL_COMPOSE.exists():
         _check_compose_variant(FULL_COMPOSE, errors, warnings, require_beets=True)
 

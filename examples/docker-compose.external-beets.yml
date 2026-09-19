@@ -1,45 +1,11 @@
-# Production Docker Compose file for Beets Web Manager stack.
-# Deploys both Beets engine and Beets Web Manager using published GHCR images.
-# No local compilation or source checkout required.
+# Standalone Docker Compose configuration for Beets Web Manager.
+# Connects to an existing Beets control agent endpoint via BEETS_API_URL and BEETS_API_TOKEN.
+# Uses the published GHCR container image -- no local source or Dockerfile required.
 #
 # Usage:
-#   docker compose up -d
+#   docker compose -f examples/docker-compose.external-beets.yml up -d
 
 services:
-  beets:
-    image: ghcr.io/iranman/beets-engine:${BEETS_WEB_MANAGER_VERSION:-stable}
-    container_name: beets
-    restart: unless-stopped
-    environment:
-      - PUID=${PUID:-1000}
-      - PGID=${PGID:-1000}
-      - TZ=${TZ:-UTC}
-      - BEETSDIR=/config
-      - BEETS_API_TOKEN=${BEETS_API_TOKEN:?set BEETS_API_TOKEN in .env}
-      - BEETS_AGENT_PORT=8338
-      - BEETS_VERSION_PROBE_TIMEOUT_SECONDS=${BEETS_VERSION_PROBE_TIMEOUT_SECONDS:-90}
-      - BEETS_VERSION_CAPABILITY_WAIT_SECONDS=${BEETS_VERSION_CAPABILITY_WAIT_SECONDS:-3}
-      - BEETS_EXPECT_EXISTING_LIBRARY=${BEETS_EXPECT_EXISTING_LIBRARY:-1}
-    volumes:
-      - ${BEETS_CONFIG_PATH:-./config}:/config
-      - ${MUSIC_LIBRARY_PATH:-./data/music}:/data/media/music
-      - ${DOWNLOAD_PATH:-./data/downloads}:/data/torrents
-    expose:
-      - "8338"
-    healthcheck:
-      test: ["CMD", "/lsiopy/bin/python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8338/health', timeout=4)"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 20s
-
-  bgutil-provider:
-    image: brainicism/bgutil-ytdlp-pot-provider:1.3.1-deno
-    container_name: bgutil-provider
-    restart: unless-stopped
-    expose:
-      - "4416"
-
   beets-web-manager:
     image: ghcr.io/iranman/beets-web-manager:${BEETS_WEB_MANAGER_VERSION:-stable}
     container_name: beets-web-manager
@@ -52,7 +18,7 @@ services:
       TZ: ${TZ:-UTC}
       WEBCONTROL_PORT: 8337
 
-      BEETS_API_URL: ${BEETS_API_URL:-http://beets:8338}
+      BEETS_API_URL: ${BEETS_API_URL:?set BEETS_API_URL in .env}
       BEETS_API_TOKEN: ${BEETS_API_TOKEN:?set BEETS_API_TOKEN in .env}
 
       BEETS_WEB_AUTH_TOKEN: ${BEETS_WEB_AUTH_TOKEN:-}
@@ -62,7 +28,7 @@ services:
       BEETS_WEB_PASSWORD: ${BEETS_WEB_PASSWORD:-}
       BEETS_WEB_AUTH_DISABLED: ${BEETS_WEB_AUTH_DISABLED:-0}
       BEETS_TRUSTED_PROXIES: ${BEETS_TRUSTED_PROXIES:-}
-      BEETS_OUTBOUND_ALLOWLIST: ${BEETS_OUTBOUND_ALLOWLIST:-beets:8338}
+      BEETS_OUTBOUND_ALLOWLIST: ${BEETS_OUTBOUND_ALLOWLIST:-}
 
       BEETS_ARTIST_RECONCILE_TIMEOUT_SECONDS: ${BEETS_ARTIST_RECONCILE_TIMEOUT_SECONDS:-120}
       BEETS_LONG_OPERATION_POLL_SECONDS: ${BEETS_LONG_OPERATION_POLL_SECONDS:-5}
@@ -86,7 +52,7 @@ services:
       LISTENBRAINZ_TOKEN: ${LISTENBRAINZ_TOKEN:-}
       SPOTIFY_CLIENT_ID: ${SPOTIFY_CLIENT_ID:-}
       SPOTIFY_CLIENT_SECRET: ${SPOTIFY_CLIENT_SECRET:-}
-      YTDLP_PO_PROVIDER_URL: ${YTDLP_PO_PROVIDER_URL:-http://bgutil-provider:4416}
+      YTDLP_PO_PROVIDER_URL: ${YTDLP_PO_PROVIDER_URL:-}
       DEMO_MODE: ${DEMO_MODE:-0}
       PUID: ${PUID:-1000}
       PGID: ${PGID:-1000}
@@ -105,10 +71,6 @@ services:
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=512m
       - /run:rw,nosuid,nodev,size=64m
-
-    depends_on:
-      beets:
-        condition: service_healthy
 
     healthcheck:
       test:

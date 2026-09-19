@@ -35,28 +35,26 @@ End users do not need Node.js, Python, or build tools on the host system.
 
 ### Quick Start (Production)
 
-Clone the repository to obtain `docker-compose.yml`, `.env.example`, and setup scripts:
+Clone the repository and run the setup script:
 
 ```bash
 git clone https://github.com/Iranman/beets-web-manager.git
 cd beets-web-manager
-cp .env.example .env
+./setup.sh          # Linux / macOS
+.\setup.ps1         # Windows PowerShell
 ```
 
-Configure your shared internal `BEETS_API_TOKEN` in `.env`, then pull the matched release pair and start the stack:
+The setup script automatically creates data directories, configures `.env` with strong internal API tokens, pulls published GHCR images, starts both `beets` and `beets-web-manager`, and verifies container health and IPC connectivity.
+
+Alternatively, to start manually with Docker Compose:
 
 ```bash
+cp .env.example .env
 docker compose pull
 docker compose up -d
 docker compose ps
 ```
 
-Or run the automated setup script:
-
-```bash
-./setup.sh          # Linux / macOS
-.\setup.ps1         # Windows PowerShell
-```
 
 ### First-Run Setup & Web Sign-In
 
@@ -279,7 +277,7 @@ Packaging status: passing tests on a local or CI branch do not authorize product
 ## Troubleshooting
 
 **`pull access denied for beets-engine`**
-Docker encountered a local-only engine image tag (`beets-engine:local` or `beets-engine:dev`) without a local build context. Do **not** run `docker login`. Use the production `docker-compose.yml` (web-manager only) with an existing `BEETS_API_URL`, or run `docker compose -f docker-compose.full.yml up -d --build` from the repository root.
+Docker encountered a local-only engine image tag (`beets-engine:local` or `beets-engine:dev`) without a local build context. Do **not** run `docker login`. Use the production `docker-compose.yml` (bundled beets + beets-web-manager using published GHCR images), `examples/docker-compose.external-beets.yml` (for standalone web-manager deployments), or run `docker compose -f docker-compose.full.yml up -d --build` from the repository root.
 
 **`pull access denied for beets-web-manager`**
 Compose is attempting to use a local-only image name instead of the published registry image. Make sure your Compose file uses `image: ghcr.io/iranman/beets-web-manager:${BEETS_WEB_MANAGER_VERSION:-stable}` or run `docker compose -f docker-compose.dev.yml up -d --build` for local source builds.
