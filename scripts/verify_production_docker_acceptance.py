@@ -156,7 +156,16 @@ services:
 """
         self.override_file.write_text(override_content.strip() + "\n", encoding="utf-8")
 
+        # Augment the inherited environment, never replace it: the docker
+        # CLI (particularly the Windows/Docker Desktop client's `compose`
+        # plugin resolution) depends on other ambient variables
+        # (SYSTEMROOT, USERPROFILE, DOCKER_HOST/DOCKER_CONTEXT, etc.) --
+        # passing subprocess.run() a bare, replacement env dict containing
+        # only these overrides breaks `docker compose` outright on some
+        # platforms ("unknown shorthand flag: 'p' in -p", i.e. `compose`
+        # silently fails to resolve as a subcommand).
         self.env = {
+            **os.environ,
             "PUID": str(os.getuid() if hasattr(os, "getuid") else 1000),
             "PGID": str(os.getgid() if hasattr(os, "getgid") else 1000),
             "TZ": "UTC",
@@ -165,7 +174,6 @@ services:
             "MUSIC_PATH": str(self.music_dir),
             "DOWNLOADS_PATH": str(self.downloads_dir),
             "WEB_MANAGER_DATA_PATH": str(self.web_manager_dir),
-            "PATH": os.environ.get("PATH", ""),
         }
 
     def compose(self, *args, **kwargs):
@@ -321,10 +329,10 @@ def run_acceptance() -> None:
             _fail(f"/api/setup/status failed: {status} {body}")
             return
 
-        if not body.get("setup_required"):
-            _fail(f"Expected setup_required=True on clean install, got: {body}")
+        if body.get("setup_complete") is not False or not body.get("first_run", {}).get("required"):
+            _fail(f"Expected setup_complete=False and first_run.required=True on clean install, got: {body}")
             return
-        _ok(f"First-run setup required confirmed: {body}")
+        _ok("First-run setup required confirmed (setup_complete=False, first_run.required=True)")
 
         # Protected route rejected before setup
         status, _, body = stack.request("GET", "/api/stats")
@@ -332,6 +340,25 @@ def run_acceptance() -> None:
             _fail(f"Expected protected route /api/stats to reject before setup, got: {status} {body}")
         else:
             _ok(f"Protected route /api/stats correctly rejected before setup (status={status})")
+
+        # The setup-wizard mutation routes (first-run, complete) enforce the
+        # app's own CSRF check, which rejects a plain non-browser POST with
+        # no Origin/Referer and no Authorization header. Real browser
+        # clients pass same-origin headers automatically; this script isn't
+        # a browser, so it authenticates the same way the app's docs tell
+        # any other non-browser API client to: the auto-generated bearer
+        # token, persisted to .auth_token under the Web Manager data mount
+        # before any admin password exists.
+        auth_token_file = stack.web_manager_dir / ".auth_token"
+        if not auth_token_file.exists():
+            _fail(f".auth_token file was not created in {stack.web_manager_dir}")
+            return
+        auth_token = auth_token_file.read_text(encoding="utf-8").strip()
+        if len(auth_token) < 16:
+            _fail(f"Auto-generated auth token is too short or empty: {auth_token}")
+            return
+        _ok(f"Verified auto-generated .auth_token in {stack.web_manager_dir} (length={len(auth_token)})")
+        bearer_header = {"Authorization": f"Bearer {auth_token}"}
 
         # Claim admin credentials via first-run endpoint
         admin_user = "admin"
@@ -341,18 +368,30 @@ def run_acceptance() -> None:
             "POST",
             "/api/setup/first-run",
             json_body={"username": admin_user, "password": admin_pass},
+            headers=bearer_header,
         )
         if status != 200 or not (isinstance(body, dict) and (body.get("ok") or body.get("status") == "ok" or "success" in str(body))):
             _fail(f"First-run credential claim failed: {status} {body}")
             return
         _ok("First-run admin credentials established successfully")
 
+        # Completing setup is a separate, explicit step (mirrors the real
+        # browser wizard's final "Finish" action) -- this is exactly the
+        # step that a real production install must not lose the marker for
+        # across a container recreation (see the persistence test below).
+        print("==> Step 7b: Completing setup via POST /api/setup/complete...")
+        status, _, body = stack.request("POST", "/api/setup/complete", json_body={}, headers=bearer_header)
+        if status != 200 or not (isinstance(body, dict) and body.get("ok", True) is not False):
+            _fail(f"POST /api/setup/complete failed: {status} {body}")
+            return
+        _ok("Setup marked complete via POST /api/setup/complete")
+
         # Check setup status is now complete
         status, _, body = stack.request("GET", "/api/setup/status")
-        if status != 200 or body.get("setup_required") is not False:
-            _fail(f"Expected setup_required=False after claim, got: {status} {body}")
+        if status != 200 or body.get("setup_complete") is not True or body.get("first_run", {}).get("required") is not False:
+            _fail(f"Expected setup_complete=True and first_run.required=False after claim, got: {status} {body}")
             return
-        _ok("First-run setup status confirmed complete (setup_required=False)")
+        _ok("Setup status confirmed complete (setup_complete=True, first_run.required=False)")
 
         # 4. Authentication with Basic Auth
         print("==> Step 8: Verifying Basic Auth and auto-generated Bearer token...")
@@ -365,18 +404,6 @@ def run_acceptance() -> None:
             return
         _ok(f"Authenticated as '{admin_user}' via Basic Auth")
 
-        # Check auto-generated .auth_token
-        auth_token_file = stack.web_manager_dir / ".auth_token"
-        if not auth_token_file.exists():
-            _fail(f".auth_token file was not created in {stack.web_manager_dir}")
-            return
-        auth_token = auth_token_file.read_text(encoding="utf-8").strip()
-        if len(auth_token) < 16:
-            _fail(f"Auto-generated auth token is too short or empty: {auth_token}")
-            return
-        _ok(f"Verified auto-generated .auth_token in {stack.web_manager_dir} (length={len(auth_token)})")
-
-        bearer_header = {"Authorization": f"Bearer {auth_token}"}
         status, _, body = stack.request("GET", "/api/auth/me", headers=bearer_header)
         if status != 200:
             _fail(f"Bearer token /api/auth/me failed: {status} {body}")
@@ -466,12 +493,18 @@ def run_acceptance() -> None:
             return
         _ok("Stack rebooted and healthy after restart")
 
-        # Verify setup is NOT required and Basic Auth still works
+        # Verify setup is NOT required and Basic Auth still works. Checking
+        # setup_complete specifically (not just first_run.required) matters:
+        # first_run.required has a legacy self-healing fallback that
+        # re-derives "not required" from the mere existence of a password,
+        # which would mask exactly the WEB_MANAGER_DATA_DIR persistence
+        # regression this test exists to catch (the .setup_complete marker
+        # silently written to a non-persistent path across a recreate).
         status, _, body = stack.request("GET", "/api/setup/status")
-        if status != 200 or body.get("setup_required") is not False:
+        if status != 200 or body.get("setup_complete") is not True or body.get("first_run", {}).get("required") is not False:
             _fail(f"Setup state corrupted after restart: {status} {body}")
             return
-        _ok("Setup state preserved across restart (setup_required=False)")
+        _ok("Setup state preserved across restart (setup_complete=True, first_run.required=False)")
 
         status, _, body = stack.request("GET", "/api/auth/me", headers=basic_header)
         if status != 200:

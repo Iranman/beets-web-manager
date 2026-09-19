@@ -57,8 +57,8 @@ jobs:
             -e BEETS_WEB_AUTH_TOKEN=ci-smoke-test-token-not-a-real-secret \
             -e WEBCONTROL_PORT=8337 \
             -v /tmp/beets-ci-config:/config \
-            -v /tmp/beets-ci-music:/data/media/music \
-            -v /tmp/beets-ci-downloads:/data/torrents \
+            -v /tmp/beets-ci-music:/music \
+            -v /tmp/beets-ci-downloads:/downloads \
             beets-web-manager:ci
           alive=0
           for i in $(seq 1 30); do

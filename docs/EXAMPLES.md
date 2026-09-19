@@ -66,14 +66,12 @@ services:
       - ./web-manager:/data
 ```
 
----
+### Connection Modes (Advanced / External deployments only)
 
-## 2. Beets Connection Modes
+These only apply when running Beets Web Manager against a separately-managed Beets control agent, as above — the standard stack in section 1 needs no `BEETS_API_URL`/`BEETS_API_TOKEN` configuration at all; it uses its own embedded control agent automatically.
 
-Beets Web Manager communicates with the Beets engine solely through HTTP API calls using `BEETS_API_URL` and `BEETS_API_TOKEN`.
-
-### Mode A: Beets in the same Compose project
-If the Beets control agent runs as a service named `beets` inside the same `docker-compose.yml`:
+#### Mode A: A remote control agent that happens to share a Compose project
+If a separately-managed Beets control agent runs as a service named `beets` inside the same `docker-compose.yml` (not the standard stock `lscr.io/linuxserver/beets` image, which has no control agent of its own):
 
 ```yaml
 BEETS_API_URL: http://beets:8338
@@ -86,7 +84,7 @@ depends_on:
     condition: service_healthy
 ```
 
-### Mode B: Beets on a separate host or separate Compose stack
+#### Mode B: Beets on a separate host or separate Compose stack
 If the Beets control agent runs on another host or in a separate Compose project:
 
 ```yaml

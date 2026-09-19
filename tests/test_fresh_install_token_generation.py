@@ -1,10 +1,14 @@
 """Regression coverage for the fresh-install experience and token generation.
 
+setup.sh and setup.ps1 are optional convenience wrappers around the standard
+`beets`/`music`/`downloads`/`web-manager` unified-compose topology -- the
+normal install path is just `docker compose up -d` with no script at all.
+
 setup.sh and setup.ps1:
-1. Create required persistent data directories (`config`, `data/music`, `data/downloads`, `web-manager-data`).
-2. Initialize default `config/config.yaml` from `config.yaml.example` if not present.
+1. Create the standard persistent data directories (`beets`, `music`, `downloads`, `web-manager`).
+2. Initialize default `beets/config.yaml` from `config.yaml.example` if not present.
 3. Generate cryptographically strong non-placeholder tokens for `BEETS_API_TOKEN` and `BEETS_WEB_AUTH_TOKEN`.
-4. Set `BEETS_EXPECT_EXISTING_LIBRARY=0` on fresh install when no database exists, and `1` when `config/musiclibrary.blb` exists.
+4. Set `BEETS_EXPECT_EXISTING_LIBRARY=0` on fresh install when no database exists, and `1` when `beets/musiclibrary.blb` exists.
 5. Leave browser password unconfigured in `.env` so the browser first-run wizard is triggered without requiring a complex 32-char CLI password prompt.
 6. Support idempotent re-runs preserving existing configuration.
 
@@ -113,12 +117,12 @@ class SetupShTokenGenerationTests(unittest.TestCase):
             result = self._run_setup_sh(workdir)
             self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
 
-            # Persistent directories created
-            self.assertTrue((workdir / "config").is_dir())
-            self.assertTrue((workdir / "data" / "music").is_dir())
-            self.assertTrue((workdir / "data" / "downloads").is_dir())
-            self.assertTrue((workdir / "web-manager-data").is_dir())
-            self.assertTrue((workdir / "config" / "config.yaml").is_file())
+            # Persistent directories created (standard unified topology)
+            self.assertTrue((workdir / "beets").is_dir())
+            self.assertTrue((workdir / "music").is_dir())
+            self.assertTrue((workdir / "downloads").is_dir())
+            self.assertTrue((workdir / "web-manager").is_dir())
+            self.assertTrue((workdir / "beets" / "config.yaml").is_file())
 
             env_path = workdir / ".env"
             self.assertTrue(env_path.exists())
@@ -141,9 +145,9 @@ class SetupShTokenGenerationTests(unittest.TestCase):
     def test_fresh_install_with_existing_database_sets_expect_existing_library_1(self):
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp)
-            config_dir = workdir / "config"
-            config_dir.mkdir(parents=True)
-            (config_dir / "musiclibrary.blb").write_bytes(b"existing-db")
+            beets_dir = workdir / "beets"
+            beets_dir.mkdir(parents=True)
+            (beets_dir / "musiclibrary.blb").write_bytes(b"existing-db")
 
             result = self._run_setup_sh(workdir)
             self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
@@ -227,12 +231,12 @@ class SetupPs1TokenGenerationTests(unittest.TestCase):
             result = self._run_setup_ps1(workdir)
             self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
 
-            # Persistent directories created
-            self.assertTrue((workdir / "config").is_dir())
-            self.assertTrue((workdir / "data" / "music").is_dir())
-            self.assertTrue((workdir / "data" / "downloads").is_dir())
-            self.assertTrue((workdir / "web-manager-data").is_dir())
-            self.assertTrue((workdir / "config" / "config.yaml").is_file())
+            # Persistent directories created (standard unified topology)
+            self.assertTrue((workdir / "beets").is_dir())
+            self.assertTrue((workdir / "music").is_dir())
+            self.assertTrue((workdir / "downloads").is_dir())
+            self.assertTrue((workdir / "web-manager").is_dir())
+            self.assertTrue((workdir / "beets" / "config.yaml").is_file())
 
             env_path = workdir / ".env"
             self.assertTrue(env_path.exists())
@@ -255,9 +259,9 @@ class SetupPs1TokenGenerationTests(unittest.TestCase):
     def test_fresh_install_with_existing_database_sets_expect_existing_library_1(self):
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp)
-            config_dir = workdir / "config"
-            config_dir.mkdir(parents=True)
-            (config_dir / "musiclibrary.blb").write_bytes(b"existing-db")
+            beets_dir = workdir / "beets"
+            beets_dir.mkdir(parents=True)
+            (beets_dir / "musiclibrary.blb").write_bytes(b"existing-db")
 
             result = self._run_setup_ps1(workdir)
             self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)

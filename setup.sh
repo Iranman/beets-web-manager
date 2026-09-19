@@ -25,18 +25,12 @@ if ! docker info >/dev/null 2>&1; then
 fi
 
 echo "==> Creating persistent data directories..."
-mkdir -p beets music downloads web-manager config data/music data/downloads web-manager-data
-chmod 777 web-manager web-manager-data 2>/dev/null || true
-chmod 777 beets config 2>/dev/null || true
-chmod 777 music data/music 2>/dev/null || true
-chmod 777 downloads data/downloads 2>/dev/null || true
+mkdir -p beets music downloads web-manager
+chmod 777 beets music downloads web-manager 2>/dev/null || true
 
 if [ ! -f "beets/config.yaml" ] && [ -f "config.yaml.example" ]; then
   cp config.yaml.example beets/config.yaml
   echo "    Initialized default beets/config.yaml from template."
-fi
-if [ ! -f "config/config.yaml" ] && [ -f "config.yaml.example" ]; then
-  cp config.yaml.example config/config.yaml
 fi
 
 # Set/replace KEY=VALUE in .env safely
@@ -74,7 +68,7 @@ else
   API_TOKEN="$(openssl rand -hex 32 2>/dev/null || head -c32 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n' || python3 -c 'import secrets; print(secrets.token_hex(32))' 2>/dev/null || python -c 'import secrets; print(secrets.token_hex(32))' 2>/dev/null)"
   set_env_value "BEETS_WEB_AUTH_TOKEN" "${TOKEN}"
   set_env_value "BEETS_API_TOKEN" "${API_TOKEN}"
-  if [ ! -f "beets/musiclibrary.blb" ] && [ ! -f "config/musiclibrary.blb" ]; then
+  if [ ! -f "beets/musiclibrary.blb" ]; then
     set_env_value "BEETS_EXPECT_EXISTING_LIBRARY" "0"
   else
     set_env_value "BEETS_EXPECT_EXISTING_LIBRARY" "1"
@@ -103,13 +97,6 @@ if [ "$FRESH_ENV" -eq 1 ] && [ -t 0 ]; then
   else
     echo "    Set BEETS_WEB_BIND_ADDRESS=127.0.0.1 in .env -- only reachable from this computer, at http://localhost:8337"
   fi
-fi
-
-# Validation
-API_TOKEN_VAL="$(grep -E '^BEETS_API_TOKEN=' .env | cut -d= -f2- | tr -d '\r" ' || true)"
-if [ -z "$API_TOKEN_VAL" ] || [ "$API_TOKEN_VAL" = "changeme" ]; then
-  echo "WARNING: BEETS_API_TOKEN is unconfigured or set to 'changeme' placeholder." >&2
-  echo "Please set BEETS_API_TOKEN in .env to match your Beets control agent." >&2
 fi
 
 if [ "$DEV_MODE" -eq 1 ]; then

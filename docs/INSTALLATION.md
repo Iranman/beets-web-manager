@@ -72,7 +72,7 @@ Open **`http://<server-ip>:8337`** in your browser. On your first visit, you wil
 
 ## Directory & Volume Architecture
 
-Both containers share the same underlying files with atomic locking:
+Both containers share the same underlying files:
 
 | Host Path | Container Path | Purpose |
 |---|---|---|
@@ -98,7 +98,7 @@ docker compose exec beets beet ls
 docker compose exec beets beet import /downloads/new-album
 ```
 
-Both Beets Web Manager and the `beets` container use atomic SQLite locking (`/config/.beet_db.lock`), preventing concurrency conflicts.
+SQLite's own file-level locking on `/config/musiclibrary.blb` prevents literal database corruption from simultaneous writes, but it does not coordinate multi-step operations: Beets Web Manager's own jobs (imports, cleanup, tag writes) additionally serialize on a higher-level lock file (`/config/.beet_db.lock`) that only Web Manager's code acquires — a manual `beet` command run here does not take that lock. Read-only commands (`beet ls`, `beet version`) are always safe; avoid running a manual mutating command (`beet import`, `beet modify`, `beet rm`) at the same time as an active Web Manager job.
 
 ---
 

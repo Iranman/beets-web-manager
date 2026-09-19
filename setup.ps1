@@ -21,14 +21,11 @@ try { docker info | Out-Null } catch {
 }
 
 Write-Host "==> Creating persistent data directories..."
-New-Item -ItemType Directory -Force -Path "beets", "music", "downloads", "web-manager", "config", "data\music", "data\downloads", "web-manager-data" | Out-Null
+New-Item -ItemType Directory -Force -Path "beets", "music", "downloads", "web-manager" | Out-Null
 
 if (-not (Test-Path "beets\config.yaml") -and (Test-Path "config.yaml.example")) {
     Copy-Item "config.yaml.example" "beets\config.yaml"
     Write-Host "    Initialized default beets\config.yaml from template."
-}
-if (-not (Test-Path "config\config.yaml") -and (Test-Path "config.yaml.example")) {
-    Copy-Item "config.yaml.example" "config\config.yaml"
 }
 
 function Set-EnvValue {
@@ -57,7 +54,7 @@ if (Test-Path ".env") {
     Set-EnvValue -Key "BEETS_WEB_AUTH_TOKEN" -Value $token
     Set-EnvValue -Key "BEETS_API_TOKEN" -Value $apiToken
 
-    if (-not (Test-Path "beets\musiclibrary.blb") -and -not (Test-Path "config\musiclibrary.blb")) {
+    if (-not (Test-Path "beets\musiclibrary.blb")) {
         Set-EnvValue -Key "BEETS_EXPECT_EXISTING_LIBRARY" -Value "0"
     } else {
         Set-EnvValue -Key "BEETS_EXPECT_EXISTING_LIBRARY" -Value "1"
@@ -87,14 +84,6 @@ if ($freshEnv -and $isInteractive) {
     } else {
         Write-Host "    Set BEETS_WEB_BIND_ADDRESS=127.0.0.1 in .env -- only reachable from this computer, at http://localhost:8337"
     }
-}
-
-# Validation
-$apiTokenLine = Select-String -Path ".env" -Pattern '^BEETS_API_TOKEN=' | Select-Object -First 1
-$apiTokenVal = if ($apiTokenLine) { ($apiTokenLine.Line -split '=', 2)[1].Trim() } else { "" }
-if (-not $apiTokenVal -or $apiTokenVal -eq "changeme") {
-    Write-Warning "BEETS_API_TOKEN is unconfigured or set to 'changeme' placeholder."
-    Write-Warning "Please set BEETS_API_TOKEN in .env to match your Beets control agent."
 }
 
 $composeFile = "docker-compose.yml"
