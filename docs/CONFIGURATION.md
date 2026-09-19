@@ -51,7 +51,7 @@ If this ambiguity trips you up, that's expected -- treat "Deployment setting" (C
 
 | Variable | Service | Required | Meaning |
 |---|---|---:|---|
-| `BEETS_WEB_MANAGER_VERSION` | compose | no | Published image tag to deploy: `stable` (recommended default), `latest`, exact version `0.1.17`, or `edge`. |
+| `BEETS_WEB_MANAGER_VERSION` | compose | no | Published image tag to deploy: `stable` (recommended default), `latest`, exact version `0.1.18`, or `edge`. |
 | `WEBCONTROL_PORT` | web | no | Web port inside the container, default `8337`. |
 | `BEETS_API_TOKEN` | both | optional | Shared secret for internal Beets control agent. Auto-generated and managed internally in standard unified deployments. |
 | `BEETS_API_URL` | web | optional | Control agent endpoint URL. In standard unified deployment, defaults to internal loopback `http://127.0.0.1:8338`. For external deployments, set to external URL (e.g. `http://192.168.1.50:8338`). |

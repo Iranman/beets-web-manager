@@ -1107,7 +1107,7 @@ def _agent_status_payload(*, force_refresh: bool = False) -> dict[str, Any]:
         "status": "ok",
         "service": "beets-control-agent",
         "agent_version": "1.0.0",
-        "engine_release": os.environ.get("BEETS_WEB_MANAGER_VERSION") or os.environ.get("BEETS_ENGINE_RELEASE") or "0.1.17",
+        "engine_release": os.environ.get("BEETS_WEB_MANAGER_VERSION") or os.environ.get("BEETS_ENGINE_RELEASE") or "0.1.18",
         "engine_revision": os.environ.get("BEETS_ENGINE_REVISION") or os.environ.get("VCS_REF") or "",
         "control_api_version": 1,
         "beets_version": snapshot.get("version") or "",
@@ -4504,7 +4504,7 @@ class ControlAgentHandler(BaseHTTPRequestHandler):
             self._send_json(200, {
                 "agent_version": "1.0.0",
                 "beets_version": _installed_beets_package_version(),
-                "engine_release": os.environ.get("BEETS_WEB_MANAGER_VERSION") or os.environ.get("BEETS_ENGINE_RELEASE") or "0.1.17",
+                "engine_release": os.environ.get("BEETS_WEB_MANAGER_VERSION") or os.environ.get("BEETS_ENGINE_RELEASE") or "0.1.18",
                 "engine_revision": os.environ.get("BEETS_ENGINE_REVISION") or os.environ.get("VCS_REF") or "",
             })
             return

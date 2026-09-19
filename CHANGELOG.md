@@ -6,6 +6,29 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+## v0.1.18 - 2026-09-19
+
+Simplifies the standard Docker deployment (PR #128, follow-up to #126): a normal install now runs a stock Beets container and Beets Web Manager together in one Compose file, with no custom Beets engine, no manual internal API tokens, no `.env`, and no setup scripts required.
+
+### Changed
+
+- **Standard deployment simplified.** The default `docker-compose.yml` now runs `lscr.io/linuxserver/beets:2.13.1` (stock, unmodified) alongside `ghcr.io/iranman/beets-web-manager:stable`, sharing `/config`, `/music`, `/downloads`, plus a `/data` mount for Web Manager's own persistent state. `docker compose up -d` and opening the browser setup wizard is the whole install.
+- **Beets Web Manager bundles its own `beets==2.13.1` + `ffmpeg` + `fpcalc` + `pyacoustid`** and starts the existing Beets control agent on an internal loopback address (`127.0.0.1:8338`) inside its own container only -- never exposed to the host or another container. The stock `beets` container remains a normal, independently-usable Beets install and CLI environment (`docker compose exec beets beet ...`); Web Manager does not depend on it being reachable.
+- Both Beets runtimes are pinned to the identical `2.13.1` release -- no schema-version-skew risk between them.
+- `docker-compose.dev.yml` migrated to build Web Manager from source against the stock Beets image (previously built the old custom engine image). `docker-compose.full.yml` retained and explicitly labeled legacy/advanced-only. `.env.example` now states `.env` is optional and isolates external-engine variables under an "Advanced / External" section.
+- CI's `production-docker-acceptance` job now boots and exercises the actual stock-Beets + Web Manager topology end-to-end (fresh install, setup wizard, real cross-container import, persistence across `down`/`up` and `--force-recreate`) and gates image publication; the old custom-engine/remote-HTTP acceptance job is retained separately as a legacy-compatibility check only.
+
+### Fixed
+
+- A fresh `/data` bind mount was not writable by Web Manager: the image ran as a fixed build-time UID and never actually applied the documented `PUID`/`PGID` settings at runtime. Fixed with a proper root-then-drop-privileges entrypoint that remaps the container's user to the runtime PUID/PGID (default unchanged) and fixes ownership of `/data`, `/config`, and the top level of `/music`/`/downloads` before dropping to the unprivileged user -- the application itself still never runs as root.
+- The stock Beets container's own default service (`beet web`) was restart-looping with "unknown command 'web'" because the `web` plugin wasn't enabled in the config it ended up with. Fixed by enabling `web` in `config.yaml.example` for the setup-script path, and correcting the corresponding acceptance test, which had itself been pre-seeding an unrealistic config that no real installation ever produces.
+- Fixed the same class of persistence bug found and corrected during this refactor's review: Web Manager's own data-directory auto-detection was not exported for other modules to see, silently writing settings and the setup-complete marker to a non-persistent path that was lost across `docker compose down && up` / `--force-recreate`.
+- Corrected several stale documentation claims (`README.md`, `docs/ARCHITECTURE.md`, `docs/INSTALLATION.md`, `docs/EXAMPLES.md`) referencing a `beet-locked` locking wrapper that does not exist in the stock image used by the new default deployment, replaced with an accurate description of what SQLite's own locking actually protects versus what it does not.
+
+### Migration Note
+
+Existing v0.1.17 (or earlier) installs using the previous two-container `beets` + custom `beets-engine` architecture (port 8338, `BEETS_API_TOKEN`, `/data/media/music`) are **not** upgraded in place by swapping in the new `docker-compose.yml` -- that file assumes the stock LinuxServer image and the new mount layout. Keep using `docker-compose.full.yml` (now explicitly legacy/advanced) or deliberately migrate your `/config` bind mount and drop the old engine-specific env vars before switching.
+
 ## v0.1.17 - 2026-09-18
 
 Hotfix release addressing ARCH-020 and related fail-closed/information-exposure defects found across three independent-review passes (PR #126, follow-up to #120).

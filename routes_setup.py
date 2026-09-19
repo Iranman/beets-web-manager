@@ -700,7 +700,7 @@ def _remote_beets_diagnostics_failure(
             "engine_release": "",
             "engine_revision": "",
             "control_api_version": None,
-            "expected_release": os.environ.get("BEETS_WEB_MANAGER_VERSION", "0.1.17"),
+            "expected_release": os.environ.get("BEETS_WEB_MANAGER_VERSION", "0.1.18"),
             "expected_api_version": 1,
             "message": diagnostic_error,
         },
@@ -871,7 +871,7 @@ def _check_engine_compatibility(remote_status: Dict[str, Any]) -> Dict[str, Any]
     engine_revision = str(remote_status.get("engine_revision") or "").strip()
     control_api_ver = remote_status.get("control_api_version")
 
-    expected_release = os.environ.get("BEETS_WEB_MANAGER_VERSION", "0.1.17").strip() or "0.1.17"
+    expected_release = os.environ.get("BEETS_WEB_MANAGER_VERSION", "0.1.18").strip() or "0.1.18"
     min_api_version = _MIN_CONTROL_API_VERSION
 
     is_compatible = True

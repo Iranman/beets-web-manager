@@ -12,7 +12,7 @@ FROM ${BEETS_BASE_IMAGE}
 # image, and a later rebuild with new fixes must never be able to keep
 # an earlier commit's label by omission.
 ARG VCS_REF
-ARG VERSION=0.1.17
+ARG VERSION=0.1.18
 RUN test -n "${VCS_REF}" || (echo "ERROR: VCS_REF build-arg is required and must not be blank" >&2 && exit 1)
 LABEL org.opencontainers.image.title="Beets Engine for Beets Web Manager" \
       org.opencontainers.image.description="Authoritative Beets engine and control agent" \
