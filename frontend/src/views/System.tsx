@@ -11,6 +11,7 @@ import {
   getConfigFile,
   getSetupEnv,
   getSetupStatus,
+  provisionPlugins,
   regenerateAuthToken,
   revertConfigFile,
   saveConfigFile,
@@ -19,8 +20,10 @@ import {
   testSetupAi,
   testSetupMusicBrainz,
   testSetupPlex,
+  verifyPlugins,
 } from '../api/client';
 import type {
+  BeetsPluginsReport,
   ConfigFileResponse,
   SetupEnvResponse,
   SetupEnvVariable,
@@ -359,6 +362,11 @@ export default function System() {
   const [regenerateTokenError, setRegenerateTokenError] = useState('');
   const [confirmRegenerate, setConfirmRegenerate] = useState(false);
   const [revealedToken, setRevealedToken] = useState<{ token: string; warning: string } | null>(null);
+  const [pluginsReport, setPluginsReport] = useState<BeetsPluginsReport | null>(null);
+  const [pluginsLoading, setPluginsLoading] = useState(false);
+  const [pluginsProvisioning, setPluginsProvisioning] = useState(false);
+  const [pluginsMsg, setPluginsMsg] = useState('');
+  const [pluginsError, setPluginsError] = useState('');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -366,6 +374,9 @@ export default function System() {
     try {
       const [nextStatus, nextEnv] = await Promise.all([getSetupStatus(), getSetupEnv()]);
       setStatus(nextStatus);
+      if (nextStatus.plugins) {
+        setPluginsReport(nextStatus.plugins);
+      }
       setEnv(nextEnv);
       setForm(initialFormValues(nextEnv.variables));
       setClearNames(new Set());
@@ -519,6 +530,38 @@ export default function System() {
     }
   };
 
+  const handleVerifyPlugins = async () => {
+    setPluginsLoading(true);
+    setPluginsMsg('');
+    setPluginsError('');
+    try {
+      const res = await verifyPlugins();
+      setPluginsReport(res);
+      setPluginsMsg(res.ok ? 'All required Beets plugins verified healthy.' : 'Plugin verification found issues.');
+    } catch (err) {
+      setPluginsError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPluginsLoading(false);
+    }
+  };
+
+  const handleProvisionPlugins = async () => {
+    setPluginsProvisioning(true);
+    setPluginsMsg('');
+    setPluginsError('');
+    try {
+      const res = await provisionPlugins();
+      setPluginsReport(res);
+      setPluginsMsg(res.ok ? 'Provisioned bundled plugins and updated required plugins successfully.' : (res.message || 'Plugin provisioning completed.'));
+      await load();
+      await loadConfig();
+    } catch (err) {
+      setPluginsError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPluginsProvisioning(false);
+    }
+  };
+
   const markComplete = async () => {
     setCompleting(true);
     setError('');
@@ -662,14 +705,103 @@ export default function System() {
       )}
 
       {status?.beets && (
-        <section className="rounded border border-graphite-800 bg-graphite-900 p-4">
-          <div className="mb-2 text-sm font-semibold text-zinc-100">Beets plugin diagnostics</div>
-          <div className="grid gap-2 text-[0.72rem] text-zinc-200 sm:grid-cols-2">
+        <section className="rounded border border-graphite-800 bg-graphite-900 p-4 space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div className="text-sm font-semibold text-zinc-100">Beets Plugin Management</div>
+              <div className="text-xs text-zinc-400">
+                Authoritative Beets plugin status, bundled extensions, and runtime health.
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outlined"
+                size="small"
+                onClick={() => void handleVerifyPlugins()}
+                disabled={pluginsLoading || pluginsProvisioning}
+              >
+                {pluginsLoading ? 'Checking...' : 'Recheck plugins'}
+              </Button>
+              <Button
+                variant="contained"
+                size="small"
+                onClick={() => void handleProvisionPlugins()}
+                disabled={pluginsLoading || pluginsProvisioning}
+              >
+                {pluginsProvisioning ? 'Provisioning...' : 'Provision & repair plugins'}
+              </Button>
+            </div>
+          </div>
+
+          {pluginsMsg && <Alert severity="success">{pluginsMsg}</Alert>}
+          {pluginsError && <Alert severity="error">{pluginsError}</Alert>}
+
+          <div className="grid gap-2 text-[0.72rem] text-zinc-200 sm:grid-cols-2 lg:grid-cols-4 rounded bg-graphite-950 p-3 border border-graphite-800">
             <div><span className="font-semibold text-zinc-100">Plugin path:</span> {status.beets.pluginpath?.join(' then ') || 'not configured'}</div>
             <div><span className="font-semibold text-zinc-100">ReplayGain:</span> {status.beets.replaygain_backend || status.beets.replaygain_command || 'not configured'}</div>
             <div><span className="font-semibold text-zinc-100">Enabled plugins:</span> {status.beets.configured_plugins?.length ?? 0}</div>
             <div><span className="font-semibold text-zinc-100">Plugin loader:</span> {pluginLoaderLabel(status.beets)}</div>
           </div>
+
+          {pluginsReport && (
+            <div className="space-y-3 pt-2">
+              <div className="flex items-center justify-between">
+                <div className="text-xs font-bold uppercase tracking-wider text-zinc-300">
+                  Required Core Plugins ({pluginsReport.required_healthy_count} of {pluginsReport.required_count} Healthy)
+                </div>
+                <span className={`text-xs font-bold px-2 py-0.5 rounded ${
+                  pluginsReport.all_required_healthy ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 'bg-amber-950 text-amber-400 border border-amber-800'
+                }`}>
+                  {pluginsReport.all_required_healthy ? '✓ All Required Healthy' : '⚠ Action Required'}
+                </span>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
+                {pluginsReport.categories.required.map((plugin) => (
+                  <div
+                    key={plugin.name}
+                    className="rounded border border-graphite-800 bg-graphite-950 p-2.5 flex items-center justify-between text-xs"
+                  >
+                    <div className="min-w-0 pr-2">
+                      <div className="font-semibold text-zinc-100 truncate">{plugin.display_name || plugin.name}</div>
+                      <div className="text-[10px] text-zinc-400 truncate">{plugin.description}</div>
+                    </div>
+                    <span className={`shrink-0 px-2 py-0.5 rounded text-[10px] font-bold ${
+                      plugin.healthy
+                        ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800'
+                        : 'bg-amber-950/80 text-amber-400 border border-amber-800'
+                    }`}>
+                      {plugin.healthy ? '✓ Ready' : '⚠ Issue'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+
+              <div className="text-xs font-bold uppercase tracking-wider text-zinc-300 pt-2">
+                Optional & Integration Plugins
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
+                {[...pluginsReport.categories.optional, ...pluginsReport.categories.integration].map((plugin) => (
+                  <div
+                    key={plugin.name}
+                    className="rounded border border-graphite-800 bg-graphite-950 p-2.5 flex items-center justify-between text-xs"
+                  >
+                    <div className="min-w-0 pr-2">
+                      <div className="font-semibold text-zinc-100 truncate">{plugin.display_name || plugin.name}</div>
+                      <div className="text-[10px] text-zinc-400 truncate">{plugin.description}</div>
+                    </div>
+                    <span className={`shrink-0 px-2 py-0.5 rounded text-[10px] font-bold ${
+                      plugin.enabled
+                        ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800'
+                        : 'bg-zinc-800 text-zinc-400'
+                    }`}>
+                      {plugin.enabled ? '✓ Enabled' : '○ Available'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {status.beets.plugin_failures?.length ? (
             <Alert severity="warning" className="mt-3">
               {status.beets.plugin_failures.join(' ')}

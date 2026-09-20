@@ -91,6 +91,7 @@ import type {
   SetupIntegrationTestResponse,
   SetupStatusResponse,
   SetupTestBeetsResponse,
+  BeetsPluginsReport,
   AuthMeResponse,
   LoginRequest,
   LoginResponse,
@@ -329,6 +330,18 @@ export function saveSetupEnv(payload: SetupEnvSavePayload): Promise<SetupEnvResp
 
 export function completeSetup(): Promise<ApiOkResponse> {
   return apiJson<ApiOkResponse>('/api/setup/complete', jsonRequest('POST'));
+}
+
+export function getPluginsStatus(): Promise<BeetsPluginsReport> {
+  return apiJson<BeetsPluginsReport>('/api/plugins/status');
+}
+
+export function provisionPlugins(): Promise<BeetsPluginsReport> {
+  return apiJson<BeetsPluginsReport>('/api/plugins/provision', jsonRequest('POST'));
+}
+
+export function verifyPlugins(): Promise<BeetsPluginsReport> {
+  return apiJson<BeetsPluginsReport>('/api/plugins/verify', jsonRequest('POST'));
 }
 
 export function testSetupBeets(): Promise<SetupTestBeetsResponse> {

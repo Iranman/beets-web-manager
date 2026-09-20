@@ -1875,6 +1875,10 @@ _FIRST_RUN_PUBLIC_ENDPOINTS = {
     ("HEAD", "react_spa_fallback"),
     ("GET", "setup_status"),
     ("HEAD", "setup_status"),
+    ("GET", "plugins_status"),
+    ("HEAD", "plugins_status"),
+    ("POST", "plugins_provision"),
+    ("POST", "plugins_verify"),
     ("POST", "setup_first_run"),
     ("POST", "setup_test_ai"),
     ("POST", "setup_test_musicbrainz"),
@@ -2572,6 +2576,22 @@ def _repair_legacy_beets_config(config_path: Optional[str] = None) -> None:
 
 
 _repair_legacy_beets_config()
+
+
+def _bootstrap_beets_plugins(config_dir: Optional[Path] = None) -> None:
+    try:
+        from backend.beets_plugins import provision_bundled_plugins
+        cfg_dir = config_dir if config_dir else Path(os.environ.get("BEETS_CONFIG", "/config/config.yaml")).parent
+        if cfg_dir.exists():
+            provision_bundled_plugins(cfg_dir)
+    except Exception as ex:
+        try:
+            app.logger.warning("Auto plugin provisioning on startup skipped/failed: %s", ex)
+        except Exception:
+            pass
+
+
+_bootstrap_beets_plugins()
 
 
 def _constant_time_equal(left: str, right: str) -> bool:

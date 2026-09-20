@@ -4336,6 +4336,57 @@
         "tests/test_security_hardening.py::test_csrf_and_security_headers_are_enforced",
         "tests/test_security_hardening.py::test_config_and_status_responses_are_redacted"
       ]
+    },
+    {
+      "method": "GET",
+      "endpoint": "plugins_status",
+      "security_classification": "SETUP_ONLY",
+      "purpose": "Return comprehensive health and readiness report for all Beets plugins across categories.",
+      "required_role_or_privilege": "public pre-setup only, then owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_beets_plugin_management.py"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "plugins_provision",
+      "security_classification": "SETUP_ONLY",
+      "purpose": "Copy bundled plugins to /config/beetsplug, safely update config.yaml with missing required plugins, and return verification report.",
+      "required_role_or_privilege": "public pre-setup only, then owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": true,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_beets_plugin_management.py"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "plugins_verify",
+      "security_classification": "SETUP_ONLY",
+      "purpose": "Re-run plugin health verification without mutating any configuration files.",
+      "required_role_or_privilege": "public pre-setup only, then owner/admin",
+      "handles_secrets": false,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_beets_plugin_management.py"
+      ]
     }
   ]
 }

@@ -194,6 +194,11 @@ _REVIEWED_RULE_DETAILS = {
         "review_reason": "SEC-002 Wave 27 correction: backend.web_manager_config_store mutates Web-Manager-owned durable app/config/security state under WEB_MANAGER_DATA_DIR using root containment, symlink rejection, cross-process locking, CAS, atomic replace, chmod, and directory fsync; it does not touch Beets config or media-library state.",
         "reviewed_in_pr": 102,
     },
+    "reviewed-beets-plugin-management-config-state": {
+        "domain": "config",
+        "review_reason": "Beets plugin management: backend.beets_plugins provisions bundled plugin files into /config/beetsplug and manages plugin activation in config.yaml with atomic writes, timestamped backups, and safe directory creation without touching media library files.",
+        "reviewed_in_pr": 105,
+    },
     "reviewed-wave27-control-agent-config-state": {
         "domain": "config",
         "review_reason": "SEC-002 Wave 27 correction: Control Agent config helpers mutate only engine-owned config.yaml/config.yaml.bak under BEETSDIR with expected_revision CAS, real Beets validation, atomic replace, fsync, and backup restore semantics.",
@@ -432,6 +437,8 @@ def _classify(sink: MutationSink) -> tuple[str, str, str]:
             return "STAGING_ONLY", "", "slskd-staging-download"
         if file == "backend/beets_config.py":
             return "CONFIG_STATE", "", "beets-config-state"
+        if file == "backend/beets_plugins.py":
+            return "CONFIG_STATE", "config_v1", "reviewed-beets-plugin-management-config-state"
         if file == "backend/web_manager_config_store.py":
             return "CONFIG_STATE", "config_v1", "reviewed-wave27-web-manager-config-store"
         if file == "backend/security.py":

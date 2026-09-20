@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react';
 import {
   completeSetup,
+  getPluginsStatus,
   getSetupStatus,
+  provisionPlugins,
   saveSetupEnv,
   submitFirstRunSetup,
   testSetupAcoustid,
@@ -9,8 +11,9 @@ import {
   testSetupBeets,
   testSetupMusicBrainz,
   testSetupPlex,
+  verifyPlugins,
 } from '../api/client';
-import type { SetupStatusResponse } from '../api/types';
+import type { BeetsPluginsReport, SetupStatusResponse } from '../api/types';
 
 function BeetsLogo() {
   return (
@@ -38,6 +41,12 @@ export default function FirstRunSetup() {
   // Connection testing states
   const [beetsStatus, setBeetsStatus] = useState<{ testing: boolean; ok?: boolean; message?: string; error?: string }>({ testing: false });
   const [showBeetsDetails, setShowBeetsDetails] = useState(false);
+
+  // Plugins state
+  const [pluginsReport, setPluginsReport] = useState<BeetsPluginsReport | null>(null);
+  const [pluginsLoading, setPluginsLoading] = useState(false);
+  const [pluginsProvisioning, setPluginsProvisioning] = useState(false);
+  const [pluginsActionMessage, setPluginsActionMessage] = useState<{ text: string; ok: boolean } | null>(null);
 
   // MusicBrainz state
   const [mbStatus, setMbStatus] = useState<{ testing: boolean; ok?: boolean; message?: string; error?: string }>({ testing: false });
@@ -68,6 +77,9 @@ export default function FirstRunSetup() {
   useEffect(() => {
     getSetupStatus().then((status) => {
       setSetupStatus(status);
+      if (status.plugins) {
+        setPluginsReport(status.plugins);
+      }
       if (status.beets?.version) {
         setBeetsStatus({ testing: false, ok: true, message: `Connected — Beets ${status.beets.version}` });
       }
@@ -156,6 +168,62 @@ export default function FirstRunSetup() {
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Plex test failed.';
       setPlexStatus({ testing: false, ok: false, error: msg });
+    }
+  };
+
+  const fetchPlugins = async () => {
+    setPluginsLoading(true);
+    try {
+      const res = await getPluginsStatus();
+      setPluginsReport(res);
+    } catch {
+      // Ignore
+    } finally {
+      setPluginsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (currentStep === 8 && !pluginsReport) {
+      void fetchPlugins();
+    }
+  }, [currentStep, pluginsReport]);
+
+  const handleProvisionPlugins = async () => {
+    setPluginsProvisioning(true);
+    setPluginsActionMessage(null);
+    try {
+      const res = await provisionPlugins();
+      setPluginsReport(res);
+      setPluginsActionMessage({
+        text: res.ok
+          ? 'All required plugins successfully installed, configured, and verified!'
+          : (res.message || 'Provisioning completed with warnings.'),
+        ok: res.ok,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Plugin provisioning failed.';
+      setPluginsActionMessage({ text: msg, ok: false });
+    } finally {
+      setPluginsProvisioning(false);
+    }
+  };
+
+  const handleVerifyPlugins = async () => {
+    setPluginsLoading(true);
+    setPluginsActionMessage(null);
+    try {
+      const res = await verifyPlugins();
+      setPluginsReport(res);
+      setPluginsActionMessage({
+        text: res.ok ? 'All required plugins verified healthy.' : 'Some plugins have unresolved issues.',
+        ok: res.ok,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Plugin verification failed.';
+      setPluginsActionMessage({ text: msg, ok: false });
+    } finally {
+      setPluginsLoading(false);
     }
   };
 
@@ -779,58 +847,152 @@ export default function FirstRunSetup() {
               <div>
                 <h2 className="text-xl font-bold text-white">Beets Plugins</h2>
                 <p className="mt-1 text-sm text-zinc-400">
-                  Detected plugins in your Beets engine installation.
+                  Web Manager automatically discovers, provisions, and configures all required Beets plugins.
                 </p>
               </div>
 
-              {/* MusicBrainz is core Beets metadata capability, not a
-                  togglable plugin -- beets has no "musicbrainz" entry in
-                  its plugins: list, so it never reports "configured" the
-                  way an optional plugin does. Shown separately as an
-                  external service (connected/unavailable) instead of
-                  mixed into the plugin grid below, where it would
-                  otherwise always render as "not enabled". */}
-              {(() => {
-                const mbState = setupStatus?.integrations?.musicbrainz?.state || 'not_configured';
-                const mbOk = mbState === 'connected' || mbState === 'configured';
-                return (
-                  <div className="rounded-lg border border-zinc-800 bg-graphite-950 p-3 flex items-center justify-between text-xs">
-                    <div>
-                      <span className="font-semibold text-white">MusicBrainz</span>
-                      <span className="ml-2 text-zinc-500">Core metadata service · no API key required</span>
-                    </div>
-                    <span className={`px-2 py-0.5 rounded font-bold ${mbOk ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 'bg-amber-950 text-amber-400 border border-amber-800'}`}>
-                      {mbOk ? '✓ Connected' : '⚠ Beets engine unreachable'}
+              {/* Status & Actions Banner */}
+              {pluginsReport && (
+                <div className={`rounded-xl border p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+                  pluginsReport.all_required_healthy
+                    ? 'border-emerald-500/30 bg-emerald-950/30 text-emerald-200'
+                    : 'border-amber-500/40 bg-amber-950/40 text-amber-200'
+                }`}>
+                  <div className="flex items-center gap-3">
+                    <span className={`flex size-8 shrink-0 items-center justify-center rounded-lg font-bold text-sm ${
+                      pluginsReport.all_required_healthy ? 'bg-emerald-500/20 text-emerald-300' : 'bg-amber-500/20 text-amber-300'
+                    }`}>
+                      {pluginsReport.all_required_healthy ? '✓' : '⚠'}
                     </span>
+                    <div>
+                      <div className="text-sm font-bold">
+                        {pluginsReport.all_required_healthy
+                          ? `All ${pluginsReport.required_count} Required Plugins Healthy`
+                          : `${pluginsReport.required_healthy_count} of ${pluginsReport.required_count} Required Plugins Ready`}
+                      </div>
+                      <div className="text-xs opacity-80">
+                        {pluginsReport.all_required_healthy
+                          ? 'Beets plugin configuration and runtime dependencies are verified.'
+                          : 'Click "Install & Configure Required Plugins" to automatically configure missing plugins.'}
+                      </div>
+                    </div>
                   </div>
-                );
-              })()}
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleVerifyPlugins}
+                      disabled={pluginsLoading || pluginsProvisioning}
+                      className="rounded-lg bg-zinc-800 px-3 py-1.5 text-xs font-semibold text-zinc-200 hover:bg-zinc-700 disabled:opacity-50"
+                    >
+                      {pluginsLoading ? 'Checking...' : 'Recheck'}
+                    </button>
+                    {!pluginsReport.all_required_healthy && (
+                      <button
+                        type="button"
+                        onClick={handleProvisionPlugins}
+                        disabled={pluginsProvisioning}
+                        className="rounded-lg bg-red-700 px-3.5 py-1.5 text-xs font-bold text-white shadow hover:bg-red-600 disabled:opacity-50"
+                      >
+                        {pluginsProvisioning ? 'Installing...' : 'Install & Configure'}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
 
+              {pluginsActionMessage && (
+                <div className={`rounded-lg border p-3 text-xs ${
+                  pluginsActionMessage.ok
+                    ? 'border-emerald-500/30 bg-emerald-950/40 text-emerald-300'
+                    : 'border-red-500/30 bg-red-950/40 text-red-300'
+                }`}>
+                  {pluginsActionMessage.text}
+                </div>
+              )}
+
+              {/* Group 1: Required Core Plugins */}
               <div>
-                <h3 className="text-xs font-bold uppercase tracking-wide text-zinc-500">Optional Beets Plugins</h3>
-              </div>
-              <div className="grid grid-cols-2 gap-2.5">
-                {[
-                  { name: 'chroma / AcoustID', key: 'acoustid', req: false },
-                  { name: 'fetchart', key: 'fetchart', req: true },
-                  { name: 'embedart', key: 'embedart', req: false },
-                  { name: 'scrub', key: 'scrub', req: false },
-                  { name: 'zero', key: 'zero', req: false },
-                  { name: 'ftintitle', key: 'ftintitle', req: false },
-                  { name: 'mbsync', key: 'mbsync', req: false },
-                  { name: 'replaygain', key: 'replaygain', req: false },
-                ].map((item) => {
-                  const state = setupStatus?.integrations?.[item.key]?.state || 'not_configured';
-                  const isOk = state === 'configured';
-                  return (
-                    <div key={item.key} className="rounded-lg border border-zinc-800 bg-graphite-950 p-3 flex items-center justify-between text-xs">
-                      <span className="font-semibold text-white">{item.name}</span>
-                      <span className={`px-2 py-0.5 rounded font-bold ${isOk ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 'bg-zinc-800 text-zinc-400'}`}>
-                        {isOk ? '✓ Enabled' : '○ Available'}
+                <div className="flex items-center justify-between pb-1 mb-2 border-b border-zinc-800">
+                  <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-300">
+                    Required Core Plugins ({pluginsReport?.categories?.required?.length || 0})
+                  </h3>
+                  <span className="text-[11px] text-zinc-500">Auto-configured for Web Manager</span>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {(pluginsReport?.categories?.required || []).map((plugin) => (
+                    <div
+                      key={plugin.name}
+                      className="rounded-lg border border-zinc-800 bg-graphite-950 p-2.5 flex items-center justify-between text-xs"
+                    >
+                      <div className="min-w-0 pr-2">
+                        <div className="font-semibold text-white truncate">{plugin.display_name || plugin.name}</div>
+                        <div className="text-[11px] text-zinc-400 truncate">{plugin.description}</div>
+                      </div>
+                      <span className={`shrink-0 px-2 py-0.5 rounded text-[11px] font-bold ${
+                        plugin.healthy
+                          ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800'
+                          : 'bg-amber-950/80 text-amber-400 border border-amber-800'
+                      }`}>
+                        {plugin.healthy ? '✓ Ready' : '⚠ Action Required'}
                       </span>
                     </div>
-                  );
-                })}
+                  ))}
+                </div>
+              </div>
+
+              {/* Group 2: Web Manager Bundled Extensions */}
+              <div>
+                <div className="flex items-center justify-between pb-1 mb-2 border-b border-zinc-800">
+                  <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-300">
+                    Bundled Web Manager Extensions
+                  </h3>
+                  <span className="text-[11px] text-zinc-500">Shared /config/beetsplug</span>
+                </div>
+                <div className="rounded-lg border border-zinc-800 bg-graphite-950 p-3 flex items-center justify-between text-xs">
+                  <div>
+                    <div className="font-semibold text-white">discpath (Multi-Disc Subfolders)</div>
+                    <div className="text-[11px] text-zinc-400">
+                      Web Manager multi-disc album directory formatting (<code>disc_subfolder</code> template field).
+                    </div>
+                  </div>
+                  <span className={`shrink-0 px-2 py-0.5 rounded text-[11px] font-bold ${
+                    pluginsReport?.categories?.required?.find((p) => p.name === 'discpath')?.healthy
+                      ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800'
+                      : 'bg-amber-950/80 text-amber-400 border border-amber-800'
+                  }`}>
+                    {pluginsReport?.categories?.required?.find((p) => p.name === 'discpath')?.healthy ? '✓ Provisioned' : '⚠ Missing in /config'}
+                  </span>
+                </div>
+              </div>
+
+              {/* Group 3: Optional & Integration Plugins */}
+              <div>
+                <div className="flex items-center justify-between pb-1 mb-2 border-b border-zinc-800">
+                  <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-300">
+                    Optional & Integration Plugins ({((pluginsReport?.categories?.optional?.length || 0) + (pluginsReport?.categories?.integration?.length || 0))})
+                  </h3>
+                  <span className="text-[11px] text-zinc-500">Enabled on demand via settings / token</span>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {[...(pluginsReport?.categories?.optional || []), ...(pluginsReport?.categories?.integration || [])].map((plugin) => (
+                    <div
+                      key={plugin.name}
+                      className="rounded-lg border border-zinc-800 bg-graphite-950 p-2.5 flex items-center justify-between text-xs"
+                    >
+                      <div className="min-w-0 pr-2">
+                        <div className="font-semibold text-white truncate">{plugin.display_name || plugin.name}</div>
+                        <div className="text-[11px] text-zinc-400 truncate">{plugin.description}</div>
+                      </div>
+                      <span className={`shrink-0 px-2 py-0.5 rounded text-[11px] font-bold ${
+                        plugin.enabled
+                          ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800'
+                          : 'bg-zinc-800 text-zinc-400'
+                      }`}>
+                        {plugin.enabled ? '✓ Enabled' : '○ Available'}
+                      </span>
+                    </div>
+                  ))}
+                </div>
               </div>
 
               <div className="pt-2 flex justify-between">
@@ -981,6 +1143,14 @@ export default function FirstRunSetup() {
                       <span className="text-zinc-400">Beets Engine</span>
                       <span className={`font-semibold ${beetsStatus.ok ? 'text-emerald-400' : 'text-amber-400'}`}>
                         {beetsStatus.ok ? beetsStatus.message : 'Checking/Unverified'}
+                      </span>
+                    </div>
+                    <div className="py-2 flex justify-between items-center">
+                      <span className="text-zinc-400">Beets Plugins</span>
+                      <span className={`font-semibold ${pluginsReport?.all_required_healthy ? 'text-emerald-400' : 'text-amber-400'}`}>
+                        {pluginsReport?.all_required_healthy
+                          ? `✓ All ${pluginsReport.required_count} Required Plugins Ready`
+                          : `${pluginsReport?.required_healthy_count || 0}/${pluginsReport?.required_count || 0} Required Plugins Ready`}
                       </span>
                     </div>
                     <div className="py-2 flex justify-between items-center">
