@@ -69,25 +69,7 @@ class PluginDefinition:
 # ─────────────────────────────────────────────────────────────────────────────
 
 BEETS_PLUGIN_MANIFEST: Dict[str, PluginDefinition] = {
-    # ── Core & Required Plugins ──────────────────────────────────────────────
-    "musicbrainz": PluginDefinition(
-        name="musicbrainz",
-        display_name="MusicBrainz Autotagger",
-        category=PluginCategory.REQUIRED,
-        plugin_type=PluginType.BUILTIN,
-        description="Core MusicBrainz album matching, release queries, and track identification.",
-        commands=[],
-    ),
-    "chroma": PluginDefinition(
-        name="chroma",
-        display_name="Chroma / AcoustID",
-        category=PluginCategory.REQUIRED,
-        plugin_type=PluginType.BUILTIN,
-        description="AcoustID audio fingerprinting, automated matching, and deduplication.",
-        python_packages=["pyacoustid==1.3.1"],
-        binary_dependencies=["fpcalc"],
-        commands=["submit"],
-    ),
+    # ── Core & Required Plugins (Concrete Web Manager Features) ──────────────
     "fetchart": PluginDefinition(
         name="fetchart",
         display_name="Fetch Artwork",
@@ -104,15 +86,6 @@ BEETS_PLUGIN_MANIFEST: Dict[str, PluginDefinition] = {
         description="Embeds cover images directly into media file tags across formats.",
         commands=["embedart"],
     ),
-    "convert": PluginDefinition(
-        name="convert",
-        display_name="Audio Converter",
-        category=PluginCategory.REQUIRED,
-        plugin_type=PluginType.BUILTIN,
-        description="Audio transcoding, format conversion, and waveform generation.",
-        binary_dependencies=["ffmpeg"],
-        commands=["convert"],
-    ),
     "scrub": PluginDefinition(
         name="scrub",
         display_name="Tag Scrubber",
@@ -121,30 +94,12 @@ BEETS_PLUGIN_MANIFEST: Dict[str, PluginDefinition] = {
         description="Cleans extraneous and corrupt metadata tags from audio files.",
         commands=["scrub"],
     ),
-    "discpath": PluginDefinition(
-        name="discpath",
-        display_name="Multi-Disc Subfolders (discpath)",
-        category=PluginCategory.REQUIRED,
-        plugin_type=PluginType.BUNDLED,
-        description="Web Manager multi-disc album directory formatting (disc_subfolder).",
-        bundled_file="discpath.py",
-        template_fields=["disc_subfolder"],
-    ),
-    "mbsubmit": PluginDefinition(
-        name="mbsubmit",
-        display_name="MusicBrainz Submit",
+    "zero": PluginDefinition(
+        name="zero",
+        display_name="Field Zeroing",
         category=PluginCategory.REQUIRED,
         plugin_type=PluginType.BUILTIN,
-        description="Generates submission URLs and tracklists for unmatched releases.",
-        commands=["mbsubmit"],
-    ),
-    "web": PluginDefinition(
-        name="web",
-        display_name="Beets Web Service",
-        category=PluginCategory.REQUIRED,
-        plugin_type=PluginType.BUILTIN,
-        description="Beets Web API service required by stock container background supervisor.",
-        commands=["web"],
+        description="Nulls out unwanted metadata fields on import according to rules.",
     ),
     "ftintitle": PluginDefinition(
         name="ftintitle",
@@ -168,69 +123,68 @@ BEETS_PLUGIN_MANIFEST: Dict[str, PluginDefinition] = {
         description="Synchronizes existing library metadata with updated MusicBrainz database.",
         commands=["mbsync"],
     ),
-    "duplicates": PluginDefinition(
-        name="duplicates",
-        display_name="Duplicate Finder",
+    "mbsubmit": PluginDefinition(
+        name="mbsubmit",
+        display_name="MusicBrainz Submit",
         category=PluginCategory.REQUIRED,
         plugin_type=PluginType.BUILTIN,
-        description="Identifies duplicate tracks and releases in the music library.",
-        commands=["duplicates"],
+        description="Generates submission URLs and tracklists for unmatched releases.",
+        commands=["mbsubmit"],
     ),
-    "missing": PluginDefinition(
-        name="missing",
-        display_name="Missing Tracks Detector",
+    "chroma": PluginDefinition(
+        name="chroma",
+        display_name="Chroma / AcoustID",
         category=PluginCategory.REQUIRED,
         plugin_type=PluginType.BUILTIN,
-        description="Detects missing tracks from incomplete albums.",
-        commands=["missing"],
+        description="AcoustID audio fingerprinting, automated matching, and deduplication.",
+        python_packages=["pyacoustid==1.3.1"],
+        binary_dependencies=["fpcalc"],
+        commands=["submit"],
     ),
-    "smartplaylist": PluginDefinition(
-        name="smartplaylist",
-        display_name="Smart Playlists",
-        category=PluginCategory.REQUIRED,
-        plugin_type=PluginType.BUILTIN,
-        description="Generates dynamic .m3u playlists from library query definitions.",
-        commands=["splupdate"],
-    ),
-    "unimported": PluginDefinition(
-        name="unimported",
-        display_name="Unimported Files Finder",
-        category=PluginCategory.REQUIRED,
-        plugin_type=PluginType.BUILTIN,
-        description="Locates media files in music directories not registered in Beets library.",
-        commands=["unimported"],
-    ),
-
-    # ── Optional Capability Plugins ──────────────────────────────────────────
     "replaygain": PluginDefinition(
         name="replaygain",
         display_name="ReplayGain Normalization",
-        category=PluginCategory.OPTIONAL,
+        category=PluginCategory.REQUIRED,
         plugin_type=PluginType.BUILTIN,
-        description="Calculates volume normalization peak and gain tags.",
+        description="Calculates volume normalization peak and gain tags using ffmpeg.",
         binary_dependencies=["ffmpeg"],
         commands=["replaygain"],
     ),
     "lastgenre": PluginDefinition(
         name="lastgenre",
-        display_name="Last.fm Genre Fetcher",
-        category=PluginCategory.OPTIONAL,
+        display_name="Canonical Genre Tagging",
+        category=PluginCategory.REQUIRED,
         plugin_type=PluginType.BUILTIN,
-        description="Fetches canonical genre tags from Last.fm.",
-        python_packages=["pylast==7.1.0"],
+        description="Canonical genre resolution, normalization, and repair.",
         commands=["lastgenre"],
     ),
-    "lyrics": PluginDefinition(
-        name="lyrics",
-        display_name="Lyrics Downloader",
-        category=PluginCategory.OPTIONAL,
+    "discpath": PluginDefinition(
+        name="discpath",
+        display_name="Multi-Disc Subfolders (discpath)",
+        category=PluginCategory.REQUIRED,
+        plugin_type=PluginType.BUNDLED,
+        description="Web Manager multi-disc album directory formatting (disc_subfolder).",
+        bundled_file="discpath.py",
+        template_fields=["disc_subfolder"],
+    ),
+    "musicbrainz": PluginDefinition(
+        name="musicbrainz",
+        display_name="MusicBrainz Autotagger (Core)",
+        category=PluginCategory.REQUIRED,
         plugin_type=PluginType.BUILTIN,
-        description="Downloads song lyrics from Genius, Musixmatch, and web sources.",
-        python_packages=["beautifulsoup4==4.12.3"],
-        commands=["lyrics"],
+        description="Core MusicBrainz album matching, release queries, and track identification.",
+        commands=[],
     ),
 
     # ── Integration-Specific Plugins ─────────────────────────────────────────
+    "discogs": PluginDefinition(
+        name="discogs",
+        display_name="Discogs Database Matching",
+        category=PluginCategory.INTEGRATION,
+        plugin_type=PluginType.BUILTIN,
+        description="Discogs database candidate matching, extra tags, and art.",
+        integration_env_var="DISCOGS_TOKEN",
+    ),
     "listenbrainz": PluginDefinition(
         name="listenbrainz",
         display_name="ListenBrainz Integration",
@@ -248,14 +202,6 @@ BEETS_PLUGIN_MANIFEST: Dict[str, PluginDefinition] = {
         description="Deezer cover art and metadata search provider.",
         python_packages=["deezer-python==2.1.0"],
     ),
-    "discogs": PluginDefinition(
-        name="discogs",
-        display_name="Discogs Database Matching",
-        category=PluginCategory.INTEGRATION,
-        plugin_type=PluginType.BUILTIN,
-        description="Discogs database candidate matching, extra tags, and art.",
-        integration_env_var="DISCOGS_TOKEN",
-    ),
     "spotify": PluginDefinition(
         name="spotify",
         display_name="Spotify Ingestion",
@@ -264,11 +210,113 @@ BEETS_PLUGIN_MANIFEST: Dict[str, PluginDefinition] = {
         description="Spotify playlist metadata ingestion.",
         integration_env_var="SPOTIFY_CLIENT_ID",
     ),
+    "plexsync": PluginDefinition(
+        name="plexsync",
+        display_name="Plex Sync",
+        category=PluginCategory.INTEGRATION,
+        plugin_type=PluginType.BUILTIN,
+        description="Plex library synchronization.",
+        integration_env_var="PLEX_TOKEN",
+    ),
+    "bpsync": PluginDefinition(
+        name="bpsync",
+        display_name="Beatport Sync",
+        category=PluginCategory.INTEGRATION,
+        plugin_type=PluginType.BUILTIN,
+        description="Beatport metadata synchronization.",
+    ),
+
+    # ── Optional Capability Plugins ──────────────────────────────────────────
+    "convert": PluginDefinition(
+        name="convert",
+        display_name="Audio Converter",
+        category=PluginCategory.OPTIONAL,
+        plugin_type=PluginType.BUILTIN,
+        description="Audio transcoding, format conversion, and waveform generation.",
+        binary_dependencies=["ffmpeg"],
+        commands=["convert"],
+    ),
+    "duplicates": PluginDefinition(
+        name="duplicates",
+        display_name="Duplicate Finder",
+        category=PluginCategory.OPTIONAL,
+        plugin_type=PluginType.BUILTIN,
+        description="Identifies duplicate tracks and releases in the music library.",
+        commands=["duplicates"],
+    ),
+    "missing": PluginDefinition(
+        name="missing",
+        display_name="Missing Tracks Detector",
+        category=PluginCategory.OPTIONAL,
+        plugin_type=PluginType.BUILTIN,
+        description="Detects missing tracks from incomplete albums.",
+        commands=["missing"],
+    ),
+    "smartplaylist": PluginDefinition(
+        name="smartplaylist",
+        display_name="Smart Playlists",
+        category=PluginCategory.OPTIONAL,
+        plugin_type=PluginType.BUILTIN,
+        description="Generates dynamic .m3u playlists from library query definitions.",
+        commands=["splupdate"],
+    ),
+    "unimported": PluginDefinition(
+        name="unimported",
+        display_name="Unimported Files Finder",
+        category=PluginCategory.OPTIONAL,
+        plugin_type=PluginType.BUILTIN,
+        description="Locates media files in music directories not registered in Beets library.",
+        commands=["unimported"],
+    ),
+    "lyrics": PluginDefinition(
+        name="lyrics",
+        display_name="Lyrics Downloader",
+        category=PluginCategory.OPTIONAL,
+        plugin_type=PluginType.BUILTIN,
+        description="Downloads song lyrics from Genius, Musixmatch, and web sources.",
+        python_packages=["beautifulsoup4==4.12.3"],
+        commands=["lyrics"],
+    ),
+    "parentwork": PluginDefinition(
+        name="parentwork",
+        display_name="Parent Work Fetcher",
+        category=PluginCategory.OPTIONAL,
+        plugin_type=PluginType.BUILTIN,
+        description="Fetches parent work metadata for classical compositions.",
+    ),
+    "edit": PluginDefinition(
+        name="edit",
+        display_name="CLI Text Tag Editor",
+        category=PluginCategory.OPTIONAL,
+        plugin_type=PluginType.BUILTIN,
+        description="Edit metadata in a text editor via CLI.",
+        commands=["edit"],
+    ),
+    "web": PluginDefinition(
+        name="web",
+        display_name="Beets Built-in Web Server",
+        category=PluginCategory.OPTIONAL,
+        plugin_type=PluginType.BUILTIN,
+        description="Beets simple built-in web server.",
+        commands=["web"],
+    ),
+    "hook": PluginDefinition(
+        name="hook",
+        display_name="Event Hook Runner",
+        category=PluginCategory.OPTIONAL,
+        plugin_type=PluginType.BUILTIN,
+        description="Runs custom shell commands on Beets events.",
+    ),
 }
 
 # Ordered list of plugins required for full Web Manager functionality
 REQUIRED_PLUGIN_NAMES: List[str] = [
     name for name, p in BEETS_PLUGIN_MANIFEST.items() if p.category == PluginCategory.REQUIRED
+]
+
+REQUIRED_CONFIG_PLUGINS: List[str] = [
+    name for name, p in BEETS_PLUGIN_MANIFEST.items()
+    if p.category == PluginCategory.REQUIRED and name != "musicbrainz"
 ]
 
 OPTIONAL_PLUGIN_NAMES: List[str] = [
@@ -439,7 +487,7 @@ def update_config_yaml_plugins(
     Returns (changed: bool, message: str).
     """
     path = Path(config_path)
-    plugins_to_ensure = ensure_plugins if ensure_plugins is not None else REQUIRED_PLUGIN_NAMES
+    plugins_to_ensure = ensure_plugins if ensure_plugins is not None else REQUIRED_CONFIG_PLUGINS
     pluginpath_to_ensure = ensure_pluginpath if ensure_pluginpath is not None else ["/config/beetsplug"]
 
     if not path.exists():
@@ -595,18 +643,26 @@ def verify_plugin(
     commands_status: Dict[str, bool] = {}
     template_fields_status: Dict[str, bool] = {}
 
+    enabled = name in configured_plugins or name == "musicbrainz"  # MusicBrainz is core built-in
+    loaded = name in loaded_plugins or name == "musicbrainz"
+
+    # MusicBrainz is special: built into Beets core
+    if name == "musicbrainz":
+        enabled = True
+        loaded = True
+
     # 1. Binary Dependencies
     for b in plugin_def.binary_dependencies:
         found, loc = _check_binary(b, available_binaries)
         binaries_status[b] = found
-        if not found:
+        if not found and (plugin_def.category == PluginCategory.REQUIRED or enabled):
             errors.append(f"Required binary '{b}' is not installed on PATH.")
 
     # 2. Python Packages
     for p in plugin_def.python_packages:
         found, ver_msg = _check_python_package(p)
         python_status[p] = found
-        if not found:
+        if not found and (plugin_def.category == PluginCategory.REQUIRED or enabled):
             errors.append(f"Required Python package '{p}' is not available ({ver_msg}).")
 
     # 3. Bundled File Verification
@@ -616,22 +672,14 @@ def verify_plugin(
         source_target = SOURCE_BEETSPLUG_DIR / plugin_def.bundled_file
         if not bundled_target.exists() and not source_target.exists() and not Path(f"/app/beetsplug/{plugin_def.bundled_file}").exists():
             installed = False
-            errors.append(f"Bundled plugin file '{plugin_def.bundled_file}' is missing from {beetsplug_dir}.")
+            if plugin_def.category == PluginCategory.REQUIRED or enabled:
+                errors.append(f"Bundled plugin file '{plugin_def.bundled_file}' is missing from {beetsplug_dir}.")
 
     # 4. Configuration and Loaded Status
-    enabled = name in configured_plugins or name == "musicbrainz"  # MusicBrainz is core built-in
-    loaded = name in loaded_plugins or name == "musicbrainz"
-
-    # MusicBrainz is special: built into Beets core
-    if name == "musicbrainz":
-        enabled = True
-        loaded = True
-
     if plugin_def.category == PluginCategory.REQUIRED:
         if not enabled:
             errors.append(f"Plugin '{name}' is required by Web Manager but not enabled in config.yaml.")
         elif not loaded and not errors:
-            # Enabled in config but didn't load in Beets
             errors.append(f"Plugin '{name}' is enabled in config.yaml but failed to load in the Beets runtime.")
 
     # 5. Commands
@@ -642,10 +690,34 @@ def verify_plugin(
     for tf in plugin_def.template_fields:
         template_fields_status[tf] = loaded
 
-    healthy = (len(errors) == 0) and (loaded or plugin_def.category != PluginCategory.REQUIRED)
+    # Determine health
+    if plugin_def.category == PluginCategory.REQUIRED:
+        healthy = (len(errors) == 0) and loaded
+    elif plugin_def.category == PluginCategory.INTEGRATION:
+        if enabled:
+            healthy = (len(errors) == 0) and loaded
+        else:
+            healthy = True  # Not enabled, optional integration
+    else:  # OPTIONAL
+        if enabled:
+            healthy = (len(errors) == 0) and loaded
+        else:
+            healthy = True  # Optional and disabled
 
     # Note generation
-    note = "Ready" if healthy else "; ".join(errors)
+    if not enabled:
+        if plugin_def.category == PluginCategory.INTEGRATION:
+            note = "Optional integration (disabled / not configured)"
+        elif plugin_def.category == PluginCategory.OPTIONAL:
+            note = "Optional (disabled in config.yaml)"
+        else:
+            note = "; ".join(errors) if errors else "Disabled"
+    elif not loaded:
+        note = "; ".join(errors) if errors else "Enabled but not loaded by Beets engine"
+    elif healthy:
+        note = "Ready"
+    else:
+        note = "; ".join(errors)
 
     return PluginHealthStatus(
         name=name,

@@ -1,4 +1,4 @@
-plugins: fetchart embedart convert scrub replaygain lastgenre chroma lyrics mbsync musicbrainz deezer listenbrainz ftintitle fromfilename duplicates missing smartplaylist mbsubmit unimported discpath web
+plugins: fetchart embedart scrub zero ftintitle fromfilename mbsync mbsubmit chroma replaygain lastgenre discpath
 pluginpath:
   - /config/beetsplug
 directory: /music

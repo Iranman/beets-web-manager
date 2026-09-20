@@ -37,11 +37,11 @@ from tests.test_routes_setup import _load_routes_setup_against_stub_app
 
 class BeetsPluginManifestTests(unittest.TestCase):
     def test_manifest_contains_all_required_plugins(self):
-        self.assertGreaterEqual(len(REQUIRED_PLUGIN_NAMES), 15)
+        self.assertEqual(len(REQUIRED_PLUGIN_NAMES), 13)
         for req in (
-            "musicbrainz", "chroma", "fetchart", "embedart", "convert",
-            "scrub", "discpath", "mbsubmit", "web", "ftintitle",
-            "fromfilename", "mbsync", "duplicates", "missing", "smartplaylist", "unimported"
+            "musicbrainz", "chroma", "fetchart", "embedart", "scrub",
+            "zero", "ftintitle", "fromfilename", "mbsync", "mbsubmit",
+            "replaygain", "lastgenre", "discpath"
         ):
             self.assertIn(req, REQUIRED_PLUGIN_NAMES)
             pdef = BEETS_PLUGIN_MANIFEST[req]
@@ -53,22 +53,17 @@ class BeetsPluginManifestTests(unittest.TestCase):
         self.assertEqual(discpath.bundled_file, "discpath.py")
         self.assertIn("disc_subfolder", discpath.template_fields)
 
-    def test_chroma_and_convert_dependencies(self):
+    def test_chroma_dependencies(self):
         chroma = BEETS_PLUGIN_MANIFEST["chroma"]
         self.assertIn("pyacoustid==1.3.1", chroma.python_packages)
         self.assertIn("fpcalc", chroma.binary_dependencies)
 
-        convert = BEETS_PLUGIN_MANIFEST["convert"]
-        self.assertIn("ffmpeg", convert.binary_dependencies)
-
     def test_optional_and_integration_plugins(self):
-        self.assertIn("replaygain", OPTIONAL_PLUGIN_NAMES)
-        self.assertIn("lastgenre", OPTIONAL_PLUGIN_NAMES)
-        self.assertIn("lyrics", OPTIONAL_PLUGIN_NAMES)
+        for opt in ("convert", "duplicates", "missing", "smartplaylist", "unimported", "lyrics", "parentwork", "edit", "web", "hook"):
+            self.assertIn(opt, OPTIONAL_PLUGIN_NAMES)
 
-        self.assertIn("listenbrainz", INTEGRATION_PLUGIN_NAMES)
-        self.assertIn("deezer", INTEGRATION_PLUGIN_NAMES)
-        self.assertIn("discogs", INTEGRATION_PLUGIN_NAMES)
+        for integ in ("listenbrainz", "deezer", "discogs", "spotify", "plexsync", "bpsync"):
+            self.assertIn(integ, INTEGRATION_PLUGIN_NAMES)
 
 
 class BeetsBundledProvisioningTests(unittest.TestCase):
@@ -243,7 +238,16 @@ class BeetsPluginVerificationTests(unittest.TestCase):
         self.assertIn("required", report["categories"])
         self.assertIn("optional", report["categories"])
         self.assertIn("integration", report["categories"])
-        self.assertGreaterEqual(report["required_count"], 15)
+        self.assertEqual(report["required_count"], 13)
+
+    def test_unconfigured_integration_does_not_block_health(self):
+        pdef = BEETS_PLUGIN_MANIFEST["discogs"]
+        configured = set()  # not enabled
+        loaded = set()
+        status = verify_plugin(pdef, configured, loaded, self.config_dir)
+        self.assertTrue(status.healthy)
+        self.assertFalse(status.enabled)
+        self.assertEqual(len(status.errors), 0)
 
     def test_provision_and_verify_end_to_end(self):
         result = provision_and_verify(self.config_dir)
