@@ -823,12 +823,58 @@ def verify_all_plugins(
     }
 
 
+def _force_fresh_loaded_plugins(max_wait_seconds: float = 95.0) -> Optional[Set[str]]:
+    """Force and wait for a genuinely fresh `beet version` probe when
+    running alongside the embedded Beets Control Agent in this same
+    process, bypassing its normal cached/asynchronous diagnostics.
+
+    verify_all_plugins()'s own fallback chain (remote beets_client.get_status()
+    or an in-process `beets.plugins.find_plugins()` call) can both return a
+    snapshot taken BEFORE update_config_yaml_plugins() just wrote a new
+    config.yaml moments earlier in the same provisioning call -- the control
+    agent's diagnostics cache (and its own /status endpoint) are
+    deliberately non-blocking/asynchronous (a real `beet version` subprocess
+    can take tens of seconds; see backend/beets_control_agent.py's
+    _cached_beet_version_snapshot), so a caller that doesn't explicitly wait
+    for a fresh probe after changing the config will see the plugins that
+    were loaded under the OLD config, not the one that was just written --
+    reporting freshly-enabled required plugins as unhealthy purely from
+    cache staleness, not a real load failure.
+
+    Deliberately calls _cached_beet_version_snapshot(force=True, ...)
+    directly rather than going through the higher-level
+    get_loaded_beet_plugins() convenience wrapper: that wrapper never
+    passes force=True (it's designed for hot-path capability gating, where
+    reusing a cache still within its normal ~30s TTL is exactly the
+    intended behavior) -- called right after writing a new config, it can
+    return the still-TTL-fresh cache from BEFORE the change, which is
+    precisely the staleness bug this function exists to close.
+
+    Returns None (not an empty set) when not running embedded, so the
+    caller falls back to its normal remote/in-process discovery instead of
+    incorrectly reporting zero plugins loaded for a remote/external engine
+    this process has no local `beet` binary or relationship to.
+    """
+    try:
+        from backend import beets_control_agent as _bca
+    except Exception:
+        return None
+    if getattr(_bca, "_embedded_server", None) is None:
+        return None
+    try:
+        snapshot = _bca._cached_beet_version_snapshot(force=True, max_wait_seconds=max_wait_seconds)
+        return set(snapshot.get("loaded_plugins") or [])
+    except Exception:
+        return None
+
+
 def provision_and_verify(config_dir: Optional[Path | str] = None) -> Dict[str, Any]:
     """Execute complete plugin provisioning workflow:
 
     1. Copy bundled plugins to `/config/beetsplug`.
     2. Safely update `config.yaml` with missing required plugins.
-    3. Re-run verification.
+    3. Re-run verification, forcing a fresh (not stale-cached) plugin load
+       probe whenever the config was actually changed above.
     4. Return full diagnostic response.
     """
     cfg_dir = Path(config_dir) if config_dir else DEFAULT_CONFIG_DIR
@@ -841,8 +887,11 @@ def provision_and_verify(config_dir: Optional[Path | str] = None) -> Dict[str, A
     config_path = cfg_dir / "config.yaml"
     changed, msg = update_config_yaml_plugins(config_path)
 
-    # 3. Verify all plugins
-    verification = verify_all_plugins(cfg_dir)
+    # 3. Verify all plugins -- force a fresh probe if the config was just
+    # modified, so verification reflects the config just written rather
+    # than a snapshot cached from before the change.
+    loaded_plugins = _force_fresh_loaded_plugins() if changed else None
+    verification = verify_all_plugins(cfg_dir, loaded_plugins=loaded_plugins)
     verification["provisioned_files"] = provisioned_files
     verification["config_updated"] = changed
     verification["message"] = msg

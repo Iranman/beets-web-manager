@@ -1,4 +1,4 @@
-plugins: fetchart embedart scrub zero ftintitle fromfilename mbsync mbsubmit chroma replaygain lastgenre discpath
+plugins: fetchart embedart scrub zero ftintitle fromfilename mbsync mbsubmit chroma replaygain lastgenre discpath musicbrainz listenbrainz
 pluginpath:
   - /config/beetsplug
 directory: /music

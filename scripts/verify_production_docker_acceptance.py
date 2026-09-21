@@ -409,7 +409,15 @@ def run_acceptance() -> None:
 
         # 3b. Verify Beets Plugin Provisioning & Multi-Runtime Loading
         print("==> Step 7a: Verifying Beets Plugin Provisioning and Multi-Runtime Loading...")
-        status, _, prov_body = stack.request("POST", "/api/plugins/provision", json_body={}, headers=bearer_header)
+        # Provisioning forces and waits for a fresh (not stale-cached) Beets
+        # plugin-load probe after writing config.yaml, which can take up to
+        # the full ~90s beet-version-probe budget under load, most of all
+        # on the very first invocation against a brand new database (real
+        # one-time Beets schema-migration backups are created) -- see
+        # backend/beets_plugins.py's _force_fresh_loaded_plugins and
+        # backend/beets_control_agent.py's _BEET_VERSION_PROBE_TIMEOUT_SECONDS.
+        # The default 15s client timeout is nowhere near enough here.
+        status, _, prov_body = stack.request("POST", "/api/plugins/provision", json_body={}, headers=bearer_header, timeout=110.0)
         if status != 200 or not isinstance(prov_body, dict):
             _fail(f"POST /api/plugins/provision failed: {status} {prov_body}")
             return

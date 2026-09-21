@@ -2232,7 +2232,7 @@ def plugins_status():
         from backend.beets_plugins import verify_all_plugins
         report = verify_all_plugins(beets_config_path.parent)
     except Exception as exc:
-        app.logger.warning("plugins_status failed: %s", exc)
+        app.logger.error("plugins_status failed: %s", exc, exc_info=True)
         report = {
             "ok": False,
             "all_required_healthy": False,
@@ -2240,7 +2240,7 @@ def plugins_status():
             "required_healthy_count": 0,
             "plugins": [],
             "categories": {"required": [], "optional": [], "integration": []},
-            "summary": {"total": 0, "healthy": 0, "errors": [str(exc)]},
+            "summary": {"total": 0, "healthy": 0, "errors": ["Beets plugin verification failed."]},
         }
     return jsonify(report)
 
@@ -2257,11 +2257,11 @@ def plugins_provision():
         from backend.beets_plugins import provision_and_verify
         result = provision_and_verify(beets_config_path.parent)
     except Exception as exc:
-        app.logger.error("plugins_provision failed: %s", exc)
+        app.logger.error("plugins_provision failed: %s", exc, exc_info=True)
         return jsonify({
             "ok": False,
             "all_required_healthy": False,
-            "error": f"Plugin provisioning failed: {exc}",
+            "error": "Beets plugin provisioning failed.",
         }), 500
     _invalidate_setup_status_cache()
     return jsonify(result)
@@ -2279,11 +2279,11 @@ def plugins_verify():
         from backend.beets_plugins import verify_all_plugins
         result = verify_all_plugins(beets_config_path.parent)
     except Exception as exc:
-        app.logger.warning("plugins_verify failed: %s", exc)
+        app.logger.error("plugins_verify failed: %s", exc, exc_info=True)
         return jsonify({
             "ok": False,
             "all_required_healthy": False,
-            "error": f"Plugin verification failed: {exc}",
+            "error": "Beets plugin verification failed.",
         }), 500
     return jsonify(result)
 
