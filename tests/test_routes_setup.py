@@ -714,19 +714,16 @@ class RoutesSetupEnvironmentTests(unittest.TestCase):
         )
         self.module._SETUP_ENV_FILE = self.env_file
         self.module._ENV_EXAMPLE_FILE = self.example_file
-        self._saved_env = {
-            name: os.environ.get(name)
-            for name in ("PLEX_URL", "PLEX_TOKEN", "LIDARR_API_KEY", "DEMO_MODE")
-        }
+        self._saved_env = dict(os.environ)
+        # Clear specific env vars that might leak from test harness
+        for var in ("OPENAI_API_KEY", "OPENROUTER_API_KEY", "AI_API_KEY", "AI_BASE_URL", "AI_MODEL", "PLEX_URL", "PLEX_TOKEN", "LIDARR_API_KEY", "DEMO_MODE"):
+            os.environ.pop(var, None)
         self.addCleanup(self._cleanup)
 
     def _cleanup(self):
         self.tempdir.cleanup()
-        for name, value in self._saved_env.items():
-            if value is None:
-                os.environ.pop(name, None)
-            else:
-                os.environ[name] = value
+        os.environ.clear()
+        os.environ.update(self._saved_env)
 
     def test_env_get_masks_secret_values(self):
         self.env_file.write_text("PLEX_URL=http://plex:32400\nPLEX_TOKEN=supersecretvalue\n", encoding="utf-8")
@@ -763,9 +760,166 @@ class RoutesSetupEnvironmentTests(unittest.TestCase):
         self.assertIn("PLEX_TOKEN=\n", self.env_file.read_text(encoding="utf-8"))
         self.assertEqual(os.environ["PLEX_TOKEN"], "")
 
-    def test_env_save_rejects_unlisted_variable(self):
-        r = self.client.post("/api/setup/env", json={"variables": {"PYTHONPATH": "x"}})
+    def test_env_save_rejects_non_editable_path_variable(self):
+        # MUSIC_PATH/BEETS_CONFIG_PATH/DOWNLOADS_PATH/WEB_MANAGER_DATA_PATH are
+        # host-side docker-compose.yml bind-mount interpolation variables that
+        # this container can never observe or change -- writing to them here
+        # would silently no-op against the real deployment, so the save
+        # endpoint must reject the attempt outright rather than pretending it
+        # took effect.
+        self.env_file.write_text("", encoding="utf-8")
+        r = self.client.post("/api/setup/env", json={
+            "variables": {"MUSIC_PATH": "/some/other/music"},
+        })
         self.assertEqual(r.status_code, 400)
+        self.assertNotIn("MUSIC_PATH=/some/other/music", self.env_file.read_text(encoding="utf-8"))
+
+    def test_env_clear_rejects_non_editable_path_variable(self):
+        self.env_file.write_text("MUSIC_PATH=/existing/music\n", encoding="utf-8")
+        r = self.client.post("/api/setup/env", json={
+            "variables": {},
+            "clear": ["MUSIC_PATH"],
+        })
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("MUSIC_PATH=/existing/music", self.env_file.read_text(encoding="utf-8"))
+
+    def test_env_displays_effective_values_and_defaults(self):
+        r = self.client.get("/api/setup/env")
+        self.assertEqual(r.status_code, 200)
+        body = r.get_json()
+        variables = {item["name"]: item for item in body["variables"]}
+
+        # PUID / PGID
+        self.assertIn("PUID", variables)
+        self.assertEqual(variables["PUID"]["default"], "1000")
+        self.assertTrue(variables["PUID"]["configured"])
+        self.assertEqual(variables["PUID"]["section"], "System & Environment")
+
+        # TZ / WEBCONTROL_PORT
+        self.assertIn("TZ", variables)
+        self.assertEqual(variables["TZ"]["default"], "UTC")
+        self.assertIn("WEBCONTROL_PORT", variables)
+        self.assertEqual(variables["WEBCONTROL_PORT"]["default"], "8337")
+
+        # Username
+        self.assertIn("BEETS_WEB_USERNAME", variables)
+        self.assertEqual(variables["BEETS_WEB_USERNAME"]["value"], "admin")
+        self.assertEqual(variables["BEETS_WEB_USERNAME"]["default"], "admin")
+
+        # AI settings
+        self.assertIn("AI_MODEL", variables)
+        self.assertEqual(variables["AI_MODEL"]["value"], "gpt-4o-mini")
+        self.assertEqual(variables["AI_MODEL"]["default"], "gpt-4o-mini")
+        self.assertIn("AI_BASE_URL", variables)
+        self.assertEqual(variables["AI_BASE_URL"]["value"], "https://api.openai.com/v1")
+
+        # Paths: BEETS_CONFIG_PATH/MUSIC_PATH/DOWNLOADS_PATH/WEB_MANAGER_DATA_PATH
+        # are docker-compose.yml's own host-side bind-mount interpolation
+        # variables -- never forwarded into this container's environment,
+        # so this application has no way to know (or change) the real host
+        # path. No fabricated "./music"-style default is shown, and the
+        # field is not editable from here (the deployment's own .env /
+        # docker-compose.yml is the only place that can change it).
+        self.assertIn("MUSIC_PATH", variables)
+        self.assertEqual(variables["MUSIC_PATH"]["container_path"], "/music")
+        self.assertIsNone(variables["MUSIC_PATH"]["default"])
+        self.assertFalse(variables["MUSIC_PATH"]["editable"])
+
+    def test_env_effective_value_overrides_default(self):
+        self.env_file.write_text("AI_MODEL=custom-llm-model-1\nMUSIC_PATH=/custom/host/music\n", encoding="utf-8")
+        r = self.client.get("/api/setup/env")
+        self.assertEqual(r.status_code, 200)
+        body = r.get_json()
+        variables = {item["name"]: item for item in body["variables"]}
+
+        self.assertEqual(variables["AI_MODEL"]["value"], "custom-llm-model-1")
+        self.assertEqual(variables["AI_MODEL"]["source"], "persisted")
+        self.assertEqual(variables["AI_MODEL"]["default"], "gpt-4o-mini")
+
+        self.assertEqual(variables["MUSIC_PATH"]["value"], "/custom/host/music")
+        self.assertEqual(variables["MUSIC_PATH"]["source"], "persisted")
+        self.assertEqual(variables["MUSIC_PATH"]["container_path"], "/music")
+
+    def test_env_runtime_override_and_source(self):
+        with mock.patch.dict(os.environ, {"PUID": "1001", "TZ": "America/New_York"}):
+            r = self.client.get("/api/setup/env")
+            self.assertEqual(r.status_code, 200)
+            variables = {item["name"]: item for item in r.get_json()["variables"]}
+            self.assertEqual(variables["PUID"]["value"], "1001")
+            self.assertEqual(variables["PUID"]["source"], "environment")
+            self.assertEqual(variables["TZ"]["value"], "America/New_York")
+            self.assertEqual(variables["TZ"]["source"], "environment")
+
+    def test_secret_configured_and_unconfigured_states(self):
+        self.env_file.write_text("OPENAI_API_KEY=sk-testsecretkey123\n", encoding="utf-8")
+        r = self.client.get("/api/setup/env")
+        self.assertEqual(r.status_code, 200)
+        variables = {item["name"]: item for item in r.get_json()["variables"]}
+
+        # Configured secret
+        self.assertTrue(variables["OPENAI_API_KEY"]["secret"])
+        self.assertTrue(variables["OPENAI_API_KEY"]["configured"])
+        self.assertNotIn("sk-testsecretkey123", variables["OPENAI_API_KEY"]["value"])
+        self.assertTrue(variables["OPENAI_API_KEY"]["has_value"])
+        self.assertEqual(variables["OPENAI_API_KEY"]["source"], "persisted")
+
+        # Unconfigured secret
+        self.assertTrue(variables["OPENROUTER_API_KEY"]["secret"])
+        self.assertFalse(variables["OPENROUTER_API_KEY"]["configured"])
+        self.assertEqual(variables["OPENROUTER_API_KEY"]["value"], "")
+        self.assertEqual(variables["OPENROUTER_API_KEY"]["source"], "not_configured")
+
+    def test_untouched_secret_survives_save(self):
+        self.env_file.write_text("OPENAI_API_KEY=sk-importantkey123\n", encoding="utf-8")
+        # Save without touching OPENAI_API_KEY (sending empty string without clear)
+        r = self.client.post("/api/setup/env", json={
+            "variables": {"AI_MODEL": "gpt-4o", "OPENAI_API_KEY": ""},
+            "clear": [],
+        })
+        self.assertEqual(r.status_code, 200)
+        file_content = self.env_file.read_text(encoding="utf-8")
+        self.assertIn("OPENAI_API_KEY=sk-importantkey123", file_content)
+        self.assertIn("AI_MODEL=gpt-4o", file_content)
+
+    def test_new_secret_replaces_existing_secret(self):
+        self.env_file.write_text("OPENAI_API_KEY=sk-old-key-12345\n", encoding="utf-8")
+        r = self.client.post("/api/setup/env", json={
+            "variables": {"OPENAI_API_KEY": "sk-new-key-67890"},
+            "clear": [],
+        })
+        self.assertEqual(r.status_code, 200)
+        file_content = self.env_file.read_text(encoding="utf-8")
+        self.assertIn("OPENAI_API_KEY=sk-new-key-67890", file_content)
+
+    def test_configuration_precedence(self):
+        # Process env > persisted .env > default
+        self.env_file.write_text("AI_MODEL=model-from-file\n", encoding="utf-8")
+        with mock.patch.dict(os.environ, {"AI_MODEL": "model-from-env"}):
+            r = self.client.get("/api/setup/env")
+            variables = {item["name"]: item for item in r.get_json()["variables"]}
+            self.assertEqual(variables["AI_MODEL"]["value"], "model-from-env")
+            self.assertEqual(variables["AI_MODEL"]["source"], "environment")
+
+        # When process env is unset/empty, file takes precedence
+        with mock.patch.dict(os.environ, {"AI_MODEL": ""}):
+            r = self.client.get("/api/setup/env")
+            variables = {item["name"]: item for item in r.get_json()["variables"]}
+            self.assertEqual(variables["AI_MODEL"]["value"], "model-from-file")
+            self.assertEqual(variables["AI_MODEL"]["source"], "persisted")
+
+    def test_page_refresh_after_save_returns_updated_state(self):
+        r = self.client.post("/api/setup/env", json={
+            "variables": {"PUID": "2000", "TZ": "Europe/London", "AI_MODEL": "claude-3.5-haiku"},
+            "clear": [],
+        })
+        self.assertEqual(r.status_code, 200)
+        get_r = self.client.get("/api/setup/env")
+        self.assertEqual(get_r.status_code, 200)
+        variables = {item["name"]: item for item in get_r.get_json()["variables"]}
+        self.assertEqual(variables["PUID"]["value"], "2000")
+        self.assertEqual(variables["TZ"]["value"], "Europe/London")
+        self.assertEqual(variables["AI_MODEL"]["value"], "claude-3.5-haiku")
+
 
 
 class RoutesSetupHelperTests(unittest.TestCase):

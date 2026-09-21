@@ -97,13 +97,6 @@ function groupVariables(variables: SetupEnvVariable[]): Array<[string, SetupEnvV
   return order.map((section) => [section, groups[section]]);
 }
 
-function sourceLabel(source: string): string {
-  if (source === 'file') return 'env file';
-  if (source === 'process') return 'runtime';
-  if (source === 'example') return 'default';
-  return source;
-}
-
 function StatusCard({
   label,
   value,
@@ -286,6 +279,45 @@ function AuthTokenDialog({
   );
 }
 
+function sourceBadge(source: string): { label: string; className: string } {
+  switch (source) {
+    case 'environment':
+    case 'process':
+      return {
+        label: 'environment',
+        className: 'bg-emerald-950/70 text-emerald-300 border border-emerald-800/80',
+      };
+    case 'persisted':
+    case 'file':
+      return {
+        label: 'persisted',
+        className: 'bg-blue-950/70 text-blue-300 border border-blue-800/80',
+      };
+    case 'runtime':
+      return {
+        label: 'runtime',
+        className: 'bg-cyan-950/70 text-cyan-300 border border-cyan-800/80',
+      };
+    case 'default':
+    case 'example':
+      return {
+        label: 'default',
+        className: 'bg-graphite-800 text-zinc-300 border border-graphite-700',
+      };
+    case 'override':
+      return {
+        label: 'override',
+        className: 'bg-amber-950/70 text-amber-300 border border-amber-800/80',
+      };
+    case 'not_configured':
+    default:
+      return {
+        label: 'not configured',
+        className: 'bg-zinc-900 text-zinc-400 border border-zinc-800',
+      };
+  }
+}
+
 function EnvVariableRow({
   variable,
   value,
@@ -300,35 +332,83 @@ function EnvVariableRow({
   onClear: (checked: boolean) => void;
 }) {
   const changed = variable.secret ? value !== '' || clear : value !== variable.value;
+  const badge = sourceBadge(variable.source);
+  const notEditable = variable.editable === false;
+
   return (
-    <div className="grid gap-3 rounded border border-graphite-800 bg-graphite-950/35 p-3 lg:grid-cols-[minmax(12rem,18rem)_minmax(0,1fr)_auto]">
+    <div className="grid gap-3 rounded border border-graphite-800 bg-graphite-950/35 p-3 lg:grid-cols-[minmax(14rem,20rem)_minmax(0,1fr)_auto]">
       <div className="min-w-0">
         <div className="break-all text-[0.78rem] font-semibold text-zinc-200">{variable.name}</div>
         <div className="mt-1 flex flex-wrap gap-1.5 text-[0.68rem] font-semibold">
-          <span className="rounded bg-graphite-800 px-1.5 py-0.5 text-zinc-400">{sourceLabel(variable.source)}</span>
-          {variable.secret && <span className="rounded bg-red-950/45 px-1.5 py-0.5 text-red-200">secret</span>}
-          {variable.runtime_has_value && <span className="rounded bg-emerald-950/45 px-1.5 py-0.5 text-emerald-300">runtime set</span>}
-          {changed && <span className="rounded bg-amber-950/55 px-1.5 py-0.5 text-amber-300">changed</span>}
+          <span className={`rounded px-1.5 py-0.5 ${badge.className}`}>{badge.label}</span>
+          {variable.secret && (
+            <span className="rounded bg-red-950/50 px-1.5 py-0.5 text-red-200 border border-red-800/50">secret</span>
+          )}
+          {variable.secret && variable.configured && !clear && value === '' && (
+            <span className="rounded bg-emerald-950/50 px-1.5 py-0.5 text-emerald-300 border border-emerald-800/50">Configured</span>
+          )}
+          {variable.secret && !variable.configured && !clear && value === '' && (
+            <span className="rounded bg-zinc-900 px-1.5 py-0.5 text-zinc-400 border border-zinc-800">Not configured</span>
+          )}
+          {variable.secret && value !== '' && !clear && (
+            <span className="rounded bg-amber-950/60 px-1.5 py-0.5 text-amber-300 border border-amber-800/60">Will replace existing value</span>
+          )}
+          {clear && (
+            <span className="rounded bg-red-950/60 px-1.5 py-0.5 text-red-300 border border-red-800/60">Will remove configured value</span>
+          )}
+          {!variable.secret && changed && (
+            <span className="rounded bg-amber-950/60 px-1.5 py-0.5 text-amber-300 border border-amber-800/60">changed</span>
+          )}
+          {notEditable && (
+            <span className="rounded bg-zinc-900 px-1.5 py-0.5 text-zinc-400 border border-zinc-800">not editable here</span>
+          )}
+        </div>
+        <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5 text-[0.70rem] text-zinc-400">
+          {variable.container_path && (
+            <span>
+              <span className="text-zinc-500">Container:</span> <code className="text-zinc-300">{variable.container_path}</code>
+            </span>
+          )}
+          {variable.default !== null && variable.default !== undefined && variable.default !== '' && (
+            <span>
+              <span className="text-zinc-500">Default:</span> <code className="text-zinc-300">{variable.default}</code>
+            </span>
+          )}
+          {variable.description && (
+            <span className="text-zinc-400">{variable.description}</span>
+          )}
         </div>
       </div>
 
       <div className="min-w-0">
         <TextField
           fullWidth
-          disabled={clear}
+          disabled={clear || notEditable}
           size="small"
           type={variable.secret ? 'password' : 'text'}
           value={clear ? '' : value}
-          placeholder={variable.secret && variable.has_value ? variable.value : ''}
+          placeholder={
+            notEditable
+              ? 'Set on the host via .env / docker-compose.yml, not here'
+              : clear
+              ? 'Will be removed on save'
+              : variable.secret
+              ? variable.configured
+                ? '••••••••••••••••'
+                : 'Not configured (enter new value)'
+              : variable.default
+              ? `Default: ${variable.default}`
+              : 'Not configured'
+          }
           onChange={(event) => onValue(event.target.value)}
         />
-        {variable.name === 'BEETS_WEB_PASSWORD' && !clear && <PasswordStrengthMeter value={value} />}
+        {variable.name === 'BEETS_WEB_PASSWORD' && !clear && value !== '' && <PasswordStrengthMeter value={value} />}
       </div>
 
       <label className="flex items-center justify-end gap-1.5 text-[0.72rem] font-semibold text-zinc-400">
         <Checkbox
           size="small"
-          disabled={!variable.secret && !variable.has_value}
+          disabled={notEditable || (!variable.secret && !variable.configured && !variable.value) || (!variable.configured && value === '')}
           checked={clear}
           onChange={(event) => onClear(event.target.checked)}
         />
@@ -442,6 +522,15 @@ export default function System() {
       setEnv(updated);
       setForm(initialFormValues(updated.variables));
       setClearNames(new Set());
+      try {
+        const nextStatus = await getSetupStatus();
+        setStatus(nextStatus);
+        if (nextStatus.plugins) {
+          setPluginsReport(nextStatus.plugins);
+        }
+      } catch {
+        // Status refresh non-fatal
+      }
       const saved = updated.saved?.length ? updated.saved.join(', ') : 'environment';
       setMessage(`Saved ${saved}. Restart or recreate the container for Docker-managed values.`);
     } catch (err) {
