@@ -6,6 +6,15 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+## v0.1.20 - 2026-09-21
+
+Two fixes found live during v0.1.19's TrueNAS rollout and the System-page acceptance verification that followed (see #131, #132).
+
+### Fixed
+
+- **System page's host-path variables (`MUSIC_PATH` et al.) still showed a fabricated `./music`-style default**, even after v0.1.19's fix marked them non-editable. `_env_catalog()` let the literal placeholder value in the bundled `.env.example` override the curated metadata's explicit `default: None`. Curated metadata now always wins.
+- **The TrueNAS rollout script checked the wrong persistent-data mount** (`/web-manager-data` instead of `/data`), causing a false post-deploy-verification failure on a real rollout even though the deploy itself succeeded and persistence was intact. Now resolves `/data` first, matching `app.py`'s own precedence.
+
 ## v0.1.19 - 2026-09-21
 
 Makes the System / Environment configuration page show the deployment's genuine effective configuration instead of static environment-variable echoes, and fixes two real configuration-accuracy bugs found while verifying it against a live deployment (PR #130). Also folds in PR #129 (zero-friction Beets plugin management), which had not yet been released under its own version tag.
