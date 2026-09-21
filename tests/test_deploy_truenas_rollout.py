@@ -975,6 +975,26 @@ class DryRunTests(EndToEndFixture):
                 snap[p] = (os.path.getsize(p), os.path.getmtime(p))
         return snap
 
+    def test_data_mount_preferred_over_web_manager_data_mount(self):
+        # The image declares both /data and /web-manager-data as VOLUME, but
+        # app.py's own WEB_MANAGER_DATA_DIR resolution prefers /data whenever
+        # it is mounted. A container with both mounts present must resolve
+        # against /data -- checking /web-manager-data instead would silently
+        # verify persistence (auth token, stale-DB detection) against a
+        # directory the running app never actually reads from or writes to.
+        real_data_dir = os.path.join(self.stack_dir, "beets-web-manager-data")
+        os.makedirs(real_data_dir, exist_ok=True)
+        self.state["containers"]["cid-webmgr"]["Mounts"] = [
+            {"Destination": "/data", "Source": real_data_dir},
+            {"Destination": "/web-manager-data", "Source": self.webmgr_dir},
+        ]
+        self._save_state()
+        res = self.run_script("--dry-run")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        real_data_canon = os.path.realpath(real_data_dir)
+        self.assertIn(f"web-manager data source: {real_data_canon}", res.stderr)
+        self.assertNotIn(os.path.realpath(self.webmgr_dir), res.stderr)
+
     def test_dry_run_rejects_same_mount_source_for_both_services(self):
         self.state["containers"]["cid-webmgr"]["Mounts"][0]["Source"] = self.engine_dir
         self._save_state()
