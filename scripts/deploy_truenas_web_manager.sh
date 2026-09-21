@@ -354,8 +354,22 @@ discover_and_verify_mounts() {
   ENGINE_CONFIG_SRC="$(mount_source_for_dest "$ENGINE_CID" /config)"
   [[ -n "$ENGINE_CONFIG_SRC" ]] || die "could not determine the Beets engine's /config host source from 'docker inspect ${ENGINE_SERVICE}'"
 
-  WEBMGR_DATA_SRC="$(mount_source_for_dest "$WEBMGR_CID" /web-manager-data)"
-  [[ -n "$WEBMGR_DATA_SRC" ]] || die "could not determine web-manager's /web-manager-data host source from 'docker inspect ${SERVICE}' -- is /web-manager-data mounted at all?"
+  # The image declares both /data and /web-manager-data as VOLUME (Dockerfile),
+  # but app.py's own WEB_MANAGER_DATA_DIR resolution (os.environ.setdefault at
+  # module import, near the top of app.py) picks /data whenever it exists and
+  # only falls back to /web-manager-data otherwise -- so /data is where the
+  # app's real persisted state (.auth_token, .flask_secret_key, settings .env,
+  # etc.) actually lives in every deployment that mounts it, which includes
+  # this repo's own docker-compose.yml template. Checking /web-manager-data
+  # here unconditionally (as this script used to) resolves to a *different*,
+  # non-durable anonymous volume that the running app never reads from or
+  # writes to, so persistence verification below would silently check the
+  # wrong directory.
+  WEBMGR_DATA_SRC="$(mount_source_for_dest "$WEBMGR_CID" /data)"
+  if [[ -z "$WEBMGR_DATA_SRC" ]]; then
+    WEBMGR_DATA_SRC="$(mount_source_for_dest "$WEBMGR_CID" /web-manager-data)"
+  fi
+  [[ -n "$WEBMGR_DATA_SRC" ]] || die "could not determine web-manager's data host source from 'docker inspect ${SERVICE}' -- is /data or /web-manager-data mounted at all?"
 
   WEBMGR_LEGACY_CONFIG_SRC="$(mount_source_for_dest "$WEBMGR_CID" /config || true)"
 
@@ -363,7 +377,7 @@ discover_and_verify_mounts() {
   engine_canon="$(canon_path "$ENGINE_CONFIG_SRC")"
   webmgr_canon="$(canon_path "$WEBMGR_DATA_SRC")"
 
-  [[ "$engine_canon" != "$webmgr_canon" ]] || die "Beets /config source and web-manager /web-manager-data source resolve to the SAME path (${engine_canon}) -- refusing to continue"
+  [[ "$engine_canon" != "$webmgr_canon" ]] || die "Beets /config source and web-manager data source resolve to the SAME path (${engine_canon}) -- refusing to continue"
 
   AUTH_DB_PATH="${engine_canon%/}/${DB_FILENAME}"
   STALE_DB_PATH="${webmgr_canon%/}/${DB_FILENAME}"
@@ -379,7 +393,7 @@ discover_and_verify_mounts() {
   esac
 
   log "Beets engine /config source:        ${engine_canon}"
-  log "web-manager /web-manager-data source: ${webmgr_canon}"
+  log "web-manager data source: ${webmgr_canon}"
   [[ -n "$WEBMGR_LEGACY_CONFIG_SRC" ]] && log "web-manager legacy /config source:  $(canon_path "$WEBMGR_LEGACY_CONFIG_SRC")"
   log "Authoritative DB path (expected):   ${AUTH_DB_PATH}"
   log "Stale DB path (if present):         ${STALE_DB_PATH}"
