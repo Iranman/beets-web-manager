@@ -2351,6 +2351,26 @@ def _persist_generated_auth_token(token: str) -> None:
     _persist_file_atomically(_GENERATED_AUTH_TOKEN_FILE, token)
 
 
+def _ensure_secret_file_mode(target_file: Path, expected_mode: int = 0o600) -> None:
+    """Correct an existing secret file's mode in place if it has drifted from
+    `expected_mode`. WebManagerConfigStore.save_text(is_secret=True) already
+    chmods to 0600 on every write, but that write path only runs when the
+    file is actually (re)written -- a file that's found valid and simply
+    *reused* (read, never rewritten, as `.auth_token` is on every restart
+    once generated) never passes through it again, so a mode set by an
+    older code path before that write-time chmod existed would otherwise
+    persist forever, including across container recreation. Call this
+    wherever an existing secret file is read and accepted as-is."""
+    if os.name != "posix":
+        return
+    try:
+        current_mode = target_file.stat().st_mode & 0o777
+        if current_mode != expected_mode:
+            os.chmod(target_file, expected_mode)
+    except OSError:
+        pass
+
+
 def _bootstrap_auth_token_if_missing() -> None:
     if _security_auth_disabled():
         return
@@ -2368,6 +2388,7 @@ def _bootstrap_auth_token_if_missing() -> None:
             pass
         existing = ""
     if _auth_secret_is_usable(existing):
+        _ensure_secret_file_mode(_GENERATED_AUTH_TOKEN_FILE)
         os.environ["BEETS_WEB_AUTH_TOKEN"] = existing
         return
     generated = generate_secure_auth_token()

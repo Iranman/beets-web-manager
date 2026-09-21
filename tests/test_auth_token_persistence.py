@@ -92,6 +92,61 @@ class AuthTokenPersistenceTests(unittest.TestCase):
                 app_module._bootstrap_auth_token_if_missing()
                 self.assertEqual(os.environ.get("BEETS_WEB_AUTH_TOKEN"), existing_token)
 
+    @unittest.skipIf(os.name == "nt", "POSIX permission bits are not enforced on Windows")
+    def test_bootstrap_self_heals_wrong_mode_on_existing_token_file(self):
+        """A real deployment was found live with .auth_token at mode 0700
+        instead of 0600 -- a file created before WebManagerConfigStore's
+        write-time chmod existed, and never rewritten since (reusing an
+        existing valid token never calls save_text() again). Bootstrapping
+        against that same file on any subsequent restart/recreation must
+        correct its mode in place, without regenerating or rewriting the
+        token itself."""
+        import app as app_module
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            token_file = Path(tmpdir) / ".auth_token"
+            existing_token = "existing_token_value_32_chars_long_entropy_test_string"
+            token_file.write_text(existing_token, encoding="utf-8")
+            os.chmod(token_file, 0o700)
+            self.assertEqual(stat.S_IMODE(token_file.stat().st_mode), 0o700)
+
+            with mock.patch.dict(os.environ, {"BEETS_WEB_AUTH_TOKEN": "", "BEETS_WEB_PASSWORD": "", "BEETS_WEB_AUTH_DISABLED": "0"}, clear=False), \
+                 mock.patch.object(app_module, "WEB_MANAGER_DATA_DIR", Path(tmpdir)), mock.patch.object(app_module, "_GENERATED_AUTH_TOKEN_FILE", token_file):
+                app_module._bootstrap_auth_token_if_missing()
+                # Must read inside the patch scope: mock.patch.dict restores
+                # os.environ's prior BEETS_WEB_AUTH_TOKEN value on exit, which
+                # would otherwise mask what the bootstrap call actually set.
+                self.assertEqual(os.environ.get("BEETS_WEB_AUTH_TOKEN"), existing_token)
+
+            self.assertEqual(token_file.read_text(encoding="utf-8"), existing_token)
+            self.assertEqual(stat.S_IMODE(token_file.stat().st_mode), 0o600)
+
+    @unittest.skipIf(os.name == "nt", "POSIX permission bits are not enforced on Windows")
+    def test_ensure_secret_file_mode_corrects_drifted_mode(self):
+        import app as app_module
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            f = Path(tmpdir) / "secret"
+            f.write_text("x", encoding="utf-8")
+            os.chmod(f, 0o755)
+            app_module._ensure_secret_file_mode(f)
+            self.assertEqual(stat.S_IMODE(f.stat().st_mode), 0o600)
+
+    @unittest.skipIf(os.name == "nt", "POSIX permission bits are not enforced on Windows")
+    def test_ensure_secret_file_mode_is_a_noop_when_already_correct(self):
+        """Must not raise or touch a file that already has the correct mode
+        (e.g. a missing/inaccessible path is tolerated, not fatal)."""
+        import app as app_module
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            f = Path(tmpdir) / "secret"
+            f.write_text("x", encoding="utf-8")
+            os.chmod(f, 0o600)
+            app_module._ensure_secret_file_mode(f)
+            self.assertEqual(stat.S_IMODE(f.stat().st_mode), 0o600)
+            # A missing file must not raise.
+            app_module._ensure_secret_file_mode(Path(tmpdir) / "does-not-exist")
+
 
 _MARKER_TOKEN = "MARKER-TOKEN-do-not-leak-1234567890123456789012345"
 
