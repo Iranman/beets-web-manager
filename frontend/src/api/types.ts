@@ -628,9 +628,15 @@ export interface SetupEnvVariable {
   name: string;
   section: string;
   secret: boolean;
-  has_value: boolean;
+  configured: boolean;
+  editable?: boolean;
   value: string;
-  source: 'file' | 'process' | 'example' | string;
+  effective_value?: string | null;
+  default?: string | null;
+  container_path?: string | null;
+  description?: string | null;
+  source: 'environment' | 'persisted' | 'runtime' | 'default' | 'not_configured' | 'file' | 'process' | 'example' | string;
+  has_value: boolean;
   runtime_has_value: boolean;
   runtime_value: string;
 }

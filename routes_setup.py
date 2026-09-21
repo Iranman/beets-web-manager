@@ -66,7 +66,11 @@ _BLOCKED_ENV_NAMES = {"SETUP_ENV_FILE", "SETUP_ENV_EXAMPLE_FILE", "SETUP_SETTING
 _SECRET_ENV_PARTS = ("KEY", "TOKEN", "PASSWORD", "SECRET")
 _PASSWORD_MIN_LENGTH_FLOOR = 12
 _PASSWORD_MIN_LENGTH_DEFAULT = 16
-_FALLBACK_AUTH_TOKEN_FILE = Path(os.environ.get("BEETS_WEB_AUTH_TOKEN_FILE", "/web-manager-data/.auth_token"))
+_FALLBACK_AUTH_TOKEN_FILE = Path(os.environ.get("BEETS_WEB_AUTH_TOKEN_FILE", f"{_default_data_dir}/.auth_token"))
+_PERSISTED_BROWSER_PASSWORD_FILE = Path(os.environ.get("BEETS_WEB_PERSISTED_PASSWORD_FILE", f"{_default_data_dir}/.browser_password"))
+_INITIAL_BROWSER_PASSWORD_FILE = Path(os.environ.get("BEETS_WEB_INITIAL_PASSWORD_FILE", f"{_default_data_dir}/.initial_admin_password"))
+_PERSISTED_BROWSER_USERNAME_FILE = Path(os.environ.get("BEETS_WEB_PERSISTED_USERNAME_FILE", f"{_default_data_dir}/.browser_username"))
+_GENERATED_AUTH_TOKEN_FILE = _FALLBACK_AUTH_TOKEN_FILE
 _FALLBACK_PLACEHOLDER_AUTH_SECRETS = {
     "admin", "password", "password1", "changeme", "changeit", "secret", "token",
     "default", "example", "letmein", "beets", "beetsweb", "setinenv", "setastrongownertoken",
@@ -365,6 +369,649 @@ def _env_example_text() -> str:
     return _read_text_if_exists(_ENV_EXAMPLE_FILE) or _FALLBACK_ENV_TEMPLATE
 
 
+_SETTING_METADATA: Dict[str, Dict[str, Any]] = {
+    # System & Environment
+    "PUID": {
+        "section": "System & Environment",
+        "default": "1000",
+        "description": "User ID for container file ownership",
+        "secret": False,
+        "editable": True,
+    },
+    "PGID": {
+        "section": "System & Environment",
+        "default": "1000",
+        "description": "Group ID for container file ownership",
+        "secret": False,
+        "editable": True,
+    },
+    "TZ": {
+        "section": "System & Environment",
+        "default": "UTC",
+        "description": "Timezone for scheduled jobs and timestamps",
+        "secret": False,
+        "editable": True,
+    },
+    "WEBCONTROL_PORT": {
+        "section": "System & Environment",
+        "default": "8337",
+        "description": "HTTP port published by Beets Web Manager",
+        "secret": False,
+        "editable": True,
+    },
+
+    # Volume Paths. BEETS_CONFIG_PATH/MUSIC_PATH/DOWNLOADS_PATH/
+    # WEB_MANAGER_DATA_PATH exist only as `${VAR:-default}` interpolation
+    # inside docker-compose.yml's own `volumes:` bind-mount source -- they
+    # are never listed under either service's `environment:` block, so
+    # Docker Compose resolves them entirely on the HOST at compose-parse
+    # time and never forwards them into the running container at all.
+    # `os.environ.get(...)` for any of these four is unconditionally empty
+    # inside this container, regardless of what the real deployment's host
+    # `.env` sets them to -- there is no way for this application to learn
+    # (or change) the real host-side path from in here. Only the
+    # container-side mount point is genuinely knowable; editable is False
+    # because writing a new value through this UI can never have any
+    # effect on the actual bind mount (change the host's own `.env` /
+    # docker-compose.yml and recreate the container instead).
+    "BEETS_CONFIG_PATH": {
+        "section": "Volume Paths (Container Side Only)",
+        "default": None,
+        "container_path": "/config",
+        "description": "Not visible to this container -- host-side bind-mount source set in the deployment's own .env/docker-compose.yml, outside this application's reach",
+        "secret": False,
+        "editable": False,
+    },
+    "MUSIC_PATH": {
+        "section": "Volume Paths (Container Side Only)",
+        "default": None,
+        "container_path": "/music",
+        "description": "Not visible to this container -- host-side bind-mount source set in the deployment's own .env/docker-compose.yml, outside this application's reach",
+        "secret": False,
+        "editable": False,
+    },
+    "DOWNLOADS_PATH": {
+        "section": "Volume Paths (Container Side Only)",
+        "default": None,
+        "container_path": "/downloads",
+        "description": "Not visible to this container -- host-side bind-mount source set in the deployment's own .env/docker-compose.yml, outside this application's reach",
+        "secret": False,
+        "editable": False,
+    },
+    "WEB_MANAGER_DATA_PATH": {
+        "section": "Volume Paths (Container Side Only)",
+        "default": None,
+        "container_path": "/data",
+        "description": "Not visible to this container -- host-side bind-mount source set in the deployment's own .env/docker-compose.yml, outside this application's reach",
+        "secret": False,
+        "editable": False,
+    },
+
+    # Authentication
+    "BEETS_WEB_USERNAME": {
+        "section": "Authentication",
+        "default": "admin",
+        "description": "Username for browser and basic authentication",
+        "secret": False,
+        "editable": True,
+    },
+    "BEETS_WEB_PASSWORD": {
+        "section": "Authentication",
+        "default": None,
+        "description": "Password for browser login (stored securely as hash)",
+        "secret": True,
+        "editable": True,
+    },
+    "BEETS_WEB_AUTH_TOKEN": {
+        "section": "Authentication",
+        "default": None,
+        "description": "Bearer token for API and headless script clients",
+        "secret": True,
+        "editable": True,
+    },
+    "BEETS_WEB_AUTH_DISABLED": {
+        "section": "Authentication",
+        "default": "0",
+        "description": "Disable authentication (1 = disabled, 0 = enabled)",
+        "secret": False,
+        "editable": True,
+    },
+    "BEETS_TRUSTED_PROXIES": {
+        "section": "Authentication",
+        "default": "",
+        "description": "Trusted reverse proxy CIDR ranges (comma-separated)",
+        "secret": False,
+        "editable": True,
+    },
+
+    # AI & LLM Services
+    "OPENAI_API_KEY": {
+        "section": "AI & LLM Services",
+        "default": None,
+        "description": "OpenAI API key for candidate ranking & matching",
+        "secret": True,
+        "editable": True,
+    },
+    "OPENROUTER_API_KEY": {
+        "section": "AI & LLM Services",
+        "default": None,
+        "description": "OpenRouter API key for LLM models",
+        "secret": True,
+        "editable": True,
+    },
+    "AI_API_KEY": {
+        "section": "AI & LLM Services",
+        "default": None,
+        "description": "Generic AI API key for custom OpenAI-compatible endpoints",
+        "secret": True,
+        "editable": True,
+    },
+    "AI_BASE_URL": {
+        "section": "AI & LLM Services",
+        "default": "https://api.openai.com/v1",
+        "description": "Base endpoint URL for AI model requests",
+        "secret": False,
+        "editable": True,
+    },
+    "AI_MODEL": {
+        "section": "AI & LLM Services",
+        "default": "gpt-4o-mini",
+        "description": "AI model identifier for candidate evaluation",
+        "secret": False,
+        "editable": True,
+    },
+
+    # Metadata Providers
+    "ACOUSTID_API_KEY": {
+        "section": "Metadata Providers",
+        "default": None,
+        "description": "AcoustID user API key for audio fingerprinting",
+        "secret": True,
+        "editable": True,
+    },
+    "DISCOGS_TOKEN": {
+        "section": "Metadata Providers",
+        "default": None,
+        "description": "Discogs personal access token for artwork & releases",
+        "secret": True,
+        "editable": True,
+    },
+    "LISTENBRAINZ_TOKEN": {
+        "section": "Metadata Providers",
+        "default": None,
+        "description": "ListenBrainz user token for scrobbling and syncing",
+        "secret": True,
+        "editable": True,
+    },
+
+    # Media & External Services
+    "PLEX_URL": {
+        "section": "Media & Download Services",
+        "default": "",
+        "description": "Plex Media Server URL (e.g. http://plex:32400)",
+        "secret": False,
+        "editable": True,
+    },
+    "PLEX_TOKEN": {
+        "section": "Media & Download Services",
+        "default": None,
+        "description": "Plex authentication token (X-Plex-Token)",
+        "secret": True,
+        "editable": True,
+    },
+    "LIDARR_URL": {
+        "section": "Media & Download Services",
+        "default": "http://lidarr:8686",
+        "description": "Lidarr server URL",
+        "secret": False,
+        "editable": True,
+    },
+    "LIDARR_API_KEY": {
+        "section": "Media & Download Services",
+        "default": None,
+        "description": "Lidarr API key",
+        "secret": True,
+        "editable": True,
+    },
+    "SLSKD_URL": {
+        "section": "Media & Download Services",
+        "default": "http://slskd:5030",
+        "description": "Soulseek slskd daemon URL",
+        "secret": False,
+        "editable": True,
+    },
+    "SLSKD_API_KEY": {
+        "section": "Media & Download Services",
+        "default": None,
+        "description": "Soulseek slskd API key",
+        "secret": True,
+        "editable": True,
+    },
+    "SPOTIFY_CLIENT_ID": {
+        "section": "Media & Download Services",
+        "default": "",
+        "description": "Spotify Developer Application Client ID",
+        "secret": False,
+        "editable": True,
+    },
+    "SPOTIFY_CLIENT_SECRET": {
+        "section": "Media & Download Services",
+        "default": None,
+        "description": "Spotify Developer Application Client Secret",
+        "secret": True,
+        "editable": True,
+    },
+    "DEMO_MODE": {
+        "section": "General",
+        "default": "0",
+        "description": "Run in synthetic demo mode without music files",
+        "secret": False,
+        "editable": True,
+    },
+}
+
+
+def _detect_system_timezone() -> Optional[str]:
+    tz = os.environ.get("TZ", "").strip()
+    if tz:
+        return tz
+    for tz_file in (Path("/etc/timezone"), Path("/etc/TZ")):
+        try:
+            if tz_file.exists():
+                content = tz_file.read_text(encoding="utf-8").strip()
+                if content:
+                    return content
+        except Exception:
+            pass
+    try:
+        import datetime
+        dt_tz = datetime.datetime.now().astimezone().tzinfo
+        if dt_tz:
+            tz_name = str(dt_tz)
+            if tz_name and tz_name != "None":
+                return tz_name
+    except Exception:
+        pass
+    try:
+        if time.tzname and time.tzname[0]:
+            return time.tzname[0]
+    except Exception:
+        pass
+    return None
+
+
+def _resolve_setting_item(
+    name: str,
+    meta: Dict[str, Any],
+    persisted: Dict[str, str],
+) -> Dict[str, Any]:
+    secret = bool(meta.get("secret") or _is_secret_env(name))
+    section = meta.get("section") or "General"
+    default_val = meta.get("default")
+    container_path = meta.get("container_path")
+    description = meta.get("description")
+    editable = meta.get("editable", True)
+
+    persisted_val = persisted.get(name, "").strip() if name in persisted else ""
+    env_val = os.environ.get(name, "").strip()
+
+    # 1. BEETS_WEB_PASSWORD
+    if name == "BEETS_WEB_PASSWORD":
+        password_configured = False
+        password_source = "not_configured"
+        if env_val:
+            password_configured = True
+            password_source = "environment"
+        else:
+            pass_file = _PERSISTED_BROWSER_PASSWORD_FILE
+            init_file = _INITIAL_BROWSER_PASSWORD_FILE
+            try:
+                import sys
+                app_m = sys.modules.get("app")
+                if app_m and hasattr(app_m, "_PERSISTED_BROWSER_PASSWORD_FILE"):
+                    pass_file = getattr(app_m, "_PERSISTED_BROWSER_PASSWORD_FILE")
+                if app_m and hasattr(app_m, "_INITIAL_BROWSER_PASSWORD_FILE"):
+                    init_file = getattr(app_m, "_INITIAL_BROWSER_PASSWORD_FILE")
+            except Exception:
+                pass
+
+            if pass_file and pass_file.exists() and pass_file.stat().st_size > 0:
+                password_configured = True
+                password_source = "persisted"
+            elif init_file and init_file.exists() and init_file.stat().st_size > 0:
+                password_configured = True
+                password_source = "persisted"
+            elif persisted_val:
+                password_configured = True
+                password_source = "persisted"
+
+        value = "********" if password_configured else ""
+        return {
+            "name": name,
+            "section": section,
+            "secret": True,
+            "configured": password_configured,
+            "editable": editable,
+            "value": value,
+            "effective_value": None,
+            "default": default_val,
+            "container_path": container_path,
+            "description": description,
+            "source": password_source,
+            "has_value": password_configured,
+            "runtime_has_value": bool(env_val),
+            "runtime_value": _mask(env_val) if env_val else "",
+        }
+
+    # 2. BEETS_WEB_AUTH_TOKEN
+    if name == "BEETS_WEB_AUTH_TOKEN":
+        token_configured = False
+        token_source = "not_configured"
+        if env_val:
+            token_configured = True
+            token_source = "environment"
+        else:
+            token_file = _GENERATED_AUTH_TOKEN_FILE
+            try:
+                import sys
+                app_m = sys.modules.get("app")
+                if app_m and hasattr(app_m, "_GENERATED_AUTH_TOKEN_FILE"):
+                    token_file = getattr(app_m, "_GENERATED_AUTH_TOKEN_FILE")
+            except Exception:
+                pass
+
+            if token_file and token_file.exists() and token_file.stat().st_size > 0:
+                token_configured = True
+                token_source = "persisted"
+            elif _FALLBACK_AUTH_TOKEN_FILE.exists() and _FALLBACK_AUTH_TOKEN_FILE.stat().st_size > 0:
+                token_configured = True
+                token_source = "persisted"
+            elif persisted_val:
+                token_configured = True
+                token_source = "persisted"
+
+        value = _mask(persisted_val or env_val) if (persisted_val or env_val) else ("********" if token_configured else "")
+        return {
+            "name": name,
+            "section": section,
+            "secret": True,
+            "configured": token_configured,
+            "editable": editable,
+            "value": value,
+            "effective_value": None,
+            "default": default_val,
+            "container_path": container_path,
+            "description": description,
+            "source": token_source,
+            "has_value": token_configured,
+            "runtime_has_value": bool(env_val),
+            "runtime_value": _mask(env_val) if env_val else "",
+        }
+
+    # 3. BEETS_WEB_USERNAME
+    if name == "BEETS_WEB_USERNAME":
+        username_val = ""
+        username_source = "default"
+        if env_val:
+            username_val = env_val
+            username_source = "environment"
+        else:
+            user_file = _PERSISTED_BROWSER_USERNAME_FILE
+            try:
+                import sys
+                app_m = sys.modules.get("app")
+                if app_m and hasattr(app_m, "_PERSISTED_BROWSER_USERNAME_FILE"):
+                    user_file = getattr(app_m, "_PERSISTED_BROWSER_USERNAME_FILE")
+            except Exception:
+                pass
+
+            if user_file and user_file.exists():
+                try:
+                    u = user_file.read_text(encoding="utf-8", errors="ignore").splitlines()[0].strip()
+                    if u:
+                        username_val = u
+                        username_source = "persisted"
+                except Exception:
+                    pass
+            if not username_val and persisted_val:
+                username_val = persisted_val
+                username_source = "persisted"
+            elif not username_val:
+                username_val = "admin"
+                username_source = "default"
+
+        return {
+            "name": name,
+            "section": section,
+            "secret": False,
+            "configured": True,
+            "editable": editable,
+            "value": username_val,
+            "effective_value": username_val,
+            "default": "admin",
+            "container_path": container_path,
+            "description": description,
+            "source": username_source,
+            "has_value": True,
+            "runtime_has_value": bool(env_val),
+            "runtime_value": env_val or username_val,
+        }
+
+    # 4. PUID / PGID
+    if name in ("PUID", "PGID"):
+        val = ""
+        src = "default"
+        if env_val:
+            val = env_val
+            src = "environment"
+        elif persisted_val:
+            val = persisted_val
+            src = "persisted"
+        elif name == "PUID" and hasattr(os, "getuid"):
+            try:
+                val = str(os.getuid())
+                src = "runtime"
+            except Exception:
+                val = "1000"
+                src = "default"
+        elif name == "PGID" and hasattr(os, "getgid"):
+            try:
+                val = str(os.getgid())
+                src = "runtime"
+            except Exception:
+                val = "1000"
+                src = "default"
+        else:
+            val = "1000"
+            src = "default"
+
+        return {
+            "name": name,
+            "section": section,
+            "secret": False,
+            "configured": True,
+            "editable": editable,
+            "value": val,
+            "effective_value": val,
+            "default": "1000",
+            "container_path": container_path,
+            "description": description,
+            "source": src,
+            "has_value": True,
+            "runtime_has_value": bool(env_val),
+            "runtime_value": env_val or val,
+        }
+
+    # 5. TZ
+    if name == "TZ":
+        val = ""
+        src = "default"
+        if env_val:
+            val = env_val
+            src = "environment"
+        elif persisted_val:
+            val = persisted_val
+            src = "persisted"
+        else:
+            detected = _detect_system_timezone()
+            if detected:
+                val = detected
+                src = "runtime"
+            else:
+                val = "UTC"
+                src = "default"
+
+        return {
+            "name": name,
+            "section": section,
+            "secret": False,
+            "configured": True,
+            "editable": editable,
+            "value": val,
+            "effective_value": val,
+            "default": "UTC",
+            "container_path": container_path,
+            "description": description,
+            "source": src,
+            "has_value": True,
+            "runtime_has_value": bool(env_val),
+            "runtime_value": env_val or val,
+        }
+
+    # 6. AI_BASE_URL
+    if name == "AI_BASE_URL":
+        val = ""
+        src = "default"
+        if env_val:
+            val = env_val
+            src = "environment"
+        elif persisted_val:
+            val = persisted_val
+            src = "persisted"
+        elif (os.environ.get("OPENROUTER_API_KEY") or persisted.get("OPENROUTER_API_KEY")) and not (os.environ.get("OPENAI_API_KEY") or persisted.get("OPENAI_API_KEY")):
+            val = "https://openrouter.ai/api/v1"
+            src = "default"
+        else:
+            val = "https://api.openai.com/v1"
+            src = "default"
+
+        return {
+            "name": name,
+            "section": section,
+            "secret": False,
+            "configured": True,
+            "editable": editable,
+            "value": val,
+            "effective_value": val,
+            "default": "https://api.openai.com/v1",
+            "container_path": container_path,
+            "description": description,
+            "source": src,
+            "has_value": True,
+            "runtime_has_value": bool(env_val),
+            "runtime_value": env_val or val,
+        }
+
+    # 7. AI_MODEL
+    if name == "AI_MODEL":
+        val = ""
+        src = "default"
+        if env_val:
+            val = env_val
+            src = "environment"
+        elif persisted_val:
+            val = persisted_val
+            src = "persisted"
+        elif (os.environ.get("OPENROUTER_API_KEY") or persisted.get("OPENROUTER_API_KEY")) and not (os.environ.get("OPENAI_API_KEY") or persisted.get("OPENAI_API_KEY")):
+            val = "openai/gpt-4o-mini"
+            src = "default"
+        else:
+            val = "gpt-4o-mini"
+            src = "default"
+
+        return {
+            "name": name,
+            "section": section,
+            "secret": False,
+            "configured": True,
+            "editable": editable,
+            "value": val,
+            "effective_value": val,
+            "default": "gpt-4o-mini",
+            "container_path": container_path,
+            "description": description,
+            "source": src,
+            "has_value": True,
+            "runtime_has_value": bool(env_val),
+            "runtime_value": env_val or val,
+        }
+
+    # 8. Generic Secret Variable
+    if secret:
+        configured = False
+        src = "not_configured"
+        masked_val = ""
+        if env_val:
+            configured = True
+            src = "environment"
+            masked_val = _mask(env_val)
+        elif persisted_val:
+            configured = True
+            src = "persisted"
+            masked_val = _mask(persisted_val)
+
+        return {
+            "name": name,
+            "section": section,
+            "secret": True,
+            "configured": configured,
+            "editable": editable,
+            "value": masked_val,
+            "effective_value": None,
+            "default": default_val,
+            "container_path": container_path,
+            "description": description,
+            "source": src,
+            "has_value": configured,
+            "runtime_has_value": bool(env_val),
+            "runtime_value": _mask(env_val) if env_val else "",
+        }
+
+    # 9. Generic Non-Secret Variable
+    val = ""
+    configured = False
+    src = "not_configured"
+    if env_val:
+        val = env_val
+        configured = True
+        src = "environment"
+    elif persisted_val:
+        val = persisted_val
+        configured = True
+        src = "persisted"
+    elif default_val is not None and default_val != "":
+        val = str(default_val)
+        configured = True
+        src = "default"
+
+    return {
+        "name": name,
+        "section": section,
+        "secret": False,
+        "configured": configured,
+        "editable": editable,
+        "value": val,
+        "effective_value": val,
+        "default": default_val,
+        "container_path": container_path,
+        "description": description,
+        "source": src,
+        "has_value": bool(val),
+        "runtime_has_value": bool(env_val),
+        "runtime_value": env_val or val,
+    }
+
+
 def _env_catalog() -> Dict[str, Dict[str, Any]]:
     entries, values = _parse_env_text(_env_example_text())
     catalog: Dict[str, Dict[str, Any]] = {}
@@ -374,12 +1021,27 @@ def _env_catalog() -> Dict[str, Dict[str, Any]]:
         key = str(entry.get("key") or "")
         if key in _BLOCKED_ENV_NAMES:
             continue
+        meta = _SETTING_METADATA.get(key, {})
         catalog[key] = {
             "name": key,
-            "section": entry.get("section") or "General",
-            "default": values.get(key, ""),
-            "secret": _is_secret_env(key),
+            "section": meta.get("section") or entry.get("section") or "General",
+            "default": values.get(key, meta.get("default", "")),
+            "secret": meta.get("secret", _is_secret_env(key)),
+            "container_path": meta.get("container_path"),
+            "description": meta.get("description"),
+            "editable": meta.get("editable", True),
         }
+    for key, meta in _SETTING_METADATA.items():
+        if key not in catalog and key not in _BLOCKED_ENV_NAMES:
+            catalog[key] = {
+                "name": key,
+                "section": meta.get("section") or "General",
+                "default": meta.get("default", ""),
+                "secret": meta.get("secret", _is_secret_env(key)),
+                "container_path": meta.get("container_path"),
+                "description": meta.get("description"),
+                "editable": meta.get("editable", True),
+            }
     return catalog
 
 
@@ -397,37 +1059,22 @@ def _setup_env_payload(extra: Dict[str, Any] | None = None) -> Dict[str, Any]:
     names = list(catalog.keys())
     for key in persisted:
         if key not in catalog and _ENV_NAME_RE.match(key) and key not in _BLOCKED_ENV_NAMES:
+            meta = _SETTING_METADATA.get(key, {})
             catalog[key] = {
                 "name": key,
-                "section": "Custom",
-                "default": "",
-                "secret": _is_secret_env(key),
+                "section": meta.get("section") or "Custom",
+                "default": meta.get("default", ""),
+                "secret": meta.get("secret", _is_secret_env(key)),
+                "container_path": meta.get("container_path"),
+                "description": meta.get("description"),
+                "editable": meta.get("editable", True),
             }
             names.append(key)
     variables = []
     for name in names:
         meta = catalog[name]
-        if name in persisted:
-            raw_value = persisted[name]
-            source = "file"
-        elif name in os.environ:
-            raw_value = os.environ.get(name, "")
-            source = "process"
-        else:
-            raw_value = str(meta.get("default") or "")
-            source = "example"
-        runtime_value = os.environ.get(name, "")
-        secret = bool(meta.get("secret"))
-        variables.append({
-            "name": name,
-            "section": meta.get("section") or "General",
-            "secret": secret,
-            "has_value": bool(raw_value),
-            "value": _mask(raw_value) if secret else raw_value,
-            "source": source,
-            "runtime_has_value": bool(runtime_value),
-            "runtime_value": _mask(runtime_value) if secret else runtime_value,
-        })
+        var_item = _resolve_setting_item(name, meta, persisted)
+        variables.append(var_item)
     payload: Dict[str, Any] = {
         "ok": True,
         "env_file": str(_SETUP_ENV_FILE),
@@ -444,10 +1091,24 @@ def _setup_env_payload(extra: Dict[str, Any] | None = None) -> Dict[str, Any]:
 def _write_env_file(updates: Dict[str, str], clear: List[str]) -> str:
     catalog = _env_catalog()
     entries, persisted, exists = _load_env_file()
-    editable = set(catalog.keys()) | set(persisted.keys())
-    for key, value in list(updates.items()):
+    editable = set(catalog.keys()) | set(persisted.keys()) | set(_SETTING_METADATA.keys())
+
+    def _reject_if_not_editable(key: str) -> None:
         if key in _BLOCKED_ENV_NAMES or not _ENV_NAME_RE.match(key) or key not in editable:
             raise ValueError(f"{key} is not an editable setup environment variable")
+        # A name can be a recognized/allowed key (above) while still being
+        # explicitly non-editable through this UI/API -- e.g.
+        # BEETS_CONFIG_PATH/MUSIC_PATH/DOWNLOADS_PATH/WEB_MANAGER_DATA_PATH
+        # exist only as docker-compose.yml's own host-side bind-mount
+        # interpolation and are never forwarded into this container, so
+        # writing a "new value" for one here could never have any real
+        # effect -- reject it instead of silently accepting a no-op write
+        # and reporting success.
+        if _SETTING_METADATA.get(key, {}).get("editable", True) is False:
+            raise ValueError(f"{key} cannot be changed from this application -- it is a host-side deployment setting")
+
+    for key, value in list(updates.items()):
+        _reject_if_not_editable(key)
         if "\n" in value or "\r" in value:
             raise ValueError(f"{key} cannot contain newlines")
         if len(value) > 4096:
@@ -457,8 +1118,7 @@ def _write_env_file(updates: Dict[str, str], clear: List[str]) -> str:
         if unmet:
             raise ValueError("Password does not meet requirements: needs " + ", ".join(unmet) + ".")
     for key in clear:
-        if key in _BLOCKED_ENV_NAMES or not _ENV_NAME_RE.match(key) or key not in editable:
-            raise ValueError(f"{key} is not an editable setup environment variable")
+        _reject_if_not_editable(key)
 
     if not entries:
         entries, _ = _parse_env_text(_env_example_text())
@@ -516,24 +1176,43 @@ def _write_env_file(updates: Dict[str, str], clear: List[str]) -> str:
     for key, value in desired.items():
         os.environ[key] = value
     try:
-        from app import (
-            _cleanup_initial_browser_password_if_replaced,
-            _PERSISTED_BROWSER_PASSWORD_FILE,
-            _PERSISTED_BROWSER_USERNAME_FILE,
-            _persist_file_atomically,
-        )
+        import sys
+        app_m = sys.modules.get("app")
+        target_pass_file = getattr(app_m, "_PERSISTED_BROWSER_PASSWORD_FILE", _PERSISTED_BROWSER_PASSWORD_FILE) if app_m else _PERSISTED_BROWSER_PASSWORD_FILE
+        target_init_file = getattr(app_m, "_INITIAL_BROWSER_PASSWORD_FILE", _INITIAL_BROWSER_PASSWORD_FILE) if app_m else _INITIAL_BROWSER_PASSWORD_FILE
+        target_user_file = getattr(app_m, "_PERSISTED_BROWSER_USERNAME_FILE", _PERSISTED_BROWSER_USERNAME_FILE) if app_m else _PERSISTED_BROWSER_USERNAME_FILE
+        persist_fn = getattr(app_m, "_persist_file_atomically", None) if app_m else None
+        cleanup_fn = getattr(app_m, "_cleanup_initial_browser_password_if_replaced", None) if app_m else None
+
+        if persist_fn is None:
+            def persist_fn(target_file: Path, content: str) -> bool:
+                try:
+                    store, relative_name = _config_store_for_target(target_file)
+                    current = store.read_text_record(relative_name)
+                    store.save_text(
+                        relative_name,
+                        content,
+                        is_secret=True,
+                        expected_revision=current.get("revision"),
+                    )
+                    return True
+                except Exception:
+                    return False
+
         if updates.get("BEETS_WEB_PASSWORD"):
             from werkzeug.security import generate_password_hash
-            _persist_file_atomically(_PERSISTED_BROWSER_PASSWORD_FILE, generate_password_hash(updates["BEETS_WEB_PASSWORD"]))
+            persist_fn(target_pass_file, generate_password_hash(updates["BEETS_WEB_PASSWORD"]))
         elif "BEETS_WEB_PASSWORD" in clear:
-            _remove_config_file(_PERSISTED_BROWSER_PASSWORD_FILE)
+            _remove_config_file(target_pass_file)
+            _remove_config_file(target_init_file)
 
         if updates.get("BEETS_WEB_USERNAME"):
-            _persist_file_atomically(_PERSISTED_BROWSER_USERNAME_FILE, updates["BEETS_WEB_USERNAME"])
+            persist_fn(target_user_file, updates["BEETS_WEB_USERNAME"])
         elif "BEETS_WEB_USERNAME" in clear:
-            _remove_config_file(_PERSISTED_BROWSER_USERNAME_FILE)
+            _remove_config_file(target_user_file)
 
-        _cleanup_initial_browser_password_if_replaced()
+        if cleanup_fn is not None:
+            cleanup_fn()
     except Exception:
         pass
     return backup_path

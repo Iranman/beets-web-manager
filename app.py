@@ -4733,7 +4733,7 @@ def ai_suggest(iid):
         return jsonify({"ok": False, "error": "Not found"})
     # AI is optional: gathering AcoustID/MusicBrainz/Discogs candidates below
     # runs unconditionally, so a missing/invalid key still yields a match.
-    api_key = os.environ.get("OPENAI_API_KEY", "")
+    api_key = _ai_api_key()
     ai_available = bool(api_key)
     ai_configured = ai_available  # preserved for later boundary; ai_available itself may be mutated below
 
@@ -4894,8 +4894,9 @@ def ai_suggest(iid):
         '"mb_trackid":"b5316c12-b617-4086-a107-312eccfd12e7",'
         '"confidence":"high","reason":"AcoustID fingerprint matches Lil Wayne Dedication 2 mixtape"}'
     )
+    _ai_model, _ai_endpoint = _ai_model_and_endpoint("gpt-4o")
     payload = json.dumps({
-        "model": "gpt-4o",
+        "model": _ai_model,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.1,
         "response_format": {"type": "json_object"},
@@ -4904,7 +4905,7 @@ def ai_suggest(iid):
     suggestions: Optional[Dict[str, Any]] = None
     if ai_available:
         req = urllib.request.Request(
-            "https://api.openai.com/v1/chat/completions",
+            _ai_endpoint,
             data=payload,
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         )
@@ -15335,6 +15336,44 @@ def acquisition_download_all_active():
         "last_job": last_job,
     })
 
+def _ai_api_key() -> str:
+    """Resolve the outbound AI request API key from the same three
+    variables the setup wizard's own `/api/setup/status` integrations
+    readiness check (OPENAI_API_KEY or OPENROUTER_API_KEY or AI_API_KEY)
+    already treats as equivalent "AI is configured" signals -- every real
+    AI call site previously checked OPENAI_API_KEY only, so a user who set
+    just OPENROUTER_API_KEY/AI_API_KEY saw "AI configured" during setup but
+    every actual AI request silently failed. OPENAI_API_KEY still takes
+    priority when more than one is set."""
+    return (
+        os.environ.get("OPENAI_API_KEY", "").strip()
+        or os.environ.get("OPENROUTER_API_KEY", "").strip()
+        or os.environ.get("AI_API_KEY", "").strip()
+    )
+
+
+def _ai_model_and_endpoint(default_model: str) -> Tuple[str, str]:
+    """Resolve (model, chat-completions URL) for an outbound AI request from
+    the same AI_MODEL/AI_BASE_URL environment variables the System page's
+    "AI & LLM Services" section displays as live, effective settings.
+
+    Before this, every AI call site hardcoded its own literal model string
+    and "https://api.openai.com/v1/chat/completions" URL -- the System page
+    could show AI_MODEL=some-other-model / AI_BASE_URL=https://openrouter.ai/...
+    as "configured" while every real AI request silently ignored both and
+    always talked to OpenAI's gpt-4o/gpt-4o-mini. This closes that gap
+    without touching API-key resolution/gating (still OPENAI_API_KEY only,
+    exactly as before) or any prompt/schema/error-handling logic.
+
+    `default_model` preserves each call site's own historical choice
+    (gpt-4o for higher-stakes album/folder matching, gpt-4o-mini for
+    cheaper lookups like genre) when AI_MODEL is not set.
+    """
+    model = os.environ.get("AI_MODEL", "").strip() or default_model
+    base_url = (os.environ.get("AI_BASE_URL", "").strip() or "https://api.openai.com/v1").rstrip("/")
+    return model, f"{base_url}/chat/completions"
+
+
 def _classify_openai_error(exc: Exception) -> str:
     """Classify an OpenAI request failure into a short, human-readable reason.
 
@@ -15373,7 +15412,7 @@ def _ai_suggest_album_internal(
     MusicBrainz/AcoustID candidate instead of returning ok=False, so light-
     confirm repair keeps working without AI configured.
     """
-    api_key = os.environ.get("OPENAI_API_KEY", "")
+    api_key = _ai_api_key()
     ai_available = bool(api_key)
 
     aid = existing_album_id or int(getattr(album, "id", 0) or 0)
@@ -15554,8 +15593,9 @@ def _ai_suggest_album_internal(
                      "label", "country", "confidence", "reason"],
         "additionalProperties": False,
     }
+    _ai_model, _ai_endpoint = _ai_model_and_endpoint("gpt-4o")
     oai_payload = json.dumps({
-        "model": "gpt-4o",
+        "model": _ai_model,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.1,
         "response_format": {
@@ -15567,7 +15607,7 @@ def _ai_suggest_album_internal(
     sug: Optional[Dict[str, Any]] = None
     if ai_available:
         req = urllib.request.Request(
-            "https://api.openai.com/v1/chat/completions",
+            _ai_endpoint,
             data=oai_payload,
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         )
@@ -15705,8 +15745,8 @@ def _load_album_mb_suggestions() -> Dict[str, Any]:
 def batch_ai_suggest():
     payload = request.get_json(silent=True) or {}
     limit = min(int(payload.get("limit") or 500), 2000)
-    if not os.environ.get("OPENAI_API_KEY", ""):
-        return jsonify({"ok": False, "error": "OPENAI_API_KEY not configured"}), 400
+    if not _ai_api_key():
+        return jsonify({"ok": False, "error": "AI is not configured (set OPENAI_API_KEY, OPENROUTER_API_KEY, or AI_API_KEY)"}), 400
 
     def _do(log, cancel_event=None):
         try:
@@ -18087,7 +18127,7 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
     """
     if not folder_path:
         return {"ok": False, "error": "path required"}
-    api_key = os.environ.get("OPENAI_API_KEY", "")
+    api_key = _ai_api_key()
     ai_available = bool(api_key)
 
     # ── gather folder evidence ────────────────────────────────────────────────
@@ -18406,8 +18446,9 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
                      "label", "country", "confidence", "reason"],
         "additionalProperties": False,
     }
+    _ai_model, _ai_endpoint = _ai_model_and_endpoint("gpt-4o")
     req_payload = json.dumps({
-        "model": "gpt-4o",
+        "model": _ai_model,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.1,
         "response_format": {
@@ -18423,7 +18464,7 @@ def _ai_suggest_folder_internal(folder_path: str) -> dict:
     sug: Optional[Dict[str, Any]] = None
     if ai_available:
         req = urllib.request.Request(
-            "https://api.openai.com/v1/chat/completions",
+            _ai_endpoint,
             data=req_payload,
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         )
@@ -26489,8 +26530,8 @@ def start_ai_batch_import():
     if scan_path_error or trusted_scan_path is None:
         return jsonify({"ok": False, "error": scan_path_error or f"Path not found: {scan_path}"}), 400
     scan_path = str(trusted_scan_path)
-    if not os.environ.get("OPENAI_API_KEY", ""):
-        return jsonify({"ok": False, "error": "OPENAI_API_KEY not configured"}), 400
+    if not _ai_api_key():
+        return jsonify({"ok": False, "error": "AI is not configured (set OPENAI_API_KEY, OPENROUTER_API_KEY, or AI_API_KEY)"}), 400
 
     if not recover_batch_job_id:
         latest = _ai_batch_latest_state()
@@ -27304,14 +27345,15 @@ def _ai_suggest_genre(albumartist: str, album: str, year, api_key: str, log: lis
         "'Alternative Rock', 'R&B'. Use standard MusicBrainz/Last.fm genre names. "
         "No explanation, no punctuation beyond the genre name itself."
     )
+    _ai_model, _ai_endpoint = _ai_model_and_endpoint("gpt-4o-mini")
     body = json.dumps({
-        "model": "gpt-4o-mini",
+        "model": _ai_model,
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": 16,
         "temperature": 0,
     }).encode()
     req = urllib.request.Request(
-        "https://api.openai.com/v1/chat/completions",
+        _ai_endpoint,
         data=body,
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
     )
@@ -27463,7 +27505,7 @@ def library_fix_genres():
             )
             return
 
-        api_key = os.environ.get("OPENAI_API_KEY", "")
+        api_key = _ai_api_key()
         if not api_key:
             log.append("[2/2] OPENAI_API_KEY not set — skipping AI fallback")
             return
@@ -27523,7 +27565,7 @@ def album_fix_genre(aid):
             log.append(f"  ✓ Genre: {_album_genre_value(updated)}")
             return
 
-        api_key = os.environ.get("OPENAI_API_KEY", "")
+        api_key = _ai_api_key()
         if not api_key:
             log.append("  Last.fm returned no genre and OPENAI_API_KEY is not set")
             return
@@ -29099,7 +29141,7 @@ def dedup_ai_review():
     scan_jid, scan_state, resolve_error = _dedup_resolve_source_scan(scan_jid, scan_path_hint)
     if not scan_state:
         return jsonify({"ok": False, "error": resolve_error, "needs_scan": True})
-    api_key = os.environ.get("OPENAI_API_KEY", "")
+    api_key = _ai_api_key()
     if not api_key:
         return jsonify({"ok": False, "error": "OPENAI_API_KEY not configured"})
 
@@ -29342,8 +29384,9 @@ def dedup_ai_review():
                 "required": ["matches"],
                 "additionalProperties": False,
             }
+            _ai_model, _ai_endpoint = _ai_model_and_endpoint("gpt-4o-mini")
             req_body = json.dumps({
-                "model": "gpt-4o-mini",
+                "model": _ai_model,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.0,
                 "response_format": {
@@ -29354,7 +29397,7 @@ def dedup_ai_review():
 
             try:
                 req = _ur.Request(
-                    "https://api.openai.com/v1/chat/completions",
+                    _ai_endpoint,
                     data=req_body,
                     headers={"Authorization": f"Bearer {api_key}",
                              "Content-Type": "application/json"},
@@ -31431,7 +31474,7 @@ def _ai_review_album_track_candidates(album_info: Dict[str, Any],
                                       mb_tracks: List[Dict[str, Any]],
                                       candidates: List[Dict[str, Any]],
                                       log: Optional[List[str]] = None) -> Dict[str, Any]:
-    api_key = os.environ.get("OPENAI_API_KEY", "")
+    api_key = _ai_api_key()
     if not api_key:
         return {"status": "skipped", "error": "OPENAI_API_KEY not configured"}
     if not candidates:
@@ -31493,8 +31536,9 @@ def _ai_review_album_track_candidates(album_info: Dict[str, Any],
         "required": ["decisions"],
         "additionalProperties": False,
     }
+    _ai_model, _ai_endpoint = _ai_model_and_endpoint("gpt-4o-mini")
     req_body = json.dumps({
-        "model": "gpt-4o-mini",
+        "model": _ai_model,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.0,
         "response_format": {
@@ -31504,7 +31548,7 @@ def _ai_review_album_track_candidates(album_info: Dict[str, Any],
     }).encode()
     try:
         req = _ur.Request(
-            "https://api.openai.com/v1/chat/completions",
+            _ai_endpoint,
             data=req_body,
             headers={"Authorization": f"Bearer {api_key}",
                      "Content-Type": "application/json"},

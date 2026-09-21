@@ -384,8 +384,18 @@ class AuthTokenRegenerateEndpointTests(unittest.TestCase):
 
     def test_masked_everywhere_else(self):
         # GET /api/setup/env must never echo the real token back -- confirms
-        # the existing secret-masking path still covers BEETS_WEB_AUTH_TOKEN.
-        self.assertIn('"secret": secret,', SETUP_SOURCE)
+        # the secret-masking path still covers BEETS_WEB_AUTH_TOKEN. The
+        # env-variable resolution this asserts against moved from a single
+        # inline dict-builder loop (the old `"secret": secret,` literal) to
+        # per-name branches in _resolve_setting_item(); the BEETS_WEB_AUTH_TOKEN
+        # branch specifically must still (a) never expose the raw value as
+        # effective_value and (b) only ever pass the token through _mask()
+        # before putting it in the response.
+        token_branch = _function_source(
+            SETUP_SOURCE, "# 2. BEETS_WEB_AUTH_TOKEN", "# 3. BEETS_WEB_USERNAME"
+        )
+        self.assertIn('"effective_value": None,', token_branch)
+        self.assertIn("_mask(persisted_val or env_val)", token_branch)
         self.assertIn('_is_secret_env(key)', SETUP_SOURCE)
 
 
