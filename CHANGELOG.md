@@ -6,6 +6,18 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+## v0.1.21 - 2026-09-21
+
+Security cleanup following v0.1.20's live-deployment acceptance test (see #133).
+
+### Fixed
+
+- **Persisted web auth token file self-heals an incorrect `0700` mode.** A real deployment was found with `.auth_token` at mode `0700` (expected `0600`) -- created before `WebManagerConfigStore`'s write-time chmod existed, and never rewritten since (reusing an existing valid token never rewrites the file). The bootstrap path now corrects the mode in place on every startup, so existing installations self-correct on their next restart/recreation without a manual `chmod`.
+
+### Security
+
+- Rotated the `beets` engine's `BEETS_API_TOKEN` on the operator's production deployment after the previous value was inadvertently displayed in plaintext during the v0.1.20 live-verification session. No code change was required for this; noted here for the record.
+
 ## v0.1.20 - 2026-09-21
 
 Two fixes found live during v0.1.19's TrueNAS rollout and the System-page acceptance verification that followed (see #131, #132).
