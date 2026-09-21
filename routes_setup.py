@@ -1475,6 +1475,29 @@ def _build_setup_status_payload() -> Dict[str, Any]:
         "username": username,
         "first_run_required": first_run_req,
     }
+
+    try:
+        from backend.beets_plugins import verify_all_plugins
+        plugins_report = verify_all_plugins(
+            beets_config_path.parent,
+            loaded_plugins=diagnostics.get("loaded_plugins"),
+            available_binaries={
+                "fpcalc": bool(diagnostics.get("fpcalc_available")),
+                "ffmpeg": bool(diagnostics.get("ffmpeg_available")),
+            },
+        )
+    except Exception as ex:
+        app.logger.warning("Plugin verification failed in status payload: %s", ex)
+        plugins_report = {
+            "ok": True,
+            "all_required_healthy": True,
+            "required_count": 0,
+            "required_healthy_count": 0,
+            "plugins": [],
+            "categories": {"required": [], "optional": [], "integration": []},
+            "summary": {"total": 0, "healthy": 0, "errors": []},
+        }
+
     return {
         "ok": True,
         "status": "ready" if ready else "warning",
@@ -1493,6 +1516,8 @@ def _build_setup_status_payload() -> Dict[str, Any]:
         },
         "fpcalc": {"available": bool(fpcalc_path), "path": fpcalc_path or ""},
         "beets": diagnostics,
+        "plugins": plugins_report,
+        "plugins_ready": bool(plugins_report.get("all_required_healthy", False)),
         "auth": auth_status,
         "integrations": integrations,
         "settings": {k: (_mask(v) if "key" in k.lower() or "token" in k.lower() else v)
@@ -2100,6 +2125,25 @@ def setup_mark_complete():
                 "error": "Cannot complete setup: Beets engine control agent is unreachable. Check Docker service and configuration."
             }), 400
 
+        # Enforce that required Beets plugins are healthy before completing setup
+        if not is_test_env:
+            try:
+                from backend.beets_plugins import verify_all_plugins
+                plugins_check = verify_all_plugins(beets_config_path.parent)
+                if not plugins_check.get("all_required_healthy", True):
+                    unhealthy = [
+                        p["name"] for p in plugins_check.get("plugins", [])
+                        if p.get("category") == "REQUIRED" and not p.get("healthy")
+                    ]
+                    if unhealthy:
+                        return jsonify({
+                            "ok": False,
+                            "error": f"Cannot complete setup: required Beets plugins are not yet healthy ({', '.join(unhealthy)}). Please run plugin installation and configuration first.",
+                            "unhealthy_plugins": unhealthy,
+                        }), 400
+            except Exception as exc:
+                app.logger.warning("Plugin verification during setup_mark_complete encountered error: %s", exc)
+
         if not _browser_password_is_usable(_security_auth_password()):
             return jsonify({"ok": False, "error": "Cannot complete setup: administrator credentials are not configured."}), 409
 
@@ -2177,3 +2221,69 @@ def health_root():
     """Alias for /api/health under the unprefixed convention most container
     orchestrators probe by default."""
     return health_live()
+
+
+@app.get("/api/plugins/status")
+@app.get("/api/setup/plugins")
+def plugins_status():
+    """Return comprehensive Beets plugin verification report across categories."""
+    beets_config_path = Path(os.environ.get("BEETS_CONFIG", "/config/config.yaml"))
+    try:
+        from backend.beets_plugins import verify_all_plugins
+        report = verify_all_plugins(beets_config_path.parent)
+    except Exception as exc:
+        app.logger.error("plugins_status failed: %s", exc, exc_info=True)
+        report = {
+            "ok": False,
+            "all_required_healthy": False,
+            "required_count": 0,
+            "required_healthy_count": 0,
+            "plugins": [],
+            "categories": {"required": [], "optional": [], "integration": []},
+            "summary": {"total": 0, "healthy": 0, "errors": ["Beets plugin verification failed."]},
+        }
+    return jsonify(report)
+
+
+@app.post("/api/plugins/provision")
+@app.post("/api/setup/plugins/provision")
+def plugins_provision():
+    """Copy bundled plugins to /config/beetsplug, safely update config.yaml, and re-verify."""
+    csrf_failure = _setup_csrf_failure()
+    if csrf_failure is not None:
+        return csrf_failure
+    beets_config_path = Path(os.environ.get("BEETS_CONFIG", "/config/config.yaml"))
+    try:
+        from backend.beets_plugins import provision_and_verify
+        result = provision_and_verify(beets_config_path.parent)
+    except Exception as exc:
+        app.logger.error("plugins_provision failed: %s", exc, exc_info=True)
+        return jsonify({
+            "ok": False,
+            "all_required_healthy": False,
+            "error": "Beets plugin provisioning failed.",
+        }), 500
+    _invalidate_setup_status_cache()
+    return jsonify(result)
+
+
+@app.post("/api/plugins/verify")
+@app.post("/api/setup/plugins/verify")
+def plugins_verify():
+    """Re-run plugin verification without mutating any configuration files."""
+    csrf_failure = _setup_csrf_failure()
+    if csrf_failure is not None:
+        return csrf_failure
+    beets_config_path = Path(os.environ.get("BEETS_CONFIG", "/config/config.yaml"))
+    try:
+        from backend.beets_plugins import verify_all_plugins
+        result = verify_all_plugins(beets_config_path.parent)
+    except Exception as exc:
+        app.logger.error("plugins_verify failed: %s", exc, exc_info=True)
+        return jsonify({
+            "ok": False,
+            "all_required_healthy": False,
+            "error": "Beets plugin verification failed.",
+        }), 500
+    return jsonify(result)
+

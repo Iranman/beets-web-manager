@@ -554,7 +554,49 @@ export interface SetupStatusResponse {
      * instead of one flat list. */
     category?: 'service' | 'beets_plugin' | string;
   }>;
+  plugins?: BeetsPluginsReport;
+  plugins_ready?: boolean;
   settings: Record<string, unknown>;
+}
+
+export interface PluginHealthStatus {
+  name: string;
+  display_name: string;
+  category: 'REQUIRED' | 'OPTIONAL' | 'INTEGRATION';
+  plugin_type: 'builtin' | 'bundled' | 'third_party';
+  description: string;
+  installed: boolean;
+  enabled: boolean;
+  loaded: boolean;
+  healthy: boolean;
+  binaries?: Record<string, boolean>;
+  python_packages?: Record<string, boolean>;
+  commands_available?: Record<string, boolean>;
+  template_fields_available?: Record<string, boolean>;
+  errors?: string[];
+  note: string;
+}
+
+export interface BeetsPluginsReport {
+  ok: boolean;
+  all_required_healthy: boolean;
+  required_count: number;
+  required_healthy_count: number;
+  plugins: PluginHealthStatus[];
+  categories: {
+    required: PluginHealthStatus[];
+    optional: PluginHealthStatus[];
+    integration: PluginHealthStatus[];
+  };
+  summary: {
+    total: number;
+    healthy: number;
+    errors: string[];
+  };
+  provisioned_files?: string[];
+  config_updated?: boolean;
+  message?: string;
+  error?: string;
 }
 
 /** Response from POST /api/setup/auth-token/regenerate. `token` is the

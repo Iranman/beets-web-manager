@@ -407,6 +407,46 @@ def run_acceptance() -> None:
             return
         _ok("First-run admin credentials established successfully")
 
+        # 3b. Verify Beets Plugin Provisioning & Multi-Runtime Loading
+        print("==> Step 7a: Verifying Beets Plugin Provisioning and Multi-Runtime Loading...")
+        # Provisioning forces and waits for a fresh (not stale-cached) Beets
+        # plugin-load probe after writing config.yaml, which can take up to
+        # the full ~90s beet-version-probe budget under load, most of all
+        # on the very first invocation against a brand new database (real
+        # one-time Beets schema-migration backups are created) -- see
+        # backend/beets_plugins.py's _force_fresh_loaded_plugins and
+        # backend/beets_control_agent.py's _BEET_VERSION_PROBE_TIMEOUT_SECONDS.
+        # The default 15s client timeout is nowhere near enough here.
+        status, _, prov_body = stack.request("POST", "/api/plugins/provision", json_body={}, headers=bearer_header, timeout=110.0)
+        if status != 200 or not isinstance(prov_body, dict):
+            _fail(f"POST /api/plugins/provision failed: {status} {prov_body}")
+            return
+        _ok(f"Beets plugins provisioned successfully: {prov_body.get('message')}")
+
+        # Check bundled discpath.py exists on host mount
+        discpath_host = stack.beets_dir / "beetsplug" / "discpath.py"
+        if not discpath_host.exists():
+            _fail(f"Bundled plugin discpath.py missing on host mount: {discpath_host}")
+            return
+        _ok("Bundled discpath.py exists under /config/beetsplug")
+
+        # Verify plugin health report
+        status, _, plugins_body = stack.request("GET", "/api/plugins/status", headers=bearer_header)
+        if status != 200 or not isinstance(plugins_body, dict):
+            _fail(f"GET /api/plugins/status failed: {status} {plugins_body}")
+            return
+        if not plugins_body.get("all_required_healthy"):
+            _fail(f"Expected all_required_healthy=True on fresh install, got: {plugins_body}")
+            return
+        _ok(f"All {plugins_body.get('required_count')} required Beets plugins are healthy (plugins_ready=True)")
+
+        # Verify plugins load in Web Manager embedded Beets runtime
+        wm_beet = stack.compose("exec", "-T", "beets-web-manager", "beet", "version")
+        if wm_beet.returncode != 0:
+            _fail(f"Web Manager embedded Beets version probe failed: {wm_beet.stderr}")
+            return
+        _ok(f"Web Manager embedded Beets runtime loaded plugins: {wm_beet.stdout.strip().splitlines()[0]}")
+
         # Completing setup is a separate, explicit step (mirrors the real
         # browser wizard's final "Finish" action) -- this is exactly the
         # step that a real production install must not lose the marker for
