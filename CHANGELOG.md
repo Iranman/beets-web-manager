@@ -6,6 +6,16 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+## v0.1.19 - 2026-09-21
+
+Makes the System / Environment configuration page show the deployment's genuine effective configuration instead of static environment-variable echoes, and fixes two real configuration-accuracy bugs found while verifying it against a live deployment (PR #130). Also folds in PR #129 (zero-friction Beets plugin management), which had not yet been released under its own version tag.
+
+### Changed
+
+- **System page now resolves real effective configuration**: runtime/persisted/default precedence, empty Docker env value handling, secret masking with safe replace/remove, source badges, container-path metadata, and immediate post-save refresh.
+- **AI requests now use the same configuration the System page displays.** Previously, 6 real AI-request call sites hardcoded their model (`gpt-4o`/`gpt-4o-mini`) and the OpenAI endpoint, and only ever read `OPENAI_API_KEY` -- while the System page implied `AI_MODEL`/`AI_BASE_URL`/`OPENROUTER_API_KEY`/`AI_API_KEY` were live, effective settings. Real requests now resolve model/endpoint/API key from the same variables via shared `_ai_api_key()`/`_ai_model_and_endpoint()` helpers.
+- **Host volume path variables no longer claim a fake value.** `BEETS_CONFIG_PATH`/`MUSIC_PATH`/`DOWNLOADS_PATH`/`WEB_MANAGER_DATA_PATH` are `docker-compose.yml`'s own host-side bind-mount interpolation variables and are never forwarded into the container's environment -- the page previously showed a fabricated `./music`-style default and allowed silently-no-op edits. Now labeled container-path-only and marked non-editable, enforced on both the backend write-guard and the frontend.
+
 ## v0.1.18 - 2026-09-19
 
 Simplifies the standard Docker deployment (PR #128, follow-up to #126): a normal install now runs a stock Beets container and Beets Web Manager together in one Compose file, with no custom Beets engine, no manual internal API tokens, no `.env`, and no setup scripts required.
