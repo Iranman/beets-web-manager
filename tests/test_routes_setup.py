@@ -709,7 +709,12 @@ class RoutesSetupEnvironmentTests(unittest.TestCase):
             "LIDARR_API_KEY=\n"
             "\n"
             "# Demo mode\n"
-            "DEMO_MODE=0\n",
+            "DEMO_MODE=0\n"
+            "\n"
+            "# Host volume paths -- mirrors the real repo .env.example, which\n"
+            "# writes a literal placeholder value here even though the running\n"
+            "# container never sees it (see MUSIC_PATH's own metadata entry).\n"
+            "MUSIC_PATH=./music\n",
             encoding="utf-8",
         )
         self.module._SETUP_ENV_FILE = self.env_file
@@ -782,6 +787,22 @@ class RoutesSetupEnvironmentTests(unittest.TestCase):
         })
         self.assertEqual(r.status_code, 400)
         self.assertIn("MUSIC_PATH=/existing/music", self.env_file.read_text(encoding="utf-8"))
+
+    def test_env_example_literal_value_never_overrides_metadata_none_default(self):
+        # Found live against the real deployed .env.example (which writes
+        # "MUSIC_PATH=./music" as a template placeholder): _env_catalog()
+        # must let the curated metadata's explicit default=None win over
+        # that literal value, since the running container can never actually
+        # see it -- showing "./music" here would resurrect the exact
+        # fabricated-host-path bug this metadata entry exists to fix. This
+        # test's fixture .env.example (setUp) deliberately mirrors the real
+        # repo's MUSIC_PATH=./music line so this regresses if the precedence
+        # in _env_catalog is ever flipped back.
+        r = self.client.get("/api/setup/env")
+        self.assertEqual(r.status_code, 200)
+        variables = {item["name"]: item for item in r.get_json()["variables"]}
+        self.assertIsNone(variables["MUSIC_PATH"]["default"])
+        self.assertNotEqual(variables["MUSIC_PATH"]["value"], "./music")
 
     def test_env_displays_effective_values_and_defaults(self):
         r = self.client.get("/api/setup/env")
