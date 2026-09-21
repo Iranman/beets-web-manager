@@ -1022,10 +1022,21 @@ def _env_catalog() -> Dict[str, Dict[str, Any]]:
         if key in _BLOCKED_ENV_NAMES:
             continue
         meta = _SETTING_METADATA.get(key, {})
+        # A curated metadata entry's own "default" (including an explicit
+        # None, as used by the host-only path variables -- see
+        # BEETS_CONFIG_PATH et al. above) is authoritative and must win over
+        # whatever literal placeholder .env.example happens to write for
+        # that same key (e.g. "MUSIC_PATH=./music"): .env.example is a
+        # template for a *host* .env file, not a statement about what this
+        # running container can actually see, and showing its value as the
+        # System page's "default" for a variable the app can never read
+        # fabricates a value the app does not have. Curated metadata always
+        # sets "default" explicitly, so .env.example's parsed value is only
+        # ever used as a fallback default for variables with no metadata.
         catalog[key] = {
             "name": key,
             "section": meta.get("section") or entry.get("section") or "General",
-            "default": values.get(key, meta.get("default", "")),
+            "default": meta.get("default", values.get(key, "")),
             "secret": meta.get("secret", _is_secret_env(key)),
             "container_path": meta.get("container_path"),
             "description": meta.get("description"),
