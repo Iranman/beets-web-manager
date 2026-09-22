@@ -2907,7 +2907,7 @@
       "method": "POST",
       "endpoint": "fix_leaked_db_paths",
       "security_classification": "ADMIN_ONLY",
-      "purpose": "Fix leaked path DB rows (DB-only update \u2014 no files are moved).",
+      "purpose": "Fix leaked path DB rows (DB-only update — no files are moved).",
       "required_role_or_privilege": "owner/admin shared application secret",
       "handles_secrets": false,
       "accesses_files": true,
@@ -4386,6 +4386,40 @@
       "rate_limit_implemented": true,
       "existing_security_tests": [
         "tests/test_beets_plugin_management.py"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "setup_env_reveal_auth",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Confirm the current administrator password to open a short reveal-authorization window for secret reveal; trivially succeeds on installs with no browser password (token/headless auth only).",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": false,
+      "accesses_files": false,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": true,
+      "rate_limit_implemented": true,
+      "existing_security_tests": [
+        "tests/test_secret_reveal.py"
+      ]
+    },
+    {
+      "method": "POST",
+      "endpoint": "setup_env_reveal",
+      "security_classification": "ADMIN_ONLY",
+      "purpose": "Return the single effective plaintext value for one revealable secret setting (never bulk, never BEETS_WEB_PASSWORD, never cached); the only place in the app that returns secret plaintext via the setup API.",
+      "required_role_or_privilege": "owner/admin",
+      "handles_secrets": true,
+      "accesses_files": true,
+      "creates_background_job": false,
+      "invokes_external_services_or_subprocesses": false,
+      "destructive_or_high_impact": false,
+      "rate_limit_required": false,
+      "rate_limit_implemented": false,
+      "existing_security_tests": [
+        "tests/test_secret_reveal.py"
       ]
     }
   ]

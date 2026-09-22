@@ -85,6 +85,8 @@ import type {
   StatsResponse,
   SetupAuthTokenRegenerateResponse,
   SetupEnvResponse,
+  SetupEnvRevealAuthResponse,
+  SetupEnvRevealResponse,
   SetupEnvSavePayload,
   SetupFirstRunRequest,
   SetupFirstRunResponse,
@@ -116,6 +118,11 @@ type ApiErrorBody = {
   code?: string;
   error_code?: string;
   candidate?: unknown;
+  /** Set by POST /api/setup/env/<name>/reveal when the request was rejected
+   * specifically for lacking a reveal authorization window -- distinct from
+   * other rejection reasons so the caller knows to prompt for the
+   * administrator password and retry, rather than just showing an error. */
+  reauth_required?: boolean;
 };
 
 const _CSRF_EXEMPT_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
@@ -366,6 +373,20 @@ export function testSetupPlex(payload?: { url?: string; token?: string }): Promi
 
 export function regenerateAuthToken(): Promise<SetupAuthTokenRegenerateResponse> {
   return apiJson<SetupAuthTokenRegenerateResponse>('/api/setup/auth-token/regenerate', jsonRequest('POST'));
+}
+
+/** Fetches the single effective plaintext value for one revealable secret
+ * setting. Never call this speculatively for every field -- only in direct
+ * response to the operator clicking Show on that one field. */
+export function revealSetupEnvValue(name: string): Promise<SetupEnvRevealResponse> {
+  return apiJson<SetupEnvRevealResponse>(`/api/setup/env/${encodeURIComponent(name)}/reveal`, jsonRequest('POST'));
+}
+
+/** Confirms the current administrator password to open a short reveal
+ * authorization window (only meaningful on an install with a browser
+ * password configured -- trivially succeeds otherwise). */
+export function authorizeSetupEnvReveal(password: string): Promise<SetupEnvRevealAuthResponse> {
+  return apiJson<SetupEnvRevealAuthResponse>('/api/setup/env/reveal-auth', jsonRequest('POST', { password }));
 }
 
 export function getStats(): Promise<StatsResponse> {
