@@ -6,6 +6,20 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+## v0.1.23 - 2026-09-22
+
+Ships work that had been written and passing locally but never committed/deployed -- discovered while performing live acceptance testing of v0.1.22's secret-reveal feature (see #136).
+
+### Added
+
+- **Configuration inventory expanded to 59 curated settings across 8 sections** (System & Environment, Authentication & Security, AI & LLM Services, Beets Core & Engine, Storage & Paths, Music Services & Metadata, Media Server Integrations, Playlists & Download Providers), each now carrying `restart_required` and `type`.
+- **Effective vs. saved distinction shown in the UI.** When a setting's environment value differs from its persisted/saved value, the System page now shows both ("Running: ... | Saved: ...") with an "Overridden" badge, instead of only ever showing one.
+- Two more secrets are revealable (`BEETS_API_TOKEN`, `QBITTORRENT_PASSWORD`); `SLSKD_API_KEY` reveal now also checks its dedicated `_FILE` override, matching the existing convention used elsewhere.
+
+### Security
+
+- `BEETS_WEB_AUTH_TOKEN`'s masked display switched from a length-revealing partial mask to a fixed-length `********` placeholder.
+
 ## v0.1.22 - 2026-09-21
 
 ### Added
