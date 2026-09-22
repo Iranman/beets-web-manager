@@ -943,6 +943,37 @@ verify_post_deploy() {
   verify_endpoints "post-deploy"
 }
 
+# Durably persist the deployed VERSION into .env's own BEETS_WEB_MANAGER_VERSION
+# line -- verify_compose_image() only ever `export`s it for this script's own
+# subprocesses, which resolves the image correctly for THIS run but leaves the
+# on-disk file pointing at whatever version was there before. Anything that
+# recreates the container without going through this script (a host reboot,
+# a routine `docker compose pull && up -d` across the whole stack, TrueNAS's
+# own app supervisor) then falls back to that stale on-disk value and silently
+# redeploys an older image. Confirmed live: a routine stack-wide compose
+# refresh reverted beets-web-manager from 0.1.22 back to 0.1.19 this way,
+# because this line was never added after the very first time the drift fix
+# was applied. Only called after verify_post_deploy has confirmed the new
+# version is actually healthy -- never persist a version that didn't verify.
+persist_deployed_version() {
+  STAGE="persist-version"
+  local env_file
+  env_file="$(dirname "$COMPOSE_FILE")/.env"
+  [[ -f "$env_file" ]] || { warn "no .env file at ${env_file} -- BEETS_WEB_MANAGER_VERSION not persisted (in-process export for this run only)"; return 0; }
+
+  local tmp
+  tmp="${env_file}.tmp.$$"
+  if grep -q '^BEETS_WEB_MANAGER_VERSION=' "$env_file"; then
+    sed "s/^BEETS_WEB_MANAGER_VERSION=.*/BEETS_WEB_MANAGER_VERSION=${VERSION}/" "$env_file" > "$tmp"
+  else
+    cp "$env_file" "$tmp"
+    printf '\nBEETS_WEB_MANAGER_VERSION=%s\n' "$VERSION" >> "$tmp"
+  fi
+  chmod 600 "$tmp"
+  mv "$tmp" "$env_file"
+  log "Persisted BEETS_WEB_MANAGER_VERSION=${VERSION} to ${env_file} (survives future recreations not run through this script)."
+}
+
 run_deploy() {
   log "=== Beets Web Manager ${VERSION} guarded rollout starting ==="
   validate_version
@@ -961,6 +992,7 @@ run_deploy() {
   migrate_token_if_needed
   deploy_image
   verify_post_deploy
+  persist_deployed_version
 
   log "=== Rollout of ${VERSION} completed successfully. Backup at ${BACKUP_DIR} ==="
 }

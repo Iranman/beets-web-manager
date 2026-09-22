@@ -1047,6 +1047,48 @@ class FullDeployTests(EndToEndFixture):
         backups = os.listdir(os.path.join(self.stack_dir, "_backups"))
         self.assertEqual(len(backups), 1)
 
+    def test_deploy_persists_version_into_existing_env_file(self):
+        """Found live: a deploy resolves the correct image for its own run via
+        an in-process `export BEETS_WEB_MANAGER_VERSION`, but a stale value
+        left on disk in .env silently reverts the NEXT recreation (a host
+        reboot, a routine stack-wide `docker compose pull && up -d`) back to
+        an old version. The deploy must durably rewrite .env's own line to
+        the version it just verified healthy."""
+        token = os.path.join(self.webmgr_dir, ".auth_token")
+        Path(token).write_text("tok", encoding="utf-8")
+        env_file = os.path.join(self.stack_dir, ".env")
+        Path(env_file).write_text("SOME_OTHER_VAR=1\nBEETS_WEB_MANAGER_VERSION=0.1.1\nANOTHER_VAR=2\n", encoding="utf-8")
+        res = self.run_script()
+        self.assertEqual(res.returncode, 0, res.stderr)
+        content = Path(env_file).read_text(encoding="utf-8")
+        self.assertIn("BEETS_WEB_MANAGER_VERSION=0.1.3", content)
+        self.assertNotIn("BEETS_WEB_MANAGER_VERSION=0.1.1", content)
+        # Untouched surrounding lines.
+        self.assertIn("SOME_OTHER_VAR=1", content)
+        self.assertIn("ANOTHER_VAR=2", content)
+
+    def test_deploy_appends_version_line_when_env_file_has_none(self):
+        token = os.path.join(self.webmgr_dir, ".auth_token")
+        Path(token).write_text("tok", encoding="utf-8")
+        env_file = os.path.join(self.stack_dir, ".env")
+        Path(env_file).write_text("SOME_OTHER_VAR=1\n", encoding="utf-8")
+        res = self.run_script()
+        self.assertEqual(res.returncode, 0, res.stderr)
+        content = Path(env_file).read_text(encoding="utf-8")
+        self.assertIn("BEETS_WEB_MANAGER_VERSION=0.1.3", content)
+        self.assertIn("SOME_OTHER_VAR=1", content)
+
+    def test_deploy_succeeds_without_an_env_file_at_all(self):
+        """The simplified single-compose deployment topology has no .env at
+        all -- persistence must be a no-op warning, never fatal."""
+        token = os.path.join(self.webmgr_dir, ".auth_token")
+        Path(token).write_text("tok", encoding="utf-8")
+        env_file = os.path.join(self.stack_dir, ".env")
+        self.assertFalse(os.path.exists(env_file))
+        res = self.run_script()
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("BEETS_WEB_MANAGER_VERSION not persisted", res.stderr)
+
     def test_deploy_archives_stale_db_with_missing_wal_shm(self):
         token = os.path.join(self.webmgr_dir, ".auth_token")
         Path(token).write_text("tok", encoding="utf-8")
