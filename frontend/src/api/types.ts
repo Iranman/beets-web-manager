@@ -630,6 +630,8 @@ export interface SetupEnvVariable {
   secret: boolean;
   configured: boolean;
   editable?: boolean;
+  restart_required?: boolean;
+  type?: string;
   /** Whether POST /api/setup/env/<name>/reveal can return a plaintext value
    * for this setting. Only ever true when `secret` is also true -- e.g.
    * false for BEETS_WEB_PASSWORD (stored only as a password hash, so no
@@ -639,8 +641,13 @@ export interface SetupEnvVariable {
   revealable?: boolean;
   value: string;
   effective_value?: string | null;
+  saved_value?: string | null;
+  has_saved_value?: boolean;
+  is_overridden?: boolean;
+  status_message?: string;
   default?: string | null;
   container_path?: string | null;
+  host_path?: string | null;
   description?: string | null;
   source: 'environment' | 'persisted' | 'runtime' | 'default' | 'not_configured' | 'file' | 'process' | 'example' | string;
   has_value: boolean;

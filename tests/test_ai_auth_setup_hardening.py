@@ -389,13 +389,14 @@ class AuthTokenRegenerateEndpointTests(unittest.TestCase):
         # inline dict-builder loop (the old `"secret": secret,` literal) to
         # per-name branches in _resolve_setting_item(); the BEETS_WEB_AUTH_TOKEN
         # branch specifically must still (a) never expose the raw value as
-        # effective_value and (b) only ever pass the token through _mask()
-        # before putting it in the response.
+        # effective_value and (b) only ever expose a fixed-length placeholder
+        # (never a value-length-revealing partial mask) in the response.
         token_branch = _function_source(
             SETUP_SOURCE, "# 2. BEETS_WEB_AUTH_TOKEN", "# 3. BEETS_WEB_USERNAME"
         )
         self.assertIn('"effective_value": None,', token_branch)
-        self.assertIn("_mask(persisted_val or env_val)", token_branch)
+        self.assertIn('"********" if configured else ""', token_branch)
+        self.assertNotIn("_mask(", token_branch)
         self.assertIn('_is_secret_env(key)', SETUP_SOURCE)
 
 
