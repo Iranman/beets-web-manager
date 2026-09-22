@@ -941,6 +941,107 @@ class RoutesSetupEnvironmentTests(unittest.TestCase):
         self.assertEqual(variables["TZ"]["value"], "Europe/London")
         self.assertEqual(variables["AI_MODEL"]["value"], "claude-3.5-haiku")
 
+    def test_revealable_secrets_return_plaintext_via_reveal_endpoint(self):
+        self.env_file.write_text("OPENAI_API_KEY=sk-testsecretkey123\nPLEX_TOKEN=plex-secret-token-67890\n", encoding="utf-8")
+        
+        # 1. GET /api/setup/env never returns plaintext
+        get_r = self.client.get("/api/setup/env")
+        self.assertEqual(get_r.status_code, 200)
+        variables = {item["name"]: item for item in get_r.get_json()["variables"]}
+        self.assertTrue(variables["OPENAI_API_KEY"]["secret"])
+        self.assertTrue(variables["OPENAI_API_KEY"]["revealable"])
+        self.assertTrue(variables["OPENAI_API_KEY"]["configured"])
+        self.assertIsNone(variables["OPENAI_API_KEY"]["effective_value"])
+        self.assertNotEqual(variables["OPENAI_API_KEY"]["value"], "sk-testsecretkey123")
+
+        # 2. POST /api/setup/env/<name>/reveal returns exact plaintext
+        reveal_r = self.client.post("/api/setup/env/OPENAI_API_KEY/reveal")
+        self.assertEqual(reveal_r.status_code, 200)
+        body = reveal_r.get_json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["name"], "OPENAI_API_KEY")
+        self.assertEqual(body["value"], "sk-testsecretkey123")
+
+        # 3. PLEX_TOKEN reveal
+        reveal_plex = self.client.post("/api/setup/env/PLEX_TOKEN/reveal")
+        self.assertEqual(reveal_plex.status_code, 200)
+        self.assertEqual(reveal_plex.get_json()["value"], "plex-secret-token-67890")
+
+    def test_password_is_never_revealable(self):
+        get_r = self.client.get("/api/setup/env")
+        self.assertEqual(get_r.status_code, 200)
+        variables = {item["name"]: item for item in get_r.get_json()["variables"]}
+        self.assertTrue(variables["BEETS_WEB_PASSWORD"]["secret"])
+        self.assertFalse(variables["BEETS_WEB_PASSWORD"]["revealable"])
+
+        reveal_r = self.client.post("/api/setup/env/BEETS_WEB_PASSWORD/reveal")
+        self.assertEqual(reveal_r.status_code, 403)
+        self.assertFalse(reveal_r.get_json()["ok"])
+        self.assertIn("cannot be revealed", reveal_r.get_json()["error"])
+
+    def test_overridden_status_and_saved_value_display(self):
+        # Persisted has one value, environment has another
+        self.env_file.write_text("AI_MODEL=persisted-model-v1\n", encoding="utf-8")
+        with mock.patch.dict(os.environ, {"AI_MODEL": "environment-model-v2"}):
+            r = self.client.get("/api/setup/env")
+            self.assertEqual(r.status_code, 200)
+            variables = {item["name"]: item for item in r.get_json()["variables"]}
+            ai_var = variables["AI_MODEL"]
+            self.assertEqual(ai_var["effective_value"], "environment-model-v2")
+            self.assertEqual(ai_var["saved_value"], "persisted-model-v1")
+            self.assertTrue(ai_var["has_saved_value"])
+            self.assertTrue(ai_var["is_overridden"])
+            self.assertEqual(ai_var["source"], "environment")
+            self.assertIn("overrides", ai_var["status_message"].lower())
+
+    def test_comprehensive_setting_inventory_and_metadata(self):
+        r = self.client.get("/api/setup/env")
+        self.assertEqual(r.status_code, 200)
+        variables = {item["name"]: item for item in r.get_json()["variables"]}
+
+        expected_keys = [
+            ("PUID", "System & Environment", False),
+            ("PGID", "System & Environment", False),
+            ("TZ", "System & Environment", False),
+            ("WEBCONTROL_PORT", "System & Environment", False),
+            ("DEMO_MODE", "System & Environment", False),
+            ("BEETS_SQLITE_TIMEOUT", "System & Environment", False),
+            ("BEETS_LONG_OPERATION_MAX_SECONDS", "System & Environment", False),
+            ("BEETS_WEB_USERNAME", "Authentication & Security", False),
+            ("BEETS_WEB_PASSWORD", "Authentication & Security", True),
+            ("BEETS_WEB_AUTH_TOKEN", "Authentication & Security", True),
+            ("BEETS_TRUSTED_PROXIES", "Authentication & Security", False),
+            ("BEETS_OUTBOUND_TIMEOUT_SECONDS", "Authentication & Security", False),
+            ("OPENAI_API_KEY", "AI & LLM Services", True),
+            ("OPENROUTER_API_KEY", "AI & LLM Services", True),
+            ("AI_MODEL", "AI & LLM Services", False),
+            ("BEETS_CONFIG", "Beets Core & Engine", False),
+            ("BEETS_LIBRARY", "Beets Core & Engine", False),
+            ("MUSIC_PATH", "Storage & Paths", False),
+            ("DOWNLOADS_PATH", "Storage & Paths", False),
+            ("BEETS_CONFIG_PATH", "Storage & Paths", False),
+            ("PLAYLIST_DIR", "Storage & Paths", False),
+            ("ACOUSTID_API_KEY", "Music Services & Metadata", True),
+            ("DISCOGS_TOKEN", "Music Services & Metadata", True),
+            ("LISTENBRAINZ_TOKEN", "Music Services & Metadata", True),
+            ("SPOTIFY_CLIENT_ID", "Music Services & Metadata", False),
+            ("PLEX_URL", "Media Server Integrations", False),
+            ("PLEX_TOKEN", "Media Server Integrations", True),
+            ("LIDARR_URL", "Media Server Integrations", False),
+            ("LIDARR_API_KEY", "Media Server Integrations", True),
+            ("SLSKD_URL", "Media Server Integrations", False),
+            ("SLSKD_API_KEY", "Media Server Integrations", True),
+            ("QBITTORRENT_URL", "Media Server Integrations", False),
+            ("PLAYLIST_AUTO_SYNC", "Playlists & Download Providers", False),
+            ("PLAYLIST_DOWNLOAD_METHODS", "Playlists & Download Providers", False),
+            ("SPOTIFLAC_SERVICES", "Playlists & Download Providers", False),
+        ]
+
+        for key, section, is_secret in expected_keys:
+            self.assertIn(key, variables, f"Missing expected setting key: {key}")
+            self.assertEqual(variables[key]["section"], section, f"Key {key} section mismatch")
+            self.assertEqual(variables[key]["secret"], is_secret, f"Key {key} secret mismatch")
+
 
 
 class RoutesSetupHelperTests(unittest.TestCase):

@@ -370,157 +370,214 @@ def _env_example_text() -> str:
 
 
 _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
-    # System & Environment
+    # 1. System & Environment
     "PUID": {
         "section": "System & Environment",
         "default": "1000",
-        "description": "User ID for container file ownership",
+        "description": "User ID for container file ownership and execution permissions",
         "secret": False,
         "editable": True,
+        "restart_required": True,
+        "type": "string",
     },
     "PGID": {
         "section": "System & Environment",
         "default": "1000",
-        "description": "Group ID for container file ownership",
+        "description": "Group ID for container file ownership and execution permissions",
         "secret": False,
         "editable": True,
+        "restart_required": True,
+        "type": "string",
     },
     "TZ": {
         "section": "System & Environment",
         "default": "UTC",
-        "description": "Timezone for scheduled jobs and timestamps",
+        "description": "Timezone for scheduled jobs, logs, and timestamp formatting",
         "secret": False,
         "editable": True,
+        "restart_required": True,
+        "type": "string",
     },
     "WEBCONTROL_PORT": {
         "section": "System & Environment",
         "default": "8337",
-        "description": "HTTP port published by Beets Web Manager",
+        "description": "HTTP port published by Beets Web Manager UI and API",
         "secret": False,
         "editable": True,
+        "restart_required": True,
+        "type": "integer",
+    },
+    "DEMO_MODE": {
+        "section": "System & Environment",
+        "default": "0",
+        "description": "Run in synthetic demo mode with simulated music data",
+        "secret": False,
+        "editable": True,
+        "restart_required": True,
+        "type": "boolean",
+    },
+    "BEETS_LOG": {
+        "section": "System & Environment",
+        "default": "/config/beet.log",
+        "container_path": "/config/beet.log",
+        "description": "Destination file for Beets engine execution logs",
+        "secret": False,
+        "editable": True,
+        "restart_required": True,
+        "type": "string",
+    },
+    "BEETS_SQLITE_TIMEOUT": {
+        "section": "System & Environment",
+        "default": "30.0",
+        "description": "SQLite database lock acquisition timeout in seconds",
+        "secret": False,
+        "editable": True,
+        "restart_required": False,
+        "type": "number",
+    },
+    "BEETS_LONG_OPERATION_MAX_SECONDS": {
+        "section": "System & Environment",
+        "default": "1800",
+        "description": "Maximum execution window for long background operations before timeout",
+        "secret": False,
+        "editable": True,
+        "restart_required": False,
+        "type": "integer",
+    },
+    "BEETS_LONG_OPERATION_POLL_SECONDS": {
+        "section": "System & Environment",
+        "default": "2",
+        "description": "Status polling interval in seconds for background jobs",
+        "secret": False,
+        "editable": True,
+        "restart_required": False,
+        "type": "integer",
     },
 
-    # Volume Paths. BEETS_CONFIG_PATH/MUSIC_PATH/DOWNLOADS_PATH/
-    # WEB_MANAGER_DATA_PATH exist only as `${VAR:-default}` interpolation
-    # inside docker-compose.yml's own `volumes:` bind-mount source -- they
-    # are never listed under either service's `environment:` block, so
-    # Docker Compose resolves them entirely on the HOST at compose-parse
-    # time and never forwards them into the running container at all.
-    # `os.environ.get(...)` for any of these four is unconditionally empty
-    # inside this container, regardless of what the real deployment's host
-    # `.env` sets them to -- there is no way for this application to learn
-    # (or change) the real host-side path from in here. Only the
-    # container-side mount point is genuinely knowable; editable is False
-    # because writing a new value through this UI can never have any
-    # effect on the actual bind mount (change the host's own `.env` /
-    # docker-compose.yml and recreate the container instead).
-    "BEETS_CONFIG_PATH": {
-        "section": "Volume Paths (Container Side Only)",
-        "default": None,
-        "container_path": "/config",
-        "description": "Not visible to this container -- host-side bind-mount source set in the deployment's own .env/docker-compose.yml, outside this application's reach",
-        "secret": False,
-        "editable": False,
-    },
-    "MUSIC_PATH": {
-        "section": "Volume Paths (Container Side Only)",
-        "default": None,
-        "container_path": "/music",
-        "description": "Not visible to this container -- host-side bind-mount source set in the deployment's own .env/docker-compose.yml, outside this application's reach",
-        "secret": False,
-        "editable": False,
-    },
-    "DOWNLOADS_PATH": {
-        "section": "Volume Paths (Container Side Only)",
-        "default": None,
-        "container_path": "/downloads",
-        "description": "Not visible to this container -- host-side bind-mount source set in the deployment's own .env/docker-compose.yml, outside this application's reach",
-        "secret": False,
-        "editable": False,
-    },
-    "WEB_MANAGER_DATA_PATH": {
-        "section": "Volume Paths (Container Side Only)",
-        "default": None,
-        "container_path": "/data",
-        "description": "Not visible to this container -- host-side bind-mount source set in the deployment's own .env/docker-compose.yml, outside this application's reach",
-        "secret": False,
-        "editable": False,
-    },
-
-    # Authentication
+    # 2. Authentication & Security
     "BEETS_WEB_USERNAME": {
-        "section": "Authentication",
+        "section": "Authentication & Security",
         "default": "admin",
-        "description": "Username for browser and basic authentication",
+        "description": "Username for browser login and basic authentication",
         "secret": False,
         "editable": True,
+        "restart_required": False,
+        "type": "string",
     },
     "BEETS_WEB_PASSWORD": {
-        "section": "Authentication",
+        "section": "Authentication & Security",
         "default": None,
-        "description": "Password for browser login (stored securely as hash)",
+        "description": "Password for browser login (stored securely as a one-way hash)",
         "secret": True,
         "editable": True,
-        # Every write path hashes this with werkzeug's generate_password_hash
-        # before persisting (see _write_env_file's BEETS_WEB_PASSWORD branch
-        # and the dedicated password-change endpoint) -- a password hash
-        # cannot be converted back into the original password, so this can
-        # never be revealable regardless of storage location. The only
-        # legacy exception is a pre-v0.1.9 .initial_admin_password file from
-        # before hashing was enforced everywhere; that path is no longer
-        # written by current code and is not treated as revealable either --
-        # the correct remediation for such an install is to change the
-        # password (which immediately hashes it), not to add a reveal path
-        # for a transitional legacy state.
         "revealable": False,
+        "restart_required": False,
+        "type": "password",
     },
     "BEETS_WEB_AUTH_TOKEN": {
-        "section": "Authentication",
+        "section": "Authentication & Security",
         "default": None,
-        "description": "Bearer token for API and headless script clients",
+        "description": "Bearer token for API, webhooks, and headless script clients",
         "secret": True,
         "editable": True,
         "revealable": True,
+        "restart_required": False,
+        "type": "secret",
     },
     "BEETS_WEB_AUTH_DISABLED": {
-        "section": "Authentication",
+        "section": "Authentication & Security",
         "default": "0",
-        "description": "Disable authentication (1 = disabled, 0 = enabled)",
+        "description": "Disable all authentication (1 = disabled, 0 = enabled)",
         "secret": False,
         "editable": True,
+        "restart_required": True,
+        "type": "boolean",
     },
     "BEETS_TRUSTED_PROXIES": {
-        "section": "Authentication",
+        "section": "Authentication & Security",
         "default": "",
         "description": "Trusted reverse proxy CIDR ranges (comma-separated)",
         "secret": False,
         "editable": True,
+        "restart_required": True,
+        "type": "string",
+    },
+    "BEETS_WEB_SESSION_COOKIE_SECURE": {
+        "section": "Authentication & Security",
+        "default": "0",
+        "description": "Require HTTPS for session cookies (1 = secure HTTPS-only, 0 = standard)",
+        "secret": False,
+        "editable": True,
+        "restart_required": True,
+        "type": "boolean",
+    },
+    "BEETS_OUTBOUND_TIMEOUT_SECONDS": {
+        "section": "Authentication & Security",
+        "default": "30",
+        "description": "Outbound HTTP request timeout in seconds",
+        "secret": False,
+        "editable": True,
+        "restart_required": False,
+        "type": "integer",
+    },
+    "BEETS_OUTBOUND_MAX_REDIRECTS": {
+        "section": "Authentication & Security",
+        "default": "5",
+        "description": "Maximum permitted HTTP redirects for external fetches",
+        "secret": False,
+        "editable": True,
+        "restart_required": False,
+        "type": "integer",
+    },
+    "BEETS_OUTBOUND_MAX_RESPONSE_BYTES": {
+        "section": "Authentication & Security",
+        "default": "10485760",
+        "description": "Maximum response payload size in bytes for outbound requests",
+        "secret": False,
+        "editable": True,
+        "restart_required": False,
+        "type": "integer",
+    },
+    "BEETS_OUTBOUND_ALLOWLIST": {
+        "section": "Authentication & Security",
+        "default": "",
+        "description": "Comma-separated whitelist of allowed external hostnames/IPs",
+        "secret": False,
+        "editable": True,
+        "restart_required": False,
+        "type": "string",
     },
 
-    # AI & LLM Services
+    # 3. AI & LLM Services
     "OPENAI_API_KEY": {
         "section": "AI & LLM Services",
         "default": None,
-        "description": "OpenAI API key for candidate ranking & matching",
+        "description": "OpenAI API key for candidate evaluation and matching",
         "secret": True,
         "editable": True,
         "revealable": True,
+        "restart_required": False,
+        "type": "secret",
     },
     "OPENROUTER_API_KEY": {
         "section": "AI & LLM Services",
         "default": None,
-        "description": "OpenRouter API key for LLM models",
+        "description": "OpenRouter API key for LLM provider routing",
         "secret": True,
         "editable": True,
         "revealable": True,
+        "restart_required": False,
+        "type": "secret",
     },
     "AI_API_KEY": {
         "section": "AI & LLM Services",
         "default": None,
-        "description": "Generic AI API key for custom OpenAI-compatible endpoints",
+        "description": "Generic API key for custom OpenAI-compatible endpoints",
         "secret": True,
         "editable": True,
         "revealable": True,
+        "restart_required": False,
+        "type": "secret",
     },
     "AI_BASE_URL": {
         "section": "AI & LLM Services",
@@ -528,108 +585,361 @@ _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
         "description": "Base endpoint URL for AI model requests",
         "secret": False,
         "editable": True,
+        "restart_required": False,
+        "type": "string",
     },
     "AI_MODEL": {
         "section": "AI & LLM Services",
         "default": "gpt-4o-mini",
-        "description": "AI model identifier for candidate evaluation",
+        "description": "Active AI model identifier for candidate evaluation",
         "secret": False,
         "editable": True,
+        "restart_required": False,
+        "type": "string",
     },
 
-    # Metadata Providers
-    "ACOUSTID_API_KEY": {
-        "section": "Metadata Providers",
+    # 4. Beets Core & Engine
+    "BEETS_CONFIG": {
+        "section": "Beets Core & Engine",
+        "default": "/config/config.yaml",
+        "container_path": "/config/config.yaml",
+        "description": "Container path to authoritative Beets YAML configuration",
+        "secret": False,
+        "editable": True,
+        "restart_required": True,
+        "type": "string",
+    },
+    "BEETS_LIBRARY": {
+        "section": "Beets Core & Engine",
+        "default": "/config/library.db",
+        "container_path": "/config/library.db",
+        "description": "Container path to SQLite library database",
+        "secret": False,
+        "editable": True,
+        "restart_required": True,
+        "type": "string",
+    },
+    "BEETS_API_URL": {
+        "section": "Beets Core & Engine",
+        "default": "http://beets:8338",
+        "description": "URL of the remote Beets control agent",
+        "secret": False,
+        "editable": True,
+        "restart_required": True,
+        "type": "string",
+    },
+    "BEETS_API_TOKEN": {
+        "section": "Beets Core & Engine",
         "default": None,
-        "description": "AcoustID user API key for audio fingerprinting",
+        "description": "Shared authentication token for remote Beets control agent",
         "secret": True,
         "editable": True,
         "revealable": True,
+        "restart_required": True,
+        "type": "secret",
+    },
+    "BEETS_VERSION_PROBE_TIMEOUT_SECONDS": {
+        "section": "Beets Core & Engine",
+        "default": "45",
+        "description": "Timeout in seconds for remote Beets engine diagnostics probes",
+        "secret": False,
+        "editable": True,
+        "restart_required": False,
+        "type": "integer",
+    },
+
+    # 5. Storage & Paths
+    "MUSIC_PATH": {
+        "section": "Storage & Paths",
+        "default": None,
+        "container_path": "/music",
+        "description": "Music library storage directory (mounted into container at /music)",
+        "secret": False,
+        "editable": False,
+        "restart_required": True,
+        "type": "string",
+    },
+    "DOWNLOADS_PATH": {
+        "section": "Storage & Paths",
+        "default": None,
+        "container_path": "/downloads",
+        "description": "Incoming downloads directory (mounted into container at /downloads)",
+        "secret": False,
+        "editable": False,
+        "restart_required": True,
+        "type": "string",
+    },
+    "BEETS_CONFIG_PATH": {
+        "section": "Storage & Paths",
+        "default": None,
+        "container_path": "/config",
+        "description": "Beets configuration directory (mounted into container at /config)",
+        "secret": False,
+        "editable": False,
+        "restart_required": True,
+        "type": "string",
+    },
+    "WEB_MANAGER_PATH": {
+        "section": "Storage & Paths",
+        "default": None,
+        "container_path": "/web-manager-data",
+        "description": "Web Manager persistent state directory (mounted at /web-manager-data)",
+        "secret": False,
+        "editable": False,
+        "restart_required": True,
+        "type": "string",
+    },
+    "WEB_MANAGER_DATA_PATH": {
+        "section": "Storage & Paths",
+        "default": None,
+        "container_path": "/web-manager-data",
+        "description": "Web Manager persistent state directory (mounted at /web-manager-data)",
+        "secret": False,
+        "editable": False,
+        "restart_required": True,
+        "type": "string",
+    },
+    "PLAYLIST_DIR": {
+        "section": "Storage & Paths",
+        "default": "/music/playlists",
+        "container_path": "/music/playlists",
+        "description": "Directory where exported playlist files (.m3u8) are written",
+        "secret": False,
+        "editable": True,
+        "restart_required": True,
+        "type": "string",
+    },
+    "IMPORT_REVIEW_QUARANTINE_DIR": {
+        "section": "Storage & Paths",
+        "default": "/config/quarantine",
+        "container_path": "/config/quarantine",
+        "description": "Quarantine storage path for ambiguous or conflicting import files",
+        "secret": False,
+        "editable": True,
+        "restart_required": False,
+        "type": "string",
+    },
+    "MUSIC_FORMAT_QUARANTINE_DIR": {
+        "section": "Storage & Paths",
+        "default": "/config/music_format_quarantine",
+        "container_path": "/config/music_format_quarantine",
+        "description": "Quarantine storage path for displaced lower-quality audio formats",
+        "secret": False,
+        "editable": True,
+        "restart_required": False,
+        "type": "string",
+    },
+
+    # 6. Music Services & Metadata
+    "ACOUSTID_API_KEY": {
+        "section": "Music Services & Metadata",
+        "default": None,
+        "description": "AcoustID user API key for audio fingerprinting submissions",
+        "secret": True,
+        "editable": True,
+        "revealable": True,
+        "restart_required": False,
+        "type": "secret",
     },
     "DISCOGS_TOKEN": {
-        "section": "Metadata Providers",
+        "section": "Music Services & Metadata",
         "default": None,
         "description": "Discogs personal access token for artwork & releases",
         "secret": True,
         "editable": True,
         "revealable": True,
+        "restart_required": False,
+        "type": "secret",
     },
     "LISTENBRAINZ_TOKEN": {
-        "section": "Metadata Providers",
+        "section": "Music Services & Metadata",
         "default": None,
-        "description": "ListenBrainz user token for scrobbling and syncing",
+        "description": "ListenBrainz user token for scrobbling and history syncing",
         "secret": True,
         "editable": True,
         "revealable": True,
-    },
-
-    # Media & External Services
-    "PLEX_URL": {
-        "section": "Media & Download Services",
-        "default": "",
-        "description": "Plex Media Server URL (e.g. http://plex:32400)",
-        "secret": False,
-        "editable": True,
-    },
-    "PLEX_TOKEN": {
-        "section": "Media & Download Services",
-        "default": None,
-        "description": "Plex authentication token (X-Plex-Token)",
-        "secret": True,
-        "editable": True,
-        "revealable": True,
-    },
-    "LIDARR_URL": {
-        "section": "Media & Download Services",
-        "default": "http://lidarr:8686",
-        "description": "Lidarr server URL",
-        "secret": False,
-        "editable": True,
-    },
-    "LIDARR_API_KEY": {
-        "section": "Media & Download Services",
-        "default": None,
-        "description": "Lidarr API key",
-        "secret": True,
-        "editable": True,
-        "revealable": True,
-    },
-    "SLSKD_URL": {
-        "section": "Media & Download Services",
-        "default": "http://slskd:5030",
-        "description": "Soulseek slskd daemon URL",
-        "secret": False,
-        "editable": True,
-    },
-    "SLSKD_API_KEY": {
-        "section": "Media & Download Services",
-        "default": None,
-        "description": "Soulseek slskd API key",
-        "secret": True,
-        "editable": True,
-        "revealable": True,
+        "restart_required": False,
+        "type": "secret",
     },
     "SPOTIFY_CLIENT_ID": {
-        "section": "Media & Download Services",
+        "section": "Music Services & Metadata",
         "default": "",
-        "description": "Spotify Developer Application Client ID",
+        "description": "Spotify Developer Application Client ID for playlist queries",
         "secret": False,
         "editable": True,
+        "restart_required": False,
+        "type": "string",
     },
     "SPOTIFY_CLIENT_SECRET": {
-        "section": "Media & Download Services",
+        "section": "Music Services & Metadata",
         "default": None,
         "description": "Spotify Developer Application Client Secret",
         "secret": True,
         "editable": True,
         "revealable": True,
+        "restart_required": False,
+        "type": "secret",
     },
-    "DEMO_MODE": {
-        "section": "General",
-        "default": "0",
-        "description": "Run in synthetic demo mode without music files",
+
+    # 7. Media Server Integrations
+    "PLEX_URL": {
+        "section": "Media Server Integrations",
+        "default": "http://localhost:32400",
+        "description": "Plex Media Server URL (e.g. http://plex:32400)",
         "secret": False,
         "editable": True,
+        "restart_required": False,
+        "type": "string",
+    },
+    "PLEX_TOKEN": {
+        "section": "Media Server Integrations",
+        "default": None,
+        "description": "Plex authentication token (X-Plex-Token)",
+        "secret": True,
+        "editable": True,
+        "revealable": True,
+        "restart_required": False,
+        "type": "secret",
+    },
+    "PLEX_MUSIC_SECTION": {
+        "section": "Media Server Integrations",
+        "default": "",
+        "description": "Plex Music library section name or section key",
+        "secret": False,
+        "editable": True,
+        "restart_required": False,
+        "type": "string",
+    },
+    "LIDARR_URL": {
+        "section": "Media Server Integrations",
+        "default": "http://localhost:8686",
+        "description": "Lidarr server URL (e.g. http://lidarr:8686)",
+        "secret": False,
+        "editable": True,
+        "restart_required": False,
+        "type": "string",
+    },
+    "LIDARR_API_KEY": {
+        "section": "Media Server Integrations",
+        "default": None,
+        "description": "Lidarr API key for wanted albums and artist sync",
+        "secret": True,
+        "editable": True,
+        "revealable": True,
+        "restart_required": False,
+        "type": "secret",
+    },
+    "SLSKD_URL": {
+        "section": "Media Server Integrations",
+        "default": "http://slskd:5030",
+        "description": "Soulseek / slskd daemon URL (e.g. http://slskd:5030)",
+        "secret": False,
+        "editable": True,
+        "restart_required": False,
+        "type": "string",
+    },
+    "SLSKD_API_KEY": {
+        "section": "Media Server Integrations",
+        "default": None,
+        "description": "Soulseek / slskd API key for automated acquisition",
+        "secret": True,
+        "editable": True,
+        "revealable": True,
+        "restart_required": False,
+        "type": "secret",
+    },
+    "QBITTORRENT_URL": {
+        "section": "Media Server Integrations",
+        "default": "http://localhost:8080",
+        "description": "qBittorrent WebUI URL for torrent management",
+        "secret": False,
+        "editable": True,
+        "restart_required": False,
+        "type": "string",
+    },
+    "QBITTORRENT_USERNAME": {
+        "section": "Media Server Integrations",
+        "default": "admin",
+        "description": "qBittorrent WebUI authentication username",
+        "secret": False,
+        "editable": True,
+        "restart_required": False,
+        "type": "string",
+    },
+    "QBITTORRENT_PASSWORD": {
+        "section": "Media Server Integrations",
+        "default": None,
+        "description": "qBittorrent WebUI authentication password",
+        "secret": True,
+        "editable": True,
+        "revealable": True,
+        "restart_required": False,
+        "type": "secret",
+    },
+    "QBITTORRENT_CATEGORY": {
+        "section": "Media Server Integrations",
+        "default": "music",
+        "description": "qBittorrent download category assigned to music downloads",
+        "secret": False,
+        "editable": True,
+        "restart_required": False,
+        "type": "string",
+    },
+
+    # 8. Playlists & Download Providers
+    "PLAYLIST_AUTO_SYNC": {
+        "section": "Playlists & Download Providers",
+        "default": "1",
+        "description": "Enable automated background playlist acquisition and sync",
+        "secret": False,
+        "editable": True,
+        "restart_required": False,
+        "type": "boolean",
+    },
+    "PLAYLIST_AUTO_SYNC_INTERVAL": {
+        "section": "Playlists & Download Providers",
+        "default": "300",
+        "description": "Background playlist synchronization interval in seconds",
+        "secret": False,
+        "editable": True,
+        "restart_required": False,
+        "type": "integer",
+    },
+    "PLAYLIST_DOWNLOAD_METHODS": {
+        "section": "Playlists & Download Providers",
+        "default": "slskd,spotiflac,ytdlp,soundcloud",
+        "description": "Priority order of acquisition providers for missing tracks",
+        "secret": False,
+        "editable": True,
+        "restart_required": False,
+        "type": "string",
+    },
+    "PLAYLIST_MIN_DOWNLOAD_SECONDS": {
+        "section": "Playlists & Download Providers",
+        "default": "45",
+        "description": "Minimum pacing delay in seconds between download requests",
+        "secret": False,
+        "editable": True,
+        "restart_required": False,
+        "type": "integer",
+    },
+    "YTDLP_JS_RUNTIMES": {
+        "section": "Playlists & Download Providers",
+        "default": "deno,node,quickjs",
+        "description": "JavaScript runtime engines for yt-dlp signature extraction",
+        "secret": False,
+        "editable": True,
+        "restart_required": False,
+        "type": "string",
+    },
+    "SPOTIFLAC_SERVICES": {
+        "section": "Playlists & Download Providers",
+        "default": "spotify,deezer,tidal,qobuz",
+        "description": "Streaming services supported by spotiflac acquisition provider",
+        "secret": False,
+        "editable": True,
+        "restart_required": False,
+        "type": "string",
     },
 }
 
@@ -672,328 +982,373 @@ def _resolve_setting_item(
     section = meta.get("section") or "General"
     default_val = meta.get("default")
     container_path = meta.get("container_path")
+    host_path = meta.get("host_path")
     description = meta.get("description")
     editable = meta.get("editable", True)
-    # Whether /api/setup/env/<name>/reveal can ever return a plaintext value
-    # for this setting -- only meaningful when secret is True. Defaults to
-    # False so a name with no curated metadata (secret via _is_secret_env's
-    # name-pattern heuristic alone) is never revealable by default.
+    restart_required = bool(meta.get("restart_required", False))
+    var_type = meta.get("type") or ("secret" if secret else "string")
     revealable = bool(secret and meta.get("revealable"))
 
     persisted_val = persisted.get(name, "").strip() if name in persisted else ""
+    has_persisted = name in persisted and bool(persisted_val)
     env_val = os.environ.get(name, "").strip()
 
     # 1. BEETS_WEB_PASSWORD
     if name == "BEETS_WEB_PASSWORD":
-        password_configured = False
-        password_source = "not_configured"
-        if env_val:
-            password_configured = True
-            password_source = "environment"
-        else:
-            pass_file = _PERSISTED_BROWSER_PASSWORD_FILE
-            init_file = _INITIAL_BROWSER_PASSWORD_FILE
-            try:
-                import sys
-                app_m = sys.modules.get("app")
-                if app_m and hasattr(app_m, "_PERSISTED_BROWSER_PASSWORD_FILE"):
-                    pass_file = getattr(app_m, "_PERSISTED_BROWSER_PASSWORD_FILE")
-                if app_m and hasattr(app_m, "_INITIAL_BROWSER_PASSWORD_FILE"):
-                    init_file = getattr(app_m, "_INITIAL_BROWSER_PASSWORD_FILE")
-            except Exception:
-                pass
+        pass_file = _PERSISTED_BROWSER_PASSWORD_FILE
+        init_file = _INITIAL_BROWSER_PASSWORD_FILE
+        try:
+            import sys
+            app_m = sys.modules.get("app")
+            if app_m and hasattr(app_m, "_PERSISTED_BROWSER_PASSWORD_FILE"):
+                pass_file = getattr(app_m, "_PERSISTED_BROWSER_PASSWORD_FILE")
+            if app_m and hasattr(app_m, "_INITIAL_BROWSER_PASSWORD_FILE"):
+                init_file = getattr(app_m, "_INITIAL_BROWSER_PASSWORD_FILE")
+        except Exception:
+            pass
 
-            if pass_file and pass_file.exists() and pass_file.stat().st_size > 0:
-                password_configured = True
-                password_source = "persisted"
-            elif init_file and init_file.exists() and init_file.stat().st_size > 0:
-                password_configured = True
-                password_source = "persisted"
-            elif persisted_val:
-                password_configured = True
-                password_source = "persisted"
+        has_stored = bool((pass_file and pass_file.exists() and pass_file.stat().st_size > 0) or
+                          (init_file and init_file.exists() and init_file.stat().st_size > 0) or
+                          has_persisted)
+        configured = bool(env_val or has_stored)
+        source = "environment" if env_val else ("persisted" if has_stored else "not_configured")
+        is_overridden = bool(env_val and has_stored)
 
-        value = "********" if password_configured else ""
         return {
             "name": name,
             "section": section,
             "secret": True,
-            "revealable": revealable,
-            "configured": password_configured,
-            "editable": editable,
-            "value": value,
+            "revealable": False,
+            "configured": configured,
+            "editable": True,
+            "restart_required": False,
+            "type": "password",
+            "value": "********" if configured else "",
             "effective_value": None,
-            "default": default_val,
+            "saved_value": "********" if has_stored else None,
+            "has_saved_value": has_stored,
+            "is_overridden": is_overridden,
+            "default": None,
             "container_path": container_path,
-            "description": description,
-            "source": password_source,
-            "has_value": password_configured,
+            "host_path": host_path,
+            "description": description or "Password for browser login (stored securely as a one-way hash)",
+            "source": source,
+            "status_message": "Stored as a one-way password hash" if configured else "Not configured",
+            "has_value": configured,
             "runtime_has_value": bool(env_val),
-            "runtime_value": _mask(env_val) if env_val else "",
+            "runtime_value": "********" if env_val else "",
         }
 
     # 2. BEETS_WEB_AUTH_TOKEN
     if name == "BEETS_WEB_AUTH_TOKEN":
-        token_configured = False
-        token_source = "not_configured"
-        if env_val:
-            token_configured = True
-            token_source = "environment"
-        else:
-            token_file = _GENERATED_AUTH_TOKEN_FILE
-            try:
-                import sys
-                app_m = sys.modules.get("app")
-                if app_m and hasattr(app_m, "_GENERATED_AUTH_TOKEN_FILE"):
-                    token_file = getattr(app_m, "_GENERATED_AUTH_TOKEN_FILE")
-            except Exception:
-                pass
+        token_file = _GENERATED_AUTH_TOKEN_FILE
+        try:
+            import sys
+            app_m = sys.modules.get("app")
+            if app_m and hasattr(app_m, "_GENERATED_AUTH_TOKEN_FILE"):
+                token_file = getattr(app_m, "_GENERATED_AUTH_TOKEN_FILE")
+        except Exception:
+            pass
+        has_stored = bool(has_persisted or
+                          (token_file and token_file.exists() and token_file.stat().st_size > 0) or
+                          (_FALLBACK_AUTH_TOKEN_FILE.exists() and _FALLBACK_AUTH_TOKEN_FILE.stat().st_size > 0))
+        configured = bool(env_val or has_stored)
+        source = "environment" if env_val else ("persisted" if has_stored else "not_configured")
+        is_overridden = bool(env_val and has_stored)
 
-            if token_file and token_file.exists() and token_file.stat().st_size > 0:
-                token_configured = True
-                token_source = "persisted"
-            elif _FALLBACK_AUTH_TOKEN_FILE.exists() and _FALLBACK_AUTH_TOKEN_FILE.stat().st_size > 0:
-                token_configured = True
-                token_source = "persisted"
-            elif persisted_val:
-                token_configured = True
-                token_source = "persisted"
-
-        value = _mask(persisted_val or env_val) if (persisted_val or env_val) else ("********" if token_configured else "")
         return {
             "name": name,
             "section": section,
             "secret": True,
-            "revealable": revealable,
-            "configured": token_configured,
+            "revealable": True,
+            "configured": configured,
             "editable": editable,
-            "value": value,
+            "restart_required": False,
+            "type": "secret",
+            "value": "********" if configured else "",
             "effective_value": None,
+            "saved_value": "********" if has_stored else None,
+            "has_saved_value": has_stored,
+            "is_overridden": is_overridden,
             "default": default_val,
             "container_path": container_path,
+            "host_path": host_path,
             "description": description,
-            "source": token_source,
-            "has_value": token_configured,
+            "source": source,
+            "status_message": "Active (Environment)" if source == "environment" else ("Saved" if configured else "Not configured"),
+            "has_value": configured,
             "runtime_has_value": bool(env_val),
-            "runtime_value": _mask(env_val) if env_val else "",
+            "runtime_value": "********" if env_val else "",
         }
 
     # 3. BEETS_WEB_USERNAME
     if name == "BEETS_WEB_USERNAME":
-        username_val = ""
-        username_source = "default"
-        if env_val:
-            username_val = env_val
-            username_source = "environment"
-        else:
-            user_file = _PERSISTED_BROWSER_USERNAME_FILE
+        user_file = _PERSISTED_BROWSER_USERNAME_FILE
+        try:
+            import sys
+            app_m = sys.modules.get("app")
+            if app_m and hasattr(app_m, "_PERSISTED_BROWSER_USERNAME_FILE"):
+                user_file = getattr(app_m, "_PERSISTED_BROWSER_USERNAME_FILE")
+        except Exception:
+            pass
+        file_user = ""
+        if user_file and user_file.exists():
             try:
-                import sys
-                app_m = sys.modules.get("app")
-                if app_m and hasattr(app_m, "_PERSISTED_BROWSER_USERNAME_FILE"):
-                    user_file = getattr(app_m, "_PERSISTED_BROWSER_USERNAME_FILE")
+                file_user = user_file.read_text(encoding="utf-8", errors="ignore").splitlines()[0].strip()
             except Exception:
                 pass
+        saved_val = file_user or persisted_val or None
+        has_saved = bool(saved_val)
 
-            if user_file and user_file.exists():
-                try:
-                    u = user_file.read_text(encoding="utf-8", errors="ignore").splitlines()[0].strip()
-                    if u:
-                        username_val = u
-                        username_source = "persisted"
-                except Exception:
-                    pass
-            if not username_val and persisted_val:
-                username_val = persisted_val
-                username_source = "persisted"
-            elif not username_val:
-                username_val = "admin"
-                username_source = "default"
+        if env_val:
+            eff_val = env_val
+            source = "environment"
+            is_overridden = bool(saved_val and saved_val != env_val)
+        elif saved_val:
+            eff_val = saved_val
+            source = "persisted"
+            is_overridden = False
+        else:
+            eff_val = "admin"
+            source = "default"
+            is_overridden = False
 
         return {
             "name": name,
             "section": section,
             "secret": False,
-            "revealable": revealable,
+            "revealable": False,
             "configured": True,
             "editable": editable,
-            "value": username_val,
-            "effective_value": username_val,
+            "restart_required": False,
+            "type": "string",
+            "value": eff_val,
+            "effective_value": eff_val,
+            "saved_value": saved_val,
+            "has_saved_value": has_saved,
+            "is_overridden": is_overridden,
             "default": "admin",
             "container_path": container_path,
+            "host_path": host_path,
             "description": description,
-            "source": username_source,
+            "source": source,
+            "status_message": f"Docker environment overrides saved username ({saved_val})" if is_overridden else "Active",
             "has_value": True,
             "runtime_has_value": bool(env_val),
-            "runtime_value": env_val or username_val,
+            "runtime_value": env_val or eff_val,
         }
 
     # 4. PUID / PGID
     if name in ("PUID", "PGID"):
-        val = ""
-        src = "default"
-        if env_val:
-            val = env_val
-            src = "environment"
-        elif persisted_val:
-            val = persisted_val
-            src = "persisted"
-        elif name == "PUID" and hasattr(os, "getuid"):
+        runtime_detected = None
+        if name == "PUID" and hasattr(os, "getuid"):
             try:
-                val = str(os.getuid())
-                src = "runtime"
+                runtime_detected = str(os.getuid())
             except Exception:
-                val = "1000"
-                src = "default"
+                pass
         elif name == "PGID" and hasattr(os, "getgid"):
             try:
-                val = str(os.getgid())
-                src = "runtime"
+                runtime_detected = str(os.getgid())
             except Exception:
-                val = "1000"
-                src = "default"
+                pass
+
+        saved_val = persisted_val or None
+        has_saved = bool(saved_val)
+
+        if env_val:
+            eff_val = env_val
+            source = "environment"
+            is_overridden = bool(saved_val and saved_val != env_val)
+        elif saved_val:
+            eff_val = saved_val
+            source = "persisted"
+            is_overridden = False
+        elif runtime_detected:
+            eff_val = runtime_detected
+            source = "runtime"
+            is_overridden = False
         else:
-            val = "1000"
-            src = "default"
+            eff_val = "1000"
+            source = "default"
+            is_overridden = False
 
         return {
             "name": name,
             "section": section,
             "secret": False,
-            "revealable": revealable,
+            "revealable": False,
             "configured": True,
             "editable": editable,
-            "value": val,
-            "effective_value": val,
+            "restart_required": True,
+            "type": "string",
+            "value": eff_val,
+            "effective_value": eff_val,
+            "saved_value": saved_val,
+            "has_saved_value": has_saved,
+            "is_overridden": is_overridden,
             "default": "1000",
             "container_path": container_path,
+            "host_path": host_path,
             "description": description,
-            "source": src,
+            "source": source,
+            "status_message": f"Docker environment overrides saved value ({saved_val})" if is_overridden else ("Saved — restart required" if source == "persisted" else "Active"),
             "has_value": True,
             "runtime_has_value": bool(env_val),
-            "runtime_value": env_val or val,
+            "runtime_value": env_val or eff_val,
         }
 
     # 5. TZ
     if name == "TZ":
-        val = ""
-        src = "default"
+        detected_tz = _detect_system_timezone()
+        saved_val = persisted_val or None
+        has_saved = bool(saved_val)
+
         if env_val:
-            val = env_val
-            src = "environment"
-        elif persisted_val:
-            val = persisted_val
-            src = "persisted"
+            eff_val = env_val
+            source = "environment"
+            is_overridden = bool(saved_val and saved_val != env_val)
+        elif saved_val:
+            eff_val = saved_val
+            source = "persisted"
+            is_overridden = False
+        elif detected_tz:
+            eff_val = detected_tz
+            source = "runtime"
+            is_overridden = False
         else:
-            detected = _detect_system_timezone()
-            if detected:
-                val = detected
-                src = "runtime"
-            else:
-                val = "UTC"
-                src = "default"
+            eff_val = "UTC"
+            source = "default"
+            is_overridden = False
 
         return {
             "name": name,
             "section": section,
             "secret": False,
-            "revealable": revealable,
+            "revealable": False,
             "configured": True,
             "editable": editable,
-            "value": val,
-            "effective_value": val,
+            "restart_required": True,
+            "type": "string",
+            "value": eff_val,
+            "effective_value": eff_val,
+            "saved_value": saved_val,
+            "has_saved_value": has_saved,
+            "is_overridden": is_overridden,
             "default": "UTC",
             "container_path": container_path,
+            "host_path": host_path,
             "description": description,
-            "source": src,
+            "source": source,
+            "status_message": f"Docker environment overrides saved timezone ({saved_val})" if is_overridden else ("Saved — restart required" if source == "persisted" else "Active"),
             "has_value": True,
             "runtime_has_value": bool(env_val),
-            "runtime_value": env_val or val,
+            "runtime_value": env_val or eff_val,
         }
 
     # 6. AI_BASE_URL
     if name == "AI_BASE_URL":
-        val = ""
-        src = "default"
+        saved_val = persisted_val or None
+        has_saved = bool(saved_val)
         if env_val:
-            val = env_val
-            src = "environment"
-        elif persisted_val:
-            val = persisted_val
-            src = "persisted"
+            eff_val = env_val
+            source = "environment"
+            is_overridden = bool(saved_val and saved_val != env_val)
+        elif saved_val:
+            eff_val = saved_val
+            source = "persisted"
+            is_overridden = False
         elif (os.environ.get("OPENROUTER_API_KEY") or persisted.get("OPENROUTER_API_KEY")) and not (os.environ.get("OPENAI_API_KEY") or persisted.get("OPENAI_API_KEY")):
-            val = "https://openrouter.ai/api/v1"
-            src = "default"
+            eff_val = "https://openrouter.ai/api/v1"
+            source = "default"
+            is_overridden = False
         else:
-            val = "https://api.openai.com/v1"
-            src = "default"
+            eff_val = "https://api.openai.com/v1"
+            source = "default"
+            is_overridden = False
 
         return {
             "name": name,
             "section": section,
             "secret": False,
-            "revealable": revealable,
+            "revealable": False,
             "configured": True,
             "editable": editable,
-            "value": val,
-            "effective_value": val,
+            "restart_required": False,
+            "type": "string",
+            "value": eff_val,
+            "effective_value": eff_val,
+            "saved_value": saved_val,
+            "has_saved_value": has_saved,
+            "is_overridden": is_overridden,
             "default": "https://api.openai.com/v1",
             "container_path": container_path,
+            "host_path": host_path,
             "description": description,
-            "source": src,
+            "source": source,
+            "status_message": f"Docker environment overrides saved value ({saved_val})" if is_overridden else "Active",
             "has_value": True,
             "runtime_has_value": bool(env_val),
-            "runtime_value": env_val or val,
+            "runtime_value": env_val or eff_val,
         }
 
     # 7. AI_MODEL
     if name == "AI_MODEL":
-        val = ""
-        src = "default"
+        saved_val = persisted_val or None
+        has_saved = bool(saved_val)
         if env_val:
-            val = env_val
-            src = "environment"
-        elif persisted_val:
-            val = persisted_val
-            src = "persisted"
+            eff_val = env_val
+            source = "environment"
+            is_overridden = bool(saved_val and saved_val != env_val)
+        elif saved_val:
+            eff_val = saved_val
+            source = "persisted"
+            is_overridden = False
         elif (os.environ.get("OPENROUTER_API_KEY") or persisted.get("OPENROUTER_API_KEY")) and not (os.environ.get("OPENAI_API_KEY") or persisted.get("OPENAI_API_KEY")):
-            val = "openai/gpt-4o-mini"
-            src = "default"
+            eff_val = "openai/gpt-4o-mini"
+            source = "default"
+            is_overridden = False
         else:
-            val = "gpt-4o-mini"
-            src = "default"
+            eff_val = "gpt-4o-mini"
+            source = "default"
+            is_overridden = False
 
         return {
             "name": name,
             "section": section,
             "secret": False,
-            "revealable": revealable,
+            "revealable": False,
             "configured": True,
             "editable": editable,
-            "value": val,
-            "effective_value": val,
+            "restart_required": False,
+            "type": "string",
+            "value": eff_val,
+            "effective_value": eff_val,
+            "saved_value": saved_val,
+            "has_saved_value": has_saved,
+            "is_overridden": is_overridden,
             "default": "gpt-4o-mini",
             "container_path": container_path,
+            "host_path": host_path,
             "description": description,
-            "source": src,
+            "source": source,
+            "status_message": f"Docker environment overrides saved value ({saved_val})" if is_overridden else "Active",
             "has_value": True,
             "runtime_has_value": bool(env_val),
-            "runtime_value": env_val or val,
+            "runtime_value": env_val or eff_val,
         }
 
     # 8. Generic Secret Variable
     if secret:
-        configured = False
-        src = "not_configured"
-        masked_val = ""
-        if env_val:
-            configured = True
-            src = "environment"
-            masked_val = _mask(env_val)
-        elif persisted_val:
-            configured = True
-            src = "persisted"
-            masked_val = _mask(persisted_val)
+        has_stored = has_persisted
+        if name == "SLSKD_API_KEY":
+            slskd_key_file = Path(os.environ.get("SLSKD_API_KEY_FILE", "/config/slskd_api_key"))
+            if slskd_key_file.exists() and slskd_key_file.stat().st_size > 0:
+                has_stored = True
+
+        configured = bool(env_val or has_stored)
+        source = "environment" if env_val else ("persisted" if has_stored else "not_configured")
+        is_overridden = bool(env_val and has_stored)
+        masked_val = _mask(env_val or persisted_val) if configured else ""
 
         return {
             "name": name,
@@ -1002,50 +1357,68 @@ def _resolve_setting_item(
             "revealable": revealable,
             "configured": configured,
             "editable": editable,
+            "restart_required": restart_required,
+            "type": "secret",
             "value": masked_val,
             "effective_value": None,
+            "saved_value": "••••••••••••••••" if has_stored else None,
+            "has_saved_value": has_stored,
+            "is_overridden": is_overridden,
             "default": default_val,
             "container_path": container_path,
+            "host_path": host_path,
             "description": description,
-            "source": src,
+            "source": source,
+            "status_message": "Docker environment overrides saved key" if is_overridden else ("Configured" if configured else "Not configured"),
             "has_value": configured,
             "runtime_has_value": bool(env_val),
             "runtime_value": _mask(env_val) if env_val else "",
         }
 
     # 9. Generic Non-Secret Variable
-    val = ""
-    configured = False
-    src = "not_configured"
+    saved_val = persisted_val or None
+    has_saved = bool(saved_val)
     if env_val:
-        val = env_val
-        configured = True
-        src = "environment"
-    elif persisted_val:
-        val = persisted_val
-        configured = True
-        src = "persisted"
+        eff_val = env_val
+        source = "environment"
+        is_overridden = bool(saved_val and saved_val != env_val)
+    elif saved_val:
+        eff_val = saved_val
+        source = "persisted"
+        is_overridden = False
     elif default_val is not None and default_val != "":
-        val = str(default_val)
-        configured = True
-        src = "default"
+        eff_val = str(default_val)
+        source = "default"
+        is_overridden = False
+    else:
+        eff_val = ""
+        source = "not_configured"
+        is_overridden = False
 
+    configured = bool(eff_val)
     return {
         "name": name,
         "section": section,
         "secret": False,
-        "revealable": revealable,
+        "revealable": False,
         "configured": configured,
         "editable": editable,
-        "value": val,
-        "effective_value": val,
+        "restart_required": restart_required,
+        "type": var_type,
+        "value": eff_val,
+        "effective_value": eff_val,
+        "saved_value": saved_val,
+        "has_saved_value": has_saved,
+        "is_overridden": is_overridden,
         "default": default_val,
         "container_path": container_path,
+        "host_path": host_path,
         "description": description,
-        "source": src,
-        "has_value": bool(val),
+        "source": source,
+        "status_message": f"Docker environment overrides saved value ({saved_val})" if is_overridden else ("Saved — restart required" if (source == "persisted" and restart_required) else ("Active" if configured else "Not configured")),
+        "has_value": configured,
         "runtime_has_value": bool(env_val),
-        "runtime_value": env_val or val,
+        "runtime_value": env_val or eff_val,
     }
 
 
@@ -1059,25 +1432,17 @@ def _env_catalog() -> Dict[str, Dict[str, Any]]:
         if key in _BLOCKED_ENV_NAMES:
             continue
         meta = _SETTING_METADATA.get(key, {})
-        # A curated metadata entry's own "default" (including an explicit
-        # None, as used by the host-only path variables -- see
-        # BEETS_CONFIG_PATH et al. above) is authoritative and must win over
-        # whatever literal placeholder .env.example happens to write for
-        # that same key (e.g. "MUSIC_PATH=./music"): .env.example is a
-        # template for a *host* .env file, not a statement about what this
-        # running container can actually see, and showing its value as the
-        # System page's "default" for a variable the app can never read
-        # fabricates a value the app does not have. Curated metadata always
-        # sets "default" explicitly, so .env.example's parsed value is only
-        # ever used as a fallback default for variables with no metadata.
         catalog[key] = {
             "name": key,
             "section": meta.get("section") or entry.get("section") or "General",
             "default": meta.get("default", values.get(key, "")),
             "secret": meta.get("secret", _is_secret_env(key)),
             "container_path": meta.get("container_path"),
+            "host_path": meta.get("host_path"),
             "description": meta.get("description"),
             "editable": meta.get("editable", True),
+            "restart_required": bool(meta.get("restart_required", False)),
+            "type": meta.get("type") or ("secret" if meta.get("secret") else "string"),
             "revealable": bool(meta.get("secret", False) and meta.get("revealable")),
         }
     for key, meta in _SETTING_METADATA.items():
@@ -1088,8 +1453,11 @@ def _env_catalog() -> Dict[str, Dict[str, Any]]:
                 "default": meta.get("default", ""),
                 "secret": meta.get("secret", _is_secret_env(key)),
                 "container_path": meta.get("container_path"),
+                "host_path": meta.get("host_path"),
                 "description": meta.get("description"),
                 "editable": meta.get("editable", True),
+                "restart_required": bool(meta.get("restart_required", False)),
+                "type": meta.get("type") or ("secret" if meta.get("secret") else "string"),
                 "revealable": bool(meta.get("secret", False) and meta.get("revealable")),
             }
     return catalog
@@ -1116,8 +1484,11 @@ def _setup_env_payload(extra: Dict[str, Any] | None = None) -> Dict[str, Any]:
                 "default": meta.get("default", ""),
                 "secret": meta.get("secret", _is_secret_env(key)),
                 "container_path": meta.get("container_path"),
+                "host_path": meta.get("host_path"),
                 "description": meta.get("description"),
                 "editable": meta.get("editable", True),
+                "restart_required": bool(meta.get("restart_required", False)),
+                "type": meta.get("type") or ("secret" if meta.get("secret") else "string"),
                 "revealable": bool(meta.get("secret", False) and meta.get("revealable")),
             }
             names.append(key)
@@ -1163,10 +1534,10 @@ def _resolve_secret_effective_value(name: str) -> Optional[str]:
 
     _, persisted, _ = _load_env_file()
     persisted_val = persisted.get(name, "").strip()
+    if persisted_val:
+        return persisted_val
 
     if name == "BEETS_WEB_AUTH_TOKEN":
-        if persisted_val:
-            return persisted_val
         token_file = _GENERATED_AUTH_TOKEN_FILE
         try:
             import sys
@@ -1185,11 +1556,17 @@ def _resolve_secret_effective_value(name: str) -> Optional[str]:
                 pass
         return None
 
-    # Every other revealable secret (OPENAI_API_KEY, PLEX_TOKEN, etc.) is
-    # written only through the generic .env-style persistence path -- no
-    # dedicated file, no hashing -- so the persisted .env value (already
-    # checked above for the non-empty-environment case) is the only other
-    # place it can live.
+    if name == "SLSKD_API_KEY":
+        slskd_key_file = Path(os.environ.get("SLSKD_API_KEY_FILE", "/config/slskd_api_key"))
+        try:
+            if slskd_key_file.exists():
+                val = slskd_key_file.read_text(encoding="utf-8").strip()
+                if val:
+                    return val
+        except Exception:
+            pass
+        return None
+
     return persisted_val or None
 
 

@@ -86,18 +86,38 @@ function initialFormValues(variables: SetupEnvVariable[]): Record<string, string
   return values;
 }
 
+const CANONICAL_SECTION_ORDER = [
+  'System & Environment',
+  'Authentication & Security',
+  'AI & LLM Services',
+  'Beets Core & Engine',
+  'Storage & Paths',
+  'Music Services & Metadata',
+  'Media Server Integrations',
+  'Playlists & Download Providers',
+];
+
 function groupVariables(variables: SetupEnvVariable[]): Array<[string, SetupEnvVariable[]]> {
-  const order: string[] = [];
   const groups: Record<string, SetupEnvVariable[]> = {};
   for (const variable of variables) {
-    const section = variable.section || 'General';
+    const section = variable.section || 'System & Environment';
     if (!groups[section]) {
       groups[section] = [];
-      order.push(section);
     }
     groups[section].push(variable);
   }
-  return order.map((section) => [section, groups[section]]);
+  const orderedSections: string[] = [];
+  for (const sec of CANONICAL_SECTION_ORDER) {
+    if (groups[sec]) {
+      orderedSections.push(sec);
+    }
+  }
+  for (const sec of Object.keys(groups)) {
+    if (!orderedSections.includes(sec)) {
+      orderedSections.push(sec);
+    }
+  }
+  return orderedSections.map((section) => [section, groups[section]]);
 }
 
 function StatusCard({
@@ -350,21 +370,30 @@ function EnvVariableRow({
   const canReveal = variable.secret && variable.revealable === true && variable.configured;
   const isRevealed = revealedValue !== undefined;
   const [copied, setCopied] = useState(false);
+  const [isChangingPassword, setIsChangingPassword] = useState(false);
+
+  const isPassword = variable.name === 'BEETS_WEB_PASSWORD';
 
   return (
-    <div className="grid gap-3 rounded border border-graphite-800 bg-graphite-950/35 p-3 lg:grid-cols-[minmax(14rem,20rem)_minmax(0,1fr)_auto]">
+    <div className="grid gap-3 rounded border border-graphite-800 bg-graphite-950/35 p-3.5 lg:grid-cols-[minmax(14rem,22rem)_minmax(0,1fr)_auto]">
       <div className="min-w-0">
-        <div className="break-all text-[0.78rem] font-semibold text-zinc-200">{variable.name}</div>
-        <div className="mt-1 flex flex-wrap gap-1.5 text-[0.68rem] font-semibold">
+        <div className="break-all text-[0.80rem] font-semibold text-zinc-100">{variable.name}</div>
+        <div className="mt-1.5 flex flex-wrap gap-1.5 text-[0.68rem] font-semibold">
           <span className={`rounded px-1.5 py-0.5 ${badge.className}`}>{badge.label}</span>
           {variable.secret && (
             <span className="rounded bg-red-950/50 px-1.5 py-0.5 text-red-200 border border-red-800/50">secret</span>
           )}
-          {variable.secret && variable.configured && !clear && value === '' && (
+          {variable.configured && !clear && value === '' && (
             <span className="rounded bg-emerald-950/50 px-1.5 py-0.5 text-emerald-300 border border-emerald-800/50">Configured</span>
           )}
-          {variable.secret && !variable.configured && !clear && value === '' && (
+          {!variable.configured && !clear && value === '' && (
             <span className="rounded bg-zinc-900 px-1.5 py-0.5 text-zinc-400 border border-zinc-800">Not configured</span>
+          )}
+          {variable.restart_required && (
+            <span className="rounded bg-purple-950/50 px-1.5 py-0.5 text-purple-300 border border-purple-800/50">Restart required</span>
+          )}
+          {variable.is_overridden && (
+            <span className="rounded bg-amber-950/60 px-1.5 py-0.5 text-amber-300 border border-amber-800/60">Overridden</span>
           )}
           {variable.secret && value !== '' && !clear && (
             <span className="rounded bg-amber-950/60 px-1.5 py-0.5 text-amber-300 border border-amber-800/60">Will replace existing value</span>
@@ -378,26 +407,16 @@ function EnvVariableRow({
           {notEditable && (
             <span className="rounded bg-zinc-900 px-1.5 py-0.5 text-zinc-400 border border-zinc-800">not editable here</span>
           )}
-          {canReveal && !clear && value === '' && (
-            <button
-              type="button"
-              onClick={() => (isRevealed ? onHide() : onShow())}
-              disabled={revealing}
-              className="rounded bg-graphite-800 px-1.5 py-0.5 text-zinc-300 border border-graphite-700 hover:bg-graphite-700 disabled:opacity-50"
-            >
-              {revealing ? 'Revealing…' : isRevealed ? '🙈 Hide' : '👁 Show'}
-            </button>
-          )}
-          {variable.secret && variable.configured && variable.revealable === false && !clear && value === '' && (
-            <span className="rounded bg-zinc-900 px-1.5 py-0.5 text-zinc-500 border border-zinc-800" title="Stored only as a hash; the original value cannot be recovered">
-              not recoverable
-            </span>
-          )}
         </div>
-        <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5 text-[0.70rem] text-zinc-400">
+        <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[0.72rem] text-zinc-400">
           {variable.container_path && (
             <span>
               <span className="text-zinc-500">Container:</span> <code className="text-zinc-300">{variable.container_path}</code>
+            </span>
+          )}
+          {variable.host_path && (
+            <span>
+              <span className="text-zinc-500">Host:</span> <code className="text-zinc-300">{variable.host_path}</code>
             </span>
           )}
           {variable.default !== null && variable.default !== undefined && variable.default !== '' && (
@@ -406,57 +425,135 @@ function EnvVariableRow({
             </span>
           )}
           {variable.description && (
-            <span className="text-zinc-400">{variable.description}</span>
+            <div className="w-full text-zinc-400 leading-relaxed mt-0.5">{variable.description}</div>
           )}
         </div>
+
+        {variable.is_overridden && (
+          <div className="mt-2 rounded border border-amber-800/50 bg-amber-950/30 p-2 text-[0.70rem] text-amber-200">
+            <div className="font-semibold text-amber-300">⚠️ Environment overrides saved configuration</div>
+            <div className="mt-0.5 font-mono text-zinc-300">
+              <span>Running: </span>
+              <strong className="text-amber-200">{variable.effective_value || '(set in environment)'}</strong>
+              {variable.saved_value && (
+                <>
+                  <span className="mx-1.5 text-zinc-600">|</span>
+                  <span>Saved: </span>
+                  <span className="text-zinc-400">{variable.saved_value}</span>
+                </>
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
-      <div className="min-w-0">
+      <div className="min-w-0 flex flex-col justify-center">
+        {/* Reveal display area */}
         {isRevealed && (
-          <div className="mb-1.5 flex items-center gap-2 rounded border border-emerald-800/60 bg-emerald-950/20 p-2">
-            <code className="min-w-0 flex-1 break-all font-mono text-[0.76rem] text-emerald-300">{revealedValue}</code>
+          <div className="mb-2 flex items-center gap-2 rounded border border-emerald-700/70 bg-emerald-950/40 p-2 text-xs">
+            <span className="font-mono text-[0.70rem] font-bold text-emerald-400">VALUE:</span>
+            <code className="min-w-0 flex-1 break-all font-mono text-xs text-emerald-200 select-all font-semibold">
+              {revealedValue}
+            </code>
             <Button
               size="small"
-              variant="text"
+              variant="outlined"
               onClick={() => {
                 void navigator.clipboard?.writeText(revealedValue).then(() => setCopied(true)).catch(() => undefined);
               }}
             >
-              {copied ? 'Copied' : 'Copy'}
+              {copied ? '✓ Copied' : 'Copy'}
             </Button>
-            <Button size="small" variant="text" onClick={onHide}>Hide</Button>
+            <Button size="small" variant="text" onClick={onHide}>
+              Hide
+            </Button>
           </div>
         )}
+
         {revealError && !isRevealed && (
-          <div className="mb-1.5 text-[0.7rem] text-red-300">{revealError}</div>
+          <div className="mb-1.5 text-[0.72rem] text-red-300">{revealError}</div>
         )}
-        <TextField
-          fullWidth
-          disabled={clear || notEditable}
-          size="small"
-          type={variable.secret ? 'password' : 'text'}
-          value={clear ? '' : value}
-          placeholder={
-            notEditable
-              ? 'Set on the host via .env / docker-compose.yml, not here'
-              : clear
-              ? 'Will be removed on save'
-              : variable.secret
-              ? variable.configured
-                ? '••••••••••••••••'
-                : 'Not configured (enter new value)'
-              : variable.default
-              ? `Default: ${variable.default}`
-              : 'Not configured'
-          }
-          onChange={(event) => onValue(event.target.value)}
-        />
-        {variable.name === 'BEETS_WEB_PASSWORD' && !clear && value === '' && variable.configured && (
-          <div className="mt-1 text-[0.7rem] text-zinc-500">
-            Stored as a password hash and cannot be shown. Type a new password below to change it.
+
+        {/* 1. BEETS_WEB_PASSWORD Special Row */}
+        {isPassword ? (
+          <div>
+            {!isChangingPassword && value === '' && !clear ? (
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded border border-graphite-800 bg-graphite-900/60 p-2 text-xs text-zinc-300">
+                <span className="text-zinc-400">
+                  {variable.configured ? 'Stored securely as a one-way password hash.' : 'No browser password configured.'}
+                </span>
+                <Button
+                  size="small"
+                  variant="outlined"
+                  onClick={() => setIsChangingPassword(true)}
+                >
+                  {variable.configured ? 'Change Password' : 'Set Password'}
+                </Button>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <TextField
+                  fullWidth
+                  autoFocus
+                  size="small"
+                  type="password"
+                  value={value}
+                  placeholder="Enter new password (min 8 chars, mixed case/numbers)"
+                  onChange={(event) => onValue(event.target.value)}
+                />
+                {value !== '' && <PasswordStrengthMeter value={value} />}
+                <div className="flex justify-end">
+                  <Button
+                    size="small"
+                    variant="text"
+                    onClick={() => {
+                      onValue('');
+                      setIsChangingPassword(false);
+                    }}
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            )}
+          </div>
+        ) : (
+          /* 2. Generic Input Row */
+          <div className="flex items-center gap-2">
+            <TextField
+              fullWidth
+              disabled={clear || notEditable}
+              size="small"
+              type={variable.secret ? 'password' : 'text'}
+              value={clear ? '' : value}
+              placeholder={
+                notEditable
+                  ? 'Set on the host via .env / docker-compose.yml'
+                  : clear
+                  ? 'Will be removed on save'
+                  : variable.secret
+                  ? variable.configured
+                    ? '••••••••••••••••'
+                    : 'Not configured (enter new value)'
+                  : variable.default
+                  ? `Default: ${variable.default}`
+                  : 'Not configured'
+              }
+              onChange={(event) => onValue(event.target.value)}
+            />
+            {canReveal && !clear && value === '' && (
+              <Button
+                size="small"
+                variant="outlined"
+                onClick={() => (isRevealed ? onHide() : onShow())}
+                disabled={revealing}
+                sx={{ minWidth: '5.5rem', whiteSpace: 'nowrap', height: '36px' }}
+              >
+                {revealing ? 'Revealing…' : isRevealed ? '🙈 Hide' : '👁 Show'}
+              </Button>
+            )}
           </div>
         )}
-        {variable.name === 'BEETS_WEB_PASSWORD' && !clear && value !== '' && <PasswordStrengthMeter value={value} />}
       </div>
 
       <label className="flex items-center justify-end gap-1.5 text-[0.72rem] font-semibold text-zinc-400">
@@ -464,7 +561,13 @@ function EnvVariableRow({
           size="small"
           disabled={notEditable || (!variable.secret && !variable.configured && !variable.value) || (!variable.configured && value === '')}
           checked={clear}
-          onChange={(event) => onClear(event.target.checked)}
+          onChange={(event) => {
+            onClear(event.target.checked);
+            if (event.target.checked && isChangingPassword) {
+              setIsChangingPassword(false);
+              onValue('');
+            }
+          }}
         />
         Clear
       </label>
