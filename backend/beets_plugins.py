@@ -390,6 +390,9 @@ def provision_bundled_plugins(config_dir: Optional[Path | str] = None) -> List[s
     if not source_dir.exists():
         return provisioned
 
+    import shutil
+    import secrets
+
     for entry in source_dir.iterdir():
         if entry.is_file() and entry.suffix == ".py" and entry.name != "__init__.py":
             target_file = target_beetsplug_dir / entry.name
@@ -414,6 +417,31 @@ def provision_bundled_plugins(config_dir: Optional[Path | str] = None) -> List[s
                     raise RuntimeError(f"Failed to copy bundled plugin {entry.name}: {exc}") from exc
             else:
                 provisioned.append(entry.name)
+
+        elif entry.is_dir() and not entry.name.startswith((".", "_", "__pycache__")):
+            target_sub = target_beetsplug_dir / entry.name
+            target_sub.mkdir(parents=True, exist_ok=True)
+            for sub_entry in entry.rglob("*"):
+                if sub_entry.is_file() and not sub_entry.name.endswith(".pyc") and "__pycache__" not in sub_entry.parts:
+                    rel_p = sub_entry.relative_to(entry)
+                    dest_file = target_sub / rel_p
+                    dest_file.parent.mkdir(parents=True, exist_ok=True)
+                    if not dest_file.exists() or dest_file.read_bytes() != sub_entry.read_bytes():
+                        shutil.copy2(sub_entry, dest_file)
+            provisioned.append(entry.name)
+
+    # Ensure .webmanager_api_key file is provisioned in config directory
+    api_key_file = cfg_dir / ".webmanager_api_key"
+    if not api_key_file.exists():
+        try:
+            token = secrets.token_hex(32)
+            api_key_file.write_text(token + "\n", encoding="utf-8")
+            try:
+                os.chmod(api_key_file, 0o600)
+            except Exception:
+                pass
+        except Exception as ex:
+            log.warning("Could not create .webmanager_api_key in %s: %s", cfg_dir, ex)
 
     return provisioned
 
@@ -759,7 +787,9 @@ def verify_all_plugins(
 
     configured = set(parse_configured_plugins(config_text))
 
+    # ── [MIGRATION STATUS: REPLACE IN PHASE 2] ──────────────────────────────
     # Try to get live loaded plugins from supplied args, or remote beets_client, or in-process
+    # In Phase 2, this will query BeetsAdapter.get_plugin_status() on stock Beets.
     loaded: Set[str] = set(loaded_plugins) if loaded_plugins is not None else set()
     if not loaded and remote_status is not None:
         if isinstance(remote_status, dict):
@@ -823,37 +853,13 @@ def verify_all_plugins(
     }
 
 
+# ── [MIGRATION STATUS: DELETE WHEN LEGACY CALLERS REACH ZERO] ───────────────
+# Legacy embedded-control-agent probe. Retained strictly as migration scaffolding
+# until all callers switch to BeetsAdapter in Phase 2-4 and beets_control_agent is removed.
 def _force_fresh_loaded_plugins(max_wait_seconds: float = 95.0) -> Optional[Set[str]]:
     """Force and wait for a genuinely fresh `beet version` probe when
     running alongside the embedded Beets Control Agent in this same
     process, bypassing its normal cached/asynchronous diagnostics.
-
-    verify_all_plugins()'s own fallback chain (remote beets_client.get_status()
-    or an in-process `beets.plugins.find_plugins()` call) can both return a
-    snapshot taken BEFORE update_config_yaml_plugins() just wrote a new
-    config.yaml moments earlier in the same provisioning call -- the control
-    agent's diagnostics cache (and its own /status endpoint) are
-    deliberately non-blocking/asynchronous (a real `beet version` subprocess
-    can take tens of seconds; see backend/beets_control_agent.py's
-    _cached_beet_version_snapshot), so a caller that doesn't explicitly wait
-    for a fresh probe after changing the config will see the plugins that
-    were loaded under the OLD config, not the one that was just written --
-    reporting freshly-enabled required plugins as unhealthy purely from
-    cache staleness, not a real load failure.
-
-    Deliberately calls _cached_beet_version_snapshot(force=True, ...)
-    directly rather than going through the higher-level
-    get_loaded_beet_plugins() convenience wrapper: that wrapper never
-    passes force=True (it's designed for hot-path capability gating, where
-    reusing a cache still within its normal ~30s TTL is exactly the
-    intended behavior) -- called right after writing a new config, it can
-    return the still-TTL-fresh cache from BEFORE the change, which is
-    precisely the staleness bug this function exists to close.
-
-    Returns None (not an empty set) when not running embedded, so the
-    caller falls back to its normal remote/in-process discovery instead of
-    incorrectly reporting zero plugins loaded for a remote/external engine
-    this process has no local `beet` binary or relationship to.
     """
     try:
         from backend import beets_control_agent as _bca

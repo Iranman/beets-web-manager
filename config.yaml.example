@@ -1,4 +1,4 @@
-plugins: fetchart embedart scrub zero ftintitle fromfilename mbsync mbsubmit chroma replaygain lastgenre discpath musicbrainz listenbrainz
+plugins: web webmanager fetchart embedart scrub zero ftintitle fromfilename mbsync mbsubmit chroma replaygain lastgenre discpath musicbrainz listenbrainz
 pluginpath:
   - /config/beetsplug
 directory: /music
@@ -7,6 +7,21 @@ art_filename: albumart
 threaded: yes
 original_date: no
 per_disc_numbering: yes
+
+# ── Built-in Web Plugin (:8337) ──────────────────────────────────────────────
+web:
+    host: 0.0.0.0
+    port: 8337
+    readonly: yes
+    include_paths: yes
+
+# ── Web Manager Integration Plugin ───────────────────────────────────────────
+webmanager:
+    api_key_file: /config/.webmanager_api_key
+    allowed_roots:
+        - /music
+        - /downloads
+        - /web-manager-data
 
 convert:
     auto: no

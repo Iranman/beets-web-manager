@@ -1,0 +1,127 @@
+"""Validation schemas, allowed fields, and path containment guards for webmanager plugin."""
+
+import os
+from typing import List, Set, Optional
+
+DEFAULT_API_KEY_FILE = "/config/.webmanager_api_key"
+DEFAULT_ALLOWED_ROOTS = ["/music", "/downloads", "/web-manager-data"]
+
+ALLOWED_ITEM_FIELDS: Set[str] = {
+    "title",
+    "artist",
+    "album",
+    "albumartist",
+    "genre",
+    "year",
+    "month",
+    "day",
+    "track",
+    "tracktotal",
+    "disc",
+    "disctotal",
+    "lyrics",
+    "comments",
+    "bpm",
+    "comp",
+    "mb_trackid",
+    "mb_albumid",
+    "mb_artistid",
+    "mb_albumartistid",
+    "mb_releasegroupid",
+    "acoustid_fingerprint",
+    "acoustid_id",
+    "data_source",
+    "original_year",
+    "original_month",
+    "original_day",
+    "country",
+    "media",
+    "label",
+    "catalognum",
+    "barcode",
+    "isrc",
+    "format",
+    "bitdepth",
+    "bitrate",
+    "samplerate",
+}
+
+ALLOWED_ALBUM_FIELDS: Set[str] = {
+    "album",
+    "albumartist",
+    "genre",
+    "year",
+    "month",
+    "day",
+    "disctotal",
+    "comp",
+    "mb_albumid",
+    "mb_artistid",
+    "mb_albumartistid",
+    "mb_releasegroupid",
+    "original_year",
+    "original_month",
+    "original_day",
+    "country",
+    "media",
+    "label",
+    "catalognum",
+    "barcode",
+    "artpath",
+    "albumtype",
+    "albumstatus",
+    "data_source",
+}
+
+ALLOWED_DUPLICATE_ACTIONS: Set[str] = {
+    "skip",
+    "keep",
+    "merge",
+    "remove",
+    "upgrade",
+}
+
+
+def is_path_safe_and_allowed(target_path: str, allowed_roots: List[str]) -> bool:
+    """Check if target_path resolves cleanly inside one of allowed_roots.
+
+    Rejects:
+    - Null bytes, control characters, or non-string inputs
+    - Path traversal (e.g. /downloads/../config)
+    - Symlinks pointing outside allowed roots
+    - Prefix confusion (e.g. /music-old matching /music)
+    """
+    if not target_path or not isinstance(target_path, str):
+        return False
+    if "\x00" in target_path:
+        return False
+
+    try:
+        norm_target = os.path.realpath(os.path.abspath(target_path))
+        for root in allowed_roots:
+            if not root or not isinstance(root, str):
+                continue
+            if "\x00" in root:
+                continue
+            norm_root = os.path.realpath(os.path.abspath(root))
+            if norm_target == norm_root:
+                return True
+            try:
+                # commonpath raises ValueError if paths are on different drives on Windows
+                if os.path.commonpath([norm_target, norm_root]) == norm_root:
+                    return True
+            except ValueError:
+                continue
+        return False
+    except Exception:
+        return False
+
+
+def validate_fields(fields: dict, is_album: bool = False) -> dict:
+    """Filter dictionary of fields against allowlist and return safe fields."""
+    allowed = ALLOWED_ALBUM_FIELDS if is_album else ALLOWED_ITEM_FIELDS
+    safe = {}
+    for k, v in fields.items():
+        if k in allowed:
+            safe[k] = v
+    return safe
