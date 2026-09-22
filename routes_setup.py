@@ -461,6 +461,18 @@ _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
         "description": "Password for browser login (stored securely as hash)",
         "secret": True,
         "editable": True,
+        # Every write path hashes this with werkzeug's generate_password_hash
+        # before persisting (see _write_env_file's BEETS_WEB_PASSWORD branch
+        # and the dedicated password-change endpoint) -- a password hash
+        # cannot be converted back into the original password, so this can
+        # never be revealable regardless of storage location. The only
+        # legacy exception is a pre-v0.1.9 .initial_admin_password file from
+        # before hashing was enforced everywhere; that path is no longer
+        # written by current code and is not treated as revealable either --
+        # the correct remediation for such an install is to change the
+        # password (which immediately hashes it), not to add a reveal path
+        # for a transitional legacy state.
+        "revealable": False,
     },
     "BEETS_WEB_AUTH_TOKEN": {
         "section": "Authentication",
@@ -468,6 +480,7 @@ _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
         "description": "Bearer token for API and headless script clients",
         "secret": True,
         "editable": True,
+        "revealable": True,
     },
     "BEETS_WEB_AUTH_DISABLED": {
         "section": "Authentication",
@@ -491,6 +504,7 @@ _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
         "description": "OpenAI API key for candidate ranking & matching",
         "secret": True,
         "editable": True,
+        "revealable": True,
     },
     "OPENROUTER_API_KEY": {
         "section": "AI & LLM Services",
@@ -498,6 +512,7 @@ _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
         "description": "OpenRouter API key for LLM models",
         "secret": True,
         "editable": True,
+        "revealable": True,
     },
     "AI_API_KEY": {
         "section": "AI & LLM Services",
@@ -505,6 +520,7 @@ _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
         "description": "Generic AI API key for custom OpenAI-compatible endpoints",
         "secret": True,
         "editable": True,
+        "revealable": True,
     },
     "AI_BASE_URL": {
         "section": "AI & LLM Services",
@@ -528,6 +544,7 @@ _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
         "description": "AcoustID user API key for audio fingerprinting",
         "secret": True,
         "editable": True,
+        "revealable": True,
     },
     "DISCOGS_TOKEN": {
         "section": "Metadata Providers",
@@ -535,6 +552,7 @@ _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
         "description": "Discogs personal access token for artwork & releases",
         "secret": True,
         "editable": True,
+        "revealable": True,
     },
     "LISTENBRAINZ_TOKEN": {
         "section": "Metadata Providers",
@@ -542,6 +560,7 @@ _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
         "description": "ListenBrainz user token for scrobbling and syncing",
         "secret": True,
         "editable": True,
+        "revealable": True,
     },
 
     # Media & External Services
@@ -558,6 +577,7 @@ _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
         "description": "Plex authentication token (X-Plex-Token)",
         "secret": True,
         "editable": True,
+        "revealable": True,
     },
     "LIDARR_URL": {
         "section": "Media & Download Services",
@@ -572,6 +592,7 @@ _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
         "description": "Lidarr API key",
         "secret": True,
         "editable": True,
+        "revealable": True,
     },
     "SLSKD_URL": {
         "section": "Media & Download Services",
@@ -586,6 +607,7 @@ _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
         "description": "Soulseek slskd API key",
         "secret": True,
         "editable": True,
+        "revealable": True,
     },
     "SPOTIFY_CLIENT_ID": {
         "section": "Media & Download Services",
@@ -600,6 +622,7 @@ _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
         "description": "Spotify Developer Application Client Secret",
         "secret": True,
         "editable": True,
+        "revealable": True,
     },
     "DEMO_MODE": {
         "section": "General",
@@ -651,6 +674,11 @@ def _resolve_setting_item(
     container_path = meta.get("container_path")
     description = meta.get("description")
     editable = meta.get("editable", True)
+    # Whether /api/setup/env/<name>/reveal can ever return a plaintext value
+    # for this setting -- only meaningful when secret is True. Defaults to
+    # False so a name with no curated metadata (secret via _is_secret_env's
+    # name-pattern heuristic alone) is never revealable by default.
+    revealable = bool(secret and meta.get("revealable"))
 
     persisted_val = persisted.get(name, "").strip() if name in persisted else ""
     env_val = os.environ.get(name, "").strip()
@@ -690,6 +718,7 @@ def _resolve_setting_item(
             "name": name,
             "section": section,
             "secret": True,
+            "revealable": revealable,
             "configured": password_configured,
             "editable": editable,
             "value": value,
@@ -735,6 +764,7 @@ def _resolve_setting_item(
             "name": name,
             "section": section,
             "secret": True,
+            "revealable": revealable,
             "configured": token_configured,
             "editable": editable,
             "value": value,
@@ -784,6 +814,7 @@ def _resolve_setting_item(
             "name": name,
             "section": section,
             "secret": False,
+            "revealable": revealable,
             "configured": True,
             "editable": editable,
             "value": username_val,
@@ -829,6 +860,7 @@ def _resolve_setting_item(
             "name": name,
             "section": section,
             "secret": False,
+            "revealable": revealable,
             "configured": True,
             "editable": editable,
             "value": val,
@@ -865,6 +897,7 @@ def _resolve_setting_item(
             "name": name,
             "section": section,
             "secret": False,
+            "revealable": revealable,
             "configured": True,
             "editable": editable,
             "value": val,
@@ -899,6 +932,7 @@ def _resolve_setting_item(
             "name": name,
             "section": section,
             "secret": False,
+            "revealable": revealable,
             "configured": True,
             "editable": editable,
             "value": val,
@@ -933,6 +967,7 @@ def _resolve_setting_item(
             "name": name,
             "section": section,
             "secret": False,
+            "revealable": revealable,
             "configured": True,
             "editable": editable,
             "value": val,
@@ -964,6 +999,7 @@ def _resolve_setting_item(
             "name": name,
             "section": section,
             "secret": True,
+            "revealable": revealable,
             "configured": configured,
             "editable": editable,
             "value": masked_val,
@@ -998,6 +1034,7 @@ def _resolve_setting_item(
         "name": name,
         "section": section,
         "secret": False,
+        "revealable": revealable,
         "configured": configured,
         "editable": editable,
         "value": val,
@@ -1041,6 +1078,7 @@ def _env_catalog() -> Dict[str, Dict[str, Any]]:
             "container_path": meta.get("container_path"),
             "description": meta.get("description"),
             "editable": meta.get("editable", True),
+            "revealable": bool(meta.get("secret", False) and meta.get("revealable")),
         }
     for key, meta in _SETTING_METADATA.items():
         if key not in catalog and key not in _BLOCKED_ENV_NAMES:
@@ -1052,6 +1090,7 @@ def _env_catalog() -> Dict[str, Dict[str, Any]]:
                 "container_path": meta.get("container_path"),
                 "description": meta.get("description"),
                 "editable": meta.get("editable", True),
+                "revealable": bool(meta.get("secret", False) and meta.get("revealable")),
             }
     return catalog
 
@@ -1079,6 +1118,7 @@ def _setup_env_payload(extra: Dict[str, Any] | None = None) -> Dict[str, Any]:
                 "container_path": meta.get("container_path"),
                 "description": meta.get("description"),
                 "editable": meta.get("editable", True),
+                "revealable": bool(meta.get("secret", False) and meta.get("revealable")),
             }
             names.append(key)
     variables = []
@@ -1097,6 +1137,60 @@ def _setup_env_payload(extra: Dict[str, Any] | None = None) -> Dict[str, Any]:
     if extra:
         payload.update(extra)
     return payload
+
+
+def _resolve_secret_effective_value(name: str) -> Optional[str]:
+    """Return the actual effective plaintext for a revealable secret setting,
+    using the exact same source precedence _resolve_setting_item() already
+    uses for that setting's `source`/`configured` fields (non-empty process
+    environment > persisted configuration > other supported secret store) --
+    never a second, independent resolution path. Returns None when the
+    setting is not a secret, is not marked `revealable` in
+    _SETTING_METADATA, or has no effective value right now.
+
+    This function is intentionally never called by _setup_env_payload() (or
+    anything it calls) -- /api/setup/env must keep returning masked values
+    only. It exists solely for the narrowly-scoped POST
+    /api/setup/env/<name>/reveal endpoint below.
+    """
+    meta = _SETTING_METADATA.get(name)
+    if not meta or not meta.get("secret") or not meta.get("revealable"):
+        return None
+
+    env_val = os.environ.get(name, "").strip()
+    if env_val:
+        return env_val
+
+    _, persisted, _ = _load_env_file()
+    persisted_val = persisted.get(name, "").strip()
+
+    if name == "BEETS_WEB_AUTH_TOKEN":
+        if persisted_val:
+            return persisted_val
+        token_file = _GENERATED_AUTH_TOKEN_FILE
+        try:
+            import sys
+            app_m = sys.modules.get("app")
+            if app_m and hasattr(app_m, "_GENERATED_AUTH_TOKEN_FILE"):
+                token_file = getattr(app_m, "_GENERATED_AUTH_TOKEN_FILE")
+        except Exception:
+            pass
+        for candidate in (token_file, _FALLBACK_AUTH_TOKEN_FILE):
+            try:
+                if candidate and candidate.exists():
+                    val = candidate.read_text(encoding="utf-8").strip()
+                    if val:
+                        return val
+            except Exception:
+                pass
+        return None
+
+    # Every other revealable secret (OPENAI_API_KEY, PLEX_TOKEN, etc.) is
+    # written only through the generic .env-style persistence path -- no
+    # dedicated file, no hashing -- so the persisted .env value (already
+    # checked above for the non-empty-environment case) is the only other
+    # place it can live.
+    return persisted_val or None
 
 
 def _write_env_file(updates: Dict[str, str], clear: List[str]) -> str:
@@ -2348,6 +2442,123 @@ def setup_save_env():
         "backup_path": backup_path,
         "process_applied": True,
     }))
+
+
+_REVEAL_AUTH_WINDOW_SECONDS = 300  # 5 minutes
+
+
+def _reveal_reauth_applicable() -> bool:
+    """Whether an extra password-confirmation gate applies to secret reveal
+    at all for this install. Only real when a usable browser password
+    exists -- a token/headless-only install (no browser credentials
+    configured) has nothing extra to confirm, so it is never asked for one.
+    Every reveal request still requires the normal authenticated admin
+    session/bearer token already enforced for this whole route family; this
+    only adds a second factor for the browser-password auth mode, where a
+    stolen/left-open session cookie alone would otherwise be enough."""
+    try:
+        from app import _browser_password_is_usable, _security_auth_password
+    except ImportError:
+        return False
+    try:
+        return bool(_browser_password_is_usable(_security_auth_password()))
+    except Exception:
+        return False
+
+
+def _reveal_authorized() -> bool:
+    if not _reveal_reauth_applicable():
+        return True
+    try:
+        from flask import session
+        until = session.get("reveal_authorized_until")
+        return bool(until and float(until) > time.time())
+    except Exception:
+        return False
+
+
+@app.post("/api/setup/env/reveal-auth")
+def setup_env_reveal_auth():
+    """Confirm the current administrator password before allowing secret
+    reveal, and open a short reveal-authorization window on this session so
+    the operator is not re-prompted for every individual field. Only
+    applies when this install actually has a browser password configured
+    (see _reveal_reauth_applicable) -- never asked on a token/headless-only
+    install, matching the application's existing auth modes."""
+    csrf_failure = _setup_csrf_failure()
+    if csrf_failure is not None:
+        return csrf_failure
+
+    if not _reveal_reauth_applicable():
+        # _reveal_authorized() never consults the session in this mode
+        # (token/headless install, no browser password to confirm) -- no
+        # session write needed here either.
+        return jsonify({"ok": True, "authorized": True})
+
+    try:
+        from app import _verify_password, _auth_failure_rate_limit_response
+    except ImportError:
+        return jsonify({"ok": False, "error": "Reauthentication is not available."}), 503
+
+    payload = request.get_json(silent=True) or {}
+    supplied = str(payload.get("password") or "")
+    if not _verify_password(supplied):
+        try:
+            limited = _auth_failure_rate_limit_response()
+            if limited is not None:
+                return limited
+        except Exception:
+            pass
+        return jsonify({"ok": False, "error": "Incorrect password."}), 401
+
+    from flask import session
+    session["reveal_authorized_until"] = time.time() + _REVEAL_AUTH_WINDOW_SECONDS
+    return jsonify({"ok": True, "authorized": True})
+
+
+@app.post("/api/setup/env/<name>/reveal")
+def setup_env_reveal(name: str):
+    """Return the single, effective plaintext value for one revealable
+    secret setting. Deliberately the ONLY place in this application that
+    returns secret plaintext through the setup API -- /api/setup/env (GET
+    and POST) always stays masked, matching every other secret field (see
+    _resolve_secret_effective_value's own docstring). Requires the normal
+    authenticated admin session, enforced in production by app.py's global
+    before_request security boundary (this route is not in the public
+    endpoint allowlist) plus, when this install has a browser password, a
+    short-lived reveal authorization from POST .../reveal-auth above.
+    """
+    csrf_failure = _setup_csrf_failure()
+    if csrf_failure is not None:
+        return csrf_failure
+
+    name = str(name or "").strip()
+    meta = _SETTING_METADATA.get(name)
+    if meta is None or not meta.get("secret"):
+        return jsonify({"ok": False, "error": "Not a recognized secret setting."}), 404
+    if not meta.get("revealable"):
+        return jsonify({"ok": False, "error": "This value cannot be revealed."}), 403
+
+    if not _reveal_authorized():
+        return jsonify({
+            "ok": False,
+            "error": "Password confirmation required.",
+            "reauth_required": True,
+        }), 401
+
+    try:
+        value = _resolve_secret_effective_value(name)
+    except Exception as ex:
+        app.logger.warning("Secret reveal failed for %s: %s", name, type(ex).__name__)
+        return jsonify({"ok": False, "error": "Could not retrieve the value."}), 500
+
+    if value is None:
+        return jsonify({"ok": False, "error": "Not configured.", "configured": False}), 404
+
+    response = jsonify({"ok": True, "name": name, "value": value, "configured": True})
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    return response
 
 
 @app.post("/api/setup/test/ai")

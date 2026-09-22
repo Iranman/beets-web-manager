@@ -5,14 +5,17 @@ import Checkbox from '@mui/material/Checkbox';
 import CircularProgress from '@mui/material/CircularProgress';
 import LinearProgress from '@mui/material/LinearProgress';
 import TextField from '@mui/material/TextField';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  apiErrorBody,
+  authorizeSetupEnvReveal,
   completeSetup,
   getConfigFile,
   getSetupEnv,
   getSetupStatus,
   provisionPlugins,
   regenerateAuthToken,
+  revealSetupEnvValue,
   revertConfigFile,
   saveConfigFile,
   saveSetupEnv,
@@ -324,16 +327,29 @@ function EnvVariableRow({
   clear,
   onValue,
   onClear,
+  revealedValue,
+  revealing,
+  revealError,
+  onShow,
+  onHide,
 }: {
   variable: SetupEnvVariable;
   value: string;
   clear: boolean;
   onValue: (value: string) => void;
   onClear: (checked: boolean) => void;
+  revealedValue: string | undefined;
+  revealing: boolean;
+  revealError: string;
+  onShow: () => void;
+  onHide: () => void;
 }) {
   const changed = variable.secret ? value !== '' || clear : value !== variable.value;
   const badge = sourceBadge(variable.source);
   const notEditable = variable.editable === false;
+  const canReveal = variable.secret && variable.revealable === true && variable.configured;
+  const isRevealed = revealedValue !== undefined;
+  const [copied, setCopied] = useState(false);
 
   return (
     <div className="grid gap-3 rounded border border-graphite-800 bg-graphite-950/35 p-3 lg:grid-cols-[minmax(14rem,20rem)_minmax(0,1fr)_auto]">
@@ -362,6 +378,21 @@ function EnvVariableRow({
           {notEditable && (
             <span className="rounded bg-zinc-900 px-1.5 py-0.5 text-zinc-400 border border-zinc-800">not editable here</span>
           )}
+          {canReveal && !clear && value === '' && (
+            <button
+              type="button"
+              onClick={() => (isRevealed ? onHide() : onShow())}
+              disabled={revealing}
+              className="rounded bg-graphite-800 px-1.5 py-0.5 text-zinc-300 border border-graphite-700 hover:bg-graphite-700 disabled:opacity-50"
+            >
+              {revealing ? 'Revealing…' : isRevealed ? '🙈 Hide' : '👁 Show'}
+            </button>
+          )}
+          {variable.secret && variable.configured && variable.revealable === false && !clear && value === '' && (
+            <span className="rounded bg-zinc-900 px-1.5 py-0.5 text-zinc-500 border border-zinc-800" title="Stored only as a hash; the original value cannot be recovered">
+              not recoverable
+            </span>
+          )}
         </div>
         <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5 text-[0.70rem] text-zinc-400">
           {variable.container_path && (
@@ -381,6 +412,24 @@ function EnvVariableRow({
       </div>
 
       <div className="min-w-0">
+        {isRevealed && (
+          <div className="mb-1.5 flex items-center gap-2 rounded border border-emerald-800/60 bg-emerald-950/20 p-2">
+            <code className="min-w-0 flex-1 break-all font-mono text-[0.76rem] text-emerald-300">{revealedValue}</code>
+            <Button
+              size="small"
+              variant="text"
+              onClick={() => {
+                void navigator.clipboard?.writeText(revealedValue).then(() => setCopied(true)).catch(() => undefined);
+              }}
+            >
+              {copied ? 'Copied' : 'Copy'}
+            </Button>
+            <Button size="small" variant="text" onClick={onHide}>Hide</Button>
+          </div>
+        )}
+        {revealError && !isRevealed && (
+          <div className="mb-1.5 text-[0.7rem] text-red-300">{revealError}</div>
+        )}
         <TextField
           fullWidth
           disabled={clear || notEditable}
@@ -402,6 +451,11 @@ function EnvVariableRow({
           }
           onChange={(event) => onValue(event.target.value)}
         />
+        {variable.name === 'BEETS_WEB_PASSWORD' && !clear && value === '' && variable.configured && (
+          <div className="mt-1 text-[0.7rem] text-zinc-500">
+            Stored as a password hash and cannot be shown. Type a new password below to change it.
+          </div>
+        )}
         {variable.name === 'BEETS_WEB_PASSWORD' && !clear && value !== '' && <PasswordStrengthMeter value={value} />}
       </div>
 
@@ -447,6 +501,119 @@ export default function System() {
   const [pluginsProvisioning, setPluginsProvisioning] = useState(false);
   const [pluginsMsg, setPluginsMsg] = useState('');
   const [pluginsError, setPluginsError] = useState('');
+
+  // Per-field secret reveal state -- deliberately separate from `form`
+  // (the edit/replacement buffer) so viewing a value can never be confused
+  // with typing a replacement for it. Kept only in this component's
+  // ephemeral React state: never written to localStorage/sessionStorage,
+  // never part of the payload sent to saveEnv().
+  const [revealedSecrets, setRevealedSecrets] = useState<Record<string, string>>({});
+  const [revealingNames, setRevealingNames] = useState<Set<string>>(new Set());
+  const [revealErrors, setRevealErrors] = useState<Record<string, string>>({});
+  const [reauthDialog, setReauthDialog] = useState<{
+    open: boolean;
+    pendingName: string | null;
+    password: string;
+    error: string;
+    submitting: boolean;
+  }>({ open: false, pendingName: null, password: '', error: '', submitting: false });
+  const revealTimers = useRef<Map<string, number>>(new Map());
+
+  const hideSecret = useCallback((name: string) => {
+    setRevealedSecrets((current) => {
+      if (!(name in current)) return current;
+      const next = { ...current };
+      delete next[name];
+      return next;
+    });
+    const timerId = revealTimers.current.get(name);
+    if (timerId !== undefined) {
+      window.clearTimeout(timerId);
+      revealTimers.current.delete(name);
+    }
+  }, []);
+
+  const hideAllSecrets = useCallback(() => {
+    revealTimers.current.forEach((id) => window.clearTimeout(id));
+    revealTimers.current.clear();
+    setRevealedSecrets({});
+  }, []);
+
+  // Hide any revealed secret automatically on unmount (navigating away).
+  useEffect(() => {
+    return () => {
+      revealTimers.current.forEach((id) => window.clearTimeout(id));
+      revealTimers.current.clear();
+    };
+  }, []);
+
+  // Hide all revealed secrets when the tab/page becomes inactive.
+  useEffect(() => {
+    const onVisibilityChange = () => {
+      if (document.hidden) hideAllSecrets();
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', onVisibilityChange);
+  }, [hideAllSecrets]);
+
+  const REVEAL_AUTO_HIDE_MS = 45_000;
+
+  const performReveal = useCallback(async (name: string) => {
+    setRevealingNames((current) => new Set(current).add(name));
+    setRevealErrors((current) => {
+      if (!(name in current)) return current;
+      const next = { ...current };
+      delete next[name];
+      return next;
+    });
+    try {
+      const result = await revealSetupEnvValue(name);
+      if (result.ok && typeof result.value === 'string') {
+        setRevealedSecrets((current) => ({ ...current, [name]: result.value as string }));
+        const existingTimer = revealTimers.current.get(name);
+        if (existingTimer !== undefined) window.clearTimeout(existingTimer);
+        const timerId = window.setTimeout(() => hideSecret(name), REVEAL_AUTO_HIDE_MS);
+        revealTimers.current.set(name, timerId);
+      } else {
+        setRevealErrors((current) => ({ ...current, [name]: result.error || 'Could not reveal value.' }));
+      }
+    } catch (err) {
+      const body = apiErrorBody(err);
+      if (body?.reauth_required) {
+        setReauthDialog({ open: true, pendingName: name, password: '', error: '', submitting: false });
+      } else {
+        setRevealErrors((current) => ({ ...current, [name]: err instanceof Error ? err.message : String(err) }));
+      }
+    } finally {
+      setRevealingNames((current) => {
+        if (!current.has(name)) return current;
+        const next = new Set(current);
+        next.delete(name);
+        return next;
+      });
+    }
+  }, [hideSecret]);
+
+  const handleShowSecret = (name: string) => {
+    void performReveal(name);
+  };
+
+  const submitReauth = async () => {
+    const pendingName = reauthDialog.pendingName;
+    if (!pendingName) return;
+    setReauthDialog((current) => ({ ...current, submitting: true, error: '' }));
+    try {
+      const result = await authorizeSetupEnvReveal(reauthDialog.password);
+      if (result.ok) {
+        setReauthDialog({ open: false, pendingName: null, password: '', error: '', submitting: false });
+        await performReveal(pendingName);
+      } else {
+        setReauthDialog((current) => ({ ...current, submitting: false, error: result.error || 'Incorrect password.' }));
+      }
+    } catch (err) {
+      setReauthDialog((current) => ({ ...current, submitting: false, error: err instanceof Error ? err.message : String(err) }));
+    }
+  };
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -506,6 +673,7 @@ export default function System() {
     setSaving(true);
     setError('');
     setMessage('');
+    hideAllSecrets();
     const variables: Record<string, string> = {};
     for (const variable of env.variables) {
       const nextValue = form[variable.name] ?? '';
@@ -975,6 +1143,54 @@ export default function System() {
         onClose={() => setRevealedToken(null)}
       />
 
+      <Dialog
+        open={reauthDialog.open}
+        onClose={() => setReauthDialog({ open: false, pendingName: null, password: '', error: '', submitting: false })}
+        className="relative z-50"
+      >
+        <DialogBackdrop className="fixed inset-0 bg-graphite-950/60" />
+        <div className="fixed inset-0 flex items-center justify-center p-4">
+          <DialogPanel className="w-full max-w-sm rounded-lg border border-graphite-700 bg-graphite-900 p-5 shadow-2xl">
+            <DialogTitle className="text-base font-semibold text-zinc-100">Confirm your password</DialogTitle>
+            <p className="mt-2 text-sm text-zinc-400">
+              Revealing a configured secret requires re-entering your administrator password. This confirmation
+              covers additional reveals for a short time.
+            </p>
+            <TextField
+              autoFocus
+              fullWidth
+              size="small"
+              type="password"
+              className="mt-3"
+              label="Current password"
+              value={reauthDialog.password}
+              onChange={(event) => setReauthDialog((current) => ({ ...current, password: event.target.value, error: '' }))}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && reauthDialog.password && !reauthDialog.submitting) void submitReauth();
+              }}
+            />
+            {reauthDialog.error && <div className="mt-2 text-[0.75rem] text-red-300">{reauthDialog.error}</div>}
+            <div className="mt-5 flex justify-end gap-2">
+              <Button
+                variant="outlined"
+                size="small"
+                onClick={() => setReauthDialog({ open: false, pendingName: null, password: '', error: '', submitting: false })}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="contained"
+                size="small"
+                disabled={!reauthDialog.password || reauthDialog.submitting}
+                onClick={() => void submitReauth()}
+              >
+                {reauthDialog.submitting ? 'Confirming…' : 'Confirm'}
+              </Button>
+            </div>
+          </DialogPanel>
+        </div>
+      </Dialog>
+
       <section className="space-y-3">
         <div className="flex flex-wrap items-end justify-between gap-3">
           <div>
@@ -1020,6 +1236,11 @@ export default function System() {
                     return next;
                   });
                 }}
+                revealedValue={revealedSecrets[variable.name]}
+                revealing={revealingNames.has(variable.name)}
+                revealError={revealErrors[variable.name] ?? ''}
+                onShow={() => handleShowSecret(variable.name)}
+                onHide={() => hideSecret(variable.name)}
               />
             ))}
           </div>

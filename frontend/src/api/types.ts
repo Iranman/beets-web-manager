@@ -630,6 +630,13 @@ export interface SetupEnvVariable {
   secret: boolean;
   configured: boolean;
   editable?: boolean;
+  /** Whether POST /api/setup/env/<name>/reveal can return a plaintext value
+   * for this setting. Only ever true when `secret` is also true -- e.g.
+   * false for BEETS_WEB_PASSWORD (stored only as a password hash, so no
+   * plaintext exists to recover), true for BEETS_WEB_AUTH_TOKEN and most
+   * other secret settings. The UI must only render a Show control when
+   * this is true. */
+  revealable?: boolean;
   value: string;
   effective_value?: string | null;
   default?: string | null;
@@ -639,6 +646,34 @@ export interface SetupEnvVariable {
   has_value: boolean;
   runtime_has_value: boolean;
   runtime_value: string;
+}
+
+/** Response from POST /api/setup/env/<name>/reveal. `value` is the single
+ * requested secret's plaintext, returned only when `revealable` was true
+ * for that setting and it currently has an effective value -- never bulk,
+ * never cached (server sends Cache-Control: no-store). */
+export interface SetupEnvRevealResponse {
+  ok: boolean;
+  name?: string;
+  value?: string;
+  configured?: boolean;
+  error?: string;
+  /** True when the request was rejected specifically because a reveal
+   * authorization window has not been opened yet (or has expired) --
+   * distinct from other rejection reasons so the UI knows to prompt for
+   * the administrator password and retry, rather than just showing an
+   * error. */
+  reauth_required?: boolean;
+}
+
+/** Response from POST /api/setup/env/reveal-auth (password confirmation
+ * that opens a short reveal-authorization window on this session). On an
+ * install with no browser password configured (token/headless auth only)
+ * this always succeeds trivially -- no password is ever asked for. */
+export interface SetupEnvRevealAuthResponse {
+  ok: boolean;
+  authorized?: boolean;
+  error?: string;
 }
 
 export interface SetupEnvResponse {
