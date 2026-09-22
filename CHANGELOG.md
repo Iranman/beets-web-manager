@@ -6,6 +6,12 @@ The project uses Semantic Versioning.
 
 ## Unreleased
 
+## v0.1.22 - 2026-09-21
+
+### Added
+
+- **On-demand secret reveal on the System page.** Configured secrets (`BEETS_WEB_AUTH_TOKEN`, `OPENAI_API_KEY`, `PLEX_TOKEN`, and other recoverable settings) now have a per-field Show/Hide control to inspect the actual effective value when needed -- never shown by default, never returned by the normal `/api/setup/env` endpoint. A new, narrowly-scoped `POST /api/setup/env/<name>/reveal` endpoint returns exactly one value, only for settings marked `revealable` in configuration metadata, and only to an authenticated administrator (with a short password-reauthorization window on installs that have a browser password). `BEETS_WEB_PASSWORD` is never revealable -- it is stored only as a password hash, which cannot be converted back into the original password.
+
 ## v0.1.21 - 2026-09-21
 
 Security cleanup following v0.1.20's live-deployment acceptance test (see #133).
