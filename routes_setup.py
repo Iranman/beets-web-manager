@@ -599,6 +599,25 @@ _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
     },
 
     # 4. Beets Core & Engine
+    "BEETS_WEB_URL": {
+        "section": "Beets Core & Engine",
+        "default": "http://beets:8337",
+        "description": "Primary read transport: Stock Beets Web API (http://beets:8337)",
+        "secret": False,
+        "editable": True,
+        "restart_required": True,
+        "type": "string",
+    },
+    "BEETS_WEBMANAGER_API_KEY": {
+        "section": "Beets Core & Engine",
+        "default": None,
+        "description": "Integration plugin: Bearer-authenticated /webmanager/* API key",
+        "secret": True,
+        "editable": True,
+        "revealable": True,
+        "restart_required": True,
+        "type": "secret",
+    },
     "BEETS_CONFIG": {
         "section": "Beets Core & Engine",
         "default": "/config/config.yaml",
@@ -622,7 +641,7 @@ _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
     "BEETS_API_URL": {
         "section": "Beets Core & Engine",
         "default": "http://beets:8338",
-        "description": "URL of the remote Beets control agent",
+        "description": "Legacy mutation transport — temporary during migration (http://beets:8338)",
         "secret": False,
         "editable": True,
         "restart_required": True,
@@ -631,7 +650,7 @@ _SETTING_METADATA: Dict[str, Dict[str, Any]] = {
     "BEETS_API_TOKEN": {
         "section": "Beets Core & Engine",
         "default": None,
-        "description": "Shared authentication token for remote Beets control agent",
+        "description": "Shared authentication token for legacy mutation transport (temporary during migration)",
         "secret": True,
         "editable": True,
         "revealable": True,
@@ -3332,11 +3351,46 @@ def setup_first_run():
 
 @app.post("/api/setup/test/beets")
 def setup_test_beets():
-    """Live connectivity test against the Beets engine."""
+    """Live connectivity test against Stock Beets Web & Integration plugin."""
     csrf_failure = _setup_csrf_failure()
     if csrf_failure is not None:
         return csrf_failure
 
+    # 1. Try stock Beets WebManager plugin handshake
+    try:
+        from backend.beets_adapter import beets_adapter
+        plugin_status = beets_adapter.get_plugin_status()
+        if isinstance(plugin_status, dict) and plugin_status.get("protocol_version"):
+            version = str(plugin_status.get("beets_version") or "unknown")
+            return jsonify({
+                "ok": True,
+                "status": "connected",
+                "version": version,
+                "beets_version": version,
+                "plugin_version": plugin_status.get("plugin_version", "1.0.0"),
+                "protocol_version": plugin_status.get("protocol_version", "1.0"),
+                "library_ready": plugin_status.get("library_ready", True),
+                "message": f"Connected to Stock Beets (v{version}) via WebManager Plugin",
+            })
+    except Exception:
+        pass
+
+    # 2. Try stock Beets native Web REST API (/stats)
+    try:
+        from backend.beets_adapter import beets_adapter
+        stats = beets_adapter.get_stats()
+        if isinstance(stats, dict) and "items" in stats:
+            return jsonify({
+                "ok": True,
+                "status": "connected",
+                "version": "stock",
+                "beets_version": "stock",
+                "message": "Connected to Stock Beets Web API",
+            })
+    except Exception:
+        pass
+
+    # 3. Legacy control agent fallback (temporary during migration)
     try:
         remote_status = beets_client.get_status()
         if isinstance(remote_status, dict) and remote_status.get("status") == "ok":
@@ -3347,20 +3401,16 @@ def setup_test_beets():
                 "version": version,
                 "beets_version": version,
                 "beetsdir": str(remote_status.get("beetsdir") or ""),
-                "message": f"Connected — Beets {version}",
+                "message": f"Connected — Beets {version} (legacy)",
             })
-        return jsonify({
-            "ok": False,
-            "status": "failed",
-            "error": "Could not execute Beets. Check the Docker service and configuration.",
-        }), 200
-    except BeetsAuthError:
-        return jsonify({"ok": False, "status": "failed", "error": "Beets control-agent authentication failed."}), 200
-    except BeetsUnavailableError:
-        return jsonify({"ok": False, "status": "failed", "error": "Could not execute Beets. Check the Docker service and configuration."}), 200
-    except Exception as ex:
-        app.logger.warning("Beets test connection failed: %s", type(ex).__name__)
-        return jsonify({"ok": False, "status": "failed", "error": "Could not execute Beets. Check the Docker service and configuration."}), 200
+    except Exception:
+        pass
+
+    return jsonify({
+        "ok": False,
+        "status": "failed",
+        "error": "Could not connect to Beets. Check BEETS_WEB_URL and ensure stock Beets is running.",
+    }), 200
 
 
 @app.post("/api/setup/complete")

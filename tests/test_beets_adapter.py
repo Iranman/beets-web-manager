@@ -11,6 +11,12 @@ from backend.beets_adapter import (
     BeetsAdapterAuthError,
     BeetsAdapterNotFoundError,
     BeetsAdapterConnectionError,
+    BeetsAdapterTimeoutError,
+    BeetsAdapterBadRequestError,
+    StockBeetsLibrary,
+    RemoteLibrary,
+    RemoteItem,
+    RemoteAlbum,
 )
 
 
@@ -32,7 +38,13 @@ class BeetsAdapterTests(unittest.TestCase):
         beets_web_app.config["INCLUDE_PATHS"] = True
         beets_web_app.config["TESTING"] = True
 
-        self.album = Album(album="Discovery", albumartist="Daft Punk", year=2001)
+        self.album = Album(
+            album="Discovery",
+            albumartist="Daft Punk",
+            year=2001,
+            mb_albumid="a1111111-1111-1111-1111-111111111111",
+            mb_releasegroupid="r1111111-1111-1111-1111-111111111111",
+        )
         self.lib.add(self.album)
         self.item = Item(
             title="One More Time",
@@ -42,9 +54,49 @@ class BeetsAdapterTests(unittest.TestCase):
             album_id=self.album.id,
             track=1,
             year=2001,
+            format="MP3",
+            mb_trackid="t1111111-1111-1111-1111-111111111111",
             path=os.path.join(self.td, "track1.mp3").encode("utf-8"),
         )
         self.lib.add(self.item)
+
+        # Add a second album & item for query/filtering verification
+        self.album2 = Album(
+            album="Random Access Memories",
+            albumartist="Daft Punk",
+            year=2013,
+            mb_albumid="a2222222-2222-2222-2222-222222222222",
+            mb_releasegroupid="r2222222-2222-2222-2222-222222222222",
+        )
+        self.lib.add(self.album2)
+        self.item2 = Item(
+            title="Get Lucky",
+            artist="Daft Punk",
+            album="Random Access Memories",
+            albumartist="Daft Punk",
+            album_id=self.album2.id,
+            track=8,
+            year=2013,
+            format="FLAC",
+            mb_trackid="t2222222-2222-2222-2222-222222222222",
+            path=os.path.join(self.td, "track2.flac").encode("utf-8"),
+        )
+        self.lib.add(self.item2)
+
+        # Add a singleton track without an album
+        self.singleton_item = Item(
+            title="Musique",
+            artist="Daft Punk",
+            album="",
+            albumartist="",
+            album_id=None,
+            track=1,
+            year=1996,
+            format="MP3",
+            path=os.path.join(self.td, "singleton.mp3").encode("utf-8"),
+        )
+        self.lib.add(self.singleton_item)
+
         self.lib._connection().commit()
 
         self.client = beets_web_app.test_client()
@@ -83,6 +135,7 @@ class BeetsAdapterTests(unittest.TestCase):
             return resp.get_json()
 
         self.adapter._request = mock_request
+        self.stock_lib = StockBeetsLibrary(self.adapter)
 
     def tearDown(self):
         set_api_key_file(None)
@@ -94,8 +147,8 @@ class BeetsAdapterTests(unittest.TestCase):
 
     def test_adapter_get_stats(self):
         stats = self.adapter.get_stats()
-        self.assertEqual(stats["items"], 1)
-        self.assertEqual(stats["albums"], 1)
+        self.assertEqual(stats["items"], 3)
+        self.assertEqual(stats["albums"], 2)
 
     def test_adapter_get_artists(self):
         artists = self.adapter.get_artists()
@@ -104,8 +157,7 @@ class BeetsAdapterTests(unittest.TestCase):
     def test_adapter_get_items_and_album(self):
         # Items
         items = self.adapter.get_items()
-        self.assertEqual(len(items), 1)
-        self.assertEqual(items[0]["title"], "One More Time")
+        self.assertEqual(len(items), 3)
 
         # Single item
         single_item = self.adapter.get_item(self.item.id)
@@ -114,8 +166,7 @@ class BeetsAdapterTests(unittest.TestCase):
 
         # Albums
         albums = self.adapter.get_albums()
-        self.assertEqual(len(albums), 1)
-        self.assertEqual(albums[0]["album"], "Discovery")
+        self.assertEqual(len(albums), 2)
 
         # Album with expand
         expanded_album = self.adapter.get_album(self.album.id, expand=True)
@@ -128,6 +179,85 @@ class BeetsAdapterTests(unittest.TestCase):
         album_items = self.adapter.find_all_items_by_album_id(self.album.id)
         self.assertEqual(len(album_items), 1)
         self.assertEqual(album_items[0]["title"], "One More Time")
+
+    def test_adapter_field_values_and_helpers(self):
+        formats = self.adapter.get_unique_field_values("item", "format")
+        self.assertIn("MP3", formats)
+        self.assertIn("FLAC", formats)
+
+        # Distinct artists
+        artists = self.adapter.list_distinct_albumartists()
+        self.assertEqual(artists, ["Daft Punk"])
+
+        # Artist counts
+        counts = self.adapter.get_artist_counts()
+        self.assertEqual(counts.get("Daft Punk"), 2)
+
+        # Item paths
+        paths = self.adapter.list_distinct_item_paths()
+        self.assertEqual(len(paths), 3)
+
+        # Cleanup index
+        cleanup_idx = self.adapter.get_album_cleanup_index()
+        self.assertEqual(len(cleanup_idx), 3)
+        item1_row = next(r for r in cleanup_idx if r.get("item_id") == self.item.id)
+        self.assertEqual(item1_row.get("album_album"), "Discovery")
+
+    def test_adapter_pagination(self):
+        page0 = self.adapter.get_items_page(offset=0, limit=2)
+        self.assertEqual(len(page0["items"]), 2)
+        self.assertEqual(page0["total"], 3)
+        self.assertEqual(page0["offset"], 0)
+        self.assertEqual(page0["limit"], 2)
+
+        page1 = self.adapter.get_items_page(offset=2, limit=2)
+        self.assertEqual(len(page1["items"]), 1)
+        self.assertEqual(page1["total"], 3)
+
+    def test_stock_lib_facade_reads(self):
+        # get_item
+        remote_item = self.stock_lib.get_item(self.item.id)
+        self.assertIsInstance(remote_item, RemoteItem)
+        self.assertEqual(remote_item.title, "One More Time")
+        self.assertEqual(remote_item["artist"], "Daft Punk")
+        self.assertTrue(remote_item.path.endswith("track1.mp3"))
+
+        # get_album and album.items()
+        remote_album = self.stock_lib.get_album(self.album.id)
+        self.assertIsInstance(remote_album, RemoteAlbum)
+        self.assertEqual(remote_album.album, "Discovery")
+        album_tracks = remote_album.items()
+        self.assertEqual(len(album_tracks), 1)
+        self.assertIsInstance(album_tracks[0], RemoteItem)
+        self.assertEqual(album_tracks[0].title, "One More Time")
+
+        # items() with bare and filtered queries
+        all_items = self.stock_lib.items()
+        self.assertEqual(len(all_items), 3)
+
+        discovery_items = self.stock_lib.items(f"album_id:{self.album.id}")
+        self.assertEqual(len(discovery_items), 1)
+        self.assertEqual(discovery_items[0].title, "One More Time")
+
+        # Query with mbid alias translation (mbid: -> mb_trackid:)
+        mbid_items = self.stock_lib.items("mbid:t1111111-1111-1111-1111-111111111111")
+        self.assertEqual(len(mbid_items), 1)
+        self.assertEqual(mbid_items[0].title, "One More Time")
+
+        # List query with AND semantics
+        filtered = self.stock_lib.items(["artist:Daft Punk", "format:FLAC"])
+        self.assertEqual(len(filtered), 1)
+        self.assertEqual(filtered[0].title, "Get Lucky")
+
+        # albums() query
+        ram_albums = self.stock_lib.albums("album:Random Access Memories")
+        self.assertEqual(len(ram_albums), 1)
+        self.assertEqual(ram_albums[0].year, 2013)
+
+        # albums() mbid alias translation (mbid: -> mb_albumid:)
+        mbid_albums = self.stock_lib.albums("mbid:a2222222-2222-2222-2222-222222222222")
+        self.assertEqual(len(mbid_albums), 1)
+        self.assertEqual(mbid_albums[0].album, "Random Access Memories")
 
     def test_adapter_mutations(self):
         # Modify item
@@ -152,6 +282,20 @@ class BeetsAdapterTests(unittest.TestCase):
     def test_adapter_not_found(self):
         self.assertIsNone(self.adapter.get_item(999999))
         self.assertIsNone(self.adapter.get_album(999999))
+
+    def test_adapter_connection_failure_fails_closed(self):
+        """When stock Beets is down, adapter must fail closed without fallback to legacy engine."""
+        broken_adapter = BeetsAdapter(base_url="http://127.0.0.1:59999", timeout=0.1)
+        broken_lib = StockBeetsLibrary(broken_adapter)
+
+        with self.assertRaises(BeetsAdapterConnectionError):
+            broken_adapter.get_stats()
+
+        with self.assertRaises(BeetsAdapterConnectionError):
+            broken_lib.get_item(1)
+
+        with self.assertRaises(BeetsAdapterConnectionError):
+            broken_lib.items()
 
 
 if __name__ == "__main__":

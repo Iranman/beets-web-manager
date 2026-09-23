@@ -152,8 +152,8 @@ class ReviewFilesCleanupAndLibraryPageExceptionSanitizationTests(unittest.TestCa
     def test_library_full_paginated_unavailable_is_sanitized(self):
         leak = "Beets Control Agent unreachable at 10.0.0.5:8338 (connection refused)"
         with app_module.app.test_request_context("/api/library?limit=50"), mock.patch.object(
-            app_module.beets_client, "get_items_page",
-            side_effect=app_module.BeetsUnavailableError(leak),
+            app_module.beets_adapter, "get_items_page",
+            side_effect=app_module.BeetsAdapterConnectionError(leak),
         ):
             response = app_module.library_full()
         status = response[1]
